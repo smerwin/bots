@@ -1,4 +1,4 @@
-{- Tribal Wars 2 farmbot version 2024-05-10
+{- Tribal Wars 2 farmbot version 2025-05-28
 
    This bot farms barbarian villages in Tribal Wars 2.
    It automatically detects barbarian villages, available troops and configured army presets to attack.
@@ -64,7 +64,7 @@ module Bot exposing
     , botMain
     )
 
-import BotLab.BotInterface_To_Host_2023_05_15 as InterfaceToHost
+import BotLab.BotInterface_To_Host_2024_10_19 as InterfaceToHost
 import Common.Basics exposing (stringContainsIgnoringCase)
 import Common.DecisionTree
     exposing
@@ -166,7 +166,9 @@ parseBotSettings =
              , valueParser =
                 PromptParser.valueTypeString
                     (\presetPattern settings ->
-                        { settings | farmArmyPresetPatterns = presetPattern :: settings.farmArmyPresetPatterns }
+                        { settings
+                            | farmArmyPresetPatterns = List.concat [ settings.farmArmyPresetPatterns, [ presetPattern ] ]
+                        }
                     )
              }
            )
@@ -1918,26 +1920,29 @@ pickBestMatchingArmyPresetForVillage settings presets ( villageId, villageDetail
 
     else
         let
-            farmPresetFilter =
+            farmArmyPresetPatterns : List String
+            farmArmyPresetPatterns =
                 settings.farmArmyPresetPatterns
 
-            farmPresetsMaybeEmpty =
-                presets
-                    |> List.filter
-                        (\preset ->
-                            farmPresetFilter
-                                |> List.any
-                                    (\presetFilter ->
+            matchingFarmPresets : List ArmyPreset
+            matchingFarmPresets =
+                farmArmyPresetPatterns
+                    |> List.concatMap
+                        (\presetFilter ->
+                            presets
+                                |> List.filter
+                                    (\preset ->
                                         stringContainsIgnoringCase presetFilter preset.name
                                     )
+                                |> List.sortBy (.name >> String.toLower)
                         )
-                    |> List.sortBy (.name >> String.toLower)
+                    |> Common.Basics.listUnique
         in
-        case farmPresetsMaybeEmpty of
+        case matchingFarmPresets of
             [] ->
                 describeBranch
                     ("Found no army presets matching the patterns ["
-                        ++ (farmPresetFilter |> List.map (String.Extra.surround "'") |> String.join ", ")
+                        ++ (farmArmyPresetPatterns |> List.map (String.Extra.surround "'") |> String.join ", ")
                         ++ "]."
                     )
                     (endDecisionPath (CompletedThisVillage NoMatchingArmyPresetEnabledForThisVillage))
@@ -1949,7 +1954,12 @@ pickBestMatchingArmyPresetForVillage settings presets ( villageId, villageDetail
                 of
                     [] ->
                         describeBranch
-                            ("Found " ++ (farmPresets |> List.length |> String.fromInt) ++ " army presets for farming, but none enabled for this village.")
+                            (String.concat
+                                [ "Found "
+                                , farmPresets |> List.length |> String.fromInt
+                                , " army presets for farming, but none enabled for this village."
+                                ]
+                            )
                             (endDecisionPath (CompletedThisVillage NoMatchingArmyPresetEnabledForThisVillage))
 
                     farmPresetsEnabledForThisVillage ->
@@ -1962,8 +1972,12 @@ pickBestMatchingArmyPresetForVillage settings presets ( villageId, villageDetail
                                                 |> Dict.toList
                                                 |> List.all
                                                     (\( unitId, presetUnitCount ) ->
-                                                        presetUnitCount
-                                                            <= (villageDetails.units |> Dict.get unitId |> Maybe.map .available |> Maybe.withDefault 0)
+                                                        case Dict.get unitId villageDetails.units of
+                                                            Nothing ->
+                                                                False
+
+                                                            Just villageUnitCount ->
+                                                                presetUnitCount <= villageUnitCount.available
                                                     )
                                         )
                         in
@@ -2860,7 +2874,18 @@ webBrowserDefaultContentHtml =
 <link href="https://fonts.googleapis.com/css2?family=Noto+Color+Emoji&display=swap" rel="stylesheet">
 
 <style>
-body { font-family: Arial, sans-serif; }
+
+body
+{
+    font-family: Arial, sans-serif;
+    background-color: #333;
+    color: #eee;
+}
+
+a
+{
+    color: #fff;
+}
 
 .noto-color-emoji-regular {
   font-family: "Noto Color Emoji", sans-serif;

@@ -1,4 +1,4 @@
-{- EVE Online combat anomaly bot version 2024-11-15
+{- EVE Online combat anomaly bot version 2025-10-29
 
    This bot uses the probe scanner to find combat anomalies and kills rats using drones and weapon modules.
 
@@ -61,6 +61,7 @@ module Bot exposing
     )
 
 import BotLab.BotInterface_To_Host_2024_10_19 as InterfaceToHost
+import Common
 import Common.Basics exposing (listElementAtWrappedIndex, resultFirstSuccessOrFirstError, stringContainsIgnoringCase)
 import Common.DecisionPath exposing (describeBranch)
 import Common.EffectOnWindow as EffectOnWindow exposing (MouseButton(..))
@@ -76,12 +77,12 @@ import EveOnline.BotFramework
         , localChatWindowFromUserInterface
         , menuCascadeCompleted
         , mouseClickOnUIElement
-        , pickEntryFromLastContextMenuInCascade
         , shipUIIndicatesShipIsWarpingOrJumping
         , uiNodeVisibleRegionLargeEnoughForClicking
         , useMenuEntryInLastContextMenuInCascade
         , useMenuEntryWithTextContaining
         , useMenuEntryWithTextContainingFirstOf
+        , useMenuEntryWithTextContainingFirstOfCommonContinuation
         , useMenuEntryWithTextEqual
         )
 import EveOnline.BotFrameworkSeparatingMemory
@@ -126,7 +127,7 @@ defaultBotSettings =
     , warpToAnomalyDistance = "Within 0 m"
     , sortOverviewBy = Nothing
     , deactivateModuleOnWarp = []
-    , hideLocationName = Nothing
+    , hideLocationNames = []
     }
 
 
@@ -259,7 +260,9 @@ parseBotSettings =
              , valueParser =
                 PromptParser.valueTypeString
                     (\locationName settings ->
-                        { settings | hideLocationName = Just locationName }
+                        { settings
+                            | hideLocationNames = String.trim locationName :: settings.hideLocationNames
+                        }
                     )
              }
            )
@@ -288,7 +291,7 @@ type alias BotSettings =
     , warpToAnomalyDistance : String
     , sortOverviewBy : Maybe String
     , deactivateModuleOnWarp : List String
-    , hideLocationName : Maybe String
+    , hideLocationNames : List String
     }
 
 
@@ -526,7 +529,27 @@ closeMessageBox readingFromGameClient =
 
 continueIfShouldHide : { ifShouldHide : DecisionPathNode } -> BotDecisionContext -> Maybe DecisionPathNode
 continueIfShouldHide config context =
+    case checkIfShouldHide context of
+        Nothing ->
+            Nothing
+
+        Just ( reason, justAskForHelp ) ->
+            Just
+                (describeBranch
+                    reason
+                    (if justAskForHelp then
+                        askForHelpToGetUnstuck
+
+                     else
+                        config.ifShouldHide
+                    )
+                )
+
+
+checkIfShouldHide : BotDecisionContext -> Maybe ( String, Bool )
+checkIfShouldHide context =
     let
+        hasNoShipModules : Bool
         hasNoShipModules =
             case context.readingFromGameClient.shipUI of
                 Nothing ->
@@ -537,9 +560,8 @@ continueIfShouldHide config context =
     in
     if hasNoShipModules then
         Just
-            (describeBranch
-                "Ship UI contains zero module buttons."
-                config.ifShouldHide
+            ( "Ship UI contains zero module buttons."
+            , False
             )
 
     else
@@ -550,9 +572,8 @@ continueIfShouldHide config context =
         of
             Just secondsToSessionEnd ->
                 Just
-                    (describeBranch
-                        ("Session ends in " ++ String.fromInt secondsToSessionEnd ++ " seconds.")
-                        config.ifShouldHide
+                    ( "Session ends in " ++ String.fromInt secondsToSessionEnd ++ " seconds."
+                    , False
                     )
 
             Nothing ->
@@ -563,9 +584,8 @@ continueIfShouldHide config context =
                     case context.readingFromGameClient |> localChatWindowFromUserInterface of
                         Nothing ->
                             Just
-                                (describeBranch
-                                    "I don't see the local chat window."
-                                    askForHelpToGetUnstuck
+                                ( "I don't see the local chat window."
+                                , True
                                 )
 
                         Just localChatWindow ->
@@ -596,9 +616,8 @@ continueIfShouldHide config context =
                             in
                             if 1 < List.length subsetOfUsersWithNoGoodStanding then
                                 Just
-                                    (describeBranch
-                                        "There is an enemy or neutral in local chat."
-                                        config.ifShouldHide
+                                    ( "There is an enemy or neutral in local chat."
+                                    , False
                                     )
 
                             else
@@ -607,15 +626,15 @@ continueIfShouldHide config context =
 
 runAway : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> DecisionPathNode
 runAway context shipUI =
-    case context.eventContext.botSettings.hideLocationName of
-        Nothing ->
+    case context.eventContext.botSettings.hideLocationNames of
+        [] ->
             dockAtRandomStationOrStructure context shipUI
 
-        Just hideLocationName ->
+        hideLocationNames ->
             let
                 routesToHideLocation =
-                    dockToStationOrStructureWithMatchingName
-                        { nameFromSettingOrInfoPanel = hideLocationName }
+                    dockOrWarpToLocationWithMatchingName
+                        { namesFromSettingOrInfoPanel = hideLocationNames }
                         context
             in
             case routesToHideLocation.viaLocationsWindow of
@@ -630,37 +649,74 @@ runAway context shipUI =
                         Nothing ->
                             describeBranch
                                 (String.concat
-                                    [ "Did not find "
-                                    , hideLocationName
-                                    , " in the locations window or any overview window. "
+                                    [ "Did not find any of the "
+                                    , String.fromInt (List.length hideLocationNames)
+                                    , " configured locations ("
+                                    , String.join ", " hideLocationNames
+                                    , ") in the locations window or any overview window. "
                                     , "Defaulting to solar system menu."
                                     ]
                                 )
                                 (routesToHideLocation.viaSolarSystemMenu ())
 
 
-dockToStationOrStructureWithMatchingName :
-    { nameFromSettingOrInfoPanel : String }
+dockOrWarpToLocationWithMatchingName :
+    { namesFromSettingOrInfoPanel : List String }
     -> BotDecisionContext
     ->
         { viaLocationsWindow : Maybe DecisionPathNode
         , viaOverview : Maybe DecisionPathNode
         , viaSolarSystemMenu : () -> DecisionPathNode
         }
-dockToStationOrStructureWithMatchingName { nameFromSettingOrInfoPanel } context =
+dockOrWarpToLocationWithMatchingName { namesFromSettingOrInfoPanel } context =
+    {-
+       session-2025-04-29T00-59:
+       A location given with settings is in space and is NOT directly at a structure.
+       In the context menu for that location, we see following entries at the top:
+       ----
+       Warp to Within (0 m) -> This one appears to be expandable.
+       Align to
+       Show Info
+       ...
+    -}
     let
+        destNamesSimplified : List String
+        destNamesSimplified =
+            List.map
+                simplifyStationOrStructureNameFromSettingsBeforeComparingToMenuEntry
+                namesFromSettingOrInfoPanel
+
         {-
            2023-01-11 Observation by Dean: Text in surroundings context menu entry sometimes wraps station name in XML tags:
            <color=#FF58A7BF>Niyabainen IV - M1 - Caldari Navy Assembly Plant</color>
         -}
         displayTextRepresentsMatchingStation : String -> Bool
-        displayTextRepresentsMatchingStation =
-            simplifyStationOrStructureNameFromSettingsBeforeComparingToMenuEntry
-                >> String.contains (simplifyStationOrStructureNameFromSettingsBeforeComparingToMenuEntry nameFromSettingOrInfoPanel)
+        displayTextRepresentsMatchingStation displayName =
+            let
+                displayNameSimplified =
+                    simplifyStationOrStructureNameFromSettingsBeforeComparingToMenuEntry
+                        displayName
+            in
+            List.any
+                (\destName ->
+                    String.contains destName displayNameSimplified
+                )
+                destNamesSimplified
     in
     useContextMenuOnLocationWithMatchingName
         displayTextRepresentsMatchingStation
-        (useMenuEntryWithTextContaining "dock" menuCascadeCompleted)
+        (useMenuEntryWithTextContainingFirstOf
+            [ ( "dock"
+              , menuCascadeCompleted
+              )
+            , ( "Warp to Within (0 m)"
+              , menuCascadeCompleted
+              )
+            , ( "Warp to"
+              , useMenuEntryWithTextContaining "Within 0 m" menuCascadeCompleted
+              )
+            ]
+        )
         context
 
 
@@ -736,7 +792,7 @@ useContextMenuOnLocationWithMatchingName nameMatches useMenu context =
                 |> Maybe.andThen scrollDown
                 |> Maybe.withDefault
                     (useContextMenuCascadeOnListSurroundingsButton
-                        (useMenuEntryWithTextContainingFirstOf
+                        (useMenuEntryWithTextContainingFirstOfCommonContinuation
                             [ "locations" ]
                             (useMenuEntryInLastContextMenuInCascade
                                 { describeChoice = "select using the configured predicate"
@@ -832,34 +888,43 @@ dockAtRandomStationOrStructure context seeUndockingComplete =
                         |> List.any (\toAvoid -> menuEntry.text |> stringContainsIgnoringCase toAvoid)
                         |> not
 
-                chooseNextMenuEntry =
-                    { describeChoice = "Use 'Dock' if available or a random entry."
-                    , chooseEntry =
-                        pickEntryFromLastContextMenuInCascade
-                            (\menuEntries ->
+                chooseNextMenuEntryDockOrRandom : Int -> UseContextMenuCascadeNode
+                chooseNextMenuEntryDockOrRandom remainingDepth =
+                    MenuEntryWithCustomChoice
+                        { describeChoice = "Use 'Dock' if available or a random entry."
+                        , chooseEntry =
+                            \menu ->
                                 let
                                     suitableMenuEntries =
-                                        List.filter menuEntryIsSuitable menuEntries
+                                        List.filter menuEntryIsSuitable menu.entries
                                 in
-                                [ withTextContainingIgnoringCase "dock"
-                                , List.filter (.text >> stringContainsIgnoringCase "station")
-                                    >> Common.Basics.listElementAtWrappedIndex
+                                case
+                                    [ withTextContainingIgnoringCase "dock"
+                                    , List.filter (.text >> stringContainsIgnoringCase "station")
+                                        >> Common.Basics.listElementAtWrappedIndex
+                                            (context.randomIntegers |> List.head |> Maybe.withDefault 0)
+                                    , Common.Basics.listElementAtWrappedIndex
                                         (context.randomIntegers |> List.head |> Maybe.withDefault 0)
-                                , Common.Basics.listElementAtWrappedIndex
-                                    (context.randomIntegers |> List.head |> Maybe.withDefault 0)
-                                ]
-                                    |> List.filterMap (\priority -> suitableMenuEntries |> priority)
-                                    |> List.head
-                            )
-                    }
+                                    ]
+                                        |> Common.listMapFind (\priority -> suitableMenuEntries |> priority)
+                                of
+                                    Nothing ->
+                                        Nothing
+
+                                    Just menuEntry ->
+                                        if remainingDepth <= 0 then
+                                            Just ( menuEntry, MenuCascadeCompleted )
+
+                                        else
+                                            Just
+                                                ( menuEntry
+                                                , chooseNextMenuEntryDockOrRandom (remainingDepth - 1)
+                                                )
+                        }
             in
             useContextMenuCascadeOnListSurroundingsButton
-                (useMenuEntryWithTextContainingFirstOf [ "stations", "structures" ]
-                    (MenuEntryWithCustomChoice chooseNextMenuEntry
-                        (MenuEntryWithCustomChoice chooseNextMenuEntry
-                            (MenuEntryWithCustomChoice chooseNextMenuEntry MenuCascadeCompleted)
-                        )
-                    )
+                (useMenuEntryWithTextContainingFirstOfCommonContinuation [ "stations", "structures" ]
+                    (chooseNextMenuEntryDockOrRandom 3)
                 )
                 context
 
@@ -1466,6 +1531,7 @@ launchAndEngageDrones config context =
             case ( dronesWindow.droneGroupInBay, dronesWindow.droneGroupInSpace ) of
                 ( Just droneGroupInBay, Just droneGroupInSpace ) ->
                     let
+                        idlingDrones : List EveOnline.ParseUserInterface.DronesWindowEntryDroneStructure
                         idlingDrones =
                             droneGroupInSpace
                                 |> EveOnline.ParseUserInterface.enumerateAllDronesFromDronesGroup
@@ -1476,20 +1542,37 @@ launchAndEngageDrones config context =
                                         >> List.any (stringContainsIgnoringCase "idle")
                                     )
 
+                        dronesInBayQuantity : Int
                         dronesInBayQuantity =
-                            droneGroupInBay.header.quantityFromTitle
-                                |> Maybe.map .current
-                                |> Maybe.withDefault 0
+                            case droneGroupInBay.header.quantityFromTitle of
+                                Nothing ->
+                                    0
 
+                                Just quantityFromTitle ->
+                                    quantityFromTitle.current
+
+                        dronesInSpaceQuantityCurrent : Int
                         dronesInSpaceQuantityCurrent =
-                            droneGroupInSpace.header.quantityFromTitle
-                                |> Maybe.map .current
-                                |> Maybe.withDefault 0
+                            case droneGroupInSpace.header.quantityFromTitle of
+                                Nothing ->
+                                    0
 
+                                Just quantityFromTitle ->
+                                    quantityFromTitle.current
+
+                        dronesInSpaceQuantityLimit : Int
                         dronesInSpaceQuantityLimit =
-                            droneGroupInSpace.header.quantityFromTitle
-                                |> Maybe.andThen .maximum
-                                |> Maybe.withDefault 2
+                            case droneGroupInSpace.header.quantityFromTitle of
+                                Nothing ->
+                                    2
+
+                                Just quantityFromTitle ->
+                                    case quantityFromTitle.maximum of
+                                        Nothing ->
+                                            2
+
+                                        Just maximum ->
+                                            maximum
 
                         {-
                            Observation from session-recording-2024-05-07T11-55-13.zip-event-482-eve-online-memory-reading:
@@ -1511,12 +1594,14 @@ launchAndEngageDrones config context =
                                                 )
                                     )
 
+                        engageDrones : DecisionPathNode
                         engageDrones =
                             useContextMenuCascade
                                 ( "drones group", droneGroupInSpace.header.uiNode )
                                 (useMenuEntryWithTextContaining "engage target" menuCascadeCompleted)
                                 context
 
+                        considerLaunch : () -> Maybe DecisionPathNode
                         considerLaunch () =
                             if 0 < dronesInBayQuantity && dronesInSpaceQuantityCurrent < dronesInSpaceQuantityLimit then
                                 if assumeNotEnoughBandwidthToLaunchDrone context then
@@ -1549,7 +1634,7 @@ launchAndEngageDrones config context =
                                     targetsWithDronesAssignedLowPrio : List EveOnline.ParseUserInterface.Target
                                     targetsWithDronesAssignedLowPrio =
                                         List.filter
-                                            (\target -> List.member target redirectToTargets)
+                                            (\target -> not (List.member target redirectToTargets))
                                             targetsWithDronesAssigned
                                 in
                                 if 0 < List.length targetsWithDronesAssignedLowPrio then
@@ -1661,29 +1746,34 @@ assumeNotEnoughBandwidthToLaunchDrone context =
 
 returnDronesToBay : BotDecisionContext -> Maybe DecisionPathNode
 returnDronesToBay context =
-    context.readingFromGameClient.dronesWindow
-        |> Maybe.andThen .droneGroupInSpace
-        |> Maybe.andThen
-            (\droneGroupInLocalSpace ->
-                if
-                    (droneGroupInLocalSpace.header.quantityFromTitle
-                        |> Maybe.map .current
-                        |> Maybe.withDefault 0
-                    )
-                        < 1
-                then
+    case context.readingFromGameClient.dronesWindow of
+        Nothing ->
+            Nothing
+
+        Just dronesWindow ->
+            case dronesWindow.droneGroupInSpace of
+                Nothing ->
                     Nothing
 
-                else
-                    Just
-                        (describeBranch "I see there are drones in space. Return those to bay."
-                            (useContextMenuCascade
-                                ( "drones group", droneGroupInLocalSpace.header.uiNode )
-                                (useMenuEntryWithTextContaining "Return to drone bay" menuCascadeCompleted)
-                                context
-                            )
+                Just droneGroupInLocalSpace ->
+                    if
+                        (droneGroupInLocalSpace.header.quantityFromTitle
+                            |> Maybe.map .current
+                            |> Maybe.withDefault 0
                         )
-            )
+                            < 1
+                    then
+                        Nothing
+
+                    else
+                        Just
+                            (describeBranch "I see there are drones in space. Return those to bay."
+                                (useContextMenuCascade
+                                    ( "drones group", droneGroupInLocalSpace.header.uiNode )
+                                    (useMenuEntryWithTextContaining "Return to drone bay" menuCascadeCompleted)
+                                    context
+                                )
+                            )
 
 
 lockTargetFromOverviewEntry :
@@ -1866,37 +1956,65 @@ moduleIsActiveOrReloading moduleButton =
 
 
 iconSpriteHasColorOfRat : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
-iconSpriteHasColorOfRat =
-    .iconSpriteColorPercent
-        >> Maybe.map
-            (\colorPercent ->
-                colorPercent.g * 3 < colorPercent.r && colorPercent.b * 3 < colorPercent.r && 60 < colorPercent.r && 50 < colorPercent.a
-            )
-        >> Maybe.withDefault False
+iconSpriteHasColorOfRat overviewEntry =
+    case overviewEntry.iconSpriteColorPercent of
+        Nothing ->
+            False
+
+        Just colorPercent ->
+            (colorPercent.g * 3 < colorPercent.r)
+                && (colorPercent.b * 3 < colorPercent.r)
+                && (60 < colorPercent.r && 50 < colorPercent.a)
 
 
 updateMemoryForNewReadingFromGame : UpdateMemoryContext -> BotMemory -> BotMemory
 updateMemoryForNewReadingFromGame context botMemoryBefore =
     let
+        currentStationNameFromInfoPanel : Maybe String
         currentStationNameFromInfoPanel =
             context.readingFromGameClient.infoPanelContainer
                 |> Maybe.andThen .infoPanelLocationInfo
                 |> Maybe.andThen .expandedContent
                 |> Maybe.andThen .currentStationName
 
+        shipIsWarping : Maybe Bool
         shipIsWarping =
-            context.readingFromGameClient.shipUI
-                |> Maybe.andThen .indication
-                |> Maybe.andThen .maneuverType
-                |> Maybe.map ((==) EveOnline.ParseUserInterface.ManeuverWarp)
+            case context.readingFromGameClient.shipUI of
+                Nothing ->
+                    Nothing
 
+                Just shipUI ->
+                    case shipUI.indication of
+                        Nothing ->
+                            Nothing
+
+                        Just indication ->
+                            case indication.maneuverType of
+                                Nothing ->
+                                    Nothing
+
+                                Just maneuverType ->
+                                    case maneuverType of
+                                        EveOnline.ParseUserInterface.ManeuverWarp ->
+                                            Just True
+
+                                        _ ->
+                                            Just False
+
+        namesOfRatsInOverview : List String
         namesOfRatsInOverview =
             getNamesOfRatsInOverview context.readingFromGameClient
 
+        weJustFinishedWarping : Bool
         weJustFinishedWarping =
-            (shipIsWarping /= botMemoryBefore.shipWarpingInLastReading)
-                && (botMemoryBefore.shipWarpingInLastReading == Just True)
+            case botMemoryBefore.shipWarpingInLastReading of
+                Just True ->
+                    shipIsWarping /= botMemoryBefore.shipWarpingInLastReading
 
+                _ ->
+                    False
+
+        visitedAnomalies : Dict.Dict String MemoryOfAnomaly
         visitedAnomalies =
             if shipIsWarping == Just True then
                 botMemoryBefore.visitedAnomalies
@@ -1932,8 +2050,10 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                                         Set.union anomalyMemoryBefore.ratsSeen (Set.fromList namesOfRatsInOverview)
                                 }
                         in
-                        botMemoryBefore.visitedAnomalies |> Dict.insert currentAnomalyID anomalyMemory
+                        botMemoryBefore.visitedAnomalies
+                            |> Dict.insert currentAnomalyID anomalyMemory
 
+        notEnoughBandwidthToLaunchDrone : Bool
         notEnoughBandwidthToLaunchDrone =
             readingFromGameClientSaysNotEnoughBandwidthToLaunchDrone context.readingFromGameClient
 

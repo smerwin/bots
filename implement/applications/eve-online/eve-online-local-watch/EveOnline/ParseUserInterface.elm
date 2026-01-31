@@ -693,7 +693,7 @@ asUITreeNodeWithInheritedOffset :
     -> EveOnline.MemoryReading.UITreeNode
     -> ChildOfNodeWithDisplayRegion
 asUITreeNodeWithInheritedOffset inheritedOffset { occludedRegions } rawNode =
-    case rawNode |> getDisplayRegionFromDictEntries of
+    case getDisplayRegionFromDictEntries rawNode of
         Nothing ->
             ChildWithoutRegion rawNode
 
@@ -702,7 +702,11 @@ asUITreeNodeWithInheritedOffset inheritedOffset { occludedRegions } rawNode =
                 (asUITreeNodeWithDisplayRegion
                     { selfDisplayRegion = selfRegion
                     , totalDisplayRegion =
-                        { selfRegion | x = inheritedOffset.x + selfRegion.x, y = inheritedOffset.y + selfRegion.y }
+                        { x = inheritedOffset.x + selfRegion.x
+                        , y = inheritedOffset.y + selfRegion.y
+                        , width = selfRegion.width
+                        , height = selfRegion.height
+                        }
                     , occludedRegions = occludedRegions
                     }
                     rawNode
@@ -720,10 +724,19 @@ getDisplayRegionFromDictEntries uiNode =
                     ]
                 )
 
+        fixedNumberFromPropertyName : String -> Maybe Int
         fixedNumberFromPropertyName propertyName =
-            uiNode.dictEntriesOfInterest
-                |> Dict.get propertyName
-                |> Maybe.andThen (fixedNumberFromJsonValue >> Result.toMaybe)
+            case Dict.get propertyName uiNode.dictEntriesOfInterest of
+                Just jsonValue ->
+                    case fixedNumberFromJsonValue jsonValue of
+                        Ok number ->
+                            Just number
+
+                        Err _ ->
+                            Nothing
+
+                Nothing ->
+                    Nothing
     in
     case
         ( ( fixedNumberFromPropertyName "_displayX", fixedNumberFromPropertyName "_displayY" )
@@ -3240,14 +3253,17 @@ getSubstringBetweenXmlTagsAfterMarker marker =
 parseNumberTruncatingAfterOptionalDecimalSeparator : String -> Result String Int
 parseNumberTruncatingAfterOptionalDecimalSeparator numberDisplayText =
     let
+        expectedSeparators : List String
         expectedSeparators =
-            [ ",", ".", "’", " ", "\u{00A0}", "\u{202F}" ]
+            [ ",", ".", "’", "'", " ", "\u{00A0}", "\u{202F}" ]
 
+        groupsTexts : List String
         groupsTexts =
             expectedSeparators
                 |> List.foldl (\separator -> List.concatMap (String.split separator))
                     [ String.trim numberDisplayText ]
 
+        lastGroupIsFraction : Bool
         lastGroupIsFraction =
             case List.reverse groupsTexts of
                 lastGroupText :: _ :: _ ->
@@ -3256,6 +3272,7 @@ parseNumberTruncatingAfterOptionalDecimalSeparator numberDisplayText =
                 _ ->
                     False
 
+        integerText : String
         integerText =
             String.join ""
                 (if lastGroupIsFraction then
