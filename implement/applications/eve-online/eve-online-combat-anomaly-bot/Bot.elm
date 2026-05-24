@@ -1,4 +1,4 @@
-{- EVE Online combat anomaly bot version 2025-10-29
+{- EVE Online Combat Anomaly Bot version 2026-05-24
 
    This bot uses the probe scanner to find combat anomalies and kills rats using drones and weapon modules.
 
@@ -364,11 +364,24 @@ findReasonToIgnoreProbeScanResult context probeScanResult =
 
         Just scanResultID ->
             let
-                isCombatAnomaly =
+                isCombatAnomaly2025 =
                     probeScanResult.cellsTexts
                         |> Dict.get "Group"
                         |> Maybe.map (stringContainsIgnoringCase "combat")
                         |> Maybe.withDefault False
+
+                isCombatAnomaly2026 =
+                    {-
+                       Observed in session-recording-2026-05-20T15-15-351:
+                       'Signal' = "Combat Site
+                    -}
+                    probeScanResult.cellsTexts
+                        |> Dict.get "Signal"
+                        |> Maybe.map (stringContainsIgnoringCase "combat")
+                        |> Maybe.withDefault False
+
+                isCombatAnomaly =
+                    isCombatAnomaly2025 || isCombatAnomaly2026
 
                 matchesAnomalyNameFromSettings =
                     (context.eventContext.botSettings.anomalyNames |> List.isEmpty)
