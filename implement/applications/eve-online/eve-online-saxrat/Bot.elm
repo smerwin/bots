@@ -959,17 +959,82 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
         waitTimeRemainingSeconds =
             context.eventContext.botSettings.anomalyWaitTimeSeconds - arrivalInAnomalyAgeSeconds
 
+        commanderWreckEntries =
+            context.readingFromGameClient.overviewWindows
+                |> List.concatMap .entries
+                |> List.filter isCommanderWreck
+                |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+
+        -- Extra time budget (beyond anomalyWaitTimeSeconds) to spend
+        -- looting commander wrecks before giving up and leaving anyway --
+        -- a bounded timeout rather than tracking which specific wrecks
+        -- we've already looted, since a looted wreck stays on the
+        -- overview (just empty) with no clean way to tell from here.
+        -- Re-looting an empty wreck is harmless, just wasted ticks, so
+        -- the timeout is the actual guard against getting stuck forever.
+        lootWreckTimeRemainingSeconds =
+            (context.eventContext.botSettings.anomalyWaitTimeSeconds + 120) - arrivalInAnomalyAgeSeconds
+
+        decisionAfterLootingCommanderWrecks =
+            if waitTimeRemainingSeconds <= 0 then
+                returnDronesToBay context
+                    |> Maybe.withDefault
+                        (describeBranch "No drones to return." continueIfCombatComplete)
+
+            else
+                describeBranch
+                    ("Wait before considering the anomaly finished: " ++ String.fromInt waitTimeRemainingSeconds ++ " seconds")
+                    (tetherAtStructure context)
+
         decisionIfNoEnemyToAttack =
             if overviewEntriesToAttack |> List.isEmpty then
-                if waitTimeRemainingSeconds <= 0 then
-                    returnDronesToBay context
-                        |> Maybe.withDefault
-                            (describeBranch "No drones to return." continueIfCombatComplete)
+                case context.readingFromGameClient.inventoryWindows |> List.head of
+                    Just openInventoryWindow ->
+                        -- A wreck's loot window is open (from opening a
+                        -- commander wreck's cargo below) -- handle it to
+                        -- completion (loot, then close) before touching
+                        -- anything else, regardless of what's left in
+                        -- commanderWreckEntries. "Loot All" has no
+                        -- dedicated field on InventoryWindow, so this is
+                        -- a plain text search within the window.
+                        case openInventoryWindow.uiNode |> findUiElementWithText "Loot All" of
+                            Just lootAllButton ->
+                                describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
 
-                else
-                    describeBranch
-                        ("Wait before considering the anomaly finished: " ++ String.fromInt waitTimeRemainingSeconds ++ " seconds")
-                        (tetherAtStructure context)
+                            Nothing ->
+                                case
+                                    openInventoryWindow.uiNode
+                                        |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
+                                        |> Maybe.andThen .closeButton
+                                of
+                                    Just closeButton ->
+                                        describeBranch "Nothing left to loot. Close the wreck's cargo window."
+                                            (clickUiElement closeButton)
+
+                                    Nothing ->
+                                        describeBranch "I do not see a way to close this inventory window."
+                                            askForHelpToGetUnstuck
+
+                    Nothing ->
+                        case commanderWreckEntries of
+                            wreckToLoot :: _ ->
+                                if lootWreckTimeRemainingSeconds <= 0 then
+                                    describeBranch "Giving up on looting commander wreck(s) -- out of time."
+                                        decisionAfterLootingCommanderWrecks
+
+                                else
+                                    describeBranch "Open commander wreck's cargo before leaving."
+                                        (useContextMenuCascadeOnOverviewEntry
+                                            (useMenuEntryWithTextContainingFirstOf
+                                                [ "Loot All", "Open Cargo" ]
+                                                menuCascadeCompleted
+                                            )
+                                            wreckToLoot
+                                            context
+                                        )
+
+                            [] ->
+                                decisionAfterLootingCommanderWrecks
 
             else
                 describeBranch "Locking..."
@@ -1483,6 +1548,47 @@ shouldAttackOverviewEntryFirst overviewEntry = case overviewEntry.objectName of
     Nothing -> False
     Just objectName ->
         objectName |> String.contains "Tower"
+
+
+{-| A "commander"-type rat's wreck, worth sticking around to loot before
+leaving the anomaly. Checks both name and type since which one carries
+"Commander" seems to vary; requires "wreck" in the type so we don't
+also match the (still-living) commander rat itself while it's on the
+overview.
+-}
+isCommanderWreck : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+isCommanderWreck overviewEntry =
+    let
+        containsCommander =
+            [ overviewEntry.objectName, overviewEntry.objectType ]
+                |> List.filterMap identity
+                |> List.any (stringContainsIgnoringCase "commander")
+
+        isWreck =
+            overviewEntry.objectType
+                |> Maybe.map (stringContainsIgnoringCase "wreck")
+                |> Maybe.withDefault False
+    in
+    containsCommander && isWreck
+
+
+{-| First descendant (by depth-first order) whose displayed text contains
+`textToFind`, e.g. a "Loot All" button in an inventory window -- there is
+no dedicated field for that button in `InventoryWindow`, unlike
+`buttonToStackAll`.
+-}
+findUiElementWithText : String -> EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+findUiElementWithText textToFind uiNode =
+    EveOnline.ParseUserInterface.getAllContainedDisplayTextsWithRegion uiNode
+        |> List.filter (Tuple.first >> stringContainsIgnoringCase textToFind)
+        |> List.map Tuple.second
+        |> List.head
+
+
+clickUiElement : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> DecisionPathNode
+clickUiElement uiElement =
+    decideActionForCurrentStep
+        (mouseClickOnUIElement MouseButtonLeft uiElement |> Result.withDefault [])
 
 
 moduleIsActiveOrReloading : EveOnline.ParseUserInterface.ShipUIModuleButton -> Bool
