@@ -59,6 +59,9 @@ sleep 1
 # match one of the game client's own preset "Warp to Within" distances
 # (typically 0, 5, 10, 15, 20, 30, 50, 70, 100), not an arbitrary number,
 # or the bot will get stuck unable to find a matching menu entry.
+#
+# targeting-range is the max distance (meters) to lock a target from the
+# overview; beyond it the bot approaches instead of locking.
 SETTINGS="anomaly-name=blood hideaway
 anomaly-name=blood refuge
 anomaly-name=blood burrow
@@ -77,6 +80,7 @@ hide-when-neutral-in-local = no
 orbit-in-combat=no
 keep-at-range=yes
 warp-at=100
+targeting-range=66000
 run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=80"
 

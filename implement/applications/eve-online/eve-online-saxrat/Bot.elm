@@ -33,6 +33,7 @@
    + `warp-at`: Distance in km to warp to when warping to an anomaly, e.g. `warp-at=30`. Must match one of the game client's own preset "Warp to Within" distances offered in that menu (typically 0, 5, 10, 15, 20, 30, 50, 70, 100) -- an arbitrary value will not match any menu entry and will leave the bot stuck. Defaults to 100.
    + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping range or aligning.
    + `keep-at-range`: Set this to 'yes' to keep range from the target instead of orbiting or aligning.
+   + `targeting-range`: Maximum distance in meters to lock a target from the overview, e.g. `targeting-range=50000`. Beyond this, the bot approaches instead of locking. Defaults to 66000.
 
    When using more than one setting, start a new line for each setting in the text input field.
    Here is an example of a complete settings string:
@@ -158,6 +159,7 @@ defaultBotSettings =
     , orbitInCombat = AppSettings.No
     , keepAtRange = AppSettings.No
     , warpAt = 100
+    , targetingRangeMeters = 66000
     }
 
 
@@ -222,6 +224,12 @@ parseBotSettings =
                     { settings | warpAt = warpAt }
                 )
            )
+         , ( "targeting-range"
+           , AppSettings.valueTypeInteger
+                (\targetingRangeMeters settings ->
+                    { settings | targetingRangeMeters = targetingRangeMeters }
+                )
+           )
          ]
             |> Dict.fromList
         )
@@ -246,6 +254,7 @@ type alias BotSettings =
     , orbitInCombat : AppSettings.YesOrNo
     , keepAtRange : AppSettings.YesOrNo
     , warpAt : Int
+    , targetingRangeMeters : Int
     }
 
 
@@ -982,7 +991,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
 
                                     nextOverviewEntryToLock :: _ ->
                                         describeBranch "I see an overview entry to lock."
-                                            (lockTargetFromOverviewEntry nextOverviewEntryToLock)
+                                            (lockTargetFromOverviewEntry context nextOverviewEntryToLock)
                                             
                                 )
                                 
@@ -1009,7 +1018,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
 
                                                                 nextOverviewEntryToLock :: _ ->
                                                                     describeBranch "Lock more targets."
-                                                                        (lockTargetFromOverviewEntry nextOverviewEntryToLock)
+                                                                        (lockTargetFromOverviewEntry context nextOverviewEntryToLock)
                                                         )
                                                     )
                                             )
@@ -1252,17 +1261,12 @@ returnDronesToBay context =
             )
 
 
-lockTargetFromOverviewEntry : OverviewWindowEntry -> DecisionPathNode
-lockTargetFromOverviewEntry overviewEntry  =
+lockTargetFromOverviewEntry : BotDecisionContext -> OverviewWindowEntry -> DecisionPathNode
+lockTargetFromOverviewEntry context overviewEntry =
     let
-        -- for the love of god make this a config option
         targetingRange : Int
-        -- targetingRange = 140000
-        -- targetingRange = 20000
-        targetingRange = 66000
-        -- targetingRange = 37000
-       -- NOPE targetingRange = (context.botSettings.warpAt * 1000)
-
+        targetingRange =
+            context.eventContext.botSettings.targetingRangeMeters
     in
     case overviewEntry.objectDistanceInMeters of
         Ok distanceInMeters ->
