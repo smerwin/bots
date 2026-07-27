@@ -30,6 +30,9 @@
    + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. You can use this setting multiple times to select multiple names.
    + `activate-module-always` : Text found in tooltips of ship modules that should always be active. For example: "shield hardener".
    + `anomaly-wait-time`: Minimum time to wait after arriving in an anomaly before considering it finished. Use this if you see anomalies in which rats arrive later than you arrive on grid.
+   + `warp-at`: Distance in km to warp to when warping to an anomaly, e.g. `warp-at=30`. Must match one of the game client's own preset "Warp to Within" distances offered in that menu (typically 0, 5, 10, 15, 20, 30, 50, 70, 100) -- an arbitrary value will not match any menu entry and will leave the bot stuck. Defaults to 100.
+   + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping range or aligning.
+   + `keep-at-range`: Set this to 'yes' to keep range from the target instead of orbiting or aligning.
 
    When using more than one setting, start a new line for each setting in the text input field.
    Here is an example of a complete settings string:
@@ -776,8 +779,8 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                     ++ " scan results, and no matching anomaly. Git!"
                                 )
                                 (jumpToNextSystem context)
-                        Just _ -> 
-                            describeBranch "oops?" (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
+                        Just _ ->
+                            describeBranch "Found matching anomaly." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
 
                 Just _ ->
                     case seeUndockingComplete |> shipUIModulesToActivateAlways |> List.filter (.isActive >> Maybe.withDefault False >> not) |> List.head of
