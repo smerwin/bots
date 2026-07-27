@@ -129,13 +129,11 @@ import EveOnline.BotFrameworkSeparatingMemory
         , clickModuleButtonButWaitIfClickedInPreviousStep
         , decideActionForCurrentStep
         , ensureInfoPanelLocationInfoIsExpanded
-        , identifyingInfoFromContextMenu
         , useContextMenuCascade
         , useContextMenuCascadeOnListSurroundingsButton
         , useContextMenuCascadeOnOverviewEntry
         , waitForProgressInGame
         )
-import List.Extra
 import EveOnline.ParseUserInterface
     exposing
         ( OverviewWindowEntry
@@ -260,6 +258,7 @@ type alias BotMemory =
     , shipModules : ShipModulesMemory
     , shipWarpingInLastReading : Maybe Bool
     , visitedAnomalies : Dict.Dict String MemoryOfAnomaly
+    , contextMenuOpenTicks : Int
     }
 
 
@@ -610,19 +609,14 @@ tetherAtStructure context =
                             |> Maybe.map (\menuEntry -> ( menuEntry, followingChoice ))
                 }
     in
-    returnDronesToBay context
-    |> Maybe.withDefault
-        (describeBranch "No drones to return."
-            (ensurePropulsionModuleIsDeactivatedBeforeWarping context
-                (useContextMenuCascadeOnListSurroundingsButton
-                    (useMenuEntryWithTextContainingFirstOf [ "structures" ]
-                        (chooseNextMenuEntry
-                            (chooseNextMenuEntry MenuCascadeCompleted)
-                        )
-                    )
-                    context
+    ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
+        (useContextMenuCascadeOnListSurroundingsButton
+            (useMenuEntryWithTextContainingFirstOf [ "structures" ]
+                (chooseNextMenuEntry
+                    (chooseNextMenuEntry MenuCascadeCompleted)
                 )
             )
+            context
         )
 
 alignToStructure : ShipUI -> BotDecisionContext -> Maybe DecisionPathNode
@@ -739,12 +733,18 @@ decideNextActionWhenInSpace context seeUndockingComplete =
     case context.readingFromGameClient.probeScannerWindow of
         Nothing ->
             describeBranch "No probe window" (
-                case seeUndockingComplete |> shipUIModulesToActivateAlways |> List.filter (.isActive >> Maybe.withDefault False >> not) |> List.head of
+                case
+                    if anyAttackableInOverview context.readingFromGameClient then
+                        seeUndockingComplete |> shipUIModulesToActivateAlways |> List.filter (.isActive >> Maybe.withDefault False >> not) |> List.head
+
+                    else
+                        Nothing
+                of
                         Just inactiveModule ->
                             describeBranch "Inactive module should be active"
                                 (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
 
-                                    
+
                         Nothing ->
                             decideActionInAnomaly
                                 { arrivalInAnomalyAgeSeconds = 600 }
@@ -783,12 +783,18 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                             describeBranch "Found matching anomaly." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
 
                 Just _ ->
-                    case seeUndockingComplete |> shipUIModulesToActivateAlways |> List.filter (.isActive >> Maybe.withDefault False >> not) |> List.head of
+                    case
+                        if anyAttackableInOverview context.readingFromGameClient then
+                            seeUndockingComplete |> shipUIModulesToActivateAlways |> List.filter (.isActive >> Maybe.withDefault False >> not) |> List.head
+
+                        else
+                            Nothing
+                    of
                         Just inactiveModule ->
                             describeBranch "This module should always be active"
                                 (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
 
-                                    
+
                         Nothing ->
                             let
                                 returnDronesAndEnterAnomaly { ifNoAcceptableAnomalyAvailable } =
@@ -1063,7 +1069,7 @@ enterAnomaly { ifNoAcceptableAnomalyAvailable } context =
                         ifNoAcceptableAnomalyAvailable
 
                 Just anomalyScanResult ->
-                    ensurePropulsionModuleIsDeactivatedBeforeWarping context
+                    ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
                         (describeBranch "Warp to anomaly."
                             (useContextMenuCascade
                                 ( "Scan result", anomalyScanResult.uiNode )
@@ -1310,6 +1316,7 @@ initBotMemory =
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , shipWarpingInLastReading = Nothing
     , visitedAnomalies = Dict.empty
+    , contextMenuOpenTicks = 0
     }
 
 
@@ -1354,7 +1361,17 @@ statusTextFromState context =
                                         ++ "."
 
                         namesOfOtherPilotsInOverview =
-                            []
+                            getNamesOfOtherPilotsInOverview readingFromGameClient
+
+                        namesOfRatsInOverview =
+                            getNamesOfRatsInOverview readingFromGameClient
+
+                        currentTargetName =
+                            readingFromGameClient.overviewWindows
+                                |> List.concatMap .entries
+                                |> List.filter overviewEntryIsActiveTarget
+                                |> List.head
+                                |> Maybe.andThen .objectName
 
                         describeAnomaly =
                             "Current anomaly: "
@@ -1373,10 +1390,17 @@ statusTextFromState context =
                                         ": " ++ (namesOfOtherPilotsInOverview |> String.join ", ")
                                    )
                                 ++ "."
+
+                        describeRatsInOverview =
+                            "Rats in overview: " ++ (namesOfRatsInOverview |> List.length |> String.fromInt) ++ "."
+
+                        describeCurrentTarget =
+                            "Current target: " ++ (currentTargetName |> Maybe.withDefault "None") ++ "."
                     in
                     [ [ describeShip ]
                     , [ describeDrones ]
                     , [ describeAnomaly, describeOverview ]
+                    , [ describeRatsInOverview, describeCurrentTarget ]
                     ]
                         |> List.map (String.join " ")
     in
@@ -1401,6 +1425,26 @@ overviewEntryIsActiveTarget =
 shouldAttackOverviewEntry : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 shouldAttackOverviewEntry =
     iconSpriteHasColorOfRat
+
+
+{-| Whether there is currently anything in the overview worth fighting.
+Used to gate the "keep these modules always active" enforcement (see
+`shipUIModulesToActivateAlways` call sites): that enforcement exists to
+protect us while fighting, but it has no way to tell an active-tank
+module apart from the propulsion module sitting in the same row, so it
+was fighting `ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping`
+over the propulsion module's state every time we tried to warp away with
+nothing left to shoot -- deactivate for warp, then "always active"
+reactivates it next tick, forever. Only enforcing "always active" while
+there is something to attack breaks that fight without needing to know
+which module is which.
+-}
+anyAttackableInOverview : ReadingFromGameClient -> Bool
+anyAttackableInOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.any shouldAttackOverviewEntry
+
 
 shouldAttackOverviewEntryFirst : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 shouldAttackOverviewEntryFirst overviewEntry = case overviewEntry.objectName of
@@ -1484,90 +1528,98 @@ activateWeaponModuleButWaitIfActivatedInPreviousStep context weaponIndex moduleB
                     )
 
 
-{-| Deactivate the propulsion module (Alt+F1) before warping -- an active
-prop mod can block or interfere with warping. Spends one step on the
-key press (if not already pressed in the previous step), then proceeds
-to `ifDeactivated`.
+{-| Recall drones and deactivate the propulsion module (Alt+F1) before
+warping -- warping away with drones still out abandons them in space,
+and an active prop mod can block or interfere with warping. Drones take
+priority: if any are out, this spends the step recalling them (via
+`returnDronesToBay`) and does not even look at the prop mod yet. Once
+none are out, it deactivates the prop mod (skipped if already pressed in
+the previous step), then proceeds to `ifReadyToWarp`.
+
+Feedback: this is the single gate every warp/tether-approach action goes
+through -- fixing drone recall here (once) covers every caller, including
+ones that call `enterAnomaly` directly without their own explicit
+`returnDronesToBay` step, which is what let a warp leave drones behind
+before.
 -}
-ensurePropulsionModuleIsDeactivatedBeforeWarping :
+ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping :
     BotDecisionContext
     -> DecisionPathNode
     -> DecisionPathNode
-ensurePropulsionModuleIsDeactivatedBeforeWarping context ifDeactivated =
-    if
-        context.previousStepsEffects
-            |> List.take 1
-            |> List.any doEffectsDeactivatePropulsionModule
-    then
-        ifDeactivated
+ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context ifReadyToWarp =
+    returnDronesToBay context
+        |> Maybe.withDefault
+            (if
+                context.previousStepsEffects
+                    |> List.take 1
+                    |> List.any doEffectsDeactivatePropulsionModule
+             then
+                ifReadyToWarp
 
-    else
-        describeBranch
-            "Deactivate propulsion module before warping (Alt+F1)."
-            (decideActionForCurrentStep
-                [ EffectOnWindow.KeyDown EffectOnWindow.vkey_MENU
-                , EffectOnWindow.KeyDown EffectOnWindow.vkey_F1
-                , EffectOnWindow.KeyUp EffectOnWindow.vkey_F1
-                , EffectOnWindow.KeyUp EffectOnWindow.vkey_MENU
-                ]
+             else
+                describeBranch
+                    "Deactivate propulsion module before warping (Alt+F1)."
+                    (decideActionForCurrentStep
+                        [ EffectOnWindow.KeyDown EffectOnWindow.vkey_MENU
+                        , EffectOnWindow.KeyDown EffectOnWindow.vkey_F1
+                        , EffectOnWindow.KeyUp EffectOnWindow.vkey_F1
+                        , EffectOnWindow.KeyUp EffectOnWindow.vkey_MENU
+                        ]
+                    )
             )
 
 
-{-| Number of consecutive readings a context menu must sit open,
-completely unchanged, before we treat it as stray rather than as a
-cascade we (or the framework's own `useContextMenuCascade`) are actively
-progressing through. `useContextMenuCascade` already has its own
-same-target discard-and-reopen recovery for a menu that isn't advancing,
-which normally resolves within a tick or two; a menu still unchanged
-after several more readings than that is not part of any cascade this
-bot is currently driving -- most likely a stray one left over from a
-misclick (feedback: this can occlude the Overview and intercept clicks
-meant for whatever is underneath it), and needs a plain Escape to clear.
+{-| Number of consecutive ticks *any* context menu has been open before we
+treat it as stray rather than as a cascade we (or the framework's own
+`useContextMenuCascade`) are actively progressing through.
+
+Originally this compared each reading's context menu against the previous
+few readings for exact equality (same `totalDisplayRegion`), on the theory
+that a cascade actively being clicked through changes every tick while a
+truly stray menu sits still. Live use falsified that: a real stuck case
+(a `tetherAtStructure` cascade landing on a menu with no "Warp"/"Approach"
+entry, whose fallback -- clicking whatever is first -- kept re-clicking
+"Show Info" every tick) kept the menu open, unchanged in every visible
+way, for over a minute without ever tripping the exact-equality check.
+Possibly the menu was actually being closed and freshly reopened each
+tick (a genuinely new object) with some sub-pixel difference in its
+rendered position while animating open, which would defeat an
+exact-`==` comparison indefinitely without ever looking different in a
+screenshot.
+
+The fix: don't compare menu identity across readings at all. Count
+consecutive ticks (via `BotMemory.contextMenuOpenTicks`, reset to 0
+whenever `contextMenus` is empty) where *some* menu -- any menu, whether
+or not it's literally the same instance -- has been open. A normal
+cascade clicks through and closes its menu within a tick or two; this
+threshold gives real margin above that without depending on the menu
+staying byte-for-byte identical, so it also catches the close-and
+immediately-reopen case the old check missed.
 -}
-strayContextMenuUnchangedReadingsThreshold : Int
-strayContextMenuUnchangedReadingsThreshold =
+strayContextMenuOpenTicksThreshold : Int
+strayContextMenuOpenTicksThreshold =
     3
 
 
-{-| `Just` a decision to press Escape if a context menu has been open,
-unchanged, for at least `strayContextMenuUnchangedReadingsThreshold`
-consecutive readings; `Nothing` otherwise, so callers can fall through to
-their normal decision tree.
+{-| `Just` a decision to press Escape if a context menu has been open for
+at least `strayContextMenuOpenTicksThreshold` consecutive ticks; `Nothing`
+otherwise, so callers can fall through to their normal decision tree.
 -}
 clearStrayContextMenu : BotDecisionContext -> Maybe DecisionPathNode
 clearStrayContextMenu context =
-    case context.readingFromGameClient.contextMenus of
-        [] ->
-            Nothing
+    if strayContextMenuOpenTicksThreshold <= context.memory.contextMenuOpenTicks then
+        Just
+            (describeBranch
+                "A context menu has stayed open for several ticks in a row -- likely a stray menu from a misclick or a cascade stuck on a menu with no entry it recognizes. Clear it (Escape)."
+                (decideActionForCurrentStep
+                    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_ESCAPE
+                    , EffectOnWindow.KeyUp EffectOnWindow.vkey_ESCAPE
+                    ]
+                )
+            )
 
-        currentContextMenus ->
-            let
-                currentIdentity =
-                    currentContextMenus |> List.map identifyingInfoFromContextMenu
-
-                unchangedRecentReadingsCount =
-                    context.previousReadingsFromGameClient
-                        |> List.take strayContextMenuUnchangedReadingsThreshold
-                        |> List.Extra.takeWhile
-                            (\previousReading ->
-                                (previousReading.contextMenus |> List.map identifyingInfoFromContextMenu)
-                                    == currentIdentity
-                            )
-                        |> List.length
-            in
-            if strayContextMenuUnchangedReadingsThreshold <= unchangedRecentReadingsCount then
-                Just
-                    (describeBranch
-                        "A context menu has stayed open unchanged for several readings -- likely a stray menu from a misclick. Clear it (Escape)."
-                        (decideActionForCurrentStep
-                            [ EffectOnWindow.KeyDown EffectOnWindow.vkey_ESCAPE
-                            , EffectOnWindow.KeyUp EffectOnWindow.vkey_ESCAPE
-                            ]
-                        )
-                    )
-
-            else
-                Nothing
+    else
+        Nothing
 
 
 iconSpriteHasColorOfRat : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
@@ -1624,7 +1676,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                             anomalyMemoryWithOtherPilotsOnArrival =
                                 if weJustFinishedWarping then
                                     { anomalyMemoryBefore
-                                        | otherPilotsFoundOnArrival = []
+                                        | otherPilotsFoundOnArrival = getNamesOfOtherPilotsInOverview context.readingFromGameClient
                                     }
 
                                 else
@@ -1647,6 +1699,12 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
     , shipWarpingInLastReading = shipIsWarping
     , visitedAnomalies = visitedAnomalies
+    , contextMenuOpenTicks =
+        if context.readingFromGameClient.contextMenus |> List.isEmpty then
+            0
+
+        else
+            botMemoryBefore.contextMenuOpenTicks + 1
     }
 
 
@@ -1686,6 +1744,33 @@ getNamesOfRatsInOverview readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.filter overviewEntryRepresentsRatOnGrid
+        |> List.map (.objectName >> Maybe.withDefault "do not see name of overview entry")
+
+
+{-| A real pilot on grid also shows up by name in the Local chat
+userlist; a rat/NPC never does. Cross-referencing overview entries
+against Local is how the sibling `eve-online-wingus` bot already does
+this (ported verbatim from there -- same `ChatWindow`/`ChatUserEntry`
+shape in this bot's own `ParseUserInterface.elm`).
+-}
+getNamesOfOtherPilotsInOverview : ReadingFromGameClient -> List String
+getNamesOfOtherPilotsInOverview readingFromGameClient =
+    let
+        pilotNamesFromLocalChat =
+            readingFromGameClient
+                |> localChatWindowFromUserInterface
+                |> Maybe.andThen .userlist
+                |> Maybe.map .visibleUsers
+                |> Maybe.withDefault []
+                |> List.filterMap .name
+
+        overviewEntryRepresentsOtherPilot overviewEntry =
+            (overviewEntry.objectName |> Maybe.map (\objectName -> pilotNamesFromLocalChat |> List.member objectName))
+                |> Maybe.withDefault False
+    in
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryRepresentsOtherPilot
         |> List.map (.objectName >> Maybe.withDefault "do not see name of overview entry")
 
 
