@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+# Ad-hoc-signed macOS binaries built from the adjacent .c source in each
+# tool directory -- platform-specific build output, not source.
+/tools/macos-host/probe/probe
+/tools/macos-host/memory_sample/memory_sample
+/tools/macos-host/tree_walker/tree_walker
+/tools/macos-host/live_reader/live_reader
+/tools/macos-host/window_probe/window_probe
+/tools/macos-host/cg_input/cg_input
