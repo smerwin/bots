@@ -126,11 +126,13 @@ import EveOnline.BotFrameworkSeparatingMemory
         , clickModuleButtonButWaitIfClickedInPreviousStep
         , decideActionForCurrentStep
         , ensureInfoPanelLocationInfoIsExpanded
+        , identifyingInfoFromContextMenu
         , useContextMenuCascade
         , useContextMenuCascadeOnListSurroundingsButton
         , useContextMenuCascadeOnOverviewEntry
         , waitForProgressInGame
         )
+import List.Extra
 import EveOnline.ParseUserInterface
     exposing
         ( OverviewWindowEntry
@@ -720,7 +722,8 @@ dockAtRandomStationOrStructure context =
 
 decideNextActionWhenInSpace : BotDecisionContext -> SeeUndockingComplete -> DecisionPathNode
 decideNextActionWhenInSpace context seeUndockingComplete =
-    if seeUndockingComplete.shipUI |> shipUIIndicatesShipIsWarpingOrJumping then
+    clearStrayContextMenu context |> Maybe.withDefault
+    (if seeUndockingComplete.shipUI |> shipUIIndicatesShipIsWarpingOrJumping then
         describeBranch "HOOOOONK in warp"
             ([ returnDronesToBay context
              ]
@@ -835,6 +838,7 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                                             seeUndockingComplete
                                                             returnDronesAndEnterAnomalyOrWait
                                                 )
+    )
 
 
 undockUsingStationWindow : BotDecisionContext -> DecisionPathNode
@@ -1504,6 +1508,63 @@ ensurePropulsionModuleIsDeactivatedBeforeWarping context ifDeactivated =
                 , EffectOnWindow.KeyUp EffectOnWindow.vkey_MENU
                 ]
             )
+
+
+{-| Number of consecutive readings a context menu must sit open,
+completely unchanged, before we treat it as stray rather than as a
+cascade we (or the framework's own `useContextMenuCascade`) are actively
+progressing through. `useContextMenuCascade` already has its own
+same-target discard-and-reopen recovery for a menu that isn't advancing,
+which normally resolves within a tick or two; a menu still unchanged
+after several more readings than that is not part of any cascade this
+bot is currently driving -- most likely a stray one left over from a
+misclick (feedback: this can occlude the Overview and intercept clicks
+meant for whatever is underneath it), and needs a plain Escape to clear.
+-}
+strayContextMenuUnchangedReadingsThreshold : Int
+strayContextMenuUnchangedReadingsThreshold =
+    3
+
+
+{-| `Just` a decision to press Escape if a context menu has been open,
+unchanged, for at least `strayContextMenuUnchangedReadingsThreshold`
+consecutive readings; `Nothing` otherwise, so callers can fall through to
+their normal decision tree.
+-}
+clearStrayContextMenu : BotDecisionContext -> Maybe DecisionPathNode
+clearStrayContextMenu context =
+    case context.readingFromGameClient.contextMenus of
+        [] ->
+            Nothing
+
+        currentContextMenus ->
+            let
+                currentIdentity =
+                    currentContextMenus |> List.map identifyingInfoFromContextMenu
+
+                unchangedRecentReadingsCount =
+                    context.previousReadingsFromGameClient
+                        |> List.take strayContextMenuUnchangedReadingsThreshold
+                        |> List.Extra.takeWhile
+                            (\previousReading ->
+                                (previousReading.contextMenus |> List.map identifyingInfoFromContextMenu)
+                                    == currentIdentity
+                            )
+                        |> List.length
+            in
+            if strayContextMenuUnchangedReadingsThreshold <= unchangedRecentReadingsCount then
+                Just
+                    (describeBranch
+                        "A context menu has stayed open unchanged for several readings -- likely a stray menu from a misclick. Clear it (Escape)."
+                        (decideActionForCurrentStep
+                            [ EffectOnWindow.KeyDown EffectOnWindow.vkey_ESCAPE
+                            , EffectOnWindow.KeyUp EffectOnWindow.vkey_ESCAPE
+                            ]
+                        )
+                    )
+
+            else
+                Nothing
 
 
 iconSpriteHasColorOfRat : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
