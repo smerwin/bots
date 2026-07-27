@@ -1819,3 +1819,189 @@ see sub-1s ticks from this same, unmodified host -- nothing about the
 host imposes the 2-second floor; it's entirely bot-specific and already
 handled correctly (the host just honors whatever `notifyWhenArrivedAtTime`
 each bot requests, as it should).
+
+### Done (2026-07-26): first real live run of saxrat — found and fixed a real `SearchUIRootAddress` bug, caused by a busy trade hub
+
+User asked to "undock and run saxrat until we're out of waypoints" (the
+character had a 94-jump EVE-native autopilot route already queued up in
+Gal Bistot, a busy Amarr trade hub). Launched via `run_saxrat.sh`; the
+bot compiled and started, but got stuck immediately after undocking on
+"I do not see the icon for the location info panel" — one of the
+genuinely-stuck `askForHelpToGetUnstuck` leaves, not a crash.
+
+**Root cause, found by taking a fresh dump and manually re-deriving the
+root address:** `find_ui_root` normally locates the UI root by
+repr-scanning the dump for EVE's own debug-log string
+`<UIRoot object at 0X...>`. With 246 people in local chat at this
+station, that string had been evicted from EVE's internal debug-log
+ring buffer by chat spam before the scan ran, forcing the fallback path
+(`walk_to_root`, following `_parentRef` weakrefs upward from any known
+widget). That fallback had a real, previously-undetected bug: a
+widget's `_parentRef` can be present in its dict but hold the
+interpreter's actual `None` object (not just "key absent") — e.g. a
+permanent HUD-layer container's `_parentRef` is genuinely `None`, not a
+weakref. The old code dereferenced `None`'s address as if it were a
+`PyWeakReference` (reading `+0x10` as `wr_object`) and silently walked
+to garbage, landing on a bogus "root" address that didn't contain the
+info panel at all.
+
+**Fix, in `tools/macos-host/re_helper/re_helper.py`:**
+`walk_to_root` now checks `get_type_name(sample, pref, metatype_addr) ==
+b"weakref"` before dereferencing `pref+0x10`, stopping (treating it as
+"no further parent") on anything else. `find_ui_root` was also made more
+robust generally: instead of walking up from just the *first* repr-scan
+hit and trusting it blindly, it now tries every available seed, prefers
+any result whose own class name is actually `"UIRoot"`, and otherwise
+takes whichever root address the most seeds agree on (some seeds, like
+a HUD container or a popped-out inventory window, are themselves
+self-contained trees whose `_parentRef` walk dead-ends before reaching
+the real desktop root — this discards those instead of trusting them).
+
+Verified against a fresh dump: of ~20 repr-scanned seeds, most now
+converge on the same address, correctly classified as `UIRoot`/`Desktop`
+— and a full tree walk from that root found both `InfoPanelContainer`
+and `InfoPanelLocationInfo`, using only 1405 of the 5000-node budget
+(ruling out "busy hub blew the node budget" as an alternative theory —
+it was purely the wrong-root bug). Restarted the bot with the fix in
+place: it found the real root, undocked cleanly, and started reading
+real game state and making real decisions immediately.
+
+**Confirmed working end-to-end, live:** the ship undocked, resumed the
+pre-existing 94-jump EVE-native autopilot route (unrelated to saxrat's
+own logic — saxrat doesn't drive interstellar autopiloting at all; it
+just correctly detects `shipUIIndicatesShipIsWarpingOrJumping` and waits
+during each jump/warp), and opportunistically dove into a matching
+"Sansha Refuge" anomaly in Murzi between jumps: drones launched and
+fighting, shields dipped from 100% to ~55% then stabilized once weapons
+were actually landing hits, armor untouched (the configured 80%
+run-away threshold never came close to triggering). This is the
+bot's own unmodified decision-tree logic making real combat decisions
+against live memory-read state, not a scripted demo.
+
+Set up a background watcher (`poll_route.py` + `watch_route.sh`,
+scratch-only, not checked into the repo) that read the live UI tree
+every 60s looking for the route panel's "`N Jumps`" label, to notify
+once the route hit zero ("out of waypoints") or the bot errored out.
+**User then asked to kill the bot** before that condition was reached;
+stopped `botlab_host.py`, the Node `driver.js`, `tree_walker`, and the
+watcher script. Real mouse/keyboard control was restored to the user;
+the ship was left wherever it was (mid-anomaly in Murzi).
+
+### Done (2026-07-26): `run_saxrat.sh` gained a one-bot-at-a-time guard
+
+User feedback: "we're strictly a one-bot-at-a-time shop for now." Added
+a guard at the top of `run_saxrat.sh` that kills any previous
+`run_saxrat.sh` process (matched by basename via `pgrep -f`, so it finds
+a prior run regardless of whether it was launched with a relative or
+absolute path) plus any `botlab_host.py`/`driver.js`/`tree_walker`
+processes, before launching. The script's own just-started process
+would otherwise match its own basename pattern too — guarded against by
+excluding `$$` (its own pid) from the kill loop. Verified with a
+simulated stale process (a `sleep` given `argv[0]=run_saxrat.sh` via
+`exec -a`): the guard correctly killed the impostor and left the real
+invocation's own pid alone.
+
+### Done (2026-07-26): saxrat behavior feedback — prop mod deactivation and weapon hotkeys
+
+Two pieces of bot-behavior feedback, both implemented in
+`eve-online-saxrat/Bot.elm` (this bot's own application file, not the
+shared framework):
+
+1. **Deactivate the prop mod (Alt+F1) before warping.** Added
+   `ensurePropulsionModuleIsDeactivatedBeforeWarping`, which spends one
+   tick sending `Alt+F1` (skipped if already sent the previous tick,
+   using the same `previousStepsEffects` bookkeeping pattern used
+   elsewhere) before letting the actual warp action proceed. Wired into
+   both places the bot initiates a warp: `enterAnomaly` (warp to a
+   matching anomaly) and `tetherAtStructure` (the warp/approach-back
+   cascade). Deliberately *not* added to `alignToStructure`, since
+   aligning doesn't actually engage warp.
+2. **F1-F4 hotkeys instead of mouse clicks for weapons.** Added
+   `activateWeaponModuleButWaitIfActivatedInPreviousStep`, which presses
+   F1/F2/F3/F4 for the first four top-row (weapon) module slots by
+   position (matching this bot's own setup instructions: "put combat
+   modules in the top row"), falling back to the old mouse-click
+   behavior for a 5th+ weapon. Wired into both places the bot cycles
+   weapons in combat (initial "Shoot!" and the ongoing "Cycle combat
+   mod" step in `decideActionInAnomaly`). The middle-row
+   (always-on/defensive) modules are untouched, still mouse-clicked —
+   only asked about weapons.
+
+Confirmed the VK codes for F1-F4 and Alt/`MENU` were already correctly
+mapped to macOS `CGKeyCode`s in `botlab_host.py`'s
+`_VK_TO_CGKEYCODE` table from earlier session work — no host-side
+changes needed, only `Bot.elm`. Verified the whole module still compiles
+via the usual elm-version-patched-copy-plus-`Main.elm` check. **Not yet
+exercised live** (no bot session was running when this was
+implemented) — this will be the first real test of the keyboard-effect
+path; only mouse effects had been exercised live before now.
+
+### Done (2026-07-26): saxrat behavior feedback — clear stray context menus
+
+User spotted (via screenshot) a two-level context-menu cascade (a
+right-click menu plus an "Anomalies" submenu preview) sitting open over
+the Overview window — apparently left over from a misclick — and asked
+for "some capacity to clear this state," since a stray menu like this
+can occlude the Overview and intercept clicks meant for whatever is
+underneath it.
+
+`useContextMenuCascade` already has its own recovery for a menu that
+isn't advancing *while it's actively driving a cascade* (same-target
+discard-and-reopen if the menu list hasn't changed since the previous
+reading) — the actual gap was a menu left open on a tick where the
+decision tree isn't touching any menu logic at all, so that recovery
+code never even runs.
+
+Added `clearStrayContextMenu` in `Bot.elm`: if
+`readingFromGameClient.contextMenus` is non-empty and has stayed
+byte-for-byte identical (via `identifyingInfoFromContextMenu`, reused
+from the framework) across at least 3 consecutive
+`previousReadingsFromGameClient` entries, press Escape before anything
+else runs that tick. The threshold of 3 is deliberate — long enough
+(several seconds) not to interrupt a normal, still-progressing cascade
+or the framework's own single-retry recovery, short enough to actually
+clear a genuinely stuck menu within a few ticks. Wired in as the very
+first check in `decideNextActionWhenInSpace`, via
+`clearStrayContextMenu context |> Maybe.withDefault (<existing ~120-line
+function body>)` specifically to avoid re-indenting that whole existing
+body (Elm's layout rule only requires everything inside the parens to
+stay right of column 0, not fastidiously realigned). Compiles clean.
+
+### Done (2026-07-26): first git commit of this entire project, pushed to a personal fork
+
+None of this session's work (or any prior session's) had ever been
+committed — `git status` showed ~35 changed/untracked paths accumulated
+across every session in this file. Reviewed before committing:
+
+- No root `.gitignore` existed. Added one excluding `.DS_Store`,
+  `__pycache__/`, `*.pyc`, and the six ad-hoc-signed compiled tool
+  binaries that each have adjacent `.c` source and are platform-specific
+  build output, not source (`probe`, `memory_sample`, `tree_walker`,
+  `live_reader`, `window_probe`, `cg_input`).
+- `git add -A` correctly detected renames — `Common.elm`,
+  `EveOnline/ParseGuiFromScreenshot.elm`, and
+  `BotLab/BotInterface_To_Host_2024_10_19.elm` moved from
+  `eve-online-mining-bot` to `eve-online-saxrat`, consistent with saxrat
+  having been bootstrapped by copying the mining bot's framework files
+  earlier in this project.
+- Found `eve-online-wingus` on disk — a third bot app, untracked, not
+  otherwise mentioned anywhere in this file. Not investigated; committed
+  as-is alongside everything else, since it's clearly part of the same
+  body of work. Worth a closer look in a future session if it comes up.
+- Sanity-checked `eve-online-mining-bot` still compiles despite its own
+  heavy modifications (several framework files deleted/replaced,
+  pinned to the older `BotLab.BotInterface_To_Host_2023_02_06` interface
+  rather than saxrat's `2024_10_19`) — `elm make Bot.elm --output=/dev/null`-style
+  check passed ("NO MAIN" is expected and harmless; the actual
+  type-check reported "Success!"). Not broken, just a different,
+  internally-consistent interface version than saxrat.
+
+Created the fork with `gh repo fork Viir/bots` (logged in as `smerwin`,
+`repo` scope) — note for next time: `gh`'s `--remote=true` flag reported
+success but did *not* actually add the git remote; had to add it
+manually (`git remote add fork https://github.com/smerwin/bots.git`).
+`origin` remains `Viir/bots` (upstream, untouched); `fork` is the new
+personal remote. Pushed `main` to `fork` in two commits: `10f14fc` (the
+whole accumulated project — the macOS host, saxrat, wingus, and the
+mining-bot framework updates) and a same-day follow-up `f974111` for the
+stray-context-menu fix above.
