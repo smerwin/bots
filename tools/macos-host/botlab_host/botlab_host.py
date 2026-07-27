@@ -577,9 +577,22 @@ class VolatileHost:
 
     @staticmethod
     def _bootstrap_str_type(sample, metatype):
-        hits = rh.repr_scan(sample, limit=5)
+        # limit=5 was too small: repr_scan's limit counts every match, not
+        # distinct (class, address) pairs, and the debug-log ring buffer
+        # can genuinely contain the same "<Class object at 0x...>" line
+        # repeated several times in a row (e.g. from repeated tooltip
+        # reads) -- observed live, all 5 hits were the identical address,
+        # which happened to have no usable dict, so bootstrapping failed
+        # even though the rest of the dump had plenty of good candidates.
+        # Raised the limit and dedupe by address so a run of repeats can't
+        # exhaust the scan before reaching a distinct object.
+        hits = rh.repr_scan(sample, limit=200)
+        seen_addrs = set()
         for addrs in hits.values():
             for addr in addrs:
+                if addr in seen_addrs:
+                    continue
+                seen_addrs.add(addr)
                 d = rh.get_dict(sample, addr, metatype)
                 if d is None:
                     continue
