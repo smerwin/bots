@@ -130,9 +130,11 @@ import EveOnline.BotFrameworkSeparatingMemory
         , clickModuleButtonButWaitIfClickedInPreviousStep
         , decideActionForCurrentStep
         , ensureInfoPanelLocationInfoIsExpanded
+        , discardContextMenuIfTooDistantFromTargetElement
         , useContextMenuCascade
         , useContextMenuCascadeOnListSurroundingsButton
         , useContextMenuCascadeOnOverviewEntry
+        , useContextMenuCascadeWithCustomConfig
         , waitForProgressInGame
         )
 import EveOnline.ParseUserInterface
@@ -503,8 +505,20 @@ jumpToNextSystem context =
         Just infoPanelRouteFirstMarker ->
                     returnDronesToBay context
                      |> Maybe.withDefault
-                        ( useContextMenuCascade
-                        ( "route element icon", infoPanelRouteFirstMarker.uiNode )
+                        ( useContextMenuCascadeWithCustomConfig
+                        -- Feedback: "Jump Through Stargate" took 3-4 menu
+                        -- opens before being recognized. The route icon is
+                        -- small and sits in a strip that can shift as the
+                        -- route updates, so the default distance tolerance
+                        -- (70, already once widened from 40 for this same
+                        -- kind of drift on other elements) was plausibly
+                        -- discarding a menu that had, in fact, opened
+                        -- correctly. Widened just for this one cascade
+                        -- rather than the shared default, since other
+                        -- cascades' tolerance is already tuned from past
+                        -- observations and this is a different UI element.
+                        (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
+                        { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
                         (useMenuEntryWithTextContainingFirstOf
                             [ "dock"
                             , "jump"
@@ -1182,21 +1196,33 @@ launchAndEngageDrones context =
                         in
                         if 0 < (idlingDrones |> List.length) then
                             Just
-                                (describeBranch "Assist Gal"
-                                                -- (decideActionForCurrentStep
-                                                --     ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_F ]
-                                                --     , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_F ]
-                                                --     ]
-                                                --         |> List.concat
-                                                --     )
-                                                -- )
-                                            (useContextMenuCascade
-                                                ( "drones group", droneGroupInSpace.header.uiNode )
-                                                (useMenuEntryWithTextContaining "Assist" 
-                                                   (useMenuEntryWithTextContaining "Gal Bistot" menuCascadeCompleted)
-                                                )
-                                                context
-                                            )
+                                (describeBranch "Assist Gal if available, else engage target"
+                                    (useContextMenuCascade
+                                        ( "drones group", droneGroupInSpace.header.uiNode )
+                                        (MenuEntryWithCustomChoice
+                                            { describeChoice = "'Assist' if present, else 'Engage Target'"
+                                            , chooseEntry =
+                                                \currentMenu ->
+                                                    case
+                                                        currentMenu.entries
+                                                            |> List.filter (.text >> stringContainsIgnoringCase "Assist")
+                                                            |> List.head
+                                                    of
+                                                        Just assistEntry ->
+                                                            Just
+                                                                ( assistEntry
+                                                                , useMenuEntryWithTextContaining "Gal Bistot" menuCascadeCompleted
+                                                                )
+
+                                                        Nothing ->
+                                                            currentMenu.entries
+                                                                |> List.filter (.text >> stringContainsIgnoringCase "Engage Target")
+                                                                |> List.head
+                                                                |> Maybe.map (\entry -> ( entry, menuCascadeCompleted ))
+                                            }
+                                        )
+                                        context
+                                    )
                                 )
 
                         else if 0 < dronesInBayQuantity && dronesInSpaceQuantityCurrent < dronesInSpaceQuantityLimit then
