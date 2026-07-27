@@ -260,7 +260,7 @@ processEventInBaseFramework config eventContext event stateBefore =
               , lastReadingsFromGameClient =
                     readingFromGameClientMemory
                         :: stateBefore.lastReadingsFromGameClient
-                        |> List.take 3
+                        |> List.take 4
               }
             , case decisionLeaf of
                 ContinueSession continueSession ->
@@ -474,8 +474,15 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                 beginCascade
     in
     case
+        -- "no progress" below compares the current reading against the
+        -- oldest of the last 4 readings (not 3): feedback from a real run
+        -- was that this discard-and-reopen was firing on jumpToNextSystem's
+        -- cascade (the route icon, which sits in a strip that can shift
+        -- slightly between reads) before the menu had genuinely finished
+        -- settling. Widening the lookback from 3 to 4 gives it one more
+        -- tick of patience before concluding a menu truly isn't advancing.
         context.previousReadingsFromGameClient
-            |> List.take 3
+            |> List.take 4
             |> List.reverse
             |> List.head
     of
