@@ -549,11 +549,23 @@ def find_ui_root(sample: Sample, metatype_addr, str_type_addr):
     inventory window) are themselves self-contained trees whose _parentRef
     walk dead-ends before reaching the real desktop root, so this tries
     every available seed and prefers a result actually named 'UIRoot',
-    falling back to whichever root address the most seeds agree on."""
+    falling back to whichever root address the most seeds agree on.
+
+    any_hits' limit is deliberately generous (not a small number like 50):
+    repr_scan's limit counts every match, not distinct classes, and the
+    debug-log ring buffer can be dominated by dozens of copies of the same
+    line (e.g. repeated ModuleButton tooltip reads) -- with a small limit,
+    `seeds` can end up holding only that one repeated (class, address)
+    pair, so the "vote" is really just one seed's possibly-wrong result
+    trivially winning unopposed. Observed live: this produced a
+    Tr2Sprite2d root instead of UIRoot. A wide limit makes it far more
+    likely the scan reaches enough distinct classes for the vote to mean
+    something.
+    """
     hits = repr_scan(sample, {"UIRoot"}, limit=5)
     if hits.get("UIRoot"):
         return hits["UIRoot"][0]
-    any_hits = repr_scan(sample, limit=50)
+    any_hits = repr_scan(sample, limit=500)
     seeds = [addr for addrs in any_hits.values() for addr in addrs[:1]]
     if not seeds:
         return None
