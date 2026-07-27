@@ -1581,11 +1581,34 @@ ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping :
 ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context ifReadyToWarp =
     returnDronesToBay context
         |> Maybe.withDefault
-            (if
+            (let
+                -- Alt+F1 is a toggle on this keybind setup, not a
+                -- dedicated "deactivate" -- confirmed live: pressing it
+                -- unconditionally turned the prop mod back ON right
+                -- before warping whenever it was already off. The
+                -- propulsion module is the first module in the middle
+                -- row (same row as the always-active tank modules,
+                -- which is also why it used to fight
+                -- shipUIModulesToActivateAlways -- see that check's own
+                -- anyAttackableInOverview guard).
+                propulsionModuleIsActive : Bool
+                propulsionModuleIsActive =
+                    context.readingFromGameClient.shipUI
+                        |> Maybe.andThen (.moduleButtonsRows >> .middle >> List.head)
+                        |> Maybe.andThen .isActive
+                        |> Maybe.withDefault False
+             in
+             if not propulsionModuleIsActive then
+                ifReadyToWarp
+
+             else if
                 context.previousStepsEffects
                     |> List.take 1
                     |> List.any doEffectsDeactivatePropulsionModule
              then
+                -- Already pressed it last step; give the read a chance to
+                -- catch up before checking again, rather than pressing
+                -- (and re-toggling) a second time on a stale reading.
                 ifReadyToWarp
 
              else
