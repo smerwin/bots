@@ -54,6 +54,11 @@ sleep 1
 # Bot.elm doc comment, i.e. the bot author's own suggested starting point,
 # not something invented here. Adjust freely -- these are reasonable
 # defaults, not the only correct choice.
+#
+# warp-at is the distance (km) used when warping to an anomaly -- it must
+# match one of the game client's own preset "Warp to Within" distances
+# (typically 0, 5, 10, 15, 20, 30, 50, 70, 100), not an arbitrary number,
+# or the bot will get stuck unable to find a matching menu entry.
 SETTINGS="anomaly-name=blood hideaway
 anomaly-name=blood refuge
 anomaly-name=blood burrow
@@ -71,6 +76,7 @@ anomaly-name=drone cluster
 hide-when-neutral-in-local = no
 orbit-in-combat=no
 keep-at-range=yes
+warp-at=100
 run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=80"
 
