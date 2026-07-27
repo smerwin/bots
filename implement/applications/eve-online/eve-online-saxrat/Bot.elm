@@ -258,7 +258,8 @@ type alias BotMemory =
     , shipModules : ShipModulesMemory
     , shipWarpingInLastReading : Maybe Bool
     , visitedAnomalies : Dict.Dict String MemoryOfAnomaly
-    , contextMenuOpenTicks : Int
+    , contextMenuLastDepth : Int
+    , contextMenuStuckTicks : Int
     }
 
 
@@ -1316,7 +1317,8 @@ initBotMemory =
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , shipWarpingInLastReading = Nothing
     , visitedAnomalies = Dict.empty
-    , contextMenuOpenTicks = 0
+    , contextMenuLastDepth = 0
+    , contextMenuStuckTicks = 0
     }
 
 
@@ -1587,30 +1589,44 @@ rendered position while animating open, which would defeat an
 exact-`==` comparison indefinitely without ever looking different in a
 screenshot.
 
-The fix: don't compare menu identity across readings at all. Count
-consecutive ticks (via `BotMemory.contextMenuOpenTicks`, reset to 0
-whenever `contextMenus` is empty) where *some* menu -- any menu, whether
-or not it's literally the same instance -- has been open. A normal
-cascade clicks through and closes its menu within a tick or two; this
-threshold gives real margin above that without depending on the menu
-staying byte-for-byte identical, so it also catches the close-and
-immediately-reopen case the old check missed.
+First replacement: count consecutive ticks where *some* menu -- any
+menu, open regardless of whether it's literally the same instance --
+has been open at all, resetting to 0 whenever `contextMenus` is empty.
+That also turned out wrong, the opposite way: a genuine multi-level
+cascade (e.g. a 3-deep menu select) keeps *some* menu open continuously
+across every level, by design, until the final entry is clicked -- if
+that takes more ticks than the threshold (real render/network latency
+per level adds up over 3 levels), this fired mid-cascade and cancelled
+real progress.
+
+The actual fix: track cascade *depth*, not just presence. Context menus
+nest -- descending a level adds one more entry to
+`readingFromGameClient.contextMenus` rather than replacing it (this is
+also how the framework's own `contextMenuCascadeLevel` works). So
+`BotMemory.contextMenuStuckTicks` only increments when the menu count
+has stayed the same (or dropped without reaching zero) since the last
+reading; any tick that goes *deeper* than before resets it to 0,
+regardless of how many ticks the cascade has taken in total. A
+genuinely stuck cascade -- sitting at the same depth, unable to find its
+next entry -- still trips this after a few ticks; a cascade that keeps
+advancing, no matter how many levels or how slowly, never does.
 -}
-strayContextMenuOpenTicksThreshold : Int
-strayContextMenuOpenTicksThreshold =
+strayContextMenuStuckTicksThreshold : Int
+strayContextMenuStuckTicksThreshold =
     3
 
 
-{-| `Just` a decision to press Escape if a context menu has been open for
-at least `strayContextMenuOpenTicksThreshold` consecutive ticks; `Nothing`
+{-| `Just` a decision to press Escape if a context menu has sat at the same
+cascade depth (not advancing to a deeper submenu) for at least
+`strayContextMenuStuckTicksThreshold` consecutive ticks; `Nothing`
 otherwise, so callers can fall through to their normal decision tree.
 -}
 clearStrayContextMenu : BotDecisionContext -> Maybe DecisionPathNode
 clearStrayContextMenu context =
-    if strayContextMenuOpenTicksThreshold <= context.memory.contextMenuOpenTicks then
+    if strayContextMenuStuckTicksThreshold <= context.memory.contextMenuStuckTicks then
         Just
             (describeBranch
-                "A context menu has stayed open for several ticks in a row -- likely a stray menu from a misclick or a cascade stuck on a menu with no entry it recognizes. Clear it (Escape)."
+                "A context menu has sat at the same depth for several ticks in a row without advancing to a deeper submenu -- likely a stray menu from a misclick or a cascade stuck on a menu with no entry it recognizes. Clear it (Escape)."
                 (decideActionForCurrentStep
                     [ EffectOnWindow.KeyDown EffectOnWindow.vkey_ESCAPE
                     , EffectOnWindow.KeyUp EffectOnWindow.vkey_ESCAPE
@@ -1635,6 +1651,9 @@ iconSpriteHasColorOfRat =
 updateMemoryForNewReadingFromGame : UpdateMemoryContext -> BotMemory -> BotMemory
 updateMemoryForNewReadingFromGame context botMemoryBefore =
     let
+        currentContextMenuDepth =
+            context.readingFromGameClient.contextMenus |> List.length
+
         currentStationNameFromInfoPanel =
             context.readingFromGameClient.infoPanelContainer
                 |> Maybe.andThen .infoPanelLocationInfo
@@ -1699,12 +1718,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
     , shipWarpingInLastReading = shipIsWarping
     , visitedAnomalies = visitedAnomalies
-    , contextMenuOpenTicks =
-        if context.readingFromGameClient.contextMenus |> List.isEmpty then
+    , contextMenuLastDepth = currentContextMenuDepth
+    , contextMenuStuckTicks =
+        if currentContextMenuDepth == 0 then
+            0
+
+        else if currentContextMenuDepth > botMemoryBefore.contextMenuLastDepth then
             0
 
         else
-            botMemoryBefore.contextMenuOpenTicks + 1
+            botMemoryBefore.contextMenuStuckTicks + 1
     }
 
 
