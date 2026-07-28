@@ -145,27 +145,58 @@ def activate_game(pid):
 
 
 def window_bounds(pid):
+    # Picks the LARGEST window by area, not just the first one over a
+    # width threshold: a fullscreen game window can have a smaller
+    # overlay at the *same* width (the reveal-on-hover menu-bar strip,
+    # ~1710x44) that a width-only check (what this function used to do)
+    # picks by accident, producing a badly wrong y-scale factor and a
+    # bogus click target -- found live while building route_setter.py,
+    # see find_eve_processes in botlab_host.py for the same fix applied
+    # to the real bot's own window resolution.
+    import re
+
     out = subprocess.run(
         [str(SCRIPT_DIR / "window_probe" / "window_probe"), "--all"],
         check=True, capture_output=True, text=True,
     ).stdout
+    best = None
     for line in out.splitlines():
         if f"owner_pid={pid}" not in line:
             continue
-        fields = dict(
-            part.split("=", 1) for part in line.split() if "=" in part
-        )
-        bounds = fields.get("bounds", "")
-        # bounds={x=0.0 y=38.0 w=1710.0 h=1074.0}(points) -- reconstructed
-        # from the raw line since it isn't a single field.
-        import re
-
         m = re.search(
             r"x=([\d.]+) y=([\d.]+) w=([\d.]+) h=([\d.]+)", line
         )
-        if m and float(m.group(3)) > 200:  # skip tiny menu-bar-strip windows
-            return tuple(float(v) for v in m.groups())
-    raise RuntimeError(f"no window found for pid {pid}")
+        if not m:
+            continue
+        x, y, w, h = (float(v) for v in m.groups())
+        if best is None or w * h > best[2] * best[3]:
+            best = (x, y, w, h)
+    if best is None:
+        raise RuntimeError(f"no window found for pid {pid}")
+    return best
+
+
+def _find_valid_seed_addr(sample):
+    """Pick a repr-scanned address that actually resolves to a valid
+    CPython type/metatype, instead of trusting the first hit blindly
+    (the previous version called a nonexistent rh._any_seed_addr, which
+    would AttributeError on any real run).
+
+    The repr text this scans (EVE's own "<ClassName object at 0X...>"
+    debug-log lines) can outlive the object it describes -- UI widgets
+    get destroyed/recreated constantly, so the address in an old log
+    line can point at freed/reused memory by the time a dump is taken.
+    Observed live: of 165 repr-scan hits in one real dump, 146 resolved
+    to a valid metatype and 19 (including the first one, by bad luck)
+    were stale -- see the same fix in botlab_host.py's _any_seed_addr
+    and route_setter.py's find_valid_seed_addr."""
+    hits = rh.repr_scan(sample, limit=200)
+    for addrs in hits.values():
+        for addr in addrs:
+            metatype = rh.find_metatype(sample, addr)
+            if metatype is not None and sample.read_u64(metatype + 8) == metatype:
+                return addr
+    raise RuntimeError("no repr-scan hit in this dump resolved to a valid metatype")
 
 
 def bootstrap_memory(pid):
@@ -180,15 +211,25 @@ def bootstrap_memory(pid):
             [MEMORY_SAMPLE_BIN, str(pid), d], check=True, capture_output=True
         )
         sample = rh.Sample(d)
-        seed = rh._any_seed_addr(sample)
+        seed = _find_valid_seed_addr(sample)
         metatype = rh.find_metatype(sample, seed)
-        str_type = rh.__dict__.get("_bootstrap_str_type")
         # _bootstrap_str_type is a private helper on a class in
-        # botlab_host.py, not re_helper -- reimplement its small body here.
-        hits = rh.repr_scan(sample, limit=5)
+        # botlab_host.py, not re_helper -- reimplement its small body
+        # here. limit=200 (not 5): repr_scan's limit counts every match,
+        # not distinct (class, address) pairs, and the debug-log ring
+        # buffer can contain the same line repeated several times in a
+        # row (e.g. from repeated tooltip reads) -- a too-small limit can
+        # exhaust the scan on repeats before reaching a distinct object
+        # with a usable dict, even though the dump has plenty of good
+        # candidates (same bug already found and fixed in botlab_host.py).
+        hits = rh.repr_scan(sample, limit=200)
+        seen_addrs = set()
         str_type = None
         for addrs in hits.values():
             for addr in addrs:
+                if addr in seen_addrs:
+                    continue
+                seen_addrs.add(addr)
                 dct = rh.get_dict(sample, addr, metatype)
                 if dct is None:
                     continue

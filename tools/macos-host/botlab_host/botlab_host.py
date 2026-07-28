@@ -40,6 +40,25 @@ WINDOW_PROBE_BIN = os.path.join(MACOS_HOST_DIR, "window_probe", "window_probe")
 CG_INPUT_BIN = os.path.join(MACOS_HOST_DIR, "cg_input", "cg_input")
 TREE_WALKER_BIN = os.path.join(MACOS_HOST_DIR, "tree_walker", "tree_walker")
 
+# Live-verified via the new per-decision logging (2026-07-28 saxrat run): a
+# context-menu entry click dispatched immediately after the mouse glide that
+# arrived on it can fail to register with the game at all -- the menu just
+# sits open, unclicked, and the bot re-decides the identical click on the
+# next tick. Two such real clicks landed 3+ seconds apart before the bot
+# gave up and fell back to discard-and-reopen, which is the actual source
+# of the "takes several tries to click a menu entry" delay this was added
+# to diagnose -- not the decision logic, which was confirmed (via the
+# clicked entry's own literal text now being logged) to target the right
+# entry every time. Matches the same class of finding already established
+# for drag gestures and hover-triggered flyouts elsewhere in this file:
+# Photon UI seems to need a real settle interval after the cursor arrives
+# somewhere new before it'll honor an action there. Applied only when the
+# preceding step was an actual glide to a new position (see call site) --
+# clicking again at a position the cursor was already resting on shouldn't
+# need it. Starting value, not yet independently A/B-tested the way the
+# glide steps/step_delay were -- tune from a live run if clicks still miss.
+CLICK_SETTLE_DELAY_SECONDS = 0.15
+
 
 class TreeWalkerClient:
     """Client for tree_walker, the native (C) in-process UI-tree walker
@@ -569,11 +588,24 @@ class VolatileHost:
 
     @staticmethod
     def _any_seed_addr(sample):
-        hits = rh.repr_scan(sample, limit=1)
+        # limit=1 (the previous version) took whatever the very first
+        # repr-scan hit happened to be, with no validation -- the repr
+        # text sitting in EVE's debug-log ring buffer can outlive the
+        # object it described (e.g. a ModuleButton destroyed/recreated
+        # since the line was logged), so find_metatype on that address
+        # can dereference freed/reused memory and return garbage or None.
+        # Observed live: this failed SearchUIRootAddress outright even
+        # though the same dump had plenty of other, valid candidates.
+        # Same fix as _bootstrap_str_type below -- scan more hits and
+        # validate each with the 'type(type) is type' invariant instead
+        # of trusting the first one blindly.
+        hits = rh.repr_scan(sample, limit=200)
         for addrs in hits.values():
-            if addrs:
-                return addrs[0]
-        raise RuntimeError("no repr-scan hits at all in this dump; can't bootstrap metatype")
+            for addr in addrs:
+                metatype = rh.find_metatype(sample, addr)
+                if metatype is not None and sample.read_u64(metatype + 8) == metatype:
+                    return addr
+        raise RuntimeError("no repr-scan hit in this dump resolved to a valid metatype")
 
     @staticmethod
     def _bootstrap_str_type(sample, metatype):
@@ -652,6 +684,7 @@ class TaskDispatcher:
         self._scale_x = 1.0
         self._scale_y = 1.0
         self._cg_input = None
+        self._last_mouse_pos = None
 
     def run_task(self, task):
         """task: {"TagName": <payload>}. Returns a TaskResultStructure dict
@@ -797,6 +830,128 @@ class TaskDispatcher:
         proc.stdin.flush()
         return proc.stdout.readline().strip()
 
+    def _glide_to(self, start_x, start_y, target_x, target_y, steps, step_delay):
+        for i in range(1, steps):
+            t = i / steps
+            self._cg(f"move {start_x + (target_x - start_x) * t:.1f} {start_y + (target_y - start_y) * t:.1f}")
+            time.sleep(step_delay)
+        self._cg(f"move {target_x:.1f} {target_y:.1f}")
+        self._last_mouse_pos = (target_x, target_y)
+
+    def _move_mouse_eased(self, target_x, target_y, steps=10, step_delay=0.025, force_movement=False):
+        """Move the cursor to (target_x, target_y) via a few intermediate
+        points instead of one instant CGEventPost teleport.
+
+        Feedback from live runs: a hover-triggered flyout submenu (the
+        Photon-UI "Warp to Within..." distance list off "Warp to Within",
+        and the wreck loot-menu cascade) kept getting dismissed before it
+        had a chance to open, or took several discard-and-reopen retries
+        to eventually land. EveOnline.BotFrameworkSeparatingMemory.elm's
+        cascade-follow logic already has a separate, larger fix for the
+        "gave up too early" half of that (see its widened lookback) -- but
+        the other likely contributor is that a single-point teleport may
+        not always register as a genuine hover-enter the way a real mouse
+        glide does, matching the *already established*, analogous finding
+        for drag recognition (reload_drones.py's drag(): "EVE only
+        recognizes this as a drag ... if the pointer moves promptly ...
+        a synthetic click-then-move sequence with any pause reads as a
+        plain click" -- Photon UI evidently cares about real movement
+        trajectories, not just final position, for more than one kind of
+        gesture). Skips easing (jumps straight there) on the very first
+        move of a session, when there's no known prior position to
+        interpolate from.
+
+        steps/step_delay tuned from a live A/B: the original 6 steps /
+        12ms (~70ms total glide) still let the anomaly-warp cascade get
+        stuck hovering "Warp to Within" with the flyout never opening,
+        confirmed live (screenshotted the same unopened menu, unmoved,
+        after 5+ minutes and 300+ read/act cycles). A manually-driven
+        glide over the same real target -- same coordinates, same
+        mechanism, just slower (~250ms total) and from a more deliberate
+        approach point -- opened the flyout on the first try. The
+        earlier, successful anomaly-warp cascades in that same run
+        (before the stuck one) suggest this isn't a hard failure, just a
+        marginal one -- widening it live-verified.
+
+        Widening steps/step_delay alone wasn't enough, though -- a second
+        live run with this wider glide still "flapped" (menu opening,
+        never expanding) the same way. The actual difference between
+        that and the one hand-driven glide that *did* work: the manual
+        one moved once and was then left alone; the bot's own decision
+        logic recomputes "move mouse to this entry" fresh every tick
+        while the menu list still looks unchanged (which it does, right
+        up until the flyout would open) and re-issues the same move
+        every ~3-4s cycle. If the flyout needs sustained, uninterrupted
+        dwell to expand, re-glide-ing to the *same* spot every tick would
+        reset that dwell timer before it ever accumulates enough -- an
+        endless retrigger, not a failure to arrive. Skip re-issuing any
+        move at all once we're already at (approximately) the target, so
+        a hover that's already in place gets to sit undisturbed instead
+        of being restarted every tick.
+
+        force_movement changes that skip behavior for click sequences
+        specifically (see the caller in _windows_input, which sets it
+        whenever the next item is a ButtonDown). Live-verified pattern:
+        a right-click or menu-entry click that fails to register on its
+        first, genuinely-glided attempt gets retried on every following
+        tick at the *same* target -- which this function's own dwell-
+        preservation skip then turns into a click fired from a static
+        cursor with no accompanying movement at all, every single retry.
+        Given the drag and flyout-hover findings above already establish
+        that Photon UI cares about real cursor movement, not just final
+        position, a click retried with no movement is plausibly doomed
+        to keep failing the same way the first one did -- self-
+        reinforcing exactly the "stuck for several ticks, then suddenly
+        works" pattern observed live. force_movement nudges a few pixels
+        off target and glides back, so a click always gets a real (if
+        small) movement gesture right before it fires, even when the
+        cursor was already resting on the target. Not applied to plain
+        hover moves (submenu expansion), which still want the dwell-
+        preservation skip -- restarting *those* on every tick is the
+        opposite, already-fixed problem.
+        """
+        # Logged unconditionally (cheap, one line per move) since this is
+        # exactly the diagnostic needed to tell apart the two possible
+        # causes of a slow-to-open hover flyout: the target coordinate
+        # jittering tick to tick (so this never hits the skip branch and
+        # dwell keeps getting reset) versus the coordinate being stable
+        # but the flyout still not opening (so this hits skip immediately
+        # and the delay is downstream, e.g. in the Elm-side cascade
+        # discard/reopen logic instead).
+        # Returns True if the cursor actually moved (glided, nudged, or
+        # this was the first move of the session), False if the move was
+        # skipped because the cursor was already at the target -- callers
+        # use this to decide whether a settle delay is needed before a
+        # click that immediately follows (see CLICK_SETTLE_DELAY_SECONDS).
+        if self._last_mouse_pos is not None:
+            start_x, start_y = self._last_mouse_pos
+            distance = ((target_x - start_x) ** 2 + (target_y - start_y) ** 2) ** 0.5
+            already_there = abs(target_x - start_x) < 3 and abs(target_y - start_y) < 3
+            if already_there and not force_movement:
+                print(f"#     move: already at ({target_x:.1f}, {target_y:.1f}), "
+                      f"skipping to preserve hover dwell (distance {distance:.1f}px)", file=sys.stderr)
+                return False
+            if already_there and force_movement:
+                move_start = time.monotonic()
+                nudge_x, nudge_y = target_x - 12, target_y - 8
+                self._cg(f"move {nudge_x:.1f} {nudge_y:.1f}")
+                time.sleep(step_delay)
+                self._glide_to(nudge_x, nudge_y, target_x, target_y, steps, step_delay)
+                print(f"#     move: already at ({target_x:.1f}, {target_y:.1f}) but this is a click -- "
+                      f"nudged off and glided back for a real movement gesture, in "
+                      f"{time.monotonic() - move_start:.3f}s", file=sys.stderr)
+                return True
+            move_start = time.monotonic()
+            self._glide_to(start_x, start_y, target_x, target_y, steps, step_delay)
+            print(f"#     move: glided ({start_x:.1f}, {start_y:.1f}) -> ({target_x:.1f}, {target_y:.1f}) "
+                  f"distance={distance:.1f}px in {time.monotonic() - move_start:.3f}s", file=sys.stderr)
+            return True
+        self._cg(f"move {target_x:.1f} {target_y:.1f}")
+        self._last_mouse_pos = (target_x, target_y)
+        print(f"#     move: first move of session, jumped straight to ({target_x:.1f}, {target_y:.1f})",
+              file=sys.stderr)
+        return True
+
     def _windows_input(self, items):
         start = time.time()
         if not self.execute_input:
@@ -829,7 +984,7 @@ class TaskDispatcher:
         # cycle), just without penalizing every action inside one
         # already-verified sequence.
         current_target_window = None
-        for item in items:
+        for idx, item in enumerate(items):
             (tag, payload), = item.items()
             try:
                 if tag == "WaitMilliseconds":
@@ -855,7 +1010,34 @@ class TaskDispatcher:
                              "ButtonScroll", "KeyDown", "KeyUp", "CharacterDown", "CharacterUp"):
                     if tag == "MouseMoveAbsolute":
                         x, y = payload
-                        self._cg(f"move {x/scale_x:.1f} {y/scale_y:.1f}")
+                        # force_movement whenever this move leads straight
+                        # into a click: see _move_mouse_eased's docstring --
+                        # a click needs a real movement gesture even when
+                        # the cursor is already resting on the target,
+                        # unlike a plain hover move (which should keep
+                        # skipping to preserve dwell).
+                        # Skip past WaitMilliseconds items to find the next
+                        # *real* action -- EveOnline.BotFramework.elm's
+                        # buildTaskFromEffectSequence interspersed a
+                        # WaitMilliseconds 210 between every pair of effects
+                        # (discovered while chasing this same fix), so the
+                        # item immediately after a move is never literally
+                        # "ButtonDown" -- checking only items[idx + 1]
+                        # silently never matched, meaning force_movement
+                        # and the settle-delay sleep below never actually
+                        # fired despite looking like they should have.
+                        next_real_tag = None
+                        for later_item in items[idx + 1:]:
+                            later_tag = list(later_item.keys())[0]
+                            if later_tag == "WaitMilliseconds":
+                                continue
+                            next_real_tag = later_tag
+                            break
+                        moved = self._move_mouse_eased(
+                            x / scale_x, y / scale_y, force_movement=(next_real_tag == "ButtonDown")
+                        )
+                        if moved and next_real_tag == "ButtonDown":
+                            time.sleep(CLICK_SETTLE_DELAY_SECONDS)
                     elif tag == "MouseMoveRelative":
                         errors.append("MouseMoveRelative not supported (Windows-relative semantics not implemented)")
                         continue
@@ -904,7 +1086,8 @@ class TaskDispatcher:
 # Main loop
 # ---------------------------------------------------------------------------
 
-def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_screenshots=False):
+def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_screenshots=False,
+            session_duration_minutes=None):
     proc = subprocess.Popen(
         ["node", DRIVER_JS, bot_js_path],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
@@ -922,16 +1105,50 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         return json.loads(line)
 
     response = send_event({"BotSettingsChangedEvent": settings or ""})
+
+    if session_duration_minutes is not None:
+        # BotFramework.elm's own continueIfShouldHide already docks (and
+        # stays docked, via Bot.elm's ifDocked branch) once
+        # secondsToSessionEnd drops under 200 -- that logic just needed
+        # something to actually populate sessionTimeLimitInMilliseconds via
+        # a SessionDurationPlannedEvent, which nothing was sending before
+        # this. Computed from time.time() (matching send_event's own
+        # timeInMilliseconds basis below) so the bot's internal comparison
+        # lines up with real wall-clock time.
+        session_end_at_milliseconds = int(time.time() * 1000) + int(session_duration_minutes * 60 * 1000)
+        print(f"# Session duration planned: {session_duration_minutes:.1f} minutes "
+              f"-- bot will dock once ~200s remain", file=sys.stderr)
+        response = send_event(
+            {"SessionDurationPlannedEvent": {"timeInMilliseconds": session_end_at_milliseconds}}
+        )
+
     tick = 0
     tick_start = time.monotonic()
+
+    def log_decision(cont, decision_seq):
+        # Every ContinueSession response carries its own freshly computed
+        # statusText -- a genuinely new decision, not a duplicate of the
+        # last one printed. Confirmed live: completing a WindowsInputRequest
+        # task can hand back a *new* ContinueSession (a fresh read + a new
+        # decision) without an intervening TimeArrivedEvent at all, so
+        # several real decide-and-click rounds can happen inside what used
+        # to be logged as a single outer-loop "tick" -- printing only once
+        # per outer iteration (the old behavior) silently dropped all but
+        # the last of those rounds, hiding exactly the kind of stray click
+        # this diagnostic exists to catch. Sub-numbered ("N.0", "N.1", ...)
+        # under the same outer tick N so the burst is still visually
+        # grouped.
+        elapsed = time.monotonic() - tick_start
+        print(f"# [{tick}.{decision_seq}] ({elapsed:.3f}s) {cont['statusText'][:4000]}", file=sys.stderr)
+
     while True:
         if "FinishSession" in response:
             print(f"# FinishSession: {response['FinishSession']['statusText']}", file=sys.stderr)
             break
 
         cont = response["ContinueSession"]
-        tick_elapsed = time.monotonic() - tick_start
-        print(f"# [{tick}] ({tick_elapsed:.3f}s) {cont['statusText'][:2000]}", file=sys.stderr)
+        decision_seq = 0
+        log_decision(cont, decision_seq)
         tick_start = time.monotonic()
 
         # Drain tasks as a queue, not a fixed batch: (1) a response can
@@ -963,6 +1180,8 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
             if "FinishSession" in response:
                 break
             cont = response["ContinueSession"]
+            decision_seq += 1
+            log_decision(cont, decision_seq)
             for t in cont["startTasks"]:
                 if t["taskId"] not in seen_ids:
                     pending.append(t)
@@ -1002,6 +1221,11 @@ def main():
                      help="actually send mouse/keyboard input via CGEventPost (off by default: logs what would be sent instead)")
     ap.add_argument("--capture-screenshots", action="store_true",
                      help="capture real screenshot pixel data for ReadFromWindowMethod (off by default: ~1.6s/cycle cost most bots don't need; see CLAUDE.md)")
+    ap.add_argument("--session-duration-minutes", type=float, default=None,
+                     help="tell the bot how long this session should run; BotFramework's own "
+                          "continueIfShouldHide docks (and stays docked) once ~200s remain "
+                          "(see secondsToSessionEnd in EveOnline/BotFramework.elm). Unset by "
+                          "default: no session end, the bot runs indefinitely.")
     args = ap.parse_args()
 
     workdir = tempfile.mkdtemp(prefix="botlab-host-")
@@ -1012,7 +1236,8 @@ def main():
         bot_js = compile_bot(build_dir)
         print(f"# compiled: {bot_js}", file=sys.stderr)
         run_bot(bot_js, args.settings, max_ticks=args.max_ticks, execute_input=args.execute_input,
-                capture_screenshots=args.capture_screenshots)
+                capture_screenshots=args.capture_screenshots,
+                session_duration_minutes=args.session_duration_minutes)
     finally:
         if args.keep_build_dir:
             print(f"# left build dir at {workdir}", file=sys.stderr)

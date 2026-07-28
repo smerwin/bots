@@ -62,20 +62,12 @@ sleep 1
 #
 # targeting-range is the max distance (meters) to lock a target from the
 # overview; beyond it the bot approaches instead of locking.
-SETTINGS="anomaly-name=blood hideaway
-anomaly-name=blood refuge
-anomaly-name=blood burrow
-anomaly-name=blood raider forsaken hideaway
-anomaly-name=blood raider hidden hideaway
-anomaly-name=blood raider forlorn hideaway
-anomaly-name=sansha hideaway
+SETTINGS="anomaly-name=sansha hideaway
 anomaly-name=sansha refuge
 anomaly-name=sansha burrow
 anomaly-name=sansha forsaken hideaway
 anomaly-name=sansha hidden hideaway
 anomaly-name=sansha forlorn hideaway
-anomaly-name=drone assembly
-anomaly-name=drone cluster
 hide-when-neutral-in-local = no
 orbit-in-combat=no
 keep-at-range=yes

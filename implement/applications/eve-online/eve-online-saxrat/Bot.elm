@@ -271,6 +271,11 @@ type alias BotMemory =
     , visitedAnomalies : Dict.Dict String MemoryOfAnomaly
     , contextMenuLastDepth : Int
     , contextMenuStuckTicks : Int
+    , lootWindowOpenTicks : Int
+    , routeFirstMarkerRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
+    , routeFirstMarkerUnchangedTicks : Int
+    , targetToUnlockRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
+    , targetToUnlockUnchangedTicks : Int
     }
 
 
@@ -421,6 +426,29 @@ memoryOfAnomalyWithID anomalyID =
     .visitedAnomalies >> Dict.get anomalyID
 
 
+{-| The anomaly we most recently arrived in, found by picking the memory
+entry with the latest `arrivalTime` -- used when the anomaly's own
+signature has dropped off the probe scanner (so we can no longer look it
+up by ID) but we still want to honor its wait/loot timers instead of
+treating our arrival as having just happened.
+-}
+mostRecentlyVisitedAnomalyMemory : BotMemory -> Maybe MemoryOfAnomaly
+mostRecentlyVisitedAnomalyMemory botMemory =
+    botMemory.visitedAnomalies
+        |> Dict.values
+        |> List.sortBy (.arrivalTime >> .milliseconds)
+        |> List.reverse
+        |> List.head
+
+
+arrivalInAnomalyAgeSecondsFromMemory : BotDecisionContext -> Int
+arrivalInAnomalyAgeSecondsFromMemory context =
+    context.memory
+        |> mostRecentlyVisitedAnomalyMemory
+        |> Maybe.map (\memoryOfAnomaly -> (context.eventContext.timeInMilliseconds - memoryOfAnomaly.arrivalTime.milliseconds) // 1000)
+        |> Maybe.withDefault 0
+
+
 anomalyBotDecisionRoot : BotDecisionContext -> DecisionPathNode
 anomalyBotDecisionRoot context =
     anomalyBotDecisionRootBeforeApplyingSettings context
@@ -503,29 +531,56 @@ jumpToNextSystem context =
          tetherAtStructure context
 
         Just infoPanelRouteFirstMarker ->
-                    returnDronesToBay context
-                     |> Maybe.withDefault
-                        ( useContextMenuCascadeWithCustomConfig
-                        -- Feedback: "Jump Through Stargate" took 3-4 menu
-                        -- opens before being recognized. The route icon is
-                        -- small and sits in a strip that can shift as the
-                        -- route updates, so the default distance tolerance
-                        -- (70, already once widened from 40 for this same
-                        -- kind of drift on other elements) was plausibly
-                        -- discarding a menu that had, in fact, opened
-                        -- correctly. Widened just for this one cascade
-                        -- rather than the shared default, since other
-                        -- cascades' tolerance is already tuned from past
-                        -- observations and this is a different UI element.
-                        (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
-                        { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
-                        (useMenuEntryWithTextContainingFirstOf
-                            [ "dock"
-                            , "jump"
-                            ]
-                            menuCascadeCompleted
-                        )
-                        context )
+            -- Feedback: right after the route is reset and a new
+            -- destination is set (whether by the bot or manually), EVE's
+            -- own route panel needs a moment to actually compute the new
+            -- multi-jump path -- during that brief window the marker
+            -- strip can be empty, partial, or still shifting. Clicking
+            -- during that window means right-clicking a position that
+            -- has no clickable icon there yet (or not there anymore by
+            -- the time the click lands) -- observed live as hundreds of
+            -- consecutive ticks of "open context menu on route element
+            -- icon" with no menu ever actually appearing, not even a
+            -- wrong one to discard. A live, isolated check (read the
+            -- same marker 5 times, 300ms apart) found its position
+            -- perfectly stable under normal conditions, so this is a
+            -- real but transient settling window, not a persistent
+            -- coordinate bug -- guard against it by requiring the first
+            -- marker's own display region to have stayed the same for
+            -- at least one full tick (tracked in BotMemory --
+            -- previousReadingsFromGameClient only retains contextMenus,
+            -- not route/info-panel data, so this can't be checked
+            -- directly against a prior reading the way the context-menu
+            -- "no progress" check does) before acting on it.
+            if context.memory.routeFirstMarkerUnchangedTicks < 1 then
+                describeBranch
+                    "Route panel's first marker just appeared or moved since the last reading -- wait for the route to finish (re)computing before clicking it."
+                    waitForProgressInGame
+
+            else
+                returnDronesToBay context
+                 |> Maybe.withDefault
+                    ( useContextMenuCascadeWithCustomConfig
+                    -- Feedback: "Jump Through Stargate" took 3-4 menu
+                    -- opens before being recognized. The route icon is
+                    -- small and sits in a strip that can shift as the
+                    -- route updates, so the default distance tolerance
+                    -- (70, already once widened from 40 for this same
+                    -- kind of drift on other elements) was plausibly
+                    -- discarding a menu that had, in fact, opened
+                    -- correctly. Widened just for this one cascade
+                    -- rather than the shared default, since other
+                    -- cascades' tolerance is already tuned from past
+                    -- observations and this is a different UI element.
+                    (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
+                    { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
+                    (useMenuEntryWithTextContainingFirstOf
+                        [ "dock"
+                        , "jump"
+                        ]
+                        menuCascadeCompleted
+                    )
+                    context )
 
 runAwayIfLowHealth : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> Maybe DecisionPathNode
 runAwayIfLowHealth context shipUI = 
@@ -781,30 +836,57 @@ decideNextActionWhenInSpace context seeUndockingComplete =
             case context.readingFromGameClient |> getCurrentAnomalyIDAsSeenInProbeScanner of
                 Nothing ->
                     let
-                        scanResultsWithReasonToIgnore =
-                            probeScannerWindow.scanResults
-                                |> List.map
-                                    (\scanResult ->
-                                        ( scanResult
-                                        , findReasonToIgnoreProbeScanResult context scanResult
+                        pickAnotherAnomalyOrLeave =
+                            let
+                                scanResultsWithReasonToIgnore =
+                                    probeScannerWindow.scanResults
+                                        |> List.map
+                                            (\scanResult ->
+                                                ( scanResult
+                                                , findReasonToIgnoreProbeScanResult context scanResult
+                                                )
+                                            )
+                            in
+                            case
+                                scanResultsWithReasonToIgnore
+                                    |> List.filter (Tuple.second >> (==) Nothing)
+                                    |> List.map Tuple.first
+                                    |> listElementAtWrappedIndex (context.randomIntegers |> List.head |> Maybe.withDefault 0)
+                            of
+                                Nothing ->
+                                    describeBranch
+                                        ("I see "
+                                            ++ (probeScannerWindow.scanResults |> List.length |> String.fromInt)
+                                            ++ " scan results, and no matching anomaly. Git!"
                                         )
-                                    )
+                                        (jumpToNextSystem context)
+                                Just _ ->
+                                    describeBranch "Found matching anomaly." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
                     in
-                    case
-                        scanResultsWithReasonToIgnore
-                            |> List.filter (Tuple.second >> (==) Nothing)
-                            |> List.map Tuple.first
-                            |> listElementAtWrappedIndex (context.randomIntegers |> List.head |> Maybe.withDefault 0)
-                    of
-                        Nothing ->
-                            describeBranch
-                                ("I see "
-                                    ++ (probeScannerWindow.scanResults |> List.length |> String.fromInt)
-                                    ++ " scan results, and no matching anomaly. Git!"
-                                )
-                                (jumpToNextSystem context)
-                        Just _ ->
-                            describeBranch "Found matching anomaly." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
+                    -- The anomaly's own signature can drop off the probe
+                    -- scanner (site "resolved"/expired) while rats are
+                    -- still alive or wrecks are still sitting on the
+                    -- overview -- don't abandon those just because the
+                    -- site itself stopped showing up here; keep fighting
+                    -- and looting until the grid is actually clear. Same
+                    -- for a stray locked target (e.g. a cargo container):
+                    -- warping away drops the lock as a side effect without
+                    -- ever running the unlock cascade, so check for one
+                    -- here too rather than only inside decideActionInAnomaly.
+                    if anyAttackableInOverview context.readingFromGameClient
+                        || anyCommanderWreckInOverview context.readingFromGameClient
+                        || (targetsToUnlockFromReadingFromGameClient context.readingFromGameClient |> List.isEmpty |> not)
+                    then
+                        describeBranch "The anomaly no longer shows on the scanner, but there is still something to attack or loot here."
+                            (decideActionInAnomaly
+                                { arrivalInAnomalyAgeSeconds = arrivalInAnomalyAgeSecondsFromMemory context }
+                                context
+                                seeUndockingComplete
+                                pickAnotherAnomalyOrLeave
+                            )
+
+                    else
+                        pickAnotherAnomalyOrLeave
 
                 Just _ ->
                     case
@@ -914,11 +996,8 @@ decideActionInAnomaly :
 decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplete continueIfCombatComplete =
     let
         overviewEntriesToAttack =
-            context.readingFromGameClient.overviewWindows
-                |> List.concatMap .entries
-                |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
-                |> List.filter shouldAttackOverviewEntry
-        overviewEntriesToAttackFirst = 
+            overviewEntriesToAttackFromReadingFromGameClient context.readingFromGameClient
+        overviewEntriesToAttackFirst =
             overviewEntriesToAttack 
                 |> List.filter shouldAttackOverviewEntryFirst
 
@@ -933,11 +1012,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                     |> List.filter (overviewEntryIsTargetedOrTargeting >> not)
 
         targetsToUnlock =
-            if overviewEntriesToAttack |> List.any overviewEntryIsActiveTarget then
-                []
-
-            else
-                context.readingFromGameClient.targets |> List.filter .isActiveTarget
+            targetsToUnlockFromReadingFromGameClient context.readingFromGameClient
 
         ensureShipIsOrbitingDecision =
             overviewEntriesToAttack
@@ -997,23 +1072,44 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                         -- commanderWreckEntries. "Loot All" has no
                         -- dedicated field on InventoryWindow, so this is
                         -- a plain text search within the window.
-                        case openInventoryWindow.uiNode |> findUiElementWithText "Loot All" of
-                            Just lootAllButton ->
-                                describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
+                        --
+                        -- Feedback: this window sometimes fails to close
+                        -- after clicking its own "Loot All"/close button
+                        -- (button click not registering, or the button
+                        -- not found) and just sits open forever. Once it
+                        -- has stayed open for more than two ticks past
+                        -- when we would have clicked "Loot All", force it
+                        -- shut with Ctrl+W (EVE's own close-active-window
+                        -- hotkey) instead of continuing to poke at the
+                        -- window's own controls.
+                        if context.memory.lootWindowOpenTicks > 2 then
+                            describeBranch "Loot window did not close on its own -- force it shut (Ctrl+W)."
+                                (decideActionForCurrentStep
+                                    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL
+                                    , EffectOnWindow.KeyDown EffectOnWindow.vkey_W
+                                    , EffectOnWindow.KeyUp EffectOnWindow.vkey_W
+                                    , EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL
+                                    ]
+                                )
 
-                            Nothing ->
-                                case
-                                    openInventoryWindow.uiNode
-                                        |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
-                                        |> Maybe.andThen .closeButton
-                                of
-                                    Just closeButton ->
-                                        describeBranch "Nothing left to loot. Close the wreck's cargo window."
-                                            (clickUiElement closeButton)
+                        else
+                            case openInventoryWindow.uiNode |> findUiElementWithText "Loot All" of
+                                Just lootAllButton ->
+                                    describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
 
-                                    Nothing ->
-                                        describeBranch "I do not see a way to close this inventory window."
-                                            askForHelpToGetUnstuck
+                                Nothing ->
+                                    case
+                                        openInventoryWindow.uiNode
+                                            |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
+                                            |> Maybe.andThen .closeButton
+                                    of
+                                        Just closeButton ->
+                                            describeBranch "Nothing left to loot. Close the wreck's cargo window."
+                                                (clickUiElement closeButton)
+
+                                        Nothing ->
+                                            describeBranch "I do not see a way to close this inventory window."
+                                                askForHelpToGetUnstuck
 
                     Nothing ->
                         case commanderWreckEntries of
@@ -1038,26 +1134,49 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
 
             else
                 describeBranch "Locking..."
-                    (case seeUndockingComplete |> shipUIModulesToActivateOnTarget |> List.indexedMap Tuple.pair |> List.filter (Tuple.second >> .isActive >> Maybe.withDefault False >> not) |> List.head of
-                        Nothing ->
-                            describeBranch "Scoot!"
-                                (waitForProgressInGame)
+                    (if activeTargetOverviewEntryIsStray context.readingFromGameClient then
+                        describeBranch "The active target looks like a container/wreck, not a rat -- hold fire."
+                            waitForProgressInGame
+
+                     else
+                        case seeUndockingComplete |> shipUIModulesToActivateOnTarget |> List.indexedMap Tuple.pair |> List.filter (Tuple.second >> .isActive >> Maybe.withDefault False >> not) |> List.head of
+                            Nothing ->
+                                describeBranch "Scoot!"
+                                    (waitForProgressInGame)
 
 
-                        Just ( inactiveModuleIndex, inactiveModule ) ->
-                            describeBranch "Shoot!"
-                                (activateWeaponModuleButWaitIfActivatedInPreviousStep context inactiveModuleIndex inactiveModule)
+                            Just ( inactiveModuleIndex, inactiveModule ) ->
+                                describeBranch "Shoot!"
+                                    (activateWeaponModuleButWaitIfActivatedInPreviousStep context inactiveModuleIndex inactiveModule)
                     )
 
         decisionToKillRats =
             case targetsToUnlock |> List.head of
                 Just targetToUnlock ->
-                    describeBranch "I see a target to unlock."
-                        (useContextMenuCascade
-                            ( "locked target", targetToUnlock.barAndImageCont |> Maybe.withDefault targetToUnlock.uiNode )
-                            (useMenuEntryWithTextContaining "unlock" menuCascadeCompleted)
-                            context
-                        )
+                    -- Feedback: the right-click context-menu cascade used
+                    -- here previously (with a 200px discard-distance
+                    -- tolerance) never worked reliably -- confirmed live,
+                    -- repeatedly: "Open context menu on locked target" kept
+                    -- firing fresh every tick with no matching "Click on
+                    -- menu entry" for 'unlock' ever appearing in the log,
+                    -- meaning the right-click essentially never landed a
+                    -- usable menu. Replaced with EVE's own direct
+                    -- Ctrl+Shift+Click-to-unlock shortcut on the target
+                    -- bar entry instead -- one click, no menu to land, no
+                    -- cascade to get stuck discarding and reopening. Still
+                    -- gated on the icon's position having settled for at
+                    -- least a tick (tracked in BotMemory, since this
+                    -- target isn't necessarily "the same locked target"
+                    -- across ticks in any other identifiable way), since a
+                    -- freshly-appeared/moved icon may not be click-ready.
+                    if context.memory.targetToUnlockUnchangedTicks < 1 then
+                        describeBranch
+                            "I see a target to unlock, but its position just appeared or changed since the last reading -- wait for it to settle before clicking it."
+                            waitForProgressInGame
+
+                    else
+                        describeBranch "I see a target to unlock -- Ctrl+Shift+Click it to unlock directly."
+                            (ctrlShiftClickUiElement (targetToUnlock.barAndImageCont |> Maybe.withDefault targetToUnlock.uiNode))
 
                 Nothing ->
                     case context.readingFromGameClient.targets |> List.head of
@@ -1077,40 +1196,55 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
 
                         Just _ ->
                             describeBranch "I see a locked target."
-                                (case seeUndockingComplete |> shipUIModulesToActivateOnTarget |> List.indexedMap Tuple.pair |> List.filter (Tuple.second >> .isActive >> Maybe.withDefault False >> not) |> List.head of
-                                    Nothing ->
-                                        describeBranch "All guns cycling"
-                                            (launchAndEngageDrones context
-                                                |> Maybe.withDefault
-                                                    (describeBranch "No idling drones."
-                                                        (if context.eventContext.botSettings.maxTargetCount <= (context.readingFromGameClient.targets |> List.length) then
-                                                        -- TODO branch if bouncing or brawling
-                                                        -- describeBranch "Enough locked targets." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
-                                                            describeBranch "Enough locked targets." waitForProgressInGame
+                                (if activeTargetOverviewEntryIsStray context.readingFromGameClient then
+                                    -- Second opinion, independent of the
+                                    -- Target<->overview name matching that
+                                    -- targetsToUnlockFromReadingFromGameClient
+                                    -- relies on: if it disagrees and says
+                                    -- the active target is a container/
+                                    -- wreck, don't fire weapons or send
+                                    -- drones at it (both target whatever is
+                                    -- currently active) -- hold fire and let
+                                    -- the primary classification catch up
+                                    -- on a later tick instead.
+                                    describeBranch "The active target looks like a container/wreck, not a rat -- hold fire."
+                                        waitForProgressInGame
 
-                                                         else
-                                                            case overviewEntriesToLock of
-                                                                [] ->
-                                                                -- Ditto above
-                                                                -- describeBranch "All locked up; bounce?" (tetherAtStructure context)
-                                                                    describeBranch "All locked up; bounce?" waitForProgressInGame
+                                 else
+                                    case seeUndockingComplete |> shipUIModulesToActivateOnTarget |> List.indexedMap Tuple.pair |> List.filter (Tuple.second >> .isActive >> Maybe.withDefault False >> not) |> List.head of
+                                        Nothing ->
+                                            describeBranch "All guns cycling"
+                                                (launchAndEngageDrones context
+                                                    |> Maybe.withDefault
+                                                        (describeBranch "No idling drones."
+                                                            (if context.eventContext.botSettings.maxTargetCount <= (context.readingFromGameClient.targets |> List.length) then
+                                                            -- TODO branch if bouncing or brawling
+                                                            -- describeBranch "Enough locked targets." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
+                                                                describeBranch "Enough locked targets." waitForProgressInGame
 
-                                                                nextOverviewEntryToLock :: _ ->
-                                                                    describeBranch "Lock more targets."
-                                                                        (lockTargetFromOverviewEntry context nextOverviewEntryToLock)
+                                                             else
+                                                                case overviewEntriesToLock of
+                                                                    [] ->
+                                                                    -- Ditto above
+                                                                    -- describeBranch "All locked up; bounce?" (tetherAtStructure context)
+                                                                        describeBranch "All locked up; bounce?" waitForProgressInGame
+
+                                                                    nextOverviewEntryToLock :: _ ->
+                                                                        describeBranch "Lock more targets."
+                                                                            (lockTargetFromOverviewEntry context nextOverviewEntryToLock)
+                                                            )
                                                         )
-                                                    )
-                                            )
-                                        --   (overviewEntriesToAttack
-                                        --     |> List.filter (overviewEntryIsTargetedOrTargeting)
-                                        --     |> List.head
-                                        --     |> Maybe.andThen (\overviewEntryToAttack -> ensureShipIsOrbiting seeUndockingComplete.shipUI overviewEntryToAttack) 
-                                        --         |> Maybe.withDefault waitForProgressInGame)
+                                                )
+                                            --   (overviewEntriesToAttack
+                                            --     |> List.filter (overviewEntryIsTargetedOrTargeting)
+                                            --     |> List.head
+                                            --     |> Maybe.andThen (\overviewEntryToAttack -> ensureShipIsOrbiting seeUndockingComplete.shipUI overviewEntryToAttack)
+                                            --         |> Maybe.withDefault waitForProgressInGame)
 
 
-                                    Just ( inactiveModuleIndex, inactiveModule ) ->
-                                        describeBranch "Cycle combat mod"
-                                            (activateWeaponModuleButWaitIfActivatedInPreviousStep context inactiveModuleIndex inactiveModule)
+                                        Just ( inactiveModuleIndex, inactiveModule ) ->
+                                            describeBranch "Cycle combat mod"
+                                                (activateWeaponModuleButWaitIfActivatedInPreviousStep context inactiveModuleIndex inactiveModule)
                                 )
     in
     if context.eventContext.botSettings.orbitInCombat == AppSettings.Yes then
@@ -1414,6 +1548,11 @@ initBotMemory =
     , visitedAnomalies = Dict.empty
     , contextMenuLastDepth = 0
     , contextMenuStuckTicks = 0
+    , lootWindowOpenTicks = 0
+    , routeFirstMarkerRegion = Nothing
+    , routeFirstMarkerUnchangedTicks = 0
+    , targetToUnlockRegion = Nothing
+    , targetToUnlockUnchangedTicks = 0
     }
 
 
@@ -1425,6 +1564,28 @@ statusTextFromState context =
 
         describePerformance =
             "Visited anomalies: " ++ (context.memory.visitedAnomalies |> Dict.size |> String.fromInt) ++ "."
+
+        -- Surfaces the tick counters BotMemory already tracks (see
+        -- updateMemoryForNewReadingFromGame) but that were previously
+        -- invisible outside the source -- added so a slow menu-cascade
+        -- or a stuck "waiting for element to settle" branch (route
+        -- marker, target-to-unlock icon, loot window) shows up directly
+        -- in the per-tick log instead of only being inferable from how
+        -- many consecutive ticks repeat the same decision-path text.
+        describeMenuAndSettlingCounters =
+            "Context menus open: "
+                ++ (readingFromGameClient.contextMenus |> List.length |> String.fromInt)
+                ++ " (cascade level "
+                ++ (context.contextMenuCascadeLevel |> String.fromInt)
+                ++ ", stuck ticks "
+                ++ (context.memory.contextMenuStuckTicks |> String.fromInt)
+                ++ "). Route marker unchanged ticks: "
+                ++ (context.memory.routeFirstMarkerUnchangedTicks |> String.fromInt)
+                ++ ". Target-to-unlock unchanged ticks: "
+                ++ (context.memory.targetToUnlockUnchangedTicks |> String.fromInt)
+                ++ ". Loot window open ticks: "
+                ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
+                ++ "."
 
         describeCurrentReading =
             case readingFromGameClient.shipUI of
@@ -1502,6 +1663,7 @@ statusTextFromState context =
                         |> List.map (String.join " ")
     in
     [ [ describePerformance ]
+    , [ describeMenuAndSettlingCounters ]
     , describeCurrentReading
     ]
         |> List.concat
@@ -1522,6 +1684,75 @@ overviewEntryIsActiveTarget =
 shouldAttackOverviewEntry : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 shouldAttackOverviewEntry =
     iconSpriteHasColorOfRat
+
+
+{-| Factored out of decideActionInAnomaly's own overviewEntriesToAttack /
+targetsToUnlock let-bindings so updateMemoryForNewReadingFromGame can
+compute the same "target to unlock" identity from just a reading (no bot
+settings needed) -- used to track how long it's stayed in the same place,
+see routeFirstMarkerUnchangedTicks-style tracking on BotMemory below.
+-}
+overviewEntriesToAttackFromReadingFromGameClient : ReadingFromGameClient -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+overviewEntriesToAttackFromReadingFromGameClient readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+        |> List.filter shouldAttackOverviewEntry
+
+
+overviewEntryIsStrayLockTarget : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsStrayLockTarget overviewEntry =
+    let
+        textsToCheck =
+            [ overviewEntry.objectName, overviewEntry.objectType ]
+                |> List.filterMap identity
+    in
+    [ "container", "wreck" ]
+        |> List.any (\pattern -> textsToCheck |> List.any (stringContainsIgnoringCase pattern))
+
+
+{-| Safety net for the weapon/drone-activation branches, independent of the
+Target<->overview name matching `targetsToUnlockFromReadingFromGameClient`
+relies on (so a gap in that matching doesn't also sneak past this check):
+whether the overview row for whichever target EVE currently reports as
+"active" -- the one weapons and drones actually go to when activated, since
+neither one lets you choose which locked target to hit -- looks like a
+container or wreck rather than a rat.
+-}
+activeTargetOverviewEntryIsStray : ReadingFromGameClient -> Bool
+activeTargetOverviewEntryIsStray readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsActiveTarget
+        |> List.any overviewEntryIsStrayLockTarget
+
+
+{-| Checks the locked target's own display text directly, instead of
+cross-referencing by name against a separate overview entry. Two earlier
+versions of this cross-referenced instead (first against rat-colored
+overview entries by exact name; then, after that misfired on an active rat,
+against container/wreck-typed overview entries by exact name) and both
+still ended up stuck live: even with the overview side correctly reporting
+`objectName = "Cargo Container"` (confirmed via the "Current target" status
+line, which reads that same field), the locked target never matched --
+meaning `Target.textsTopToBottom` apparently isn't an exact match for
+whatever the overview shows (likely bundled with other text, different
+whitespace, etc. -- never actually confirmed, since matching on the
+target's own text sidesteps the question entirely). Checking substrings
+directly on the target bar's own text removes that cross-tree assumption.
+-}
+targetsToUnlockFromReadingFromGameClient : ReadingFromGameClient -> List EveOnline.ParseUserInterface.Target
+targetsToUnlockFromReadingFromGameClient readingFromGameClient =
+    readingFromGameClient.targets
+        |> List.filter
+            (\target ->
+                target.textsTopToBottom
+                    |> List.any
+                        (\text ->
+                            [ "container", "wreck" ]
+                                |> List.any (\pattern -> stringContainsIgnoringCase pattern text)
+                        )
+            )
 
 
 {-| Whether there is currently anything in the overview worth fighting.
@@ -1572,6 +1803,13 @@ isCommanderWreck overviewEntry =
     containsCommander && isWreck
 
 
+anyCommanderWreckInOverview : ReadingFromGameClient -> Bool
+anyCommanderWreckInOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.any isCommanderWreck
+
+
 {-| First descendant (by depth-first order) whose displayed text contains
 `textToFind`, e.g. a "Loot All" button in an inventory window -- there is
 no dedicated field for that button in `InventoryWindow`, unlike
@@ -1589,6 +1827,27 @@ clickUiElement : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Dec
 clickUiElement uiElement =
     decideActionForCurrentStep
         (mouseClickOnUIElement MouseButtonLeft uiElement |> Result.withDefault [])
+
+
+{-| EVE's own shortcut for unlocking a target directly from the target bar:
+hold Ctrl+Shift and left-click its portrait, no context menu involved.
+-}
+ctrlShiftClickUiElement : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> DecisionPathNode
+ctrlShiftClickUiElement uiElement =
+    decideActionForCurrentStep
+        (case mouseClickOnUIElement MouseButtonLeft uiElement of
+            Ok clickEffects ->
+                [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL
+                , EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT
+                ]
+                    ++ clickEffects
+                    ++ [ EffectOnWindow.KeyUp EffectOnWindow.vkey_SHIFT
+                       , EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL
+                       ]
+
+            Err () ->
+                []
+        )
 
 
 moduleIsActiveOrReloading : EveOnline.ParseUserInterface.ShipUIModuleButton -> Bool
@@ -1813,6 +2072,17 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         currentContextMenuDepth =
             context.readingFromGameClient.contextMenus |> List.length
 
+        currentRouteFirstMarkerRegion =
+            context.readingFromGameClient
+                |> infoPanelRouteFirstMarkerFromReadingFromGameClient
+                |> Maybe.map (.uiNode >> .totalDisplayRegion)
+
+        currentTargetToUnlockRegion =
+            context.readingFromGameClient
+                |> targetsToUnlockFromReadingFromGameClient
+                |> List.head
+                |> Maybe.map (\target -> (target.barAndImageCont |> Maybe.withDefault target.uiNode).totalDisplayRegion)
+
         currentStationNameFromInfoPanel =
             context.readingFromGameClient.infoPanelContainer
                 |> Maybe.andThen .infoPanelLocationInfo
@@ -1887,6 +2157,32 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.contextMenuStuckTicks + 1
+    , lootWindowOpenTicks =
+        if context.readingFromGameClient.inventoryWindows |> List.isEmpty then
+            0
+
+        else
+            botMemoryBefore.lootWindowOpenTicks + 1
+    , routeFirstMarkerRegion = currentRouteFirstMarkerRegion
+    , routeFirstMarkerUnchangedTicks =
+        if currentRouteFirstMarkerRegion == Nothing then
+            0
+
+        else if currentRouteFirstMarkerRegion == botMemoryBefore.routeFirstMarkerRegion then
+            botMemoryBefore.routeFirstMarkerUnchangedTicks + 1
+
+        else
+            0
+    , targetToUnlockRegion = currentTargetToUnlockRegion
+    , targetToUnlockUnchangedTicks =
+        if currentTargetToUnlockRegion == Nothing then
+            0
+
+        else if currentTargetToUnlockRegion == botMemoryBefore.targetToUnlockRegion then
+            botMemoryBefore.targetToUnlockUnchangedTicks + 1
+
+        else
+            0
     }
 
 

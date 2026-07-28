@@ -1769,7 +1769,18 @@ getNextContextMenuRec treeNode remainingMenus =
                                     Ok effects ->
                                         Ok
                                             (ContinueMenuCascade
-                                                ( "Click on menu entry " ++ custom.describeChoice ++ "."
+                                                -- Logs the entry's own literal text, not just
+                                                -- the search criteria (custom.describeChoice) --
+                                                -- confirmed live that the search description
+                                                -- alone can't tell apart "matched the entry we
+                                                -- meant" from "matched some other entry whose
+                                                -- text happens to contain the same substring";
+                                                -- only the actual clicked text answers that.
+                                                ( "Click on menu entry '"
+                                                    ++ String.trim menuEntry.text
+                                                    ++ "' (matched "
+                                                    ++ custom.describeChoice
+                                                    ++ ")."
                                                 , effects
                                                 )
                                             )
@@ -1780,7 +1791,11 @@ getNextContextMenuRec treeNode remainingMenus =
                             else
                                 Ok
                                     (ContinueMenuCascade
-                                        ( "Move mouse to entry " ++ custom.describeChoice
+                                        ( "Move mouse to entry '"
+                                            ++ String.trim menuEntry.text
+                                            ++ "' (matched "
+                                            ++ custom.describeChoice
+                                            ++ ")"
                                         , mouseMoveToUIElement menuEntry.uiNode
                                         )
                                     )
