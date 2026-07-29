@@ -489,12 +489,75 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
 
 generalSetupInUserInterface : ReadingFromGameClient -> Maybe DecisionPathNode
 generalSetupInUserInterface readingFromGameClient =
-    [ closeMessageBox, ensureInfoPanelLocationInfoIsExpanded ]
+    [ closeSystemSettingsMenu, closeMessageBox, ensureInfoPanelLocationInfoIsExpanded ]
         |> List.filterMap
             (\maybeSetupDecisionFromGameReading ->
                 maybeSetupDecisionFromGameReading readingFromGameClient
             )
         |> List.head
+
+
+{-| Recovers from the game's own Settings/pause menu covering the whole
+screen -- a real incident, not a hypothetical: it opened live during a
+session (most likely from a bare Escape press meant for
+`clearStrayContextMenu`/the context-menu-occlusion fallback landing when no
+context menu was actually open, since EVE treats a "naked" Escape as "open
+the pause menu" the same way it would from any other screen). Once open, it
+blocks everything else this bot's decision tree looks for (ship UI,
+overview, etc.), so nothing else in the tree would ever recognize the state
+enough to close it on its own -- confirmed live: the bot only recovered
+after a person closed the menu manually. Placed in
+`generalSetupInUserInterface` (checked before even docked-vs-in-space) so it
+preempts everything else the moment it's detected.
+
+Targets the close ('X') icon in the menu's own header rather than any of
+the page-specific buttons in its footer (e.g. "Return to Game"): the header
+and its close button are common to every page this menu can show (Settings,
+the base pause screen, etc.), while the footer's buttons and their
+positions are specific to whichever page happens to be open -- confirmed
+live via a memory dump correlated with the running client that this
+button's `_elementId` is the stable, page-independent `"closeMenuClick"`,
+found by walking up from the `l_systemmenu`-named layer
+(`parseContextMenusFromUITreeRoot` uses the same `_name`-lookup convention
+for the analogous `l_menu` layer). Also confirmed live, while recovering
+from this by hand: a mouse move straight to the button's coordinates (no
+intermediate points) did nothing at all, not even register a hover
+tooltip -- only worked once the cursor got there via a real multi-step
+glide. That was diagnosed against `cg_input` directly, bypassing
+botlab_host.py's own input path entirely; a normal bot-driven click here
+goes through `_windows_input`'s `_move_mouse_eased`, which already glides
+every `MouseMoveAbsolute` by default, so plain `mouseClickOnUIElement` is
+sufficient -- nothing extra needed on the Elm side for this.
+-}
+closeSystemSettingsMenu : ReadingFromGameClient -> Maybe DecisionPathNode
+closeSystemSettingsMenu readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter
+            (.uiNode
+                >> EveOnline.ParseUserInterface.getNameFromDictEntries
+                >> (==) (Just "l_systemmenu")
+            )
+        |> List.head
+        |> Maybe.andThen
+            (EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+                >> List.filter
+                    (.uiNode
+                        >> EveOnline.ParseUserInterface.getElementIdFromDictEntries
+                        >> (==) (Just "closeMenuClick")
+                    )
+                >> List.head
+            )
+        |> Maybe.map
+            (\closeButton ->
+                describeBranch
+                    "The game's own Settings/pause menu is open, covering everything else -- close it."
+                    (decideActionForCurrentStep
+                        (mouseClickOnUIElement MouseButtonLeft closeButton
+                            |> Result.withDefault []
+                        )
+                    )
+            )
 
 
 closeMessageBox : ReadingFromGameClient -> Maybe DecisionPathNode
@@ -1063,7 +1126,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
 
         decisionIfNoEnemyToAttack =
             if overviewEntriesToAttack |> List.isEmpty then
-                case context.readingFromGameClient.inventoryWindows |> List.head of
+                case context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.head of
                     Just openInventoryWindow ->
                         -- A wreck's loot window is open (from opening a
                         -- commander wreck's cargo below) -- handle it to
@@ -1700,6 +1763,48 @@ overviewEntriesToAttackFromReadingFromGameClient readingFromGameClient =
         |> List.filter shouldAttackOverviewEntry
 
 
+{-| Whether the ship's own persistent cargo-hold "Inventory" window (open
+throughout this whole session, same as the probe scanner/overview/drones
+windows the bot's setup instructions call for) currently has a wreck's
+loot showing, as opposed to just sitting on the ship's own hangar view.
+`EveOnline.ParseUserInterface.InventoryWindow` has no dedicated field for
+this (same gap noted at the "Loot All" text-search call site), and
+`readingFromGameClient.inventoryWindows |> List.head` used to just grab
+the window unconditionally -- since it's *always* present, that meant the
+looting logic thought a wreck was open even when nothing had ever been
+opened at all, forcing it to Ctrl+W-close a window the player never
+wanted closed (stuck 650+ seconds live with zero rats and zero commander
+wrecks anywhere in the overview).
+
+First fix attempt here checked `leftTreeEntries |> List.isEmpty`, on the
+assumption that opening a wreck's cargo shows a separate flat popup with
+no hangar tree. Wrong, confirmed live immediately after shipping it: a
+wreck opened via "Open Cargo" shows up as one more row *in the same
+sidebar tree* as the ship's own hangar (Drone Bay, PLEX Vault, etc.), not
+a separate window -- so `leftTreeEntries` is non-empty either way, and
+that check excluded the real, already-open loot view every single tick,
+which made the bot think "Open Cargo" had never been clicked and re-click
+it forever even while the wreck's contents (and a working "Loot All"
+button) were sitting right there on screen.
+
+Checking for a findable "Loot All" button instead: not a structural
+property of the window, but the actual thing this code needs to already
+be true before it can act -- present only once a wreck is both open *and*
+selected in the tree (confirmed live: "Open Cargo" both adds and selects
+the row in one step, so this becomes findable immediately, no separate
+select-click needed). Doesn't cover the fully-looted-and-emptied case (no
+button left to find) as elegantly -- that degrades to the existing
+"harmless, just wasted ticks" fallback of re-clicking "Open Cargo" on the
+same already-empty wreck, bounded by `lootWreckTimeRemainingSeconds`
+elsewhere in this file, rather than a clean close -- but that's a correct,
+bounded, wasted-tick nuisance, not a real stall like the two bugs above.
+-}
+wreckLootWindowsFromReadingFromGameClient : ReadingFromGameClient -> List EveOnline.ParseUserInterface.InventoryWindow
+wreckLootWindowsFromReadingFromGameClient readingFromGameClient =
+    readingFromGameClient.inventoryWindows
+        |> List.filter (.uiNode >> findUiElementWithText "Loot All" >> (/=) Nothing)
+
+
 overviewEntryIsStrayLockTarget : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 overviewEntryIsStrayLockTarget overviewEntry =
     let
@@ -2158,7 +2263,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         else
             botMemoryBefore.contextMenuStuckTicks + 1
     , lootWindowOpenTicks =
-        if context.readingFromGameClient.inventoryWindows |> List.isEmpty then
+        if context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.isEmpty then
             0
 
         else

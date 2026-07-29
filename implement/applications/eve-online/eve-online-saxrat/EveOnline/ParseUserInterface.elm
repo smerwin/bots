@@ -3389,6 +3389,11 @@ getNameFromDictEntries =
     getStringPropertyFromDictEntries "_name"
 
 
+getElementIdFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Maybe String
+getElementIdFromDictEntries =
+    getStringPropertyFromDictEntries "_elementId"
+
+
 getHintTextFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Maybe String
 getHintTextFromDictEntries =
     getStringPropertyFromDictEntries "_hint"
