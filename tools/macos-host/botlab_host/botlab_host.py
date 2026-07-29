@@ -692,6 +692,9 @@ class TaskDispatcher:
         self._scale_x = 1.0
         self._scale_y = 1.0
         self._cg_input = None
+        # Mouse buttons currently held, so cursor motion between a ButtonDown
+        # and its ButtonUp is emitted as a drag rather than a plain move.
+        self._buttons_down = set()
         self._last_mouse_pos = None
 
     def run_task(self, task):
@@ -838,12 +841,31 @@ class TaskDispatcher:
         proc.stdin.flush()
         return proc.stdout.readline().strip()
 
+    def _cg_move(self, x, y):
+        """Move the cursor, as a drag when a mouse button is currently held.
+
+        macOS delivers cursor motion as either kCGEventMouseMoved or
+        kCGEventLeft/RightMouseDragged, and cg_input exposes those as its
+        separate "move" and "drag" commands. Everything here used to emit
+        "move" unconditionally, including between a ButtonDown and its
+        ButtonUp -- which means the bot could not drag anything at all: EVE
+        reads a button-down followed by plain moved events as a click that
+        happens to be followed by the pointer wandering off, not as a drag.
+        reload_drones.py hit the same wall from the other direction and has
+        used "drag" for the intermediate points since (see its drag(), and
+        its note that a click-then-move sequence reads as a plain click).
+        """
+        if self._buttons_down:
+            button = sorted(self._buttons_down)[0]
+            return self._cg(f"drag {x:.1f} {y:.1f} {button}")
+        return self._cg(f"move {x:.1f} {y:.1f}")
+
     def _glide_to(self, start_x, start_y, target_x, target_y, steps, step_delay):
         for i in range(1, steps):
             t = i / steps
-            self._cg(f"move {start_x + (target_x - start_x) * t:.1f} {start_y + (target_y - start_y) * t:.1f}")
+            self._cg_move(start_x + (target_x - start_x) * t, start_y + (target_y - start_y) * t)
             time.sleep(step_delay)
-        self._cg(f"move {target_x:.1f} {target_y:.1f}")
+        self._cg_move(target_x, target_y)
         self._last_mouse_pos = (target_x, target_y)
 
     def _move_mouse_eased(self, target_x, target_y, steps=10, step_delay=0.025, force_movement=False):
@@ -942,7 +964,7 @@ class TaskDispatcher:
             if already_there and force_movement:
                 move_start = time.monotonic()
                 nudge_x, nudge_y = target_x - 12, target_y - 8
-                self._cg(f"move {nudge_x:.1f} {nudge_y:.1f}")
+                self._cg_move(nudge_x, nudge_y)
                 time.sleep(step_delay)
                 self._glide_to(nudge_x, nudge_y, target_x, target_y, steps, step_delay)
                 print(f"#     move: already at ({target_x:.1f}, {target_y:.1f}) but this is a click -- "
@@ -954,7 +976,7 @@ class TaskDispatcher:
             print(f"#     move: glided ({start_x:.1f}, {start_y:.1f}) -> ({target_x:.1f}, {target_y:.1f}) "
                   f"distance={distance:.1f}px in {time.monotonic() - move_start:.3f}s", file=sys.stderr)
             return True
-        self._cg(f"move {target_x:.1f} {target_y:.1f}")
+        self._cg_move(target_x, target_y)
         self._last_mouse_pos = (target_x, target_y)
         print(f"#     move: first move of session, jumped straight to ({target_x:.1f}, {target_y:.1f})",
               file=sys.stderr)
@@ -1050,9 +1072,13 @@ class TaskDispatcher:
                         errors.append("MouseMoveRelative not supported (Windows-relative semantics not implemented)")
                         continue
                     elif tag == "ButtonDown":
-                        self._cg(f"down {vk_to_mouse_button(payload)}")
+                        button = vk_to_mouse_button(payload)
+                        self._cg(f"down {button}")
+                        self._buttons_down.add(button)
                     elif tag == "ButtonUp":
-                        self._cg(f"up {vk_to_mouse_button(payload)}")
+                        button = vk_to_mouse_button(payload)
+                        self._cg(f"up {button}")
+                        self._buttons_down.discard(button)
                     elif tag == "ButtonScroll":
                         button, direction, offset = payload
                         self._cg(f"scroll 0 {direction * offset}")
