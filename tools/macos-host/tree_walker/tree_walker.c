@@ -518,29 +518,49 @@ static bool describe_primitive_json(uint64_t value_addr, Buf *out) {
 // Children resolution: obj.__dict__['children'] (a PyChildrenList) ->
 // its own __dict__['_childrenObjects'] -> stock CPython list -> ob_item
 // array of child pointers.
+//
+// Some widgets nest one children-list wrapper inside another, so
+// '_childrenObjects' is not always the stock list directly: a ButtonGroup
+// (the row of Accept/Decline/... buttons in an agent conversation) goes
+// ButtonGroup.children -> ButtonGroupChildrenList._childrenObjects ->
+// PyChildrenList._childrenObjects -> list. Bailing out at the first
+// non-list made every such subtree read as having no children at all,
+// which is why an agent dialogue's buttons were invisible to the walk
+// while plainly rendered on screen. Unwrap repeatedly instead, with a
+// small bound so a corrupt or cyclic chain can't spin.
 // ---------------------------------------------------------------------
-static int get_children_addrs(uint64_t children_wrapper, uint64_t *out, int max_out) {
-    if (!children_wrapper) return 0;
-    uint64_t pcl_dict;
-    if (!get_dict(children_wrapper, &pcl_dict)) return 0;
+#define MAX_CHILDREN_UNWRAP 4
 
+static bool find_children_objects(uint64_t wrapper, uint64_t *out_value) {
+    uint64_t wrapper_dict;
+    if (!get_dict(wrapper, &wrapper_dict)) return false;
     DictEntry entries[64];
-    int n = walk_dict_raw(pcl_dict, entries, 64);
-    uint64_t child_objs_list = 0;
+    int n = walk_dict_raw(wrapper_dict, entries, 64);
     // first-occurrence-wins, matching the Python implementation
     for (int i = 0; i < n; i++) {
         unsigned char keybuf[64];
         size_t klen;
         if (decode_pystr(entries[i].key_addr, keybuf, sizeof(keybuf), &klen) &&
             klen == 16 && memcmp(keybuf, "_childrenObjects", 16) == 0) {
-            child_objs_list = entries[i].value_addr;
-            break;
+            *out_value = entries[i].value_addr;
+            return true;
         }
     }
-    if (!child_objs_list) return 0;
+    return false;
+}
+
+static int get_children_addrs(uint64_t children_wrapper, uint64_t *out, int max_out) {
+    if (!children_wrapper) return 0;
+
+    uint64_t child_objs_list = children_wrapper;
     char tname[128];
-    if (!get_type_name_of_obj(child_objs_list, tname, sizeof(tname))) return 0;
-    if (strcmp(tname, "list") != 0) return 0;
+    for (int hop = 0; ; hop++) {
+        if (!find_children_objects(child_objs_list, &child_objs_list)) return 0;
+        if (!child_objs_list) return 0;
+        if (!get_type_name_of_obj(child_objs_list, tname, sizeof(tname))) return 0;
+        if (strcmp(tname, "list") == 0) break;
+        if (hop + 1 >= MAX_CHILDREN_UNWRAP) return 0;
+    }
 
     unsigned char hdr[40];
     if (!read_mem(child_objs_list, hdr, sizeof(hdr))) return 0;

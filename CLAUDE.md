@@ -124,6 +124,21 @@ any pointer generically without per-class special-casing.
 3. That value is a **stock** `PyListObject` → `ob_item` array of child
    wrapper pointers → recurse from step 1.
 
+Step 3's value is **not always a stock list on the first hop** — some
+widgets nest one children-list wrapper inside another, so
+`_childrenObjects` yields a second wrapper that has its own
+`_childrenObjects`. Confirmed live on `ButtonGroup` (the Accept/Decline/
+Delay/Track row in an agent conversation): `ButtonGroup.children` →
+`ButtonGroupChildrenList._childrenObjects` → `PyChildrenList._childrenObjects`
+→ stock `list`. Bailing out at the first non-`list` (what both walkers
+originally did) made every such subtree read as *childless*, so the agent
+dialogue's buttons were invisible to the bot while plainly rendered on
+screen — a silent wrong answer, not an error. `tree_walker.c`'s
+`get_children_addrs` now unwraps repeatedly (bounded by
+`MAX_CHILDREN_UNWRAP`) until it reaches a stock list. `re_helper.py`'s
+`get_children_addrs_from_wrapper` still has the old single-hop behaviour;
+fix it there too if a Python-path walk ever needs these subtrees.
+
 Dead end, don't retry: `PyChildrenList+0x20`/`+0x28` look like a linked
 list but are CPython's own GC-tracked-object list (every GC object is
 threaded into one process-wide cycle-detection list) — unrelated to actual
@@ -214,6 +229,15 @@ outbound conversion, not in `cg_input` itself). Windows virtual-key codes
 (`Common/EffectOnWindow.elm`'s `vkey_*`) need an explicit lookup table to
 macOS `CGKeyCode`s (`_VK_TO_CGKEYCODE` in `botlab_host.py`) — neither side
 is contiguous for letters/digits, so no arithmetic mapping works.
+
+**In-game hotkeys worth using instead of a context-menu cascade** (this
+account's bindings, all confirmed live): `Shift+F` launches drones from the
+bay, `F` engages the current target with them, `Shift+R` recalls them,
+`Alt+F1` toggles the propulsion module, `F1`–`F4` are weapon slots 1-4. A
+keypress is one effect where the equivalent cascade is a multi-tick
+right-click → hover → click sequence with its own retry/discard logic, so
+prefer the hotkey wherever one exists. Drones must be recalled before
+taking an acceleration gate or they are left behind in the old pocket.
 
 `window_bounds()`-style window resolution must pick the **largest** window
 by area for a given pid, not the first one over a width threshold — a
