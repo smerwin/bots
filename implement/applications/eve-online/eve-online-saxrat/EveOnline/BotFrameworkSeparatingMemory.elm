@@ -258,9 +258,23 @@ processEventInBaseFramework config eventContext event stateBefore =
             ( { botMemory = botMemory
               , lastStepsEffects = lastStepsEffects
               , lastReadingsFromGameClient =
+                    -- The "no progress" discard check in
+                    -- useContextMenuCascadeWithCustomConfig looks back up to
+                    -- 8 readings (widened from 4 there, on the strength of
+                    -- live findings about slow-to-render flyouts) -- but
+                    -- this storage cap was never widened to match, so that
+                    -- widening was a no-op the entire time: with at most 4
+                    -- readings ever retained here, `List.take 8` on the
+                    -- consuming side had nothing beyond 4 to find regardless
+                    -- of what its own comment claimed. Caught live: a
+                    -- 3-level-deep flyout (surroundings button -> Stations
+                    -- -> a specific station list) kept discarding and
+                    -- reopening from scratch after only 4 real ticks,
+                    -- visually already rendered on screen (confirmed via
+                    -- screenshot) but not yet visible to our own reads.
                     readingFromGameClientMemory
                         :: stateBefore.lastReadingsFromGameClient
-                        |> List.take 4
+                        |> List.take 8
               }
             , case decisionLeaf of
                 ContinueSession continueSession ->
@@ -568,49 +582,81 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                             discardExistingContextMenu reasonToDiscard
 
                         Nothing ->
-                            if
-                                (context.readingFromGameClient.contextMenus |> List.map identifyingInfoFromContextMenu)
-                                    == (previousReadingFromGameClient.contextMenus |> List.map identifyingInfoFromContextMenu)
-                            then
-                                discardExistingContextMenu
-                                    ("no progress across the last "
-                                        ++ String.fromInt (min 8 (List.length context.previousReadingsFromGameClient))
-                                        ++ " reading(s) -- still "
-                                        ++ String.fromInt (List.length context.readingFromGameClient.contextMenus)
-                                        ++ " menu(s) open at cascade level "
-                                        ++ String.fromInt context.contextMenuCascadeLevel
-                                        ++ ", first menu region ("
-                                        ++ describeDisplayRegion cascadeFirstElement.uiNode.totalDisplayRegion
-                                        ++ ")"
+                            -- Root-caused live (2026-07-28, via `screen -X
+                            -- hardcopy` on a real stuck session plus a
+                            -- memory dump of the actual rendered menu):
+                            -- this used to check "did the open menu(s)'
+                            -- own on-screen region change since N readings
+                            -- ago" *before* ever trying
+                            -- getNextContextMenu (the thing that actually
+                            -- reads the entries and decides what to click)
+                            -- -- so a menu that finished rendering and then
+                            -- sat perfectly stable (the *good*, normal end
+                            -- state once a flyout is done animating) read
+                            -- as "no progress" and got discarded and
+                            -- reopened forever, without getNextContextMenu
+                            -- ever running even once. Confirmed live: for
+                            -- the surroundings-button cascade specifically,
+                            -- whose own 2023-01-12 comment already
+                            -- documents that opening it can auto-expand a
+                            -- second level (here, "Stations") immediately
+                            -- -- exactly the stable-after-one-tick shape
+                            -- this bug silently ate every time.
+                            --
+                            -- Now tries getNextContextMenu unconditionally
+                            -- first, and only consults region-stability
+                            -- to decide *how to react to a failure*: a
+                            -- fresh Err (the menu hasn't rendered deep
+                            -- enough yet, still changing) waits for another
+                            -- reading rather than reopening -- reopening on
+                            -- an incompletely-rendered menu is what risks
+                            -- toggling a real, working menu closed, the
+                            -- same class of self-inflicted loop as the
+                            -- empty-reading case above. Only once the SAME
+                            -- Err persists with the menu(s) themselves
+                            -- unchanged across the lookback does it give up
+                            -- and discard-and-reopen -- preserving the
+                            -- original patience for slow renders while no
+                            -- longer skipping the actual attempt.
+                            case
+                                EveOnline.BotFramework.getNextContextMenu
+                                    useContextMenu
+                                    readingFromGameClient
+                                    (min
+                                        (List.length cascadeFollowingElements)
+                                        (context.contextMenuCascadeLevel - 1)
                                     )
+                            of
+                                Err err ->
+                                    if
+                                        (context.readingFromGameClient.contextMenus |> List.map identifyingInfoFromContextMenu)
+                                            == (previousReadingFromGameClient.contextMenus |> List.map identifyingInfoFromContextMenu)
+                                    then
+                                        discardExistingContextMenu
+                                            ("failed to continue (" ++ err ++ "), no progress across the last "
+                                                ++ String.fromInt (min 8 (List.length context.previousReadingsFromGameClient))
+                                                ++ " reading(s) -- still "
+                                                ++ String.fromInt (List.length context.readingFromGameClient.contextMenus)
+                                                ++ " menu(s) open at cascade level "
+                                                ++ String.fromInt context.contextMenuCascadeLevel
+                                                ++ ", first menu region ("
+                                                ++ describeDisplayRegion cascadeFirstElement.uiNode.totalDisplayRegion
+                                                ++ ")"
+                                            )
 
-                            else
-                                case
-                                    EveOnline.BotFramework.getNextContextMenu
-                                        useContextMenu
-                                        readingFromGameClient
-                                        {-
-                                           2023-01-12 Adapt to behavior of menu from surroundings button:
-                                           When opening that menu, the game client opens not only the first level but sometimes also expands the 'stations' entry so that we immediately also have the second level on screen.
-                                        -}
-                                        (min
-                                            (List.length cascadeFollowingElements)
-                                            (context.contextMenuCascadeLevel - 1)
-                                        )
-                                of
-                                    Err err ->
+                                    else
                                         Common.DecisionPath.describeBranch
-                                            ("Failed to continue context menu: " ++ err)
-                                            beginCascade
+                                            ("Failed to continue context menu for now (" ++ err ++ ") -- still changing, give it another reading before giving up.")
+                                            waitForProgressInGame
 
-                                    Ok EveOnline.BotFramework.CompletedMenuCascade ->
-                                        Common.DecisionPath.describeBranch
-                                            ("Completed cascade on " ++ target.targetUIElementName)
-                                            beginCascade
+                                Ok EveOnline.BotFramework.CompletedMenuCascade ->
+                                    Common.DecisionPath.describeBranch
+                                        ("Completed cascade on " ++ target.targetUIElementName)
+                                        beginCascade
 
-                                    Ok (EveOnline.BotFramework.ContinueMenuCascade ( stepDescription, effectsToGameClient )) ->
-                                        Common.DecisionPath.describeBranch stepDescription
-                                            (decideActionForCurrentStep effectsToGameClient)
+                                Ok (EveOnline.BotFramework.ContinueMenuCascade ( stepDescription, effectsToGameClient )) ->
+                                    Common.DecisionPath.describeBranch stepDescription
+                                        (decideActionForCurrentStep effectsToGameClient)
 
 
 discardContextMenuIfTooDistantFromTargetElement :

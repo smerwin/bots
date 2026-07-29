@@ -657,7 +657,15 @@ class VolatileHost:
         # (~4800-4900 nodes at full depth): depth=16/nodes=5000 reliably
         # reaches this content at a real but bounded extra cost (~1.6s ->
         # ~2.3s per read on the reference machine) -- see CLAUDE.md.
-        tree = tree_walker.tree(root_addr, metatype, str_type, max_depth=16, max_nodes=5000)
+        # Still too shallow for the Opportunities panel's "Warp to Site"
+        # button, confirmed live via a raw memory RE dump to sit at depth 19
+        # (UIRoot -> ... -> InfoPanelJobBoard -> ... -> TravelStateButtonTaskWidget
+        # -> EveLabelMedium) -- silently truncated before Bot.elm's
+        # `findUiElementWithText "Warp to Site"` ever sees it, so the bot fell
+        # back to the scan-results/tether path instead. Raised to 24; the
+        # same live tree had only 3309 nodes total with just 24 of them past
+        # depth 16, so the extra depth costs effectively nothing here.
+        tree = tree_walker.tree(root_addr, metatype, str_type, max_depth=24, max_nodes=5000)
         entries = tree.get("dictEntriesOfInterest", {})
         w, h = entries.get("_displayWidth"), entries.get("_displayHeight")
         if isinstance(w, (int, float)) and isinstance(h, (int, float)) and w > 0 and h > 0:

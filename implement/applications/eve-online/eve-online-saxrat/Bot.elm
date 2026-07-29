@@ -156,7 +156,7 @@ defaultBotSettings =
     , avoidRats = []
     , activateModulesAlways = []
     , maxTargetCount = 4
-    , botStepDelayMilliseconds = 999
+    , botStepDelayMilliseconds = 499
     , anomalyWaitTimeSeconds = 600
     , orbitInCombat = AppSettings.No
     , keepAtRange = AppSettings.No
@@ -276,6 +276,7 @@ type alias BotMemory =
     , routeFirstMarkerUnchangedTicks : Int
     , targetToUnlockRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , targetToUnlockUnchangedTicks : Int
+    , noProbeScanResultsAndNoRouteLastTimeInSpace : Bool
     }
 
 
@@ -467,7 +468,38 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                             describeBranch "Stay docked." waitForProgressInGame
                         }
                         context
-                        |> Maybe.withDefault (undockUsingStationWindow context)
+                        |> Maybe.withDefault
+                            (if
+                                context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
+                                    && (context.readingFromGameClient
+                                            |> infoPanelRouteFirstMarkerFromReadingFromGameClient
+                                            |> (==) Nothing
+                                       )
+                                    -- A "Warp to Site" opportunity takes
+                                    -- precedence over staying docked: the
+                                    -- Opportunities panel this comes from is
+                                    -- part of the persistent left sidebar
+                                    -- (like the route panel), so it's
+                                    -- checkable even while docked. Undocking
+                                    -- here rather than trying to click it
+                                    -- directly from dock -- untested whether
+                                    -- that even works -- lets the very next
+                                    -- tick's normal in-space priority chain
+                                    -- (which already puts this ahead of
+                                    -- tether/dock) pick it up once genuinely
+                                    -- in space.
+                                    && (context.readingFromGameClient
+                                            |> warpToOpportunitySiteIfAvailable
+                                            |> (==) Nothing
+                                       )
+                             then
+                                describeBranch
+                                    "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
+                                    waitForProgressInGame
+
+                             else
+                                undockUsingStationWindow context
+                            )
                 , ifSeeShipUI =
                     \shipUI ->
                         runAwayIfLowHealth context shipUI
@@ -719,8 +751,28 @@ continueIfShouldHide config context =
                             Nothing
 
 
+{-| Root-caused live: this only ever searched the surroundings-button menu
+for "structures" (a player-owned Upwell citadel/etc.), with no fallback.
+A system with only NPC stations -- no player structures at all, confirmed
+live via a memory dump of the actual menu tree, which had no entry
+containing "structures" anywhere -- has no way for that search to
+succeed, ever, regardless of how many ticks it's given: the entry simply
+does not exist. `getNextContextMenu` only runs when the framework's own
+"no progress" check sees the open menu(s) change between readings, so
+once the (accidentally, from repeatedly right-clicking the same screen
+position) hover-triggered submenu stabilizes, that search never even
+gets attempted again -- it just discards and reopens forever, which is
+what actually showed up live (confirmed via `screen -X hardcopy` on the
+bot's own session and a live memory dump correlated with the rendered
+UI). Mirrors `dockAtRandomStationOrStructure`'s already-proven
+`[ "structures", "station" ]` fallback and its "Dock" priority (ahead of
+Warp/Approach) -- tethering at a player structure is still preferred
+when one exists, but an NPC station to dock at is a real, working
+fallback when it doesn't, rather than looping on a search that can never
+succeed.
+-}
 tetherAtStructure : BotDecisionContext -> DecisionPathNode
-tetherAtStructure context = 
+tetherAtStructure context =
     let
         withTextContainingIgnoringCase textToSearch =
             List.filter (.text >> String.toLower >> (==) (textToSearch |> String.toLower)) >> List.head
@@ -732,14 +784,15 @@ tetherAtStructure context =
 
         chooseNextMenuEntry followingChoice =
             MenuEntryWithCustomChoice
-                { describeChoice = "warp/approach tether"
+                { describeChoice = "dock, else warp/approach tether"
                 , chooseEntry =
                     \currentMenu ->
                         let
                             suitableMenuEntries =
                                 List.filter menuEntryIsSuitable currentMenu.entries
                         in
-                        [ withTextContainingIgnoringCase "Warp Fleet"
+                        [ withTextContainingIgnoringCase "Dock"
+                        , withTextContainingIgnoringCase "Warp Fleet"
                         , withTextContainingIgnoringCase "Warp Wing"
                         , withTextContainingIgnoringCase "Warp Squad"
                         , withTextContainingIgnoringCase "Warp"
@@ -753,7 +806,7 @@ tetherAtStructure context =
     in
     ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
         (useContextMenuCascadeOnListSurroundingsButton
-            (useMenuEntryWithTextContainingFirstOf [ "structures" ]
+            (useMenuEntryWithTextContainingFirstOf [ "structures", "station" ]
                 (chooseNextMenuEntry
                     (chooseNextMenuEntry MenuCascadeCompleted)
                 )
@@ -899,7 +952,7 @@ decideNextActionWhenInSpace context seeUndockingComplete =
             case context.readingFromGameClient |> getCurrentAnomalyIDAsSeenInProbeScanner of
                 Nothing ->
                     let
-                        pickAnotherAnomalyOrLeave =
+                        pickAnotherAnomalyOrLeaveViaScanResults =
                             let
                                 scanResultsWithReasonToIgnore =
                                     probeScannerWindow.scanResults
@@ -925,6 +978,22 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                         (jumpToNextSystem context)
                                 Just _ ->
                                     describeBranch "Found matching anomaly." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
+
+                        -- "Warp to Site" opportunities (e.g. "Sansha's
+                        -- Command Relay Outpost") and following acceleration
+                        -- gates through a multi-pocket site both take
+                        -- priority over the normal probe-scan hunt loop --
+                        -- but only once there's nothing left to fight or
+                        -- loot right now (checked by the caller before
+                        -- falling through to this), so an opportunity
+                        -- appearing mid-combat doesn't pull the ship away
+                        -- from a fight already in progress.
+                        pickAnotherAnomalyOrLeave =
+                            warpToOpportunitySiteIfAvailable context.readingFromGameClient
+                                |> Maybe.withDefault
+                                    (activateAccelerationGateIfPresent context
+                                        |> Maybe.withDefault pickAnotherAnomalyOrLeaveViaScanResults
+                                    )
                     in
                     -- The anomaly's own signature can drop off the probe
                     -- scanner (site "resolved"/expired) while rats are
@@ -937,7 +1006,7 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                     -- ever running the unlock cascade, so check for one
                     -- here too rather than only inside decideActionInAnomaly.
                     if anyAttackableInOverview context.readingFromGameClient
-                        || anyCommanderWreckInOverview context.readingFromGameClient
+                        || anyNotableWreckInOverview context.readingFromGameClient
                         || (targetsToUnlockFromReadingFromGameClient context.readingFromGameClient |> List.isEmpty |> not)
                     then
                         describeBranch "The anomaly no longer shows on the scanner, but there is still something to attack or loot here."
@@ -1097,23 +1166,23 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
         waitTimeRemainingSeconds =
             context.eventContext.botSettings.anomalyWaitTimeSeconds - arrivalInAnomalyAgeSeconds
 
-        commanderWreckEntries =
+        notableWreckEntries =
             context.readingFromGameClient.overviewWindows
                 |> List.concatMap .entries
-                |> List.filter isCommanderWreck
+                |> List.filter isNotableWreck
                 |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
 
         -- Extra time budget (beyond anomalyWaitTimeSeconds) to spend
-        -- looting commander wrecks before giving up and leaving anyway --
-        -- a bounded timeout rather than tracking which specific wrecks
-        -- we've already looted, since a looted wreck stays on the
+        -- looting commander/overseer wrecks before giving up and leaving
+        -- anyway -- a bounded timeout rather than tracking which specific
+        -- wrecks we've already looted, since a looted wreck stays on the
         -- overview (just empty) with no clean way to tell from here.
         -- Re-looting an empty wreck is harmless, just wasted ticks, so
         -- the timeout is the actual guard against getting stuck forever.
         lootWreckTimeRemainingSeconds =
             (context.eventContext.botSettings.anomalyWaitTimeSeconds + 120) - arrivalInAnomalyAgeSeconds
 
-        decisionAfterLootingCommanderWrecks =
+        decisionAfterLootingNotableWrecks =
             if waitTimeRemainingSeconds <= 0 then
                 returnDronesToBay context
                     |> Maybe.withDefault
@@ -1129,10 +1198,10 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                 case context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.head of
                     Just openInventoryWindow ->
                         -- A wreck's loot window is open (from opening a
-                        -- commander wreck's cargo below) -- handle it to
-                        -- completion (loot, then close) before touching
-                        -- anything else, regardless of what's left in
-                        -- commanderWreckEntries. "Loot All" has no
+                        -- commander/overseer wreck's cargo below) -- handle
+                        -- it to completion (loot, then close) before
+                        -- touching anything else, regardless of what's left
+                        -- in notableWreckEntries. "Loot All" has no
                         -- dedicated field on InventoryWindow, so this is
                         -- a plain text search within the window.
                         --
@@ -1175,14 +1244,14 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                                                 askForHelpToGetUnstuck
 
                     Nothing ->
-                        case commanderWreckEntries of
+                        case notableWreckEntries of
                             wreckToLoot :: _ ->
                                 if lootWreckTimeRemainingSeconds <= 0 then
-                                    describeBranch "Giving up on looting commander wreck(s) -- out of time."
-                                        decisionAfterLootingCommanderWrecks
+                                    describeBranch "Giving up on looting commander/overseer wreck(s) -- out of time."
+                                        decisionAfterLootingNotableWrecks
 
                                 else
-                                    describeBranch "Open commander wreck's cargo before leaving."
+                                    describeBranch "Open commander/overseer wreck's cargo before leaving."
                                         (useContextMenuCascadeOnOverviewEntry
                                             (useMenuEntryWithTextContainingFirstOf
                                                 [ "Loot All", "Open Cargo" ]
@@ -1193,7 +1262,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                                         )
 
                             [] ->
-                                decisionAfterLootingCommanderWrecks
+                                decisionAfterLootingNotableWrecks
 
             else
                 describeBranch "Locking..."
@@ -1616,6 +1685,7 @@ initBotMemory =
     , routeFirstMarkerUnchangedTicks = 0
     , targetToUnlockRegion = Nothing
     , targetToUnlockUnchangedTicks = 0
+    , noProbeScanResultsAndNoRouteLastTimeInSpace = False
     }
 
 
@@ -1648,6 +1718,13 @@ statusTextFromState context =
                 ++ (context.memory.targetToUnlockUnchangedTicks |> String.fromInt)
                 ++ ". Loot window open ticks: "
                 ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
+                ++ ". No scan results and no route last time in space: "
+                ++ (if context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace then
+                        "yes"
+
+                    else
+                        "no"
+                   )
                 ++ "."
 
         describeCurrentReading =
@@ -1886,33 +1963,101 @@ shouldAttackOverviewEntryFirst overviewEntry = case overviewEntry.objectName of
         objectName |> String.contains "Tower"
 
 
-{-| A "commander"-type rat's wreck, worth sticking around to loot before
-leaving the anomaly. Checks both name and type since which one carries
-"Commander" seems to vary; requires "wreck" in the type so we don't
-also match the (still-living) commander rat itself while it's on the
-overview.
+{-| Matches the "Ancient Acceleration Gate" (and any other "* Acceleration
+Gate") objects that link the separate rooms ("pockets") inside a multi-room
+site like the "Sansha's Command Relay Outpost" opportunity: checks both
+`objectName` and `objectType` the same defensive way `isNotableWreck`
+does, since which field actually carries the "acceleration gate" text for
+this specific object class hasn't been confirmed live yet.
 -}
-isCommanderWreck : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
-isCommanderWreck overviewEntry =
+isAccelerationGate : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+isAccelerationGate overviewEntry =
+    [ overviewEntry.objectName, overviewEntry.objectType ]
+        |> List.filterMap identity
+        |> List.any (stringContainsIgnoringCase "acceleration gate")
+
+
+{-| Right-clicks the nearest acceleration gate and activates it to move on to
+the next pocket. Priority list covers both the "already close enough" case
+(EVE's own menu text for these is "Activate Gate", mirrored on
+`jumpToNextSystem`'s "dock"/"jump" cascade for regular stargates) and the
+"still need to close distance first" case (falls back to warping/
+approaching, the same two-step pattern already proven live for
+`tetherAtStructure`'s NPC-station fallback -- a later tick's fresh right-
+click then finds "Activate Gate" once in range). Goes through
+`ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping` first,
+same as every other warp/tether action, since drones left behind in the
+current pocket are stranded once the gate carries the ship to the next one.
+-}
+activateAccelerationGateIfPresent : BotDecisionContext -> Maybe DecisionPathNode
+activateAccelerationGateIfPresent context =
+    context.readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter isAccelerationGate
+        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+        |> List.head
+        |> Maybe.map
+            (\accelerationGateEntry ->
+                describeBranch "I see an acceleration gate -- activate it to move to the next pocket."
+                    (ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
+                        (useContextMenuCascadeOnOverviewEntry
+                            (useMenuEntryWithTextContainingFirstOf
+                                [ "activate gate", "activate", "warp to within", "approach" ]
+                                menuCascadeCompleted
+                            )
+                            accelerationGateEntry
+                            context
+                        )
+                    )
+            )
+
+
+{-| The "Opportunities" panel (e.g. "Sansha's Command Relay Outpost") is a
+separate mechanism from the probe-scanner anomalies this bot otherwise
+hunts -- confirmed live it has no existing parsing anywhere in this
+codebase. Rather than adding a dedicated parser for that whole panel, this
+just looks for a clickable "Warp to Site" button anywhere on screen (the
+same generic whole-tree text search already proven for the "Loot All" and
+message-box-close buttons) and clicks it directly.
+-}
+warpToOpportunitySiteIfAvailable : ReadingFromGameClient -> Maybe DecisionPathNode
+warpToOpportunitySiteIfAvailable readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> findUiElementWithText "Warp to Site"
+        |> Maybe.map
+            (\warpToSiteButton ->
+                describeBranch "I see a 'Warp to Site' opportunity -- warp there."
+                    (clickUiElement warpToSiteButton)
+            )
+
+
+{-| A "commander"- or "overseer"-type rat's wreck, worth sticking around to
+loot before leaving the anomaly. Checks both name and type since which one
+carries "Commander"/"Overseer" seems to vary; requires "wreck" in the type
+so we don't also match the (still-living) commander/overseer rat itself
+while it's on the overview.
+-}
+isNotableWreck : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+isNotableWreck overviewEntry =
     let
-        containsCommander =
+        containsNotableRatName =
             [ overviewEntry.objectName, overviewEntry.objectType ]
                 |> List.filterMap identity
-                |> List.any (stringContainsIgnoringCase "commander")
+                |> (\texts -> [ "commander", "overseer" ] |> List.any (\pattern -> texts |> List.any (stringContainsIgnoringCase pattern)))
 
         isWreck =
             overviewEntry.objectType
                 |> Maybe.map (stringContainsIgnoringCase "wreck")
                 |> Maybe.withDefault False
     in
-    containsCommander && isWreck
+    containsNotableRatName && isWreck
 
 
-anyCommanderWreckInOverview : ReadingFromGameClient -> Bool
-anyCommanderWreckInOverview readingFromGameClient =
+anyNotableWreckInOverview : ReadingFromGameClient -> Bool
+anyNotableWreckInOverview readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
-        |> List.any isCommanderWreck
+        |> List.any isNotableWreck
 
 
 {-| First descendant (by depth-first order) whose displayed text contains
@@ -2288,6 +2433,35 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , noProbeScanResultsAndNoRouteLastTimeInSpace =
+        -- Used to decide whether to stay docked rather than immediately
+        -- undocking again into the same dead end: root-caused live that
+        -- with no anomalies to hunt in the current system and no route to
+        -- move to another one, tetherAtStructure's fallback (park at an
+        -- NPC station) was being followed right back out again on the very
+        -- next tick by the unconditional undock in branchDependingOnDockedOrInSpace,
+        -- for as long as that stayed true. Deliberately weaker than "no
+        -- anomaly matching the bot's settings" (which would need
+        -- BotSettings, not available in UpdateMemoryContext) -- "zero probe
+        -- scan results at all" undercounts real dead ends (a system with
+        -- non-matching scan results still won't trip this), but that's the
+        -- safe direction to be wrong in: it only ever *skips* staying
+        -- docked, falling back to the existing undock-and-look-again
+        -- behavior, never suppresses hunting when there's genuinely
+        -- something on the scanner. Frozen while docked (no fresh space
+        -- reading to update it from) and re-checked against the route
+        -- fresh every tick at the call site, so setting a route while
+        -- docked still un-sticks it immediately rather than waiting for
+        -- another trip into space.
+        if context.readingFromGameClient.shipUI == Nothing then
+            botMemoryBefore.noProbeScanResultsAndNoRouteLastTimeInSpace
+
+        else
+            (currentRouteFirstMarkerRegion == Nothing)
+                && (context.readingFromGameClient.probeScannerWindow
+                        |> Maybe.map (.scanResults >> List.isEmpty)
+                        |> Maybe.withDefault True
+                   )
     }
 
 
