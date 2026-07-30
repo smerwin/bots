@@ -8,9 +8,16 @@
 //   down <button>             mouse button down at last-known position (0=left 1=right 2=other)
 //   up <button>                mouse button up at last-known position
 //   drag <x> <y> <button>      mouse move while <button> is held (drag event)
+//   doubleclick <button>       double click at last-known position
 //   keydown <keyCode>          key down (macOS virtual keycode, CGKeyCode)
 //   keyup <keyCode>            key up
 //   scroll <dx> <dy>           scroll wheel event
+//
+// `doubleclick` is its own command rather than two `down`/`up` pairs because
+// two ordinary clicks in a row are not a double click, however fast they are
+// sent: what makes the second one count is the kCGMouseEventClickState field,
+// which has to say 2. Without it the application receives two independent
+// single clicks and no double-click action ever fires.
 //
 // Requires Accessibility permission granted to whatever process runs this
 // (System Settings -> Privacy & Security -> Accessibility) -- CGEventPost
@@ -30,6 +37,19 @@ static CGMouseButton buttonFromInt(int b) {
 
 static void postMouse(CGEventType type, CGPoint point, CGMouseButton button) {
     CGEventRef event = CGEventCreateMouseEvent(NULL, type, point, button);
+    CGEventPost(kCGHIDEventTap, event);
+    CFRelease(event);
+    lastPos = point;
+}
+
+// Same as postMouse, but stamping the click number the window server uses to
+// decide whether a press is a fresh click or a continuation of the previous
+// one. 1 then 2 across two press/release pairs is what an application reads as
+// a double click.
+static void postMouseWithClickState(CGEventType type, CGPoint point,
+                                    CGMouseButton button, int64_t clickState) {
+    CGEventRef event = CGEventCreateMouseEvent(NULL, type, point, button);
+    CGEventSetIntegerValueField(event, kCGMouseEventClickState, clickState);
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
     lastPos = point;
@@ -71,6 +91,16 @@ int main(void) {
                 } else {
                     printf("err bad drag args\n");
                 }
+            } else if (strcmp(cmd, "doubleclick") == 0) {
+                ib = (int)a1;
+                CGMouseButton btn = buttonFromInt(ib);
+                CGEventType downType = ib == 1 ? kCGEventRightMouseDown : kCGEventLeftMouseDown;
+                CGEventType upType = ib == 1 ? kCGEventRightMouseUp : kCGEventLeftMouseUp;
+                postMouseWithClickState(downType, lastPos, btn, 1);
+                postMouseWithClickState(upType, lastPos, btn, 1);
+                postMouseWithClickState(downType, lastPos, btn, 2);
+                postMouseWithClickState(upType, lastPos, btn, 2);
+                printf("ok\n");
             } else if (strcmp(cmd, "keydown") == 0 || strcmp(cmd, "keyup") == 0) {
                 CGKeyCode key = (CGKeyCode)a1;
                 bool down = strcmp(cmd, "keydown") == 0;

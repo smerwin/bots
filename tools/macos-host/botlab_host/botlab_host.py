@@ -1041,6 +1041,31 @@ class TaskDispatcher:
               file=sys.stderr)
         return True
 
+
+    @staticmethod
+    def _consume_double_click(items, idx, button):
+        """How many items make up a double click starting at `idx`, or 0.
+
+        The shape is ButtonDown/ButtonUp/ButtonDown/ButtonUp on one button,
+        ignoring the WaitMilliseconds the framework interleaves between every
+        pair of effects. Returns the number of items to skip past (not counting
+        the one at `idx` itself), so the caller can jump the whole run.
+        """
+        wanted = ["ButtonUp", "ButtonDown", "ButtonUp"]
+        matched = 0
+        for offset in range(idx + 1, len(items)):
+            (tag, payload), = items[offset].items()
+            if tag == "WaitMilliseconds":
+                continue
+            if tag != wanted[matched]:
+                return 0
+            if vk_to_mouse_button(payload) != button:
+                return 0
+            matched += 1
+            if matched == len(wanted):
+                return offset - idx
+        return 0
+
     def _windows_input(self, items):
         start = time.time()
         if not self.execute_input:
@@ -1073,11 +1098,40 @@ class TaskDispatcher:
         # cycle), just without penalizing every action inside one
         # already-verified sequence.
         current_target_window = None
+        # Index up to which items have already been consumed by an earlier
+        # step -- set when a double-click pattern is collapsed into one
+        # command, so its remaining press/release items are not replayed.
+        skip_until_index = -1
         for idx, item in enumerate(items):
+            if idx <= skip_until_index:
+                continue
             (tag, payload), = item.items()
             try:
                 if tag == "WaitMilliseconds":
-                    time.sleep(payload / 1000.0)
+                    # Do not pause in the middle of a drag. The framework
+                    # interleaves a WaitMilliseconds between every pair of
+                    # effects, which for a drag lands one between the
+                    # ButtonDown and the moves meant to follow it -- and EVE
+                    # only reads a drag when the pointer moves promptly after
+                    # the press. With the pause in, the client receives a click
+                    # and then the cursor wandering off, which is exactly what
+                    # the overview scrollbar drag looked like on screen: mouse
+                    # onto the bar, mouse away, handle unmoved.
+                    #
+                    # The pause before the release is kept. reload_drones.py,
+                    # whose drag has worked for a long time, presses, moves
+                    # immediately, and then waits at the destination before
+                    # letting go -- the drop needs that settle even though the
+                    # drag itself needs the motion to be prompt.
+                    next_real_tag_after_wait = None
+                    for later_item in items[idx + 1:]:
+                        later_tag = list(later_item.keys())[0]
+                        if later_tag == "WaitMilliseconds":
+                            continue
+                        next_real_tag_after_wait = later_tag
+                        break
+                    if (not self._buttons_down) or next_real_tag_after_wait == "ButtonUp":
+                        time.sleep(payload / 1000.0)
                 elif tag == "BringWindowToForeground":
                     window_number = int(payload.split("/")[-1])
                     current_target_window = window_number
@@ -1132,6 +1186,23 @@ class TaskDispatcher:
                         continue
                     elif tag == "ButtonDown":
                         button = vk_to_mouse_button(payload)
+                        # A double click cannot be expressed as two ordinary
+                        # clicks: what makes the second one count is the
+                        # kCGMouseEventClickState field, which only cg_input's
+                        # own "doubleclick" command sets. The bot asks for one
+                        # by emitting two press/release pairs on the same
+                        # button with nothing in between (see
+                        # Common.EffectOnWindow.effectsMouseDoubleClickAtLocation),
+                        # so that shape is recognised here and collapsed into
+                        # the single command that actually works. Collapsing
+                        # also drops the framework's ~210ms inter-effect waits,
+                        # which would otherwise sit between the two clicks.
+                        consumed = self._consume_double_click(items, idx, button)
+                        if consumed:
+                            self._cg(f"doubleclick {button}")
+                            skip_until_index = idx + consumed
+                            completed += 1
+                            continue
                         self._cg(f"down {button}")
                         self._buttons_down.add(button)
                     elif tag == "ButtonUp":
@@ -1307,9 +1378,16 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("bot_source", help="GitHub URL (repo or .../tree/<branch>/<subpath>) or a local file/directory path")
-    ap.add_argument("--settings", default="")
-    ap.add_argument("--max-ticks", type=int, default=None)
-    ap.add_argument("--keep-build-dir", action="store_true")
+    ap.add_argument("--settings", default="",
+                     help="the bot's own settings string, one 'key=value' per line. Which keys a "
+                          "bot accepts is up to that bot (its parseBotSettings); see the "
+                          "'Configuration Settings' section of its Bot.elm header.")
+    ap.add_argument("--max-ticks", type=int, default=None,
+                     help="stop after this many decision cycles instead of running until "
+                          "interrupted. Useful for a short dry run.")
+    ap.add_argument("--keep-build-dir", action="store_true",
+                     help="keep the temporary directory holding the fetched bot source and the "
+                          "compiled bot, instead of deleting it on exit")
     ap.add_argument("--execute-input", action="store_true",
                      help="actually send mouse/keyboard input via CGEventPost (off by default: logs what would be sent instead)")
     ap.add_argument("--capture-screenshots", action="store_true",
