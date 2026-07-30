@@ -457,6 +457,29 @@ static bool describe_pycolor_json(uint64_t addr, Buf *out) {
 // scalar kinds; returns false (appends nothing) for nested
 // objects/containers, matching describe_primitive's scope in the Python
 // implementation.
+// A JSON number is a double by the time anything downstream sees it (the bot
+// host parses this with JSON.parse before Elm decodes it), so an integer past
+// 2^53 silently loses its low digits in transit. That is not hypothetical:
+// EVE's object ids are ~9e18, and on one real grid 18 distinct overview
+// itemIDs collapsed to 5 distinct doubles -- enough to make two different
+// wrecks look like the same object. Emit those as JSON strings so the digits
+// survive; ParseUserInterface already decodes ids with an int-or-string
+// decoder. Values inside the safe range keep their old numeric form, so
+// nothing that worked before changes shape.
+#define JSON_MAX_EXACT_INTEGER 9007199254740992LL  // 2^53
+
+static void emit_integer_json(Buf *out, int64_t v) {
+    char tmp[32];
+    int k = snprintf(tmp, sizeof(tmp), "%lld", (long long)v);
+    if (v > JSON_MAX_EXACT_INTEGER || v < -JSON_MAX_EXACT_INTEGER) {
+        buf_str(out, "\"");
+        buf_append(out, tmp, k);
+        buf_str(out, "\"");
+    } else {
+        buf_append(out, tmp, k);
+    }
+}
+
 static bool describe_primitive_json(uint64_t value_addr, Buf *out) {
     if (!value_addr) return false;
     char tname[128];
@@ -486,18 +509,19 @@ static bool describe_primitive_json(uint64_t value_addr, Buf *out) {
     if (strcmp(tname, "int") == 0) {
         int64_t v;
         if (!decode_pyint(value_addr, &v)) return false;
-        char tmp[32];
-        int k = snprintf(tmp, sizeof(tmp), "%lld", (long long)v);
-        buf_append(out, tmp, k);
+        emit_integer_json(out, v);
         return true;
     }
     if (strcmp(tname, "long") == 0) {
         double dv; int64_t iv; bool exact;
         if (!decode_pylong(value_addr, &dv, &iv, &exact)) return false;
-        char tmp[64];
-        int k = exact ? snprintf(tmp, sizeof(tmp), "%lld", (long long)iv)
-                       : snprintf(tmp, sizeof(tmp), "%.17g", dv);
-        buf_append(out, tmp, k);
+        if (exact) {
+            emit_integer_json(out, iv);
+        } else {
+            char tmp[64];
+            int k = snprintf(tmp, sizeof(tmp), "%.17g", dv);
+            buf_append(out, tmp, k);
+        }
         return true;
     }
     if (strcmp(tname, "unicode") == 0) {

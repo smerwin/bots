@@ -47,6 +47,11 @@
      the agent's "Delay" button rather than "Decline", since declining more than
      once every four hours costs standing. Repeatable.
    + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. Repeatable.
+   + `approach-object` : Name (or type) of an object to approach when a mission
+     asks you to get close to something, e.g.
+     `approach-object=Abandoned Mining Station`. Needed because the objective's
+     own wording can name a decorative object rather than the one that actually
+     satisfies it. Tried after the name the objective gives. Repeatable.
    + `prefer-wreck` : Name (or type) of a wreck to search first when a mission
      wants cargo out of destroyed ships, e.g. `prefer-wreck=Personnel Transport`.
      Purely an optimisation -- the bot still opens every other wreck afterwards,
@@ -99,6 +104,8 @@ import Common.Basics exposing (listElementAtWrappedIndex, stringContainsIgnoring
 import Common.DecisionPath exposing (describeBranch)
 import Common.EffectOnWindow as EffectOnWindow exposing (MouseButton(..))
 import Dict
+import EveOnline.MemoryReading
+import Json.Decode
 import EveOnline.BotFramework
     exposing
         ( ReadingFromGameClient
@@ -151,6 +158,7 @@ defaultBotSettings =
     , runAwayArmorHitpointsThresholdPercent = -1
     , avoidRats = []
     , attackObjectNames = []
+    , approachObjectNames = []
     , preferWreckNames = []
     , activateModulesAlways = []
     , maxTargetCount = 4
@@ -190,6 +198,12 @@ parseBotSettings =
            , AppSettings.valueTypeString
                 (\objectName settings ->
                     { settings | attackObjectNames = String.trim objectName :: settings.attackObjectNames }
+                )
+           )
+         , ( "approach-object"
+           , AppSettings.valueTypeString
+                (\objectName settings ->
+                    { settings | approachObjectNames = String.trim objectName :: settings.approachObjectNames }
                 )
            )
          , ( "prefer-wreck"
@@ -233,6 +247,7 @@ type alias BotSettings =
     , runAwayArmorHitpointsThresholdPercent : Int
     , avoidRats : List String
     , attackObjectNames : List String
+    , approachObjectNames : List String
     , preferWreckNames : List String
     , activateModulesAlways : List String
     , maxTargetCount : Int
@@ -454,12 +469,11 @@ missionTravelStep context =
                         if labelUndoesStepInProgress label then
                             Nothing
 
-                        else if routeIsSet context && labelSetsRoute label then
-                            -- The route already exists; "Set Destination" /
-                            -- "Destination Set" would only re-set it. In space
-                            -- the caller travels the route instead; docked,
-                            -- there is nothing to do but wait for the button
-                            -- to offer "Undock".
+                        else if labelReportsRouteAlreadySet label then
+                            -- Nothing to click: the route is already set. In
+                            -- space the caller travels it instead; docked,
+                            -- there is nothing to do but wait for the button to
+                            -- offer "Undock".
                             Nothing
 
                         else
@@ -470,11 +484,40 @@ missionTravelStep context =
             )
 
 
+{-| Whether the autopilot actually has a destination.
+
+Neither of the obvious tests works. `AutopilotDestinationIcon` is present in the
+route panel whether or not a route exists, so the framework's
+`infoPanelRouteFirstMarkerFromReadingFromGameClient` is always Just. And the
+"No Destination" label keeps its *text* even once a route is set -- an earlier
+attempt at this read that text and was simply wrong.
+
+What does change is visibility: the panel hides `noDestinationLabel` and shows
+`NextWaypointPanel` once a route exists. Confirmed by comparing two live
+readings of the same panel, with and without a destination:
+
+    no route:   NextWaypointPanel _display=False,  noDestinationLabel _display=True
+    route set:  NextWaypointPanel _display=True,   noDestinationLabel _display=False
+-}
 routeIsSet : BotDecisionContext -> Bool
 routeIsSet context =
-    context.readingFromGameClient
-        |> infoPanelRouteFirstMarkerFromReadingFromGameClient
-        |> (/=) Nothing
+    context.readingFromGameClient.infoPanelContainer
+        |> Maybe.andThen .infoPanelRoute
+        |> Maybe.map (.uiNode >> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion)
+        |> Maybe.withDefault []
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "NextWaypointPanel")
+        |> List.any (.uiNode >> nodeIsDisplayed)
+
+
+{-| The widget's own `_display` flag, defaulting to shown when absent (most
+nodes never set it).
+-}
+nodeIsDisplayed : EveOnline.MemoryReading.UITreeNode -> Bool
+nodeIsDisplayed uiNode =
+    uiNode.dictEntriesOfInterest
+        |> Dict.get "_display"
+        |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.bool >> Result.toMaybe)
+        |> Maybe.withDefault True
 
 
 labelUndoesStepInProgress : String -> Bool
@@ -528,6 +571,63 @@ loadCourierCargoDescribed context itemName =
             (describeBranch ("This mission wants '" ++ itemName ++ "' in the cargo hold."))
 
 
+{-| Some missions are satisfied simply by getting close to something -- "You
+need to approach <a ...>Fire Cloud</a>". The objective clears itself once the
+ship is near enough, so there is nothing to detect beyond "is it still asking".
+
+What the objective *names*, though, cannot be trusted to be what you approach.
+On "Athran Exigency" the instruction points at an Acidic Cloud (typeID 10131)
+which is flavour and is not even on the overview; the thing that actually
+satisfies it is an Abandoned Mining Station (typeID 23615) sitting on the same
+grid. Matching by the link's id would be no better than matching by its text --
+both identify the cloud. So the objective's own name is tried first, and
+`approach-object` from the settings covers the missions where it lies.
+-}
+approachMissionObjectIfNeeded : BotDecisionContext -> Maybe DecisionPathNode
+approachMissionObjectIfNeeded context =
+    case
+        missionInfoPanelEntry context
+            |> Maybe.map .objectNamesToApproach
+            |> Maybe.withDefault []
+            |> List.head
+    of
+        Nothing ->
+            Nothing
+
+        Just objectNameFromObjective ->
+            let
+                candidateNames =
+                    objectNameFromObjective :: context.eventContext.botSettings.approachObjectNames
+
+                entriesNamed name =
+                    context.readingFromGameClient.overviewWindows
+                        |> List.concatMap .entries
+                        |> List.filter
+                            (\entry ->
+                                [ entry.objectName, entry.objectType ]
+                                    |> List.filterMap identity
+                                    |> List.any (stringContainsIgnoringCase name)
+                            )
+                        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+            in
+            candidateNames
+                |> List.concatMap entriesNamed
+                |> List.head
+                |> Maybe.map
+                    (\entry ->
+                        describeBranch
+                            ("The mission wants me close to the "
+                                ++ (entry.objectName |> Maybe.withDefault objectNameFromObjective)
+                                ++ " -- approach it."
+                            )
+                            (useContextMenuCascadeOnOverviewEntry
+                                (useMenuEntryWithTextContainingFirstOf [ "approach" ] menuCascadeCompleted)
+                                entry
+                                context
+                            )
+                    )
+
+
 {-| Some missions want an item that is sitting in a cargo container on grid
 rather than in the station hangar -- "Get the Relic" asks for an `Ancient
 Amarrian Relic` that is inside a `Cargo Container - Ancient Amarrian Relic`
@@ -571,7 +671,7 @@ lootMissionItemFromContainerIfPresent context =
                                         containerEntry.objectDistanceInMeters
                                             |> Result.withDefault 999999
                                 in
-                                if lootingRangeInMeters < distanceInMeters then
+                                if interactionRangeInMeters < distanceInMeters then
                                     -- "Open Cargo" is offered at any distance but
                                     -- silently does nothing from outside looting
                                     -- range -- observed live, re-clicked once per
@@ -629,12 +729,13 @@ lootMissionItemFromContainerIfPresent context =
                             )
 
 
-{-| How close the ship has to be before a container can be opened. EVE's own
-limit is 2,500 m; this stays inside that so the ship is not sitting exactly on
-the boundary when the click lands.
+{-| How close the ship has to be before it can act on an object out in space --
+open a container, or activate an acceleration gate. EVE's own limit is 2,500 m
+for both; this stays inside that so the ship is not sitting exactly on the
+boundary when the click lands.
 -}
-lootingRangeInMeters : Int
-lootingRangeInMeters =
+interactionRangeInMeters : Int
+interactionRangeInMeters =
     2000
 
 
@@ -1286,9 +1387,15 @@ decideActionInMissionPocket context seeUndockingComplete =
                 expandTracker
 
             Nothing ->
-                case lootMissionItemFromContainerIfPresent context of
-                  Just lootIt ->
-                    lootIt
+                case
+                    [ lootMissionItemFromContainerIfPresent context
+                    , approachMissionObjectIfNeeded context
+                    ]
+                        |> List.filterMap identity
+                        |> List.head
+                of
+                  Just objectiveAction ->
+                    objectiveAction
 
                   Nothing ->
                     case missionTravelStep context of
@@ -1309,14 +1416,17 @@ decideActionInMissionPocket context seeUndockingComplete =
                                 )
         )
 
-{-| Whether the tracker's button is talking about the route rather than
-offering a step to take right now. The button says "Set Destination" before
-the route exists and "Destination Set" afterwards, and neither one flies the
-route -- so once a route is set, both mean "travel", not "click me".
+{-| "Destination Set" is the tracker reporting state, not offering an action:
+the route already exists and clicking it again does nothing. "Set Destination"
+is the action that creates the route. The two read almost identically, and
+matching them both as one "route-related" case -- then trying to tell them apart
+by whether a route appeared to exist -- is what made the bot click a dead button
+84 times in a row. The label itself already carries the distinction, so no
+inference is needed.
 -}
-labelSetsRoute : String -> Bool
-labelSetsRoute label =
-    stringContainsIgnoringCase "destination" label
+labelReportsRouteAlreadySet : String -> Bool
+labelReportsRouteAlreadySet label =
+    stringContainsIgnoringCase "destination set" label
 
 
 generalSetupInUserInterface : ReadingFromGameClient -> Maybe DecisionPathNode
@@ -2492,17 +2602,42 @@ activateAccelerationGateIfPresent context =
         |> List.head
         |> Maybe.map
             (\accelerationGateEntry ->
-                describeBranch "I see an acceleration gate -- activate it to move to the next pocket."
-                    (ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
+                let
+                    distanceInMeters =
+                        accelerationGateEntry.objectDistanceInMeters |> Result.withDefault 999999
+                in
+                if interactionRangeInMeters < distanceInMeters then
+                    -- Close the distance under propulsion. The drone recall and
+                    -- prop-mod shutdown belong to *activating* the gate, not to
+                    -- getting to it: doing them up front meant crawling the last
+                    -- tens of km with the prop mod off for no reason. Same
+                    -- shape as approaching a container before looting it.
+                    describeBranch
+                        ("The acceleration gate is "
+                            ++ String.fromInt distanceInMeters
+                            ++ " m away -- approach it before activating."
+                        )
                         (useContextMenuCascadeOnOverviewEntry
                             (useMenuEntryWithTextContainingFirstOf
-                                [ "activate gate", "activate", "warp to within", "approach" ]
+                                [ "approach" ]
                                 menuCascadeCompleted
                             )
                             accelerationGateEntry
                             context
                         )
-                    )
+
+                else
+                    describeBranch "I see an acceleration gate -- activate it to move to the next pocket."
+                        (ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
+                            (useContextMenuCascadeOnOverviewEntry
+                                (useMenuEntryWithTextContainingFirstOf
+                                    [ "activate gate", "activate" ]
+                                    menuCascadeCompleted
+                                )
+                                accelerationGateEntry
+                                context
+                            )
+                        )
             )
 
 
