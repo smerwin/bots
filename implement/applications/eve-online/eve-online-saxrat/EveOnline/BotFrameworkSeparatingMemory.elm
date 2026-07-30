@@ -252,8 +252,16 @@ processEventInBaseFramework config eventContext event stateBefore =
 
                 lastStepsEffects : List (List Common.EffectOnWindow.EffectOnWindowStruct)
                 lastStepsEffects =
-                    List.take 2
-                        (effectsOnGameClientWindow :: stateBefore.lastStepsEffects)
+                    -- Same trap the reading history below fell into: this was
+                    -- capped at 2, so no consumer could look back further than
+                    -- two steps no matter what it asked for. That is not enough
+                    -- to cover a click whose result the client has not shown yet
+                    -- -- see `moduleButtonClickSettlingSteps`, where a too-short
+                    -- window made the bot click a module a second time and
+                    -- toggle it back off.
+                    effectsOnGameClientWindow
+                        :: stateBefore.lastStepsEffects
+                        |> List.take 10
             in
             ( { botMemory = botMemory
               , lastStepsEffects = lastStepsEffects
@@ -557,8 +565,15 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                     -- right-click, give the game one more reading to
                     -- finish populating the new menu's layout before
                     -- concluding it isn't there and clicking again.
+                    --
+                    -- The `List.take` is what makes "a step or two" literal.
+                    -- It used to be implicit in the effects history only ever
+                    -- holding two steps; now that the history is longer (see
+                    -- `lastStepsEffects`), an unbounded search here would keep
+                    -- waiting for ten steps instead of one.
                     if
                         context.previousStepsEffects
+                            |> List.take 2
                             |> List.any
                                 (List.member
                                     (Common.EffectOnWindow.ButtonDown Common.EffectOnWindow.MouseButtonRight)
@@ -933,27 +948,55 @@ readShipUIModuleButtonTooltipWhereNotYetInMemory context =
             )
 
 
+{-| How many steps to let a module-button click settle before believing a
+reading that still shows the module unchanged.
+
+A module button is a toggle, so a click issued because the module "looks
+inactive" is only safe while that look is current. It is not current
+immediately: the bot decides from a reading taken before the click was sent,
+the client needs a moment to act on it, and the module ramps up rather than
+flipping. Every step inside that gap reads exactly like "still inactive".
+
+The window used to be two steps -- and the framework only stored two, so it was
+really "as long as we can see", with no margin at all. Any module slower than
+that got a second click, which turned it *off*, and a third, which turned it on
+again. That on/off/on flicker is what this number exists to prevent.
+
+Bounded rather than "wait for confirmation forever" because a click genuinely
+can fail to land (a lost input focus, a click that arrives while the client is
+busy), and a module that is still inactive well after the fact is one that never
+got the click at all.
+-}
+moduleButtonClickSettlingSteps : Int
+moduleButtonClickSettlingSteps =
+    5
+
+
 clickModuleButtonButWaitIfClickedInPreviousStep :
     StepDecisionContext s m
     -> EveOnline.ParseUserInterface.ShipUIModuleButton
     -> DecisionPathNode
 clickModuleButtonButWaitIfClickedInPreviousStep context moduleButton =
-    if
+    case
         context.previousStepsEffects
-            |> List.take 2
-            |> List.any (\previousStepEffects -> doEffectsClickModuleButton moduleButton previousStepEffects)
-    then
-        Common.DecisionPath.describeBranch
-            "Already clicked on this module button in previous step."
-            waitForProgressInGame
+            |> List.take moduleButtonClickSettlingSteps
+            |> List.Extra.findIndex (doEffectsClickModuleButton moduleButton)
+    of
+        Just stepsAgo ->
+            Common.DecisionPath.describeBranch
+                ("I clicked this module button "
+                    ++ String.fromInt (stepsAgo + 1)
+                    ++ " step(s) ago and the client has not shown the change yet -- wait rather than click it again, which would toggle it back."
+                )
+                waitForProgressInGame
 
-    else
-        Common.DecisionPath.describeBranch "Click on this module button."
-            (mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft moduleButton.uiNode
-                |> Result.Extra.unpack
-                    (always (Common.DecisionPath.describeBranch "Failed to click" askForHelpToGetUnstuck))
-                    decideActionForCurrentStep
-            )
+        Nothing ->
+            Common.DecisionPath.describeBranch "Click on this module button."
+                (mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft moduleButton.uiNode
+                    |> Result.Extra.unpack
+                        (always (Common.DecisionPath.describeBranch "Failed to click" askForHelpToGetUnstuck))
+                        decideActionForCurrentStep
+                )
 
 
 updateMillisecondsToNextReadingFromGameModifierPercent : (Int -> Int) -> DecisionPathNode -> DecisionPathNode

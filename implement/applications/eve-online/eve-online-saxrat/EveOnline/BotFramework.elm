@@ -1580,6 +1580,11 @@ effectOnWindowAsWindowsInputSequenceItem lastReadFromGameClientRectLeftUpperToSc
         Common.EffectOnWindow.KeyUp (Common.EffectOnWindow.VirtualKeyCodeFromInt key) ->
             InterfaceToHost.KeyUp key False
 
+        -- The host interface already carries a scroll item; nothing was
+        -- emitting one, because Common.EffectOnWindow had no way to say it.
+        Common.EffectOnWindow.ScrollVertically notches ->
+            InterfaceToHost.ButtonScroll 0 1 notches
+
 
 selectGameClientInstanceWithTopmostWindow :
     List GameClientProcessSummary
@@ -1851,6 +1856,22 @@ mouseClickOnUIElement mouseButton uiElement =
         Err ()
 
 
+mouseDoubleClickOnUIElement :
+    Common.EffectOnWindow.MouseButton
+    -> UIElement
+    -> Result () (List Common.EffectOnWindow.EffectOnWindowStruct)
+mouseDoubleClickOnUIElement mouseButton uiElement =
+    if uiNodeVisibleRegionLargeEnoughForClicking uiElement then
+        Ok
+            (Common.EffectOnWindow.effectsMouseDoubleClickAtLocation
+                mouseButton
+                (uiElement.totalDisplayRegionVisible |> centerFromDisplayRegion)
+            )
+
+    else
+        Err ()
+
+
 {-| Checks if the visible portion of the display region of the given element is large enough for clicking on it.
 Other UI elements like windows or context menus could occlude this UI element, preventing us from a direct click in the current step.
 -}
@@ -2020,13 +2041,35 @@ shipUIIndicatesShipIsWarpingOrJumping =
         >> Maybe.withDefault False
 
 
+{-| Whether these effects already clicked this module button.
+
+Both of the button's regions are accepted, and both are grown by a pixel first:
+the click is aimed at the centre of `totalDisplayRegionVisible` but was computed
+from an earlier reading, so a region that has shifted slightly since should not
+read as a different button. Erring towards recognising the click is the safe
+direction -- the cost is a wasted step waiting, against a stray toggle of a live
+module.
+
+That breadth was added while chasing a guard that never fired, and it was not
+the cause: `findMouseButtonClickLocationsInListOfEffects` was returning an empty
+list for every click, so no region would have matched. It is kept because it is
+cheap and strictly more forgiving, not because the regions were ever seen to
+disagree.
+-}
 doEffectsClickModuleButton :
     EveOnline.ParseUserInterface.ShipUIModuleButton
     -> List Common.EffectOnWindow.EffectOnWindowStruct
     -> Bool
 doEffectsClickModuleButton moduleButton =
+    let
+        regionsAimedAt =
+            [ moduleButton.uiNode.totalDisplayRegionVisible
+            , moduleButton.uiNode.totalDisplayRegion
+            ]
+                |> List.map (growRegionOnAllSides 1)
+    in
     findMouseButtonClickLocationsInListOfEffects Common.EffectOnWindow.MouseButtonLeft
-        >> List.any (isPointInRectangle moduleButton.uiNode.totalDisplayRegion)
+        >> List.any (\location -> regionsAimedAt |> List.any (\region -> isPointInRectangle region location))
 
 
 findMouseButtonClickLocationsInListOfEffects :
@@ -2038,6 +2081,14 @@ findMouseButtonClickLocationsInListOfEffects mouseButton =
         mouseButtonCode : Common.EffectOnWindow.VirtualKeyCode
         mouseButtonCode =
             Common.EffectOnWindow.virtualKeyCodeFromMouseButton mouseButton
+
+        recordClick maybeLastMouseMoveLocation clickLocations =
+            case maybeLastMouseMoveLocation of
+                Nothing ->
+                    ( maybeLastMouseMoveLocation, clickLocations )
+
+                Just lastMouseMoveLocation ->
+                    ( maybeLastMouseMoveLocation, clickLocations ++ [ lastMouseMoveLocation ] )
     in
     List.foldl
         (\effect ( maybeLastMouseMoveLocation, clickLocations ) ->
@@ -2045,17 +2096,31 @@ findMouseButtonClickLocationsInListOfEffects mouseButton =
                 Common.EffectOnWindow.MouseMoveTo mouseMoveTo ->
                     ( Just mouseMoveTo, clickLocations )
 
+                -- The constructor a mouse click is actually built from.
+                -- `effectsMouseClickAtLocation` emits MouseMoveTo/ButtonDown/
+                -- ButtonUp, so before this case existed the fold matched
+                -- nothing and the function returned an empty list for every
+                -- click ever issued. Everything downstream that asks "did we
+                -- already click there?" therefore always answered no:
+                -- `doEffectsClickModuleButton` never once recognised its own
+                -- click across two full live sessions, so every module
+                -- activation was clicked repeatedly and only came out right
+                -- because a module toggles on an odd number of presses.
+                Common.EffectOnWindow.ButtonDown button ->
+                    if button == mouseButton then
+                        recordClick maybeLastMouseMoveLocation clickLocations
+
+                    else
+                        ( maybeLastMouseMoveLocation, clickLocations )
+
+                -- Kept for effect sequences that spell a mouse button out as a
+                -- virtual key code rather than using ButtonDown.
                 Common.EffectOnWindow.KeyDown keyDown ->
-                    case maybeLastMouseMoveLocation of
-                        Nothing ->
-                            ( maybeLastMouseMoveLocation, clickLocations )
+                    if keyDown == mouseButtonCode then
+                        recordClick maybeLastMouseMoveLocation clickLocations
 
-                        Just lastMouseMoveLocation ->
-                            if keyDown == mouseButtonCode then
-                                ( maybeLastMouseMoveLocation, clickLocations ++ [ lastMouseMoveLocation ] )
-
-                            else
-                                ( maybeLastMouseMoveLocation, clickLocations )
+                    else
+                        ( maybeLastMouseMoveLocation, clickLocations )
 
                 _ ->
                     ( maybeLastMouseMoveLocation, clickLocations )
