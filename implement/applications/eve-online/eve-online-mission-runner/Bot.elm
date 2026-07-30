@@ -273,6 +273,8 @@ type alias BotMemory =
     , routeFirstMarkerUnchangedTicks : Int
     , targetToUnlockRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , targetToUnlockUnchangedTicks : Int
+    , shipApproachingTicks : Int
+    , lootedWreckIds : List String
     }
 
 
@@ -571,6 +573,276 @@ loadCourierCargoDescribed context itemName =
             (describeBranch ("This mission wants '" ++ itemName ++ "' in the cargo hold."))
 
 
+{-| The mission's terms, as one line, logged when it is accepted: objective,
+pickup and drop-off, cargo, rewards, bonus and its deadline, and any ship
+restrictions. All of that sits in the conversation's `objectiveHtml`, which is
+gone the moment the window closes, so it is worth capturing at the point of
+acceptance rather than trying to recover it later from the mission tracker,
+which carries only the current objective.
+-}
+missionFinePrint : EveOnline.ParseUserInterface.AgentConversationWindow -> String
+missionFinePrint conversation =
+    conversation.objectiveHtml
+        |> Maybe.withDefault ""
+        |> EveOnline.ParseUserInterface.stripHtmlTags
+        |> String.replace "&nbsp;" " "
+        |> String.words
+        |> String.join " "
+
+
+notAlreadyEmptied : BotDecisionContext -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+notAlreadyEmptied context entry =
+    not (overviewEntryLooksLooted entry)
+        && (case entry.objectItemID of
+                Just itemID ->
+                    not (List.member itemID context.memory.lootedWreckIds)
+
+                Nothing ->
+                    True
+           )
+
+
+{-| Whether a wreck has already been emptied.
+
+EVE swaps the bracket icon when a wreck is looted -- `wreckNPC.png` becomes
+`wreckLootedNPC.png`, and the row dims from full white to 55% grey -- so the
+game already answers this and nothing needs remembering. Better than the id
+memory below in every respect: stateless, correct across restarts, and right
+about wrecks emptied by someone else.
+
+The id memory is kept as a backstop. This test depends on the icon updating
+promptly, and if it ever does not, the memory is what stops a repeat of the
+73-times-into-the-same-wreck loop rather than merely making it less likely.
+-}
+overviewEntryLooksLooted : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryLooksLooted entry =
+    entry.uiNode.uiNode
+        :: EveOnline.MemoryReading.listDescendantsInUITreeNode entry.uiNode.uiNode
+        |> List.filterMap EveOnline.ParseUserInterface.getTexturePathFromDictEntries
+        |> List.any (stringContainsIgnoringCase "looted")
+
+
+{-| Whether an overview row is really on screen.
+
+The overview virtualises: every object in space has an entry in the UI tree,
+but only the dozen or so rows that fit are rendered, and the rest keep whatever
+position they last held while recycled. So a hidden entry reports a perfectly
+plausible region pointing at a row that now belongs to something else. Clicking
+it is worse than a no-op -- it acts on the wrong object. Seen live: the bot
+approached an Asteroid Factory 18 times while trying to reach a Cargo Warehouse
+that was scrolled out of sight, and parked at the factory.
+
+`_display` is what distinguishes them; the region does not.
+-}
+overviewEntryIsDisplayed : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsDisplayed entry =
+    nodeIsDisplayed entry.uiNode.uiNode
+
+
+{-| Rows worth opening for a wanted item: one that names the item, or any wreck
+or cargo container. Shared by the picker and by the scroller, so the scroll only
+fires for a row the picker would actually use.
+-}
+isLootableFor : BotDecisionContext -> String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+isLootableFor context itemName entry =
+    let
+        texts =
+            [ entry.objectName, entry.objectType ] |> List.filterMap identity
+
+        alreadyOpened =
+            not (notAlreadyEmptied context entry)
+    in
+    (not alreadyOpened)
+        && ((texts |> List.any (stringContainsIgnoringCase itemName))
+        || (texts
+                |> List.any
+                    (\text ->
+                        [ "wreck", "cargo container", "warehouse" ]
+                            |> List.any (\pattern -> stringContainsIgnoringCase pattern text)
+                    )
+           ))
+
+
+matchesOverviewName : String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+matchesOverviewName name entry =
+    [ entry.objectName, entry.objectType ]
+        |> List.filterMap identity
+        |> List.any (stringContainsIgnoringCase name)
+
+
+{-| Bring a wanted overview row into view by dragging the scrollbar handle
+straight to where that row sits in the list.
+
+Paging was tried first and cannot work here. The overview sorts by distance and
+the wanted object is usually somewhere in the middle, while a page click only
+ever walks the extremes: live, the handle went 0 -> 0.35 -> 0.70 -> 0.99, wrapped
+to the top and repeated, 49 page-downs and 51 wraps without the row ever landing
+on screen.
+
+Dragging to a computed position needs no search. The list is distance-sorted, so
+the row's rank by distance is its index, and the fraction of the way down the
+list is the fraction of the way down the scrollbar. The half-page offset centres
+the row rather than putting it flush against the top edge.
+-}
+scrollOverviewToReveal :
+    BotDecisionContext
+    -> (EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool)
+    -> Maybe DecisionPathNode
+scrollOverviewToReveal context entryIsWanted =
+    let
+        windowsHidingAWantedEntry =
+            context.readingFromGameClient.overviewWindows
+                |> List.filter
+                    (\overviewWindow ->
+                        (overviewWindow.entries |> List.any entryIsWanted)
+                            && (overviewWindow.entries
+                                    |> List.filter entryIsWanted
+                                    |> List.all (overviewEntryIsDisplayed >> not)
+                               )
+                    )
+    in
+    if shipIsAlreadyApproaching context && context.memory.shipApproachingTicks < approachIndicationTrustedForTicks then
+        -- Do not chase the row while closing on it: an object being approached
+        -- climbs a distance-sorted list on its own and arrives in view without
+        -- help, and scrolling meanwhile only fights the sort.
+        Nothing
+
+    else
+        case windowsHidingAWantedEntry |> List.head of
+            Nothing ->
+                Nothing
+
+            Just overviewWindow ->
+                case overviewWindow.scrollControls |> Maybe.andThen .scrollHandle of
+                    Nothing ->
+                        Just
+                            (describeBranch
+                                "A row I want is scrolled out of the overview and I see no scrollbar to reach it."
+                                askForHelpToGetUnstuck
+                            )
+
+                    Just scrollHandle ->
+                        let
+                            track =
+                                (overviewWindow.scrollControls
+                                    |> Maybe.map .uiNode
+                                    |> Maybe.withDefault overviewWindow.uiNode
+                                ).totalDisplayRegion
+
+                            handle =
+                                scrollHandle.totalDisplayRegion
+
+                            distanceOf entry =
+                                entry.objectDistanceInMeters |> Result.withDefault 999999
+
+                            wantedDistance =
+                                overviewWindow.entries
+                                    |> List.filter entryIsWanted
+                                    |> List.map distanceOf
+                                    |> List.minimum
+                                    |> Maybe.withDefault 0
+
+                            rank =
+                                overviewWindow.entries
+                                    |> List.filter (\entry -> distanceOf entry < wantedDistance)
+                                    |> List.length
+
+                            rowsOnScreen =
+                                overviewWindow.entries
+                                    |> List.filter overviewEntryIsDisplayed
+                                    |> List.length
+                                    |> max 1
+
+                            scrollableRows =
+                                (List.length overviewWindow.entries - rowsOnScreen) |> max 1
+
+                            fraction =
+                                (toFloat rank - toFloat rowsOnScreen / 2)
+                                    / toFloat scrollableRows
+                                    |> clamp 0 1
+
+                            travel =
+                                (track.height - handle.height) |> max 0
+
+                            targetHandleCentreY =
+                                track.y + round (fraction * toFloat travel) + handle.height // 2
+
+                            handleCentre =
+                                { x = handle.x + handle.width // 2
+                                , y = handle.y + handle.height // 2
+                                }
+                        in
+                        Just
+                            (describeBranch
+                                ("The row I want is #"
+                                    ++ String.fromInt (rank + 1)
+                                    ++ " of "
+                                    ++ String.fromInt (List.length overviewWindow.entries)
+                                    ++ " and off screen -- drag the overview scrollbar to it."
+                                )
+                                (decideActionForCurrentStep
+                                    (EffectOnWindow.effectsForDragAndDrop
+                                        { startLocation = handleCentre
+                                        , mouseButton = MouseButtonLeft
+                                        , waypointsPositionsInBetween =
+                                            [ { x = handleCentre.x
+                                              , y = (handleCentre.y + targetHandleCentreY) // 2
+                                              }
+                                            ]
+                                        , endLocation = { x = handleCentre.x, y = targetHandleCentreY }
+                                        }
+                                    )
+                                )
+                            )
+
+
+{-| Issue an Approach on an overview entry, unless the ship is already doing
+exactly that.
+
+An approach command runs until it completes, so re-issuing it every tick is
+pure noise: it restarts the same manoeuvre and burns a context-menu cascade
+each time. The ship's own indication reports `ManeuverApproach` while one is in
+flight, which is the cheapest way to tell.
+
+`ManeuverApproach` alone is not enough to trust indefinitely, though: it stays
+set while the ship approaches *something*, which need not be the thing the
+mission wants. Seen live sitting 29 km from a Cargo Warehouse, moving at
+304 m/s, distance unchanged over 12 seconds -- approaching, but not that. With
+no bound, the guard suppressed every re-issue and the bot never redirected. So
+the indication is only believed for a bounded run of readings; past that the
+approach is re-issued, which retargets the ship.
+-}
+approachIndicationTrustedForTicks : Int
+approachIndicationTrustedForTicks =
+    10
+approachOverviewEntry :
+    BotDecisionContext
+    -> String
+    -> EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> DecisionPathNode
+approachOverviewEntry context description entry =
+    if shipIsAlreadyApproaching context && context.memory.shipApproachingTicks < approachIndicationTrustedForTicks then
+        describeBranch (description ++ " Already on the way -- let the approach run.")
+            waitForProgressInGame
+
+    else
+        describeBranch description
+            (useContextMenuCascadeOnOverviewEntry
+                (useMenuEntryWithTextContainingFirstOf [ "approach" ] menuCascadeCompleted)
+                entry
+                context
+            )
+
+
+shipIsAlreadyApproaching : BotDecisionContext -> Bool
+shipIsAlreadyApproaching context =
+    context.readingFromGameClient.shipUI
+        |> Maybe.andThen .indication
+        |> Maybe.andThen .maneuverType
+        |> Maybe.map ((==) EveOnline.ParseUserInterface.ManeuverApproach)
+        |> Maybe.withDefault False
+
+
 {-| Some missions are satisfied simply by getting close to something -- "You
 need to approach <a ...>Fire Cloud</a>". The objective clears itself once the
 ship is near enough, so there is nothing to detect beyond "is it still asking".
@@ -602,12 +874,8 @@ approachMissionObjectIfNeeded context =
                 entriesNamed name =
                     context.readingFromGameClient.overviewWindows
                         |> List.concatMap .entries
-                        |> List.filter
-                            (\entry ->
-                                [ entry.objectName, entry.objectType ]
-                                    |> List.filterMap identity
-                                    |> List.any (stringContainsIgnoringCase name)
-                            )
+                        |> List.filter (matchesOverviewName name)
+                        |> List.filter overviewEntryIsDisplayed
                         |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
             in
             candidateNames
@@ -615,16 +883,12 @@ approachMissionObjectIfNeeded context =
                 |> List.head
                 |> Maybe.map
                     (\entry ->
-                        describeBranch
+                        approachOverviewEntry context
                             ("The mission wants me close to the "
                                 ++ (entry.objectName |> Maybe.withDefault objectNameFromObjective)
                                 ++ " -- approach it."
                             )
-                            (useContextMenuCascadeOnOverviewEntry
-                                (useMenuEntryWithTextContainingFirstOf [ "approach" ] menuCascadeCompleted)
-                                entry
-                                context
-                            )
+                            entry
                     )
 
 
@@ -663,8 +927,13 @@ lootMissionItemFromContainerIfPresent context =
                         )
 
                 Nothing ->
-                    lootableHoldingMissionItem context itemName
-                        |> Maybe.map
+                    case scrollOverviewToReveal context (isLootableFor context itemName) of
+                      Just scrollIntoView ->
+                        Just scrollIntoView
+
+                      Nothing ->
+                        lootableHoldingMissionItem context itemName
+                            |> Maybe.map
                             (\containerEntry ->
                                 let
                                     distanceInMeters =
@@ -679,21 +948,14 @@ lootMissionItemFromContainerIfPresent context =
                                     -- and no error. Unlike an acceleration gate,
                                     -- which turns the same click into an approach,
                                     -- a container has to be approached explicitly.
-                                    describeBranch
+                                    approachOverviewEntry context
                                         ("The container holding the "
                                             ++ itemName
                                             ++ " is "
                                             ++ String.fromInt distanceInMeters
                                             ++ " m away -- too far to loot, approach it first."
                                         )
-                                        (useContextMenuCascadeOnOverviewEntry
-                                            (useMenuEntryWithTextContainingFirstOf
-                                                [ "approach" ]
-                                                menuCascadeCompleted
-                                            )
-                                            containerEntry
-                                            context
-                                        )
+                                        containerEntry
 
                                 else
                                     describeBranch
@@ -771,6 +1033,14 @@ lootableHoldingMissionItem context itemName =
             context.readingFromGameClient.overviewWindows
                 |> List.concatMap .entries
                 |> List.filter predicate
+                |> List.filter overviewEntryIsDisplayed
+                -- Skip anything already emptied. This exclusion lives here as
+                -- well as in `isLootableFor` because the two are consulted by
+                -- different callers: `isLootableFor` only gates the scroller,
+                -- so putting the check there alone left this picker -- the one
+                -- that actually chooses what to open -- still selecting looted
+                -- wrecks, and the loop carried on unchanged.
+                |> List.filter (notAlreadyEmptied context)
                 |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
 
         textsOfEntry entry =
@@ -1318,7 +1588,8 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                         describeBranch
                             ("Accept the mission '"
                                 ++ (offeredMissionName |> Maybe.withDefault "unnamed")
-                                ++ "'."
+                                ++ "'. "
+                                ++ missionFinePrint conversation
                             )
                             (clickUiElement acceptButton)
 
@@ -2248,6 +2519,8 @@ initBotMemory =
     , routeFirstMarkerUnchangedTicks = 0
     , targetToUnlockRegion = Nothing
     , targetToUnlockUnchangedTicks = 0
+    , shipApproachingTicks = 0
+    , lootedWreckIds = []
     }
 
 
@@ -2612,19 +2885,12 @@ activateAccelerationGateIfPresent context =
                     -- getting to it: doing them up front meant crawling the last
                     -- tens of km with the prop mod off for no reason. Same
                     -- shape as approaching a container before looting it.
-                    describeBranch
+                    approachOverviewEntry context
                         ("The acceleration gate is "
                             ++ String.fromInt distanceInMeters
                             ++ " m away -- approach it before activating."
                         )
-                        (useContextMenuCascadeOnOverviewEntry
-                            (useMenuEntryWithTextContainingFirstOf
-                                [ "approach" ]
-                                menuCascadeCompleted
-                            )
-                            accelerationGateEntry
-                            context
-                        )
+                        accelerationGateEntry
 
                 else
                     describeBranch "I see an acceleration gate -- activate it to move to the next pocket."
@@ -3010,6 +3276,51 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else if currentRouteFirstMarkerRegion == botMemoryBefore.routeFirstMarkerRegion then
             botMemoryBefore.routeFirstMarkerUnchangedTicks + 1
+
+        else
+            0
+    , lootedWreckIds =
+        -- An emptied wreck is supposed to drop off the overview, and the setup
+        -- instructions ask for that filter -- but it does not always hold:
+        -- observed live re-opening the same Coreli Scout Wreck 73 times, hauling
+        -- out ammo and scrap while the mission item was never in it. Nothing in
+        -- a row's text tells an emptied wreck from a full one, so remember the
+        -- ones already opened by object id.
+        --
+        -- The id recorded is the nearest lootable row at the moment a loot
+        -- window is open, which is necessarily the one just opened, since that
+        -- is the only one the bot ever opens. Capped so a long session cannot
+        -- grow this without bound.
+        if context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.isEmpty then
+            botMemoryBefore.lootedWreckIds
+
+        else
+            case
+                context.readingFromGameClient.overviewWindows
+                    |> List.concatMap .entries
+                    |> List.filter (\entry -> entry.objectItemID /= Nothing)
+                    |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+                    |> List.head
+                    |> Maybe.andThen .objectItemID
+            of
+                Nothing ->
+                    botMemoryBefore.lootedWreckIds
+
+                Just nearestId ->
+                    if List.member nearestId botMemoryBefore.lootedWreckIds then
+                        botMemoryBefore.lootedWreckIds
+
+                    else
+                        nearestId :: botMemoryBefore.lootedWreckIds |> List.take 200
+    , shipApproachingTicks =
+        if
+            context.readingFromGameClient.shipUI
+                |> Maybe.andThen .indication
+                |> Maybe.andThen .maneuverType
+                |> Maybe.map ((==) EveOnline.ParseUserInterface.ManeuverApproach)
+                |> Maybe.withDefault False
+        then
+            botMemoryBefore.shipApproachingTicks + 1
 
         else
             0
