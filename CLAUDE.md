@@ -193,9 +193,18 @@ by `taskId`, extended from every response, until empty.
 | `cg_input/` | persistent `CGEventPost`-based input executor, one text command per stdin line (`move`/`down`/`up`/`drag`/`keydown`/`keyup`/`scroll`) |
 | `botlab_host/botlab_host.py` | the actual BotLab.exe replacement — fetches bot source (GitHub URL or local path), patches `elm-version`, compiles with `Main.elm`, drives the compiled bot via `driver.js`, dispatches every `Task` type |
 | `botlab_host/Main.elm`, `driver.js` | port wrapper + Node bridge (newline-delimited JSON) between the Python host and the compiled bot |
-| `run_saxrat.sh` | launcher for `eve-online-saxrat` with sensible settings; one-bot-at-a-time guard (kills any prior `run_saxrat.sh`/`botlab_host.py`/`driver.js`/`tree_walker` before starting) |
+| `run_saxrat.sh`, `run_mission.sh` | launchers for `eve-online-saxrat` / `eve-online-mission-runner` with sensible settings; one-bot-at-a-time guard (kills any prior launcher/`botlab_host.py`/`driver.js`/`tree_walker` before starting) |
+| `bot_help.py` | backs `--help` on the launchers: lists the bot's settings and the host's flags |
 | `reload_drones.py` | standalone one-off: refill drone bay from station hangar |
 | `route_setter/route_setter.py` | standalone one-off: set the autopilot route from a chat channel's MOTD (see below) |
+
+**Launcher `--help`** answers before the one-bot-at-a-time guard runs, so
+asking what the settings are never kills a session already in progress.
+`bot_help.py` reads the settings out of the bot's own `Bot.elm` — the
+`## Configuration Settings` section of its header, plus every key its
+`parseBotSettings` accepts, reported separately when the header omits it — and
+the flags out of `botlab_host.py --help`. Nothing is restated in the launcher,
+which is what keeps it from drifting as a bot gains settings.
 
 **Bot source acquisition** (both forms tested working): a local file/directory
 path (or `file://`), or a GitHub URL — either a plain repo or a
