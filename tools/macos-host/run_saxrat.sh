@@ -20,9 +20,9 @@
 # (nearest at top); in the ship UI, put combat modules in the top row and
 # hide passive modules; bind the 'W' key to orbit.
 #
-# Usage:
-#   ./run_saxrat.sh              # runs with --execute-input: takes over your real mouse/keyboard
-#   ./run_saxrat.sh --max-ticks 50
+# Run `./run_saxrat.sh --help` for the usage examples, this bot's settings and
+# the host's flags -- it prints the USAGE and SETTINGS defined below plus
+# botlab_host.py's own flag list, so there is no second copy here to drift.
 # Any extra arguments are passed straight through to botlab_host.py.
 #
 # This always passes --execute-input -- it WILL click and type for real.
@@ -33,22 +33,10 @@ set -e -u -o pipefail
 SCRIPT_DIR="${0:A:h}"
 BOT_SOURCE="${SCRIPT_DIR}/../../implement/applications/eve-online/eve-online-saxrat"
 
-# Guard: one bot at a time. A stale run left alive from a previous session
-# would still be clicking/typing against the game client and fighting this
-# one for control, so kill any previous run_saxrat.sh wrapper (matched by
-# basename, since it may have been invoked with a relative or absolute
-# path) and the host processes it spawned, before starting a new one.
-# (pgrep -f also matches this very script's own just-started process, so
-# its own pid is excluded rather than killing ourselves before we get
-# going.)
-self_pid=$$
-for pattern in "run_saxrat\.sh" "botlab_host/botlab_host.py" "botlab_host/driver.js" "tree_walker/tree_walker"; do
-    for pid in $(pgrep -f "$pattern" 2>/dev/null); do
-        [[ "$pid" == "$self_pid" ]] && continue
-        kill "$pid" 2>/dev/null || true
-    done
-done
-sleep 1
+USAGE='./run_saxrat.sh                                # start a run
+./run_saxrat.sh --max-ticks 50                 # short run, then stop
+./run_saxrat.sh --settings "anomaly-name=..."  # replaces the defaults below wholesale
+./run_saxrat.sh --help                         # this text'
 
 # Default settings string: the exact example from eve-online-saxrat's own
 # Bot.elm doc comment, i.e. the bot author's own suggested starting point,
@@ -69,11 +57,47 @@ anomaly-name=sansha forsaken hideaway
 anomaly-name=sansha hidden hideaway
 anomaly-name=sansha forlorn hideaway
 hide-when-neutral-in-local = no
-orbit-in-combat=no
-keep-at-range=yes
-warp-at=50
-targeting-range=66000
+orbit-in-combat=yes
+keep-at-range=no
+warp-at=10
+targeting-range=37000
 run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=80"
+
+# Answered before the guard below: asking what the flags are must not kill a
+# session that is already running.
+for arg in "$@"; do
+    case "$arg" in
+        -h | --help)
+            python3 "${SCRIPT_DIR}/bot_help.py" "$BOT_SOURCE" \
+                --script "run_saxrat.sh" \
+                --summary "runs the eve-online-saxrat combat anomaly bot, which hunts combat anomalies from the probe scanner and kills rats with drones and weapon modules." \
+                --note "This always passes --execute-input: it WILL drive your real mouse and
+keyboard. Starting a run also kills any bot session already running, since two
+of them fighting over the cursor produces chaos. Set the game client up first
+-- see the instructions at the top of this script." \
+                --usage "$USAGE" \
+                --defaults "$SETTINGS"
+            exit 0
+            ;;
+    esac
+done
+
+# Guard: one bot at a time. A stale run left alive from a previous session
+# would still be clicking/typing against the game client and fighting this
+# one for control, so kill any previous run_saxrat.sh wrapper (matched by
+# basename, since it may have been invoked with a relative or absolute
+# path) and the host processes it spawned, before starting a new one.
+# (pgrep -f also matches this very script's own just-started process, so
+# its own pid is excluded rather than killing ourselves before we get
+# going.)
+self_pid=$$
+for pattern in "run_saxrat\.sh" "botlab_host/botlab_host.py" "botlab_host/driver.js" "tree_walker/tree_walker"; do
+    for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+        [[ "$pid" == "$self_pid" ]] && continue
+        kill "$pid" 2>/dev/null || true
+    done
+done
+sleep 1
 
 python3 "${SCRIPT_DIR}/botlab_host/botlab_host.py" "$BOT_SOURCE" --settings "$SETTINGS" --execute-input "$@"

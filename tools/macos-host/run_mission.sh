@@ -22,12 +22,9 @@
 # Start it docked in the station where the agent is. It will pick up whatever
 # mission is already running, or ask the agent for a new one.
 #
-# Usage:
-#   ./run_mission.sh                       # runs with --execute-input: takes over your real mouse/keyboard
-#   ./run_mission.sh --max-ticks 50
-#   ./run_mission.sh --settings "agent-name=Some Agent"   # overrides the defaults below
-#   ./run_mission.sh --session-duration-minutes 180        # default is 60
-#   SESSION_DURATION_MINUTES=180 ./run_mission.sh          # same, via the environment
+# Run `./run_mission.sh --help` for the usage examples, this bot's settings and
+# the host's flags -- it prints the USAGE and SETTINGS defined below plus
+# botlab_host.py's own flag list, so there is no second copy here to drift.
 # Any extra arguments are passed straight through to botlab_host.py.
 #
 # This always passes --execute-input -- it WILL click and type for real.
@@ -38,22 +35,12 @@ set -e -u -o pipefail
 SCRIPT_DIR="${0:A:h}"
 BOT_SOURCE="${SCRIPT_DIR}/../../implement/applications/eve-online/eve-online-mission-runner"
 
-# Guard: one bot at a time. A stale run left alive from a previous session
-# would still be clicking/typing against the game client and fighting this
-# one for control, so kill any previous bot wrapper (matched by basename,
-# since it may have been invoked with a relative or absolute path) and the
-# host processes it spawned, before starting a new one. run_saxrat.sh is in
-# the list too -- the two bots drive the same mouse and must never overlap.
-# (pgrep -f also matches this very script's own just-started process, so its
-# own pid is excluded rather than killing ourselves before we get going.)
-self_pid=$$
-for pattern in "run_mission\.sh" "run_saxrat\.sh" "botlab_host/botlab_host.py" "botlab_host/driver.js" "tree_walker/tree_walker"; do
-    for pid in $(pgrep -f "$pattern" 2>/dev/null); do
-        [[ "$pid" == "$self_pid" ]] && continue
-        kill "$pid" 2>/dev/null || true
-    done
-done
-sleep 1
+USAGE='./run_mission.sh                                     # start a run
+./run_mission.sh --max-ticks 50                      # short run, then stop
+./run_mission.sh --settings "agent-name=Some Agent"  # replaces the defaults below wholesale
+./run_mission.sh --session-duration-minutes 180      # default is 60
+SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
+./run_mission.sh --help                              # this text'
 
 # Default settings. All of these are optional -- the bot runs with none of
 # them -- but these are a reasonable starting point.
@@ -79,6 +66,12 @@ sleep 1
 # Silo</a>"), the bot reads the name straight out of the objective. The setting
 # remains available as an override for anything that does not cover.
 #
+# attack-object matches the overview's Type column, not its Name -- so give it
+# the type, "Cargo Warehouse", not a word that happens to appear in something's
+# name. This was "Warehouse", which matched a Caldari Trading Station called
+# "Bhizheba VIII - Moon 5 - Expert Distribution Warehouse" and had the bot
+# trying to lock and shoot the station for a whole session.
+#
 # Either way the object must be enabled in the overview's type filters
 # (Overview Settings -> Types -> Celestial -> Large Collidable Object), or the
 # bot never sees it in the first place.
@@ -97,15 +90,26 @@ sleep 1
 # Mining Station on the same grid is what actually satisfies it. Tried after
 # whatever the objective itself names.
 #
+# It also doubles as a last resort when the bot runs out of anything else to do
+# on a grid, which covers objectives satisfied by proximity that never say so --
+# "Interstellar Railroad" asks only for an Amarr Diplomat in the cargo hold, and
+# the way to get one is to fly at a Large Collidable Object the brief does not
+# mention. Add that object's name here when a mission strands the bot with
+# "Nothing to fight and no travel step offered".
+#
 # prefer-wreck searches particular hulls first when a mission wants cargo out of
 # destroyed ships. Purely an optimisation -- every other wreck is still opened
 # afterwards, so a wrong guess costs only a wasted trip.
 SETTINGS="orbit-in-combat=no
 keep-at-range=yes
-targeting-range=66000
+targeting-range=37000
+attack-object=Warehouse
+attack-object=Habitat
 decline-mission=Worlds Collide
 prefer-wreck=Personnel Transport
+prefer-wreck=Cargo Container
 approach-object=Abandoned Mining Station
+approach-object=Amarr Station
 run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=80"
 
@@ -114,6 +118,43 @@ run-away-armor-hitpoints-threshold-percent=80"
 # being cut off mid-warp with drones out. Override by passing the flag again
 # on the command line.
 SESSION_DURATION_MINUTES="${SESSION_DURATION_MINUTES:-60}"
+
+# Answered before the guard below: asking what the flags are must not kill a
+# session that is already running.
+for arg in "$@"; do
+    case "$arg" in
+        -h | --help)
+            python3 "${SCRIPT_DIR}/bot_help.py" "$BOT_SOURCE" \
+                --script "run_mission.sh" \
+                --summary "runs the eve-online-mission-runner bot, which takes a security mission from an agent, flies out and clears the site pocket by pocket, returns, and hands it in." \
+                --note "This always passes --execute-input: it WILL drive your real mouse and
+keyboard. Starting a run also kills any bot session already running, since two
+of them fighting over the cursor produces chaos. Start docked in the agent's
+station, with the game client set up as described at the top of this script." \
+                --usage "$USAGE" \
+                --defaults "$SETTINGS
+session-duration-minutes=$SESSION_DURATION_MINUTES  (a host flag, not a bot setting)"
+            exit 0
+            ;;
+    esac
+done
+
+# Guard: one bot at a time. A stale run left alive from a previous session
+# would still be clicking/typing against the game client and fighting this
+# one for control, so kill any previous bot wrapper (matched by basename,
+# since it may have been invoked with a relative or absolute path) and the
+# host processes it spawned, before starting a new one. run_saxrat.sh is in
+# the list too -- the two bots drive the same mouse and must never overlap.
+# (pgrep -f also matches this very script's own just-started process, so its
+# own pid is excluded rather than killing ourselves before we get going.)
+self_pid=$$
+for pattern in "run_mission\.sh" "run_saxrat\.sh" "botlab_host/botlab_host.py" "botlab_host/driver.js" "tree_walker/tree_walker"; do
+    for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+        [[ "$pid" == "$self_pid" ]] && continue
+        kill "$pid" 2>/dev/null || true
+    done
+done
+sleep 1
 
 # An explicit --settings or --session-duration-minutes later on the command
 # line wins: botlab_host.py's argument parser takes the last occurrence, so
