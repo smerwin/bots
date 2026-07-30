@@ -284,6 +284,7 @@ type alias OverviewWindowEntry =
     , rightAlignedIconsHints : List String
     , commonIndications : OverviewWindowEntryCommonIndications
     , opacityPercent : Maybe Int
+    , objectItemID : Maybe String
     }
 
 
@@ -1456,11 +1457,29 @@ parseOverviewWindow overviewWindowNode =
                 |> List.head
 
         scrollControlsNode =
-            scrollNode
-                |> Maybe.map listDescendantsWithDisplayRegion
-                |> Maybe.withDefault []
+            let
+                scrollDescendants =
+                    scrollNode
+                        |> Maybe.map listDescendantsWithDisplayRegion
+                        |> Maybe.withDefault []
+            in
+            {- This client build has no node type containing "ScrollControls":
+               the overview's scrollbar is a plain `Scrollbar` holding a
+               `ScrollHandle`, so the original lookup always returned Nothing
+               and the window looked unscrollable. Fall back to the Scrollbar,
+               whose descendants include the handle `parseScrollControls`
+               looks for, keeping the original match first for builds that do
+               use that type.
+            -}
+            (scrollDescendants
                 |> List.filter (.uiNode >> .pythonObjectTypeName >> String.contains "ScrollControls")
                 |> List.head
+            )
+                |> Maybe.Extra.or
+                    (scrollDescendants
+                        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "Scrollbar")
+                        |> List.head
+                    )
 
         headersContainerNode =
             scrollNode
@@ -1572,6 +1591,23 @@ parseOverviewWindowEntry entriesHeaders overviewEntryNode =
     , rightAlignedIconsHints = rightAlignedIconsHints
     , commonIndications = commonIndications
     , opacityPercent = opacityPercent
+    , objectItemID =
+        -- EVE's own id for the object this row refers to, kept as text: it is
+        -- ~9e18, past what a JSON number survives intact (see tree_walker's
+        -- emit_integer_json). Used to remember which wrecks have already been
+        -- opened, since nothing about a row's text distinguishes an emptied
+        -- wreck from a full one.
+        overviewEntryNode.uiNode.dictEntriesOfInterest
+            |> Dict.get "itemID"
+            |> Maybe.andThen
+                (Json.Decode.decodeValue
+                    (Json.Decode.oneOf
+                        [ Json.Decode.string
+                        , Json.Decode.int |> Json.Decode.map String.fromInt
+                        ]
+                    )
+                    >> Result.toMaybe
+                )
     }
 
 
