@@ -1,85 +1,78 @@
 # Running EVE Online Elm bots on macOS (Apple Silicon)
 
-This is a macOS-native replacement for the Windows-only `BotLab.exe`. It
-lets you run the existing Elm bots in `implement/applications/eve-online/`
-(mining bot, combat anomaly bot, warp-to-0 autopilot) against the native
-Apple Silicon EVE Online client, without Windows, without Wine, and
-without any account/licensing dependency on reactor.botlab.org — the bot
-code itself is used completely unmodified.
+A macOS-native replacement for the Windows-only `BotLab.exe`. It runs the
+existing Elm bots in `implement/applications/eve-online/` against the native
+Apple Silicon EVE Online client — no Windows, no Wine, and no account or
+licensing dependency on reactor.botlab.org. The bot source is used completely
+unmodified.
 
-For non-commercial, personal use. Everything here reads and interacts
-with your own EVE Online client's memory and screen; nothing is sent
-anywhere except to the game server, exactly as a human playing normally
-would.
+For non-commercial, personal use. Everything here reads and interacts with your
+own client's memory and screen; nothing is sent anywhere except to the game
+server, exactly as a human playing normally would.
 
-## How this works, in one paragraph
+## If you know BotLab, start here
 
-The Elm bot logic never touches memory directly — it talks to a "volatile
-process" via a small JSON protocol, expecting a stream of UI-tree
-readings (what's on screen, structurally) and issuing mouse/keyboard
-commands in response. On Windows, `BotLab.exe` supplies that volatile
-process. Here, a small set of native macOS tools reads the game client's
-memory directly (the same way BotLab.exe does on Windows, just
-re-derived for this build's binary layout) and a Python host
-(`botlab_host.py`) emulates the rest of BotLab.exe's job: fetching and
-compiling the bot, feeding it readings, and executing the actions it
-asks for.
+The bot side is identical. Same Elm source, same `botMain`, same settings
+strings, same `Bot.elm` header conventions. What changes is everything under it:
+
+| BotLab on Windows | here |
+|---|---|
+| `BotLab.exe` (host, licensing, bot fetch, scheduling) | `tools/macos-host/botlab_host/botlab_host.py` |
+| reactor.botlab.org account and online session | nothing — no account, no network dependency |
+| "Pine" Elm interpreter | vanilla `elm make` plus a small `Platform.worker` port wrapper |
+| `EveOnline/VolatileProcess.csx` (C#, reads client memory) | native tools under `tools/macos-host/` — the same CPython-object-graph walk, offsets re-derived for this build |
+| BotLab session UI / recordings / catalogue | none. A run is a terminal process printing its decision tree |
+| `botlab  play  <url>` | `python3 botlab_host.py <path-or-url>`, or a launcher script |
+
+Two consequences worth knowing up front. There is **no dry-run-by-default
+safety net in BotLab's sense** — but there is a better one here: input is off
+unless you pass `--execute-input`, so the default run reads the game and prints
+what it *would* do without touching your mouse. And there is **no session
+recording**; the terminal log is the whole record, so redirect it to a file if
+you want to keep it.
 
 ## Prerequisites
 
-- **Apple Silicon Mac**, EVE Online installed via the native
-  `eve-online.app` launcher (not through any Windows compatibility
-  layer).
-- **System Integrity Protection's debugging restrictions must be
-  disabled.** This is the one unusual, standing system change this
-  project requires — SIP normally blocks any process (including this
-  project's tools) from reading another process's memory at all, with no
-  entitlement-based workaround. To disable just that part:
-  1. Reboot into Recovery Mode (hold the power button at startup until
-     you see "Loading startup options", then choose Options).
-  2. Open Terminal from the Utilities menu and run:
-     ```
-     csrutil enable --without debug
-     ```
+- **Apple Silicon Mac**, EVE Online installed via the native `eve-online.app`
+  launcher (not through any Windows compatibility layer).
+- **SIP's debugging restrictions must be disabled.** This is the one unusual,
+  standing system change the project requires: SIP otherwise blocks any process
+  from reading another process's memory, with no entitlement-based workaround.
+  1. Reboot into Recovery Mode (hold the power button until "Loading startup
+     options", then Options).
+  2. Terminal from the Utilities menu: `csrutil enable --without debug`
   3. Reboot normally.
-  4. Confirm with `csrutil status` — you should see `Debugging
-     Restrictions: disabled` while everything else stays enabled.
+  4. Confirm `csrutil status` shows `Debugging Restrictions: disabled` with
+     everything else enabled.
 
-  This is a genuine, standing tradeoff: it lowers macOS's anti-debugging
-  protection **system-wide**, for every process, not just this project's
-  tools, until you revert it (Recovery Mode, plain `csrutil enable`).
-  Nothing else about your Mac's security posture changes.
-- **Screen Recording permission** for whichever app you run this from
-  (Terminal.app, iTerm2, etc.) — System Settings → Privacy & Security →
-  Screen Recording. Needed for window titles to resolve and for
-  screenshot capture to work.
-- **Accessibility permission** for the same app — System Settings →
-  Privacy & Security → Accessibility. Needed for `cg_input` to actually
-  move the mouse and press keys.
-- **Homebrew**, then:
-  ```
-  brew install elm node
-  ```
-  Do **not** `npm install -g elm` — the official npm package for `elm`
-  is unrelated software that happens to squat the name, and even
-  `elm@0.19.1` specifically fails on Apple Silicon (its installer's
-  architecture detection is broken for arm64). Homebrew's `elm` is a
-  real, arm64-native build (reports itself as `0.19.2`).
-- **Python 3** (Homebrew's `python@3.x` is fine) with `Pillow` and
-  `numpy`:
+  This is a real tradeoff: it lowers macOS's anti-debugging protection
+  **system-wide**, for every process, until you revert it (Recovery Mode, plain
+  `csrutil enable`). Nothing else about your Mac's security posture changes.
+- **Screen Recording permission** for the app you run this from (Terminal,
+  iTerm2, …) — System Settings → Privacy & Security. Needed for window titles to
+  resolve and for screenshot capture.
+- **Accessibility permission** for the same app. Needed for `cg_input` to move
+  the mouse and press keys.
+- **Homebrew**, then `brew install elm node`.
+
+  Do **not** `npm install -g elm`: the npm package of that name is unrelated
+  software squatting it, and `elm@0.19.1` specifically fails on Apple Silicon
+  because its installer's architecture detection is broken for arm64.
+  Homebrew's `elm` is a real arm64 build, reporting `0.19.2`.
+- **Python 3** with Pillow and numpy:
   ```
   python3 -m pip install --user --break-system-packages Pillow numpy
   ```
-  (`--break-system-packages` is needed because Homebrew's Python blocks
-  plain `pip install` outside a virtualenv; `--user` keeps it scoped to
-  your account, not Homebrew's own managed packages.)
-- **Xcode Command Line Tools** (`xcode-select --install`) for `clang`
-  and `codesign`, used to build the small native helper tools below.
+  (`--break-system-packages` because Homebrew's Python blocks plain
+  `pip install` outside a virtualenv; `--user` keeps it out of Homebrew's own
+  packages.)
+- **Xcode Command Line Tools** (`xcode-select --install`) for `clang` and
+  `codesign`.
 
 ## One-time setup: build the native helper tools
 
-All of this project's memory-reading and input tools live under
-`tools/macos-host/`. Build and ad-hoc sign each one:
+The compiled binaries are deliberately not in the repo — they are
+platform-specific build output — so a fresh clone must build them:
 
 ```
 cd tools/macos-host
@@ -97,131 +90,156 @@ clang -O2 -o tree_walker/tree_walker tree_walker/tree_walker.c
 codesign -s - --entitlements tree_walker/entitlements.plist -f tree_walker/tree_walker
 
 clang -framework ApplicationServices -o window_probe/window_probe window_probe/window_probe.c
-
-clang -framework ApplicationServices -o cg_input/cg_input cg_input/cg_input.c
+clang -O2 -framework ApplicationServices -o cg_input/cg_input cg_input/cg_input.c
 ```
 
-(`window_probe` and `cg_input` need no entitlements — they use public
-`ApplicationServices` APIs gated by the Accessibility/Screen Recording
-permissions above, not `task_for_pid`.)
+`window_probe` and `cg_input` need no entitlements — they use public
+`ApplicationServices` APIs gated by the Accessibility and Screen Recording
+permissions above, not `task_for_pid`.
 
-You only need to redo this if you edit the `.c` files, or after a macOS
-update that invalidates ad-hoc signatures.
+Redo this only if you edit the `.c` files, or after a macOS update invalidates
+ad-hoc signatures.
 
 ## Running a bot
 
-1. **Launch EVE Online normally** through the native launcher and log
-   in. Fullscreen or windowed both work — fullscreen puts the game on
-   its own macOS Space, which the host handles automatically (it will
-   switch Spaces as needed when bringing the window to the foreground).
-   Set the in-game UI language to **English** — the bots match menu text
-   literally. For the autopilot bot specifically, also set an in-game
-   autopilot route and make sure the route info panel is expanded so the
-   route is visible on screen (check the specific bot's own `Bot.elm`
-   header comment for its exact prerequisites — they vary per bot).
+Set the in-game UI language to **English** — the bots match menu text literally
+— and read the target bot's own `Bot.elm` header, which lists the client setup
+it needs. Those requirements are real: overview columns, which row each module
+sits in, and specific keybinds. A bot cannot work around a client configured
+differently, and most "the bot is stuck" reports trace back to one of them.
 
-2. **From `tools/macos-host/botlab_host/`, run:**
-   ```
-   python3 botlab_host.py <bot-source> [options]
-   ```
+Fullscreen and windowed both work. Fullscreen puts the game on its own macOS
+Space, which the host handles — it switches Spaces when bringing the window
+forward, and verifies it got there before clicking.
 
-   `<bot-source>` is either:
-   - a local path, e.g.
-     `../../../implement/applications/eve-online/eve-online-warp-to-0-autopilot`
-   - a GitHub URL, either a plain repo or a `.../tree/<branch>/<subpath>`
-     URL pointing at a subdirectory (needed for this repo, since apps
-     live under `implement/applications/...`, not the repo root), e.g.
-     `https://github.com/Viir/bots/tree/main/implement/applications/eve-online/eve-online-warp-to-0-autopilot`
+### The easy path
 
-   Options:
-   | flag | effect |
-   |---|---|
-   | `--settings "<text>"` | bot-settings string, same format the bot's own documentation describes (e.g. `activate-module-always = cloaking device`) |
-   | `--execute-input` | **actually** send mouse/keyboard input. Without this flag, the host runs in a safe dry-run mode: it reads the game and prints what it *would* click, but never touches your mouse/keyboard. Start here first. |
-   | `--capture-screenshots` | capture real screenshot pixel data for the bot's screenshot-based fallback parsing. Off by default — costs roughly 1.5s per cycle and most bots don't read this data at all (only used for message-box/repair-shop-window button-label matching in the tested bot). Turn on only if a specific bot needs it. |
-   | `--max-ticks N` | stop after N decision cycles — useful for testing |
-   | `--keep-build-dir` | don't delete the temporary compiled-bot directory on exit (handy for inspecting what got compiled) |
+Two bots have launcher scripts that carry known-good settings:
 
-3. **First run, do a dry run:**
-   ```
-   python3 botlab_host.py ../../../implement/applications/eve-online/eve-online-warp-to-0-autopilot --max-ticks 15
-   ```
-   Watch the status text scroll by. You should see it progress through
-   setup (creating the "volatile process", finding the game window,
-   locating the UI root — this last step takes a few seconds the first
-   time) and then into normal operation, printing real decisions based
-   on what's actually on your screen ("I see the ship is warping...",
-   "Open context menu on route element icon", etc.) without touching
-   your mouse.
+```
+cd tools/macos-host
+./run_mission.sh          # eve-online-mission-runner
+./run_saxrat.sh           # eve-online-saxrat
+./run_mission.sh --help   # this bot's settings, and the host's flags
+```
 
-4. **Once you're confident it's reading the game correctly**, add
-   `--execute-input` to let it actually act. **This takes over your real
-   mouse and keyboard while it runs** — don't use your computer for
-   anything else while a bot is running with this flag, the same way you
-   wouldn't while BotLab.exe is driving on Windows.
+`--help` is worth reading before the first run: it prints the bot's own
+documented settings, any settings its `parseBotSettings` accepts that the
+documentation omits, the defaults the launcher passes, and the host's flags.
+It is answered before the launcher's one-bot-at-a-time guard runs, so asking
+never disturbs a session already going.
 
-   The host brings the game window to the foreground automatically
-   before every input action (switching macOS Spaces if needed for a
-   fullscreen game) and verifies it actually got there before clicking
-   anything — if focus can't be confirmed, it aborts that action rather
-   than risk clicking into the wrong window.
+Both launchers pass `--execute-input`, so they drive the real mouse and
+keyboard, and both kill any bot session already running first.
 
-5. **To stop**, `Ctrl-C` in the terminal, or let `--max-ticks` run out.
+### The general path
+
+```
+cd tools/macos-host/botlab_host
+python3 botlab_host.py <bot-source> [options]
+```
+
+`<bot-source>` is a local path, e.g.
+`../../../implement/applications/eve-online/eve-online-warp-to-0-autopilot`,
+or a GitHub URL — a plain repo, or a `.../tree/<branch>/<subpath>` URL for a
+subdirectory, which this repo needs since apps live under
+`implement/applications/…` rather than the root.
+
+| flag | effect |
+|---|---|
+| `--settings "<text>"` | bot-settings string, exactly the format the bot's own documentation describes |
+| `--execute-input` | **actually** send mouse and keyboard input. Without it the host reads the game and prints what it *would* click, touching nothing. Start here. |
+| `--session-duration-minutes N` | tell the bot how long the session runs; `BotFramework`'s own wind-down docks it once ~200s remain |
+| `--capture-screenshots` | capture real pixel data for screenshot-based parsing. Off by default: ~1.6s per cycle, and most bots never read it |
+| `--max-ticks N` | stop after N decision cycles |
+| `--keep-build-dir` | keep the temporary compiled-bot directory for inspection |
+
+First run, do it without `--execute-input`:
+
+```
+python3 botlab_host.py ../../../implement/applications/eve-online/eve-online-warp-to-0-autopilot --max-ticks 15
+```
+
+Watch it work through setup — creating the volatile process, finding the game
+window, locating the UI root (a few seconds the first time) — and then print
+real decisions from what is actually on your screen, without touching your
+mouse. Add `--execute-input` once you believe it is reading the game correctly.
+Stop with `Ctrl-C`, or let `--max-ticks` run out.
+
+### Watching a long run
+
+`stall_watch.py` tails a running bot's log and screenshots the client the moment
+it stalls, so an overnight run leaves evidence rather than just a stopped bot:
+
+```
+python3 stall_watch.py <logfile> --pid <game client pid> --out <screenshot dir>
+```
+
+A stall is the bot saying *"I am stuck here and need help to continue."*, or the
+same decision repeating 60 times. It captures the game window by id rather than
+the screen, which matters when the client is on another Space. Run the bot with
+`2>&1 | tee somefile.log` to have a log for it to read.
 
 ## What to expect, realistically
 
-- **Per-cycle speed** for the tested bot (`eve-online-warp-to-0-autopilot`)
-  is roughly **2.5-2.8 seconds per decision cycle** on the reference
-  machine — dominated by the bot's *own* built-in 2-second pacing
-  (`Bot.elm`'s `setMillisecondsToNextReadingFromGameBase 2000`), not host
-  overhead. The host's own memory-read + dispatch work is well under a
-  second. A different bot with tighter pacing would see faster real
-  cycles automatically, with no host changes needed.
-- **Only `eve-online-warp-to-0-autopilot` has been exercised
-  end-to-end** so far. Other EVE bots in this repo (mining bot, combat
-  anomaly bot) use the same framework and *should* work the same way,
-  but haven't been run against this host yet — try them in dry-run mode
-  first.
-- **Non-EVE bots** (e.g. `tribal-wars-2-farmbot`, which drives a web
-  browser via `OpenWindowRequest`) are **not supported** — that task type
-  always fails on this host. Only the EVE Online memory-reading path is
-  implemented.
-- **Only tested on one display configuration** (a single Retina
-  display). Multi-monitor or non-Retina setups haven't been exercised
-  and may need adjustment to the coordinate-scaling logic in
+- **`eve-online-mission-runner`** is the most exercised bot here: it takes a
+  security mission from an agent, flies out, clears each pocket through its
+  acceleration gates, returns and hands in. Over 55 logged runs it completed 48
+  missions, median ~5.4 minutes each. Combat featured in 79%, acceleration gates
+  in 33%, looting in 21%.
+- **`eve-online-saxrat`** (combat anomalies) and
+  **`eve-online-warp-to-0-autopilot`** are also proven end to end, from both a
+  local path and a GitHub URL. `eve-online-mining-bot` still compiles but has
+  not been run against this host. `eve-online-wingus` is unexplored.
+- **Cycle time is set by the bot, not the host.** `warp-to-0` runs ~2.5-2.8s per
+  cycle because its own `Bot.elm` sets
+  `setMillisecondsToNextReadingFromGameBase 2000`. The mission runner and saxrat
+  use a `bot-step-delay` setting instead, 499ms by default, and land around 7s
+  per cycle once the memory read and screenshot read are included. Host overhead
+  is well under a second either way; the native `tree_walker` reads a
+  ~2,800-node tree in roughly 0.4s.
+- **Non-EVE bots are not supported.** Anything driving a browser via
+  `OpenWindowRequest` (e.g. `tribal-wars-2-farmbot`) always fails here; only the
+  EVE memory-reading path is implemented.
+- **One display configuration tested** — a single Retina display. Multi-monitor
+  or non-Retina setups may need adjustment to the coordinate scaling in
   `botlab_host.py`.
+- **Expect to tune settings against your own fit and overview.** Several of the
+  bots' settings match against the overview's *Type* column, so they depend on
+  what your overview shows and how it is sorted. The `Bot.elm` headers say which.
 
 ## Troubleshooting
 
 - **`task_for_pid failed: (os/kern) failure (kr=5)`** — SIP's debugging
-  restrictions are still enabled. Re-check `csrutil status` shows
-  `Debugging Restrictions: disabled`; if not, redo the Recovery Mode
-  step above.
-- **`no matching windows found`** — the game client isn't running, or
-  Screen Recording permission isn't granted to the terminal app you're
-  running this from.
-- **Clicks land near, but not exactly on, the right spot** — this
-  usually means the game's own UI-scale setting changed (it's read live
-  every cycle and self-calibrated against the actual window size, so it
-  should self-correct within one cycle; if it doesn't, restart the
-  host).
-- **`elm make` fails with a version-mismatch error** — check `elm
-  --version`; the host automatically patches a working copy's
-  `elm.json` to match whatever's installed, so this should be rare, but
-  if you have multiple `elm` installs on your `PATH`, make sure the
-  Homebrew one takes precedence.
-- **The bot immediately says `FinishSession` with an error about
-  bot-settings** — check the bot's own documentation/comments at the top
-  of its `Bot.elm` for the exact settings format it expects.
-- **Nothing happens when `--execute-input` is on** — check Accessibility
-  permission is actually granted (not just requested) to your terminal
-  app in System Settings, and that the game window isn't minimized.
+  restrictions are still on. Re-check `csrutil status`.
+- **`no matching windows found`** — the client isn't running, or Screen
+  Recording permission isn't granted to your terminal app.
+- **Nothing happens with `--execute-input`** — check Accessibility permission is
+  actually granted (not merely requested) to your terminal app, and that the
+  game window isn't minimized.
+- **Clicks land near but not on the target** — usually the game's UI-scale
+  setting changed. It is read live and self-calibrated against the real window
+  size each cycle, so it should correct itself within a cycle; restart the host
+  if not.
+- **`elm make` fails on a version mismatch** — the host patches a working copy's
+  `elm.json` to match the installed `elm`, so this is rare. If you have several
+  `elm` installs, make sure Homebrew's takes precedence.
+- **`FinishSession` immediately, complaining about bot-settings** — run the
+  launcher's `--help`, or read the bot's `Bot.elm` header, for the exact keys it
+  accepts. Unknown keys are rejected outright rather than ignored.
+- **The bot does nothing while sitting in space** — most often it cannot see
+  what you expect it to. The overview only renders the rows that fit, and the
+  bot only acts on rendered rows; objects far enough away for the distance to
+  read in AU are ignored entirely.
+- **A module toggles on and off** — a module button is a toggle, so anything
+  clicking it twice before the client has shown the first result switches it
+  back. Check the module row assignments in the bot's `Bot.elm` header.
 
 ## Reverting the SIP change
 
-If you want to restore full System Integrity Protection later (this
-also disables everything in this guide):
+Restores full System Integrity Protection, and disables everything in this
+guide:
 
 1. Reboot into Recovery Mode.
-2. Open Terminal → `csrutil enable`.
+2. Terminal → `csrutil enable`
 3. Reboot normally.
