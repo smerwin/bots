@@ -665,7 +665,19 @@ class VolatileHost:
         # back to the scan-results/tether path instead. Raised to 24; the
         # same live tree had only 3309 nodes total with just 24 of them past
         # depth 16, so the extra depth costs effectively nothing here.
-        tree = tree_walker.tree(root_addr, metatype, str_type, max_depth=24, max_nodes=5000)
+        #
+        # The node budget was left at 5000 when the depth was raised, and that
+        # became the binding limit instead: a mission grid busy with wrecks and
+        # jetcans measured 5554 nodes, so every read silently dropped ~550 of
+        # them. Which ones depends on DFS order, so the loss is arbitrary --
+        # live, this intermittently truncated ListSurroundingsBtn out of the
+        # location info panel, and since the panel's parser returns Nothing
+        # without that button, the bot decided the panel did not exist and sat
+        # clicking "enable the info panel" 181 times. A silent wrong answer
+        # again, not an error. Raised to 20000: measured on that same grid, the
+        # untruncated read costs 0.80s against 0.72s truncated, and anything
+        # past 10000 costs nothing at all since the tree is smaller than that.
+        tree = tree_walker.tree(root_addr, metatype, str_type, max_depth=24, max_nodes=20000)
         entries = tree.get("dictEntriesOfInterest", {})
         w, h = entries.get("_displayWidth"), entries.get("_displayHeight")
         if isinstance(w, (int, float)) and isinstance(h, (int, float)) and w > 0 and h > 0:
