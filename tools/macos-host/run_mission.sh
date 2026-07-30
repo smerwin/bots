@@ -66,11 +66,24 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # Silo</a>"), the bot reads the name straight out of the objective. The setting
 # remains available as an override for anything that does not cover.
 #
-# attack-object matches the overview's Type column, not its Name -- so give it
-# the type, "Cargo Warehouse", not a word that happens to appear in something's
-# name. This was "Warehouse", which matched a Caldari Trading Station called
-# "Bhizheba VIII - Moon 5 - Expert Distribution Warehouse" and had the bot
-# trying to lock and shoot the station for a whole session.
+# attack-object matches the overview's Name or Type EXACTLY -- give the full
+# label as the overview shows it. Substrings were tried and are a trap both ways:
+# "Warehouse" matched a Caldari Trading Station called "Bhizheba VIII - Moon 5 -
+# Expert Distribution Warehouse" and had the bot shooting the station for a whole
+# session, and narrowing to the Type column then made "Habitat" match every
+# Habitation Module on every grid instead of the one the mission wants.
+#
+# It takes a comma-separated list, so this stays one line as it grows. Seeded
+# with every structure the mission objectives have actually named across 56
+# logged runs. Most are redundant -- when an objective says "You need to destroy
+# the Drone Silo" the bot already takes the name from the objective -- but
+# listing them costs nothing and covers the case where that extraction misses.
+#
+# Kruul's Pleasure Hub is the one that genuinely needs to be here: on The Damsel
+# In Distress the tracker objective only ever says "You need The Damsel in your
+# cargohold" and never names a structure. The acceptance briefing does -- "held
+# inside Kruul's Pleasure Hub" -- but the bot discards it when the conversation
+# window closes, so nothing carries that name into combat.
 #
 # Either way the object must be enabled in the overview's type filters
 # (Overview Settings -> Types -> Celestial -> Large Collidable Object), or the
@@ -103,8 +116,7 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 SETTINGS="orbit-in-combat=no
 keep-at-range=yes
 targeting-range=37000
-attack-object=Warehouse
-attack-object=Habitat
+attack-object=Kruul's Pleasure Hub, Drone Silo, Repair Station, Habitat, Infested Laboratory, Laboratory, Gallente Broadcast Tower, Athran Ammunitions Depot
 decline-mission=Worlds Collide
 prefer-wreck=Personnel Transport
 prefer-wreck=Cargo Container
@@ -117,7 +129,7 @@ run-away-armor-hitpoints-threshold-percent=80"
 # once ~200 seconds remain, so it finishes parked in a station rather than
 # being cut off mid-warp with drones out. Override by passing the flag again
 # on the command line.
-SESSION_DURATION_MINUTES="${SESSION_DURATION_MINUTES:-60}"
+SESSION_DURATION_MINUTES="${SESSION_DURATION_MINUTES:-180}"
 
 # Answered before the guard below: asking what the flags are must not kill a
 # session that is already running.
