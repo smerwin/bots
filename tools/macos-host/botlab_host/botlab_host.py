@@ -564,10 +564,55 @@ class VolatileHost:
             "stage": {"SearchUIRootAddressCompleted": {"uiRootAddress": hex(addr) if addr else None}},
         }
 
+    UI_ROOT_CACHE_PATH = os.path.join(tempfile.gettempdir(), "botlab-host-ui-root-cache.json")
+
+    def _cached_ui_root(self, process_id):
+        """A previously found root for this same client process, if it still
+        reads back sensibly.
+
+        Finding the root needs a full process dump (~20-40s), which is the
+        whole cost of starting the bot -- and it is pure waste across a
+        restart, since these addresses are per-process-launch and the client
+        has usually not restarted. Cached on disk keyed by pid, then validated
+        by actually reading the root: a stale entry (pid reused by an unrelated
+        process, or the client relaunched into the same pid) gives a node with
+        no _displayWidth, and we fall through to the slow path."""
+        try:
+            with open(self.UI_ROOT_CACHE_PATH) as cache_file:
+                entry = json.load(cache_file)
+        except (OSError, ValueError):
+            return None
+        if entry.get("pid") != process_id:
+            return None
+        try:
+            walker = self._get_tree_walker(process_id)
+            probe = walker.tree(entry["root"], entry["metatype"], entry["str_type"],
+                                max_depth=1, max_nodes=1)
+        except Exception:
+            return None
+        if not (probe.get("dictEntriesOfInterest") or {}).get("_displayWidth"):
+            return None
+        print(f"# reusing cached UI root {entry['root']:#x} for process {process_id}", file=sys.stderr)
+        return entry
+
+    def _store_ui_root_cache(self, process_id, root, metatype, str_type):
+        try:
+            with open(self.UI_ROOT_CACHE_PATH, "w") as cache_file:
+                json.dump({"pid": process_id, "root": root,
+                           "metatype": metatype, "str_type": str_type}, cache_file)
+        except OSError:
+            pass
+
     def _search_ui_root_worker(self, process_id, state):
         """One-time cost: take a real dump (the only way to repr-scan for
         the root object's address), find it, then all later ReadFromWindow
         calls use the fast LiveSample path -- no more dumps needed."""
+        cached = self._cached_ui_root(process_id)
+        if cached is not None:
+            self.metatype[process_id] = cached["metatype"]
+            self.str_type[process_id] = cached["str_type"]
+            state["result"] = cached["root"]
+            return
         try:
             with tempfile.TemporaryDirectory() as d:
                 subprocess.run([MEMORY_SAMPLE_BIN, str(process_id), d], check=True,
@@ -581,6 +626,8 @@ class VolatileHost:
                 self.metatype[process_id] = metatype
                 self.str_type[process_id] = str_type
                 root = rh.find_ui_root(sample, metatype, str_type)
+                if root is not None:
+                    self._store_ui_root_cache(process_id, root, metatype, str_type)
                 state["result"] = root
         except Exception as exc:
             print(f"# SearchUIRootAddress failed: {exc}", file=sys.stderr)
