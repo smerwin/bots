@@ -208,6 +208,9 @@ screenshot read), and later responses offer genuinely new tasks such as the
 | `run_saxrat.sh`, `run_mission.sh` | launchers for `eve-online-saxrat` / `eve-online-mission-runner`; one-bot-at-a-time guard kills any prior launcher/`botlab_host.py`/`driver.js`/`tree_walker` first |
 | `bot_help.py` | backs `--help` on the launchers |
 | `stall_watch.py` | watches a running bot's log and screenshots the client when it stalls |
+| `eve_read.py` | live reads of the client (overview, targets, modules, combat feed, window id) by reusing botlab_host's UI-root cache -- ~2s instead of rediscovering the root |
+| `compile_bot.sh` | compiles a bot the way the host does, without running it; verifies the scratch copy matches the source |
+| `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session |
 | `reload_drones.py` | standalone one-off: refill drone bay from station hangar |
 | `route_setter/route_setter.py` | standalone one-off: set the autopilot route from a chat channel's MOTD |
 
@@ -417,8 +420,14 @@ exists.
 - **Input execution:** working (`cg_input`), gated behind `--execute-input`.
 - **Full bot loop:** proven end to end for `eve-online-mission-runner` and
   `eve-online-saxrat`, and for `eve-online-warp-to-0-autopilot`, from both a
-  local path and a GitHub URL. `eve-online-mining-bot` still compiles (older
-  host-interface version, untouched). `eve-online-wingus` is unexplored.
+  local path and a GitHub URL.
+- **`eve-online-mining-bot` and `eve-online-wingus` cannot run on this host as
+  they stand.** Both are written against `BotLab.BotInterface_To_Host_2023_02_06`
+  while `botlab_host/Main.elm` imports `..._2024_10_19`, so `elm make` fails on a
+  missing module -- confirmed by `compile_bot.sh`, which builds every app. Running
+  either needs a Main.elm for the older interface. (This entry previously said
+  the mining bot "still compiles", which is true only on its own and not with the
+  host's wrapper.)
 - **`eve-online-mission-runner`** takes a security mission from an agent, flies
   out, clears each pocket through its acceleration gates, returns and hands in.
   Across 55 logged runs it completed 48 missions, median 58 ticks (~5.4 min).
