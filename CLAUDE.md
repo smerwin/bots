@@ -156,6 +156,23 @@ plainly rendered on screen. A silent wrong answer, not an error.
 `get_children_addrs_from_wrapper` still has the old single-hop behaviour; fix it
 there too if a Python-path walk ever needs these subtrees.
 
+**The walk is syscall-bound, not decode-bound.** Nearly every read is an 8-byte
+pointer field, and uncached each one is its own `mach_vm_read_overwrite` — which
+measured ~0.5ms per node, linear in node count, putting a real in-mission read at
+1.78s and a 7,000-node docked tree at 3.4s. An object's header, its dict and that
+dict's entries all sit within a page or two of each other, so `read_mem` now
+serves from a direct-mapped 4K page cache: 3.36s → 0.39s on the same tree, 4x
+in-host end to end. Two constraints hold it together. The cache is scoped to a
+single request (bumped via `g_page_epoch`, so invalidation costs nothing) because
+holding pages across reads would hand the bot a tree blended from moments seconds
+apart — within one walk it is instead a consistency *gain*, since the uncached
+walk already samples a live tree over several seconds. And a page that cannot be
+read whole is not an unreadable field: the last page of a mapped region fails as
+a page while the bytes asked for are fine, so that case falls back to a direct
+read rather than reporting failure. Verified against the pre-cache binary on a
+live client: same node count, 2,743 identical strings, and the only differences
+were values that genuinely change between reads (distances, speed, a countdown).
+
 Dead end, don't retry: `PyChildrenList+0x20`/`+0x28` look like a linked list but
 are CPython's own GC-tracked-object list — every GC object is threaded into one
 process-wide cycle-detection list, unrelated to content.
@@ -200,7 +217,7 @@ screenshot read), and later responses offer genuinely new tasks such as the
 | `memory_sample/` + `save_process_sample.sh` | full process memory dump + `regions.tsv` index + correlated screenshot, for one-off RE |
 | `re_helper/re_helper.py` | Python RE tool and library — `dump`/`find`/`walkdict`/`tree` CLI, plus reusable decoders (`read_pystr`, `read_pyint`, `read_pylong`, `read_pyunicode`, `read_pyfloat`, `classify`, `get_dict`, `walk_dict_entries`, `dict_items`, `build_tree`, `repr_scan`, `find_metatype`, `walk_to_root`, `find_ui_root`). Works against a dump (`Sample`) or a live process (`LiveSample`) interchangeably. |
 | `live_reader/` | persistent live memory-read helper (binary protocol over stdin/stdout), backs `LiveSample` |
-| `tree_walker/` | C rewrite of the whole UI-tree-walk hot path — memory read, struct decode and tree assembly in one attached process, no per-field pipe protocol. ~5x faster than the Python path (~0.4s vs ~2s for a ~2,800-node tree); what `botlab_host.py` uses for `ReadFromWindow` |
+| `tree_walker/` | C rewrite of the whole UI-tree-walk hot path — memory read, struct decode and tree assembly in one attached process, no per-field pipe protocol. ~5x faster than the Python path (~0.4s vs ~2s for a ~2,800-node tree); what `botlab_host.py` uses for `ReadFromWindow`. Reads go through a per-request page cache — see below |
 | `window_probe/` | window enumeration via `CGWindowList` (bounds in points, backing scale); `--all` sees windows on any macOS Space, not just the active one |
 | `cg_input/` | persistent `CGEventPost` input executor, one text command per stdin line (`move`/`down`/`up`/`drag`/`doubleclick`/`keydown`/`keyup`/`scroll`) |
 | `botlab_host/botlab_host.py` | the BotLab.exe replacement — fetches bot source (GitHub URL or local path), patches `elm-version`, compiles with `Main.elm`, drives the compiled bot via `driver.js`, dispatches every `Task` type |
@@ -487,9 +504,14 @@ screenshot-driven RE, not more polling.
 - Tested against a handful of bots and one display configuration (single
   display, specific Retina scale). Non-EVE bots using
   `OpenWindowRequest`/browser automation are stubbed to always fail.
-- Tick time is dominated by the bot's own `bot-step-delay` (499ms by default)
-  plus the read cycle, giving roughly 7s per tick in practice. That is bot-
-  authored pacing plus host overhead, not a host bug.
+- Tick time, measured over run 57 (376 ticks, 3,025s): the memory read was 53%
+  of the whole run, `send-effects` 22%, `bot-step-delay` 9%. The page cache
+  below cut the read from 1.78s to 0.44s, which takes roughly 40% off total
+  run time; after it, `send-effects` is the largest remaining cost. Most of
+  that is not the input itself but the `WaitMilliseconds 210` the framework
+  interleaves between every pair of effects, plus ~0.82s per eased mouse
+  glide. Both are bot-authored pacing that the Photon UI genuinely needs —
+  shortening either is a live-behaviour risk, not a free win.
 
 ## Repo state
 

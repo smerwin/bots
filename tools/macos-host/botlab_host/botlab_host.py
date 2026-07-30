@@ -70,7 +70,11 @@ class TreeWalkerClient:
     tree_walker does the entire memory-read + struct-decode + tree
     assembly in one attached C process with zero pipe protocol for
     individual fields -- ~5x faster in practice (measured: ~2.0s Python
-    vs ~0.4s C for the same ~2800-node live tree)."""
+    vs ~0.4s C for the same ~2800-node live tree).
+
+    Its page cache is what keeps that true as trees grew: uncached, a walk
+    is syscall-bound and costs ~0.5ms per node, which put a real in-mission
+    read at ~1.8s. Measured in-host after the cache: ~0.44s."""
 
     def __init__(self, pid):
         self.proc = subprocess.Popen(
