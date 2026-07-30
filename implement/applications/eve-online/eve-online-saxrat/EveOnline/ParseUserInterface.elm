@@ -2770,6 +2770,13 @@ parseAgentConversationWindow windowUINode =
     }
 
 
+stripHtmlTags : String -> String
+stripHtmlTags =
+    Regex.replace
+        (Regex.fromString "<[^>]*>" |> Maybe.withDefault Regex.never)
+        (always "")
+
+
 parseMarketOrdersWindowFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe MarketOrdersWindow
 parseMarketOrdersWindowFromUITreeRoot uiTreeRoot =
     uiTreeRoot

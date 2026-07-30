@@ -918,6 +918,68 @@ alignToStructure shipUI context =
                 )
                 context)
 
+{-| The combat messages currently faded onto the screen, oldest first.
+
+EVE keeps the floating damage feed in the UI tree, so the same lines it writes
+to ~/Documents/EVE/logs/Gamelogs are readable live with no file involved. One
+`CombatMessage` node holds the whole feed, with one child per message and the
+message split across several labels ("43", " to ", "Mercenary Elite Fighter",
+the effect) -- so a message is its child's texts joined, not any single label.
+
+This is a display buffer, not a log: messages age off the screen and disappear
+from the tree with them. It answers "what just happened to whom, for how much"
+over the last few seconds, which is the question the status text wants; anything
+needing history should read the gamelog file instead.
+
+The markup is EVE's own colour and font tagging, stripped here because the
+status text is read by a human in a terminal.
+-}
+visibleCombatMessages : ReadingFromGameClient -> List String
+visibleCombatMessages readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "CombatMessage")
+        |> List.concatMap EveOnline.ParseUserInterface.listChildrenWithDisplayRegion
+        |> List.map
+            (\messageNode ->
+                messageNode.uiNode
+                    |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+                    |> List.map EveOnline.ParseUserInterface.stripHtmlTags
+                    |> String.join " "
+                    |> String.words
+                    |> String.join " "
+            )
+        |> List.filter (String.isEmpty >> not)
+
+
+{-| The combat feed for the status text, newest last, capped so a busy fight
+does not push everything else out of view.
+-}
+describeVisibleCombatMessages : ReadingFromGameClient -> String
+describeVisibleCombatMessages readingFromGameClient =
+    case visibleCombatMessages readingFromGameClient of
+        [] ->
+            "Combat feed: quiet."
+
+        messages ->
+            let
+                shown =
+                    messages |> List.reverse |> List.take 6 |> List.reverse
+
+                omitted =
+                    List.length messages - List.length shown
+            in
+            "Combat feed"
+                ++ (if 0 < omitted then
+                        " (" ++ String.fromInt omitted ++ " older not shown)"
+
+                    else
+                        ""
+                   )
+                ++ ":\n  "
+                ++ String.join "\n  " shown
+
+
 {-| 2020-07-11 Discovery by Viktor:
 The entries for structures in the menu from the SurroundingsButton can be nested one level deeper than the ones for stations.
 In other words, not all structures appear directly under the "structures" entry.
@@ -1476,8 +1538,11 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
 
 
                                         Just ( inactiveModuleIndex, inactiveModule ) ->
-                                            describeBranch "Cycle combat mod"
-                                                (activateWeaponModuleButWaitIfActivatedInPreviousStep context inactiveModuleIndex inactiveModule)
+                                            clickTargetBeforeShooting context overviewEntriesToAttack
+                                                |> Maybe.withDefault
+                                                    (describeBranch "Cycle combat mod"
+                                                        (activateWeaponModuleButWaitIfActivatedInPreviousStep context inactiveModuleIndex inactiveModule)
+                                                    )
                                 )
     in
     if context.eventContext.botSettings.orbitInCombat == AppSettings.Yes then
@@ -1837,6 +1902,8 @@ statusTextFromState context =
                 ++ (context.memory.lootedWreckIds |> List.length |> String.fromInt)
                 ++ ". "
                 ++ describeModulesToActivateAlways readingFromGameClient
+                ++ "\n"
+                ++ describeVisibleCombatMessages readingFromGameClient
 
         describeCurrentReading =
             case readingFromGameClient.shipUI of
@@ -2029,6 +2096,69 @@ overviewEntryIsStrayLockTarget overviewEntry =
     in
     [ "container", "wreck" ]
         |> List.any (\pattern -> textsToCheck |> List.any (stringContainsIgnoringCase pattern))
+
+
+{-| Click the object we are about to shoot, before shooting it.
+
+Locking a target is not the same as the client treating it as the thing your
+weapons act on. Seen live and then confirmed by hand: the Kruul's Pleasure Hub
+was locked, carried `ActiveTargetIndicator` in the target bar, and the bot
+pressed F1 at it for fifteen minutes with the weapon never leaving
+`ramp_active=False` and not one line in the game log. A plain left click on its
+overview row, and the very next moment the beam fired for 242 and five idle
+drones engaged.
+
+So a click on the row goes out before the guns do. `overviewEntryIsActiveTarget`
+is preferred where the overview marks one, since that is the row the client
+already agrees with; otherwise the nearest thing worth attacking, which is what
+the bot locks from anyway.
+
+Returns Nothing once the click has gone out, so the guns follow on the next
+step rather than the row being re-clicked every tick -- a click is also how you
+*change* the active target, so repeating it is not free.
+-}
+clickTargetBeforeShooting :
+    BotDecisionContext
+    -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> Maybe DecisionPathNode
+clickTargetBeforeShooting context entriesToAttack =
+    let
+        alreadyClicked entry =
+            context.previousStepsEffects
+                |> List.take EveOnline.BotFrameworkSeparatingMemory.moduleButtonClickSettlingSteps
+                |> List.any
+                    (\stepEffects ->
+                        stepEffects
+                            |> EveOnline.BotFramework.findMouseButtonClickLocationsInListOfEffects
+                                MouseButtonLeft
+                            |> List.any
+                                (EveOnline.BotFramework.isPointInRectangle
+                                    (EveOnline.BotFramework.growRegionOnAllSides 1
+                                        entry.uiNode.totalDisplayRegion
+                                    )
+                                )
+                    )
+    in
+    [ entriesToAttack |> List.filter overviewEntryIsActiveTarget |> List.head
+    , entriesToAttack |> List.head
+    ]
+        |> List.filterMap identity
+        |> List.head
+        |> Maybe.andThen
+            (\entry ->
+                if alreadyClicked entry then
+                    Nothing
+
+                else
+                    Just
+                        (describeBranch
+                            ("Click '"
+                                ++ (entry.objectName |> Maybe.withDefault "the target")
+                                ++ "' on the overview first -- locking it is not enough to make the guns act on it."
+                            )
+                            (clickUiElement entry.uiNode)
+                        )
+            )
 
 
 {-| Promote one of the locked targets to being the active one, if none is.

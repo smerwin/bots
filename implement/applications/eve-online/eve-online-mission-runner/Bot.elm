@@ -77,12 +77,15 @@
      wants cargo out of destroyed ships, e.g. `prefer-wreck=Personnel Transport`.
      Purely an optimisation -- the bot still opens every other wreck afterwards,
      so a wrong guess costs nothing but a wasted trip. Repeatable.
-   + `attack-object` : A non-rat object the bot should also shoot, matched
-     against the overview's **Type** column -- not its Name. Name is free-form
-     and full of arbitrary words: `attack-object=Warehouse` matched a station
-     called "Bhizheba VIII - Moon 5 - Expert Distribution Warehouse" and the bot
-     spent a session trying to shoot it. Type is what classifies the object, so
-     use the type as the overview shows it, e.g. `attack-object=Drone Silo`.
+   + `attack-object` : Non-rat objects the bot should also shoot, as a
+     comma-separated list -- `attack-object=Drone Silo, Repair Station`. The key
+     may also be repeated; both accumulate. Each entry is matched **exactly**
+     against the overview's Name or Type -- not as a substring of
+     either. Give the full label as the overview shows it, e.g.
+     `attack-object=Kruul's Pleasure Hub`. Substrings were tried and are a trap
+     in both directions: `Warehouse` matched a station called "Bhizheba VIII -
+     Moon 5 - Expert Distribution Warehouse", and `Habitat` matched every
+     Habitation Module on every grid rather than the one the mission is about.
      Usually unnecessary: when a mission objective names a structure to destroy
      ("You need to destroy the <a ...>Drone Silo</a>"), the bot takes the name
      from the objective itself; this setting is the manual override for what
@@ -191,6 +194,28 @@ defaultBotSettings =
     }
 
 
+{-| One setting line, many values: `attack-object=Drone Silo, Repair Station`.
+
+The list of structures a bot should shoot grows one mission at a time, and a
+column of near-identical `attack-object=` lines is a poor way to hold it. Commas
+separate, surrounding space is trimmed, and empties are dropped, so the line can
+be edited like the list it is.
+
+Comma rather than a JSON array because these settings reach the bot through a
+shell string in the launcher: `["a","b"]` would need its quotes escaped there,
+which is exactly the kind of punctuation that gets silently mangled. No EVE
+object name in use contains a comma.
+
+Repeating the key still works and still accumulates, so an existing settings
+string keeps behaving as it did.
+-}
+splitSettingIntoNames : String -> List String
+splitSettingIntoNames =
+    String.split ","
+        >> List.map String.trim
+        >> List.filter (String.isEmpty >> not)
+
+
 parseBotSettings : String -> Result String BotSettings
 parseBotSettings =
     AppSettings.parseSimpleListOfAssignmentsSeparatedByNewlines
@@ -218,8 +243,11 @@ parseBotSettings =
            )
          , ( "attack-object"
            , AppSettings.valueTypeString
-                (\objectName settings ->
-                    { settings | attackObjectNames = String.trim objectName :: settings.attackObjectNames }
+                (\objectNames settings ->
+                    { settings
+                        | attackObjectNames =
+                            splitSettingIntoNames objectNames ++ settings.attackObjectNames
+                    }
                 )
            )
          , ( "approach-object"
@@ -2316,6 +2344,68 @@ undockUsingStationWindow context =
                     
 
 
+{-| The combat messages currently faded onto the screen, oldest first.
+
+EVE keeps the floating damage feed in the UI tree, so the same lines it writes
+to ~/Documents/EVE/logs/Gamelogs are readable live with no file involved. One
+`CombatMessage` node holds the whole feed, with one child per message and the
+message split across several labels ("43", " to ", "Mercenary Elite Fighter",
+the effect) -- so a message is its child's texts joined, not any single label.
+
+This is a display buffer, not a log: messages age off the screen and disappear
+from the tree with them. It answers "what just happened to whom, for how much"
+over the last few seconds, which is the question the status text wants; anything
+needing history should read the gamelog file instead.
+
+The markup is EVE's own colour and font tagging, stripped here because the
+status text is read by a human in a terminal.
+-}
+visibleCombatMessages : ReadingFromGameClient -> List String
+visibleCombatMessages readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "CombatMessage")
+        |> List.concatMap EveOnline.ParseUserInterface.listChildrenWithDisplayRegion
+        |> List.map
+            (\messageNode ->
+                messageNode.uiNode
+                    |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+                    |> List.map EveOnline.ParseUserInterface.stripHtmlTags
+                    |> String.join " "
+                    |> String.words
+                    |> String.join " "
+            )
+        |> List.filter (String.isEmpty >> not)
+
+
+{-| The combat feed for the status text, newest last, capped so a busy fight
+does not push everything else out of view.
+-}
+describeVisibleCombatMessages : ReadingFromGameClient -> String
+describeVisibleCombatMessages readingFromGameClient =
+    case visibleCombatMessages readingFromGameClient of
+        [] ->
+            "Combat feed: quiet."
+
+        messages ->
+            let
+                shown =
+                    messages |> List.reverse |> List.take 6 |> List.reverse
+
+                omitted =
+                    List.length messages - List.length shown
+            in
+            "Combat feed"
+                ++ (if 0 < omitted then
+                        " (" ++ String.fromInt omitted ++ " older not shown)"
+
+                    else
+                        ""
+                   )
+                ++ ":\n  "
+                ++ String.join "\n  " shown
+
+
 {-| The fight itself. Structurally the anomaly bot's combat loop with the
 anomaly-specific parts removed: there is no "wait in case more rats arrive"
 timer and no tethering, because the mission tracker tells us when the pocket
@@ -2498,8 +2588,11 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                                                 )
 
                                         Just ( inactiveModuleIndex, inactiveModule ) ->
-                                            describeBranch "Cycle combat mod"
-                                                (activateWeaponModuleButWaitIfActivatedInPreviousStep context inactiveModuleIndex inactiveModule)
+                                            clickTargetBeforeShooting context overviewEntriesToAttack
+                                                |> Maybe.withDefault
+                                                    (describeBranch "Cycle combat mod"
+                                                        (activateWeaponModuleButWaitIfActivatedInPreviousStep context inactiveModuleIndex inactiveModule)
+                                                    )
                                 )
     in
     if overviewEntriesToAttack |> List.isEmpty then
@@ -2788,6 +2881,8 @@ statusTextFromState context =
                 ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
                 ++ ". "
                 ++ describeModulesToActivateAlways readingFromGameClient
+                ++ "\n"
+                ++ describeVisibleCombatMessages readingFromGameClient
 
         describeCurrentReading =
             case readingFromGameClient.shipUI of
@@ -2951,24 +3046,37 @@ isObjectToAttackFromObjective namesToAttack overviewEntry =
 
 {-| Whether an `attack-object` from the settings picks this object out.
 
-Matched against Type only, unlike the objective above. A setting is a blunt
-substring the player typed once, and Name is free-form: station names in
-particular are built out of arbitrary words, so `attack-object=Warehouse`, meant
-for a mission structure, matched a Caldari Trading Station called "Bhizheba
-VIII - Moon 5 - Expert Distribution Warehouse" and the bot spent a session
-trying to lock and shoot the station. Type is what classifies the object --
-"Caldari Trading Station" there, "Drone Silo" on the structures this setting is
-for -- so it is the column that answers the question being asked.
+Matched **exactly** against the overview's Name or Type -- not as a substring of
+either. Substring matching is what made this setting dangerous in both
+directions. `attack-object=Warehouse` matched a Caldari Trading Station called
+"Bhizheba VIII - Moon 5 - Expert Distribution Warehouse" and the bot spent a
+session shooting the station; narrowing it to the Type column then meant
+`attack-object=Habitat` matched every Habitation Module on any grid, including
+the many a mission does not want touched.
+
+An exact name is the discriminator that actually separates "the structure this
+mission is about" from "every structure of that kind": on The Damsel In
+Distress, `Kruul's Pleasure Hub` names one object on the grid and nothing else.
+Comparison is case-insensitive and trims surrounding space, so a setting copied
+out of the overview works whatever its capitalisation.
+
+Either column is accepted because which one carries the identifying label
+varies -- see `isObjectToAttackFromObjective`, where the same is true of the
+names a mission gives.
 -}
 isObjectToAttackFromSettings : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isObjectToAttackFromSettings namesToAttack overviewEntry =
-    case overviewEntry.objectType of
-        Nothing ->
-            False
+    let
+        normalize =
+            String.trim >> String.toLower
 
-        Just objectType ->
-            namesToAttack
-                |> List.any (\nameToAttack -> stringContainsIgnoringCase nameToAttack objectType)
+        labels =
+            [ overviewEntry.objectName, overviewEntry.objectType ]
+                |> List.filterMap identity
+                |> List.map normalize
+    in
+    namesToAttack
+        |> List.any (\nameToAttack -> labels |> List.member (normalize nameToAttack))
 
 
 {-| Non-rat objects worth shooting: whatever the mission objective names as a
@@ -3061,6 +3169,69 @@ overviewEntryIsStrayLockTarget overviewEntry =
     in
     [ "container", "wreck" ]
         |> List.any (\pattern -> textsToCheck |> List.any (stringContainsIgnoringCase pattern))
+
+
+{-| Click the object we are about to shoot, before shooting it.
+
+Locking a target is not the same as the client treating it as the thing your
+weapons act on. Seen live and then confirmed by hand: the Kruul's Pleasure Hub
+was locked, carried `ActiveTargetIndicator` in the target bar, and the bot
+pressed F1 at it for fifteen minutes with the weapon never leaving
+`ramp_active=False` and not one line in the game log. A plain left click on its
+overview row, and the very next moment the beam fired for 242 and five idle
+drones engaged.
+
+So a click on the row goes out before the guns do. `overviewEntryIsActiveTarget`
+is preferred where the overview marks one, since that is the row the client
+already agrees with; otherwise the nearest thing worth attacking, which is what
+the bot locks from anyway.
+
+Returns Nothing once the click has gone out, so the guns follow on the next
+step rather than the row being re-clicked every tick -- a click is also how you
+*change* the active target, so repeating it is not free.
+-}
+clickTargetBeforeShooting :
+    BotDecisionContext
+    -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> Maybe DecisionPathNode
+clickTargetBeforeShooting context entriesToAttack =
+    let
+        alreadyClicked entry =
+            context.previousStepsEffects
+                |> List.take EveOnline.BotFrameworkSeparatingMemory.moduleButtonClickSettlingSteps
+                |> List.any
+                    (\stepEffects ->
+                        stepEffects
+                            |> EveOnline.BotFramework.findMouseButtonClickLocationsInListOfEffects
+                                MouseButtonLeft
+                            |> List.any
+                                (EveOnline.BotFramework.isPointInRectangle
+                                    (EveOnline.BotFramework.growRegionOnAllSides 1
+                                        entry.uiNode.totalDisplayRegion
+                                    )
+                                )
+                    )
+    in
+    [ entriesToAttack |> List.filter overviewEntryIsActiveTarget |> List.head
+    , entriesToAttack |> List.head
+    ]
+        |> List.filterMap identity
+        |> List.head
+        |> Maybe.andThen
+            (\entry ->
+                if alreadyClicked entry then
+                    Nothing
+
+                else
+                    Just
+                        (describeBranch
+                            ("Click '"
+                                ++ (entry.objectName |> Maybe.withDefault "the target")
+                                ++ "' on the overview first -- locking it is not enough to make the guns act on it."
+                            )
+                            (clickUiElement entry.uiNode)
+                        )
+            )
 
 
 {-| Promote one of the locked targets to being the active one, if none is.
