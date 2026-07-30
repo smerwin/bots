@@ -583,6 +583,7 @@ type alias AgentMissionInfoPanelEntry =
     , instructionTexts : List String
     , objectNamesToDestroy : List String
     , objectNamesToCarry : List String
+    , objectNamesToApproach : List String
     , locationButton : Maybe AgentMissionLocationButton
     , isExpanded : Bool
     }
@@ -3065,9 +3066,18 @@ parseAgentMissionInfoPanelEntry entryNode =
         -- wording so the destination link in a travel objective is not
         -- mistaken for freight.
         --
-        -- Both spellings occur: "in your cargo hold" on the courier arc
-        -- mission, "in your cargohold" (one word) on "Get the Relic". Matching
-        -- only the spaced form silently missed the latter entirely.
+        -- The wording varies more than it looks: "in your cargo hold" on the
+        -- courier arc mission, "in your cargohold" (one word) on "Get the
+        -- Relic", and "Retrieve <a>Prisoner</a> from the cargo Container" on
+        -- "Escaped Dissident", which mentions no hold at all. Each variant in
+        -- turn silently produced no cargo to fetch and left the bot idling.
+        --
+        -- Matched on these phrases rather than the bare word "cargo", which
+        -- would also catch the *delivery* instruction "Bring 15 x <a>Small
+        -- Sealed Cargo Containers</a> to ..." -- there the item's own name
+        -- contains "Cargo Containers", and treating that as something to go
+        -- and fetch would send the bot hunting for cargo it is already
+        -- carrying.
         instructionTexts
             |> List.filter
                 (\instruction ->
@@ -3075,8 +3085,16 @@ parseAgentMissionInfoPanelEntry entryNode =
                         lowered =
                             String.toLower instruction
                     in
-                    String.contains "cargo hold" lowered || String.contains "cargohold" lowered
+                    [ "cargo hold", "cargohold", "retrieve" ]
+                        |> List.any (\phrase -> String.contains phrase lowered)
                 )
+            |> List.concatMap linkTextsFromHtml
+    , objectNamesToApproach =
+        -- Some missions are satisfied just by getting close to something:
+        -- "You need to approach <a ...>Fire Cloud</a>". Named the same way as
+        -- a destroy target, so the same link extraction applies.
+        instructionTexts
+            |> List.filter (String.toLower >> String.contains "approach")
             |> List.concatMap linkTextsFromHtml
     , locationButton =
         locationButton

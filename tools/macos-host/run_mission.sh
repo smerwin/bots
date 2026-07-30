@@ -91,6 +91,12 @@ sleep 1
 # Worlds Collide: its acceleration gates restrict entry to smaller hulls than
 # the cruiser this is flown in, so the site cannot be completed at all -- not a
 # difficulty judgement, a hard gate restriction.
+# approach-object covers missions that ask you to get close to something but
+# name the wrong thing: "Athran Exigency" says to approach an Acidic Cloud,
+# which is decoration and is not even on the overview, while the Abandoned
+# Mining Station on the same grid is what actually satisfies it. Tried after
+# whatever the objective itself names.
+#
 # prefer-wreck searches particular hulls first when a mission wants cargo out of
 # destroyed ships. Purely an optimisation -- every other wreck is still opened
 # afterwards, so a wrong guess costs only a wasted trip.
@@ -99,6 +105,7 @@ keep-at-range=yes
 targeting-range=66000
 decline-mission=Worlds Collide
 prefer-wreck=Personnel Transport
+approach-object=Abandoned Mining Station
 run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=80"
 
