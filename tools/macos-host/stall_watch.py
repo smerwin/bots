@@ -108,8 +108,16 @@ class StallCheck:
     def observe(self, decision):
         """Returns a reason string when stuck, else None."""
         if BENIGN_IDLE.search(decision):
-            self.stuck_for = 0
             self.recent.append(decision)
+            # Reset only while the bot is doing nothing *but* idling. A benign
+            # line interleaved with a recurring action is a loop wearing an idle
+            # line as camouflage, and zeroing on it hides exactly that: run 101
+            # alternated "assume we are docked" with "I see a message box to
+            # close" for 415 decisions, and because every other line was benign
+            # the counter never climbed past one. The watcher sat there, alive
+            # and silent, through the whole thing.
+            if all(BENIGN_IDLE.search(d) for d in self.recent):
+                self.stuck_for = 0
             return None
         if self.shooting_only and not SHOOTING.search(decision):
             return None
@@ -167,6 +175,10 @@ def main():
                     help="decisions without progress before a stall is called")
     ap.add_argument("--gamelogs", default=os.path.expanduser("~/Documents/EVE/logs/Gamelogs"),
                     help="EVE's own game-log directory, for the silent-guns check")
+    ap.add_argument("--keep-going", action="store_true",
+                    help="report every stall and keep watching, instead of exiting on the first. "
+                         "Without it one invocation gives one alarm and then stops, which looks "
+                         "identical to having crashed.")
     args = ap.parse_args()
 
     win = game_window_id(args.pid)
@@ -196,7 +208,8 @@ def main():
             if STUCK_TEXT in line:
                 shot = capture(win, args.out, "askedforhelp")
                 print(f"STALL: bot asked for help\nSCREENSHOT: {shot}", flush=True)
-                return 0
+                if not args.keep_going:
+                    return 0
 
             m = DECISION.match(line.rstrip())
             if not m:
@@ -208,7 +221,8 @@ def main():
                 if reason:
                     shot = capture(win, args.out, label)
                     print(f"STALL: {reason}\nSCREENSHOT: {shot}", flush=True)
-                    return 0
+                    if not args.keep_going:
+                        return 0
 
 
 if __name__ == "__main__":

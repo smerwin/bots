@@ -322,6 +322,7 @@ type alias BotMemory =
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
     , clearingNotRequired : Bool
+    , readingsCount : Int
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
     }
@@ -2451,9 +2452,79 @@ runAwayIfLowHealth context shipUI =
     else
         Nothing
 
+{-| How many readings one escape choice stays put.
+
+The choice has to outlive the two-tick select-then-press-the-panel manoeuvre, or
+the bot selects one celestial and warps to whatever the next reading picked
+instead. It also has to keep moving if a warp does not get us out of trouble,
+which is why it rotates at all.
+-}
+runAwayCelestialStickyReadings : Int
+runAwayCelestialStickyReadings =
+    12
+
+
+{-| Somewhere to run to: whatever the overview reports at AU range.
+
+Distance in AU means off this grid, which is the only property that matters when
+leaving. It is also self-correcting -- arriving turns that entry into a km-range
+one that no longer qualifies, so the next warp necessarily picks somewhere else,
+and the ship keeps moving until its armour recovers.
+
+Deliberately *not* "anything whose name contains station". That is what killed
+run 102: an "Angel Asteroid Outpost" carries the object type "Asteroid Station
+- 1", matched as a station, and the bot then waited 119 readings for a Dock
+button that site scenery never offers, while armour drained from 52% to nothing.
+-}
+escapeCelestialsOnOverview : BotDecisionContext -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+escapeCelestialsOnOverview context =
+    context.readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter
+            (.objectDistance
+                >> Maybe.map (String.toUpper >> String.contains "AU")
+                >> Maybe.withDefault False
+            )
+
+
+{-| Leave, and keep leaving until the hitpoints hysteresis says we are safe.
+
+Warping to a celestial beats docking here: it needs no Dock button to exist, no
+station to be a real station, and every grid worth fleeing has something at AU
+range. Which celestial is picked rotates with the reading count, so a retreat
+that has not worked yet tries a different corner of the system rather than
+retrying one that did not help.
+-}
 runAway : BotDecisionContext -> DecisionPathNode
-runAway = 
-    tetherAtStructure
+runAway context =
+    case escapeCelestialsOnOverview context of
+        [] ->
+            describeBranch "Get out -- nothing at AU range on the overview to warp to."
+                (tetherAtStructure context)
+
+        celestials ->
+            case
+                celestials
+                    |> Common.Basics.listElementAtWrappedIndex
+                        (context.memory.readingsCount // runAwayCelestialStickyReadings)
+            of
+                Nothing ->
+                    tetherAtStructure context
+
+                Just celestial ->
+                    returnDronesToBay context
+                        |> Maybe.withDefault
+                            (selectThenPanelAction context
+                                "selectedItemWarpTo"
+                                celestial
+                                ("Get out -- warp to '"
+                                    ++ (celestial.objectName |> Maybe.withDefault "a celestial")
+                                    ++ "' at "
+                                    ++ (celestial.objectDistance |> Maybe.withDefault "range")
+                                )
+                            )
+
 
 tetherAtStructure : BotDecisionContext -> DecisionPathNode
 tetherAtStructure context =
@@ -3407,6 +3478,7 @@ initBotMemory =
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
     , clearingNotRequired = False
+    , readingsCount = 0
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
     }
@@ -4725,6 +4797,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         lowWaterMark context.readingFromGameClient
             (.armor)
             botMemoryBefore.lowestArmorPercentSinceHealthy
+    , readingsCount = botMemoryBefore.readingsCount + 1
     , clearingNotRequired =
         -- Kept far longer than siteAdmitsThisShip below, and deliberately: the
         -- briefing is only readable while the conversation is open, but the
