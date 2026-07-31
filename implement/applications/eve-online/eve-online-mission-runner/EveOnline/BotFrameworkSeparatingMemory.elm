@@ -765,7 +765,19 @@ ensureInfoPanelLocationInfoIsExpanded readingFromGameClient =
                 (Common.DecisionPath.describeBranch "I do not see the location info panel. Enable the info panel."
                     (case readingFromGameClient.infoPanelContainer |> Maybe.andThen .icons |> Maybe.andThen .locationInfo of
                         Nothing ->
-                            Common.DecisionPath.describeBranch "I do not see the icon for the location info panel." askForHelpToGetUnstuck
+                            -- Wait, do not give up. The icon is missing while the
+                            -- client is still building its UI -- after a client
+                            -- restart, and briefly around docking -- and it turns
+                            -- up a tick or two later on its own. Observed live
+                            -- across several runs: three readings without it,
+                            -- askForHelpToGetUnstuck, and then the bot carrying on
+                            -- to hand in missions perfectly well. Nothing was ever
+                            -- actually stuck; the only cost was a stall alert on
+                            -- every dock cycle, and a watcher that cries wolf is
+                            -- one you stop reading.
+                            Common.DecisionPath.describeBranch
+                                "I do not see the icon for the location info panel yet -- wait for the client to draw it."
+                                waitForProgressInGame
 
                         Just iconLocationInfoPanel ->
                             case mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft iconLocationInfoPanel of
