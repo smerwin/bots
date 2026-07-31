@@ -1650,7 +1650,14 @@ parseSelectedItemWindowFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe Sel
 parseSelectedItemWindowFromUITreeRoot uiTreeRoot =
     uiTreeRoot
         |> listDescendantsWithDisplayRegion
-        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "ActiveItem")
+        -- The macOS client names this window 'SelectedItemWnd'; 'ActiveItem' is
+        -- the name the upstream parser was written against and matches nothing
+        -- here, which read as "no panel" rather than as an error.
+        |> List.filter
+            (.uiNode
+                >> .pythonObjectTypeName
+                >> (\typeName -> List.member typeName [ "ActiveItem", "SelectedItemWnd" ])
+            )
         |> List.head
         |> Maybe.map parseSelectedItemWindow
 
