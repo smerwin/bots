@@ -455,10 +455,20 @@ exists.
   picks "Set Destination" then "Add Waypoint", verifying each click against the
   menu's own "Avoid X (Solar System)" text first. Genuinely fragile next to the
   main bot loop; run it standalone.
-- **ESI (the official API) is not viable here.** `POST
-  /ui/autopilot/waypoint/` would be the correct way to set a route, but
-  registering a developer app now requires a real-money EVE Store purchase,
-  which conflicts with this user's no-spend policy. UI automation it is.
+- **ESI (the official API) is available after all**, via an older account that
+  already had developer access — the earlier note here said registration now
+  required a real-money EVE Store purchase and so ruled it out. `POST
+  /ui/autopilot/waypoint/` is the correct way to set a route, and
+  `tools/macos-host/esi_waypoint.py` implements it (PKCE, so no client secret
+  exists; the refresh token lives in the macOS Keychain and is never printed).
+  Name resolution is verified both ways; the authenticated half is untested
+  pending a browser login. Note `/universe/ids/` does not index every NPC
+  station — the agent's own "Amarr VI (Zorast) - Moon 2 - Theology Council
+  Tribunal" comes back empty from it — so the tool falls back to resolving the
+  system from the name's first token and enumerating its stations.
+  ESI covers navigation only: CCP exposes no endpoint to request, accept or
+  complete an agent mission, so the conversation stays UI automation either way.
+  The search-bar route below needs no registration at all and is the fallback.
 
 ## `route_setter.py` internals worth knowing before touching it again
 
@@ -484,10 +494,54 @@ guarding against a failure that looks like being stuck:
 - **"Set Destination" replaces the entire route**, so clicking it on the next
   intended system is a clean reset with no separate clear step.
 
-EVE's "Search for anything" bar does **not** yield a readable results list from
-type+Enter — tested with generous waits, with and without a trailing Return, and
-a full tree sweep afterwards found nothing new. Revisiting it needs
-screenshot-driven RE, not more polling.
+## Setting a destination by name, via the search bar
+
+This section previously recorded the "Search for anything" bar as a dead end
+that yielded no readable results from type+Enter. **That was wrong**, and the
+likely reason is instructive: the sweep that "found nothing new" ran while
+`tree_walker` was truncating at 5,000 nodes in arbitrary DFS order, so the
+results window was probably read and then discarded. The budget is 20,000 now.
+Re-verified live end to end, and it is the only way the bot can originate a
+destination — every route it sets otherwise comes from the mission tracker's own
+travel buttons, which do not exist once a mission ends.
+
+The working sequence, each step confirmed against the live client:
+
+1. Click `InfoPanelSearch` (the field is its own node, canvas ~(60,71)), type the
+   station name, press Return.
+2. A `ListWindow` captioned **Search Results** opens, with collapsed group
+   headers — `Corporations (1)`, `Stations (26)`.
+3. Click the `Stations (N)` label to expand. Rows render as
+   `<color=…>0.9</color> Amarr VI (Zorast) - Moon 2 - Theology Council Tribunal (2 Jumps)`,
+   so security, full name and jump count are all readable.
+4. **Double-click** the row. This opens a `Station: Information` window.
+5. Click that window's **Set Destination** button (a `ButtonWrapper`, 126×32).
+6. `InfoPanelRoute` flips from `No Destination` to `Route N Jumps …`.
+
+Two traps, both hit live:
+
+- **Right-clicking a result row does nothing.** No context menu at any x position
+  across the row — it only selects the row and raises a tooltip. Double-click to
+  Show Info is the only route through. Do not spend time widening a cascade
+  tolerance for a menu that never opens.
+- **The hover tooltip is a separate label rendered outside the window**, to its
+  left. A naive text search for the station name matches the tooltip before the
+  real row, and right-clicking that hits empty space. Scope the row lookup to the
+  `ListWindow` subtree — and note `eve_read.walk(node, x, y)` accumulates offsets
+  from wherever it starts, so re-walking a subtree with its own absolute position
+  as the base double-counts that offset. Identify the subtree by node identity
+  and keep the coordinates from a single root-level walk.
+
+Typing the query needs no new host capability: `Common/EffectOnWindow.elm`'s
+`effectsToEnterString` already turns a string into `KeyDown`/`KeyUp` effects and
+tracks shift state across the sequence. Its coverage is the limit — see
+`getKeyboardKeyToEnterChar`, which handles letters, digits, space, `-` and `+`
+and returns `Nothing` for everything else, which makes the whole string an `Err`.
+A station name containing parentheses cannot be typed as-is. It does not need to
+be: search on a distinctive parenthesis-free substring and pick the right row by
+full-name match from the rendered list. Note also that `'-'` maps to
+`vkey_SUBTRACT` (0x6D, the numpad key), which is **not** in `botlab_host.py`'s
+`_VK_TO_CGKEYCODE` — a hyphen in a query silently has no key to press.
 
 ## Open gaps
 
