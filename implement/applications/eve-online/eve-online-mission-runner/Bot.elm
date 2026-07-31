@@ -336,6 +336,7 @@ type alias BotMemory =
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
     , clearingNotRequired : Bool
+    , agentConversationWithoutTrackerTicks : Int
     , readingsCount : Int
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
@@ -1929,7 +1930,31 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
             -- "Complete Mission" is offered throughout the mission, not only
             -- once it can succeed, so a mission still in progress means we are
             -- done talking and should go fly it.
-            closeConversation "The mission is still in progress -- go fly it."
+            --
+            -- Unless there is nothing to go and fly. Every travel step comes
+            -- from the mission's info-panel entry, and that entry exists only
+            -- for a *tracked* mission -- accepting one does not track it. With
+            -- the agent saying a mission is in progress and no entry to fly,
+            -- closing the conversation only starts the cycle again: run 103
+            -- opened it 87 times, closed it 79, and never undocked, with every
+            -- branch individually convinced it was making progress.
+            --
+            -- Gated on the counter rather than this reading, because a mission
+            -- just accepted shows in the conversation a reading or two before
+            -- it shows in the panel, and that is not the same condition.
+            if
+                (context.memory.agentConversationWithoutTrackerTicks > missionNotTrackedTicks)
+                    && (missionInfoPanelEntry context == Nothing)
+            then
+                describeBranch
+                    ("The agent says a mission is in progress, but it has no entry in the info panel after "
+                        ++ (context.memory.agentConversationWithoutTrackerTicks |> String.fromInt)
+                        ++ " readings -- it is not tracked, so there is no travel step to follow and nothing here will change that. Track it: Opportunities (Alt-J) -> Active -> right-click the mission -> 'Track'."
+                    )
+                    askForHelpToGetUnstuck
+
+            else
+                closeConversation "The mission is still in progress -- go fly it."
 
         ( Nothing, _ ) ->
             case buttonNamed "AcceptMission_Button" of
@@ -3492,6 +3517,7 @@ initBotMemory =
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
     , clearingNotRequired = False
+    , agentConversationWithoutTrackerTicks = 0
     , readingsCount = 0
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
@@ -3869,6 +3895,20 @@ wreckLootWindowsFromReadingFromGameClient : ReadingFromGameClient -> List EveOnl
 wreckLootWindowsFromReadingFromGameClient readingFromGameClient =
     readingFromGameClient.inventoryWindows
         |> List.filter (.uiNode >> findUiElementWithText "Loot All" >> (/=) Nothing)
+
+
+{-| How many readings an agent conversation may sit there insisting a mission
+is in progress, with no mission tracked at all, before that is called what it
+is rather than retried.
+
+Generous on purpose: a mission just accepted appears in the conversation a
+reading or two before it appears in the info panel, and mistaking that for an
+untracked mission would halt every run at its first mission. The failure it
+catches is unbounded, so waiting a few more readings costs nothing.
+-}
+missionNotTrackedTicks : Int
+missionNotTrackedTicks =
+    15
 
 
 {-| How many readings to keep trying to close a loot window before giving up and
@@ -4749,6 +4789,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         currentContextMenuDepth =
             context.readingFromGameClient.contextMenus |> List.length
 
+        -- The agent offering to complete a mission is the agent asserting one
+        -- is in progress. Read here rather than in the decision tree so the
+        -- assertion can be counted across readings, including the ones where
+        -- the bot has closed the conversation again.
+        agentSaysMissionInProgress =
+            context.readingFromGameClient.agentConversationWindows
+                |> List.concatMap .buttons
+                |> List.any
+                    (\button ->
+                        [ "CompleteMission_Button", "CompleteRemotely_Button" ]
+                            |> List.member button.name
+                    )
+
         currentRouteFirstMarkerRegion =
             context.readingFromGameClient
                 |> infoPanelRouteFirstMarkerFromReadingFromGameClient
@@ -4812,6 +4865,25 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             (.armor)
             botMemoryBefore.lowestArmorPercentSinceHealthy
     , readingsCount = botMemoryBefore.readingsCount + 1
+    , agentConversationWithoutTrackerTicks =
+        -- How many readings the agent has claimed a mission is in progress
+        -- while nothing at all is tracked. Counted from the reading so the
+        -- decision tree can tell "the panel has not caught up yet" from "this
+        -- mission is not tracked", which look identical in any one reading.
+        --
+        -- Deliberately not reset when the conversation closes. The failure this
+        -- catches is a cycle that closes and reopens it every few readings, so
+        -- resetting there would hold the count near zero forever and the check
+        -- would never fire -- which is the same silent-no-op shape it exists to
+        -- report. Only a mission actually appearing in the panel clears it.
+        if context.readingFromGameClient.agentMissionInfoPanelEntries |> List.isEmpty |> not then
+            0
+
+        else if agentSaysMissionInProgress then
+            botMemoryBefore.agentConversationWithoutTrackerTicks + 1
+
+        else
+            botMemoryBefore.agentConversationWithoutTrackerTicks
     , clearingNotRequired =
         -- Kept far longer than siteAdmitsThisShip below, and deliberately: the
         -- briefing is only readable while the conversation is open, but the
