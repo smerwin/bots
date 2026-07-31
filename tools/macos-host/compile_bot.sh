@@ -21,6 +21,18 @@ set -e -u -o pipefail
 SCRIPT_DIR="${0:A:h}"
 APPS_DIR="${SCRIPT_DIR}/../../implement/applications/eve-online"
 MAIN_ELM="${SCRIPT_DIR}/botlab_host/Main.elm"
+MAIN_ELM_2023_02_06="${SCRIPT_DIR}/botlab_host/Main_2023_02_06.elm"
+
+# Which wrapper a bot needs is fixed by the interface its own Bot.elm imports.
+# Mirrors host_interface_of_bot in botlab_host.py -- keep the two in step, or
+# this verifies a build the host would never produce.
+main_elm_for() {
+    case "$(grep -m1 -o 'BotLab\.BotInterface_To_Host_[0-9_]*' "$1/Bot.elm")" in
+        BotLab.BotInterface_To_Host_2024_10_19) print -r -- "$MAIN_ELM" ;;
+        BotLab.BotInterface_To_Host_2023_02_06) print -r -- "$MAIN_ELM_2023_02_06" ;;
+        *) return 1 ;;
+    esac
+}
 BUILD_ROOT="${TMPDIR:-/tmp}/compile_bot"
 
 if ! command -v elm > /dev/null; then
@@ -56,10 +68,15 @@ for target in "${targets[@]}"; do
         continue
     fi
 
+    if ! main_elm="$(main_elm_for "$src")"; then
+        printf "  %-32s no wrapper for its host interface, skipped\n" "$name"
+        continue
+    fi
+
     build="${BUILD_ROOT}/${name}"
     mkdir -p "$build"
     rsync -a --delete --exclude elm-stuff --exclude Main.elm "$src/" "$build/"
-    cp "$MAIN_ELM" "$build/"
+    cp "$main_elm" "$build/Main.elm"
     sed -i '' "s/\"0\.19\.[0-9]*\"/\"${ELM_VERSION}\"/" "$build/elm.json"
 
     # The copy must be the source. elm.json is expected to differ by exactly the

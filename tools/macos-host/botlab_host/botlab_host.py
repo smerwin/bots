@@ -34,6 +34,12 @@ sys.path.insert(0, os.path.join(MACOS_HOST_DIR, "re_helper"))
 import re_helper as rh  # noqa: E402
 
 MAIN_ELM_TEMPLATE = os.path.join(HERE, "Main.elm")
+# A bot's own source fixes which host interface it imports, and the wrappers are
+# not interchangeable -- see Main_2023_02_06.elm's header.
+MAIN_ELM_TEMPLATE_BY_INTERFACE = {
+    "BotLab.BotInterface_To_Host_2024_10_19": MAIN_ELM_TEMPLATE,
+    "BotLab.BotInterface_To_Host_2023_02_06": os.path.join(HERE, "Main_2023_02_06.elm"),
+}
 DRIVER_JS = os.path.join(HERE, "driver.js")
 MEMORY_SAMPLE_BIN = os.path.join(MACOS_HOST_DIR, "memory_sample", "memory_sample")
 WINDOW_PROBE_BIN = os.path.join(MACOS_HOST_DIR, "window_probe", "window_probe")
@@ -179,6 +185,61 @@ def vk_to_mouse_button(vk):
     return 0
 
 
+MOUSE_BUTTON_VK_CODES = (0x01, 0x02, 0x04)
+
+
+def _effect_sequence_of_request(request_str):
+    """The EffectSequenceOnWindow body of a volatile-process request, or None.
+
+    Only bots on the 2023_02_06 host interface send these; on 2024_10_19 the
+    same input arrives as a WindowsInputRequest task instead.
+    """
+    try:
+        req = json.loads(request_str)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(req, dict):
+        return req.get("EffectSequenceOnWindow")
+    return None
+
+
+def _effect_sequence_as_input_items(sequence):
+    """EffectSequenceOnWindow -> the item list _windows_input executes.
+
+    Translating rather than executing directly is what keeps the two host
+    interfaces on one input path: everything _windows_input has learned about
+    this client -- eased movement, the double-click collapse, not pausing
+    mid-drag, standing down for a human at the keyboard -- applies unchanged.
+
+    The 2023 vocabulary is narrower: mouse buttons are KeyDown/KeyUp carrying a
+    mouse virtual-key code rather than their own ButtonDown/ButtonUp, and there
+    is no scroll, no relative move and no raw character input.
+    """
+    items = []
+    window_id = sequence.get("windowId")
+    if sequence.get("bringWindowToForeground") and window_id is not None:
+        items.append({"BringWindowToForeground": str(window_id)})
+
+    for element in sequence.get("task") or []:
+        if "delayMilliseconds" in element:
+            items.append({"WaitMilliseconds": element["delayMilliseconds"]})
+            continue
+        effect = element.get("effect")
+        if not effect:
+            continue
+        (tag, payload), = effect.items()
+        if tag == "MouseMoveTo":
+            location = payload["location"]
+            items.append({"MouseMoveAbsolute": [location["x"], location["y"]]})
+        elif tag in ("KeyDown", "KeyUp"):
+            code = payload["virtualKeyCode"]
+            if code in MOUSE_BUTTON_VK_CODES:
+                items.append({"ButtonDown" if tag == "KeyDown" else "ButtonUp": code})
+            else:
+                items.append({tag: [code, False]})
+    return items
+
+
 # ---------------------------------------------------------------------------
 # Bot source acquisition
 # ---------------------------------------------------------------------------
@@ -246,6 +307,22 @@ def installed_elm_version():
     return out.stdout.strip()
 
 
+def host_interface_of_bot(bot_dir):
+    """Which BotLab.BotInterface_To_Host_* module the bot's own Bot.elm imports.
+
+    Read from Bot.elm rather than from which interface modules the app happens
+    to vendor: the mining bot ships both 2023_01_17 and 2023_02_06, and only the
+    import says which one its botMain is actually typed against.
+    """
+    bot_elm = os.path.join(bot_dir, "Bot.elm")
+    with open(bot_elm) as f:
+        for line in f:
+            m = re.match(r"\s*import\s+(BotLab\.BotInterface_To_Host_\w+)", line)
+            if m:
+                return m.group(1)
+    return None
+
+
 def prepare_build_dir(bot_dir, workdir):
     build_dir = os.path.join(workdir, "build")
     shutil.copytree(bot_dir, build_dir)
@@ -260,7 +337,15 @@ def prepare_build_dir(bot_dir, workdir):
         with open(elm_json_path, "w") as f:
             json.dump(elm_json, f, indent=4)
 
-    shutil.copy(MAIN_ELM_TEMPLATE, os.path.join(build_dir, "Main.elm"))
+    interface = host_interface_of_bot(build_dir)
+    template = MAIN_ELM_TEMPLATE_BY_INTERFACE.get(interface)
+    if template is None:
+        raise RuntimeError(
+            f"no Main.elm wrapper for host interface {interface!r} "
+            f"(have: {', '.join(sorted(MAIN_ELM_TEMPLATE_BY_INTERFACE))})"
+        )
+    print(f"# host interface {interface} -> {os.path.basename(template)}", file=sys.stderr)
+    shutil.copy(template, os.path.join(build_dir, "Main.elm"))
     return build_dir
 
 
@@ -540,6 +625,13 @@ class VolatileHost:
             body = req["ReadFromWindow"]
             return json.dumps({"ReadFromWindowResult": self._read_from_window(body)})
 
+        # Nothing else is implemented. This used to answer everything with
+        # CompletedEffectSequenceOnWindow, which reported success for requests
+        # that never ran -- including, before the 2023_02_06 interface was
+        # wired up, every input effect a bot on it sent. Input is now
+        # intercepted before it reaches this method (see run_task), so anything
+        # arriving here is genuinely unhandled and says so.
+        print(f"# unhandled volatile-process request: {sorted(req)}", file=sys.stderr)
         return json.dumps({"CompletedEffectSequenceOnWindow": True})
 
     def _search_ui_root(self, process_id):
@@ -790,7 +882,17 @@ class TaskDispatcher:
             request_struct = self._unwrap_request_considering_focus(payload)
             request_str = request_struct["request"]
             try:
-                response_json = self.volatile.handle_request(request_str)
+                # Bots on the 2023_02_06 host interface have no
+                # WindowsInputRequest task -- their input arrives here instead,
+                # inside the volatile-process request. Intercept it rather than
+                # letting it reach VolatileProcess.handle_request, which has no
+                # way to reach the input executor.
+                effect_sequence = _effect_sequence_of_request(request_str)
+                if effect_sequence is not None:
+                    self._windows_input(_effect_sequence_as_input_items(effect_sequence))
+                    response_json = json.dumps({"CompletedEffectSequenceOnWindow": True})
+                else:
+                    response_json = self.volatile.handle_request(request_str)
                 return {
                     "RequestToVolatileProcessResponse": {
                         "Ok": {
