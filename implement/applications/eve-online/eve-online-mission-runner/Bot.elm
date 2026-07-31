@@ -320,6 +320,8 @@ type alias BotMemory =
     , lootedWreckIds : List String
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
+    , lowestShieldPercentSinceHealthy : Int
+    , lowestArmorPercentSinceHealthy : Int
     }
 
 
@@ -2374,22 +2376,47 @@ runAwayIfLowHealth context shipUI =
         runAwayArmorThreshold = 
             context.eventContext.botSettings.runAwayArmorHitpointsThresholdPercent
 
-        runAwayWithShieldDescription = 
-            describeBranch 
-            ("Shield HP " ++ (shipUI.hitpointsPercent.shield |> String.fromInt) ++ "%, get out get out")
-            (runAway context)
+        -- The low-water mark, not the live reading: see runAwayRearmPercent for
+        -- why a single threshold flip-flops. Trip on the configured level, stay
+        -- committed until hitpoints climb back over the re-arm level.
+        lowestShield =
+            plausibleHitpointsPercent shipUI.hitpointsPercent.shield
+                |> Maybe.map (\current -> min current context.memory.lowestShieldPercentSinceHealthy)
+                |> Maybe.withDefault context.memory.lowestShieldPercentSinceHealthy
 
-        runAwayWithArmorDescription = 
-            describeBranch 
-            ("Armor at " ++ (shipUI.hitpointsPercent.armor |> String.fromInt) ++ "%, get out get out get out")
-            (runAway context)
+        lowestArmor =
+            plausibleHitpointsPercent shipUI.hitpointsPercent.armor
+                |> Maybe.map (\current -> min current context.memory.lowestArmorPercentSinceHealthy)
+                |> Maybe.withDefault context.memory.lowestArmorPercentSinceHealthy
+
+        runAwayWithShieldDescription =
+            describeBranch
+                ("Shield reached "
+                    ++ (lowestShield |> String.fromInt)
+                    ++ "% (now "
+                    ++ (shipUI.hitpointsPercent.shield |> String.fromInt)
+                    ++ "%), get out get out"
+                )
+                (runAway context)
+
+        runAwayWithArmorDescription =
+            describeBranch
+                ("Armor reached "
+                    ++ (lowestArmor |> String.fromInt)
+                    ++ "% (now "
+                    ++ (shipUI.hitpointsPercent.armor |> String.fromInt)
+                    ++ "%), get out get out get out"
+                )
+                (runAway context)
     in
-    if shipUI.hitpointsPercent.shield < runAwayShieldThreshold then
+    if lowestShield < runAwayShieldThreshold then
         Just runAwayWithShieldDescription
-    else if shipUI.hitpointsPercent.armor < runAwayArmorThreshold then
+
+    else if lowestArmor < runAwayArmorThreshold then
         Just runAwayWithArmorDescription
+
     else
-      Nothing
+        Nothing
 
 runAway : BotDecisionContext -> DecisionPathNode
 runAway = 
@@ -3091,6 +3118,8 @@ initBotMemory =
     , lootedWreckIds = []
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
+    , lowestShieldPercentSinceHealthy = 100
+    , lowestArmorPercentSinceHealthy = 100
     }
 
 
@@ -4218,6 +4247,68 @@ iconSpriteHasColorOfRat =
         >> Maybe.withDefault False
 
 
+{-| A hitpoints reading, if it is one we can believe.
+
+The parser returns nonsense occasionally -- measured across four runs, roughly
+one reading in a few hundred, with values like 1862%, 2307%, 7711% and -213%.
+That used to cost a single wrong tick, because every check compared the live
+value and the next reading corrected it. Latching the low-water mark for the
+retreat changed the stakes: one bogus -213% is below even a disabled threshold
+of -1, and `min` then holds it until the ship is docked or fully healthy. Seen
+live within one run of the latch going in -- "Shield reached -213% (now 70%),
+get out get out" -- so the two changes have to land together.
+-}
+plausibleHitpointsPercent : Int -> Maybe Int
+plausibleHitpointsPercent value =
+    if value < 0 || 100 < value then
+        Nothing
+
+    else
+        Just value
+
+
+{-| Where the retreat's hysteresis actually lives.
+
+Two levels, not one. The bot trips out on the configured threshold and keeps
+going until hitpoints come back above `runAwayRearmPercent` -- so a dip that
+repairs fully cancels the retreat, while a ship that keeps sliding stays
+committed. Comparing the live reading alone gave neither: under fire with a
+repairer running, armor oscillates across a single threshold and the decision
+flips with it, observed firing "get out get out get out" at 76% then "All guns
+cycling" at 82%, 64 times across four episodes without once completing a
+retreat. Each reversal also recalled and relaunched the drones, which is how
+they got chewed up.
+
+This is the memory half: keep the low-water mark, and forget it once the ship
+is healthy again or docked. `runAwayIfLowHealth` compares it against the
+threshold, because `UpdateMemoryContext` carries only the reading -- the bot
+settings are not visible from here, which is why the re-arm level is a constant
+and the trip level is not.
+-}
+runAwayRearmPercent : Int
+runAwayRearmPercent =
+    90
+
+
+lowWaterMark : ReadingFromGameClient -> ({ shield : Int, armor : Int, structure : Int } -> Int) -> Int -> Int
+lowWaterMark readingFromGameClient getPercent previous =
+    case readingFromGameClient.shipUI of
+        Nothing ->
+            100
+
+        Just shipUI ->
+            case plausibleHitpointsPercent (getPercent shipUI.hitpointsPercent) of
+                Nothing ->
+                    previous
+
+                Just current ->
+                    if runAwayRearmPercent <= current then
+                        100
+
+                    else
+                        min previous current
+
+
 updateMemoryForNewReadingFromGame : UpdateMemoryContext -> BotMemory -> BotMemory
 updateMemoryForNewReadingFromGame context botMemoryBefore =
     let
@@ -4278,6 +4369,14 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.lootWindowOpenTicks + 1
+    , lowestShieldPercentSinceHealthy =
+        lowWaterMark context.readingFromGameClient
+            (.shield)
+            botMemoryBefore.lowestShieldPercentSinceHealthy
+    , lowestArmorPercentSinceHealthy =
+        lowWaterMark context.readingFromGameClient
+            (.armor)
+            botMemoryBefore.lowestArmorPercentSinceHealthy
     , siteAdmitsThisShip =
         -- Read while the restrictions window is up, then kept so the answer
         -- outlives closing it. Forgotten once the conversation ends, since the

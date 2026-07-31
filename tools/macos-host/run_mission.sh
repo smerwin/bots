@@ -59,7 +59,12 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 #
 # The run-away thresholds dock the ship up when it drops below them. Shield
 # is disabled (-1) because shields recharge and dipping into them is normal
-# in a mission; armor damage is not, so 80% is a real warning sign.
+# in a mission; armor damage is not, so this is a real warning sign.
+#
+# This is only the trip level. The bot stays committed to leaving until armor
+# climbs back over runAwayRearmPercent (90) in Bot.elm -- one threshold on its
+# own flip-flops, since a repairer running under fire walks the value back and
+# forth across the line and the decision follows it.
 #
 # No attack-object entries are needed for the ordinary case: when a mission
 # objective names a structure to kill ("You need to destroy the <a ...>Drone
@@ -123,7 +128,7 @@ prefer-wreck=Cargo Container
 approach-object=Abandoned Mining Station
 approach-object=Amarr Station
 run-away-shield-hitpoints-threshold-percent=-1
-run-away-armor-hitpoints-threshold-percent=80"
+run-away-armor-hitpoints-threshold-percent=70"
 
 # How long this session should run. The bot stops taking new work and docks
 # once ~200 seconds remain, so it finishes parked in a station rather than
