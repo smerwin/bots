@@ -116,6 +116,12 @@ class TreeWalkerClient:
 # letters or digits, so this has to be an explicit table, not arithmetic.
 # ---------------------------------------------------------------------------
 
+# How recently a person must have used the mouse or keyboard for the bot to keep
+# its hands off. Long enough to cover the pause between a human's own clicks,
+# short enough that the bot resumes on its own without being told to.
+HUMAN_INPUT_STAND_DOWN_SECONDS = 5.0
+
+
 _VK_TO_CGKEYCODE = {
     0x08: 0x33,  # BACK -> Delete (backspace)
     0x09: 0x30,  # TAB
@@ -759,6 +765,9 @@ class TaskDispatcher:
         # and its ButtonUp is emitted as a drag rather than a plain move.
         self._buttons_down = set()
         self._last_mouse_pos = None
+        # Monotonic time of our own last posted event, so a stand-down check can
+        # tell a person's input apart from the bot's own.
+        self._last_input_post_at = None
 
     def run_task(self, task):
         """task: {"TagName": <payload>}. Returns a TaskResultStructure dict
@@ -902,7 +911,12 @@ class TaskDispatcher:
         proc = self._get_cg_input()
         proc.stdin.write(cmd + "\n")
         proc.stdin.flush()
-        return proc.stdout.readline().strip()
+        reply = proc.stdout.readline().strip()
+        # "idle" only asks a question; everything else posts an event, and
+        # _seconds_since_human_input needs to know when we last did.
+        if not cmd.startswith("idle"):
+            self._last_input_post_at = time.monotonic()
+        return reply
 
     def _cg_move(self, x, y):
         """Move the cursor, as a drag when a mouse button is currently held.
@@ -1070,6 +1084,38 @@ class TaskDispatcher:
                 return offset - idx
         return 0
 
+    def _seconds_since_human_input(self):
+        """How long since a *person* last touched the mouse or keyboard.
+
+        `None` when it cannot be told apart from our own activity.
+
+        The obvious approach does not work. CGEventSourceSecondsSinceLastEventType
+        against kCGEventSourceStateHIDSystemState is documented as hardware-only,
+        and the intent was that our own CGEventPost calls would not disturb it --
+        but measured live while the bot was clicking, it resets to ~0 on our own
+        events just as it does on a real one. So the reading alone cannot say who
+        moved the mouse.
+
+        What distinguishes them is that we know when *we* last posted. If the last
+        input event is no more recent than our own last post, it was us. If it is
+        appreciably more recent, somebody else is at the machine.
+        """
+        reply = self._cg("idle")
+        if not reply.startswith("idle "):
+            return None
+        try:
+            idle = float(reply.split()[1])
+        except (IndexError, ValueError):
+            return None
+        if self._last_input_post_at is None:
+            return idle
+        since_our_post = time.monotonic() - self._last_input_post_at
+        # A margin so ordinary jitter between posting an event and reading the
+        # clock does not read as a person.
+        if since_our_post - idle < 0.5:
+            return None
+        return idle
+
     def _windows_input(self, items):
         start = time.time()
         if not self.execute_input:
@@ -1080,6 +1126,23 @@ class TaskDispatcher:
                     "abortedStepsCount": len(items),
                     "totalTimeMilliseconds": 0,
                     "errorMessages": ["input execution disabled (run with --execute-input to enable)"],
+                }
+            }
+
+        human_idle = self._seconds_since_human_input()
+        if human_idle is not None and human_idle < HUMAN_INPUT_STAND_DOWN_SECONDS:
+            # Stand down rather than fight for the cursor. Nothing needs
+            # unwinding: the bot re-derives its decision from a fresh reading
+            # every step, so a skipped sequence costs one tick and is simply
+            # decided again once the machine is quiet.
+            print(f"#   standing down: someone used the mouse/keyboard "
+                  f"{human_idle:.1f}s ago", file=sys.stderr)
+            return {
+                "WindowsInputResponse": {
+                    "completedStepsCount": 0,
+                    "abortedStepsCount": len(items),
+                    "totalTimeMilliseconds": 0,
+                    "errorMessages": [f"standing down: human input {human_idle:.1f}s ago"],
                 }
             }
 

@@ -8,6 +8,7 @@
 //   down <button>             mouse button down at last-known position (0=left 1=right 2=other)
 //   up <button>                mouse button up at last-known position
 //   drag <x> <y> <button>      mouse move while <button> is held (drag event)
+//   idle                       seconds since the last real (hardware) input
 //   doubleclick <button>       double click at last-known position
 //   keydown <keyCode>          key down (macOS virtual keycode, CGKeyCode)
 //   keyup <keyCode>            key up
@@ -108,6 +109,15 @@ int main(void) {
                 CGEventPost(kCGHIDEventTap, event);
                 CFRelease(event);
                 printf("ok\n");
+            } else if (strcmp(cmd, "idle") == 0) {
+                // Seconds since the last *hardware* input event. Asking the HID
+                // state specifically is what makes this usable: events we post
+                // ourselves with CGEventPost do not update it, so this measures
+                // the human at the keyboard rather than the bot's own clicking.
+                // Combined session state would count both and always read ~0.
+                double idle = CGEventSourceSecondsSinceLastEventType(
+                    kCGEventSourceStateHIDSystemState, kCGAnyInputEventType);
+                printf("idle %.3f\n", idle);
             } else if (strcmp(cmd, "scroll") == 0) {
                 CGEventRef event = CGEventCreateScrollWheelEvent(
                     NULL, kCGScrollEventUnitLine, 2, (int32_t)a2, (int32_t)a1);
