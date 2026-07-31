@@ -110,14 +110,22 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # (Overview Settings -> Types -> Celestial -> Large Collidable Object), or the
 # bot never sees it in the first place.
 #
-# decline-mission skips a mission by name. The bot uses the agent's "Delay"
-# button rather than "Decline", since declining more than once every four hours
-# costs standing. Matched case-insensitively as a substring, so "Worlds Collide"
-# also covers the higher-level variants of the same mission.
+# decline-mission skips a mission by name, using the agent's "Decline" button.
+# Matched case-insensitively as a substring, so a name here also covers the
+# higher-level variants of the same mission.
 #
-# Worlds Collide: its acceleration gates restrict entry to smaller hulls than
-# the cruiser this is flown in, so the site cannot be completed at all -- not a
-# difficulty judgement, a hard gate restriction.
+# It used to press "Delay" instead, to protect the standing that declining more
+# than once every four hours costs. That is a loop: Delay means "ask me later",
+# so the agent re-offers the same mission on the next request. Run 101 delayed
+# Worlds Collide 87 times and asked for a mission 88 times without ever being
+# offered a different one.
+#
+# The list is empty. Worlds Collide was on it because its acceleration gates
+# admit smaller hulls than the cruiser the bot flew at the time; it now flies a
+# Coercer, two classes down, so the premise no longer holds and it is worth
+# letting the bot try. If the gates do refuse the destroyer, the bot finds out
+# at the gate -- gateRefusesThisShipTicks bounds that -- which costs a wasted
+# trip rather than the whole mission type.
 # approach-object covers missions that ask you to get close to something but
 # name the wrong thing: "Athran Exigency" says to approach an Acidic Cloud,
 # which is decoration and is not even on the overview, while the Abandoned
@@ -138,7 +146,6 @@ SETTINGS="orbit-in-combat=no
 keep-at-range=yes
 targeting-range=32000
 attack-object=Kruul's Pleasure Hub, Drone Silo, Repair Station, Habitat, Infested Laboratory, Laboratory, Gallente Broadcast Tower, Athran Ammunitions Depot, Warehouse
-decline-mission=Worlds Collide
 prefer-wreck=Personnel Transport
 prefer-wreck=Cargo Container
 approach-object=Abandoned Mining Station

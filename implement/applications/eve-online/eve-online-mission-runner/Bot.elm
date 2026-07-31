@@ -1866,6 +1866,23 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                 |> List.filterMap buttonNamed
                 |> List.head
 
+        -- How to get rid of an offered mission the bot will never take, with
+        -- the label to report. 'Decline' first: 'Delay' means "ask me later",
+        -- so the agent re-offers the same mission on the next request and a
+        -- permanent skip becomes an endless cycle -- run 101 delayed Worlds
+        -- Collide 87 times, asked for a mission 88 times, and never saw a
+        -- different one. Declining repeatedly inside four hours costs standing
+        -- with the agent, which is the price of actually moving on; delaying
+        -- costs the whole session. 'Delay' stays as the fallback for a
+        -- conversation that offers no Decline at all.
+        skipOfferedMissionButton =
+            [ ( "Decline", "DeclineMission_Button" )
+            , ( "Delay", "DeferMission_Button" )
+            ]
+                |> List.filterMap
+                    (\( label, name ) -> buttonNamed name |> Maybe.map (Tuple.pair label))
+                |> List.head
+
         missionReadyToComplete =
             missionInfoPanelEntry context
                 |> Maybe.map missionIsReadyToComplete
@@ -1984,35 +2001,36 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                                         -- Only reached when the answer was "no":
                                         -- an admitted ship falls through to the
                                         -- ordinary accept path above.
-                                        case buttonNamed "DeferMission_Button" of
-                                            Just deferButton ->
+                                        case skipOfferedMissionButton of
+                                            Just ( label, skipButton ) ->
                                                 describeBranch
                                                     ("'"
                                                         ++ (offeredMissionName |> Maybe.withDefault "unnamed")
-                                                        ++ "' does not admit this ship -- skip it with 'Delay'. "
+                                                        ++ "' does not admit this ship -- skip it with '"
+                                                        ++ label
+                                                        ++ "'. "
                                                         ++ missionFinePrint conversation
                                                     )
-                                                    (clickUiElement deferButton)
+                                                    (clickUiElement skipButton)
 
                                             Nothing ->
                                                 closeConversation
-                                                    "This mission does not admit this ship and I see no 'Delay' button to skip it."
+                                                    "This mission does not admit this ship and I see no way to skip it."
 
                     else if shouldDeclineMission context offeredMissionName then
-                        case buttonNamed "DeferMission_Button" of
-                            Just deferButton ->
-                                -- "Delay" rather than "Decline": declining more
-                                -- than once every four hours costs standing
-                                -- with the agent, delaying does not.
+                        case skipOfferedMissionButton of
+                            Just ( label, skipButton ) ->
                                 describeBranch
                                     ("Skip this mission ("
                                         ++ (offeredMissionName |> Maybe.withDefault "unnamed")
-                                        ++ ") using 'Delay'."
+                                        ++ ") using '"
+                                        ++ label
+                                        ++ "'."
                                     )
-                                    (clickUiElement deferButton)
+                                    (clickUiElement skipButton)
 
                             Nothing ->
-                                closeConversation "I want to skip this mission but see no 'Delay' button."
+                                closeConversation "I want to skip this mission but see no way to."
 
                     else
                         describeBranch
