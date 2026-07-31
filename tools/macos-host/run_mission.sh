@@ -62,8 +62,9 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # configured value, not a measured one, and it does not follow when you change
 # ships. Set above what the hull can reach, the bot issues locks that simply
 # fail, which reads as it ignoring rats rather than as a misconfiguration.
-# 32000 sits just under this hull's 33 km. Weapon range is a separate limit:
-# locking something does not mean the guns reach it.
+# 66000 is set for the hull currently flown on this account; the previous
+# 32000 was for a Coercer's 33 km and does not carry over. Weapon range is a
+# separate limit: locking something does not mean the guns reach it.
 #
 # The run-away thresholds dock the ship up when it drops below them. Shield
 # is disabled (-1) because shields recharge and dipping into them is normal
@@ -144,7 +145,7 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # afterwards, so a wrong guess costs only a wasted trip.
 SETTINGS="orbit-in-combat=no
 keep-at-range=yes
-targeting-range=32000
+targeting-range=66000
 attack-object=Kruul's Pleasure Hub, Drone Silo, Repair Station, Habitat, Infested Laboratory, Laboratory, Gallente Broadcast Tower, Athran Ammunitions Depot, Warehouse
 prefer-wreck=Personnel Transport
 prefer-wreck=Cargo Container
