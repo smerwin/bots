@@ -221,7 +221,7 @@ screenshot read), and later responses offer genuinely new tasks such as the
 | `window_probe/` | window enumeration via `CGWindowList` (bounds in points, backing scale); `--all` sees windows on any macOS Space, not just the active one |
 | `cg_input/` | persistent `CGEventPost` input executor, one text command per stdin line (`move`/`down`/`up`/`drag`/`doubleclick`/`keydown`/`keyup`/`scroll`) |
 | `botlab_host/botlab_host.py` | the BotLab.exe replacement — fetches bot source (GitHub URL or local path), patches `elm-version`, compiles with `Main.elm`, drives the compiled bot via `driver.js`, dispatches every `Task` type |
-| `botlab_host/Main.elm`, `driver.js` | port wrapper + Node bridge (newline-delimited JSON) between the Python host and the compiled bot |
+| `botlab_host/Main.elm`, `Main_2023_02_06.elm`, `driver.js` | port wrappers (one per host interface, picked from the bot's own import) + Node bridge (newline-delimited JSON) between the Python host and the compiled bot |
 | `run_saxrat.sh`, `run_mission.sh` | launchers for `eve-online-saxrat` / `eve-online-mission-runner`; one-bot-at-a-time guard kills any prior launcher/`botlab_host.py`/`driver.js`/`tree_walker` first |
 | `bot_help.py` | backs `--help` on the launchers |
 | `stall_watch.py` | watches a running bot's log and screenshots the client when it stalls |
@@ -438,13 +438,31 @@ exists.
 - **Full bot loop:** proven end to end for `eve-online-mission-runner` and
   `eve-online-saxrat`, and for `eve-online-warp-to-0-autopilot`, from both a
   local path and a GitHub URL.
-- **`eve-online-mining-bot` and `eve-online-wingus` cannot run on this host as
-  they stand.** Both are written against `BotLab.BotInterface_To_Host_2023_02_06`
-  while `botlab_host/Main.elm` imports `..._2024_10_19`, so `elm make` fails on a
-  missing module -- confirmed by `compile_bot.sh`, which builds every app. Running
-  either needs a Main.elm for the older interface. (This entry previously said
-  the mining bot "still compiles", which is true only on its own and not with the
-  host's wrapper.)
+- **`eve-online-mining-bot` and `eve-online-wingus` compile now, but their input
+  path is untested live.** Both are written against
+  `BotLab.BotInterface_To_Host_2023_02_06` while `botlab_host/Main.elm` imports
+  `..._2024_10_19`, so `elm make` used to fail on a missing module.
+  `botlab_host/Main_2023_02_06.elm` is the wrapper for the older interface, and
+  both `botlab_host.py` and `compile_bot.sh` now choose the wrapper from the
+  interface the bot's own `Bot.elm` imports (read from the import, not from
+  which interface modules the app vendors -- the mining bot ships two). All six
+  apps build.
+
+  The older interface has no `WindowsInputRequest` task: input travels inside
+  the volatile-process request as `EffectSequenceOnWindow`, so `run_task`
+  intercepts that and translates it into the same item list `_windows_input`
+  already executes, keeping one input path with all its client-specific
+  behaviour. Mouse buttons arrive as `KeyDown`/`KeyUp` carrying a mouse
+  virtual-key code rather than as `ButtonDown`/`ButtonUp`; there is no scroll,
+  relative move or raw character input in that vocabulary. The translation is
+  unit-checked, **but no 2023-interface bot has yet been run against the live
+  client** -- treat the first run as unproven, and watch that input actually
+  lands rather than trusting the log.
+
+  `VolatileProcess.handle_request`'s fallback used to answer *every*
+  unrecognised request with `CompletedEffectSequenceOnWindow`, which is how a
+  2023-interface bot would previously have reported every input as successful
+  while executing nothing. It now logs what it could not handle.
 - **`eve-online-mission-runner`** takes a security mission from an agent, flies
   out, clears each pocket through its acceleration gates, returns and hands in.
   Across 55 logged runs it completed 48 missions, median 58 ticks (~5.4 min).
