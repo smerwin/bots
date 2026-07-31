@@ -98,6 +98,14 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # inside Kruul's Pleasure Hub" -- but the bot discards it when the conversation
 # window closes, so nothing carries that name into combat.
 #
+# Warehouse is the same case, found the same way: The Hidden Stash asks only for
+# "15 x Small Sealed Cargo Containers in your cargohold", which come from
+# destroying the Warehouse, and names no structure at all. Run 100 sat in the
+# pocket deciding "nothing to fight" 415 times over. Note this is the object the
+# substring warning above is about -- listed here as the exact overview Name
+# ("Warehouse"; its Type is "Starbase Storage Facility"), which is why it no
+# longer also matches stations like "... Expert Distribution Warehouse".
+#
 # Either way the object must be enabled in the overview's type filters
 # (Overview Settings -> Types -> Celestial -> Large Collidable Object), or the
 # bot never sees it in the first place.
@@ -129,7 +137,7 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 SETTINGS="orbit-in-combat=no
 keep-at-range=yes
 targeting-range=32000
-attack-object=Kruul's Pleasure Hub, Drone Silo, Repair Station, Habitat, Infested Laboratory, Laboratory, Gallente Broadcast Tower, Athran Ammunitions Depot
+attack-object=Kruul's Pleasure Hub, Drone Silo, Repair Station, Habitat, Infested Laboratory, Laboratory, Gallente Broadcast Tower, Athran Ammunitions Depot, Warehouse
 decline-mission=Worlds Collide
 prefer-wreck=Personnel Transport
 prefer-wreck=Cargo Container
