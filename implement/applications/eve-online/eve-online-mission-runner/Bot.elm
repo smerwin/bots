@@ -3395,12 +3395,23 @@ escapeTargetOnOverview context =
                 |> Maybe.map (\gate -> ( gate, "selectedItemWarpTo", "warp to it" ))
 
 
-{-| D-click an acceleration gate to activate it.
+{-| Activate an acceleration gate from the Selected Item panel.
 
-The account's own binding for gate activation, and one effect rather than a
-three-step cascade. The cascade this replaces is the one that produced run 81's
-11,882 activation attempts over three hours -- clicked from out of range, where
-nothing ever counted the attempts, against a gate that never opened.
+This held D and left-clicked the overview row before -- "D-click", EVE's own
+gesture for it. That does not work, and it failed silently: run 104 issued 124
+of them against a gate at 0 m and the objective never once changed, and run 99
+managed 88 with the same result. Reproduced by hand, so it is the gesture and
+not the host: the D key reaches the client (no mapping error, and the table has
+0x44) and the click lands (the panel shows the gate selected), yet the gate
+never opens. What a D-click degrades to when the D does nothing is a plain
+select, which is exactly what was observed.
+
+The panel's own `selectedItemActivateGate` button does work -- verified live on
+the gate that had refused 124 D-clicks: the objective went from "You need to
+activate the Acceleration Gate" to "Warping" and the overview turned over from
+17 rows to 22. Same lesson as the loot window and the retreat: where the panel
+offers a named button, press it rather than reaching for a keybind or a
+cascade.
 
 Wrapped in unlessAlreadyClosingIn like the other close-in commands: EVE flies the
 ship to the gate and takes it on arrival, so re-issuing while already on the way
@@ -3414,13 +3425,10 @@ activateGateOnOverviewEntry :
 activateGateOnOverviewEntry context description entry =
     unlessAlreadyClosingIn context
         description
-        (decideActionForCurrentStep
-            ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_D ]
-             , entry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-             , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_D ]
-             ]
-                |> List.concat
-            )
+        (selectThenPanelAction context
+            "selectedItemActivateGate"
+            entry
+            "Activate the gate from the selected-item panel"
         )
 
 
