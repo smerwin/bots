@@ -1735,6 +1735,11 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                 |> List.head
                 |> Maybe.map .uiNode
 
+        firstButtonNamed names =
+            names
+                |> List.filterMap buttonNamed
+                |> List.head
+
         missionReadyToComplete =
             missionInfoPanelEntry context
                 |> Maybe.map missionIsReadyToComplete
@@ -1749,7 +1754,15 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                     describeBranch (reason ++ " (but I see no button to close the conversation)")
                         waitForProgressInGame
     in
-    case ( buttonNamed "CompleteMission_Button", missionReadyToComplete ) of
+    -- Which button finishes a mission depends on where the ship is. Docked at
+    -- the agent's station the conversation carries "CompleteMission_Button";
+    -- out in space it carries "CompleteRemotely_Button" instead, and EVE is
+    -- happy to settle the mission from there. Matching only the first meant a
+    -- completed mission fell through to the ( Nothing, _ ) arm, so the bot
+    -- opened the conversation, failed to find anything to press, and went back
+    -- to flying with the reward sitting one click away -- seen live on Mission
+    -- of Mercy with the bonus timer still running.
+    case ( firstButtonNamed [ "CompleteMission_Button", "CompleteRemotely_Button" ], missionReadyToComplete ) of
         ( Just completeButton, True ) ->
             describeBranch "Hand the finished mission in." (clickUiElement completeButton)
 
@@ -1821,6 +1834,13 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                                 (clickUiElement requestButton)
 
                         Nothing ->
+                            -- Not worth waiting on. Tested by hand against a
+                            -- live agent: after a remote hand-in it answers a
+                            -- mission request with "Please drop by, so we can
+                            -- formalize the mission contract" and offers only a
+                            -- Close button, indefinitely. Missions cannot be
+                            -- accepted remotely, so an empty conversation here
+                            -- is a final answer rather than a slow one.
                             closeConversation "This conversation offers nothing I need."
 
 
@@ -1837,12 +1857,24 @@ decideActionWhenInSpace context seeUndockingComplete =
                     (returnDronesToBay context |> Maybe.withDefault waitForProgressInGame)
 
              else
-                case manageMiddleRowModules context seeUndockingComplete of
-                    Just moduleAction ->
-                        moduleAction
+                -- An agent conversation is not a docked-only state. EVE offers
+                -- "Complete Remotely", so a finished mission can be settled from
+                -- space and the conversation window opens right there. Handling
+                -- it only under decideActionWhenDocked -- its sole caller until
+                -- now -- left the bot in space clicking the tracker's "Start
+                -- Conversation" over and over with the reward one click away,
+                -- while the window it had just opened sat unread.
+                case context.readingFromGameClient.agentConversationWindows |> List.head of
+                    Just conversation ->
+                        decideActionInAgentConversation context conversation
 
                     Nothing ->
-                        decideActionInMissionPocket context seeUndockingComplete
+                        case manageMiddleRowModules context seeUndockingComplete of
+                            Just moduleAction ->
+                                moduleAction
+
+                            Nothing ->
+                                decideActionInMissionPocket context seeUndockingComplete
             )
 
 
@@ -1894,9 +1926,35 @@ decideActionInMissionPocket context seeUndockingComplete =
                                  else
                                     approachConfiguredObjectIfPresent context
                                         |> Maybe.withDefault
-                                            (describeBranch
-                                                "Nothing to fight and no travel step offered -- wait for the mission to catch up."
-                                                waitForProgressInGame
+                                            (case missionInfoPanelEntry context of
+                                                Just _ ->
+                                                    describeBranch
+                                                        "Nothing to fight and no travel step offered -- wait for the mission to catch up."
+                                                        waitForProgressInGame
+
+                                                Nothing ->
+                                                    -- No tracker means no mission, a state that could not
+                                                    -- arise while every hand-in happened docked, since the
+                                                    -- mission then ended with the ship already at the agent.
+                                                    -- Completing remotely ends it in space instead, and the
+                                                    -- agent will only offer the next one in person -- asked
+                                                    -- remotely it answers "Please drop by, so we can
+                                                    -- formalize the mission contract" and offers no buttons.
+                                                    --
+                                                    -- Getting there needs a destination, which this bot has
+                                                    -- never been able to originate: every route it has set
+                                                    -- came from the tracker's own travel buttons. dockAtStation
+                                                    -- is not the substitute -- it reads the surroundings menu,
+                                                    -- which lists only the current system, so it cannot reach
+                                                    -- an agent two jumps out, and inside a deadspace pocket it
+                                                    -- offers no stations at all. Live, it fell through its
+                                                    -- priority list to clicking "Approach" and "Warp to Within
+                                                    -- (0 m)" on whatever was in the menu. Idling beats that
+                                                    -- until the destination can be set outright; see
+                                                    -- tools/macos-host/esi_waypoint.py.
+                                                    describeBranch
+                                                        "No mission, and no way to route back to the agent from here -- waiting."
+                                                        waitForProgressInGame
                                             )
                                 )
         )
@@ -2468,6 +2526,15 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
             context.readingFromGameClient.overviewWindows
                 |> List.concatMap .entries
                 |> List.filter isNotableWreck
+                |> List.filter overviewEntryIsDisplayed
+                -- `isNotableWreck` only asks whether a wreck is worth looting,
+                -- never whether it still holds anything, so without this the
+                -- branch reopens one it has already emptied for as long as the
+                -- row is on the overview -- 844 repeats in a single run before
+                -- it was caught. The courier picker needed the same filter for
+                -- the same reason; see the note at `notAlreadyEmptied`'s other
+                -- caller.
+                |> List.filter (notAlreadyEmptied context)
                 |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
 
         decisionIfNoEnemyToAttack =
