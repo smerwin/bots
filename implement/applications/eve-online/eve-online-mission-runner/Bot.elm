@@ -667,6 +667,42 @@ shipRestrictionsLinkFromReading readingFromGameClient =
         |> List.head
 
 
+{-| A window's close control, however this particular window carries it.
+
+Three ways of asking, because the obvious two both failed on
+`ShipRestrictionsWindow`. Matching the caption cannot work: the control is a
+`ButtonIcon` whose text lives in `_hint`, and `getDisplayText` reads only
+`_setText`/`_text`, so `findUiElementWithText "Close"` never matches and the
+first version of this stalled the session outright. `parseWindowControlsFromWindow`
+then returned Nothing too -- this window does not parse as a standard one -- and
+the Escape fallback did not close it either, so the bot simply pressed Escape
+forever.
+
+What does work, verified by hand against this exact window, is the icon's own
+`_name`: every window in this client carries a `CloseButtonIcon`, whatever else
+differs about it.
+-}
+closeControlOfWindow : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+closeControlOfWindow window =
+    case
+        window
+            |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
+            |> Maybe.andThen .closeButton
+    of
+        Just closeButton ->
+            Just closeButton
+
+        Nothing ->
+            window
+                |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+                |> List.filter
+                    (\node ->
+                        (node.uiNode |> EveOnline.ParseUserInterface.getNameFromDictEntries)
+                            == Just "CloseButtonIcon"
+                    )
+                |> List.head
+
+
 shipRestrictionsWindowFromReading : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
 shipRestrictionsWindowFromReading readingFromGameClient =
     readingFromGameClient.uiTree
@@ -1874,7 +1910,12 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                             Just restrictionsWindow ->
                                 -- The verdict is already in memory by now: it is
                                 -- read from this same reading.
-                                case restrictionsWindow |> findUiElementWithText "Close" of
+                                -- Its close control is a ButtonIcon whose caption
+                                -- lives in `_hint`, and getDisplayText reads only
+                                -- `_setText`/`_text` -- so findUiElementWithText
+                                -- "Close" can never match it, and the first
+                                -- version of this stalled the session outright.
+                                case closeControlOfWindow restrictionsWindow of
                                     Just closeButton ->
                                         describeBranch
                                             (if context.memory.siteAdmitsThisShip == Just True then
@@ -1886,9 +1927,18 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                                             (clickUiElement closeButton)
 
                                     Nothing ->
+                                        -- Escape rather than asking for help. A
+                                        -- window whose control we cannot parse is
+                                        -- not worth ending a session over, and
+                                        -- Escape closes it without clicking
+                                        -- anywhere something else could be.
                                         describeBranch
-                                            "I see no way to close the ship restrictions window."
-                                            askForHelpToGetUnstuck
+                                            "I see no close control on the ship restrictions window -- press Escape."
+                                            (decideActionForCurrentStep
+                                                [ EffectOnWindow.KeyDown EffectOnWindow.vkey_ESCAPE
+                                                , EffectOnWindow.KeyUp EffectOnWindow.vkey_ESCAPE
+                                                ]
+                                            )
 
                             Nothing ->
                                 case context.memory.siteAdmitsThisShip of
