@@ -377,8 +377,12 @@ objective text.
 This is per character, and it is why the bot ran for weeks on one character and
 failed instantly on another: missions tracked earlier stay tracked, a fresh
 character's do not. Suspect it whenever a docked bot talks to an agent in a
-loop. Watch for it recurring on each newly accepted mission until something
-confirms tracking is inherited.
+loop.
+
+**Only the first mission on a character needs this.** Tracking is inherited:
+run 106 handed in Minmatar Plot (1 of 3), took (2 of 3), and the new mission
+appeared in the info panel by itself with no intervention. So it is a one-time
+setup step per character, not something to repeat each mission.
 
 ## Reading the overview
 
