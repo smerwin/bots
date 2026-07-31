@@ -153,6 +153,7 @@ import EveOnline.BotFramework
 import EveOnline.BotFrameworkSeparatingMemory
     exposing
         ( DecisionPathNode
+        , EndDecisionPathStructure(..)
         , UpdateMemoryContext
         , askForHelpToGetUnstuck
         , branchDependingOnDockedOrInSpace
@@ -398,7 +399,20 @@ windDownBeforeSessionEnd context =
                         )
                         (case context.readingFromGameClient.shipUI of
                             Nothing ->
-                                describeBranch "Already docked. Stay put." waitForProgressInGame
+                                if secondsRemaining <= 0 then
+                                    -- Parked with the session over, so stop.
+                                    -- The host only *announces* the deadline --
+                                    -- it does not stop its own loop -- so a bot
+                                    -- that just parks here ticks on forever.
+                                    -- Observed running 2h11m past a 180-minute
+                                    -- session, printing "Already docked. Stay
+                                    -- put." 7,633 times.
+                                    describeBranch
+                                        "Session over and docked -- finish."
+                                        (Common.DecisionPath.endDecisionPath FinishSession)
+
+                                else
+                                    describeBranch "Already docked. Stay put." waitForProgressInGame
 
                             Just _ ->
                                 returnDronesToBay context
@@ -2651,32 +2665,25 @@ visibleCombatMessages readingFromGameClient =
         |> List.filter (String.isEmpty >> not)
 
 
-{-| The combat feed for the status text, newest last, capped so a busy fight
-does not push everything else out of view.
+{-| The on-screen combat feed used to be printed with every status line, and it
+was worse than useless: EVE's floating combat text lingers after a fight ends, so
+the status kept reprinting the last exchange indefinitely. Seen with "40 to
+Federation Nauclarius - Hits" sitting directly above "Rats in overview: 0.
+Current target: None." -- six lines of screen space suggesting a fight that had
+finished. A stale display reported faithfully, not stale data.
+
+The host now follows EVE's own game log instead (GameLogTail in
+botlab_host.py), which carries real wall-clock timestamps and cannot go stale,
+so nothing is lost by leaving it out here.
+
+`visibleCombatMessages` above is now unused, kept deliberately rather than
+deleted: it encodes which UI nodes carry combat text and how to read them, which
+is the expensive part to rediscover, and any future in-decision use of combat
+state wants exactly that.
 -}
-describeVisibleCombatMessages : ReadingFromGameClient -> String
-describeVisibleCombatMessages readingFromGameClient =
-    case visibleCombatMessages readingFromGameClient of
-        [] ->
-            "Combat feed: quiet."
-
-        messages ->
-            let
-                shown =
-                    messages |> List.reverse |> List.take 6 |> List.reverse
-
-                omitted =
-                    List.length messages - List.length shown
-            in
-            "Combat feed"
-                ++ (if 0 < omitted then
-                        " (" ++ String.fromInt omitted ++ " older not shown)"
-
-                    else
-                        ""
-                   )
-                ++ ":\n  "
-                ++ String.join "\n  " shown
+combatFeedIsReportedByTheHostGameLog : ()
+combatFeedIsReportedByTheHostGameLog =
+    ()
 
 
 {-| The fight itself. Structurally the anomaly bot's combat loop with the
@@ -2837,8 +2844,35 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                         Just _ ->
                             describeBranch "I see a locked target."
                                 (if activeTargetOverviewEntryIsStray context.readingFromGameClient then
-                                    describeBranch "The active target looks like a container/wreck, not a rat -- hold fire."
-                                        waitForProgressInGame
+                                    -- Unlock it, do not merely decline to shoot
+                                    -- it. Holding fire leaves the wreck locked
+                                    -- and active, so the next reading reaches
+                                    -- exactly this branch again and the bot waits
+                                    -- forever with a full target slot.
+                                    --
+                                    -- targetsToUnlock does not cover this case:
+                                    -- it matches the *target bar's* own text,
+                                    -- while this branch fires on what the
+                                    -- *overview entry* says, and the two do not
+                                    -- always agree -- see the note on
+                                    -- targetsToUnlockFromReadingFromGameClient
+                                    -- for how the bar's text resisted matching.
+                                    -- Either detector spotting a wreck is reason
+                                    -- enough to let it go.
+                                    case context.readingFromGameClient.targets |> List.filter .isActiveTarget |> List.head of
+                                        Just activeTarget ->
+                                            describeBranch
+                                                "The active target is a container/wreck, not a rat -- unlock it (Ctrl+Shift+Click)."
+                                                (ctrlShiftClickUiElement
+                                                    (activeTarget.barAndImageCont
+                                                        |> Maybe.withDefault activeTarget.uiNode
+                                                    )
+                                                )
+
+                                        Nothing ->
+                                            describeBranch
+                                                "The active target looks like a container/wreck, but I cannot find it in the target bar to unlock -- hold fire."
+                                                waitForProgressInGame
 
                                  else if activateOneOfTheLockedTargets context /= Nothing then
                                     activateOneOfTheLockedTargets context
@@ -3169,8 +3203,6 @@ statusTextFromState context =
                 ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
                 ++ ". "
                 ++ describeModulesToActivateAlways readingFromGameClient
-                ++ "\n"
-                ++ describeVisibleCombatMessages readingFromGameClient
 
         describeCurrentReading =
             case readingFromGameClient.shipUI of
@@ -3690,13 +3722,14 @@ activateAccelerationGateIfPresent context =
         |> List.filter isAccelerationGate
         |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
         |> List.head
-        |> Maybe.map
+        |> Maybe.andThen
             (\accelerationGateEntry ->
                 let
                     distanceInMeters =
                         accelerationGateEntry.objectDistanceInMeters |> Result.withDefault 999999
                 in
                 if interactionRangeInMeters < distanceInMeters then
+                    Just <|
                     -- "Activate Gate" from out here does the whole thing: the
                     -- client flies the ship over and takes the gate on arrival,
                     -- with no tick spent noticing it has arrived. The drones
@@ -3715,14 +3748,21 @@ activateAccelerationGateIfPresent context =
                         )
 
                 else if gateRefusesThisShipTicks < context.memory.gateWithinReachTicks then
-                    describeBranch
-                        ("I have been sitting on this acceleration gate for "
-                            ++ String.fromInt context.memory.gateWithinReachTicks
-                            ++ " readings and it has not taken me anywhere. It most likely will not admit this ship -- the mission's own terms would say 'special ship restrictions'. Stopping rather than clicking it any longer."
-                        )
-                        askForHelpToGetUnstuck
+                    -- Hand the turn back rather than end the session. This used to
+                    -- askForHelpToGetUnstuck, stopping everything on the strength
+                    -- of a guess -- and the guess is often wrong: the message
+                    -- blames "special ship restrictions", but it fired live on
+                    -- Athran Exigency, whose terms say nothing of the sort and
+                    -- whose objective is satisfied by approaching an object
+                    -- elsewhere on the grid (see approach-object in
+                    -- run_mission.sh). Returning Nothing lets the caller's own
+                    -- fallbacks run -- travelling a set route, then
+                    -- approachConfiguredObjectIfPresent -- which is the move that
+                    -- mission actually needs.
+                    Nothing
 
                 else
+                    Just <|
                     describeBranch "I see an acceleration gate -- activate it to move to the next pocket."
                         (ensureDronesRecalledBeforeWarping context
                             (useContextMenuCascadeOnOverviewEntry
