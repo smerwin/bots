@@ -115,7 +115,7 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # afterwards, so a wrong guess costs only a wasted trip.
 SETTINGS="orbit-in-combat=no
 keep-at-range=yes
-targeting-range=37000
+targeting-range=66000
 attack-object=Kruul's Pleasure Hub, Drone Silo, Repair Station, Habitat, Infested Laboratory, Laboratory, Gallente Broadcast Tower, Athran Ammunitions Depot
 decline-mission=Worlds Collide
 prefer-wreck=Personnel Transport
