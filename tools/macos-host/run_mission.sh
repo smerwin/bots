@@ -57,6 +57,14 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # targeting-range is the max distance (meters) to lock a target from the
 # overview; beyond it the bot approaches instead of locking.
 #
+# This must stay inside the hull's own maximum targeting range, and that is
+# not readable from the UI tree -- nothing on the HUD carries it -- so it is a
+# configured value, not a measured one, and it does not follow when you change
+# ships. Set above what the hull can reach, the bot issues locks that simply
+# fail, which reads as it ignoring rats rather than as a misconfiguration.
+# 32000 sits just under this hull's 33 km. Weapon range is a separate limit:
+# locking something does not mean the guns reach it.
+#
 # The run-away thresholds dock the ship up when it drops below them. Shield
 # is disabled (-1) because shields recharge and dipping into them is normal
 # in a mission; armor damage is not, so this is a real warning sign.
@@ -120,7 +128,7 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # afterwards, so a wrong guess costs only a wasted trip.
 SETTINGS="orbit-in-combat=no
 keep-at-range=yes
-targeting-range=66000
+targeting-range=32000
 attack-object=Kruul's Pleasure Hub, Drone Silo, Repair Station, Habitat, Infested Laboratory, Laboratory, Gallente Broadcast Tower, Athran Ammunitions Depot
 decline-mission=Worlds Collide
 prefer-wreck=Personnel Transport
