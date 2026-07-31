@@ -1079,9 +1079,9 @@ approachOverviewEntry :
     -> EveOnline.ParseUserInterface.OverviewWindowEntry
     -> DecisionPathNode
 approachOverviewEntry context description entry =
-    closeInOnOverviewEntry context
-        { description = description, menuEntries = [ "approach" ] }
-        entry
+    unlessAlreadyClosingIn context
+        description
+        (selectThenPanelAction context "selectedItemApproach" entry description)
 
 
 shipIsAlreadyApproaching : BotDecisionContext -> Bool
@@ -2438,6 +2438,38 @@ runAway =
 
 tetherAtStructure : BotDecisionContext -> DecisionPathNode
 tetherAtStructure context =
+    -- Try the overview and the Selected Item panel first. The surroundings-button
+    -- cascade below is the old path and it is too slow to be a retreat: measured
+    -- live, it spent nineteen decisions clicking menu entries while armor fell
+    -- from 58% to 31%, and the hysteresis gate that had correctly committed to
+    -- leaving could do nothing about it. Docking or warping from the panel is two
+    -- clicks with nothing to render in between.
+    case escapeTargetOnOverview context of
+        Just ( entry, buttonName, what ) ->
+            returnDronesToBay context
+                |> Maybe.withDefault
+                    (selectThenPanelAction context
+                        buttonName
+                        entry
+                        ("Get out -- '"
+                            ++ (entry.objectName |> Maybe.withDefault "somewhere off this grid")
+                            ++ "' is on the overview, "
+                            ++ what
+                        )
+                    )
+
+        Nothing ->
+            tetherAtStructureViaSurroundings context
+
+
+{-| The original surroundings-menu escape, kept as the fallback for a grid with
+neither a station nor a stargate on the overview -- a deadspace pocket, most
+often, which is exactly where a retreat is most likely to be needed and where
+this has the worst chance of working. Better than nothing, and no longer the
+first thing tried.
+-}
+tetherAtStructureViaSurroundings : BotDecisionContext -> DecisionPathNode
+tetherAtStructureViaSurroundings context =
     let
         withTextContainingIgnoringCase textToSearch =
             List.filter (.text >> String.toLower >> (==) (textToSearch |> String.toLower)) >> List.head
@@ -3082,6 +3114,145 @@ returnDronesToBay context =
             )
 
 
+{-| A button in the Selected Item panel, by its own `_name`.
+
+The panel is a far better action surface than a context-menu cascade: the
+buttons are name-addressable, always in the same place, and need nothing to
+render before they can be clicked. `ParseUserInterface` only exposes
+`orbitButton`, so the rest are reached by name -- `selectedItemApproach`,
+`selectedItemWarpTo`, `selectedItemJump`, `selectedItemDock` and friends.
+-}
+selectedItemButtonNamed : BotDecisionContext -> String -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+selectedItemButtonNamed context name =
+    context.readingFromGameClient.selectedItemWindow
+        |> Maybe.map (.uiNode >> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion)
+        |> Maybe.withDefault []
+        |> List.filter
+            (\node ->
+                (node.uiNode |> EveOnline.ParseUserInterface.getNameFromDictEntries) == Just name
+            )
+        |> List.head
+
+
+{-| Whether the Selected Item panel is showing this overview entry.
+
+Checked before pressing any of its buttons: they act on whatever is selected,
+which is not necessarily what this decision is about.
+-}
+selectedItemIsOverviewEntry : BotDecisionContext -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+selectedItemIsOverviewEntry context entry =
+    case ( context.readingFromGameClient.selectedItemWindow, entry.objectName ) of
+        ( Just window, Just name ) ->
+            EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode.uiNode
+                |> List.any (containsWords name)
+
+        _ ->
+            False
+
+
+{-| Select an overview row, then press one of the Selected Item panel's buttons.
+
+The pattern that replaces context-menu cascades wherever an overview entry is the
+subject. A cascade is three things that must all land -- right-click the row,
+wait for the flyout to render, find and click the entry -- and this session it
+failed on approach, on acceleration gates, and on the retreat, each time as a
+silent no-op that the bot happily repeated for hundreds of readings. The panel's
+buttons are name-addressable, always in the same place, and need nothing to
+render first. Verified live: selecting the drone row and pressing
+`selectedItemApproach` took the ship from 0.0 to 585 m/s after a cascade had
+achieved nothing across 180 decisions.
+
+Two ticks by design. The panel acts on whatever is selected, so this presses its
+button only once the panel is showing the row we mean, and otherwise spends a
+tick selecting. That is still far quicker than a cascade, and it cannot act on
+the wrong object.
+-}
+selectThenPanelAction :
+    BotDecisionContext
+    -> String
+    -> EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> String
+    -> DecisionPathNode
+selectThenPanelAction context buttonName entry description =
+    if selectedItemIsOverviewEntry context entry then
+        case selectedItemButtonNamed context buttonName of
+            Just button ->
+                describeBranch description (clickUiElement button)
+
+            Nothing ->
+                describeBranch
+                    (description ++ " -- but the selected-item panel offers no '" ++ buttonName ++ "'.")
+                    waitForProgressInGame
+
+    else
+        describeBranch (description ++ " (selecting it first)")
+            (clickUiElement entry.uiNode)
+
+
+{-| Somewhere off this grid, preferred nearest-first: a station to dock at, or a
+stargate to warp to.
+
+Used by the retreat, which previously drove the surroundings-button cascade and
+was measured taking armor from 58% to 31% while it tried. Docking beats warping
+-- it ends the fight outright rather than moving it -- so stations come first.
+-}
+escapeTargetOnOverview : BotDecisionContext -> Maybe ( EveOnline.ParseUserInterface.OverviewWindowEntry, String, String )
+escapeTargetOnOverview context =
+    let
+        onGrid =
+            context.readingFromGameClient.overviewWindows
+                |> List.concatMap .entries
+                |> List.filter overviewEntryIsDisplayed
+                |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+
+        matching predicate =
+            onGrid
+                |> List.filter
+                    (\entry ->
+                        [ entry.objectName, entry.objectType ]
+                            |> List.filterMap identity
+                            |> List.any predicate
+                    )
+                |> List.head
+    in
+    case matching (containsWords "station") of
+        Just station ->
+            Just ( station, "selectedItemDock", "dock at it" )
+
+        Nothing ->
+            matching (containsWords "stargate")
+                |> Maybe.map (\gate -> ( gate, "selectedItemWarpTo", "warp to it" ))
+
+
+{-| D-click an acceleration gate to activate it.
+
+The account's own binding for gate activation, and one effect rather than a
+three-step cascade. The cascade this replaces is the one that produced run 81's
+11,882 activation attempts over three hours -- clicked from out of range, where
+nothing ever counted the attempts, against a gate that never opened.
+
+Wrapped in unlessAlreadyClosingIn like the other close-in commands: EVE flies the
+ship to the gate and takes it on arrival, so re-issuing while already on the way
+just restarts the manoeuvre.
+-}
+activateGateOnOverviewEntry :
+    BotDecisionContext
+    -> String
+    -> EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> DecisionPathNode
+activateGateOnOverviewEntry context description entry =
+    unlessAlreadyClosingIn context
+        description
+        (decideActionForCurrentStep
+            ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_D ]
+             , entry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
+             , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_D ]
+             ]
+                |> List.concat
+            )
+        )
+
+
 lockTargetFromOverviewEntry : BotDecisionContext -> OverviewWindowEntry -> DecisionPathNode
 lockTargetFromOverviewEntry context overviewEntry =
     let
@@ -3106,15 +3277,37 @@ lockTargetFromOverviewEntry context overviewEntry =
                                         )
                                     )
             else
-                describeBranch ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Approach.")
-                                    (decideActionForCurrentStep
-                                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_E ]
-                                        , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-                                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_E ]
-                                        ]
-                                            |> List.concat
-                                        )
-                                    )
+                -- Press the panel's own Approach button rather than a modifier
+                -- click. This branch used to hold vkey_E, which is keep-at-range
+                -- on this account -- it is what ensureShipIsKeepingRange presses
+                -- -- so it said "Approach" while asking the client to hold
+                -- station. Switching it to vkey_Q did not help either: measured
+                -- live, the ship sat at 0.0 m/s for 100 seconds with the distance
+                -- frozen, so the keystroke is not producing an approach whatever
+                -- it is bound to. The click itself lands -- the Selected Item
+                -- panel shows the row we clicked -- so only the key is in doubt,
+                -- and the panel's button removes it from the picture.
+                --
+                -- Guarded on the panel actually showing this entry, since its
+                -- buttons act on whatever is selected. When it is showing
+                -- something else, clicking the row selects it and the next
+                -- reading takes the branch above.
+                if selectedItemIsOverviewEntry context overviewEntry then
+                    case selectedItemButtonNamed context "selectedItemApproach" of
+                        Just approachButton ->
+                            describeBranch
+                                ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Approach from the selected-item panel.")
+                                (clickUiElement approachButton)
+
+                        Nothing ->
+                            describeBranch
+                                ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away), and the selected-item panel offers no Approach.")
+                                waitForProgressInGame
+
+                else
+                    describeBranch
+                        ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Select it so the panel offers Approach.")
+                        (clickUiElement overviewEntry.uiNode)
         Err error ->
             describeBranch ("Failed to read the distance: " ++ error) askForHelpToGetUnstuck
                                 
@@ -3737,13 +3930,11 @@ activateAccelerationGateIfPresent context =
                     -- still in space; the prop mod stays on, so the ship covers
                     -- the distance fast.
                     ensureDronesRecalledBeforeWarping context
-                        (closeInOnOverviewEntry context
-                            { description =
-                                "The acceleration gate is "
-                                    ++ String.fromInt distanceInMeters
-                                    ++ " m away -- activate it from here and let the client fly me in."
-                            , menuEntries = [ "activate gate", "activate", "approach" ]
-                            }
+                        (activateGateOnOverviewEntry context
+                            ("The acceleration gate is "
+                                ++ String.fromInt distanceInMeters
+                                ++ " m away -- D-click it from here and let the client fly me in."
+                            )
                             accelerationGateEntry
                         )
 
@@ -3763,16 +3954,10 @@ activateAccelerationGateIfPresent context =
 
                 else
                     Just <|
-                    describeBranch "I see an acceleration gate -- activate it to move to the next pocket."
-                        (ensureDronesRecalledBeforeWarping context
-                            (useContextMenuCascadeOnOverviewEntry
-                                (useMenuEntryWithTextContainingFirstOf
-                                    [ "activate gate", "activate" ]
-                                    menuCascadeCompleted
-                                )
-                                accelerationGateEntry
-                                context
-                            )
+                    ensureDronesRecalledBeforeWarping context
+                        (activateGateOnOverviewEntry context
+                            "I see an acceleration gate -- D-click it to move to the next pocket."
+                            accelerationGateEntry
                         )
             )
 
