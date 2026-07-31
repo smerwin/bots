@@ -1920,7 +1920,9 @@ decideActionInMissionPocket context seeUndockingComplete =
                     Nothing ->
                         activateAccelerationGateIfPresent context
                             |> Maybe.withDefault
-                                (if routeIsSet context then
+                                (closeSearchResultsWhenRouteIsSet context
+                                    |> Maybe.withDefault
+                                 (if routeIsSet context then
                                     travelTheRoute
 
                                  else
@@ -1941,21 +1943,27 @@ decideActionInMissionPocket context seeUndockingComplete =
                                                     -- remotely it answers "Please drop by, so we can
                                                     -- formalize the mission contract" and offers no buttons.
                                                     --
-                                                    -- Getting there needs a destination, which this bot has
-                                                    -- never been able to originate: every route it has set
-                                                    -- came from the tracker's own travel buttons. dockAtStation
-                                                    -- is not the substitute -- it reads the surroundings menu,
-                                                    -- which lists only the current system, so it cannot reach
-                                                    -- an agent two jumps out, and inside a deadspace pocket it
-                                                    -- offers no stations at all. Live, it fell through its
-                                                    -- priority list to clicking "Approach" and "Warp to Within
-                                                    -- (0 m)" on whatever was in the menu. Idling beats that
-                                                    -- until the destination can be set outright; see
-                                                    -- tools/macos-host/esi_waypoint.py.
-                                                    describeBranch
-                                                        "No mission, and no way to route back to the agent from here -- waiting."
-                                                        waitForProgressInGame
+                                                    -- So route back to the station we last undocked from,
+                                                    -- which is the agent's, and let the docked flow ask for
+                                                    -- the next mission. dockAtStation is not the way: it
+                                                    -- reads the surroundings menu, which lists only the
+                                                    -- current system, so it cannot reach an agent two jumps
+                                                    -- out, and inside a deadspace pocket it offers no
+                                                    -- stations at all -- live, it fell through to clicking
+                                                    -- "Approach" and "Warp to Within (0 m)" on whatever was
+                                                    -- in the menu.
+                                                    case context.memory.lastDockedStationNameFromInfoPanel of
+                                                        Just stationName ->
+                                                            routeToStationByName context stationName
+
+                                                        Nothing ->
+                                                            -- Only before the first dock of a session, so
+                                                            -- there is nothing to aim at yet.
+                                                            describeBranch
+                                                                "No mission, and I have not docked anywhere this session to head back to."
+                                                                waitForProgressInGame
                                             )
+                                 )
                                 )
         )
 
@@ -3565,6 +3573,163 @@ anyNotableWreckInOverview readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.any isNotableWreck
+
+
+{-| Route to a station by name, through the "Search for anything" bar.
+
+This is the only way the bot can originate a destination. Every other route it
+sets comes from the mission tracker's own travel buttons, and those stop existing
+the moment a mission ends -- so a mission handed in remotely leaves the ship
+wherever it finished with nothing left to follow, and no way to reach the agent
+who will only offer the next one in person.
+
+Progress is read off the screen rather than remembered, so an attempt interrupted
+at any point simply resumes from whatever is showing.
+
+Three things here are not guessable and were established against the live client:
+
+  - **Result rows carry no context menu.** Right-clicking one selects it and
+    raises a tooltip, at every position across the row, and opens nothing. A
+    double click, which opens Show Info, is the only way in.
+  - **That tooltip is drawn outside the results window** and repeats the station
+    name, so a whole-tree text search matches it before the real row and sends
+    the click into empty space. Every lookup below is scoped to the results
+    window's own descendants.
+  - **The full name cannot be typed.** `typeTextEffects` emits only letters,
+    digits and spaces, so the parentheses and hyphens in "Amarr VI (Zorast) -
+    Moon 2 - Theology Council Tribunal" are dropped and the remains match
+    nothing. Search a typable tail of the name instead and match the full name
+    against the rendered rows -- reading is not limited the way typing is.
+
+-}
+routeToStationByName : BotDecisionContext -> String -> DecisionPathNode
+routeToStationByName context stationName =
+    let
+        query =
+            searchQueryForStation stationName
+
+        withinWindow window textToFind =
+            findUiElementWithText textToFind window
+
+        stationInfoWindow =
+            allUiNodesInReading context
+                |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "InfoWindow")
+                |> List.filter
+                    (\window ->
+                        EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode
+                            |> List.any (stringContainsIgnoringCase stationName)
+                    )
+                |> List.head
+    in
+    case stationInfoWindow |> Maybe.andThen (\window -> withinWindow window "Set Destination") of
+        Just setDestination ->
+            describeBranch ("Set destination to '" ++ stationName ++ "'.")
+                (clickUiElement setDestination)
+
+        Nothing ->
+            case searchResultsWindow context of
+                Just resultsWindow ->
+                    case withinWindow resultsWindow stationName of
+                        Just row ->
+                            describeBranch
+                                ("Open '" ++ stationName ++ "' from the search results.")
+                                (doubleClickUiElement row)
+
+                        Nothing ->
+                            case withinWindow resultsWindow "Stations (" of
+                                Just stationsGroup ->
+                                    -- The groups come back collapsed, so the rows
+                                    -- are not in the tree at all until this is
+                                    -- clicked -- not merely unrendered.
+                                    describeBranch "Expand the Stations group in the search results."
+                                        (clickUiElement stationsGroup)
+
+                                Nothing ->
+                                    describeBranch
+                                        ("The search results do not offer '" ++ stationName ++ "'.")
+                                        askForHelpToGetUnstuck
+
+                Nothing ->
+                    case searchInputField context of
+                        Just searchField ->
+                            if previousStepClickedMouse context then
+                                describeBranch
+                                    "I just clicked the search bar -- wait for the reading to catch up before typing."
+                                    waitForProgressInGame
+
+                            else
+                                describeBranch ("Search for '" ++ query ++ "'.")
+                                    (decideActionForCurrentStep
+                                        (List.concat
+                                            [ mouseClickOnUIElement MouseButtonLeft searchField
+                                                |> Result.withDefault []
+                                            , selectAllEffects
+                                            , typeTextEffects query
+                                            , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_RETURN
+                                              , EffectOnWindow.KeyUp EffectOnWindow.vkey_RETURN
+                                              ]
+                                            ]
+                                        )
+                                    )
+
+                        Nothing ->
+                            describeBranch "I do not see the search bar." askForHelpToGetUnstuck
+
+
+{-| A typable search term for a station name -- the tail after the last " - ",
+which for an NPC station is the distinctive part and free of the punctuation
+`typeTextEffects` has to drop.
+-}
+searchQueryForStation : String -> String
+searchQueryForStation stationName =
+    stationName
+        |> String.split " - "
+        |> List.reverse
+        |> List.head
+        |> Maybe.withDefault stationName
+
+
+allUiNodesInReading : BotDecisionContext -> List EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+allUiNodesInReading context =
+    context.readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+
+
+searchInputField : BotDecisionContext -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+searchInputField context =
+    allUiNodesInReading context
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "InfoPanelSearch")
+        |> List.head
+
+
+searchResultsWindow : BotDecisionContext -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+searchResultsWindow context =
+    allUiNodesInReading context
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "ListWindow")
+        |> List.filter
+            (\window ->
+                EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode
+                    |> List.any (stringContainsIgnoringCase "Search Results")
+            )
+        |> List.head
+
+
+{-| Once a route exists the search windows have done their job, and a results
+window left open sits over the screen for the rest of the trip.
+-}
+closeSearchResultsWhenRouteIsSet : BotDecisionContext -> Maybe DecisionPathNode
+closeSearchResultsWhenRouteIsSet context =
+    if not (routeIsSet context) then
+        Nothing
+
+    else
+        searchResultsWindow context
+            |> Maybe.andThen (findUiElementWithText "Close")
+            |> Maybe.map
+                (\closeButton ->
+                    describeBranch "The route is set -- close the search results."
+                        (clickUiElement closeButton)
+                )
 
 
 {-| First descendant (by depth-first order) whose displayed text contains
