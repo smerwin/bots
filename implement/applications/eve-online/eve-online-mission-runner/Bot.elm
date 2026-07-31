@@ -319,6 +319,7 @@ type alias BotMemory =
     , shipApproachingTicks : Int
     , lootedWreckIds : List String
     , gateWithinReachTicks : Int
+    , siteAdmitsThisShip : Maybe Bool
     }
 
 
@@ -626,22 +627,67 @@ gateRefusesThisShipTicks =
     40
 
 
-{-| Whether a mission's site refuses the ship we are flying.
+{-| Whether a mission's terms mention special ship restrictions at all.
 
-"After The Seven (4 of 5)" reads: "This site contains special ship restrictions"
-and "Granted Items ... 1 x Caldari Shuttle" -- the mission hands over a shuttle
-because its acceleration gates admit nothing larger. Accepted in a cruiser, the
-bot sat at the gate at 0 m and clicked Activate Gate 741 times over half an hour,
-with no error dialog and nothing to notice. Missions carrying *normal* ship
-restrictions are fine and common, so only the special wording counts.
+This is only the question "is there a list?", **not** "are we excluded?" -- the
+two were conflated for a long time and it was expensive. "After The Seven
+(4 of 5)" reads "special ship restrictions" and grants a Caldari Shuttle because
+its gates admit nothing larger; flown in a cruiser the bot sat at the gate and
+clicked Activate Gate 741 times. But "Communications Cold War" carries the same
+phrase and its restriction list *includes* the Omen Navy Issue we fly, and it
+grants no ship at all. Treating the phrase as a refusal skipped a mission we
+could fly and jammed the agent behind it -- 153 Delay clicks in one run, since a
+deferred mission stays in the journal and stops the agent offering another.
 
-The bot has no ship-switching logic, so this is a skip rather than something to
-handle.
+So the phrase only decides whether to *ask*. `restrictionsAdmitThisShip` reads
+the answer.
+
 -}
-missionNeedsADifferentShip : EveOnline.ParseUserInterface.AgentConversationWindow -> Bool
-missionNeedsADifferentShip conversation =
+missionHasSpecialShipRestrictions : EveOnline.ParseUserInterface.AgentConversationWindow -> Bool
+missionHasSpecialShipRestrictions conversation =
     missionFinePrint conversation
         |> stringContainsIgnoringCase "special ship restrictions"
+
+
+{-| The mission terms' "ship restrictions" link, which opens the site's permitted
+list. It carries its caption in a `linkText` dict entry rather than the usual
+`_setText`/`_text`, so an ordinary display-text sweep does not see it.
+-}
+shipRestrictionsLinkFromReading : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+shipRestrictionsLinkFromReading readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter
+            (\node ->
+                node.uiNode
+                    |> EveOnline.ParseUserInterface.getStringPropertyFromDictEntries "linkText"
+                    |> Maybe.map (stringContainsIgnoringCase "ship restrictions")
+                    |> Maybe.withDefault False
+            )
+        |> List.head
+
+
+shipRestrictionsWindowFromReading : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+shipRestrictionsWindowFromReading readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "ShipRestrictionsWindow")
+        |> List.head
+
+
+{-| Whether the site's permitted list covers the hull we are in.
+
+The client answers this itself: the window opens with "you may use your Omen Navy
+Issue to access it, or one of the following types of ship: ...". Matching that
+clause needs no ship database here, and it names our own ship, so it cannot be
+confused by the list of alternatives below it. A wording we fail to match reads
+as "not admitted", which is the conservative direction -- it skips a mission we
+might have flown rather than committing to one we cannot.
+-}
+restrictionsAdmitThisShip : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Bool
+restrictionsAdmitThisShip restrictionsWindow =
+    EveOnline.ParseUserInterface.getAllContainedDisplayTexts restrictionsWindow.uiNode
+        |> List.any (stringContainsIgnoringCase "you may use your")
 
 
 {-| The mission's terms, as one line, logged when it is accepted: objective,
@@ -1783,24 +1829,80 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                         offeredMissionName =
                             conversation.offeredMissionName
                     in
-                    if missionNeedsADifferentShip conversation then
-                        -- The site's gates will not admit the ship we are in, so
-                        -- the mission cannot be flown as configured. Delay rather
-                        -- than decline: declining more than once every four hours
-                        -- costs standing, and this is a routine skip.
-                        case buttonNamed "DeferMission_Button" of
-                            Just deferButton ->
-                                describeBranch
-                                    ("'"
-                                        ++ (offeredMissionName |> Maybe.withDefault "unnamed")
-                                        ++ "' has special ship restrictions and grants a ship to fly it in -- skip it with 'Delay'. "
-                                        ++ missionFinePrint conversation
-                                    )
-                                    (clickUiElement deferButton)
+                    if
+                        missionHasSpecialShipRestrictions conversation
+                            && (context.memory.siteAdmitsThisShip
+                                    /= Just True
+                                    || shipRestrictionsWindowFromReading context.readingFromGameClient
+                                    /= Nothing
+                               )
+                    then
+                        -- The phrase means the site has a permitted list, not that
+                        -- we are off it. Open the list, read the verdict, close it
+                        -- again, and only then decide -- see
+                        -- missionHasSpecialShipRestrictions for what conflating
+                        -- those two cost.
+                        case shipRestrictionsWindowFromReading context.readingFromGameClient of
+                            Just restrictionsWindow ->
+                                -- The verdict is already in memory by now: it is
+                                -- read from this same reading.
+                                case restrictionsWindow |> findUiElementWithText "Close" of
+                                    Just closeButton ->
+                                        describeBranch
+                                            (if context.memory.siteAdmitsThisShip == Just True then
+                                                "The site admits this ship -- close the restrictions and take the mission."
+
+                                             else
+                                                "The site does not admit this ship -- close the restrictions and skip the mission."
+                                            )
+                                            (clickUiElement closeButton)
+
+                                    Nothing ->
+                                        describeBranch
+                                            "I see no way to close the ship restrictions window."
+                                            askForHelpToGetUnstuck
 
                             Nothing ->
-                                closeConversation
-                                    "This mission needs a different ship and I see no 'Delay' button to skip it."
+                                case context.memory.siteAdmitsThisShip of
+                                    Nothing ->
+                                        case shipRestrictionsLinkFromReading context.readingFromGameClient of
+                                            Just restrictionsLink ->
+                                                describeBranch
+                                                    "This site has ship restrictions -- open them and see whether they admit this ship."
+                                                    (clickUiElement restrictionsLink)
+
+                                            Nothing ->
+                                                -- Nothing to ask with. Taking the
+                                                -- mission is the better guess:
+                                                -- gateRefusesThisShipTicks already
+                                                -- bounds the cost of being wrong,
+                                                -- while skipping parks the mission
+                                                -- in the journal and stops the
+                                                -- agent offering anything else.
+                                                describeBranch
+                                                    ("This site has ship restrictions and offers no link to read them -- take '"
+                                                        ++ (offeredMissionName |> Maybe.withDefault "unnamed")
+                                                        ++ "' and let the gate decide."
+                                                    )
+                                                    (clickUiElement acceptButton)
+
+                                    Just _ ->
+                                        -- Only reached when the answer was "no":
+                                        -- an admitted ship falls through to the
+                                        -- ordinary accept path above.
+                                        case buttonNamed "DeferMission_Button" of
+                                            Just deferButton ->
+                                                describeBranch
+                                                    ("'"
+                                                        ++ (offeredMissionName |> Maybe.withDefault "unnamed")
+                                                        ++ "' does not admit this ship -- skip it with 'Delay'. "
+                                                        ++ missionFinePrint conversation
+                                                    )
+                                                    (clickUiElement deferButton)
+
+                                            Nothing ->
+                                                closeConversation
+                                                    "This mission does not admit this ship and I see no 'Delay' button to skip it."
 
                     else if shouldDeclineMission context offeredMissionName then
                         case buttonNamed "DeferMission_Button" of
@@ -2910,6 +3012,7 @@ initBotMemory =
     , shipApproachingTicks = 0
     , lootedWreckIds = []
     , gateWithinReachTicks = 0
+    , siteAdmitsThisShip = Nothing
     }
 
 
@@ -4097,6 +4200,20 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.lootWindowOpenTicks + 1
+    , siteAdmitsThisShip =
+        -- Read while the restrictions window is up, then kept so the answer
+        -- outlives closing it. Forgotten once the conversation ends, since the
+        -- next mission's site is a different question.
+        case shipRestrictionsWindowFromReading context.readingFromGameClient of
+            Just restrictionsWindow ->
+                Just (restrictionsAdmitThisShip restrictionsWindow)
+
+            Nothing ->
+                if context.readingFromGameClient.agentConversationWindows |> List.isEmpty then
+                    Nothing
+
+                else
+                    botMemoryBefore.siteAdmitsThisShip
     , routeFirstMarkerRegion = currentRouteFirstMarkerRegion
     , routeFirstMarkerUnchangedTicks =
         if currentRouteFirstMarkerRegion == Nothing then
