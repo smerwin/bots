@@ -209,6 +209,18 @@ screenshot read), and later responses offer genuinely new tasks such as the
 `SearchUIRootAddress` → `ReadFromWindow` transition. Drain a queue keyed by
 `taskId`, extended from every response, until empty.
 
+## Skills (`.claude/skills/`)
+
+Slash commands wrapping the workflows that recur here. They carry the
+procedure and its traps; this file carries the facts.
+
+| skill | use it when |
+|---|---|
+| `/diagnose-stuck-run` | a run may be looping — find out, and find the branch |
+| `/check-ui-parse` | the bot seems blind to something on screen, or a guard's premise needs checking against the live client |
+| `/bot-run` | start, stop, cycle or stall-watch a run |
+| `/review-silent-success` | reviewing changes for the failure mode that reports success and does nothing |
+
 ## Tools (`tools/macos-host/`)
 
 | path | purpose |
