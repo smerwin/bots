@@ -321,6 +321,7 @@ type alias BotMemory =
     , lootedWreckIds : List String
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
+    , clearingNotRequired : Bool
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
     }
@@ -2749,10 +2750,23 @@ decideActionInCombat :
     -> DecisionPathNode
 decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
     let
-        overviewEntriesToAttack =
+        everythingWorthAttacking =
             overviewEntriesToAttackFromReadingFromGameClient
                 (objectNamesToAttack context)
                 context.readingFromGameClient
+
+        -- When the briefing says the rooms need not be cleared, drop everything
+        -- that only qualified by looking like a rat. What the objective or the
+        -- settings named by name still stands: those missions ask for a
+        -- structure dead, and "clearing is optional" is about the pirates
+        -- guarding it, not about the target itself.
+        overviewEntriesToAttack =
+            if context.memory.clearingNotRequired then
+                everythingWorthAttacking
+                    |> List.filter (isObjectToAttackByName (objectNamesToAttack context))
+
+            else
+                everythingWorthAttacking
 
         -- Locking clicks the row, so only rows actually rendered can be used: a
         -- hidden one's reported position belongs to whatever row was recycled
@@ -2985,7 +2999,16 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                                 )
     in
     if overviewEntriesToAttack |> List.isEmpty then
-        decisionIfNoEnemyToAttack
+        if context.memory.clearingNotRequired && not (List.isEmpty everythingWorthAttacking) then
+            describeBranch
+                ("The briefing says clearing is not required -- leaving "
+                    ++ (everythingWorthAttacking |> List.length |> String.fromInt)
+                    ++ " hostile(s) alone and getting on with the objective."
+                )
+                decisionIfNoEnemyToAttack
+
+        else
+            decisionIfNoEnemyToAttack
 
     else if context.eventContext.botSettings.orbitInCombat == AppSettings.Yes then
         ensureShipIsOrbitingDecision |> Maybe.withDefault decisionToKillRats
@@ -3383,6 +3406,7 @@ initBotMemory =
     , lootedWreckIds = []
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
+    , clearingNotRequired = False
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
     }
@@ -3667,6 +3691,56 @@ overviewEntriesToAttackFromReadingFromGameClient namesToAttack readingFromGameCl
         |> List.concatMap .entries
         |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
         |> List.filter (shouldAttackOverviewEntry namesToAttack)
+
+
+{-| Targets this mission actually named, as opposed to hostiles that merely
+happen to share the grid. Distinguished by *why* the entry matched: an
+objective- or settings-named structure still has to die when the briefing says
+clearing is optional, a wandering pirate does not.
+-}
+isObjectToAttackByName : ObjectNamesToAttack -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+isObjectToAttackByName namesToAttack overviewEntry =
+    isObjectToAttackFromObjective namesToAttack.fromObjective overviewEntry
+        || isObjectToAttackFromSettings namesToAttack.fromSettings overviewEntry
+
+
+{-| Whether the mission's own briefing says the pirates need not be cleared.
+
+EVE says so in fixed wording when a site's gates are unlocked -- "The
+acceleration gates are not locked, hence clearing the pirates in the first two
+rooms is not required" -- and it is worth acting on: run 102 spent over 400
+combat decisions shooting rats on a mission whose brief said not to bother,
+while the tracker objective read "You need to activate the Acceleration Gate"
+the whole time.
+
+Both halves of the phrase are required. Anything less explicit is treated as
+"clearing is required", which is the behaviour that was always there -- getting
+this wrong the other way strands the ship at a gate that will not open.
+-}
+briefingSaysClearingIsOptional : String -> Bool
+briefingSaysClearingIsOptional briefing =
+    let
+        normalised =
+            briefing |> String.toLower
+    in
+    (normalised |> String.contains "not locked")
+        && (normalised |> String.contains "not required")
+
+
+{-| The answer from any briefing on screen right now, or `Nothing` when no
+briefing is readable and the remembered answer should stand.
+-}
+clearingNotRequiredFromReading : ReadingFromGameClient -> Maybe Bool
+clearingNotRequiredFromReading readingFromGameClient =
+    case
+        readingFromGameClient.agentConversationWindows
+            |> List.filter (.objectiveHtml >> (/=) Nothing)
+    of
+        [] ->
+            Nothing
+
+        conversations ->
+            Just (conversations |> List.any (missionFinePrint >> briefingSaysClearingIsOptional))
 
 
 {-| Whether the ship's own persistent cargo-hold "Inventory" window (open
@@ -4651,6 +4725,14 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         lowWaterMark context.readingFromGameClient
             (.armor)
             botMemoryBefore.lowestArmorPercentSinceHealthy
+    , clearingNotRequired =
+        -- Kept far longer than siteAdmitsThisShip below, and deliberately: the
+        -- briefing is only readable while the conversation is open, but the
+        -- rooms it describes are fought long after it closes. Every briefing
+        -- that appears overwrites the answer, so the next mission replaces this
+        -- one rather than inheriting it.
+        clearingNotRequiredFromReading context.readingFromGameClient
+            |> Maybe.withDefault botMemoryBefore.clearingNotRequired
     , siteAdmitsThisShip =
         -- Read while the restrictions window is up, then kept so the answer
         -- outlives closing it. Forgotten once the conversation ends, since the
