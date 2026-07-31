@@ -775,9 +775,37 @@ isLootableFor context itemName entry =
                 |> List.any
                     (\text ->
                         [ "wreck", "cargo container", "warehouse" ]
-                            |> List.any (\pattern -> stringContainsIgnoringCase pattern text)
+                            |> List.any (\pattern -> containsWords pattern text)
                     )
            ))
+
+
+{-| Whether `pattern` occurs in `text` as whole words rather than as a substring.
+
+Substring matching keeps costing this project real bugs. "Warehouse" matched a
+Caldari Trading Station called "Bhizheba VIII - Moon 5 - Expert Distribution
+Warehouse" and had the bot shooting the station for a session. Narrowing that to
+Type then made "Habitat" match every Habitation Module on the grid. And a live
+rogue drone called a "Wrecker" contains "wreck", so the bot locked it as a rat
+and then unlocked it again as debris on the next tick, unable to ever kill it.
+
+EVE carries these words whole -- "Mission Generic Medium Wreck", "Cargo
+Container" -- so comparing on word boundaries keeps every real match while
+dropping "Wrecker". Whitespace is normalised and both sides padded, so a match
+can neither begin nor end mid-word, and a multi-word pattern still matches as a
+sequence.
+
+Note this cannot help where the unwanted match really is a whole word: the
+"Warehouse" station above still contains the word. That one is handled by
+`attack-object` matching Name or Type exactly instead.
+-}
+containsWords : String -> String -> Bool
+containsWords pattern text =
+    let
+        padded value =
+            " " ++ (value |> String.toLower |> String.words |> String.join " ") ++ " "
+    in
+    String.contains (padded pattern) (padded text)
 
 
 matchesOverviewName : String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
@@ -1262,7 +1290,7 @@ lootableHoldingMissionItem context itemName =
                 |> List.any
                     (\text ->
                         [ "wreck", "cargo container" ]
-                            |> List.any (\pattern -> stringContainsIgnoringCase pattern text)
+                            |> List.any (\pattern -> containsWords pattern text)
                     )
 
         isPreferredWreck entry =
@@ -3349,7 +3377,7 @@ overviewEntryIsStrayLockTarget overviewEntry =
                 |> List.filterMap identity
     in
     [ "container", "wreck" ]
-        |> List.any (\pattern -> textsToCheck |> List.any (stringContainsIgnoringCase pattern))
+        |> List.any (\pattern -> textsToCheck |> List.any (containsWords pattern))
 
 
 {-| Click the object we are about to shoot, before shooting it.
@@ -3494,7 +3522,7 @@ targetsToUnlockFromReadingFromGameClient readingFromGameClient =
                     |> List.any
                         (\text ->
                             [ "container", "wreck" ]
-                                |> List.any (\pattern -> stringContainsIgnoringCase pattern text)
+                                |> List.any (\pattern -> containsWords pattern text)
                         )
             )
 
@@ -3665,7 +3693,7 @@ isNotableWreck overviewEntry =
 
         isWreck =
             overviewEntry.objectType
-                |> Maybe.map (stringContainsIgnoringCase "wreck")
+                |> Maybe.map (containsWords "wreck")
                 |> Maybe.withDefault False
     in
     containsNotableRatName && isWreck
