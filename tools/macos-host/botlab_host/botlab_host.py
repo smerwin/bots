@@ -1255,7 +1255,7 @@ class TaskDispatcher:
 # ---------------------------------------------------------------------------
 
 def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_screenshots=False,
-            session_duration_minutes=None):
+            session_duration_minutes=None, game_log_dir=None):
     proc = subprocess.Popen(
         ["node", DRIVER_JS, bot_js_path],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
@@ -1292,6 +1292,7 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
 
     tick = 0
     tick_start = time.monotonic()
+    game_log = GameLogTail(game_log_dir) if game_log_dir else None
 
     def log_decision(cont, decision_seq):
         # Every ContinueSession response carries its own freshly computed
@@ -1308,6 +1309,9 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         # grouped.
         elapsed = time.monotonic() - tick_start
         print(f"# [{tick}.{decision_seq}] ({elapsed:.3f}s) {cont['statusText'][:4000]}", file=sys.stderr)
+        if game_log is not None:
+            for line in game_log.new_lines():
+                print(f"#   game log: {line}", file=sys.stderr)
 
     while True:
         if "FinishSession" in response:
@@ -1379,6 +1383,77 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
     proc.wait(timeout=5)
 
 
+_GAME_LOG_MARKUP = re.compile(r"<[^>]*>")
+
+
+class GameLogTail:
+    """Follow EVE's own game log, the only timestamped record in this system.
+
+    The bot's combat feed reads the floating combat text out of the UI tree, and
+    that text lingers on screen after a fight ends -- so the status keeps
+    reprinting the last exchange long after it stopped meaning anything, which
+    reads as alarming when nothing is happening. It is a stale display being
+    reported faithfully, not stale data, and the bot cannot do better: it only
+    ever sees the UI tree, never the filesystem.
+
+    The client writes a real log with wall-clock timestamps
+    ("[ 2026.07.31 03:56:19 ] (None) Jumping from Hedion to Amarr"), which also
+    fills the gap left by this host's own log carrying no timestamps at all.
+
+    A new file is opened per client session, so the newest one wins and is
+    re-checked as we go rather than pinned at startup. On first sight of a file
+    we start at its end: the point is what happened since the last decision, not
+    a replay of the session so far.
+    """
+
+    def __init__(self, directory):
+        self.directory = os.path.expanduser(directory)
+        self.path = None
+        self.offset = 0
+
+    def _newest_file(self):
+        try:
+            names = os.listdir(self.directory)
+        except OSError:
+            return None
+        paths = [os.path.join(self.directory, n) for n in names if n.endswith(".txt")]
+        paths = [p for p in paths if os.path.isfile(p)]
+        return max(paths, key=os.path.getmtime) if paths else None
+
+    def new_lines(self, limit=25):
+        path = self._newest_file()
+        if path is None:
+            return []
+        if path != self.path:
+            self.path = path
+            try:
+                self.offset = os.path.getsize(path)
+            except OSError:
+                self.offset = 0
+            return []
+        try:
+            size = os.path.getsize(path)
+            # Truncated or replaced under us -- read from the top rather than
+            # seeking past the end and reporting nothing forever.
+            if size < self.offset:
+                self.offset = 0
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(self.offset)
+                data = handle.read()
+                self.offset = handle.tell()
+        except OSError:
+            return []
+        # Combat lines arrive wrapped in colour and font markup
+        # ("<color=0xffcc0000><b>133</b> ... <b>Tower Sentry Gallente I</b> ...
+        # - Smashes"), which is unreadable at a glance and drowns the numbers.
+        lines = [_GAME_LOG_MARKUP.sub("", line) for line in data.splitlines()]
+        lines = [" ".join(line.split()) for line in lines]
+        lines = [line for line in lines if line]
+        if len(lines) > limit:
+            lines = [f"({len(lines) - limit} earlier lines not shown)"] + lines[-limit:]
+        return lines
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("bot_source", help="GitHub URL (repo or .../tree/<branch>/<subpath>) or a local file/directory path")
@@ -1396,6 +1471,11 @@ def main():
                      help="actually send mouse/keyboard input via CGEventPost (off by default: logs what would be sent instead)")
     ap.add_argument("--capture-screenshots", action="store_true",
                      help="capture real screenshot pixel data for ReadFromWindowMethod (off by default: ~1.6s/cycle cost most bots don't need; see CLAUDE.md)")
+    ap.add_argument("--game-log-dir", default="~/Documents/EVE/logs/Gamelogs",
+                    help="EVE's own game log directory; its newest file is followed and "
+                         "echoed under each decision (it is the only timestamped record here)")
+    ap.add_argument("--no-game-log", action="store_true",
+                    help="do not follow EVE's game log")
     ap.add_argument("--session-duration-minutes", type=float, default=None,
                      help="tell the bot how long this session should run; BotFramework's own "
                           "continueIfShouldHide docks (and stays docked) once ~200s remain "
@@ -1412,7 +1492,8 @@ def main():
         print(f"# compiled: {bot_js}", file=sys.stderr)
         run_bot(bot_js, args.settings, max_ticks=args.max_ticks, execute_input=args.execute_input,
                 capture_screenshots=args.capture_screenshots,
-                session_duration_minutes=args.session_duration_minutes)
+                session_duration_minutes=args.session_duration_minutes,
+            game_log_dir=None if args.no_game_log else args.game_log_dir)
     finally:
         if args.keep_build_dir:
             print(f"# left build dir at {workdir}", file=sys.stderr)
