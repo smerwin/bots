@@ -19,7 +19,11 @@ set -e -u -o pipefail
 
 SCRIPT_DIR="${0:A:h}"
 SCREEN_SESSION="${BOT_SCREEN:-saxrat}"
-LAUNCHER="${BOT_LAUNCHER:-./run_mission.sh}"
+# Absolute, not "./run_mission.sh": the command is stuffed into a screen session
+# whose working directory this script does not control, and which does drift --
+# a cycle failed with "no such file or directory: ./run_mission.sh" after the
+# session had been cd'd elsewhere, leaving no bot running at all.
+LAUNCHER="${BOT_LAUNCHER:-${SCRIPT_DIR}/run_mission.sh}"
 LOG_DIR="${BOT_LOG_DIR:-/private/tmp/claude-501/-Users-smerwin-code-bots/8486a8c5-32d8-4523-ac86-9f9c3a68aaec/scratchpad}"
 LOG_PREFIX="${BOT_LOG_PREFIX:-mission_run}"
 
