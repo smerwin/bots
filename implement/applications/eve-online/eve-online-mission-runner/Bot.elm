@@ -2572,15 +2572,18 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                 Nothing ->
                     case notableWreckEntries of
                         wreckToLoot :: _ ->
-                            describeBranch "Open commander/overseer wreck's cargo before leaving."
-                                (useContextMenuCascadeOnOverviewEntry
-                                    (useMenuEntryWithTextContainingFirstOf
-                                        [ "Loot All", "Open Cargo" ]
-                                        menuCascadeCompleted
-                                    )
-                                    wreckToLoot
-                                    context
-                                )
+                            -- Double click, not the right-click cascade, for the
+                            -- reason openCargoOnOverviewEntry documents. The
+                            -- cascade needs the row to hold still between opening
+                            -- the menu and clicking the entry, and a pocket with
+                            -- several commander wrecks at near-identical range
+                            -- re-sorts the distance-ordered overview between
+                            -- readings, so the click lands on whichever wreck
+                            -- moved into that row. Measured live: 530 cascade
+                            -- attempts to land 21 loots.
+                            openCargoOnOverviewEntry context
+                                "Open commander/overseer wreck's cargo before leaving."
+                                wreckToLoot
 
                         [] ->
                             continueIfCombatComplete
