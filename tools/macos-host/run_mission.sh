@@ -12,7 +12,10 @@
 # header): set the UI language to English; open the overview and drones
 # windows; sort the overview by distance (nearest at top); make sure the
 # overview shows acceleration gates, or the bot cannot follow a mission from
-# one pocket to the next; filter empty wrecks out of the overview, so that
+# one pocket to the next; track the mission so it shows in the info panel
+# (Opportunities, Alt-J -> Active -> right-click the card -> Track) -- accepting
+# it is not enough, and untracked there is no travel button and the bot never
+# undocks; filter empty wrecks out of the overview, so that
 # looting cargo out of destroyed ships terminates instead of reopening wrecks
 # it has already emptied; in the ship UI, put combat modules in the top row,
 # the propulsion module first in the middle row, and hide passive modules;

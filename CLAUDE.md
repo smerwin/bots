@@ -352,6 +352,34 @@ that cannot change between two `CGEventPost` calls milliseconds apart. Check onl
 at the sequence's own `BringWindowToForeground`/`AbortIfWindowNotInForeground`
 checkpoints.
 
+## A mission must be *tracked* or the mission runner cannot leave the station
+
+`eve-online-mission-runner` navigates entirely from the mission tracker's own
+travel button in the info panel — Undock, Set Destination, Warp to Location,
+Dock. That entry (`AgentMissionInfoPanelEntry`, under `InfoPanelJobBoard`)
+exists only for a mission that is **tracked**. Accepting one does not track it.
+
+Untracked, the panel entry is absent, and the failure is a loop rather than an
+error: the bot sees no mission, asks the agent for one, the agent offers
+"Complete Mission" because a mission *is* in progress, `Bot.elm` reads that as
+"still in progress — go fly it" and closes the conversation, and the next
+reading starts over. Run 103 did that for 47 ticks — 87 conversation opens, 79
+closes, 221 "assume we are docked", never undocked, and `askForHelpToGetUnstuck`
+never fired because every individual branch believed it was making progress.
+
+To track: **Opportunities (Alt-J) → Active tab → right-click the mission card →
+"Track"**. The right-click menu is the only place it lives; the card's own
+controls and the Agency window do not offer it, and neither does the Journal.
+Confirm it took by checking the info panel gained a fourth
+`ButtonIconInfoPanel` toggle and an `AgentMissionInfoPanelEntry` carrying the
+objective text.
+
+This is per character, and it is why the bot ran for weeks on one character and
+failed instantly on another: missions tracked earlier stay tracked, a fresh
+character's do not. Suspect it whenever a docked bot talks to an agent in a
+loop. Watch for it recurring on each newly accepted mission until something
+confirms tracking is inherited.
+
 ## Reading the overview
 
 The overview **virtualises**: every object in space has an entry in the UI tree,

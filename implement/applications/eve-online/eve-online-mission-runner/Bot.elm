@@ -16,6 +16,13 @@
    has a label and there is nothing to fight, which removes any need to set
    routes or drive the autopilot itself.
 
+   That tracker is the bot's only route out of the station, and it exists only
+   for a mission that is **tracked** -- see the setup list below. Accepting a
+   mission is not enough. Untracked, the panel entry is simply absent, which
+   the bot reads as "no mission running": it asks the agent for one, the agent
+   answers that a mission is already in progress, it closes the conversation,
+   and it starts over. Run 103 did that 87 times without undocking.
+
    ## Setting up the Game Client
 
    Despite being quite robust, this bot is less intelligent than a human. For
@@ -29,6 +36,13 @@
      nearest entry at the top.
    + Make sure the overview shows acceleration gates, or the bot cannot follow
      a mission from one pocket to the next.
+   + Track the mission, so that it appears in the info panel. Open
+     Opportunities (Alt-J), go to the "Active" tab, right-click the mission's
+     card and choose "Track". Accepting a mission does not track it, and an
+     untracked mission has no info-panel entry at all -- which is where every
+     travel step comes from, so the bot never leaves the station. A character
+     whose missions were tracked before keeps that; a fresh one does not, which
+     is what makes this look like a bot fault rather than client setup.
    + In the ship UI, arrange the modules:
      + Place the modules to use in combat (to activate on targets) in the top row.
      + Place the propulsion module first in the middle row. The bot drives this
