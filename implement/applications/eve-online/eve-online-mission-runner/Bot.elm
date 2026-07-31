@@ -2794,15 +2794,35 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
         decisionIfNoEnemyToAttack =
             case context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.head of
                 Just openLootWindow ->
-                    if context.memory.lootWindowOpenTicks > 2 then
-                        describeBranch "Loot window did not close on its own -- force it shut (Ctrl+W)."
-                            (decideActionForCurrentStep
-                                [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL
-                                , EffectOnWindow.KeyDown EffectOnWindow.vkey_W
-                                , EffectOnWindow.KeyUp EffectOnWindow.vkey_W
-                                , EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL
-                                ]
+                    if context.memory.lootWindowOpenTicks > lootWindowRefusesToCloseTicks then
+                        describeBranch
+                            ("The loot window has stayed open for "
+                                ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
+                                ++ " readings and will not close."
                             )
+                            askForHelpToGetUnstuck
+
+                    else if context.memory.lootWindowOpenTicks > 2 then
+                        -- Click the window's own Close control, not Ctrl+W. That
+                        -- hotkey acts only on the *focused* window and nothing here
+                        -- focuses the loot window first, so it reached the client
+                        -- and closed nothing -- 650 presses in one run while the
+                        -- window sat open. Confirmed live on a window that had been
+                        -- stuck open for hours: Ctrl+W alone left it open, clicking
+                        -- its title bar first then Ctrl+W closed it, and clicking
+                        -- Close closed it with no focus step at all.
+                        case
+                            openLootWindow.uiNode
+                                |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
+                                |> Maybe.andThen .closeButton
+                        of
+                            Just closeButton ->
+                                describeBranch "Loot window did not close on its own -- click its Close button."
+                                    (clickUiElement closeButton)
+
+                            Nothing ->
+                                describeBranch "Loot window did not close on its own, and I cannot find its Close button."
+                                    askForHelpToGetUnstuck
 
                     else
                         case openLootWindow.uiNode |> findUiElementWithText "Loot All" of
@@ -3671,6 +3691,17 @@ wreckLootWindowsFromReadingFromGameClient : ReadingFromGameClient -> List EveOnl
 wreckLootWindowsFromReadingFromGameClient readingFromGameClient =
     readingFromGameClient.inventoryWindows
         |> List.filter (.uiNode >> findUiElementWithText "Loot All" >> (/=) Nothing)
+
+
+{-| How many readings to keep trying to close a loot window before giving up and
+asking for help. Closing it works on the first attempt when it works at all, so
+anything past a handful means the window is not responding; the version that
+pressed Ctrl+W at it forever managed 650 attempts in one run without ever
+saying so.
+-}
+lootWindowRefusesToCloseTicks : Int
+lootWindowRefusesToCloseTicks =
+    30
 
 
 overviewEntryIsStrayLockTarget : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
