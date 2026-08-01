@@ -338,6 +338,7 @@ type alias BotMemory =
     , clearingNotRequired : Bool
     , agentConversationWithoutTrackerTicks : Int
     , keepAtRangeUnconfirmedTicks : Int
+    , orbitUnconfirmedTicks : Int
     , readingsCount : Int
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
@@ -2944,7 +2945,7 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
 
         ensureShipIsOrbitingDecision =
             activeTargetEntry
-                |> Maybe.andThen (ensureShipIsOrbiting seeUndockingComplete.shipUI)
+                |> Maybe.andThen (ensureShipIsOrbiting context seeUndockingComplete.shipUI)
 
         ensureShipIsKeepingRangeDecision =
             activeTargetEntry
@@ -3174,26 +3175,28 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
         decisionToKillRats
 
 
-{-| How many readings to keep telling the ship to hold range before letting it
-get on with shooting instead.
+{-| How many readings to keep commanding a manoeuvre the client never confirms
+before letting the ship get on with shooting instead.
 
-The command reports success only through the HUD's manoeuvre indicator, and on
-this client `HudActionIndicationContainer` is often empty -- so `ManeuverRange`
-never arrives and the branch below re-issues forever. Run 111 spent a whole
-180-minute session on it: 8,941 keypresses, no missions.
+Both keep-at-range and orbit report success only through the HUD's manoeuvre
+indicator, and on this client `HudActionIndicationContainer` is often empty --
+so `ManeuverRange`/`ManeuverOrbit` never arrives and the branch re-issues
+forever. Run 111 spent a whole 180-minute session on the range one: 8,941
+keypresses, no missions. Orbit is the same shape with less protection, having
+no locked-target check at all.
 
-Give up quietly rather than ask for help. Holding range is an optimisation, not
-a prerequisite -- the guns and drones work regardless -- so the right answer
-when it cannot be confirmed is to stop trying and fight, not to stop the run.
+Give up quietly rather than ask for help. Positioning is an optimisation, not a
+prerequisite -- the guns and drones work regardless -- so the right answer when
+it cannot be confirmed is to stop trying and fight, not to stop the run.
 -}
-keepAtRangeGiveUpTicks : Int
-keepAtRangeGiveUpTicks =
+maneuverNotConfirmedGiveUpTicks : Int
+maneuverNotConfirmedGiveUpTicks =
     20
 
 
 ensureShipIsKeepingRange : BotDecisionContext -> ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
 ensureShipIsKeepingRange context shipUI overviewEntryToKAR =
-    if context.memory.keepAtRangeUnconfirmedTicks > keepAtRangeGiveUpTicks then
+    if context.memory.keepAtRangeUnconfirmedTicks > maneuverNotConfirmedGiveUpTicks then
         Nothing
 
     else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverRange then
@@ -3222,9 +3225,12 @@ ensureShipIsKeepingRange context shipUI overviewEntryToKAR =
                 )
             )
 
-ensureShipIsOrbiting : ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
-ensureShipIsOrbiting shipUI overviewEntryToOrbit =
-        if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
+ensureShipIsOrbiting : BotDecisionContext -> ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
+ensureShipIsOrbiting context shipUI overviewEntryToOrbit =
+        if context.memory.orbitUnconfirmedTicks > maneuverNotConfirmedGiveUpTicks then
+            Nothing
+
+        else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
             Nothing
 
         else
@@ -3591,6 +3597,7 @@ initBotMemory =
     , clearingNotRequired = False
     , agentConversationWithoutTrackerTicks = 0
     , keepAtRangeUnconfirmedTicks = 0
+    , orbitUnconfirmedTicks = 0
     , readingsCount = 0
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
@@ -4971,6 +4978,31 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             (.armor)
             botMemoryBefore.lowestArmorPercentSinceHealthy
     , readingsCount = botMemoryBefore.readingsCount + 1
+    , orbitUnconfirmedTicks =
+        -- The orbit twin of keepAtRangeUnconfirmedTicks below; same indicator,
+        -- same way of never arriving.
+        case context.readingFromGameClient.shipUI of
+            Nothing ->
+                0
+
+            Just shipUI ->
+                if
+                    [ EveOnline.ParseUserInterface.ManeuverOrbit
+                    , EveOnline.ParseUserInterface.ManeuverAlign
+                    ]
+                        |> List.member
+                            (shipUI.indication
+                                |> Maybe.andThen .maneuverType
+                                |> Maybe.withDefault EveOnline.ParseUserInterface.ManeuverWarp
+                            )
+                then
+                    0
+
+                else if context.readingFromGameClient.targets |> List.isEmpty then
+                    0
+
+                else
+                    botMemoryBefore.orbitUnconfirmedTicks + 1
     , keepAtRangeUnconfirmedTicks =
         -- How long the ship has been told to keep at range without the HUD ever
         -- saying it is. The command's only confirmation is the manoeuvre
