@@ -143,6 +143,22 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # mention. Add that object's name here when a mission strands the bot with
 # "Nothing to fight and no travel step offered".
 #
+# The four structures below are that mission's pocket, read off the overview in
+# the run 114 screenshot -- the run that sat on "Nothing to fight" for 14,111
+# decisions, 37% of the session, and never recovered. Which of them yields the
+# Diplomat is not established; the Amarr-Caldari Mediation Center is the
+# thematic fit and is listed last so it is tried first (settings prepend, so
+# file order is reverse priority). The rest are there so a wrong guess costs a
+# trip rather than the session: each is dropped from the candidate list once the
+# ship is inside interactionRangeInMeters, so the bot works down them.
+#
+# Ordering these ahead of Amarr Station is safe. approachConfiguredObjectIfPresent
+# is deliberately last in the decision tree -- it fires only with nothing to
+# shoot, no cargo to fetch, no travel step, no gate and no route -- so a name
+# here cannot pull the ship away from real work, only fill an otherwise idle
+# grid. They also have to be on in Overview Settings -> Types -> Celestial ->
+# Large Collidable Object, which they are: run 114 saw all four.
+#
 # prefer-wreck searches particular hulls first when a mission wants cargo out of
 # destroyed ships. Purely an optimisation -- every other wreck is still opened
 # afterwards, so a wrong guess costs only a wasted trip.
@@ -154,6 +170,10 @@ prefer-wreck=Personnel Transport
 prefer-wreck=Cargo Container
 approach-object=Abandoned Mining Station
 approach-object=Amarr Station
+approach-object=Circular Construction
+approach-object=Caldari Deadspace Tactical Outpost
+approach-object=Amarr Chapel
+approach-object=Amarr-Caldari Mediation Center
 run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=70"
 
