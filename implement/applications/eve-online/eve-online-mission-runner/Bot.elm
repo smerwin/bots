@@ -333,6 +333,9 @@ type alias BotMemory =
     , targetToUnlockUnchangedTicks : Int
     , shipApproachingTicks : Int
     , lootedWreckIds : List String
+    , unlootableWreckIds : List String
+    , lootAllRefusedTicks : Int
+    , lootWindowOutOfRangeTicks : Int
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
     , clearingNotRequired : Bool
@@ -790,6 +793,7 @@ notAlreadyEmptied context entry =
         && (case entry.objectItemID of
                 Just itemID ->
                     not (List.member itemID context.memory.lootedWreckIds)
+                        && not (List.member itemID context.memory.unlootableWreckIds)
 
                 Nothing ->
                     True
@@ -1258,13 +1262,47 @@ lootMissionItemFromContainerIfPresent context =
                 Just openLootWindow ->
                     Just
                         (describeBranch ("A container is open -- take the " ++ itemName ++ ".")
-                            (case openLootWindow.uiNode |> findUiElementWithText "Loot All" of
-                                Just lootAllButton ->
-                                    describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
+                            (case giveUpOnOpenContainerReason context of
+                                Just reason ->
+                                    -- Close it, do not merely stop acting on it.
+                                    -- An open wreck loot window short-circuits
+                                    -- the whole objective branch above, so
+                                    -- waiting here hangs the bot on a container
+                                    -- it has already decided to abandon.
+                                    case openLootWindow.uiNode |> closeControlOfWindow of
+                                        Just closeButton ->
+                                            describeBranch (reason ++ " Close it and look elsewhere.")
+                                                (clickUiElement closeButton)
+
+                                        Nothing ->
+                                            describeBranch
+                                                (reason ++ " I cannot find its Close button to move on.")
+                                                askForHelpToGetUnstuck
 
                                 Nothing ->
-                                    describeBranch "I see no 'Loot All' in the open container."
-                                        askForHelpToGetUnstuck
+                                    if not (shipIsWithinLootRange context.readingFromGameClient) then
+                                        -- The window opens on the double click,
+                                        -- not on arrival, and the client is still
+                                        -- flying the ship over. Clicking now is
+                                        -- refused outright with "You must be
+                                        -- within 2500 meters of the container",
+                                        -- which the bot cannot see and used to
+                                        -- mistake for a completed loot.
+                                        describeBranch
+                                            ("Still on the way to the container -- wait until inside "
+                                                ++ String.fromInt interactionRangeInMeters
+                                                ++ " m before taking anything."
+                                            )
+                                            waitForProgressInGame
+
+                                    else
+                                        case openLootWindow.uiNode |> findUiElementWithText "Loot All" of
+                                            Just lootAllButton ->
+                                                describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
+
+                                            Nothing ->
+                                                describeBranch "I see no 'Loot All' in the open container."
+                                                    askForHelpToGetUnstuck
                             )
                         )
 
@@ -3582,6 +3620,9 @@ initBotMemory =
     , targetToUnlockUnchangedTicks = 0
     , shipApproachingTicks = 0
     , lootedWreckIds = []
+    , unlootableWreckIds = []
+    , lootAllRefusedTicks = 0
+    , lootWindowOutOfRangeTicks = 0
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
     , clearingNotRequired = False
@@ -3992,6 +4033,125 @@ wreckLootWindowsFromReadingFromGameClient : ReadingFromGameClient -> List EveOnl
 wreckLootWindowsFromReadingFromGameClient readingFromGameClient =
     readingFromGameClient.inventoryWindows
         |> List.filter (.uiNode >> findUiElementWithText "Loot All" >> (/=) Nothing)
+
+
+{-| The overview row the open loot window belongs to: the nearest one that can be
+looted at all. That is necessarily the container just opened, since it is the only
+one the bot ever opens.
+-}
+nearestLootableEntry : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+nearestLootableEntry readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter (\entry -> entry.objectItemID /= Nothing)
+        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+        |> List.head
+
+
+{-| Whether the ship is close enough to take items out of the open container.
+
+Run 113 is why this exists. A double click is "Open Cargo", and from outside range
+the client opens the window immediately and flies the ship over -- so an open loot
+window is not evidence of having arrived, and EVE said so 39 times in one run
+("Cargo is too far away. Ship is on automatic approach to cargo."). The bot clicked
+'Loot All' anyway on the reading the window appeared, and the client refused it 8
+times out of 8 with "You must be within 2500 meters of the container to remove
+items from it". Every wreck that run was left full.
+-}
+shipIsWithinLootRange : ReadingFromGameClient -> Bool
+shipIsWithinLootRange readingFromGameClient =
+    case nearestLootableEntry readingFromGameClient of
+        Nothing ->
+            False
+
+        Just entry ->
+            case entry.objectDistanceInMeters of
+                Ok distance ->
+                    distance <= interactionRangeInMeters
+
+                Err _ ->
+                    False
+
+
+{-| Whether the open container reports itself empty.
+
+The capacity gauge is the only honest answer to "did the loot work". The bot used
+to record a wreck as looted the moment its window opened, which is the one moment
+we have positive evidence it still holds something -- so a refused 'Loot All' was
+remembered as a completed one and the wreck never looked at again. On run 113 that
+lost the Blood Raider Personnel Transport carrying the mission's Militants.
+-}
+openContainerIsEmpty : EveOnline.ParseUserInterface.InventoryWindow -> Bool
+openContainerIsEmpty lootWindow =
+    case lootWindow.selectedContainerCapacityGauge of
+        Just (Ok gauge) ->
+            gauge.used <= 0
+
+        _ ->
+            False
+
+
+{-| The open wreck loot window together with the overview id it belongs to.
+
+Both halves are needed together and neither means anything without the other, so
+the pairing is done once here rather than at each of the three call sites.
+-}
+openWreckLootWindowAndId : ReadingFromGameClient -> Maybe ( EveOnline.ParseUserInterface.InventoryWindow, String )
+openWreckLootWindowAndId readingFromGameClient =
+    case readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.head of
+        Nothing ->
+            Nothing
+
+        Just lootWindow ->
+            readingFromGameClient
+                |> nearestLootableEntry
+                |> Maybe.andThen .objectItemID
+                |> Maybe.map (\wreckId -> ( lootWindow, wreckId ))
+
+
+{-| Readings with the container open and in range, its gauge still not empty,
+before the bot writes the wreck off. Deliberately generous: the gauge lags the
+client by a reading or two after a successful 'Loot All', and the cost of being
+wrong here is abandoning a wreck that may hold the mission item.
+-}
+lootAllRefusedTicksBeforeGivingUp : Int
+lootAllRefusedTicksBeforeGivingUp =
+    12
+
+
+{-| Readings with the container open and the ship still not in range before the
+bot writes the wreck off. An approach across a pocket is legitimately long -- run
+113 spent over a hundred readings covering 30 km -- so this only catches an
+approach that is not happening at all.
+-}
+outOfRangeTicksBeforeGivingUp : Int
+outOfRangeTicksBeforeGivingUp =
+    250
+
+
+{-| Why the bot should stop working on the container it has open, if it should.
+
+Both counters are bounds on waiting, and each names a different failure, so the
+log says which one happened rather than reporting a generic give-up.
+-}
+giveUpOnOpenContainerReason : BotDecisionContext -> Maybe String
+giveUpOnOpenContainerReason context =
+    if context.memory.lootAllRefusedTicks >= lootAllRefusedTicksBeforeGivingUp then
+        Just
+            ("'Loot All' has not emptied this container in "
+                ++ String.fromInt context.memory.lootAllRefusedTicks
+                ++ " readings within range."
+            )
+
+    else if context.memory.lootWindowOutOfRangeTicks >= outOfRangeTicksBeforeGivingUp then
+        Just
+            ("The ship has not reached this container in "
+                ++ String.fromInt context.memory.lootWindowOutOfRangeTicks
+                ++ " readings."
+            )
+
+    else
+        Nothing
 
 
 {-| How many readings an agent conversation may sit there insisting a mission
@@ -5077,33 +5237,79 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- observed live re-opening the same Coreli Scout Wreck 73 times, hauling
         -- out ammo and scrap while the mission item was never in it. Nothing in
         -- a row's text tells an emptied wreck from a full one, so remember the
-        -- ones already opened by object id.
+        -- ones already emptied by object id.
         --
-        -- The id recorded is the nearest lootable row at the moment a loot
-        -- window is open, which is necessarily the one just opened, since that
-        -- is the only one the bot ever opens. Capped so a long session cannot
-        -- grow this without bound.
-        if context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.isEmpty then
-            botMemoryBefore.lootedWreckIds
+        -- *Emptied*, not *opened*. This used to record the wreck as soon as its
+        -- window appeared, which is precisely the moment we have evidence it
+        -- still holds something. A 'Loot All' the client refused was then
+        -- remembered as a completed one, and the wreck was filtered out of the
+        -- candidate list forever. Run 113 lost the Blood Raider Personnel
+        -- Transport holding the mission's Militants that way, and then waited
+        -- out the rest of the session for an objective that could no longer
+        -- clear. The capacity gauge is the honest signal: the container itself
+        -- says what is left in it.
+        --
+        -- Capped so a long session cannot grow this without bound.
+        case openWreckLootWindowAndId context.readingFromGameClient of
+            Just ( lootWindow, wreckId ) ->
+                if openContainerIsEmpty lootWindow && not (List.member wreckId botMemoryBefore.lootedWreckIds) then
+                    wreckId :: botMemoryBefore.lootedWreckIds |> List.take 200
 
-        else
-            case
-                context.readingFromGameClient.overviewWindows
-                    |> List.concatMap .entries
-                    |> List.filter (\entry -> entry.objectItemID /= Nothing)
-                    |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
-                    |> List.head
-                    |> Maybe.andThen .objectItemID
-            of
-                Nothing ->
+                else
                     botMemoryBefore.lootedWreckIds
 
-                Just nearestId ->
-                    if List.member nearestId botMemoryBefore.lootedWreckIds then
-                        botMemoryBefore.lootedWreckIds
+            Nothing ->
+                botMemoryBefore.lootedWreckIds
+    , lootAllRefusedTicks =
+        -- Readings with the container open, the ship in range, and the gauge
+        -- still not reading empty. In the normal case this is one or two while
+        -- the client catches up. It climbing means 'Loot All' is not working on
+        -- this container for a reason the bot cannot see -- a full cargohold,
+        -- say -- and `unlootableWreckIds` gives up on it rather than letting it
+        -- hold the mission open indefinitely.
+        case openWreckLootWindowAndId context.readingFromGameClient of
+            Just ( lootWindow, _ ) ->
+                if shipIsWithinLootRange context.readingFromGameClient && not (openContainerIsEmpty lootWindow) then
+                    botMemoryBefore.lootAllRefusedTicks + 1
 
-                    else
-                        nearestId :: botMemoryBefore.lootedWreckIds |> List.take 200
+                else
+                    0
+
+            Nothing ->
+                0
+    , lootWindowOutOfRangeTicks =
+        -- The other half of the same bound. Waiting for the ship to arrive is
+        -- correct, but only the client is steering, and if the approach never
+        -- completes -- or the row leaves the overview entirely, which makes the
+        -- range unanswerable -- the wait has to end somewhere. Generous, because
+        -- a legitimate approach from the far side of a pocket is minutes of
+        -- readings and cutting one short abandons a wreck for no reason.
+        case openWreckLootWindowAndId context.readingFromGameClient of
+            Just _ ->
+                if shipIsWithinLootRange context.readingFromGameClient then
+                    0
+
+                else
+                    botMemoryBefore.lootWindowOutOfRangeTicks + 1
+
+            Nothing ->
+                0
+    , unlootableWreckIds =
+        case openWreckLootWindowAndId context.readingFromGameClient of
+            Just ( _, wreckId ) ->
+                if
+                    ((botMemoryBefore.lootAllRefusedTicks >= lootAllRefusedTicksBeforeGivingUp)
+                        || (botMemoryBefore.lootWindowOutOfRangeTicks >= outOfRangeTicksBeforeGivingUp)
+                    )
+                        && not (List.member wreckId botMemoryBefore.unlootableWreckIds)
+                then
+                    wreckId :: botMemoryBefore.unlootableWreckIds |> List.take 200
+
+                else
+                    botMemoryBefore.unlootableWreckIds
+
+            Nothing ->
+                botMemoryBefore.unlootableWreckIds
     , gateWithinReachTicks =
         -- Readings in a row with an acceleration gate close enough to use. A
         -- gate normally takes a handful; a gate that refuses the ship never
