@@ -1096,9 +1096,25 @@ approachOverviewEntry :
     -> EveOnline.ParseUserInterface.OverviewWindowEntry
     -> DecisionPathNode
 approachOverviewEntry context description entry =
+    let
+        -- The range belongs in the decision text, not just in the reading.
+        -- stall_watch calls a stall when the same decisions recur and EVE's
+        -- game log stays silent, and a sublight approach is exactly that: no
+        -- combat, nothing written, one decision repeating. Run 107 raised two
+        -- alarms while the ship was closing perfectly well from 28 km to 2.7
+        -- km, because "approach it" reads identically at every range.
+        --
+        -- With the range in it the text changes as the ship closes, so the
+        -- circling test resets itself and the alarm only survives when the
+        -- distance genuinely stops moving -- which is the case worth waking
+        -- someone for. No special case in the watcher; it already keys on the
+        -- decision changing.
+        withRange =
+            description ++ " (" ++ (entry.objectDistance |> Maybe.withDefault "range unknown") ++ ")"
+    in
     unlessAlreadyClosingIn context
-        description
-        (selectThenPanelAction context "selectedItemApproach" entry description)
+        withRange
+        (selectThenPanelAction context "selectedItemApproach" entry withRange)
 
 
 shipIsAlreadyApproaching : BotDecisionContext -> Bool
