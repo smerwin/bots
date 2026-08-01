@@ -63,8 +63,24 @@ NAME_COLUMN = 200
 LEFT, RIGHT = 0, 1
 
 # macOS key codes for the few keys worth having to hand.
+#
+# `escape` is here because you sometimes need it, but think before using it:
+# with no menu open, Escape opens EVE's own settings/pause menu, which then
+# covers the client and silently swallows every subsequent click and keystroke.
+# Two debugging sessions were lost to exactly that.
 KEYS = {"escape": 53, "return": 36, "d": 2, "j": 38, "c": 8, "w": 13,
         "alt": 58, "ctrl": 59, "shift": 56, "cmd": 55}
+
+# Letters and digits, for typing into a field.
+KEYCODE = {
+    "a": 0x00, "b": 0x0B, "c": 0x08, "d": 0x02, "e": 0x0E, "f": 0x03,
+    "g": 0x05, "h": 0x04, "i": 0x22, "j": 0x26, "k": 0x28, "l": 0x25,
+    "m": 0x2E, "n": 0x2D, "o": 0x1F, "p": 0x23, "q": 0x0C, "r": 0x0F,
+    "s": 0x01, "t": 0x11, "u": 0x20, "v": 0x09, "w": 0x0D, "x": 0x07,
+    "y": 0x10, "z": 0x06, " ": 0x31,
+    "0": 0x1D, "1": 0x12, "2": 0x13, "3": 0x14, "4": 0x15,
+    "5": 0x17, "6": 0x16, "7": 0x1A, "8": 0x1C, "9": 0x19,
+}
 
 
 class Session:
@@ -221,6 +237,40 @@ class Session:
             self._cg_send(f"keyup {code}")
             time.sleep(0.05)
         time.sleep(settle)
+
+    def type_text(self, text, delay=0.04):
+        """Type into whatever has keyboard focus. Click the field first."""
+        for ch in text.lower():
+            code = KEYCODE.get(ch)
+            if code is None:
+                continue
+            self._cg_send(f"keydown {code}")
+            self._cg_send(f"keyup {code}")
+            time.sleep(delay)
+
+    def drag(self, src, dst, steps=24, step_delay=0.05):
+        """Drag between two canvas points.
+
+        EVE reads this as a drag only if the pointer moves promptly after the
+        press -- press, pause, move reads as a click and the cursor wandering
+        off. So: down, then move immediately, and only pause once at the
+        destination before releasing, which the drop does need.
+        """
+        sx, sy = self.to_screen(*src)
+        dx, dy = self.to_screen(*dst)
+        self._cg_send(f"move {sx:.1f} {sy:.1f}")
+        time.sleep(0.15)
+        self._cg_send("down 0")
+        for i in range(1, steps + 1):
+            ix = sx + (dx - sx) * i / steps
+            iy = sy + (dy - sy) * i / steps
+            self._cg_send(f"drag {ix:.1f} {iy:.1f} 0")
+            time.sleep(step_delay)
+        time.sleep(0.3)
+        self._cg_send(f"drag {dx:.1f} {dy:.1f} 0")
+        time.sleep(0.3)
+        self._cg_send("up 0")
+        time.sleep(0.5)
 
     # -- the reliable interactions ---------------------------------------
 

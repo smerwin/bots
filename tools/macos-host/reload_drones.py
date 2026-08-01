@@ -1,462 +1,178 @@
 #!/usr/bin/env python3
-"""Refill the active ship's drone bay from the station Items hangar, while
-docked. Built from a live, manually-verified session against the real game
-(see CLAUDE.md) -- every coordinate is computed from a live memory read of
-the UI tree, not guessed from a screenshot.
+"""Refill the active ship's drone bay from the station Item hangar, while docked.
 
-Usage:
-    python3 reload_drones.py [--drone-name "Acolyte I"] [--pid 86516]
+    python3 reload_drones.py [--drone-name "Acolyte I"] [--count N]
 
-Preconditions:
-    - Character is docked, with the station "Hangars" panel visible
-      (the right-side panel showing Undock / Guests / Agents / Offices /
-      Hangars).
-    - The active ship has spare capacity in its drone bay.
-    - The named drone is sitting in the station's Item hangar (not a
-      sub-folder -- this only searches the flat root item list).
+Rewritten on top of `eve_repl`, which now owns the parts every one-off needs:
+attaching to the client, the canvas-to-screen calibration, one long-lived
+`cg_input`, and the drag and typing mechanics. What is kept from the original,
+because it was established live and each piece has a reason:
 
-What it does, end to end:
-    1. Activates EVE as the frontmost application. This step is not
-       optional: CGEventPost mouse clicks are routed by cursor position
-       regardless of which app is frontmost, but keyDown/keyUp events go
-       to whichever app currently has keyboard focus. Skipping this step
-       is the single most common failure mode -- clicks appear to work
-       (menus open, buttons respond) while every typed character silently
-       goes to the wrong application.
-    2. Bootstraps live memory access to the game process (one-time
-       repr-scan + walk-to-root, ~5-7s).
-    3. Switches the Hangars panel to the "Ships" tab and right-clicks the
-       active ship, choosing "Open Drone Bay" -- this opens a proper
-       Inventory window already anchored to that ship, with Drone Bay
-       selected in its tree.
-    4. Selects "Item hangar" in that same Inventory window's tree.
-    5. Types the drone name into the Item hangar's own quick-filter
-       search box (NOT the global "Search for anything" box -- see
-       CLAUDE.md for how this was found: the game's internal UI
-       coordinate space is a non-uniformly-scaled virtual canvas
-       reported via the UIRoot's own _displayWidth/_displayHeight
-       and _dpiScaling, not a simple multiple of the window's actual
-       point size).
-    6. Drags the filtered item from the list onto "Drone Bay" in the
-       tree. EVE only recognizes this as a drag (as opposed to a
-       click-to-select) if the pointer moves promptly after mouse-down;
-       a synthetic click-then-move sequence with any pause reads as a
-       plain click.
-    7. If a "Set Quantity" dialog appears (typical: the drone bay has
-       less free capacity than the stack size), accepts the default
-       quantity by clicking OK. The default is already computed by the
-       game to exactly fill remaining capacity, so no typing is needed
-       here.
+  * Keyboard focus has to be given back to the game window before typing.
+    Mouse clicks are routed by cursor position and keep working regardless,
+    but key events go to whatever holds keyboard focus -- and closing UI
+    windows can leave the client frontmost with no window focused, at which
+    point every keystroke vanishes. Neither cg_input nor System Events gets
+    through in that state. One click on empty viewport fixes it, and this
+    cost an hour to find.
+  * The Item hangar's quick-filter is found by **widget type**
+    (`InvContQuickFilter`, widest match), not by its placeholder text. Several
+    unrelated nodes read "Search", including other windows' tabs, and clicking
+    one of those focuses nothing while looking exactly like success.
+  * A drag is only a drag if the pointer moves promptly after the press. Press,
+    pause, then move reads as a click and the item stays put.
+  * The quantity dialog's default is already the amount that fits, so it is
+    accepted rather than typed into.
 
-Known limitations, not yet handled:
-    - Only searches the root Item hangar; drones stored in a hangar
-      sub-folder or inside another ship's cargo won't be found.
-    - Assumes a single EVE game window; does not handle multiple
-      characters/windows.
-    - Does not verify the drone bay actually had room before starting --
-      if it's already full, the drag will simply fail to open a dialog
-      and the script will report that rather than erroring cleanly.
+What is dropped: the original walked the station Hangars panel, switched it to
+the Ships tab and right-clicked the active ship to reach "Open Drone Bay". That
+step is unnecessary -- the Inventory window's own sidebar lists Drone Bay
+directly -- and it was also the step that broke, because it aimed at a fixed
+offset from the "Active" marker and missed the ship card.
+
+Preconditions: docked, the named drone in the root Item hangar (not a
+sub-folder), and spare capacity in the drone bay.
+
+Never run this while a bot is running. It drives the real mouse, and the two
+will fight for the cursor.
 """
-
 import argparse
-import subprocess
+import os
 import sys
 import time
 
-SCRIPT_DIR = __import__("pathlib").Path(__file__).resolve().parent
-sys.path.insert(0, str(SCRIPT_DIR / "re_helper"))
-import re_helper as rh  # noqa: E402
-
-CG_INPUT = str(SCRIPT_DIR / "cg_input" / "cg_input")
-MEMORY_SAMPLE_BIN = str(SCRIPT_DIR / "memory_sample" / "memory_sample")
-
-KEYCODE = {
-    "a": 0x00, "b": 0x0B, "c": 0x08, "d": 0x02, "e": 0x0E, "f": 0x03,
-    "g": 0x05, "h": 0x04, "i": 0x22, "j": 0x26, "k": 0x28, "l": 0x25,
-    "m": 0x2E, "n": 0x2D, "o": 0x1F, "p": 0x23, "q": 0x0C, "r": 0x0F,
-    "s": 0x01, "t": 0x11, "u": 0x20, "v": 0x09, "w": 0x0D, "x": 0x07,
-    "y": 0x10, "z": 0x06, " ": 0x31,
-}
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import eve_repl
+import eve_read
 
 
-class CgInput:
-    """Thin persistent wrapper around the cg_input binary."""
+def sidebar_entry(eve, label):
+    """A row in the Inventory window's tree sidebar, by exact label.
 
-    def __init__(self):
-        self.p = subprocess.Popen(
-            [CG_INPUT], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            text=True, bufsize=1,
-        )
-
-    def send(self, cmd):
-        self.p.stdin.write(cmd + "\n")
-        self.p.stdin.flush()
-        return self.p.stdout.readline().strip()
-
-    def click(self, x, y, button=0, delay=0.05):
-        self.send(f"move {x} {y}")
-        time.sleep(delay)
-        self.send(f"down {button}")
-        time.sleep(delay)
-        self.send(f"up {button}")
-        time.sleep(delay)
-
-    def type_text(self, text, delay=0.03):
-        for ch in text.lower():
-            code = KEYCODE.get(ch)
-            if code is None:
-                continue
-            self.send(f"keydown {code}")
-            self.send(f"keyup {code}")
-            time.sleep(delay)
-
-    def drag(self, sx, sy, dx, dy, button=0, steps=24, step_delay=0.05):
-        self.send(f"move {sx} {sy}")
-        time.sleep(0.15)
-        self.send(f"down {button}")
-        for i in range(1, steps + 1):
-            ix = sx + (dx - sx) * i / steps
-            iy = sy + (dy - sy) * i / steps
-            self.send(f"drag {ix} {iy} {button}")
-            time.sleep(step_delay)
-        time.sleep(0.3)
-        self.send(f"drag {dx} {dy} {button}")
-        time.sleep(0.3)
-        self.send(f"up {button}")
-
-    def close(self):
-        self.p.stdin.close()
-        self.p.wait()
-
-
-def activate_game(pid):
-    """Bring the game process to the frontmost/active application. Real
-    keyboard events (as opposed to clicks) only reach whichever app is
-    frontmost, regardless of where the mouse is."""
-    subprocess.run(
-        [
-            "osascript", "-e",
-            f'tell application "System Events" to set frontmost of first '
-            f'process whose unix id is {pid} to true',
-        ],
-        check=True,
-        capture_output=True,
-    )
-
-
-def window_bounds(pid):
-    # Picks the LARGEST window by area, not just the first one over a
-    # width threshold: a fullscreen game window can have a smaller
-    # overlay at the *same* width (the reveal-on-hover menu-bar strip,
-    # ~1710x44) that a width-only check (what this function used to do)
-    # picks by accident, producing a badly wrong y-scale factor and a
-    # bogus click target -- found live while building route_setter.py,
-    # see find_eve_processes in botlab_host.py for the same fix applied
-    # to the real bot's own window resolution.
-    import re
-
-    out = subprocess.run(
-        [str(SCRIPT_DIR / "window_probe" / "window_probe"), "--all"],
-        check=True, capture_output=True, text=True,
-    ).stdout
+    Matched on size rather than widget type: "Item hangar" is a
+    TreeViewEntryWithTag but "Drone Bay" is a plain Container, because it hangs
+    under the ship rather than the station. Both render as the same 160-wide
+    row, so take the widest node carrying exactly that label.
+    """
     best = None
-    for line in out.splitlines():
-        if f"owner_pid={pid}" not in line:
+    for node, x, y in eve.nodes():
+        texts = eve_read.texts_of(node)
+        if not texts or texts[0].strip() != label:
             continue
-        m = re.search(
-            r"x=([\d.]+) y=([\d.]+) w=([\d.]+) h=([\d.]+)", line
-        )
-        if not m:
+        size = eve.size_of(node)
+        if not size:
             continue
-        x, y, w, h = (float(v) for v in m.groups())
-        if best is None or w * h > best[2] * best[3]:
-            best = (x, y, w, h)
-    if best is None:
-        raise RuntimeError(f"no window found for pid {pid}")
-    return best
+        if best is None or size[0] > best[0]:
+            best = (size[0], node, x, y)
+    return best[1:] if best else None
 
 
-def _find_valid_seed_addr(sample):
-    """Pick a repr-scanned address that actually resolves to a valid
-    CPython type/metatype, instead of trusting the first hit blindly
-    (the previous version called a nonexistent rh._any_seed_addr, which
-    would AttributeError on any real run).
-
-    The repr text this scans (EVE's own "<ClassName object at 0X...>"
-    debug-log lines) can outlive the object it describes -- UI widgets
-    get destroyed/recreated constantly, so the address in an old log
-    line can point at freed/reused memory by the time a dump is taken.
-    Observed live: of 165 repr-scan hits in one real dump, 146 resolved
-    to a valid metatype and 19 (including the first one, by bad luck)
-    were stale -- see the same fix in botlab_host.py's _any_seed_addr
-    and route_setter.py's find_valid_seed_addr."""
-    hits = rh.repr_scan(sample, limit=200)
-    for addrs in hits.values():
-        for addr in addrs:
-            metatype = rh.find_metatype(sample, addr)
-            if metatype is not None and sample.read_u64(metatype + 8) == metatype:
-                return addr
-    raise RuntimeError("no repr-scan hit in this dump resolved to a valid metatype")
+def quick_filter(eve):
+    """The Item hangar's own filter box: by type, widest match."""
+    found = eve.of_type("InvContQuickFilter", refresh=False)
+    if not found:
+        return None
+    return max(found, key=lambda f: (eve.size_of(f[0]) or (0, 0))[0])
 
 
-def bootstrap_memory(pid):
-    """One-time cost: dump the process, find the UI root, and figure out
-    the metatype/str-type addresses and the root's own virtual-canvas
-    size (needed to convert the game's internal UI coordinates to real
-    screen points)."""
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as d:
-        subprocess.run(
-            [MEMORY_SAMPLE_BIN, str(pid), d], check=True, capture_output=True
-        )
-        sample = rh.Sample(d)
-        seed = _find_valid_seed_addr(sample)
-        metatype = rh.find_metatype(sample, seed)
-        # _bootstrap_str_type is a private helper on a class in
-        # botlab_host.py, not re_helper -- reimplement its small body
-        # here. limit=200 (not 5): repr_scan's limit counts every match,
-        # not distinct (class, address) pairs, and the debug-log ring
-        # buffer can contain the same line repeated several times in a
-        # row (e.g. from repeated tooltip reads) -- a too-small limit can
-        # exhaust the scan on repeats before reaching a distinct object
-        # with a usable dict, even though the dump has plenty of good
-        # candidates (same bug already found and fixed in botlab_host.py).
-        hits = rh.repr_scan(sample, limit=200)
-        seen_addrs = set()
-        str_type = None
-        for addrs in hits.values():
-            for addr in addrs:
-                if addr in seen_addrs:
-                    continue
-                seen_addrs.add(addr)
-                dct = rh.get_dict(sample, addr, metatype)
-                if dct is None:
-                    continue
-                st = rh.bootstrap_str_type(sample, dct, metatype)
-                if st:
-                    str_type = st
-                    break
-            if str_type:
-                break
-        if str_type is None:
-            raise RuntimeError("could not bootstrap str type")
-
-        root = rh.find_ui_root(sample, metatype, str_type)
-        if root is None:
-            raise RuntimeError("could not find UI root")
-
-    # Live reads from here on -- no more dumps needed.
-    live = rh.LiveSample(pid)
-    root_dict = rh.get_dict(live, root, metatype)
-    root_entries = dict(rh.dict_items(live, root_dict, metatype, str_type))
-    root_w = rh.describe_primitive(
-        live, root_entries.get(b"_displayWidth"), metatype, str_type
-    )
-    root_h = rh.describe_primitive(
-        live, root_entries.get(b"_displayHeight"), metatype, str_type
-    )
-    return live, root, metatype, str_type, root_w, root_h
+def item_matching(eve, name):
+    """A rendered item icon in the hangar list whose text matches."""
+    needle = name.lower()
+    best = None
+    for node, x, y in eve.nodes():
+        if node.get("pythonObjectTypeName") not in ("InvItem", "Item", "ContainerAutoSize"):
+            continue
+        joined = " ".join(eve_read.texts_of(node)).lower()
+        if needle in joined and eve.size_of(node):
+            # the smallest matching node is the icon itself rather than a
+            # container several levels up that happens to contain the text
+            size = eve.size_of(node)
+            area = size[0] * size[1]
+            if best is None or area < best[0]:
+                best = (area, node, x, y)
+    return best[1:] if best else None
 
 
-def build_scale(root_w, root_h, win_bounds):
-    """The game's internal UI coordinates (_displayX/_displayY) are laid
-    out against a virtual canvas of size root_w x root_h -- NOT the
-    window's own point or backing-pixel size. Scale factors below convert
-    a summed game-pixel coordinate to a real global screen point."""
-    win_x, win_y, win_w, win_h = win_bounds
-    sx = win_w / root_w
-    sy = win_h / root_h
-    return sx, sy, win_x, win_y
+def reload_drones(eve, drone_name, expect_overlay_free=True):
+    if expect_overlay_free:
+        overlay = [1 for n, _, _ in eve.nodes()
+                   if "Display Mode" in " ".join(eve_read.texts_of(n)[:8])]
+        if overlay:
+            raise RuntimeError("the settings window is covering the client -- close it first; "
+                               "note Escape opens it rather than closing anything")
 
+    if not eve.docked(refresh=False):
+        raise RuntimeError("not docked")
 
-def game_to_global(gx, gy, scale):
-    sx, sy, win_x, win_y = scale
-    return win_x + gx * sx, win_y + gy * sy
+    # Give the game window keyboard focus before any typing -- see the header.
+    eve.click(1900, 400, settle=1.2)
 
+    if not eve.of_type("InventoryPrimary", refresh=False):
+        eve.key("alt", "c", settle=3)
+        eve.read()
 
-def get_tree(live, root, metatype, str_type, max_depth=22, max_nodes=10000):
-    return rh.build_tree(
-        live, root, metatype, str_type, max_depth=max_depth, max_nodes=max_nodes
-    )
+    hangar = sidebar_entry(eve, "Item hangar")
+    if hangar is None:
+        raise RuntimeError("no 'Item hangar' in the inventory sidebar")
+    eve.click(*eve.centre_of(*hangar), settle=2)
+    eve.read()
 
+    box = quick_filter(eve)
+    if box is None:
+        raise RuntimeError("no InvContQuickFilter -- is the Inventory window open?")
+    eve.click(*eve.centre_of(*box), settle=1.2)
+    # Clear first. The box keeps whatever a previous run typed, and typing
+    # again appends -- "Acolyte IAcolyte I" matches nothing, which looks
+    # exactly like the typing having failed.
+    eve._cg_send("keydown 55"); eve._cg_send("keydown 0")
+    eve._cg_send("keyup 0");    eve._cg_send("keyup 55")
+    time.sleep(0.2)
+    eve._cg_send("keydown 51"); eve._cg_send("keyup 51")
+    time.sleep(0.4)
+    eve.type_text(drone_name)
+    time.sleep(2.5)
+    eve.read()
 
-def find_all(tree, predicate):
-    """Depth-first walk accumulating each node's absolute (summed)
-    game-pixel display region alongside whatever predicate(node) returns
-    truthy for."""
-    out = []
+    item = item_matching(eve, drone_name.split()[0])
+    if item is None:
+        raise RuntimeError(f"the filter did not surface {drone_name!r} -- "
+                           f"check the text actually landed in the box")
 
-    def walk(n, dx, dy):
-        entries = n.get("dictEntriesOfInterest", {})
-        sx_, sy_ = entries.get("_displayX"), entries.get("_displayY")
-        w, h = entries.get("_displayWidth"), entries.get("_displayHeight")
-        absx = dx + sx_ if isinstance(sx_, (int, float)) else dx
-        absy = dy + sy_ if isinstance(sy_, (int, float)) else dy
-        if predicate(n):
-            out.append((absx, absy, w, h, n))
-        for c in n.get("children", []):
-            walk(c, absx, absy)
+    bay = sidebar_entry(eve, "Drone Bay")
+    if bay is None:
+        raise RuntimeError("no 'Drone Bay' in the inventory sidebar")
 
-    walk(tree, 0, 0)
-    return out
+    eve.drag(eve.centre_of(*item), eve.centre_of(*bay))
 
+    # A "Set Quantity" dialog appears when the stack is larger than the bay's
+    # remaining capacity. Its default already fills the bay exactly, so accept.
+    eve.read()
+    for node, x, y in eve.nodes():
+        texts = eve_read.texts_of(node)
+        if texts and texts[0].strip() in ("OK", "Ok") and eve.size_of(node):
+            eve.click(*eve.centre_of(node, x, y), settle=1.5)
+            break
+    else:
+        eve.key("return", settle=1.5)
 
-def find_text(tree, needle, exact=False):
-    needle_l = needle.lower()
-
-    def pred(n):
-        entries = n.get("dictEntriesOfInterest", {})
-        for v in entries.values():
-            if isinstance(v, str):
-                if exact and v.lower() == needle_l:
-                    return True
-                if not exact and needle_l in v.lower():
-                    return True
-        return False
-
-    return find_all(tree, pred)
-
-
-def find_type(tree, type_name):
-    return find_all(tree, lambda n: n.get("pythonObjectTypeName") == type_name)
+    eve.read()
+    return eve.grep(drone_name.split()[0], refresh=False)
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--pid", type=int, default=None, help="game process pid (auto-detected if omitted)")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--drone-name", default="Acolyte I")
     args = ap.parse_args()
 
-    pid = args.pid
-    if pid is None:
-        out = subprocess.run(["pgrep", "-f", "SharedCache.*exefile"], capture_output=True, text=True).stdout
-        pid = int(out.strip().splitlines()[0])
-        print(f"# using detected game pid {pid}")
-
-    print("# activating EVE as the frontmost application")
-    activate_game(pid)
-
-    print("# bootstrapping live memory access (one-time dump, ~5-7s)")
-    live, root, metatype, str_type, root_w, root_h = bootstrap_memory(pid)
-    scale = build_scale(root_w, root_h, window_bounds(pid))
-    print(f"# root canvas {root_w}x{root_h}, scale={scale}")
-
-    cg = CgInput()
-
-    def click_node(gx, gy, w, h, button=0):
-        cx, cy = gx + (w or 0) / 2, gy + (h or 0) / 2
-        px, py = game_to_global(cx, cy, scale)
-        if button == 0:
-            cg.click(px, py, 0)
-        else:
-            cg.send(f"move {px} {py}")
-            time.sleep(0.05)
-            cg.send(f"down {button}")
-            time.sleep(0.08)
-            cg.send(f"up {button}")
-        return px, py
-
-    tree = get_tree(live, root, metatype, str_type)
-
-    ships_tab = find_text(tree, "Ships", exact=True)
-    if not ships_tab:
-        print("! could not find the 'Ships' hangar tab -- is the station Hangars panel open?")
-        sys.exit(1)
-    click_node(*ships_tab[0][:4])
-    time.sleep(0.3)
-
-    tree = get_tree(live, root, metatype, str_type)
-    active_hits = find_text(tree, "Active", exact=True)
-    if not active_hits:
-        print("! could not find the active ship marker")
-        sys.exit(1)
-    # the active ship's own name label sits above the "Active" marker in
-    # the same row; approximate by clicking slightly above/left of it,
-    # then rely on the resulting context menu for the real target.
-    ax, ay, aw, ah, _ = active_hits[0]
-    px, py = game_to_global(ax - 200, ay - 40, scale)
-    cg.send(f"move {px} {py}")
-    time.sleep(0.05)
-    cg.send("down 1")
-    time.sleep(0.08)
-    cg.send("up 1")
-    time.sleep(0.4)
-
-    tree = get_tree(live, root, metatype, str_type)
-    open_drone_bay = find_text(tree, "Open Drone Bay", exact=True)
-    if not open_drone_bay:
-        print("! no 'Open Drone Bay' menu entry -- right-click may have missed the active ship")
-        cg.send("keydown 0x35")
-        cg.send("keyup 0x35")
-        sys.exit(1)
-    gx, gy, w, h, _ = open_drone_bay[0]
-    click_node(gx, gy, w, h)
-    time.sleep(0.5)
-
-    tree = get_tree(live, root, metatype, str_type)
-    item_hangar = find_text(tree, "Item hangar", exact=True)
-    if not item_hangar:
-        print("! could not find 'Item hangar' in the Inventory window's tree")
-        sys.exit(1)
-    click_node(*item_hangar[0][:4])
-    time.sleep(0.3)
-
-    activate_game(pid)  # re-assert focus before typing
-    tree = get_tree(live, root, metatype, str_type)
-    filters = find_type(tree, "InvContQuickFilter")
-    if not filters:
-        print("! could not find the Item hangar's quick-filter search box")
-        sys.exit(1)
-    # the Inventory window's own filter box is the widest match
-    gx, gy, w, h, _ = max(filters, key=lambda f: f[2] or 0)
-    px, py = game_to_global(gx + (w or 0) / 2, gy + (h or 0) / 2, scale)
-    cg.click(px, py, 0)
-    cg.click(px, py, 0)  # double-click: first click can only select/hover
-    time.sleep(0.15)
-    cg.type_text(args.drone_name)
-    time.sleep(0.4)
-
-    tree = get_tree(live, root, metatype, str_type)
-    item_hits = find_text(tree, f"<center>{args.drone_name}")
-    drone_bay_hits = find_text(tree, "Drone Bay", exact=True)
-    if not item_hits:
-        print(f"! '{args.drone_name}' not found in the Item hangar (checked root folder only)")
-        sys.exit(1)
-    if not drone_bay_hits:
-        print("! could not find 'Drone Bay' in the tree")
-        sys.exit(1)
-
-    ix, iy, iw, ih, _ = item_hits[0]
-    # the icon sits above its caption label; aim for the icon, not the text
-    icon_x, icon_y = ix + (iw or 0) / 2, iy - 55
-    dx, dy, dw, dh, _ = drone_bay_hits[0]
-    dest_x, dest_y = dx + (dw or 0) / 2, dy + (dh or 0) / 2
-
-    src_px, src_py = game_to_global(icon_x, icon_y, scale)
-    dst_px, dst_py = game_to_global(dest_x, dest_y, scale)
-
-    print(f"# dragging '{args.drone_name}' onto Drone Bay")
-    cg.drag(src_px, src_py, dst_px, dst_py)
-    time.sleep(0.4)
-
-    tree = get_tree(live, root, metatype, str_type)
-    ok_dialog = find_text(tree, "Set Quantity", exact=True)
-    if ok_dialog:
-        gx, gy, w, h, _ = ok_dialog[0]
-        # OK/Cancel button group sits near the bottom of the dialog;
-        # OK is the left half.
-        ok_x, ok_y = gx + (w or 450) * 0.29, gy + (h or 276) * 0.8
-        px, py = game_to_global(ok_x, ok_y, scale)
-        cg.click(px, py, 0)
-        print("# confirmed quantity dialog")
-    else:
-        print("# no quantity dialog appeared (stack may have fit without one)")
-
-    cg.close()
-    live.close()
-    print("# done")
+    eve = eve_repl.connect()
+    try:
+        loaded = reload_drones(eve, args.drone_name)
+    except RuntimeError as exc:
+        print(f"! {exc}", file=sys.stderr)
+        return 1
+    print(f"drone bay now mentions {args.drone_name.split()[0]} in {len(loaded)} nodes")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
