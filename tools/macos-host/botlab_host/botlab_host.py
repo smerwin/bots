@@ -1439,6 +1439,7 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
 
     response = send_event({"BotSettingsChangedEvent": settings or ""})
 
+    session_end_at_milliseconds = None
     if session_duration_minutes is not None:
         # BotFramework.elm's own continueIfShouldHide already docks (and
         # stays docked, via Bot.elm's ifDocked branch) once
@@ -1531,6 +1532,22 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         if max_ticks is not None and tick > max_ticks:
             print("# max_ticks reached, stopping", file=sys.stderr)
             break
+
+        # The deadline is the host's to enforce, not the bot's. The bot is told
+        # when the session ends and is expected to wind down and answer
+        # FinishSession, but that is a decision it can fail to reach -- stuck in
+        # space, unable to dock, or looping on something -- and then nothing
+        # stops the run at all. Left to itself the remaining time just goes
+        # negative and the session carries on indefinitely.
+        #
+        # Checked between ticks rather than mid-tick so a dispatched input
+        # sequence finishes rather than being cut in half.
+        if session_end_at_milliseconds is not None:
+            overrun_seconds = (time.time() * 1000 - session_end_at_milliseconds) / 1000.0
+            if overrun_seconds > 0:
+                print(f"# session duration elapsed {overrun_seconds:.0f}s ago and the bot has not "
+                      f"finished the session -- stopping", file=sys.stderr)
+                break
 
         notify = cont.get("notifyWhenArrivedAtTime")
         if notify:
