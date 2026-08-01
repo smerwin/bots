@@ -238,6 +238,7 @@ procedure and its traps; this file carries the facts.
 | `bot_help.py` | backs `--help` on the launchers |
 | `stall_watch.py` | watches a running bot's log and screenshots the client when it stalls |
 | `eve_read.py` | live reads of the client (overview, targets, modules, combat feed, window id) by reusing botlab_host's UI-root cache -- ~2s instead of rediscovering the root |
+| `eve_repl.py` | interactive handle on the client for one-offs -- `python3 -i eve_repl.py`, then `eve.dock(...)`, `eve.warp_to(...)`, `eve.menu_click(...)`. See `REPL.md` |
 | `compile_bot.sh` | compiles a bot the way the host does, without running it; verifies the scratch copy matches the source |
 | `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session |
 | `reload_drones.py` | standalone one-off: refill drone bay from station hangar |

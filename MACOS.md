@@ -208,6 +208,20 @@ the screen, which matters when the client is on another Space. Run the bot with
   bots' settings match against the overview's *Type* column, so they depend on
   what your overview shows and how it is sorted. The `Bot.elm` headers say which.
 
+## Driving the client by hand
+
+For one-offs -- rescuing a ship, unsticking a window, checking what the bot can
+actually see -- there is an interactive handle on the client:
+
+```
+cd tools/macos-host
+python3 -i eve_repl.py
+>>> eve.dock("Emperor Family Academy")
+```
+
+`REPL.md` covers it, including the coordinate conversion and the conventions
+that have to be right for a click to land where you meant.
+
 ## Driving the EVE launcher (switching accounts)
 
 The launcher and the game are separate apps: `/Applications/eve-online.app` (an

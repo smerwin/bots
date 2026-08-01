@@ -1,0 +1,168 @@
+# Driving the EVE client by hand (`eve_repl.py`)
+
+An interactive handle on the running client, for the one-offs that don't
+justify a script: rescuing a ship, unsticking a window, checking what the bot
+can actually see, or trying an interaction before writing it into a bot.
+
+```
+cd tools/macos-host
+python3 -i eve_repl.py
+```
+
+```
+EVE session: pid 21325, window 9228, canvas 2880x1864 -> 1710x1069 pt (scale 1.684 x 1.744)
+`eve` is ready. Try eve.overview(), eve.find('...'), eve.buttons().
+```
+
+The scale on that line is measured, not assumed — see *Coordinates* below.
+
+## Before it will attach
+
+- SIP debugging restrictions off, as for everything else here (see `MACOS.md`).
+- **A bot must have run at least once since the client launched.** The REPL
+  reuses `botlab_host`'s UI-root cache; without it there is nothing to attach
+  to, and it will say so rather than guess. The addresses are per-launch, so a
+  client restart means running a bot again.
+
+## The model
+
+Read a snapshot, act on it, read again. `eve.read()` refreshes; most helpers
+refresh for you unless you pass `refresh=False`. A read is about half a second,
+so re-reading freely is fine.
+
+## Looking around
+
+```python
+eve.overview()                     # rows: (x, y, cells) — only rendered rows are real
+eve.windows()                      # open windows by type and caption
+eve.grep("Kruul")                  # every node whose text mentions this
+eve.of_type("SelectedItemButton")  # nodes by widget type
+eve.docked()                       # in station?
+eve.objective()                    # the tracked mission's current objective line
+```
+
+`eve.objective()` returning `None` means no mission is **tracked**, which is a
+real failure mode and not the same as having no mission — see CLAUDE.md.
+
+## Acting on something in space
+
+Everything here is the same pattern: select the overview row, then press a
+named button on the Selected Item panel. That is the one interaction on this
+client that has worked every time.
+
+```python
+eve.dock("Emperor Family Academy")     # select the station, press Dock
+eve.warp_to("Amarr - Star")            # get off this grid
+eve.jump("Amarr")                      # stargate: warps and jumps in one action
+eve.approach("Acceleration Gate")
+eve.keep_at_range("Centii Loyal")
+eve.activate_gate()                    # defaults to "Acceleration Gate"
+eve.undock()
+```
+
+Each is `act_on(needle, button)` underneath, which re-finds the row, confirms
+the panel is showing it, then presses. To see what a selection offers:
+
+```python
+eve.select("Acceleration Gate")
+eve.buttons()
+# {'selectedItemActivateGate': (2485, 93), 'selectedItemWarpTo': (2465, 93), ...}
+eve.panel("selectedItemActivateGate")
+```
+
+A gate whose name reads **"(Locked Down)"** will not open until the pocket is
+cleared — and approaching it is what spawns the rats that unlock it, so
+`eve.approach(...)` is the right move there, not `activate_gate`.
+
+## Rescuing a ship
+
+The sequence that recovered a pod from a mission pocket:
+
+```python
+eve.warp_to("Amarr - Star")            # anything at AU range is off this grid
+eve.wait_until(lambda: not eve.docked(), timeout=60)
+eve.dock("Emperor Family Academy")
+eve.wait_until(eve.docked, timeout=300)
+```
+
+## Context menus
+
+Right-click, read the entries, click one by label. `menu()` returns
+**mid-entry** y coordinates, because the reported y is an entry's top edge and
+clicking there hits the entry above.
+
+```python
+row = eve.find("Minmatar Plot")
+eve.menu(row[0] + 200, row[1] + 12)
+# [('Agent: Almananeg Erafeke', ...), ('Start Conversation', ...), ('Track', ...)]
+eve.menu_click("Track")
+```
+
+That exact sequence is how a mission gets tracked so it appears in the info
+panel — without which the mission runner cannot leave the station.
+
+## Windows
+
+```python
+eve.close_window("Agency")             # press the window's own Close control
+eve.key("alt", "j")                    # Opportunities
+eve.key("alt", "c")                    # Inventory
+eve.key("escape")
+eve.screenshot()                       # by window id, returns the path
+```
+
+`screenshot()` captures the game window rather than the screen: the client is
+usually on another macOS Space, where a screen grab catches the wrong desktop.
+
+## Clicking something awkward
+
+```python
+n = eve.node("InfoPanelSearch")
+eve.size_of(n)          # (312, 38)
+eve.click_node(n)       # centre of it, descending if it has no size of its own
+```
+
+## Coordinates
+
+The client's internal canvas is not screen points, and the ratio is **not** the
+Retina backing scale. It is UIRoot's reported size over the window's point
+size, per axis, measured on connect — 1.684 × 1.744 on the machine this was
+written on, where 2.0 would have been wrong on both axes. `eve.to_screen(x, y)`
+does the conversion; the helpers all use it.
+
+Two things the tree does *not* give you:
+
+- **No `totalDisplayRegion`.** Not one node has one — that field is computed by
+  the Elm parser, not by `tree_walker`. Sizes are in `dictEntriesOfInterest` as
+  `_displayWidth`/`_displayHeight`, which is what `size_of` reads. Any
+  `x + region.width / 2` written against this tree silently yields the node's
+  top-left corner.
+- **Overview rows have no size**, so a row's position is its left edge — the
+  icon column, which does not select. The helpers click `NAME_COLUMN` (200)
+  into the row, on the name.
+
+## Running it while a bot is running
+
+Safe, and useful: `botlab_host` treats input it did not post itself as a human
+at the keyboard and stands down for a few seconds, so you can close a stray
+window mid-fight without stopping anything. The log says
+`standing down: someone used the mouse/keyboard 3.7s ago`.
+
+That is courtesy, not isolation. Anything that moves the ship will be fought by
+the bot as soon as it resumes, so stop the bot first for anything beyond
+tidying windows — the same reason `route_setter.py` and `reload_drones.py` are
+documented as never-alongside.
+
+## Gotchas worth knowing
+
+- **The overview re-sorts between a read and a click.** `select()` re-finds the
+  row each attempt and confirms by name; do the same if you drive clicks
+  yourself. Reading a position and clicking it later selected a star instead of
+  a station, live.
+- **Check nothing is overlaying.** An open Settings window silently swallowed
+  two test clicks and produced a confident, wrong conclusion about a keybind.
+  `eve.windows()` before concluding a click "didn't work".
+- **Verify after acting.** Objective text changed, overview row count changed,
+  window gone. Most wrong conclusions come from acting and assuming.
+- **Not everything responds to synthetic clicks.** The EVE *launcher's* PLAY
+  NOW ignores them entirely; see `MACOS.md`.
