@@ -28,6 +28,11 @@ plausible and wrong, each of which cost a real debugging session:
     Click mid-entry.
   * The overview re-sorts between a read and a click, so find and click in one
     pass and confirm by name afterwards, never by position alone.
+  * `tree_walker` emits no `totalDisplayRegion` -- not one node in 5,400 has
+    one. That field is computed by the Elm parser, not by the walker, so any
+    `x + region.width / 2` here silently returns the node's top-left corner.
+    Sizes live in `dictEntriesOfInterest` as `_displayWidth`/`_displayHeight`;
+    `size_of` and `centre_of` read those.
   * Where the Selected Item panel offers a named button, press that. It is the
     one interaction on this client that has been reliable every time -- Dock,
     Warp To, Jump, Activate Gate, Approach, Keep At Range.
@@ -259,8 +264,7 @@ class Session:
         for n, x, y in self.nodes():
             if n.get("pythonObjectTypeName") == "SelectedItemButton":
                 d = n.get("dictEntriesOfInterest") or {}
-                r = n.get("totalDisplayRegion") or {}
-                out[d.get("_name")] = (x + r.get("width", 0) / 2, y + r.get("height", 0) / 2)
+                out[d.get("_name")] = self.centre_of(n, x, y)
         return out
 
     def panel(self, button_name, settle=2.0):
@@ -301,6 +305,167 @@ class Session:
                 self.click(x + 60, y)
                 return True
         return False
+
+    # -- clicking things that are not directly clickable -------------------
+
+    def size_of(self, node):
+        """A node's size, from `dictEntriesOfInterest`. `totalDisplayRegion`
+        does not exist in this tree -- see the header."""
+        d = node.get("dictEntriesOfInterest") or {}
+        w = d.get("_displayWidth") or d.get("_width")
+        h = d.get("_displayHeight") or d.get("_height")
+        return (w, h) if w and h else None
+
+    def centre_of(self, node, x, y):
+        """The middle of a node, given its absolute position from a walk."""
+        size = self.size_of(node)
+        return (x + size[0] / 2, y + size[1] / 2) if size else (x, y)
+
+    def clickable(self, node, base=None):
+        """The centre of something you can actually click inside `node`.
+
+        Plenty of nodes carry no `totalDisplayRegion` at all -- every info
+        panel does, and so does every overview row. That is not cosmetic: the
+        bot's own `allUiNodesInReading` is built from nodes *with* a region, so
+        a region-less node is invisible to it however it is named. That is why
+        `searchInputField` can never find `InfoPanelSearch` even while the
+        search bar sits on screen, which stalled run 108.
+
+        The fix is the same by hand or in code: descend until something has a
+        real region, and click that.
+        """
+        if base is None:
+            base = self._position_of(node)
+            if base is None:
+                return None
+        if self.size_of(node):
+            return self.centre_of(node, base[0], base[1])
+        # No size of its own: fall through to the first descendant that has
+        # one. walk() re-applies this node's own offset, so start from its
+        # parent's origin to avoid counting it twice.
+        d = node.get("dictEntriesOfInterest") or {}
+        ox = base[0] - (d.get("_displayX") or 0)
+        oy = base[1] - (d.get("_displayY") or 0)
+        for child, x, y in eve_read.walk(node, ox, oy):
+            if child is not node and self.size_of(child):
+                return self.centre_of(child, x, y)
+        return base
+
+    def _position_of(self, node):
+        for other, x, y in self.nodes():
+            if other is node:
+                return (x, y)
+        return None
+
+    def click_node(self, node, button=LEFT, settle=1.0):
+        """Click a node, descending to whatever inside it has a region."""
+        point = self.clickable(node)
+        if point is None:
+            raise ValueError("nothing clickable inside that node")
+        self.click(point[0], point[1], button=button, settle=settle)
+        return point
+
+    def node(self, type_name, refresh=True):
+        """The first node of a type, whether or not it has a region."""
+        found = self.of_type(type_name, refresh=refresh)
+        return found[0][0] if found else None
+
+    # -- state ------------------------------------------------------------
+
+    def docked(self, refresh=True):
+        if refresh:
+            self.read()
+        types = {n.get("pythonObjectTypeName") for n, _, _ in self.nodes()}
+        return "LobbyWnd" in types
+
+    def objective(self, refresh=True):
+        """The tracked mission's current objective line, which is what the
+        travel logic keys on -- absent entirely if the mission is not tracked."""
+        if refresh:
+            self.read()
+        for n, _, _ in self.nodes():
+            if n.get("pythonObjectTypeName") == "AgentMissionInfoPanelEntry":
+                texts = eve_read.texts_of(n)
+                return texts[-1] if texts else None
+        return None
+
+    def wait_until(self, predicate, timeout=120, every=4):
+        """Poll a predicate over fresh readings. `eve.wait_until(eve.docked)`."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return True
+            time.sleep(every)
+        return False
+
+    # -- the actions worth having to hand ---------------------------------
+
+    def act_on(self, needle, button_name, settle=2.5):
+        """Select an overview row by name, then press a panel button on it.
+
+        The whole reliable-interaction pattern in one call: `select` re-finds
+        and confirms, `panel` presses by stable name. Everything below is this
+        with a button filled in.
+        """
+        if self.select(needle) is None:
+            raise LookupError(f"no overview row matching {needle!r}")
+        return self.panel(button_name, settle=settle)
+
+    def dock(self, needle):
+        return self.act_on(needle, "selectedItemDock")
+
+    def warp_to(self, needle):
+        return self.act_on(needle, "selectedItemWarpTo")
+
+    def jump(self, needle):
+        return self.act_on(needle, "selectedItemJump")
+
+    def approach(self, needle):
+        return self.act_on(needle, "selectedItemApproach")
+
+    def orbit(self, needle):
+        return self.act_on(needle, "selectedItemOrbit")
+
+    def keep_at_range(self, needle):
+        return self.act_on(needle, "selectedItemKeepAtRange")
+
+    def activate_gate(self, needle="Acceleration Gate"):
+        """Take the gate. Note a gate reading "(Locked Down)" will not open
+        until the pocket is cleared -- approaching it is what triggers the
+        spawn that unlocks it."""
+        return self.act_on(needle, "selectedItemActivateGate")
+
+    def undock(self):
+        for n, x, y in self.nodes():
+            if n.get("pythonObjectTypeName") == "UndockButton":
+                self.click_node(n, settle=3.0)
+                return True
+        return False
+
+    def close_window(self, needle):
+        """Close the first window whose type or caption mentions `needle`, by
+        its own Close control -- the same move that works for a loot window."""
+        self.read()
+        for n, x, y in self.nodes():
+            t = n.get("pythonObjectTypeName", "")
+            if needle.lower() not in (t + " " + " ".join(eve_read.texts_of(n)[:4])).lower():
+                continue
+            for child, cx, cy in eve_read.walk(n, x, y):
+                if child.get("pythonObjectTypeName") == "WindowControlButton" \
+                        and "Close" in eve_read.texts_of(child):
+                    self.click(*self.centre_of(child, cx, cy))
+                    return True
+        return False
+
+    def screenshot(self, path=None):
+        """Capture the game window by id. Not the screen -- the client is
+        usually on another macOS Space, where a screen grab catches the wrong
+        desktop entirely."""
+        path = path or os.path.join(os.environ.get("TMPDIR", "/tmp"),
+                                    f"eve_{time.strftime('%H%M%S')}.png")
+        subprocess.run(["screencapture", "-x", "-o", "-l", str(self.window), path],
+                       check=True)
+        return path
 
     def close(self):
         if self._cg is not None:
