@@ -2979,8 +2979,20 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                                     (clickUiElement closeButton)
 
                             Nothing ->
-                                describeBranch "Loot window did not close on its own, and I cannot find its Close button."
-                                    askForHelpToGetUnstuck
+                                -- Wait, do not cry stuck. The window's controls
+                                -- are not always in the reading -- run 108 took
+                                -- this arm three readings running, then found
+                                -- the button and went on to hand the mission in.
+                                -- Asking for help on the first miss turned a
+                                -- transient into three alarms and a screenshot.
+                                --
+                                -- The genuine case is already covered above:
+                                -- lootWindowRefusesToCloseTicks gives up after
+                                -- 30 readings however the close fails, so
+                                -- waiting here costs nothing and cannot loop.
+                                describeBranch
+                                    "Loot window did not close on its own, and its Close button is not in this reading -- wait for the next one."
+                                    waitForProgressInGame
 
                     else
                         case openLootWindow.uiNode |> findUiElementWithText "Loot All" of
