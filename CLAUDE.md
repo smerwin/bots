@@ -237,7 +237,7 @@ procedure and its traps; this file carries the facts.
 | `run_saxrat.sh`, `run_mission.sh` | launchers for `eve-online-saxrat` / `eve-online-mission-runner`; one-bot-at-a-time guard kills any prior launcher/`botlab_host.py`/`driver.js`/`tree_walker` first |
 | `bot_help.py` | backs `--help` on the launchers |
 | `stall_watch.py` | watches a running bot's log and screenshots the client when it stalls |
-| `eve_read.py` | live reads of the client (overview, targets, modules, combat feed, window id) by reusing botlab_host's UI-root cache -- ~2s instead of rediscovering the root |
+| `eve_read.py` | live reads of the client (overview, targets, modules, combat feed, window id, client pid) by reusing botlab_host's UI-root cache -- ~2s instead of rediscovering the root |
 | `eve_repl.py` | interactive handle on the client for one-offs -- `python3 -i eve_repl.py`, then `eve.dock(...)`, `eve.warp_to(...)`, `eve.menu_click(...)`. See `REPL.md` |
 | `compile_bot.sh` | compiles a bot the way the host does, without running it; verifies the scratch copy matches the source |
 | `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session |
@@ -278,6 +278,16 @@ and are **not** part of the bot loop. Never run them alongside a launcher sessio
 — both fight for the same mouse and keyboard, and a stray background run once
 caused a long, confusing debugging detour. Check with `pgrep -f` on the same
 patterns the launchers' guard uses before starting either.
+
+**Never print the client's command line.** The launcher starts the game with the
+account's `/ssoToken=` and `/refreshToken=` as arguments, so `ps aux | grep EVE`,
+`pgrep -fl`, or `ps -o command=` dumps live credentials into whatever reads that
+output — a terminal, a run log, a transcript pasted somewhere else. The
+`ssoToken` expires in ten minutes but the `refreshToken` does not. Ask
+`python3 eve_read.py pid` (or `eve_read.client_pid()`), which resolves the pid
+from `lsappinfo`'s bundle id and never touches an argument vector. `pgrep -f`
+without `-l` is also fine — it matches the command line without printing it,
+which is what the launchers' own guard does.
 
 ## Coordinates and input execution
 

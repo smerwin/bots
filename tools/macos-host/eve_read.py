@@ -27,6 +27,8 @@ Usage as a CLI:
     python3 eve_read.py modules      # ship module slots and ramp_active
     python3 eve_read.py combat       # the floating combat feed
     python3 eve_read.py window       # the game window id, for screencapture -l
+    python3 eve_read.py pid          # the client's pid, without printing its
+                                     # command line -- see client_pid()
 
 or as a library:
 
@@ -56,9 +58,7 @@ class NotAvailable(Exception):
 
 
 def _pid_is_eve(pid):
-    out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
-                         capture_output=True, text=True).stdout
-    return "SharedCache/tq/EVE.app" in out
+    return pid == client_pid()
 
 
 def ui_root():
@@ -152,7 +152,30 @@ def game_window_id(pid=None):
     return best[0] if best else None
 
 
+def client_pid():
+    """The running client's pid, or None.
+
+    Ask for this rather than reaching for `ps`. The launcher starts the client
+    with the account's `/ssoToken=` and `/refreshToken=` on its command line, so
+    anything that prints a command line -- `ps aux | grep EVE`, `pgrep -fl`,
+    `ps -o command=` -- puts live credentials wherever that output goes: a
+    terminal, a run log, a transcript pasted into a chat. `lsappinfo` answers
+    from the bundle id and never reports an argument vector; this is the same
+    lookup `botlab_host.find_eve_processes` uses.
+    """
+    out = subprocess.run(["lsappinfo", "list"], capture_output=True, text=True).stdout
+    for m in re.finditer(r'bundleID="([^"]+)"[^\x00]*?pid = (\d+)', out):
+        if m.group(1) == "com.ccpgames.eveonline":
+            return int(m.group(2))
+    return None
+
+
 def _cli(what):
+    if what == "pid":
+        pid = client_pid()
+        print(pid if pid is not None else "no EVE client running")
+        return 0 if pid is not None else 1
+
     if what == "window":
         print(game_window_id())
         return 0
