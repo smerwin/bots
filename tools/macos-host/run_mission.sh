@@ -143,14 +143,18 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # mention. Add that object's name here when a mission strands the bot with
 # "Nothing to fight and no travel step offered".
 #
-# The four structures below are that mission's pocket, read off the overview in
-# the run 114 screenshot -- the run that sat on "Nothing to fight" for 14,111
-# decisions, 37% of the session, and never recovered. Which of them yields the
-# Diplomat is not established; the Amarr-Caldari Mediation Center is the
-# thematic fit and is listed last so it is tried first (settings prepend, so
-# file order is reverse priority). The rest are there so a wrong guess costs a
-# trip rather than the session: each is dropped from the candidate list once the
-# ship is inside interactionRangeInMeters, so the bot works down them.
+# The object is the Amarr-Caldari Mediation Center, confirmed on run 115: 48
+# readings closing on it turned "You need Amarr Diplomat in your cargohold" into
+# "Bring Amarr Diplomat to Uraarala Kigiken", and the mission handed in. It is
+# listed last so it is tried first -- settings prepend, so file order is reverse
+# priority.
+#
+# The other three are the rest of that pocket, read off the overview in run
+# 114's stall screenshot -- the run that sat on "Nothing to fight" for 14,111
+# decisions, 37% of the session, and never recovered. They are kept as a hedge
+# for the sibling missions in this chain: each candidate is dropped once the
+# ship is inside interactionRangeInMeters, so the bot works down the list rather
+# than stalling on the first wrong guess.
 #
 # Ordering these ahead of Amarr Station is safe. approachConfiguredObjectIfPresent
 # is deliberately last in the decision tree -- it fires only with nothing to
