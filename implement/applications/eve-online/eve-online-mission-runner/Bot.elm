@@ -709,13 +709,19 @@ Three ways of asking, because the obvious two both failed on
 `ButtonIcon` whose text lives in `_hint`, and `getDisplayText` reads only
 `_setText`/`_text`, so `findUiElementWithText "Close"` never matches and the
 first version of this stalled the session outright. `parseWindowControlsFromWindow`
-then returned Nothing too -- this window does not parse as a standard one -- and
-the Escape fallback did not close it either, so the bot simply pressed Escape
-forever.
+then returned Nothing too, and the Escape fallback did not close it either, so
+the bot simply pressed Escape forever.
 
-What does work, verified by hand against this exact window, is the icon's own
-`_name`: every window in this client carries a `CloseButtonIcon`, whatever else
-differs about it.
+That second failure was not particular to that window. `parseWindowControls`
+looked for a texture path containing `eveicon/window/close`, which this client
+does not use -- across 112 logged runs the loot window's own close arm matched
+it zero times and missed 77. It now also accepts this client's
+`system_icons/close_16px`, so the standard parse does work here.
+
+The fallback below stays regardless, because it is the more robust question:
+the icon's own `_name`. Every window in this client carries a
+`CloseButtonIcon`, whatever else differs about it, and that is what got
+`ShipRestrictionsWindow` closed when the texture match could not.
 -}
 closeControlOfWindow : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
 closeControlOfWindow window =
@@ -2380,8 +2386,7 @@ closeMessageBox readingFromGameClient =
                             , namedButton "no_dialog_button"
                                 |> Maybe.map (labelled "No")
                             , messageBox.uiNode
-                                |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
-                                |> Maybe.andThen .closeButton
+                                |> closeControlOfWindow
                                 |> Maybe.map (\node -> ( "the window's close button", node ))
                             ]
                      in
@@ -2986,27 +2991,16 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                         -- stuck open for hours: Ctrl+W alone left it open, clicking
                         -- its title bar first then Ctrl+W closed it, and clicking
                         -- Close closed it with no focus step at all.
-                        case
-                            openLootWindow.uiNode
-                                |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
-                                |> Maybe.andThen .closeButton
-                        of
+                        case openLootWindow.uiNode |> closeControlOfWindow of
                             Just closeButton ->
                                 describeBranch "Loot window did not close on its own -- click its Close button."
                                     (clickUiElement closeButton)
 
                             Nothing ->
-                                -- Wait, do not cry stuck. The window's controls
-                                -- are not always in the reading -- run 108 took
-                                -- this arm three readings running, then found
-                                -- the button and went on to hand the mission in.
-                                -- Asking for help on the first miss turned a
-                                -- transient into three alarms and a screenshot.
-                                --
-                                -- The genuine case is already covered above:
-                                -- lootWindowRefusesToCloseTicks gives up after
-                                -- 30 readings however the close fails, so
-                                -- waiting here costs nothing and cannot loop.
+                                -- Wait rather than cry stuck. The genuine case is
+                                -- already covered above: lootWindowRefusesToCloseTicks
+                                -- gives up after 30 readings however the close fails,
+                                -- so waiting here costs nothing and cannot loop.
                                 describeBranch
                                     "Loot window did not close on its own, and its Close button is not in this reading -- wait for the next one."
                                     waitForProgressInGame
@@ -3017,11 +3011,7 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                                 describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
 
                             Nothing ->
-                                case
-                                    openLootWindow.uiNode
-                                        |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
-                                        |> Maybe.andThen .closeButton
-                                of
+                                case openLootWindow.uiNode |> closeControlOfWindow of
                                     Just closeButton ->
                                         describeBranch "Nothing left to loot. Close the wreck's cargo window."
                                             (clickUiElement closeButton)

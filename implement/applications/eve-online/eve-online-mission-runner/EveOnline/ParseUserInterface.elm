@@ -3545,22 +3545,37 @@ parseWindowControlsFromWindow =
 parseWindowControls : UITreeNodeWithDisplayRegion -> WindowControls
 parseWindowControls controlsNode =
     let
-        nodeFromTexturePathContains texturePathSubstring =
+        nodeFromTexturePathContainingAny texturePathSubstrings =
             controlsNode
                 |> listDescendantsWithDisplayRegion
                 |> List.filter
                     (.uiNode
                         >> getTexturePathFromDictEntries
-                        >> Maybe.map (String.toLower >> String.contains (String.toLower texturePathSubstring))
+                        >> Maybe.map
+                            (\texturePath ->
+                                texturePathSubstrings
+                                    |> List.any
+                                        (\substring ->
+                                            texturePath
+                                                |> String.toLower
+                                                |> String.contains (String.toLower substring)
+                                        )
+                            )
                         >> Maybe.withDefault False
                     )
                 |> List.head
 
+        -- The macOS client keeps these icons under 'system_icons' with a size
+        -- suffix. 'eveicon/window/...' is the path the upstream parser was
+        -- written against and matches nothing here, so every window read as
+        -- having no controls rather than as an error.
         minimizeButton =
-            nodeFromTexturePathContains "eveicon/window/minimize"
+            nodeFromTexturePathContainingAny
+                [ "eveicon/window/minimize", "system_icons/minimize_16px" ]
 
         closeButton =
-            nodeFromTexturePathContains "eveicon/window/close"
+            nodeFromTexturePathContainingAny
+                [ "eveicon/window/close", "system_icons/close_16px" ]
     in
     { uiNode = controlsNode
     , minimizeButton = minimizeButton
