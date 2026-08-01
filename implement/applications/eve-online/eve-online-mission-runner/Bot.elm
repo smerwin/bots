@@ -2880,6 +2880,21 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
             overviewEntriesToAttackFromReadingFromGameClient
                 (objectNamesToAttack context)
                 context.readingFromGameClient
+                -- Anything warp-disrupting us goes to the front, ahead of the
+                -- distance order everything else is in. This list drives what
+                -- gets locked and, through clickTargetBeforeShooting, what
+                -- becomes the active target -- so putting the scrambler first
+                -- also points keep-at-range at it, which is the one target
+                -- worth holding range on. Stable sort, so the nearest
+                -- scrambler leads and the rest keep their existing order.
+                |> List.sortBy
+                    (\entry ->
+                        if overviewEntryIsWarpDisruptingMe entry then
+                            0
+
+                        else
+                            1
+                    )
 
         -- When the briefing says the rooms need not be cleared, drop everything
         -- that only qualified by looking like a rat. What the objective or the
@@ -3696,6 +3711,25 @@ overviewEntryIsActiveTarget =
         >> Set.member "myActiveTargetIndicator"
 
 
+{-| Whether this object is holding the ship in place.
+
+The client says so on the overview entry itself -- the parser has carried
+`isWarpDisruptingMe` all along and nothing ever read it. It matters more than
+any other property of a target, because everything the bot does when a fight
+goes wrong assumes it can leave: the retreat warps to a celestial, and warping
+is precisely what a scrambler prevents. Without this the bot issues warp after
+warp that cannot succeed while its armour drains, which is how the Coercer was
+lost in run 102 -- the retreat rewrite that followed did not fix it, because it
+still only knew how to warp.
+
+So a scrambler is shot first. Killing it is the only thing that restores the
+option to leave.
+-}
+overviewEntryIsWarpDisruptingMe : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsWarpDisruptingMe overviewEntry =
+    overviewEntry.commonIndications.isWarpDisruptingMe
+
+
 {-| Whether to shoot this overview entry. Rats are recognised by their icon
 colour, but some missions require destroying a structure -- a "Drone Silo" and
 other Large Collidable Objects -- and those are neutral objects with no
@@ -4018,7 +4052,13 @@ clickTargetBeforeShooting context entriesToAttack =
                                 )
                     )
     in
-    [ entriesToAttack |> List.filter overviewEntryIsActiveTarget |> List.head
+    -- A scrambler outranks the target already selected. Everything else prefers
+    -- to stay on the active target rather than flip between them, but a warp
+    -- disruptor is the one thing worth switching for: until it dies the ship
+    -- cannot leave, and it is also what keep-at-range should be holding range
+    -- on, since keep-at-range follows whatever is active.
+    [ entriesToAttack |> List.filter overviewEntryIsWarpDisruptingMe |> List.head
+    , entriesToAttack |> List.filter overviewEntryIsActiveTarget |> List.head
     , entriesToAttack |> List.head
     ]
         |> List.filterMap identity
