@@ -53,13 +53,17 @@ python3 stall_watch.py <log> --pid <game pid> --out <dir>
 ```
 
 The game pid is the argument `tree_walker` was started with — `pgrep -fl
-tree_walker/tree_walker` shows it.
+tree_walker/tree_walker` shows it. `python3 eve_read.py pid` also answers it,
+and unlike `ps` or `pgrep -fl` it will not print the client's command line,
+which carries the account's live SSO and refresh tokens.
 
-**It exits on the first stall.** That is by design so a caller can act, but it
-means one invocation gives one alarm and then coverage silently stops. For a
-long run, either re-launch it after each firing or wrap it in a loop. If you
-started it and later find it gone, check its output before assuming it crashed
-— firing and exiting looks identical to dying from the outside.
+**It exits on the first stall** unless you pass `--keep-going`. Exiting is by
+design so a caller can act, but it means one invocation gives one alarm and then
+coverage silently stops — if you started it and later find it gone, check its
+output before assuming it crashed, because firing and exiting looks identical to
+dying from the outside. For a long run prefer `--keep-going`: each distinct
+stall is screenshotted once and `--max-shots` caps the rest, so it no longer
+fills the disk with pictures of the same frozen screen.
 
 It screenshots the client **by window id**, because the client is usually on
 another macOS Space where a screen grab catches the wrong desktop.

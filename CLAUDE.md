@@ -267,6 +267,23 @@ of "I see a message box to close". It screenshots the game **window by id**
 (`screencapture -x -o -l`), not the screen, because the client is usually on
 another macOS Space where a screen grab catches the wrong desktop.
 
+`--keep-going` keeps watching after a stall instead of exiting, and is now safe
+to leave on. Each distinct stall is screenshotted **once** — distinctness judged
+on the reason with its numbers masked, since the quoted loop carries drifting
+distances and tick counts — and `--max-shots` (default 20) caps the run
+regardless. Without that dedupe it reported on a metronome: a shot per 40 stuck
+decisions, and the worst pathology on record repeated one decision 8,983 times,
+which is ~225 near-identical Retina grabs of a frozen screen at ~7.5 MB each,
+or the 1.7 GB that actually accumulated.
+
+The universal leaf `Wait for progress in game` is **passed over** when judging
+whether a window of decisions is benign idling. Every benign state reaches that
+leaf, so a window holding "I am in warp" and its leaf could never be all-benign,
+and run 114 raised an alarm for a bot correctly sitting out a warp. It is still
+never benign on its own — a window of nothing but leaves says nothing about
+*why* the bot is waiting, and treating it as idle is what once dropped detection
+to nothing.
+
 **Bot source acquisition** (both tested): a local file or directory path (or
 `file://`), or a GitHub URL — a plain repo, or a `.../tree/<branch>/<subpath>`
 URL, needed since apps in *this* repo live under `implement/applications/...`
