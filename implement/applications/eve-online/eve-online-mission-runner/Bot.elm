@@ -3826,16 +3826,22 @@ isObjectToAttackByName namesToAttack overviewEntry =
 
 {-| Whether the mission's own briefing says the pirates need not be cleared.
 
-EVE says so in fixed wording when a site's gates are unlocked -- "The
-acceleration gates are not locked, hence clearing the pirates in the first two
-rooms is not required" -- and it is worth acting on: run 102 spent over 400
-combat decisions shooting rats on a mission whose brief said not to bother,
-while the tracker objective read "You need to activate the Acceleration Gate"
-the whole time.
+EVE says so in more than one wording, and the first version of this matched
+only the first of them:
 
-Both halves of the phrase are required. Anything less explicit is treated as
-"clearing is required", which is the behaviour that was always there -- getting
-this wrong the other way strands the ship at a gate that will not open.
+  + "The acceleration gates are not locked, hence clearing the pirates in the
+    first two rooms is not required" -- Worlds Collide
+  + "Destroying any pirates found in the area is not a requirement" -- Recon
+
+Worth acting on either way. Run 102 spent over 400 combat decisions shooting
+rats on a mission whose brief said not to bother, and run 106 did the same on
+Recon while the objective read "You need to activate the Acceleration Gate".
+
+So: the briefing must mention pirates *and* say they are not required. That
+keeps it explicit -- getting this wrong the other way strands the ship at a
+gate that will not open -- while not depending on the gates-not-locked clause,
+which only one of the two wordings has. Checked against every briefing in the
+run history: of 46 missions, it matches those two and nothing else.
 -}
 briefingSaysClearingIsOptional : String -> Bool
 briefingSaysClearingIsOptional briefing =
@@ -3843,8 +3849,10 @@ briefingSaysClearingIsOptional briefing =
         normalised =
             briefing |> String.toLower
     in
-    (normalised |> String.contains "not locked")
-        && (normalised |> String.contains "not required")
+    (normalised |> String.contains "pirate")
+        && ([ "not required", "not a requirement" ]
+                |> List.any (\phrase -> normalised |> String.contains phrase)
+           )
 
 
 {-| The answer from any briefing on screen right now, or `Nothing` when no
