@@ -174,7 +174,8 @@ def main():
         print(f"! {exc}", file=sys.stderr)
         return 1
     if after != before:
-        print(f"loaded: hangar stack {before} -> {after}")
+        moved = "the whole stack" if after is None else f"{before} -> {after}"
+        print(f"loaded {args.drone_name}: hangar stack {moved}")
         return 0
     print(f"! nothing moved -- hangar stack still {before}; is the drone bay full?",
           file=sys.stderr)
