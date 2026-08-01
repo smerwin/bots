@@ -337,6 +337,7 @@ type alias BotMemory =
     , siteAdmitsThisShip : Maybe Bool
     , clearingNotRequired : Bool
     , agentConversationWithoutTrackerTicks : Int
+    , keepAtRangeUnconfirmedTicks : Int
     , readingsCount : Int
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
@@ -2947,7 +2948,7 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
 
         ensureShipIsKeepingRangeDecision =
             activeTargetEntry
-                |> Maybe.andThen (ensureShipIsKeepingRange seeUndockingComplete.shipUI)
+                |> Maybe.andThen (ensureShipIsKeepingRange context seeUndockingComplete.shipUI)
 
         notableWreckEntries =
             context.readingFromGameClient.overviewWindows
@@ -3173,9 +3174,29 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
         decisionToKillRats
 
 
-ensureShipIsKeepingRange : ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
-ensureShipIsKeepingRange shipUI overviewEntryToKAR =
-    if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverRange then
+{-| How many readings to keep telling the ship to hold range before letting it
+get on with shooting instead.
+
+The command reports success only through the HUD's manoeuvre indicator, and on
+this client `HudActionIndicationContainer` is often empty -- so `ManeuverRange`
+never arrives and the branch below re-issues forever. Run 111 spent a whole
+180-minute session on it: 8,941 keypresses, no missions.
+
+Give up quietly rather than ask for help. Holding range is an optimisation, not
+a prerequisite -- the guns and drones work regardless -- so the right answer
+when it cannot be confirmed is to stop trying and fight, not to stop the run.
+-}
+keepAtRangeGiveUpTicks : Int
+keepAtRangeGiveUpTicks =
+    20
+
+
+ensureShipIsKeepingRange : BotDecisionContext -> ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
+ensureShipIsKeepingRange context shipUI overviewEntryToKAR =
+    if context.memory.keepAtRangeUnconfirmedTicks > keepAtRangeGiveUpTicks then
+        Nothing
+
+    else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverRange then
         Nothing
 
     else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverAlign then
@@ -3569,6 +3590,7 @@ initBotMemory =
     , siteAdmitsThisShip = Nothing
     , clearingNotRequired = False
     , agentConversationWithoutTrackerTicks = 0
+    , keepAtRangeUnconfirmedTicks = 0
     , readingsCount = 0
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
@@ -4949,6 +4971,33 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             (.armor)
             botMemoryBefore.lowestArmorPercentSinceHealthy
     , readingsCount = botMemoryBefore.readingsCount + 1
+    , keepAtRangeUnconfirmedTicks =
+        -- How long the ship has been told to keep at range without the HUD ever
+        -- saying it is. The command's only confirmation is the manoeuvre
+        -- indicator, and on this client that container is frequently empty --
+        -- so the check that ends the command can simply never come true.
+        case context.readingFromGameClient.shipUI of
+            Nothing ->
+                0
+
+            Just shipUI ->
+                if
+                    [ EveOnline.ParseUserInterface.ManeuverRange
+                    , EveOnline.ParseUserInterface.ManeuverAlign
+                    ]
+                        |> List.member
+                            (shipUI.indication
+                                |> Maybe.andThen .maneuverType
+                                |> Maybe.withDefault EveOnline.ParseUserInterface.ManeuverWarp
+                            )
+                then
+                    0
+
+                else if context.readingFromGameClient.targets |> List.isEmpty then
+                    0
+
+                else
+                    botMemoryBefore.keepAtRangeUnconfirmedTicks + 1
     , agentConversationWithoutTrackerTicks =
         -- How many readings the agent has claimed a mission is in progress
         -- while nothing at all is tracked. Counted from the reading so the
