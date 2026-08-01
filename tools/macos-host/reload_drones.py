@@ -1,40 +1,48 @@
 #!/usr/bin/env python3
 """Refill the active ship's drone bay from the station Item hangar, while docked.
 
-    python3 reload_drones.py [--drone-name "Acolyte I"] [--count N]
+    python3 reload_drones.py [--drone-name "Acolyte I"]
 
-Rewritten on top of `eve_repl`, which now owns the parts every one-off needs:
-attaching to the client, the canvas-to-screen calibration, one long-lived
-`cg_input`, and the drag and typing mechanics. What is kept from the original,
-because it was established live and each piece has a reason:
+Built on `eve_repl`, which owns attaching to the client, the canvas-to-screen
+calibration, one long-lived `cg_input`, and the drag and typing mechanics. The
+original did its own repr-scan bootstrap and a fresh full tree read per step,
+which made a run take minutes; this reuses the cached UI root and reads in
+about half a second.
 
-  * Keyboard focus has to be given back to the game window before typing.
-    Mouse clicks are routed by cursor position and keep working regardless,
-    but key events go to whatever holds keyboard focus -- and closing UI
-    windows can leave the client frontmost with no window focused, at which
-    point every keystroke vanishes. Neither cg_input nor System Events gets
-    through in that state. One click on empty viewport fixes it, and this
-    cost an hour to find.
-  * The Item hangar's quick-filter is found by **widget type**
-    (`InvContQuickFilter`, widest match), not by its placeholder text. Several
-    unrelated nodes read "Search", including other windows' tabs, and clicking
-    one of those focuses nothing while looking exactly like success.
-  * A drag is only a drag if the pointer moves promptly after the press. Press,
-    pause, then move reads as a click and the item stays put.
-  * The quantity dialog's default is already the amount that fits, so it is
-    accepted rather than typed into.
+Every step below earned its place by failing without it:
 
-What is dropped: the original walked the station Hangars panel, switched it to
-the Ships tab and right-clicked the active ship to reach "Open Drone Bay". That
-step is unnecessary -- the Inventory window's own sidebar lists Drone Bay
-directly -- and it was also the step that broke, because it aimed at a fixed
-offset from the "Active" marker and missed the ship card.
+  * **Keyboard focus.** Mouse clicks are routed by cursor position and keep
+    working regardless, but key events go to whatever holds keyboard focus, and
+    closing UI windows leaves EVE frontmost with nothing focused. In that state
+    neither cg_input nor System Events lands a single key, while every check
+    still reports EVE as frontmost. One click on empty viewport fixes it.
 
-Preconditions: docked, the named drone in the root Item hangar (not a
-sub-folder), and spare capacity in the drone bay.
+  * **Open the drone bay from the ship's own context menu.** Not decoration: an
+    Inventory opened this way is anchored to that ship, and that is the context
+    where a drop onto Drone Bay is accepted. An Alt+C inventory looks identical
+    in the UI tree and silently refuses the drop -- the items stay in the
+    hangar while the quantity dialog still appears, as if it had worked.
 
-Never run this while a bot is running. It drives the real mouse, and the two
-will fight for the cursor.
+  * **Find widgets by type, not by nearby text.** The ship is a `ShipItemCard`;
+    the filter is an `InvContQuickFilter` (widest match). The original aimed at
+    a fixed offset from the "Active" label and missed the card entirely, and
+    hunting for the text "Search" finds unrelated tabs in other windows. Three
+    separate bugs in one session had this shape.
+
+  * **Clear the filter before typing.** It keeps the previous run's text, and
+    appending gives "Acolyte IAcolyte I", which matches nothing and looks
+    exactly like the typing having failed.
+
+  * **A drag is only a drag if the pointer moves promptly after the press** --
+    press, pause, then move reads as a click.
+
+  * **The quantity dialog's default already fills the bay**, so it is accepted
+    rather than typed into.
+
+Preconditions: docked, spare capacity in the drone bay, and the drone in the
+root Item hangar of *this* station (sub-folders are not searched).
+
+Never run alongside a bot. Both drive the real mouse.
 """
 import argparse
 import os
@@ -45,118 +53,113 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import eve_repl
 import eve_read
 
+VIEWPORT = (1900, 400)          # empty space, for restoring keyboard focus
 
-def sidebar_entry(eve, label):
-    """A row in the Inventory window's tree sidebar, by exact label.
 
-    Matched on size rather than widget type: "Item hangar" is a
-    TreeViewEntryWithTag but "Drone Bay" is a plain Container, because it hangs
-    under the ship rather than the station. Both render as the same 160-wide
-    row, so take the widest node carrying exactly that label.
-    """
+def labelled(eve, label, kind=None):
+    """Widest node whose first visible text is exactly `label`."""
     best = None
     for node, x, y in eve.nodes():
         texts = eve_read.texts_of(node)
         if not texts or texts[0].strip() != label:
             continue
-        size = eve.size_of(node)
-        if not size:
+        if kind and node.get("pythonObjectTypeName") != kind:
             continue
-        if best is None or size[0] > best[0]:
+        size = eve.size_of(node)
+        if size and (best is None or size[0] > best[0]):
             best = (size[0], node, x, y)
     return best[1:] if best else None
 
 
-def quick_filter(eve):
-    """The Item hangar's own filter box: by type, widest match."""
-    found = eve.of_type("InvContQuickFilter", refresh=False)
-    if not found:
-        return None
-    return max(found, key=lambda f: (eve.size_of(f[0]) or (0, 0))[0])
+def open_drone_bay(eve):
+    """Right-click the active ship and choose Open Drone Bay."""
+    for tab in ("Hangars", "Ships"):
+        entry = labelled(eve, tab, kind="EveLabelMedium")
+        if entry:
+            eve.click(entry[1] + 18, entry[2] + 8, settle=2.2)
+            eve.read()
+
+    cards = eve.of_type("ShipItemCard", refresh=False)
+    if not cards:
+        raise RuntimeError("no ship card in the Hangars/Ships panel")
+    node, x, y = cards[0]
+    eve.rclick(*eve.centre_of(node, x, y), settle=1.8)
+
+    if not eve.menu_click("Open Drone Bay"):
+        raise RuntimeError("the ship's context menu offered no 'Open Drone Bay'")
+    time.sleep(1.5)
+    eve.read()
 
 
-def item_matching(eve, name):
-    """A rendered item icon in the hangar list whose text matches."""
-    needle = name.lower()
-    best = None
-    for node, x, y in eve.nodes():
-        if node.get("pythonObjectTypeName") not in ("InvItem", "Item", "ContainerAutoSize"):
-            continue
-        joined = " ".join(eve_read.texts_of(node)).lower()
-        if needle in joined and eve.size_of(node):
-            # the smallest matching node is the icon itself rather than a
-            # container several levels up that happens to contain the text
-            size = eve.size_of(node)
-            area = size[0] * size[1]
-            if best is None or area < best[0]:
-                best = (area, node, x, y)
-    return best[1:] if best else None
-
-
-def reload_drones(eve, drone_name, expect_overlay_free=True):
-    if expect_overlay_free:
-        overlay = [1 for n, _, _ in eve.nodes()
-                   if "Display Mode" in " ".join(eve_read.texts_of(n)[:8])]
-        if overlay:
-            raise RuntimeError("the settings window is covering the client -- close it first; "
-                               "note Escape opens it rather than closing anything")
-
-    if not eve.docked(refresh=False):
-        raise RuntimeError("not docked")
-
-    # Give the game window keyboard focus before any typing -- see the header.
-    eve.click(1900, 400, settle=1.2)
-
-    if not eve.of_type("InventoryPrimary", refresh=False):
-        eve.key("alt", "c", settle=3)
-        eve.read()
-
-    hangar = sidebar_entry(eve, "Item hangar")
+def filter_hangar(eve, drone_name):
+    hangar = labelled(eve, "Item hangar")
     if hangar is None:
         raise RuntimeError("no 'Item hangar' in the inventory sidebar")
     eve.click(*eve.centre_of(*hangar), settle=2)
     eve.read()
 
-    box = quick_filter(eve)
-    if box is None:
-        raise RuntimeError("no InvContQuickFilter -- is the Inventory window open?")
+    boxes = eve.of_type("InvContQuickFilter", refresh=False)
+    if not boxes:
+        raise RuntimeError("no quick-filter box -- is the Inventory window open?")
+    box = max(boxes, key=lambda f: (eve.size_of(f[0]) or (0, 0))[0])
     eve.click(*eve.centre_of(*box), settle=1.2)
-    # Clear first. The box keeps whatever a previous run typed, and typing
-    # again appends -- "Acolyte IAcolyte I" matches nothing, which looks
-    # exactly like the typing having failed.
-    eve._cg_send("keydown 55"); eve._cg_send("keydown 0")
-    eve._cg_send("keyup 0");    eve._cg_send("keyup 55")
-    time.sleep(0.2)
-    eve._cg_send("keydown 51"); eve._cg_send("keyup 51")
+
+    # select-all then delete, so a previous run's text is replaced not appended
+    eve._cg_send("keydown 55")
+    eve._cg_send("keydown 0")
+    eve._cg_send("keyup 0")
+    eve._cg_send("keyup 55")
+    eve._cg_send("keydown 51")
+    eve._cg_send("keyup 51")
     time.sleep(0.4)
+
     eve.type_text(drone_name)
     time.sleep(2.5)
     eve.read()
 
-    item = item_matching(eve, drone_name.split()[0])
-    if item is None:
-        raise RuntimeError(f"the filter did not surface {drone_name!r} -- "
-                           f"check the text actually landed in the box")
 
-    bay = sidebar_entry(eve, "Drone Bay")
+def reload_drones(eve, drone_name):
+    if not eve.docked(refresh=False):
+        raise RuntimeError("not docked")
+    if [1 for n, _, _ in eve.nodes()
+            if "Display Mode" in " ".join(eve_read.texts_of(n)[:8])]:
+        raise RuntimeError("the settings window is covering the client; close it "
+                           "(and note Escape opens it rather than closing anything)")
+
+    eve.click(*VIEWPORT, settle=1.2)          # keyboard focus, see the header
+    open_drone_bay(eve)
+    filter_hangar(eve, drone_name)
+
+    needle = drone_name.split()[0].lower()
+
+    def stack():
+        for node, x, y in eve.nodes():
+            if (node.get("pythonObjectTypeName") == "InvItem"
+                    and needle in " ".join(eve_read.texts_of(node)).lower()):
+                return node, x, y
+        return None
+
+    found = stack()
+    if found is None:
+        raise RuntimeError(f"no {drone_name!r} in this station's item hangar")
+    node, ix, iy = found
+    before = eve_read.texts_of(node)[0]
+
+    bay = labelled(eve, "Drone Bay")
     if bay is None:
         raise RuntimeError("no 'Drone Bay' in the inventory sidebar")
 
-    eve.drag(eve.centre_of(*item), eve.centre_of(*bay))
+    width, _ = eve.size_of(node)
+    # from the icon, not the label beneath it -- the InvItem box covers both
+    eve.drag((ix + width / 2, iy + 25), eve.centre_of(*bay), steps=30, step_delay=0.06)
 
-    # A "Set Quantity" dialog appears when the stack is larger than the bay's
-    # remaining capacity. Its default already fills the bay exactly, so accept.
-    eve.read()
-    for node, x, y in eve.nodes():
-        texts = eve_read.texts_of(node)
-        if texts and texts[0].strip() in ("OK", "Ok") and eve.size_of(node):
-            eve.click(*eve.centre_of(node, x, y), settle=1.5)
-            break
-    else:
-        eve.key("return", settle=1.5)
+    ok = labelled(eve, "OK") or labelled(eve, "Ok")
+    if ok:
+        eve.click(*eve.centre_of(*ok), settle=2)
 
     eve.read()
-    return eve.grep(drone_name.split()[0], refresh=False)
+    again = stack()
+    return before, (eve_read.texts_of(again[0])[0] if again else None)
 
 
 def main():
@@ -166,12 +169,16 @@ def main():
 
     eve = eve_repl.connect()
     try:
-        loaded = reload_drones(eve, args.drone_name)
+        before, after = reload_drones(eve, args.drone_name)
     except RuntimeError as exc:
         print(f"! {exc}", file=sys.stderr)
         return 1
-    print(f"drone bay now mentions {args.drone_name.split()[0]} in {len(loaded)} nodes")
-    return 0
+    if after != before:
+        print(f"loaded: hangar stack {before} -> {after}")
+        return 0
+    print(f"! nothing moved -- hangar stack still {before}; is the drone bay full?",
+          file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
