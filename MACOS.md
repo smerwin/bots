@@ -208,6 +208,47 @@ the screen, which matters when the client is on another Space. Run the bot with
   bots' settings match against the overview's *Type* column, so they depend on
   what your overview shows and how it is sorted. The `Bot.elm` headers say which.
 
+## Driving the EVE launcher (switching accounts)
+
+The launcher and the game are separate apps: `/Applications/eve-online.app` (an
+Electron shell) and the client itself out of `SharedCache/tq/EVE.app`. Different
+pids, different windows, and `window_probe --all` sees both. The launcher's main
+window is named `EVE Launcher`; the client's is named for the character, e.g.
+`EVE - Gal Bistot`.
+
+Screenshot a launcher window with `screencapture -x -o -l <window id>`. The
+image is at backing scale 2, so image pixel / 2 = window point, and screen point
+= window origin + window point. The window sits below the menu bar, so its
+origin y is not zero.
+
+**Clicking an account row selects it.** Verified by parking the cursor far away
+afterwards and re-reading: the right-hand panel keeps the new account, so it is
+a real selection and not a hover effect.
+
+**PLAY NOW ignores synthetic clicks.** Three attempts -- centre of the button,
+the play-icon side, and once with an approach gesture so it registered as real
+movement -- left the status bar reading "EVE Online | Ready to play!" with no
+client process and no error dialog. This is not a general problem with clicking
+the launcher: the same mechanism selects accounts perfectly well.
+
+**Press and hold the character's avatar for about five seconds instead.** That
+launches that character directly, and skips the character-selection screen
+entirely.
+
+Quitting the client:
+
+```
+osascript -e 'tell application "EVE" to quit'
+```
+
+This reports `execution error: EVE got an error: User canceled. (-128)` and
+quits anyway. Check with `pgrep -f "SharedCache/tq/EVE.app"` rather than
+trusting the exit status.
+
+One caution: the client's command line carries its SSO and refresh tokens, so
+`ps`/`pgrep -fl` output for that process does not belong in a shared log or
+a pasted transcript.
+
 ## Troubleshooting
 
 - **`task_for_pid failed: (os/kern) failure (kr=5)`** — SIP's debugging
