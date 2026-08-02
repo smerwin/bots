@@ -64,6 +64,8 @@ import Common.Basics exposing (listElementAtWrappedIndex, stringContainsIgnoring
 import Common.DecisionPath exposing (describeBranch)
 import Common.EffectOnWindow as EffectOnWindow exposing (MouseButton(..))
 import Dict
+import EveOnline.MemoryReading
+import Json.Decode
 import EveOnline.BotFramework
     exposing
         ( ModuleButtonTooltipMemory
@@ -410,23 +412,8 @@ decideNextActionWhenInSpace context seeUndockingComplete =
 
             Nothing ->
                 let
-                    returnDronesAndEnterAnomaly =
-                            case context |> knownModulesToActivateAlways |> List.filter (Tuple.second >> moduleIsActiveOrReloading >> not) |> List.head of
-                                Just ( inactiveModuleMatchingText, inactiveModule ) ->
-                                    describeBranch ("I see inactive module '" ++ inactiveModuleMatchingText ++ "' to activate always. Activate it.")
-                                        (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
-
-                                Nothing ->
-                                    describeBranch "Wait for a fleet warp." waitForProgressInGame
-
                     returnDronesAndEnterAnomalyOrWait =
-                          case context |> knownModulesToActivateAlways |> List.filter (Tuple.second >> moduleIsActiveOrReloading >> not) |> List.head of
-                                Just ( inactiveModuleMatchingText, inactiveModule ) ->
-                                    describeBranch ("I see inactive module '" ++ inactiveModuleMatchingText ++ "' to activate always. Activate it.")
-                                        (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
-
-                                Nothing ->
-                                    describeBranch "Just wait for a fleet warp." waitForProgressInGame
+                        describeBranch "Wait for a fleet warp." waitForProgressInGame
                 in
                 case context.readingFromGameClient |> getCurrentAnomalyIDAsSeenInProbeScanner of
                     Nothing ->
@@ -492,6 +479,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
 
         overviewEntriesToLock =
             overviewEntriesToAttack
+                |> List.filter overviewEntryIsDisplayed
                 |> List.filter (overviewEntryIsTargetedOrTargeting >> not)
 
         targetsToUnlock =
@@ -587,11 +575,6 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
 
     else
         decisionToKillRats
-
-
-enterAnomaly : { ifNoAcceptableAnomalyAvailable : DecisionPathNode } -> BotDecisionContext -> DecisionPathNode
-enterAnomaly { ifNoAcceptableAnomalyAvailable } context =
-            describeBranch "I do not see or care about the probe scanner window." waitForProgressInGame
 
 
 ensureShipIsOrbiting : ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
@@ -792,8 +775,48 @@ overviewEntryIsActiveTarget =
 
 
 shouldAttackOverviewEntry : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
-shouldAttackOverviewEntry =
-    iconSpriteHasColorOfRat
+shouldAttackOverviewEntry overviewEntry =
+    iconSpriteHasColorOfRat overviewEntry && overviewEntryDistanceIsOnGrid overviewEntry
+
+
+{-| The overview shows a distance in AU once an object is far enough away, and
+distance parsing understands only "m" and "km" -- so an AU distance is an
+`Err`, and nothing measured in AU is within targeting range in the first
+place. Excluded here, at the one point that decides what counts as something
+to shoot, rather than at each place that would otherwise try to lock it.
+-}
+overviewEntryDistanceIsOnGrid : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryDistanceIsOnGrid overviewEntry =
+    case overviewEntry.objectDistanceInMeters of
+        Ok _ ->
+            True
+
+        Err _ ->
+            False
+
+
+{-| The widget's own `_display` flag, defaulting to shown when absent (most
+nodes never set it).
+-}
+nodeIsDisplayed : EveOnline.MemoryReading.UITreeNode -> Bool
+nodeIsDisplayed uiNode =
+    uiNode.dictEntriesOfInterest
+        |> Dict.get "_display"
+        |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.bool >> Result.toMaybe)
+        |> Maybe.withDefault True
+
+
+{-| The overview virtualises: every object in space has an entry in the UI
+tree, but only the rows that fit are rendered, and the rest keep whatever
+position they last held while recycled. A hidden entry reports a plausible
+region pointing at a row that now belongs to something else, so locking it is
+worse than a no-op -- it locks the wrong object. `_display` is what
+distinguishes them; the region does not.
+-}
+overviewEntryIsDisplayed : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsDisplayed entry =
+    nodeIsDisplayed entry.uiNode.uiNode
+
 
 
 moduleIsActiveOrReloading : EveOnline.ParseUserInterface.ShipUIModuleButton -> Bool
