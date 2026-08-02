@@ -1636,15 +1636,22 @@ expectedQuickFilterText itemName =
         |> String.toLower
 
 
-{-| Ctrl+A, so typing replaces whatever the filter box already held rather than
-appending to it.
+{-| Select all, so typing replaces whatever the filter box already held rather
+than appending to it.
+
+Command+A, not Control+A. This is a native macOS client and its text fields take
+the system editing shortcuts, where Control+A means "move to the start of the
+line". Run 115 sent Control+A and then typed, which inserted at the caret
+instead of replacing: the quick filter accumulated
+"reportreprrrr...reporteporteporte..." across retries, never read back as the
+text the bot expected, and the mission never loaded its cargo.
 -}
 selectAllEffects : List EffectOnWindow.EffectOnWindowStruct
 selectAllEffects =
-    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL
+    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_LWIN
     , EffectOnWindow.KeyDown EffectOnWindow.vkey_A
     , EffectOnWindow.KeyUp EffectOnWindow.vkey_A
-    , EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL
+    , EffectOnWindow.KeyUp EffectOnWindow.vkey_LWIN
     ]
 
 
