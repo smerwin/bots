@@ -337,6 +337,7 @@ type alias BotMemory =
     , lootAllRefusedTicks : Int
     , lootWindowOutOfRangeTicks : Int
     , agentSurveyTicks : Int
+    , dronesInSpaceTicks : Int
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
     , clearingNotRequired : Bool
@@ -3533,6 +3534,36 @@ launchAndEngageDrones context =
                         Nothing
             )
 
+{-| Readings of drones sitting in space before the recall is treated as not
+landing at all, and before it is abandoned.
+
+Shift+R is a bare keypress: there is nothing to aim it at and nothing in the
+reading that says whether the client took it. So the only evidence available is
+the drones still being out, and these are the two points at which that stops
+looking like latency.
+
+The recovery threshold is generous because a fight legitimately keeps drones out
+for a long stretch, and the cost of hitting it early is only one click.
+-}
+droneRecallFocusRecoveryTicks : Int
+droneRecallFocusRecoveryTicks =
+    20
+
+
+droneRecallGiveUpTicks : Int
+droneRecallGiveUpTicks =
+    60
+
+
+dronesAreInSpace : ReadingFromGameClient -> Bool
+dronesAreInSpace readingFromGameClient =
+    readingFromGameClient.dronesWindow
+        |> Maybe.andThen .droneGroupInSpace
+        |> Maybe.andThen (.header >> .quantityFromTitle)
+        |> Maybe.map (.current >> (<) 0)
+        |> Maybe.withDefault False
+
+
 returnDronesToBay : BotDecisionContext -> Maybe DecisionPathNode
 returnDronesToBay context =
     context.readingFromGameClient.dronesWindow
@@ -3547,6 +3578,51 @@ returnDronesToBay context =
                         < 1
                 then
                     Nothing
+
+                else if droneRecallGiveUpTicks < context.memory.dronesInSpaceTicks then
+                    -- Stop asking. The caller's fallback is what matters here:
+                    -- in the wind-down path it docks, so giving up ends the
+                    -- session with drones abandoned instead of never ending at
+                    -- all. Run 118 held that path open for 150 readings and
+                    -- overran its session by five minutes, which cost the whole
+                    -- remainder of the run; a set of drones does not.
+                    Nothing
+
+                else if droneRecallGiveUpTicks == context.memory.dronesInSpaceTicks then
+                    Just
+                        (describeBranch
+                            ("Drones have been in space for "
+                                ++ String.fromInt context.memory.dronesInSpaceTicks
+                                ++ " readings and will not come back -- give up on them so the ship can move on."
+                            )
+                            waitForProgressInGame
+                        )
+
+                else if
+                    (droneRecallFocusRecoveryTicks < context.memory.dronesInSpaceTicks)
+                        && not (previousStepClickedMouse context)
+                then
+                    -- Shift+R is a bare keypress with nothing to aim at, so it
+                    -- does nothing at all when the client is not taking
+                    -- keyboard input -- and nothing in the reading says so. The
+                    -- decision looks identical whether the key landed or was
+                    -- swallowed, which is how run 118 pressed it 150 times
+                    -- while the drones sat in space.
+                    --
+                    -- Clicking inside the client first is the documented remedy
+                    -- for exactly this: a window that ignored Ctrl+W took it
+                    -- immediately after its title bar was clicked. The drone
+                    -- group header is a real, addressable target inside the
+                    -- window we are already acting on, and clicking it does
+                    -- nothing but move focus.
+                    --
+                    -- Gated on not having just clicked, so this alternates
+                    -- click, press, click, press rather than clicking forever.
+                    Just
+                        (describeBranch
+                            "Drones are not coming back -- click the drones window to put keyboard focus back in the client, then press again."
+                            (clickUiElement droneGroupInLocalSpace.header.uiNode)
+                        )
 
                 else
                     Just
@@ -3810,6 +3886,7 @@ initBotMemory =
     , lootAllRefusedTicks = 0
     , lootWindowOutOfRangeTicks = 0
     , agentSurveyTicks = 0
+    , dronesInSpaceTicks = 0
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
     , clearingNotRequired = False
@@ -5469,6 +5546,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
             Nothing ->
                 0
+    , dronesInSpaceTicks =
+        -- Consecutive readings with drones out. Reset when the bay has them
+        -- back, so this measures "how long have they been out", which is what
+        -- tells a recall that is not landing from one that simply has not been
+        -- answered yet.
+        if dronesAreInSpace context.readingFromGameClient then
+            botMemoryBefore.dronesInSpaceTicks + 1
+
+        else
+            0
     , agentSurveyTicks =
         -- Reset, not saturate. The counter has to survive the agent conversations
         -- of an ordinary mission without being used up before the wind-down
