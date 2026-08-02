@@ -71,6 +71,11 @@ LEFT, RIGHT = 0, 1
 KEYS = {"escape": 53, "return": 36, "d": 2, "j": 38, "c": 8, "w": 13,
         "alt": 58, "ctrl": 59, "shift": 56, "cmd": 55}
 
+# Editing keys, for getting a field into a known state before typing into it.
+KEY_BACKSPACE = 51
+KEY_FORWARD_DELETE = 117
+KEY_END = 119
+
 # Letters and digits, for typing into a field.
 KEYCODE = {
     "a": 0x00, "b": 0x0B, "c": 0x08, "d": 0x02, "e": 0x0E, "f": 0x03,
@@ -239,7 +244,13 @@ class Session:
         time.sleep(settle)
 
     def type_text(self, text, delay=0.04):
-        """Type into whatever has keyboard focus. Click the field first."""
+        """Type into whatever has keyboard focus. Click the field first.
+
+        Unverified, and this client drops characters: "theology" arrives as
+        "teology" often enough to matter, at 40ms and at 120ms per character
+        alike, so it is not a pacing problem. Prefer `type_verified` anywhere
+        the exact text matters.
+        """
         for ch in text.lower():
             code = KEYCODE.get(ch)
             if code is None:
@@ -247,6 +258,56 @@ class Session:
             self._cg_send(f"keydown {code}")
             self._cg_send(f"keyup {code}")
             time.sleep(delay)
+
+    def caret_to_end(self):
+        """Put the caret after any existing text.
+
+        Text goes in wherever the caret is, and it is not reliably at the end:
+        Control+A is macOS's "move to start of line", so anything that pressed
+        it -- the bot's old select-all did -- leaves the caret at position 0 and
+        the next characters land in *front* of what is already there. That also
+        breaks the obvious verification, since checking that the field ends with
+        the character just typed can never pass.
+        """
+        self._cg_send(f"keydown {KEY_END}")
+        self._cg_send(f"keyup {KEY_END}")
+        time.sleep(0.08)
+
+    def clear_text(self, presses=60):
+        """Empty a focused field, from either side of the caret."""
+        for _ in range(presses):
+            self._cg_send(f"keydown {KEY_FORWARD_DELETE}")
+            self._cg_send(f"keyup {KEY_FORWARD_DELETE}")
+            self._cg_send(f"keydown {KEY_BACKSPACE}")
+            self._cg_send(f"keyup {KEY_BACKSPACE}")
+            time.sleep(0.02)
+        time.sleep(0.3)
+
+    def type_verified(self, text, read_back, attempts=3, delay=0.08):
+        """Type `text` and confirm the field really holds it, retrying if not.
+
+        `read_back` is a callable returning the field's current contents -- only
+        the caller knows which node that is. Compares the whole field rather
+        than its tail, because the caret may be anywhere (see `caret_to_end`).
+
+        Retries the whole string rather than the missing character: a tree read
+        costs a couple of seconds, so per-character verification of a station
+        name runs to the best part of a minute, while a clean retype is usually
+        right the second time.
+
+        Returns the final field contents, which the caller should still check --
+        this reports what happened rather than guaranteeing success.
+        """
+        want = "".join(ch for ch in text.lower() if ch in KEYCODE)
+        for _ in range(attempts):
+            self.clear_text()
+            self.caret_to_end()
+            self.type_text(want, delay=delay)
+            time.sleep(0.6)
+            got = (read_back() or "").strip().lower()
+            if got == want:
+                return got
+        return (read_back() or "").strip()
 
     def drag(self, src, dst, steps=24, step_delay=0.05):
         """Drag between two canvas points.
