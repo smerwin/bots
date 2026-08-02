@@ -338,6 +338,7 @@ type alias BotMemory =
     , lootWindowOutOfRangeTicks : Int
     , dronesInSpaceTicks : Int
     , dockedWithCargoWantedTicks : Int
+    , nothingToDoTicks : Int
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
     , clearingNotRequired : Bool
@@ -2489,9 +2490,38 @@ decideActionInMissionPocket context seeUndockingComplete =
                                         |> Maybe.withDefault
                                             (case missionInfoPanelEntry context of
                                                 Just _ ->
-                                                    describeBranch
-                                                        "Nothing to fight and no travel step offered -- wait for the mission to catch up."
-                                                        waitForProgressInGame
+                                                    if nothingToDoTicksBeforeCryingStuck < context.memory.nothingToDoTicks then
+                                                        -- Waiting was the right first answer and the wrong
+                                                        -- last one. This branch is the bottom of the tree:
+                                                        -- nothing to shoot, no cargo it can find, no travel
+                                                        -- step, no gate, no route, no configured object on
+                                                        -- grid. If that has not changed in minutes, the
+                                                        -- mission is not "catching up" and nothing here will
+                                                        -- make it.
+                                                        --
+                                                        -- Two runs died in this branch without a word. Run
+                                                        -- 114 sat in it for 14,111 decisions, 37% of the
+                                                        -- session. Run 124 reached it with the tracker
+                                                        -- offering no travel button at all and burned half
+                                                        -- an hour. Neither raised an alarm, because waiting
+                                                        -- looks identical whether the mission is a second
+                                                        -- behind or permanently unreachable.
+                                                        --
+                                                        -- This does not rescue the mission -- it cannot, from
+                                                        -- here. It converts a silently wasted session into
+                                                        -- one that says so, which is what stall_watch
+                                                        -- screenshots and reports.
+                                                        describeBranch
+                                                            ("Nothing to fight, no travel step, nothing on grid to approach, and "
+                                                                ++ String.fromInt context.memory.nothingToDoTicks
+                                                                ++ " readings of it -- this mission is not going to progress on its own."
+                                                            )
+                                                            askForHelpToGetUnstuck
+
+                                                    else
+                                                        describeBranch
+                                                            "Nothing to fight and no travel step offered -- wait for the mission to catch up."
+                                                            waitForProgressInGame
 
                                                 Nothing ->
                                                     -- No tracker means no mission, a state that could not
@@ -3942,6 +3972,7 @@ initBotMemory =
     , lootWindowOutOfRangeTicks = 0
     , dronesInSpaceTicks = 0
     , dockedWithCargoWantedTicks = 0
+    , nothingToDoTicks = 0
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
     , clearingNotRequired = False
@@ -4365,6 +4396,45 @@ nearestLootableEntry readingFromGameClient =
         |> List.filter (\entry -> entry.objectItemID /= Nothing)
         |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
         |> List.head
+
+
+{-| In space, with a mission tracked, and nothing in the overview the bot would
+act on -- no rats, no wrecks, no containers.
+
+An approximation of the decision tree's own bottom branch, close enough to bound
+how long the bot sits there and cheap enough to compute from the reading alone.
+-}
+nothingToActOnInSpace : ReadingFromGameClient -> Bool
+nothingToActOnInSpace readingFromGameClient =
+    let
+        isInSpace =
+            readingFromGameClient.shipUI /= Nothing
+
+        missionRunning =
+            readingFromGameClient.agentMissionInfoPanelEntries |> List.isEmpty |> not
+
+        actionableRows =
+            readingFromGameClient.overviewWindows
+                |> List.concatMap .entries
+                |> List.filter overviewEntryIsDisplayed
+                |> List.filter
+                    (\entry ->
+                        (entry.objectItemID /= Nothing)
+                            || entry.commonIndications.targetedByMe
+                            || entry.commonIndications.targeting
+                    )
+    in
+    isInSpace && missionRunning && List.isEmpty actionableRows
+
+
+{-| Readings at the bottom of the tree before the bot stops calling it waiting.
+
+Generous -- a mission genuinely can take a while to catch up after a warp -- but
+finite, because the two runs that died here waited for the rest of the session.
+-}
+nothingToDoTicksBeforeCryingStuck : Int
+nothingToDoTicksBeforeCryingStuck =
+    90
 
 
 {-| Whether the hangar has had long enough to produce the mission's cargo.
@@ -5650,6 +5720,17 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
             Nothing ->
                 0
+    , nothingToDoTicks =
+        -- Readings spent at the bottom of the decision tree with a mission
+        -- running and nothing to act on. Counted from the reading rather than
+        -- from the branch, so it is really "in space, mission tracked, nothing
+        -- in the overview worth acting on" -- close enough to the branch's own
+        -- conditions to bound it, and it resets the moment anything changes.
+        if nothingToActOnInSpace context.readingFromGameClient then
+            botMemoryBefore.nothingToDoTicks + 1
+
+        else
+            0
     , dockedWithCargoWantedTicks =
         if dockedWithCargoWanted context.readingFromGameClient then
             botMemoryBefore.dockedWithCargoWantedTicks + 1
