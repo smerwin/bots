@@ -336,6 +336,23 @@ and are **not** part of the bot loop. Never run them alongside a launcher sessio
 caused a long, confusing debugging detour. Check with `pgrep -f` on the same
 patterns the launchers' guard uses before starting either.
 
+**The bot does yield to a human, though.** Before executing any input sequence
+the host checks how long ago a *person* last touched the mouse or keyboard, and
+if that was under `HUMAN_INPUT_STAND_DOWN_SECONDS` (5.0) it skips the sequence
+and says `standing down: someone used the mouse/keyboard Ns ago`. Nothing needs
+unwinding: the bot re-derives its decision from a fresh reading every step, so a
+skipped sequence costs one tick and is simply decided again once the machine is
+quiet. It resumes on its own five seconds after the last human input, with
+nothing to switch back on.
+
+So taking the mouse mid-run is safe and does not require stopping the bot —
+which is what makes reading the client by hand during a session practical. It is
+*not* a licence to run the input-driving tools alongside it: those keep clicking
+regardless, and each of their clicks also resets the bot's five-second timer, so
+the two simply take turns badly. Read-only tools (`eve_read.py`, and
+`eve_repl.py` as long as you only call its reading methods) touch no input at
+all and are always safe.
+
 **Never print the client's command line.** The launcher starts the game with the
 account's `/ssoToken=` and `/refreshToken=` as arguments, so `ps aux | grep EVE`,
 `pgrep -fl`, or `ps -o command=` dumps live credentials into whatever reads that
