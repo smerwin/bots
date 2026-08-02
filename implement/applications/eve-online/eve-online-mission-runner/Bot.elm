@@ -3820,9 +3820,29 @@ selectThenPanelAction context buttonName entry description =
                 describeBranch description (clickUiElement button)
 
             Nothing ->
-                describeBranch
-                    (description ++ " -- but the selected-item panel offers no '" ++ buttonName ++ "'.")
-                    waitForProgressInGame
+                -- The panel is showing the right object but not the button we
+                -- want. That is normal for a reading or two while the panel
+                -- catches up, and never normal for long: these buttons appear
+                -- with the selection, or depend on range, in which case waiting
+                -- cannot produce them and something has to close the distance.
+                --
+                -- Bounded because the not-progressing alarm does not reach here.
+                -- That one fires from the bottom of the decision tree, and this
+                -- branch is several levels above it -- run 127 sat here for
+                -- 11,964 decisions without tripping anything at all.
+                if nothingToDoTicksBeforeCryingStuck < context.memory.nothingToDoTicks then
+                    describeBranch
+                        (description
+                            ++ " -- the panel still offers no '"
+                            ++ buttonName
+                            ++ "' and the mission has not moved in a long time."
+                        )
+                        askForHelpToGetUnstuck
+
+                else
+                    describeBranch
+                        (description ++ " -- but the selected-item panel offers no '" ++ buttonName ++ "'.")
+                        waitForProgressInGame
 
     else
         describeBranch (description ++ " (selecting it first)")
@@ -4892,17 +4912,28 @@ activateAccelerationGateIfPresent context =
                 in
                 if interactionRangeInMeters < distanceInMeters then
                     Just <|
-                    -- "Activate Gate" from out here does the whole thing: the
-                    -- client flies the ship over and takes the gate on arrival,
-                    -- with no tick spent noticing it has arrived. The drones
-                    -- come home first, since the gate fires with whatever is
-                    -- still in space; the prop mod stays on, so the ship covers
-                    -- the distance fast.
+                    -- Close the distance first. The panel's
+                    -- `selectedItemActivateGate` button only exists while the
+                    -- gate is in range, so from out here there is nothing to
+                    -- press -- selectThenPanelAction selects the gate, finds no
+                    -- button, and waits. Run 127 did exactly that at 36,000 m
+                    -- for 11,964 decisions and never took the gate.
+                    --
+                    -- This branch used to claim the opposite: that activating
+                    -- from range makes the client fly over and take the gate on
+                    -- arrival. That is true of the *D-click* gesture, which is
+                    -- what the branch originally sent -- and which does not work
+                    -- here at all, per the note on activateGateOnOverviewEntry.
+                    -- When the gesture was replaced by the panel button, the
+                    -- comment's promise came with it and stopped being true.
+                    --
+                    -- Drones come home first, as before: the gate fires with
+                    -- whatever is still in space.
                     ensureDronesRecalledBeforeWarping context
-                        (activateGateOnOverviewEntry context
+                        (approachOverviewEntry context
                             ("The acceleration gate is "
                                 ++ String.fromInt distanceInMeters
-                                ++ " m away -- D-click it from here and let the client fly me in."
+                                ++ " m away -- approach it, the panel offers no Activate until we are close."
                             )
                             accelerationGateEntry
                         )
