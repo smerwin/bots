@@ -336,7 +336,6 @@ type alias BotMemory =
     , unlootableWreckIds : List String
     , lootAllRefusedTicks : Int
     , lootWindowOutOfRangeTicks : Int
-    , agentSurveyTicks : Int
     , dronesInSpaceTicks : Int
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
@@ -544,11 +543,19 @@ also no reason to leave the client in a different state than we found it.
 -}
 surveyAgentsInStation : BotDecisionContext -> Maybe DecisionPathNode
 surveyAgentsInStation context =
-    -- A counter rather than a "done" flag, so this does not depend on whether
-    -- the memory update runs before or after the decision on a given reading.
-    -- With a flag, updating first would set it on the very reading the survey
-    -- meant to print and the line would never appear at all.
-    if context.memory.agentSurveyTicks > 1 then
+    -- Gated on the session clock, not on bot memory. The memory counter this
+    -- used to rely on was consumed before the window ever opened: the bot docks
+    -- to hand its last mission in, the Agents tab is up and populated for that
+    -- whole conversation, and it then stays docked into wind-down without ever
+    -- undocking -- so the reset never fired. Run 119 parked for 403 readings
+    -- and printed nothing.
+    --
+    -- `UpdateMemoryContext` cannot see the session clock, but the decision can,
+    -- so the window is defined here instead: the opening seconds of wind-down.
+    -- That is self-limiting without any stored state, at the cost of repeating
+    -- for those few readings rather than printing exactly once, and of missing
+    -- the session entirely if the ship has not finished docking by then.
+    if not (withinAgentSurveyWindow context) then
         Nothing
 
     else
@@ -585,37 +592,26 @@ surveyAgentsInStation context =
                                 )
 
 
-{-| Docked with the Agents tab up and showing entries -- the state in which the
-survey has something to print.
-
-Deliberately not "and winding down", even though that is the only branch which
-prints it. `UpdateMemoryContext` carries just the reading, not the event context,
-so the memory update cannot see the session clock and the counter cannot be
-conditioned on it. What makes that safe is the reset: this state ends every time
-the ship undocks, so the ordinary agent conversations during a mission cannot
-leave the counter used up by the time the wind-down window arrives.
+{-| The opening seconds of the wind-down window, which is when the survey runs.
 -}
-agentSurveyConditionsHold : ReadingFromGameClient -> Bool
-agentSurveyConditionsHold readingFromGameClient =
-    let
-        isDocked =
-            case readingFromGameClient.shipUI of
-                Nothing ->
-                    True
+withinAgentSurveyWindow : BotDecisionContext -> Bool
+withinAgentSurveyWindow context =
+    case secondsToSessionEnd context.eventContext of
+        Nothing ->
+            False
 
-                Just _ ->
-                    False
+        Just secondsRemaining ->
+            (secondsRemaining <= secondsBeforeSessionEndToWindDown)
+                && (secondsBeforeSessionEndToWindDown - agentSurveyWindowSeconds < secondsRemaining)
 
-        agentsTabIsUp =
-            case readingFromGameClient.stationWindow of
-                Nothing ->
-                    False
 
-                Just stationWindow ->
-                    (stationWindow.agentsTab |> Maybe.map .isSelected |> Maybe.withDefault False)
-                        && not (List.isEmpty stationWindow.agentEntries)
-    in
-    isDocked && agentsTabIsUp
+{-| How long the survey keeps printing. Readings come about twice a second, so
+this is a handful of repeated lines -- bounded well below anything stall_watch
+would call a stall, and the price of needing no stored state to stop.
+-}
+agentSurveyWindowSeconds : Int
+agentSurveyWindowSeconds =
+    4
 
 
 describeStationAgentEntry : EveOnline.ParseUserInterface.StationAgentEntry -> String
@@ -3885,7 +3881,6 @@ initBotMemory =
     , unlootableWreckIds = []
     , lootAllRefusedTicks = 0
     , lootWindowOutOfRangeTicks = 0
-    , agentSurveyTicks = 0
     , dronesInSpaceTicks = 0
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
@@ -5553,16 +5548,6 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- answered yet.
         if dronesAreInSpace context.readingFromGameClient then
             botMemoryBefore.dronesInSpaceTicks + 1
-
-        else
-            0
-    , agentSurveyTicks =
-        -- Reset, not saturate. The counter has to survive the agent conversations
-        -- of an ordinary mission without being used up before the wind-down
-        -- window, and undocking is what guarantees that: it ends the state below,
-        -- so every dock starts the count again from zero.
-        if agentSurveyConditionsHold context.readingFromGameClient then
-            botMemoryBefore.agentSurveyTicks + 1
 
         else
             0
