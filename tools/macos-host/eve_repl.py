@@ -76,6 +76,9 @@ KEY_BACKSPACE = 51
 KEY_FORWARD_DELETE = 117
 KEY_END = 119
 
+# Hold time between a key's down and up -- see type_text.
+KEY_HOLD = 0.03
+
 # Letters and digits, for typing into a field.
 KEYCODE = {
     "a": 0x00, "b": 0x0B, "c": 0x08, "d": 0x02, "e": 0x0E, "f": 0x03,
@@ -256,6 +259,10 @@ class Session:
             if code is None:
                 continue
             self._cg_send(f"keydown {code}")
+            # Hold briefly. Down and up back to back is a press the client can
+            # miss, which reads as characters dropping at random; this is long
+            # enough to register and well under the system repeat delay.
+            time.sleep(KEY_HOLD)
             self._cg_send(f"keyup {code}")
             time.sleep(delay)
 

@@ -36,6 +36,11 @@ import re_helper as rh  # noqa: E402
 sys.path.insert(0, MACOS_HOST_DIR)
 import web_console  # noqa: E402
 
+# How long a key is held between its KeyDown and KeyUp. Long enough that the
+# client registers the press, and well under macOS's minimum "delay until
+# repeat" (~250ms) so the key never starts auto-repeating.
+KEY_HOLD_SECONDS = 0.03
+
 MAIN_ELM_TEMPLATE = os.path.join(HERE, "Main.elm")
 # A bot's own source fixes which host interface it imports, and the wrappers are
 # not interchangeable -- see Main_2023_02_06.elm's header.
@@ -1314,12 +1319,21 @@ class TaskDispatcher:
                     # and KeyUp is longer than the system repeat delay, so every
                     # typed character came out as a run of itself. Run 115 typed
                     # "Reports" into the inventory quick filter and left
-                    # "reportreprrrrrr...rrreporteporteporte...", never matched
-                    # the text it expected, and retyped for 26,103 decisions.
-                    # A keypress wants no hold time at all, so unlike a drag
-                    # there is no settle to preserve before the release.
-                    if self._keys_down:
-                        pass
+                    # "reportreprrrrrr...rrreporteporteporte...".
+                    #
+                    # But a keypress with *no* hold at all is not the answer
+                    # either: the client can miss it, which reads as characters
+                    # dropping at random. So the pause before a KeyUp becomes a
+                    # short, fixed hold -- long enough to register, far below the
+                    # system's repeat delay -- rather than either extreme.
+                    #
+                    # Scoped to the release specifically, not to "any key is
+                    # down". effectsToEnterString holds Shift across a whole run
+                    # of capitals, so keying off the held set would collapse the
+                    # gaps between those characters too, firing them back to back
+                    # with no spacing -- the same shape that loses keystrokes.
+                    if next_real_tag_after_wait in ("KeyUp", "CharacterUp"):
+                        time.sleep(KEY_HOLD_SECONDS)
                     elif (not self._buttons_down) or next_real_tag_after_wait == "ButtonUp":
                         time.sleep(payload / 1000.0)
                 elif tag == "BringWindowToForeground":
