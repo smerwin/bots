@@ -180,6 +180,37 @@ same decision repeating 60 times. It captures the game window by id rather than
 the screen, which matters when the client is on another Space. Run the bot with
 `2>&1 | tee somefile.log` to have a log for it to read.
 
+## Watching and steering a run: the web console
+
+Pass `--web-console` and the host serves a page on your tailnet -- session
+stats, the log as a live filterable stream, and an editable settings box. It
+binds to this machine's Tailscale address and refuses to start without one, so
+it is never exposed beyond the tailnet.
+
+The settings box is the part worth knowing about, because it changes settings
+**without restarting the run**:
+
+```
+# read what the bot is using now
+curl -s http://<tailnet-ip>:8787/api/state | python3 -c 'import json,sys; print(json.load(sys.stdin)["settings"])'
+
+# replace it -- send the whole string, not a patch
+curl -s -X POST http://<tailnet-ip>:8787/api/settings \
+     -H 'Content-Type: application/json' \
+     -d '{"settings": "orbit-in-combat=no\nkeep-at-range=yes\n..."}'
+```
+
+The loop applies it on its next tick and logs `applying settings change from the
+console`. Under the hood it re-sends `BotSettingsChangedEvent`, the same event
+the session opens with, so the bot re-reads every setting and nothing in the bot
+needs to know the console exists.
+
+This is the cheapest way to test a settings guess. A wrong `approach-object` or
+`attack-object` is one POST away from being undone, whereas finding out by
+restarting costs the whole session's progress -- and a two-hour run that has
+already handed in seven missions is not something to throw away over one
+misjudged line.
+
 ## What to expect, realistically
 
 - **`eve-online-mission-runner`** is the most exercised bot here: it takes a

@@ -310,6 +310,20 @@ added to next bounty payout` line is emitted once per rat killed and carries
 what it paid, so kills and ISK are a count and a sum of those. The `(combat)`
 lines are per shot, not per kill, and are no use for a kill count.
 
+**Applying settings live** is the console's most useful trick and needs no
+restart. `GET /api/state` returns the current settings string; `POST
+/api/settings` with `{"settings": "<the whole string>"}` queues a replacement,
+and the loop applies it on its next tick via `BotSettingsChangedEvent` — the
+same event the session opens with, so the bot re-reads *everything* and no code
+in `Bot.elm` need know the console exists. Send the complete string, not a
+patch. The host logs `applying settings change from the console` when it lands.
+
+Proven live on run 129: a bot raising the not-progressing alarm beside an
+unreachable objective started acting on a newly added `approach-object` within
+one tick, saving a session that was otherwise going to be restarted. It is also
+the fastest way to *test* a settings guess — a wrong one is one POST away from
+being undone, where a restart costs the whole session's progress.
+
 **Bot source acquisition** (both tested): a local file or directory path (or
 `file://`), or a GitHub URL — a plain repo, or a `.../tree/<branch>/<subpath>`
 URL, needed since apps in *this* repo live under `implement/applications/...`
