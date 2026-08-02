@@ -592,7 +592,17 @@ surveyAgentsInStation context =
                                 )
 
 
-{-| The opening seconds of the wind-down window, which is when the survey runs.
+{-| The last seconds before the session ends, which is when the survey runs.
+
+At the *start* of wind-down the ship is still flying home -- run 120 spent that
+stretch on "Head for a station and dock" and did not park until 144 of its 200
+seconds were gone, so a window at that end was evaluated only while there was no
+station window to read. The end of the clock is the one moment the ship is
+reliably parked, because getting there is what wind-down is for.
+
+Still nothing stored: the session clock alone decides, so there is no counter to
+be consumed early and no dependence on whether the memory update runs before or
+after the decision.
 -}
 withinAgentSurveyWindow : BotDecisionContext -> Bool
 withinAgentSurveyWindow context =
@@ -601,17 +611,17 @@ withinAgentSurveyWindow context =
             False
 
         Just secondsRemaining ->
-            (secondsRemaining <= secondsBeforeSessionEndToWindDown)
-                && (secondsBeforeSessionEndToWindDown - agentSurveyWindowSeconds < secondsRemaining)
+            (0 < secondsRemaining) && (secondsRemaining <= agentSurveyWindowSeconds)
 
 
 {-| How long the survey keeps printing. Readings come about twice a second, so
-this is a handful of repeated lines -- bounded well below anything stall_watch
-would call a stall, and the price of needing no stored state to stop.
+this is roughly twenty repeated lines -- under stall_watch's threshold of 40,
+and the price of needing no stored state to stop. Wide enough that a slow tick
+cannot step over the window entirely.
 -}
 agentSurveyWindowSeconds : Int
 agentSurveyWindowSeconds =
-    4
+    10
 
 
 describeStationAgentEntry : EveOnline.ParseUserInterface.StationAgentEntry -> String
