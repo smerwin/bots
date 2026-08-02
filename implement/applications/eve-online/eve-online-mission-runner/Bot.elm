@@ -739,24 +739,41 @@ missionTravelStep context =
         |> Maybe.andThen .locationButton
         |> Maybe.andThen
             (\button ->
-                case button.label of
-                    Just label ->
-                        if labelUndoesStepInProgress label then
+                if not (nodeIsDisplayed button.uiNode.uiNode) then
+                    -- The client keeps this button in the tree when it has no
+                    -- travel step to offer, hiding it with `_display` False and
+                    -- an empty label rather than removing it. Verified live on
+                    -- "After The Seven (3 of 5)": the entry is expanded, the
+                    -- objective renders, and the button is present, hidden and
+                    -- unlabelled.
+                    --
+                    -- Nothing depended on this before, because the empty label
+                    -- already fell through below. That is protection by
+                    -- coincidence: a hidden button that kept a stale label
+                    -- would be clicked, and clicking a control that is not on
+                    -- screen is the same class of mistake as acting on an
+                    -- overview row that is not rendered.
+                    Nothing
+
+                else
+                    case button.label of
+                        Just label ->
+                            if labelUndoesStepInProgress label then
+                                Nothing
+
+                            else if labelReportsRouteAlreadySet label then
+                                -- Nothing to click: the route is already set. In
+                                -- space the caller travels it instead; docked,
+                                -- there is nothing to do but wait for the button to
+                                -- offer "Undock".
+                                Nothing
+
+                            else
+                                Just ( label, button.uiNode )
+
+                        Nothing ->
                             Nothing
-
-                        else if labelReportsRouteAlreadySet label then
-                            -- Nothing to click: the route is already set. In
-                            -- space the caller travels it instead; docked,
-                            -- there is nothing to do but wait for the button to
-                            -- offer "Undock".
-                            Nothing
-
-                        else
-                            Just ( label, button.uiNode )
-
-                    Nothing ->
-                        Nothing
-            )
+                )
 
 
 {-| Whether the autopilot actually has a destination.
