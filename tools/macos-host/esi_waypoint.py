@@ -10,6 +10,7 @@ and the bot's existing travel logic flies it from there.
 
 Usage:
     python3 esi_waypoint.py auth                      # one-time, opens a browser
+    python3 esi_waypoint.py auth --manual             # same, but log in on another device
     python3 esi_waypoint.py resolve "Jita IV - Moon 4 - Caldari Navy Assembly Plant"
     python3 esi_waypoint.py set --name "Amarr VI (Zorast) - Moon 2 - Theology Council Tribunal"
     python3 esi_waypoint.py set --id 60008494 --keep-other-waypoints
@@ -152,6 +153,58 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *_):
         pass  # the default handler writes the full query string, code included
+
+
+def authorize_manual():
+    """Authorize when the browser is on another device.
+
+    `authorize` opens a browser here and catches the redirect on this machine's
+    localhost. Log in on a phone instead and that redirect resolves to the
+    *phone's* localhost, where nothing is listening, so the final hop just fails
+    to load -- but the URL in the address bar still carries the code. This prints
+    the authorize URL, takes that failed URL back, and finishes the exchange
+    here.
+
+    The code_verifier never leaves this process, so the half that proves the
+    request is ours stays local no matter which device did the logging in. The
+    code itself is single-use and short-lived.
+    """
+    verifier, challenge = pkce_pair()
+    state = secrets.token_urlsafe(16)
+    query = urllib.parse.urlencode({
+        "response_type": "code",
+        "redirect_uri": REDIRECT_URI,
+        "client_id": client_id(),
+        "scope": SCOPES,
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    })
+    url = f"{LOGIN_HOST}/v2/oauth/authorize/?{query}"
+
+    print("Open this on the other device and log in:\n")
+    print(url)
+    print("\nThe page it lands on will fail to load -- that is expected, the "
+          "redirect points at this machine. Copy its full address and paste it "
+          "here.\n")
+    pasted = input("callback URL: ").strip()
+
+    captured = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(pasted).query))
+    if captured.get("state") != state:
+        sys.exit("state mismatch -- refusing the response. Start again.")
+    if "code" not in captured:
+        sys.exit(f"no authorization code in that URL: {sorted(captured)}")
+
+    tokens = post_form(f"{LOGIN_HOST}/v2/oauth/token", {
+        "grant_type": "authorization_code",
+        "code": captured["code"],
+        "client_id": client_id(),
+        "code_verifier": verifier,
+    })
+    keychain_store(tokens["refresh_token"])
+    print(f"authorized; refresh token stored in the Keychain as "
+          f"{KEYCHAIN_SERVICE!r} (not printed).")
+    return tokens["access_token"]
 
 
 def authorize():
@@ -303,7 +356,11 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("auth", help="one-time browser authorization (PKCE)")
+    auth_cmd = sub.add_parser("auth", help="one-time browser authorization (PKCE)")
+    auth_cmd.add_argument("--manual", action="store_true",
+                          help="print the URL and take the pasted redirect back, for logging "
+                               "in on another device (the callback points at this machine's "
+                               "localhost, which a phone cannot reach)")
 
     resolve = sub.add_parser("resolve", help="look up a station/system id by name")
     resolve.add_argument("name")
@@ -319,6 +376,9 @@ def main():
     args = parser.parse_args()
 
     if args.command == "auth":
+        if args.manual:
+            authorize_manual()
+            return 0
         authorize()
         return 0
 
