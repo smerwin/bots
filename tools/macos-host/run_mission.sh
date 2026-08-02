@@ -149,6 +149,13 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # listed last so it is tried first -- settings prepend, so file order is reverse
 # priority.
 #
+# Survey Ship is the same story on "Survey Rendezvous", which wants Survey Data
+# in the cargohold. The ship carrying it sits on the overview as a plain
+# `Survey Ship` -- not a wreck, not a cargo container, so the looting path does
+# not consider it, and nothing in the objective names it. Run 129 handed in
+# seven missions and then sat next to one at 192 km raising the
+# not-progressing alarm 81 times.
+#
 # The other three are the rest of that pocket, read off the overview in run
 # 114's stall screenshot -- the run that sat on "Nothing to fight" for 14,111
 # decisions, 37% of the session, and never recovered. They are kept as a hedge
@@ -178,6 +185,7 @@ approach-object=Circular Construction
 approach-object=Caldari Deadspace Tactical Outpost
 approach-object=Amarr Chapel
 approach-object=Amarr-Caldari Mediation Center
+approach-object=Survey Ship
 run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=70"
 
