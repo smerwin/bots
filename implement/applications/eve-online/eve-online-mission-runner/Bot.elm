@@ -3643,6 +3643,23 @@ launchAndEngageDrones context =
                         Nothing
             )
 
+{-| Whether the client is currently offering to take this gate.
+
+The panel carries `selectedItemActivateGate` only while the gate is in range, so
+its presence answers "are we close enough?" better than any distance we could
+compute -- the overview's own distance lags the ship, which is what made a
+threshold unreliable here and in the loot window.
+
+Requires the panel to be showing this gate, because the button belongs to
+whatever is selected; a button read while something else is selected would
+activate that instead.
+-}
+gateCanBeActivatedNow : BotDecisionContext -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+gateCanBeActivatedNow context entry =
+    selectedItemIsOverviewEntry context entry
+        && (selectedItemButtonNamed context "selectedItemActivateGate" /= Nothing)
+
+
 {-| Readings of drones sitting in space before the recall is treated as not
 landing at all, and before it is abandoned.
 
@@ -4910,30 +4927,30 @@ activateAccelerationGateIfPresent context =
                     distanceInMeters =
                         accelerationGateEntry.objectDistanceInMeters |> Result.withDefault 999999
                 in
-                if interactionRangeInMeters < distanceInMeters then
+                if not (gateCanBeActivatedNow context accelerationGateEntry) then
                     Just <|
-                    -- Close the distance first. The panel's
-                    -- `selectedItemActivateGate` button only exists while the
-                    -- gate is in range, so from out here there is nothing to
-                    -- press -- selectThenPanelAction selects the gate, finds no
-                    -- button, and waits. Run 127 did exactly that at 36,000 m
-                    -- for 11,964 decisions and never took the gate.
+                    -- Approach until the client says we can take the gate, and
+                    -- let *it* decide when that is. The panel only carries
+                    -- `selectedItemActivateGate` while the gate is genuinely in
+                    -- range, so the button's presence is the range test -- and
+                    -- unlike a distance of our own it cannot be stale.
                     --
-                    -- This branch used to claim the opposite: that activating
-                    -- from range makes the client fly over and take the gate on
-                    -- arrival. That is true of the *D-click* gesture, which is
-                    -- what the branch originally sent -- and which does not work
-                    -- here at all, per the note on activateGateOnOverviewEntry.
-                    -- When the gesture was replaced by the panel button, the
-                    -- comment's promise came with it and stopped being true.
+                    -- A distance threshold was the obvious alternative and it
+                    -- does not work. The overview distance lags the ship's true
+                    -- position: run 128 read "in reach" and shut the prop mod
+                    -- down, and the panel still offered no button. It is the
+                    -- same lag that had the loot window refusing "Loot All" with
+                    -- "you must be within 2500 meters" while the reading said
+                    -- 1,602 m. Tightening interactionRangeInMeters would only
+                    -- move the guess; asking the client removes it.
                     --
-                    -- Drones come home first, as before: the gate fires with
-                    -- whatever is still in space.
+                    -- Drones come home first: the gate fires with whatever is
+                    -- still in space.
                     ensureDronesRecalledBeforeWarping context
                         (approachOverviewEntry context
                             ("The acceleration gate is "
                                 ++ String.fromInt distanceInMeters
-                                ++ " m away -- approach it, the panel offers no Activate until we are close."
+                                ++ " m away and the panel offers no Activate yet -- keep closing."
                             )
                             accelerationGateEntry
                         )
