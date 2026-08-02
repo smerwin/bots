@@ -393,6 +393,19 @@ secondsBeforeSessionEndToWindDown =
     200
 
 
+{-| How long past the planned end to keep trying to dock before ending the
+session in space instead.
+
+Generous, because a legitimate trip home is a warp and a dock and can take a
+couple of minutes. Bounded, because every way that trip fails previously ran
+until something else stopped the session -- and the host only announces the
+deadline, it does not enforce it.
+-}
+secondsPastSessionEndBeforeGivingUpOnDocking : Int
+secondsPastSessionEndBeforeGivingUpOnDocking =
+    120
+
+
 {-| Wind the session down cleanly instead of being killed mid-flight: once the
 planned end is close, recall drones and dock rather than starting another leg.
 
@@ -443,12 +456,41 @@ windDownBeforeSessionEnd context =
                                             describeBranch "Already docked. Stay put." waitForProgressInGame
 
                             Just _ ->
-                                returnDronesToBay context
-                                    |> Maybe.withDefault
-                                        (dockAtStation
-                                            context.memory.lastDockedStationNameFromInfoPanel
-                                            context
+                                if secondsRemaining <= -secondsPastSessionEndBeforeGivingUpOnDocking then
+                                    -- Still in space well past the deadline, so
+                                    -- stop trying to park and end the session
+                                    -- where we are.
+                                    --
+                                    -- Docking during wind-down fails in more
+                                    -- ways than can be enumerated here, and each
+                                    -- one previously ran until something else
+                                    -- killed the session. Run 118 could not get
+                                    -- its drones back and overran by five
+                                    -- minutes. Run 121 was in Ebidan, a system
+                                    -- with no station at all, and spent the
+                                    -- whole window right-clicking for a
+                                    -- "Stations" entry the menu cannot contain --
+                                    -- 32 cascades, never docked, never finished.
+                                    --
+                                    -- This is the backstop for all of them: the
+                                    -- session ending is what matters, and ending
+                                    -- it undocked is worth more than not ending
+                                    -- it. It does not repair the underlying
+                                    -- cause, which is why it says what happened.
+                                    describeBranch
+                                        ("Session ended "
+                                            ++ String.fromInt -secondsRemaining
+                                            ++ " seconds ago and I still have not docked -- stop here rather than keep trying."
                                         )
+                                        (Common.DecisionPath.endDecisionPath FinishSession)
+
+                                else
+                                    returnDronesToBay context
+                                        |> Maybe.withDefault
+                                            (dockAtStation
+                                                context.memory.lastDockedStationNameFromInfoPanel
+                                                context
+                                            )
                         )
                     )
 
