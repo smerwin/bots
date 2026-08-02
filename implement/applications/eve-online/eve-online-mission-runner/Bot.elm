@@ -1378,7 +1378,7 @@ approachMissionObjectIfNeeded context =
                         |> List.concatMap .entries
                         |> List.filter (matchesOverviewName name)
                         |> List.filter overviewEntryIsDisplayed
-                        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+                        |> List.sortBy overviewEntryDistanceOrFarInMeters
             in
             candidateNames
                 |> List.concatMap entriesNamed
@@ -1429,9 +1429,9 @@ approachConfiguredObjectIfPresent context =
                     |> List.filter
                         (\entry ->
                             interactionRangeInMeters
-                                < (entry.objectDistanceInMeters |> Result.withDefault 999999)
+                                < (overviewEntryDistanceOrFarInMeters entry)
                         )
-                    |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+                    |> List.sortBy overviewEntryDistanceOrFarInMeters
             )
         |> List.head
         |> Maybe.map
@@ -1524,8 +1524,7 @@ lootMissionItemFromContainerIfPresent context =
                             (\containerEntry ->
                                 let
                                     distanceInMeters =
-                                        containerEntry.objectDistanceInMeters
-                                            |> Result.withDefault 999999
+                                        overviewEntryDistanceOrFarInMeters containerEntry
                                 in
                                 -- One call, whatever the range. A double click
                                 -- is "Open Cargo", and from further out the
@@ -1615,7 +1614,7 @@ lootableHoldingMissionItem context itemName =
                 -- that actually chooses what to open -- still selecting looted
                 -- wrecks, and the loop carried on unchanged.
                 |> List.filter (notAlreadyEmptied context)
-                |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+                |> List.sortBy overviewEntryDistanceOrFarInMeters
 
         textsOfEntry entry =
             [ entry.objectName, entry.objectType ] |> List.filterMap identity
@@ -3303,7 +3302,7 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                 -- the same reason; see the note at `notAlreadyEmptied`'s other
                 -- caller.
                 |> List.filter (notAlreadyEmptied context)
-                |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+                |> List.sortBy overviewEntryDistanceOrFarInMeters
 
         decisionIfNoEnemyToAttack =
             case context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.head of
@@ -3506,8 +3505,9 @@ Both keep-at-range and orbit report success only through the HUD's manoeuvre
 indicator, and on this client `HudActionIndicationContainer` is often empty --
 so `ManeuverRange`/`ManeuverOrbit` never arrives and the branch re-issues
 forever. Run 111 spent a whole 180-minute session on the range one: 8,941
-keypresses, no missions. Orbit is the same shape with less protection, having
-no locked-target check at all.
+keypresses, no missions. Orbit is the same shape and now carries the same
+locked-target check, so this counter is the last line of defence for both
+rather than the only one for orbit.
 
 Give up quietly rather than ask for help. Positioning is an optimisation, not a
 prerequisite -- the guns and drones work regardless -- so the right answer when
@@ -3555,6 +3555,9 @@ ensureShipIsOrbiting context shipUI overviewEntryToOrbit =
             Nothing
 
         else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
+            Nothing
+
+        else if not (overviewEntryToOrbit |> overviewEntryIsTargetedOrTargeting) then
             Nothing
 
         else
@@ -3880,7 +3883,7 @@ escapeTargetOnOverview context =
             context.readingFromGameClient.overviewWindows
                 |> List.concatMap .entries
                 |> List.filter overviewEntryIsDisplayed
-                |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+                |> List.sortBy overviewEntryDistanceOrFarInMeters
 
         matching predicate =
             onGrid
@@ -4251,6 +4254,17 @@ overviewEntryDistanceIsOnGrid overviewEntry =
             False
 
 
+{-| An overview entry's distance, or a placeholder standing for "too far to
+act on" when the distance reads in AU and does not parse as meters. Sorting
+with this is safe -- an unreadable distance simply sorts last -- but nothing
+should treat the placeholder as a real number; gate on
+`overviewEntryDistanceIsOnGrid` first wherever that matters.
+-}
+overviewEntryDistanceOrFarInMeters : EveOnline.ParseUserInterface.OverviewWindowEntry -> Int
+overviewEntryDistanceOrFarInMeters overviewEntry =
+    overviewEntry.objectDistanceInMeters |> Result.withDefault 999999
+
+
 {-| Whether the mission's own objective picks this object out.
 
 Matched against Name and Type both. The objective names the exact structure the
@@ -4343,7 +4357,7 @@ overviewEntriesToAttackFromReadingFromGameClient : ObjectNamesToAttack -> Readin
 overviewEntriesToAttackFromReadingFromGameClient namesToAttack readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
-        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+        |> List.sortBy overviewEntryDistanceOrFarInMeters
         |> List.filter (shouldAttackOverviewEntry namesToAttack)
 
 
@@ -4456,7 +4470,7 @@ nearestLootableEntry readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.filter (\entry -> entry.objectItemID /= Nothing)
-        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+        |> List.sortBy overviewEntryDistanceOrFarInMeters
         |> List.head
 
 
@@ -4891,7 +4905,7 @@ accelerationGateIsWithinReach readingFromGameClient =
         |> List.filter isAccelerationGate
         |> List.any
             (\entry ->
-                (entry.objectDistanceInMeters |> Result.withDefault 999999)
+                (overviewEntryDistanceOrFarInMeters entry)
                     <= interactionRangeInMeters
             )
 
@@ -4919,13 +4933,13 @@ activateAccelerationGateIfPresent context =
     context.readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.filter isAccelerationGate
-        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+        |> List.sortBy overviewEntryDistanceOrFarInMeters
         |> List.head
         |> Maybe.andThen
             (\accelerationGateEntry ->
                 let
                     distanceInMeters =
-                        accelerationGateEntry.objectDistanceInMeters |> Result.withDefault 999999
+                        overviewEntryDistanceOrFarInMeters accelerationGateEntry
                 in
                 if not (gateCanBeActivatedNow context accelerationGateEntry) then
                     Just <|
