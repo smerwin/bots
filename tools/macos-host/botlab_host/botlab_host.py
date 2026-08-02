@@ -135,6 +135,9 @@ _VK_TO_CGKEYCODE = {
     0x10: 0x38,  # SHIFT
     0x11: 0x3B,  # CONTROL
     0x12: 0x3A,  # ALT/MENU -> Option
+    0x5B: 0x37,  # LWIN -> Command. The editing shortcuts a macOS text field
+                 # answers to are Command-based; Control+A is "move to start of
+                 # line" here, not "select all".
     0x1B: 0x35,  # ESCAPE
     0x20: 0x31,  # SPACE
     0x21: 0x74,  # PRIOR -> PageUp
@@ -856,6 +859,9 @@ class TaskDispatcher:
         # Mouse buttons currently held, so cursor motion between a ButtonDown
         # and its ButtonUp is emitted as a drag rather than a plain move.
         self._buttons_down = set()
+        # Keys currently held, so the framework's inter-effect wait is not taken
+        # while one is down and macOS never starts auto-repeating it.
+        self._keys_down = set()
         self._last_mouse_pos = None
         # Monotonic time of our own last posted event, so a stand-down check can
         # tell a person's input apart from the bot's own.
@@ -1299,7 +1305,19 @@ class TaskDispatcher:
                             continue
                         next_real_tag_after_wait = later_tag
                         break
-                    if (not self._buttons_down) or next_real_tag_after_wait == "ButtonUp":
+                    #
+                    # A held *key* is worse than a held button: macOS starts
+                    # auto-repeating it. The framework's 210ms between KeyDown
+                    # and KeyUp is longer than the system repeat delay, so every
+                    # typed character came out as a run of itself. Run 115 typed
+                    # "Reports" into the inventory quick filter and left
+                    # "reportreprrrrrr...rrreporteporteporte...", never matched
+                    # the text it expected, and retyped for 26,103 decisions.
+                    # A keypress wants no hold time at all, so unlike a drag
+                    # there is no settle to preserve before the release.
+                    if self._keys_down:
+                        pass
+                    elif (not self._buttons_down) or next_real_tag_after_wait == "ButtonUp":
                         time.sleep(payload / 1000.0)
                 elif tag == "BringWindowToForeground":
                     window_number = int(payload.split("/")[-1])
@@ -1388,6 +1406,7 @@ class TaskDispatcher:
                             errors.append(f"no macOS key mapping for VK code {code}")
                             continue
                         self._cg(f"keydown {mac_code}")
+                        self._keys_down.add(mac_code)
                     elif tag == "KeyUp":
                         code, extended = payload
                         mac_code = vk_to_cgkeycode(code)
@@ -1395,6 +1414,7 @@ class TaskDispatcher:
                             errors.append(f"no macOS key mapping for VK code {code}")
                             continue
                         self._cg(f"keyup {mac_code}")
+                        self._keys_down.discard(mac_code)
                     elif tag in ("CharacterDown", "CharacterUp"):
                         errors.append(f"{tag} (raw unicode character input) not implemented")
                         continue
