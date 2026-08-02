@@ -337,6 +337,7 @@ type alias BotMemory =
     , lootAllRefusedTicks : Int
     , lootWindowOutOfRangeTicks : Int
     , dronesInSpaceTicks : Int
+    , dockedWithCargoWantedTicks : Int
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
     , clearingNotRequired : Bool
@@ -2033,7 +2034,13 @@ decideActionWhenDockedWithoutConversation context =
             expandTracker
 
         Nothing ->
-            case courierCargoToLoad context |> Maybe.andThen (loadCourierCargoDescribed context) of
+            case
+                if courierLoadHasHadLongEnough context then
+                    Nothing
+
+                else
+                    courierCargoToLoad context |> Maybe.andThen (loadCourierCargoDescribed context)
+            of
                 Just loadCargo ->
                     -- Load freight before travelling: the objective keeps asking
                     -- for it until it is in the hold, and flying on without it
@@ -3934,6 +3941,7 @@ initBotMemory =
     , lootAllRefusedTicks = 0
     , lootWindowOutOfRangeTicks = 0
     , dronesInSpaceTicks = 0
+    , dockedWithCargoWantedTicks = 0
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
     , clearingNotRequired = False
@@ -4357,6 +4365,55 @@ nearestLootableEntry readingFromGameClient =
         |> List.filter (\entry -> entry.objectItemID /= Nothing)
         |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
         |> List.head
+
+
+{-| Whether the hangar has had long enough to produce the mission's cargo.
+
+Not every objective that says "you need X in your cargohold" means X is in this
+station. "After The Seven (3 of 5)" wants Phenod's DNA, which comes out of a
+deadspace encounter, and the tracker's own next step is Undock -- but the docked
+branch tries the hangar first and, before this, never stopped. Run 123 spent 86
+readings docked, cycling the inventory quick filter for an item that was never
+going to be there, while the button that would have started the mission sat on
+the info panel.
+
+A load that can succeed succeeds quickly: run 117 filtered, found and dragged in
+about six readings. So this is not a close call, and the generous bound costs
+nothing when the cargo really is in the hangar.
+
+Counted on the reading alone -- docked with the mission asking for cargo -- so
+it resets the moment the ship undocks or the objective moves on.
+-}
+courierLoadHasHadLongEnough : BotDecisionContext -> Bool
+courierLoadHasHadLongEnough context =
+    courierLoadTicksBeforeGivingUpOnTheHangar < context.memory.dockedWithCargoWantedTicks
+
+
+courierLoadTicksBeforeGivingUpOnTheHangar : Int
+courierLoadTicksBeforeGivingUpOnTheHangar =
+    40
+
+
+{-| Docked, with the mission asking for cargo. The state the hangar search runs
+in, counted so it cannot run forever.
+-}
+dockedWithCargoWanted : ReadingFromGameClient -> Bool
+dockedWithCargoWanted readingFromGameClient =
+    let
+        isDocked =
+            case readingFromGameClient.shipUI of
+                Nothing ->
+                    True
+
+                Just _ ->
+                    False
+    in
+    isDocked
+        && (readingFromGameClient.agentMissionInfoPanelEntries
+                |> List.concatMap .objectNamesToCarry
+                |> List.isEmpty
+                |> not
+           )
 
 
 {-| Whether the ship is close enough to take items out of the open container.
@@ -5593,6 +5650,12 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
             Nothing ->
                 0
+    , dockedWithCargoWantedTicks =
+        if dockedWithCargoWanted context.readingFromGameClient then
+            botMemoryBefore.dockedWithCargoWantedTicks + 1
+
+        else
+            0
     , dronesInSpaceTicks =
         -- Consecutive readings with drones out. Reset when the bay has them
         -- back, so this measures "how long have they been out", which is what
