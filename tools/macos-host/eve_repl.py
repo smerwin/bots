@@ -259,6 +259,17 @@ class Session:
             self._cg_send(f"keyup {code}")
             time.sleep(delay)
 
+    def type_literal(self, text):
+        """Type text by character payload rather than by keycode.
+
+        Does NOT work on the EVE client -- kept only so the next person does not
+        spend the afternoon rediscovering that. A single 'z' sent this way
+        arrives as nothing, while the same character by keycode arrives every
+        time, so the client reads keycodes and ignores the unicode payload.
+        """
+        self._cg_send(f"text {text}")
+        time.sleep(0.25)
+
     def caret_to_end(self):
         """Put the caret after any existing text.
 

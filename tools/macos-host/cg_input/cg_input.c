@@ -12,6 +12,7 @@
 //   doubleclick <button>       double click at last-known position
 //   keydown <keyCode>          key down (macOS virtual keycode, CGKeyCode)
 //   keyup <keyCode>            key up
+//   text <utf8>                type literal text (by character, not keycode)
 //   scroll <dx> <dy>           scroll wheel event
 //
 // `doubleclick` is its own command rather than two `down`/`up` pairs because
@@ -109,6 +110,53 @@ int main(void) {
                 CGEventPost(kCGHIDEventTap, event);
                 CFRelease(event);
                 printf("ok\n");
+            } else if (strcmp(cmd, "text") == 0) {
+                // Type literal text, one character per event, by payload rather
+                // than by keycode.
+                //
+                // Keycodes are how every other key here is sent, and for text
+                // they are not reliable against this client: driving the search
+                // field a character at a time, 'a' (keycode 0) never arrived at
+                // all across five retries, and 'h', 'c', 'n' and 's' dropped
+                // intermittently while 'z', 'i', 'o' and 'r' were perfect. Same
+                // window, same focus, same pacing.
+                //
+                // CGEventKeyboardSetUnicodeString should sidestep the whole
+                // question: the event carries the character itself, so nothing
+                // depends on a keycode being mapped or on the keyboard layout.
+                //
+                // It does not work on the EVE client. Tested against a focused
+                // search field, a single 'z' sent this way arrives as nothing at
+                // all, while the same character sent by keycode arrives every
+                // time. The client evidently reads keycodes and ignores the
+                // unicode payload, which is usual for games taking input at a
+                // low level. Kept because the command is correct and may serve
+                // another application; do not reach for it here.
+                char *rest = line + 4;
+                while (*rest == ' ') rest++;
+                size_t n = strlen(rest);
+                while (n && (rest[n - 1] == '\n' || rest[n - 1] == '\r')) rest[--n] = '\0';
+
+                CFStringRef str = CFStringCreateWithCString(NULL, rest, kCFStringEncodingUTF8);
+                if (!str) {
+                    printf("err bad utf8\n");
+                } else {
+                    CFIndex count = CFStringGetLength(str);
+                    for (CFIndex i = 0; i < count; i++) {
+                        UniChar ch = CFStringGetCharacterAtIndex(str, i);
+                        CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0, true);
+                        CGEventKeyboardSetUnicodeString(down, 1, &ch);
+                        CGEventPost(kCGHIDEventTap, down);
+                        CFRelease(down);
+
+                        CGEventRef up = CGEventCreateKeyboardEvent(NULL, 0, false);
+                        CGEventKeyboardSetUnicodeString(up, 1, &ch);
+                        CGEventPost(kCGHIDEventTap, up);
+                        CFRelease(up);
+                    }
+                    CFRelease(str);
+                    printf("ok\n");
+                }
             } else if (strcmp(cmd, "idle") == 0) {
                 // Seconds since the last *hardware* input event. Asking the HID
                 // state specifically is what makes this usable: events we post
