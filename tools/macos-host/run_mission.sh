@@ -124,7 +124,17 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # Worlds Collide 87 times and asked for a mission 88 times without ever being
 # offered a different one.
 #
-# The list is empty. Worlds Collide was on it because its acceleration gates
+# Survey Rendezvous is on it because the bot cannot do it at all, and no amount
+# of settings will change that. Its objective item sits inside a *hackable*
+# container -- the "Survey Ship" on the overview -- which needs a Data Analyzer
+# fitted and EVE's hacking minigame played. Run 129 approached it to 0 m, then
+# tried destroying it on a guess of mine: 2,445 gun cycles for "0 to Survey
+# Ship" every time, because a hackable container is not a combat target.
+# Hacking it would also spawn 16-22 drones as reinforcements. It is the first
+# of a three-mission chain (Listening Post, Kicking the Nest), so declining it
+# skips all three.
+#
+# The list is otherwise empty. Worlds Collide was on it because its acceleration gates
 # admit smaller hulls than the cruiser the bot flew at the time; it now flies a
 # Coercer, two classes down, so the premise no longer holds and it is worth
 # letting the bot try. If the gates do refuse the destroyer, the bot finds out
@@ -186,6 +196,7 @@ approach-object=Caldari Deadspace Tactical Outpost
 approach-object=Amarr Chapel
 approach-object=Amarr-Caldari Mediation Center
 approach-object=Survey Ship
+decline-mission=Survey Rendezvous
 run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=70"
 
