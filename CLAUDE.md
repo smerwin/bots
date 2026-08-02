@@ -237,6 +237,7 @@ procedure and its traps; this file carries the facts.
 | `run_saxrat.sh`, `run_mission.sh` | launchers for `eve-online-saxrat` / `eve-online-mission-runner`; one-bot-at-a-time guard kills any prior launcher/`botlab_host.py`/`driver.js`/`tree_walker` first |
 | `bot_help.py` | backs `--help` on the launchers |
 | `stall_watch.py` | watches a running bot's log and screenshots the client when it stalls |
+| `web_console.py` + `web_console.html` | tailnet-only status/log/settings console for a running session (`--web-console`) |
 | `eve_read.py` | live reads of the client (overview, targets, modules, combat feed, window id, client pid) by reusing botlab_host's UI-root cache -- ~2s instead of rediscovering the root |
 | `eve_repl.py` | interactive handle on the client for one-offs -- `python3 -i eve_repl.py`, then `eve.dock(...)`, `eve.warp_to(...)`, `eve.menu_click(...)`. See `REPL.md` |
 | `compile_bot.sh` | compiles a bot the way the host does, without running it; verifies the scratch copy matches the source |
@@ -283,6 +284,31 @@ and run 114 raised an alarm for a bot correctly sitting out a warp. It is still
 never benign on its own — a window of nothing but leaves says nothing about
 *why* the bot is waiting, and treating it as idle is what once dropped detection
 to nothing.
+
+**`--web-console [PORT]`** (default 8787, off unless asked for) serves a live
+console: session stats, the log as a filterable stream, an editable settings
+box, and pause/resume/stop. `./run_mission.sh --web-console` works as-is, since
+the launcher already forwards `"$@"`.
+
+It binds to this machine's **Tailscale address and nothing else**, and **fails
+to start** if no 100.64.0.0/10 address can be found rather than falling back to
+a wider interface — the console can change what the bot does and stop it, so
+guessing wrong means publishing a remote control. Tailscale is the
+authentication; there is no login of its own, which is exactly why the bind must
+stay narrow.
+
+Two design points that are load-bearing rather than stylistic. **HTTP handlers
+never touch the pipe to the bot process** — it is a strict request/response
+conversation with the Elm runtime, and a second writer desynchronises it — so
+handlers only queue intent and `run_bot`'s own loop performs it between ticks.
+And **live settings reload needs no new bot machinery**: re-sending
+`BotSettingsChangedEvent`, the same event the session opens with, makes the bot
+re-read its whole settings string.
+
+Stats come from EVE's game log, which the host already tails: a `(bounty) N ISK
+added to next bounty payout` line is emitted once per rat killed and carries
+what it paid, so kills and ISK are a count and a sum of those. The `(combat)`
+lines are per shot, not per kill, and are no use for a kill count.
 
 **Bot source acquisition** (both tested): a local file or directory path (or
 `file://`), or a GitHub URL — a plain repo, or a `.../tree/<branch>/<subpath>`

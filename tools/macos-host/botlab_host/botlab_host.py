@@ -33,6 +33,9 @@ MACOS_HOST_DIR = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(MACOS_HOST_DIR, "re_helper"))
 import re_helper as rh  # noqa: E402
 
+sys.path.insert(0, MACOS_HOST_DIR)
+import web_console  # noqa: E402
+
 MAIN_ELM_TEMPLATE = os.path.join(HERE, "Main.elm")
 # A bot's own source fixes which host interface it imports, and the wrappers are
 # not interchangeable -- see Main_2023_02_06.elm's header.
@@ -1440,7 +1443,7 @@ class TaskDispatcher:
 # ---------------------------------------------------------------------------
 
 def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_screenshots=False,
-            session_duration_minutes=None, game_log_dir=None):
+            session_duration_minutes=None, game_log_dir=None, console=None):
     proc = subprocess.Popen(
         ["node", DRIVER_JS, bot_js_path],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
@@ -1495,14 +1498,70 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         # grouped.
         elapsed = time.monotonic() - tick_start
         print(f"# [{tick}.{decision_seq}] ({elapsed:.3f}s) {cont['statusText'][:4000]}", file=sys.stderr)
+        if console is not None:
+            console.note_decision(tick, cont["statusText"])
         if game_log is not None:
             for line in game_log.new_lines():
                 print(f"#   game log: {line}", file=sys.stderr)
+                if console is not None:
+                    console.note_game_log(line)
+
+    stop_requested = False
 
     while True:
         if "FinishSession" in response:
             print(f"# FinishSession: {response['FinishSession']['statusText']}", file=sys.stderr)
+            if console is not None:
+                console.note_finished(response["FinishSession"]["statusText"])
             break
+
+        if console is not None:
+            # Apply what the console asked for, here and only here: this is the
+            # thread that owns the pipe to the bot process, and that pipe is a
+            # strict request/response conversation. A handler thread writing to
+            # it would interleave with a task response and desynchronise the
+            # runtime.
+            while True:
+                command = console.take_command()
+                if command is None:
+                    break
+                if command == "pause":
+                    console.set_paused(True)
+                elif command == "resume":
+                    console.set_paused(False)
+                elif command == "stop":
+                    stop_requested = True
+
+            new_settings = console.take_settings()
+            if new_settings is not None:
+                # The bot re-reads its whole settings string from this event --
+                # the same one the session opens with -- so a live change needs
+                # no restart and no special path in the bot.
+                print("# applying settings change from the console", file=sys.stderr)
+                response = send_event({"BotSettingsChangedEvent": new_settings})
+                console.note_host("settings applied")
+                continue
+
+            if stop_requested:
+                print("# stop requested from the console", file=sys.stderr)
+                console.note_finished("stopped from the console")
+                break
+
+            while console.is_paused():
+                # Paused means paused: no reads, no input, nothing sent to the
+                # bot. Held here rather than by skipping work further down, so
+                # a paused session cannot be halfway through a click sequence.
+                time.sleep(0.25)
+                command = console.take_command()
+                if command == "resume":
+                    console.set_paused(False)
+                elif command == "stop":
+                    stop_requested = True
+                    break
+            if stop_requested:
+                print("# stop requested from the console", file=sys.stderr)
+                console.note_finished("stopped from the console")
+                break
 
         cont = response["ContinueSession"]
         decision_seq = 0
@@ -1678,6 +1737,12 @@ def main():
                          "echoed under each decision (it is the only timestamped record here)")
     ap.add_argument("--no-game-log", action="store_true",
                     help="do not follow EVE's game log")
+    ap.add_argument("--web-console", nargs="?", const=8787, type=int, default=None,
+                    metavar="PORT",
+                    help="serve a status/log/settings console on the tailnet (default port "
+                         "8787). Bound to this machine's Tailscale address and nowhere else; "
+                         "if there is no tailnet address the run refuses to start rather than "
+                         "falling back to a wider interface.")
     ap.add_argument("--session-duration-minutes", type=float, default=None,
                      help="tell the bot how long this session should run; BotFramework's own "
                           "continueIfShouldHide docks (and stays docked) once ~200s remain "
@@ -1692,10 +1757,20 @@ def main():
         build_dir = prepare_build_dir(bot_dir, workdir)
         bot_js = compile_bot(build_dir)
         print(f"# compiled: {bot_js}", file=sys.stderr)
+        console = None
+        if args.web_console is not None:
+            session_end_at_ms = None
+            if args.session_duration_minutes is not None:
+                session_end_at_ms = int(time.time() * 1000) + int(args.session_duration_minutes * 60 * 1000)
+            console = web_console.ConsoleState(settings_text=args.settings,
+                                               session_end_at_ms=session_end_at_ms)
+            _httpd, url = web_console.start(console, port=args.web_console)
+            print(f"# web console: {url}", file=sys.stderr)
         run_bot(bot_js, args.settings, max_ticks=args.max_ticks, execute_input=args.execute_input,
                 capture_screenshots=args.capture_screenshots,
                 session_duration_minutes=args.session_duration_minutes,
-            game_log_dir=None if args.no_game_log else args.game_log_dir)
+            game_log_dir=None if args.no_game_log else args.game_log_dir,
+            console=console)
     finally:
         if args.keep_build_dir:
             print(f"# left build dir at {workdir}", file=sys.stderr)

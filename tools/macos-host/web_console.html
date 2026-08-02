@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Host Console</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#121820; --panel2:#0e141b; --line:#1e2a36;
+    --ink:#d7e3ee; --dim:#7d90a3; --accent:#4fd1c5; --warn:#f0b429; --bad:#f2705f;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+         padding:14px 18px;border-bottom:1px solid var(--line);background:var(--panel2)}
+  h1{font-size:15px;margin:0;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);
+       box-shadow:0 0 0 3px rgba(79,209,197,.15)}
+  .dot.paused{background:var(--warn);box-shadow:0 0 0 3px rgba(240,180,41,.15)}
+  .dot.done{background:var(--bad);box-shadow:0 0 0 3px rgba(242,112,95,.15)}
+  .spacer{flex:1}
+  button{background:#18222d;color:var(--ink);border:1px solid var(--line);
+         border-radius:6px;padding:6px 12px;font:inherit;cursor:pointer}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button[disabled]{opacity:.4;cursor:not-allowed}
+  main{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:16px;padding:16px}
+  @media(max-width:900px){main{grid-template-columns:1fr}}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  h2{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);
+     margin:0;padding:10px 14px;border-bottom:1px solid var(--line);font-weight:600}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:1px;background:var(--line)}
+  .tile{background:var(--panel);padding:12px 14px}
+  .tile .k{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+  .tile .v{font-family:var(--mono);font-size:20px;margin-top:4px;font-variant-numeric:tabular-nums}
+  .status{padding:12px 14px;font-family:var(--mono);font-size:12px;color:var(--dim);
+          white-space:pre-wrap;word-break:break-word;border-top:1px solid var(--line)}
+  .logwrap{height:52vh;overflow:auto;padding:8px 0}
+  .row{display:flex;gap:10px;padding:1px 14px;font-family:var(--mono);font-size:12px}
+  .row:hover{background:#16202b}
+  .t{color:#4a5b6b;flex:0 0 62px}
+  .m{white-space:pre-wrap;word-break:break-word;min-width:0}
+  .decision .m{color:var(--ink)}
+  .game .m{color:var(--accent)}
+  .host .m{color:var(--warn)}
+  .controls{display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  input[type=search]{flex:1;min-width:120px;background:var(--panel2);border:1px solid var(--line);
+         border-radius:6px;color:var(--ink);padding:6px 10px;font:inherit}
+  textarea{width:100%;height:230px;background:var(--panel2);color:var(--ink);
+           border:0;border-top:1px solid var(--line);padding:12px 14px;
+           font-family:var(--mono);font-size:12px;resize:vertical}
+  textarea:focus{outline:1px solid var(--accent);outline-offset:-1px}
+  .apply{display:flex;align-items:center;gap:10px;padding:10px 14px;border-top:1px solid var(--line)}
+  .note{color:var(--dim);font-size:12px}
+  .ok{color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Host Console</h1>
+  <span class="note" id="conn">connecting…</span>
+  <span class="spacer"></span>
+  <button id="pause">Pause</button>
+  <button id="resume" disabled>Resume</button>
+  <button id="stop">Stop session</button>
+</header>
+
+<main>
+  <section>
+    <h2>Activity</h2>
+    <div class="controls">
+      <input type="search" id="filter" placeholder="filter lines…">
+      <button id="follow">Following</button>
+    </div>
+    <div class="logwrap" id="log"></div>
+  </section>
+
+  <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
+    <section>
+      <h2>Session</h2>
+      <div class="tiles">
+        <div class="tile"><div class="k">Operating</div><div class="v" id="uptime">—</div></div>
+        <div class="tile"><div class="k">Remaining</div><div class="v" id="left">—</div></div>
+        <div class="tile"><div class="k">Rats killed</div><div class="v" id="kills">—</div></div>
+        <div class="tile"><div class="k">Bounty ISK</div><div class="v" id="isk">—</div></div>
+        <div class="tile"><div class="k">Ticks</div><div class="v" id="tick">—</div></div>
+        <div class="tile"><div class="k">Decisions</div><div class="v" id="decisions">—</div></div>
+      </div>
+      <div class="status" id="status">—</div>
+    </section>
+
+    <section>
+      <h2>Settings</h2>
+      <textarea id="settings" spellcheck="false"></textarea>
+      <div class="apply">
+        <button id="applySettings">Apply live</button>
+        <span class="note" id="settingsNote">one key=value per line</span>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+let since = 0, following = true, serverSettings = null, dirty = false;
+const $ = id => document.getElementById(id);
+
+const clock = s => {
+  if (s === null || s === undefined) return "—";
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`
+           : `${m}:${String(sec).padStart(2,"0")}`;
+};
+const num = n => n.toLocaleString("en-US", {maximumFractionDigits: 0});
+const hhmm = at => new Date(at * 1000).toLocaleTimeString("en-GB", {hour12:false});
+
+function matchesFilter(text){
+  const q = $("filter").value.trim().toLowerCase();
+  return !q || text.toLowerCase().includes(q);
+}
+
+function addLines(lines){
+  const box = $("log");
+  for (const line of lines){
+    const row = document.createElement("div");
+    row.className = "row " + line.kind;
+    row.dataset.text = line.text;
+    row.innerHTML = `<span class="t"></span><span class="m"></span>`;
+    row.firstChild.textContent = hhmm(line.at);
+    row.lastChild.textContent = line.text;
+    if (!matchesFilter(line.text)) row.style.display = "none";
+    box.appendChild(row);
+  }
+  while (box.childElementCount > 4000) box.removeChild(box.firstChild);
+  if (following) box.scrollTop = box.scrollHeight;
+}
+
+$("filter").addEventListener("input", () => {
+  for (const row of $("log").children)
+    row.style.display = matchesFilter(row.dataset.text) ? "" : "none";
+});
+$("follow").addEventListener("click", () => {
+  following = !following;
+  $("follow").textContent = following ? "Following" : "Paused scroll";
+  if (following) $("log").scrollTop = $("log").scrollHeight;
+});
+$("settings").addEventListener("input", () => { dirty = true; });
+
+async function command(name){
+  await fetch("/api/command", {method:"POST", headers:{"Content-Type":"application/json"},
+                               body: JSON.stringify({command:name})});
+}
+$("pause").onclick  = () => command("pause");
+$("resume").onclick = () => command("resume");
+$("stop").onclick   = () => { if (confirm("Stop the session after the current step?")) command("stop"); };
+
+$("applySettings").onclick = async () => {
+  const body = JSON.stringify({settings: $("settings").value});
+  await fetch("/api/settings", {method:"POST", headers:{"Content-Type":"application/json"}, body});
+  dirty = false;
+  $("settingsNote").innerHTML = '<span class="ok">queued — applied on the next step</span>';
+  setTimeout(() => $("settingsNote").textContent = "one key=value per line", 4000);
+};
+
+async function poll(){
+  try {
+    const res = await fetch(`/api/state?since=${since}`);
+    const s = await res.json();
+    since = s.latestSeq;
+
+    $("conn").textContent = s.finished ? ("finished — " + (s.finishReason || ""))
+                                       : (s.paused ? "paused" : "running");
+    $("dot").className = "dot" + (s.finished ? " done" : s.paused ? " paused" : "");
+    $("pause").disabled = s.paused || s.finished;
+    $("resume").disabled = !s.paused || s.finished;
+    $("stop").disabled = s.finished;
+
+    $("uptime").textContent = clock(s.uptimeSeconds);
+    $("left").textContent = clock(s.sessionSecondsLeft);
+    $("kills").textContent = num(s.kills);
+    $("isk").textContent = num(s.isk);
+    $("tick").textContent = num(s.tick);
+    $("decisions").textContent = num(s.decisions);
+    $("status").textContent = s.status || "—";
+
+    if (serverSettings === null || (!dirty && s.settings !== serverSettings)){
+      $("settings").value = s.settings;
+      serverSettings = s.settings;
+    }
+    if (s.lines.length) addLines(s.lines);
+  } catch (err) {
+    $("conn").textContent = "disconnected — retrying";
+  }
+}
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>
