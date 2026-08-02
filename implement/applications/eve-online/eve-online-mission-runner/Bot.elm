@@ -339,6 +339,7 @@ type alias BotMemory =
     , dronesInSpaceTicks : Int
     , dockedWithCargoWantedTicks : Int
     , nothingToDoTicks : Int
+    , lastObjectiveText : String
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
     , clearingNotRequired : Bool
@@ -3973,6 +3974,7 @@ initBotMemory =
     , dronesInSpaceTicks = 0
     , dockedWithCargoWantedTicks = 0
     , nothingToDoTicks = 0
+    , lastObjectiveText = ""
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
     , clearingNotRequired = False
@@ -4398,33 +4400,27 @@ nearestLootableEntry readingFromGameClient =
         |> List.head
 
 
-{-| In space, with a mission tracked, and nothing in the overview the bot would
-act on -- no rats, no wrecks, no containers.
+{-| The mission's own objective text, for noticing that it has stopped changing.
 
-An approximation of the decision tree's own bottom branch, close enough to bound
-how long the bot sits there and cheap enough to compute from the reading alone.
+The first version of this tried to decide from the overview whether there was
+anything worth acting on, using `objectItemID` as the mark of a lootable wreck.
+Every row has one -- stargates, stations, the sun -- so nothing was ever
+"nothing", the counter reset on every reading, and the alarm it gated could not
+fire at all. Run 125 sat in the branch for 7,442 decisions with the fix
+supposedly in place.
+
+What the reading can answer honestly is narrower: has the objective changed. A
+mission that is progressing rewrites this -- a pocket clears, a step completes,
+the cargo lands -- so text that is identical for hundreds of readings while the
+ship is in space means nothing is happening. It does not have to distinguish
+"nothing to do" from "busy", because the branch that consults it is only reached
+when there is nothing to do.
 -}
-nothingToActOnInSpace : ReadingFromGameClient -> Bool
-nothingToActOnInSpace readingFromGameClient =
-    let
-        isInSpace =
-            readingFromGameClient.shipUI /= Nothing
-
-        missionRunning =
-            readingFromGameClient.agentMissionInfoPanelEntries |> List.isEmpty |> not
-
-        actionableRows =
-            readingFromGameClient.overviewWindows
-                |> List.concatMap .entries
-                |> List.filter overviewEntryIsDisplayed
-                |> List.filter
-                    (\entry ->
-                        (entry.objectItemID /= Nothing)
-                            || entry.commonIndications.targetedByMe
-                            || entry.commonIndications.targeting
-                    )
-    in
-    isInSpace && missionRunning && List.isEmpty actionableRows
+missionObjectiveText : ReadingFromGameClient -> String
+missionObjectiveText readingFromGameClient =
+    readingFromGameClient.agentMissionInfoPanelEntries
+        |> List.concatMap .instructionTexts
+        |> String.join " / "
 
 
 {-| Readings at the bottom of the tree before the bot stops calling it waiting.
@@ -4434,7 +4430,7 @@ finite, because the two runs that died here waited for the rest of the session.
 -}
 nothingToDoTicksBeforeCryingStuck : Int
 nothingToDoTicksBeforeCryingStuck =
-    90
+    300
 
 
 {-| Whether the hangar has had long enough to produce the mission's cargo.
@@ -5720,13 +5716,17 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
             Nothing ->
                 0
+    , lastObjectiveText = missionObjectiveText context.readingFromGameClient
     , nothingToDoTicks =
-        -- Readings spent at the bottom of the decision tree with a mission
-        -- running and nothing to act on. Counted from the reading rather than
-        -- from the branch, so it is really "in space, mission tracked, nothing
-        -- in the overview worth acting on" -- close enough to the branch's own
-        -- conditions to bound it, and it resets the moment anything changes.
-        if nothingToActOnInSpace context.readingFromGameClient then
+        -- Readings in space with the objective text unchanged. Generous,
+        -- because the branch that reads it is only reached when there is
+        -- genuinely nothing to do -- so this does not have to tell waiting from
+        -- fighting, only tell "the mission moved" from "it did not".
+        if
+            (context.readingFromGameClient.shipUI /= Nothing)
+                && (missionObjectiveText context.readingFromGameClient /= "")
+                && (missionObjectiveText context.readingFromGameClient == botMemoryBefore.lastObjectiveText)
+        then
             botMemoryBefore.nothingToDoTicks + 1
 
         else
