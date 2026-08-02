@@ -2512,9 +2512,15 @@ decideActionInMissionPocket context seeUndockingComplete =
                                                         -- here. It converts a silently wasted session into
                                                         -- one that says so, which is what stall_watch
                                                         -- screenshots and reports.
+                                                        -- Deliberately no reading count in the text. The
+                                                        -- alarm repeats for as long as the state lasts, and
+                                                        -- a counter in the message makes every repeat a
+                                                        -- distinct line -- which defeats stall_watch's
+                                                        -- dedupe and any log filter downstream. Run 126
+                                                        -- emitted 151 unique variants of this one alarm.
                                                         describeBranch
-                                                            ("Nothing to fight, no travel step, nothing on grid to approach, and "
-                                                                ++ String.fromInt context.memory.nothingToDoTicks
+                                                            ("Nothing to fight, no travel step, nothing on grid to approach, and over "
+                                                                ++ String.fromInt nothingToDoTicksBeforeCryingStuck
                                                                 ++ " readings of it -- this mission is not going to progress on its own."
                                                             )
                                                             askForHelpToGetUnstuck
