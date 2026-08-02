@@ -38,8 +38,8 @@ tty and suggests, wrongly, that no log exists.
 pgrep -fl tee
 ```
 
-`cycle_run.sh` writes `${BOT_LOG_DIR}/mission_run<N>.log`, defaulting to a
-scratchpad path hardcoded in that script. If there is no `tee`, read the screen
+`cycle_run.sh` writes `${BOT_LOG_DIR}/mission_run<N>.log`, defaulting to
+`~/eve-bot-logs`. If there is no `tee`, read the screen
 session directly — this works while it is attached, and needs the **full**
 session name from `screen -ls`, not the bare name:
 
