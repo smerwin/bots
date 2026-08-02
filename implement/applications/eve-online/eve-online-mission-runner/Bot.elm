@@ -336,6 +336,7 @@ type alias BotMemory =
     , unlootableWreckIds : List String
     , lootAllRefusedTicks : Int
     , lootWindowOutOfRangeTicks : Int
+    , agentSurveyTicks : Int
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
     , clearingNotRequired : Bool
@@ -434,7 +435,12 @@ windDownBeforeSessionEnd context =
                                         (Common.DecisionPath.endDecisionPath FinishSession)
 
                                 else
-                                    describeBranch "Already docked. Stay put." waitForProgressInGame
+                                    case maintenanceWhileDocked context of
+                                        Just maintenance ->
+                                            maintenance
+
+                                        Nothing ->
+                                            describeBranch "Already docked. Stay put." waitForProgressInGame
 
                             Just _ ->
                                 returnDronesToBay context
@@ -500,6 +506,138 @@ selectedAgentEntry context =
                             |> List.filter agentIsInThisStation
                             |> List.head
            )
+
+
+{-| Work worth doing while parked in station, or Nothing to just sit there.
+
+Called only from the wind-down branch, which is the one stretch where the bot is
+docked and has already decided not to start another leg -- roughly 200 seconds
+per session with the clock running out. Anything here is therefore free: it
+cannot delay a mission, because there is no mission left to delay. That is also
+the constraint. A maintenance task must be interruptible and must finish or give
+up inside that window, and must never be placed anywhere the bot still has work
+to do.
+
+Each task states its own "already done" condition, because this branch is
+re-entered on every reading for the whole window. A task that cannot tell it has
+run would repeat for the rest of the session, which is both useless and exactly
+the shape `stall_watch` calls a stall.
+-}
+maintenanceWhileDocked : BotDecisionContext -> Maybe DecisionPathNode
+maintenanceWhileDocked context =
+    surveyAgentsInStation context
+
+
+{-| Log every agent this station's panel knows about, once per session.
+
+The point is finding agents worth moving to. The panel is not limited to agents
+based here -- `agentLocation` carries a remote agent's system and jump count --
+so this is a genuine survey of what is reachable, not just a list of the room
+we are standing in. It reads what the parser already produces, so it needs no
+new UI work; the Agency window, which reaches further than any one station's
+panel, is the obvious next task to add here.
+
+Reading only. It selects the Agents tab if that is needed to see the list, and
+otherwise clicks nothing -- there is no mission running to disturb, but there is
+also no reason to leave the client in a different state than we found it.
+-}
+surveyAgentsInStation : BotDecisionContext -> Maybe DecisionPathNode
+surveyAgentsInStation context =
+    -- A counter rather than a "done" flag, so this does not depend on whether
+    -- the memory update runs before or after the decision on a given reading.
+    -- With a flag, updating first would set it on the very reading the survey
+    -- meant to print and the line would never appear at all.
+    if context.memory.agentSurveyTicks > 1 then
+        Nothing
+
+    else
+        case context.readingFromGameClient.stationWindow of
+            Nothing ->
+                Nothing
+
+            Just stationWindow ->
+                case stationWindow.agentsTab of
+                    Nothing ->
+                        Nothing
+
+                    Just agentsTab ->
+                        if not agentsTab.isSelected then
+                            Just
+                                (describeBranch
+                                    "Maintenance: open the station's Agents tab to survey them."
+                                    (clickUiElement agentsTab.uiNode)
+                                )
+
+                        else if List.isEmpty stationWindow.agentEntries then
+                            Nothing
+
+                        else
+                            Just
+                                (describeBranch
+                                    ("Maintenance: agents this station lists -- "
+                                        ++ (stationWindow.agentEntries
+                                                |> List.map describeStationAgentEntry
+                                                |> String.join " | "
+                                           )
+                                    )
+                                    waitForProgressInGame
+                                )
+
+
+{-| Docked with the Agents tab up and showing entries -- the state in which the
+survey has something to print.
+
+Deliberately not "and winding down", even though that is the only branch which
+prints it. `UpdateMemoryContext` carries just the reading, not the event context,
+so the memory update cannot see the session clock and the counter cannot be
+conditioned on it. What makes that safe is the reset: this state ends every time
+the ship undocks, so the ordinary agent conversations during a mission cannot
+leave the counter used up by the time the wind-down window arrives.
+-}
+agentSurveyConditionsHold : ReadingFromGameClient -> Bool
+agentSurveyConditionsHold readingFromGameClient =
+    let
+        isDocked =
+            case readingFromGameClient.shipUI of
+                Nothing ->
+                    True
+
+                Just _ ->
+                    False
+
+        agentsTabIsUp =
+            case readingFromGameClient.stationWindow of
+                Nothing ->
+                    False
+
+                Just stationWindow ->
+                    (stationWindow.agentsTab |> Maybe.map .isSelected |> Maybe.withDefault False)
+                        && not (List.isEmpty stationWindow.agentEntries)
+    in
+    isDocked && agentsTabIsUp
+
+
+describeStationAgentEntry : EveOnline.ParseUserInterface.StationAgentEntry -> String
+describeStationAgentEntry agentEntry =
+    [ agentEntry.name |> Maybe.withDefault "(unnamed)"
+    , agentEntry.agentType |> Maybe.withDefault "(type?)"
+    , case agentEntry.agentLocation of
+        Nothing ->
+            "here"
+
+        Just location ->
+            if String.trim location |> String.isEmpty then
+                "here"
+
+            else
+                String.trim location
+    , if agentEntry.isAvailable then
+        "available"
+
+      else
+        "not available"
+    ]
+        |> String.join ", "
 
 
 {-| Agents based elsewhere are listed in the station's Agents panel too, with
@@ -3671,6 +3809,7 @@ initBotMemory =
     , unlootableWreckIds = []
     , lootAllRefusedTicks = 0
     , lootWindowOutOfRangeTicks = 0
+    , agentSurveyTicks = 0
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
     , clearingNotRequired = False
@@ -5330,6 +5469,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
             Nothing ->
                 0
+    , agentSurveyTicks =
+        -- Reset, not saturate. The counter has to survive the agent conversations
+        -- of an ordinary mission without being used up before the wind-down
+        -- window, and undocking is what guarantees that: it ends the state below,
+        -- so every dock starts the count again from zero.
+        if agentSurveyConditionsHold context.readingFromGameClient then
+            botMemoryBefore.agentSurveyTicks + 1
+
+        else
+            0
     , lootWindowOutOfRangeTicks =
         -- The other half of the same bound. Waiting for the ship to arrive is
         -- correct, but only the client is steering, and if the approach never
