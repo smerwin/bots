@@ -1509,9 +1509,25 @@ loadCourierCargo context itemName =
                         _ ->
                             False
 
+                -- A prefix, not an exact match. Typing into this field drops
+                -- characters: "reports" lands as "report" every time it was
+                -- tried live. Demanding the whole string back meant the filter
+                -- never looked set, so the bot retyped for the rest of the
+                -- session -- while the filter it had already typed was doing its
+                -- job, since the field is a substring match and "report" finds
+                -- Reports perfectly well. Any non-empty prefix is good enough to
+                -- stop typing; an empty box or unrelated text still is not.
                 filterIsAlreadySet =
                     inventoryWindow.quickFilterText
-                        |> Maybe.map (\current -> String.toLower current == expectedQuickFilterText itemName)
+                        |> Maybe.map
+                            (\current ->
+                                let
+                                    typed =
+                                        current |> String.trim |> String.toLower
+                                in
+                                not (String.isEmpty typed)
+                                    && String.startsWith typed (expectedQuickFilterText itemName)
+                            )
                         |> Maybe.withDefault False
             in
             case ( matchingItem, shipCargoTreeEntry ) of
@@ -1553,17 +1569,34 @@ loadCourierCargo context itemName =
                                             waitForProgressInGame
 
                                     else
-                                        describeBranch
-                                            ("Filter the inventory for '" ++ itemName ++ "'.")
-                                            (decideActionForCurrentStep
-                                                (List.concat
-                                                    [ mouseClickOnUIElement MouseButtonLeft filterBox
-                                                        |> Result.withDefault []
-                                                    , selectAllEffects
-                                                    , typeTextEffects itemName
-                                                    ]
-                                                )
+                                        case
+                                            ( inventoryWindow.quickFilterText
+                                                |> Maybe.withDefault ""
+                                                |> String.trim
+                                                |> String.isEmpty
+                                            , quickFilterClearButton filterBox
                                             )
+                                        of
+                                            ( False, Just clearButton ) ->
+                                                -- Whatever is in there is not
+                                                -- what we want and typing cannot
+                                                -- replace it, so empty it first
+                                                -- and type on the next reading.
+                                                describeBranch
+                                                    "The quick filter holds something else -- clear it before typing."
+                                                    (clickUiElement clearButton)
+
+                                            _ ->
+                                                describeBranch
+                                                    ("Filter the inventory for '" ++ itemName ++ "'.")
+                                                    (decideActionForCurrentStep
+                                                        (List.concat
+                                                            [ mouseClickOnUIElement MouseButtonLeft filterBox
+                                                                |> Result.withDefault []
+                                                            , typeTextEffects itemName
+                                                            ]
+                                                        )
+                                                    )
                                 )
 
                     else if lookingAtACapacityLimitedContainer && itemHangarTreeEntry /= Nothing then
@@ -1636,23 +1669,31 @@ expectedQuickFilterText itemName =
         |> String.toLower
 
 
-{-| Select all, so typing replaces whatever the filter box already held rather
-than appending to it.
+{-| The quick filter's own Clear button, so typing starts from an empty box.
 
-Command+A, not Control+A. This is a native macOS client and its text fields take
-the system editing shortcuts, where Control+A means "move to the start of the
-line". Run 115 sent Control+A and then typed, which inserted at the caret
-instead of replacing: the quick filter accumulated
-"reportreprrrr...reporteporteporte..." across retries, never read back as the
-text the bot expected, and the mission never loaded its cargo.
+No select-all shortcut works here, both tried live against this client. Control+A
+is the macOS "move to start of line" binding, so the bot moved the caret and then
+inserted: run 115's filter accumulated "reportreprrrr...reporteporteporte..."
+across retries. Command+A is worse -- it does not select, and it leaves the field
+swallowing every keystroke that follows, so run 116 typed 128 times and changed
+the box by not one character.
+
+Clearing by button is what actually works: verified live, 6,818 characters of
+accumulated junk to empty in one click.
+
+Identified by type rather than by label. It is a `ButtonIcon` whose text lives in
+`_hint`, and `getDisplayText` reads only `_setText`/`_text`, so a text search
+never matches it -- the same trap `closeControlOfWindow` documents. It is the one
+`ButtonIcon` inside the filter box.
 -}
-selectAllEffects : List EffectOnWindow.EffectOnWindowStruct
-selectAllEffects =
-    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_LWIN
-    , EffectOnWindow.KeyDown EffectOnWindow.vkey_A
-    , EffectOnWindow.KeyUp EffectOnWindow.vkey_A
-    , EffectOnWindow.KeyUp EffectOnWindow.vkey_LWIN
-    ]
+quickFilterClearButton :
+    EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+quickFilterClearButton filterBox =
+    filterBox
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "ButtonIcon")
+        |> List.head
 
 
 {-| Type plain text as individual key presses.
@@ -4615,9 +4656,14 @@ routeToStationByName context stationName =
                                 describeBranch ("Search for '" ++ query ++ "'.")
                                     (decideActionForCurrentStep
                                         (List.concat
+                                            -- No select-all first: neither
+                                            -- Control+A nor Command+A selects in
+                                            -- this client's fields, and Command+A
+                                            -- additionally stops the field taking
+                                            -- keystrokes at all. This one is
+                                            -- normally opened empty.
                                             [ mouseClickOnUIElement MouseButtonLeft searchField
                                                 |> Result.withDefault []
-                                            , selectAllEffects
                                             , typeTextEffects query
                                             , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_RETURN
                                               , EffectOnWindow.KeyUp EffectOnWindow.vkey_RETURN
