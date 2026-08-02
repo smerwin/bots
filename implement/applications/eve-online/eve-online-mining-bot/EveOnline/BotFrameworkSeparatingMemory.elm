@@ -242,7 +242,7 @@ processEventInBaseFramework config eventContext event stateBefore =
               , lastReadingsFromGameClient =
                     readingFromGameClientMemory
                         :: stateBefore.lastReadingsFromGameClient
-                        |> List.take 3
+                        |> List.take 8
               }
             , case decisionLeaf of
                 ContinueSession continueSession ->
@@ -300,7 +300,7 @@ useContextMenuCascadeOnListSurroundingsButton useContextMenu context =
 filterToDiscardContextMenuOnListSurroundingsButton : FilterToDiscardContextMenu a b
 filterToDiscardContextMenuOnListSurroundingsButton =
     \target context cascadeFirstElement ->
-        discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 30 } target context cascadeFirstElement
+        discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 70 } target context cascadeFirstElement
             |> Maybe.andThen
                 (\reasonToDiscard ->
                     if
@@ -323,7 +323,7 @@ filterToDiscardContextMenuOnListSurroundingsButton =
 
 filterToDiscardContextMenuDefault : FilterToDiscardContextMenu a b
 filterToDiscardContextMenuDefault =
-    discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 20 }
+    discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 70 }
 
 
 useContextMenuCascade :
@@ -365,26 +365,28 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                     |> List.head
             of
                 Nothing ->
-                    let
-                        clickLocation =
-                            context.readingFromGameClient.neocom
-                                |> Maybe.andThen .clock
-                                |> Maybe.map
-                                    (\clock ->
-                                        { x = clock.uiNode.totalDisplayRegion.x + clock.uiNode.totalDisplayRegion.width // 2
-                                        , y = clock.uiNode.totalDisplayRegion.y - 10
-                                        }
-                                    )
-                                |> Maybe.withDefault
-                                    { x = 4, y = context.readingFromGameClient.uiTree.totalDisplayRegion.height - 30 }
-                    in
+                    {-
+                       Used to right-click a computed "somewhere else" location
+                       (near the neocom clock, or a bottom-left fallback) to
+                       dismiss the occluding menu(s). That location isn't
+                       reliably empty space -- it can land on a real Neocom icon
+                       or another clickable element, opening a different menu
+                       (or acting on whatever's there) instead of dismissing
+                       anything, and the next click can then hit whatever that
+                       opened. Confirmed live elsewhere: this wiped an autopilot
+                       route via an accidentally triggered "Clear All
+                       Waypoints". Escape closes an open context menu reliably
+                       without clicking anywhere, so nothing can be in the way
+                       to hit by accident.
+                    -}
                     Common.DecisionPath.describeBranch
                         ("All of " ++ target.targetUIElementName ++ " is occluded by context menus.")
                         (Common.DecisionPath.describeBranch
-                            "Click somewhere else to get rid of the occluding elements."
-                            (clickLocation
-                                |> Common.EffectOnWindow.effectsMouseClickAtLocation Common.EffectOnWindow.MouseButtonRight
-                                |> decideActionForCurrentStep
+                            "Press Escape to get rid of the occluding elements."
+                            (decideActionForCurrentStep
+                                [ Common.EffectOnWindow.KeyDown Common.EffectOnWindow.vkey_ESCAPE
+                                , Common.EffectOnWindow.KeyUp Common.EffectOnWindow.vkey_ESCAPE
+                                ]
                             )
                         )
 
@@ -402,7 +404,7 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                 ("Discard existing context menu (" ++ reasonToDiscard ++ ")")
                 beginCascade
     in
-    case context.previousReadingsFromGameClient |> List.take 3 |> List.reverse |> List.head of
+    case context.previousReadingsFromGameClient |> List.take 8 |> List.reverse |> List.head of
         Nothing ->
             beginCascade
 

@@ -308,6 +308,8 @@ type alias BotMemory =
     , visitedAnomalies : Dict.Dict String MemoryOfAnomaly
     , notEnoughBandwidthToLaunchDrone : Bool
     , droneBandwidthLimitatatinEvents : List { timeMilliseconds : Int, dronesInSpaceCount : Int }
+    , contextMenuLastDepth : Int
+    , contextMenuStuckTicks : Int
     }
 
 
@@ -944,6 +946,12 @@ dockAtRandomStationOrStructure context seeUndockingComplete =
 
 decideNextActionWhenInSpace : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> DecisionPathNode
 decideNextActionWhenInSpace context shipUI =
+    clearStrayContextMenu context
+        |> Maybe.withDefault (decideNextActionWhenInSpaceNotStuckOnContextMenu context shipUI)
+
+
+decideNextActionWhenInSpaceNotStuckOnContextMenu : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> DecisionPathNode
+decideNextActionWhenInSpaceNotStuckOnContextMenu context shipUI =
     case
         continueIfShouldHide
             { ifShouldHide =
@@ -1870,6 +1878,8 @@ initBotMemory =
     , visitedAnomalies = Dict.empty
     , notEnoughBandwidthToLaunchDrone = False
     , droneBandwidthLimitatatinEvents = []
+    , contextMenuLastDepth = 0
+    , contextMenuStuckTicks = 0
     }
 
 
@@ -1980,6 +1990,41 @@ iconSpriteHasColorOfRat overviewEntry =
                 && (60 < colorPercent.r && 50 < colorPercent.a)
 
 
+{-| `BotMemory.contextMenuStuckTicks` only increments when the context menu
+cascade depth has stayed the same (or dropped without reaching zero) since the
+last reading; any tick that goes deeper than before resets it to 0, regardless
+of how many ticks the cascade has taken in total. A genuinely stuck cascade --
+sitting at the same depth, unable to find its next entry -- still trips this
+after a few ticks; a cascade that keeps advancing, no matter how many levels or
+how slowly, never does.
+-}
+strayContextMenuStuckTicksThreshold : Int
+strayContextMenuStuckTicksThreshold =
+    3
+
+
+{-| `Just` a decision to press Escape if a context menu has sat at the same
+cascade depth (not advancing to a deeper submenu) for at least
+`strayContextMenuStuckTicksThreshold` consecutive ticks; `Nothing` otherwise, so
+callers can fall through to their normal decision tree.
+-}
+clearStrayContextMenu : BotDecisionContext -> Maybe DecisionPathNode
+clearStrayContextMenu context =
+    if strayContextMenuStuckTicksThreshold <= context.memory.contextMenuStuckTicks then
+        Just
+            (describeBranch
+                "A context menu has sat at the same depth for several ticks in a row without advancing to a deeper submenu -- likely a stray menu from a misclick or a cascade stuck on a menu with no entry it recognizes. Clear it (Escape)."
+                (decideActionForCurrentStep
+                    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_ESCAPE
+                    , EffectOnWindow.KeyUp EffectOnWindow.vkey_ESCAPE
+                    ]
+                )
+            )
+
+    else
+        Nothing
+
+
 updateMemoryForNewReadingFromGame : UpdateMemoryContext -> BotMemory -> BotMemory
 updateMemoryForNewReadingFromGame context botMemoryBefore =
     let
@@ -2066,6 +2111,10 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                         botMemoryBefore.visitedAnomalies
                             |> Dict.insert currentAnomalyID anomalyMemory
 
+        currentContextMenuDepth : Int
+        currentContextMenuDepth =
+            context.readingFromGameClient.contextMenus |> List.length
+
         notEnoughBandwidthToLaunchDrone : Bool
         notEnoughBandwidthToLaunchDrone =
             readingFromGameClientSaysNotEnoughBandwidthToLaunchDrone context.readingFromGameClient
@@ -2110,6 +2159,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     , visitedAnomalies = visitedAnomalies
     , notEnoughBandwidthToLaunchDrone = notEnoughBandwidthToLaunchDrone
     , droneBandwidthLimitatatinEvents = droneBandwidthLimitatatinEvents |> List.take 4
+    , contextMenuLastDepth = currentContextMenuDepth
+    , contextMenuStuckTicks =
+        if currentContextMenuDepth == 0 then
+            0
+
+        else if currentContextMenuDepth > botMemoryBefore.contextMenuLastDepth then
+            0
+
+        else
+            botMemoryBefore.contextMenuStuckTicks + 1
     }
 
 
