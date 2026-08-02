@@ -605,38 +605,8 @@ inSpaceWithMiningHoldSelected context seeUndockingComplete inventoryWindowWithMi
                                 inventoryWindowWithMiningHoldSelected |> fleetHangarFromInventoryWindow |> Maybe.map .uiNode
                             of
                                 Nothing ->
-                                    describeBranch ("No fleet hangar, not yet" ++ describeThresholdToUnload ++ " full. Keep honking.")
-                                    (case context.readingFromGameClient.targets |> List.head of
-                                        Nothing ->
-                                            describeBranch "I see no locked target."
-                                                (travelToMiningSiteAndLaunchDronesAndTargetAsteroid context)
-
-                                        Just _ ->
-                                            {- Depending on the UI configuration, the game client might automatically target rats.
-                                            To avoid these targets interfering with mining, unlock them here.
-                                            -}
-                                            unlockTargetsNotForMining context
-                                                |> Maybe.withDefault
-                                                    (describeBranch "I see a locked target."
-                                                        (case knownMiningModules |> List.filter (.isActive >> Maybe.withDefault False >> not) |> List.head of
-                                                            Nothing ->
-                                                                describeBranch
-                                                                    (if knownMiningModules == [] then
-                                                                        "Found no mining modules so far."
-
-                                                                    else
-                                                                        "All known mining modules found so far are active."
-                                                                    )
-                                                                    (readShipUIModuleButtonTooltips context
-                                                                        |> Maybe.withDefault waitForProgressInGame
-                                                                    )
-
-                                                            Just inactiveModule ->
-                                                                describeBranch "I see an inactive mining module. Activate it."
-                                                                    (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
-                                                        )
-                                                    )
-                                    )
+                                    describeBranch ("No fleet hangar, not yet " ++ describeThresholdToUnload ++ " full. Keep honking.")
+                                        (getMoreOre context knownMiningModules)
 
                                 Just fleetHangarFromInventory ->
                                     describeBranch ("The mining hold is filled at least " ++ describeThresholdToUnloadFleetHangar ++ ". Unload the ore on fleet hangar.")
@@ -647,37 +617,41 @@ inSpaceWithMiningHoldSelected context seeUndockingComplete inventoryWindowWithMi
 
                         else
                             describeBranch ("The mining hold is not yet filled " ++ describeThresholdToUnload ++ ". Get more ore.")
-                                (case context.readingFromGameClient.targets |> List.head of
-                                    Nothing ->
-                                        describeBranch "I see no locked target."
-                                            (travelToMiningSiteAndLaunchDronesAndTargetAsteroid context)
+                                (getMoreOre context knownMiningModules)
 
-                                    Just _ ->
-                                        {- Depending on the UI configuration, the game client might automatically target rats.
-                                           To avoid these targets interfering with mining, unlock them here.
-                                        -}
-                                        unlockTargetsNotForMining context
-                                            |> Maybe.withDefault
-                                                (describeBranch "I see a locked target."
-                                                    (case knownMiningModules |> List.filter (.isActive >> Maybe.withDefault False >> not) |> List.head of
-                                                        Nothing ->
-                                                            describeBranch
-                                                                (if knownMiningModules == [] then
-                                                                    "Found no mining modules so far."
 
-                                                                 else
-                                                                    "All known mining modules found so far are active."
-                                                                )
-                                                                (readShipUIModuleButtonTooltips context
-                                                                    |> Maybe.withDefault waitForProgressInGame
-                                                                )
+getMoreOre : BotDecisionContext -> List EveOnline.ParseUserInterface.ShipUIModuleButton -> DecisionPathNode
+getMoreOre context knownMiningModules =
+    case context.readingFromGameClient.targets |> List.head of
+        Nothing ->
+            describeBranch "I see no locked target."
+                (travelToMiningSiteAndLaunchDronesAndTargetAsteroid context)
 
-                                                        Just inactiveModule ->
-                                                            describeBranch "I see an inactive mining module. Activate it."
-                                                                (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
-                                                    )
-                                                )
-                                )
+        Just _ ->
+            {- Depending on the UI configuration, the game client might automatically target rats.
+               To avoid these targets interfering with mining, unlock them here.
+            -}
+            unlockTargetsNotForMining context
+                |> Maybe.withDefault
+                    (describeBranch "I see a locked target."
+                        (case knownMiningModules |> List.filter (.isActive >> Maybe.withDefault False >> not) |> List.head of
+                            Nothing ->
+                                describeBranch
+                                    (if knownMiningModules == [] then
+                                        "Found no mining modules so far."
+
+                                     else
+                                        "All known mining modules found so far are active."
+                                    )
+                                    (readShipUIModuleButtonTooltips context
+                                        |> Maybe.withDefault waitForProgressInGame
+                                    )
+
+                            Just inactiveModule ->
+                                describeBranch "I see an inactive mining module. Activate it."
+                                    (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
+                        )
+                    )
 
 
 unlockTargetsNotForMining : BotDecisionContext -> Maybe DecisionPathNode
@@ -705,32 +679,19 @@ unlockTargetsNotForMining context =
 
 warpToMiningBeaconBeforeDocking : BotDecisionContext -> DecisionPathNode
 warpToMiningBeaconBeforeDocking context =
-    let
-        continueWithDocking =
-            dockToUnloadOre context
-    in
-    case context.readingFromGameClient |> overviewWindowEntriesRepresentingMiningBeacon of
-        [] ->
+    case context.readingFromGameClient |> overviewWindowEntriesRepresentingMiningBeacon |> List.head of
+        Nothing ->
             describeBranch "No 'Moon Beacon' on grid, do a thing."
-                continueWithDocking
+                (dockToUnloadOre context)
 
-        miningBeacons ->
-            case
-                miningBeacons
-                    |> List.head
-            of
-                Nothing ->
-                    describeBranch "I still see no moon beacon on grid, dock as usual" continueWithDocking
-
-                Just miningBeacon ->
-                            describeBranch ("'Moon Beacon' in sight, warping")
-                                (returnDronesToBay context
-                                |> Maybe.withDefault (
-                                    warpToOverviewEntryIfFarEnough context miningBeacon
-                                    |> Maybe.withDefault (
-                                        dockToUnloadOre context
-                                    ))
-                                )
+        Just miningBeacon ->
+            describeBranch "'Moon Beacon' in sight, warping"
+                (returnDronesToBay context
+                    |> Maybe.withDefault
+                        (warpToOverviewEntryIfFarEnough context miningBeacon
+                            |> Maybe.withDefault (dockToUnloadOre context)
+                        )
+                )
 
 
 travelToMiningSiteAndLaunchDronesAndTargetAsteroid : BotDecisionContext -> DecisionPathNode
