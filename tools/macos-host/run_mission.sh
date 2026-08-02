@@ -41,7 +41,7 @@ BOT_SOURCE="${SCRIPT_DIR}/../../implement/applications/eve-online/eve-online-mis
 USAGE='./run_mission.sh                                     # start a run
 ./run_mission.sh --max-ticks 50                      # short run, then stop
 ./run_mission.sh --settings "agent-name=Some Agent"  # replaces the defaults below wholesale
-./run_mission.sh --session-duration-minutes 180      # default is 60
+./run_mission.sh --session-duration-minutes 180      # default is 120
 SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 ./run_mission.sh --help                              # this text'
 
@@ -185,7 +185,7 @@ run-away-armor-hitpoints-threshold-percent=70"
 # once ~200 seconds remain, so it finishes parked in a station rather than
 # being cut off mid-warp with drones out. Override by passing the flag again
 # on the command line.
-SESSION_DURATION_MINUTES="${SESSION_DURATION_MINUTES:-180}"
+SESSION_DURATION_MINUTES="${SESSION_DURATION_MINUTES:-120}"
 
 # Answered before the guard below: asking what the flags are must not kill a
 # session that is already running.
