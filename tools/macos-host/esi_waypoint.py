@@ -19,7 +19,8 @@ Setup, once:
     * developers.eveonline.com -> Create New Application
     * type "Authentication & API Access", scope `esi-ui.write_waypoint.v1`
     * callback exactly `http://localhost:8635/callback`
-    * export ESI_CLIENT_ID=<the client id>   (not a secret; PKCE issues none)
+    * python3 esi_waypoint.py client-id <the client id>   (kept in the Keychain)
+      or export ESI_CLIENT_ID=<the client id> to override it for one run
 
 Secrets. The PKCE flow means no client secret exists at all, so the only
 sensitive artifact is the refresh token, and it goes straight into the macOS
@@ -55,16 +56,52 @@ REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}"
 KEYCHAIN_SERVICE = "eve-esi-refresh"
 KEYCHAIN_ACCOUNT = os.environ.get("USER", "eve")
 
+# The client id lives beside the refresh token rather than in the repo or a
+# shell profile. It is not a secret -- PKCE issues no client secret, and this
+# one is useless without the login it authorises -- but it does identify a
+# specific developer application on a specific account, which is not something
+# to commit to a fork or leave in shell history.
+KEYCHAIN_CLIENT_ID_SERVICE = "eve-esi-client-id"
+
 # CCP asks that every caller identify itself so they can get in touch before
 # blocking a misbehaving client rather than after.
 USER_AGENT = "macos-host-eve-bot (personal, non-commercial)"
 
 
 def client_id():
+    """The application's client id: the environment first, then the Keychain.
+
+    The environment still wins, so a one-off run against a different application
+    needs no state change. Falling back to the Keychain is what stops the id
+    being something to remember and re-export on every invocation.
+    """
     value = os.environ.get("ESI_CLIENT_ID")
     if not value:
-        sys.exit("ESI_CLIENT_ID is not set -- see the setup notes at the top of this file.")
+        value = keychain_load_client_id()
+    if not value:
+        sys.exit("no client id -- set ESI_CLIENT_ID, or store one once with "
+                 "`esi_waypoint.py client-id <id>`. See the setup notes at the "
+                 "top of this file.")
     return value.strip()
+
+
+def keychain_store_client_id(value):
+    subprocess.run(
+        ["security", "add-generic-password", "-U",
+         "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_CLIENT_ID_SERVICE, "-w", value],
+        check=True,
+    )
+
+
+def keychain_load_client_id():
+    result = subprocess.run(
+        ["security", "find-generic-password",
+         "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_CLIENT_ID_SERVICE, "-w"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +393,9 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
+    id_cmd = sub.add_parser("client-id", help="store the application's client id in the Keychain")
+    id_cmd.add_argument("value", help="the client id from developers.eveonline.com")
+
     auth_cmd = sub.add_parser("auth", help="one-time browser authorization (PKCE)")
     auth_cmd.add_argument("--manual", action="store_true",
                           help="print the URL and take the pasted redirect back, for logging "
@@ -374,6 +414,11 @@ def main():
     setter.add_argument("--add-to-beginning", action="store_true")
 
     args = parser.parse_args()
+
+    if args.command == "client-id":
+        keychain_store_client_id(args.value.strip())
+        print(f"client id stored in the Keychain as {KEYCHAIN_CLIENT_ID_SERVICE!r}")
+        return 0
 
     if args.command == "auth":
         if args.manual:
