@@ -1031,6 +1031,40 @@ homeStationRestockGraceSeconds =
     60
 
 
+{-| How long past the planned session end the _preparation_ for the trip may
+run, while the ship is still docked at the station the mission left it in.
+
+Setting the route is part of the trip and costs a six-step cascade through the
+search bar -- click the field, type, Return, expand the `Stations (N)` group,
+double-click the row, click Set Destination -- and until this existed it was the
+one leg of the wind-down with no overrun at all.
+`dockedWindDownDeadlineSeconds` returned a flat `0` for it, so the whole
+preparation had to fit inside `secondsBeforeSessionEndToWindDown` (200 s) or the
+session ended with the ship still sitting in the wrong station. That is the
+`homeStationToGoTo` trip failing before it ever undocks, and the log says so
+("the drone bay is still empty and this is not ...") rather than lying about it,
+but the trip is wasted all the same.
+
+It is deliberately **smaller than the trip's own allowance**, and that is the
+whole reason it is a separate number rather than a reuse of
+`homeStationTripSecondsPastSessionEnd`. The in-space branch ends the session at
+`-homeStationTripSecondsPastSessionEnd` whatever the ship is doing, so a
+preparation phase granted the same 420 s could undock at 419 and be cut off one
+second later -- ending the session *in space*, which is the outcome the trip's
+allowance exists to avoid. Reserving the difference leaves the flight it is
+preparing 300 s, against the 48-65 s an intra-system warp and dock measured
+across run 14's five missions.
+
+120 s matches `secondsPastSessionEndBeforeGivingUpOnDocking`, the overrun an
+ordinary wind-down dock already takes, so preparing the trip is no more generous
+than the docking it replaces.
+
+-}
+homeStationRoutePreparationSecondsPastSessionEnd : Int
+homeStationRoutePreparationSecondsPastSessionEnd =
+    120
+
+
 {-| The home station, when one is configured _and_ there is a reason to go
 there. Both halves are the trigger, so a bot whose bay still holds drones winds
 down exactly as it did before this existed.
@@ -1134,18 +1168,47 @@ windDownOverrunAllowanceSeconds context =
 
 {-| The point at which a docked bot stops winding down and ends the session.
 
-Normally the planned end itself. A ship that has reached its home station with
-an empty bay gets `homeStationRestockGraceSeconds` past that, because arriving
-and then finishing without restocking would waste the whole trip.
+Normally the planned end itself. A trip to the home station moves it twice, and
+the two cases are different phases of that trip rather than one allowance:
+
+  - **Still docked where the mission left us**, with the route yet to be set.
+    This draws on `homeStationRoutePreparationSecondsPastSessionEnd`, because
+    setting the route is part of the trip and previously had no overrun at all.
+  - **Docked at the home station**, restocking. The grace is measured from the
+    trip's own deadline rather than from the planned end, so it cannot be
+    outlived by the flight that had to happen first.
+
+That second one is the bug this replaced, and it is worth stating plainly
+because every log line it produced read like success. The flight was allowed to
+run to `-homeStationTripSecondsPastSessionEnd` (420 s) while the restock's
+deadline sat at `-homeStationRestockGraceSeconds` (60 s), and the docked branch
+tests its deadline _before_ it looks at the restock. So a ship arriving home any
+later than 60 s past the planned end ended the session on the reading it docked,
+having flown the whole way for nothing -- a 360-second window in which the trip
+completed perfectly and bought exactly nothing. Anchoring the grace to the trip
+deadline closes it: whenever the flight lands inside its own allowance, the
+restock gets its full grace.
+
+The cost of that anchoring is bounded and paid while docked, which is the safe
+place to pay it. A restock that reaches no verdict at all -- the case the clock
+exists for, since `droneRestockLooksBeforeGivingUp` ends the task by falling
+silent -- can now hold a docked ship to 480 s past the planned end instead of
+60 s. It stays a deadline, and idling in a station is not what the wind-down is
+protecting the ship from.
 
 -}
 dockedWindDownDeadlineSeconds : BotDecisionContext -> Int
 dockedWindDownDeadlineSeconds context =
-    if homeStationRestockGraceApplies context then
-        -homeStationRestockGraceSeconds
+    case homeStationToGoTo context of
+        Nothing ->
+            0
 
-    else
-        0
+        Just stationName ->
+            if dockedAtHomeStation context stationName == Just True then
+                -(homeStationTripSecondsPastSessionEnd + homeStationRestockGraceSeconds)
+
+            else
+                -homeStationRoutePreparationSecondsPastSessionEnd
 
 
 {-| Whether the wind-down is being held open for a restock at the home station.
@@ -2338,7 +2401,14 @@ withinDroneRestockWindow context =
                 -- the ordinary window has closed by then. The grace is the same
                 -- bound the docked wind-down uses, so the restock and the
                 -- session end together rather than one outliving the other.
-                -homeStationRestockGraceSeconds < secondsRemaining
+                --
+                -- Asked of `dockedWindDownDeadlineSeconds` rather than restated,
+                -- because "the same bound" was a comment holding two copies of
+                -- one number together and it did not survive the first change to
+                -- either. `homeStationRestockGraceApplies` is exactly the
+                -- condition under which that function returns the at-home
+                -- deadline, so the two agree by construction.
+                dockedWindDownDeadlineSeconds context < secondsRemaining
 
             else
                 droneRestockGiveUpSecondsBeforeSessionEnd < secondsRemaining
