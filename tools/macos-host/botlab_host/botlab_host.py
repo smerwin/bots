@@ -562,7 +562,71 @@ def make_image_crop(im, offset_x, offset_y):
     }
 
 
-def capture_image_data(window_number, scaled_rect, scale_x, scale_y):
+# The game's canvas does not always fill its window. Mirroring this Mac to an
+# external display left the EVE window 1710x1068 points (3420x2136 device
+# pixels) while UIRoot went on reporting a 3420x2079 canvas -- 57 pixels
+# shorter, with the shortfall at the *top*. That position is measured, not
+# assumed: a known info-panel icon the tree placed at canvas y=75 rendered at
+# y=134 in a capture of the same window.
+#
+# Dividing the canvas size by the full window size, which is what this did
+# unconditionally, absorbs that shortfall into scale_y -- 2079/1068 = 1.947
+# where the truth is a clean 2.0. The resulting error is proportional to y, so
+# it is nothing at the top of the window and ~28 points at the bottom, which is
+# enough to land a click on the Neocom icon *next to* the intended one. Run 22
+# opened Inventory, Wallet, Directional Scanner and Opportunities that way, and
+# then could not switch the location info panel back on because the bot's own
+# repair click missed the toggle by the same offset -- 116 times, silently,
+# since a click that lands on nothing reports exactly like one that lands.
+#
+# So the canvas is modelled as "uniformly scaled, possibly inset within its
+# window", with the old per-axis divide kept as the fallback. The inset model
+# is only used when the OS backing scale explains one axis *exactly* -- that
+# exact axis is what tells a genuinely uniform scale apart from two ratios that
+# merely came out close -- and leaves the other short by no more than
+# CANVAS_INSET_MAX_PIXELS. The game has its own UI-scale setting independent of
+# the OS backing factor (ratios of 1.684 / 1.743 have been seen on this
+# machine), and that case must keep the old behaviour: it is a genuinely
+# non-square scale, not an inset.
+CANVAS_INSET_MAX_PIXELS = 200
+
+
+def calibrate_window_canvas(root_size, point_w, point_h, backing_scale):
+    """Work out how the game's canvas sits inside its window.
+
+    Returns (scale_x, scale_y, inset_x, inset_y, canvas_w, canvas_h). The
+    scales and the insets are in "game pixel" units -- the units the bot's own
+    coordinate arithmetic works in, see the note at the ReadFromWindowMethod
+    call site. A non-zero inset means the canvas does not start at the window's
+    top-left, and every screen coordinate handed to or taken from the bot has
+    to carry it.
+    """
+    if not root_size:
+        # First call, before any ReadFromWindow has populated root_display_size.
+        # Without the canvas size there is nothing to compare, so assume it
+        # fills the window -- which is what this has always done.
+        s = backing_scale or 1.0
+        return s, s, 0, 0, int(point_w * s), int(point_h * s)
+
+    canvas_w, canvas_h = int(root_size[0]), int(root_size[1])
+    s = backing_scale or 0.0
+    if s > 0:
+        short_x = point_w * s - canvas_w
+        short_y = point_h * s - canvas_h
+        one_axis_is_exact = abs(short_x) < 1.0 or abs(short_y) < 1.0
+        both_shortfalls_are_small = (
+            -1.0 < short_x <= CANVAS_INSET_MAX_PIXELS
+            and -1.0 < short_y <= CANVAS_INSET_MAX_PIXELS
+        )
+        if one_axis_is_exact and both_shortfalls_are_small:
+            return (s, s,
+                    max(0, int(round(short_x))), max(0, int(round(short_y))),
+                    canvas_w, canvas_h)
+
+    return canvas_w / point_w, canvas_h / point_h, 0, 0, canvas_w, canvas_h
+
+
+def capture_image_data(window_number, scaled_rect, scale_x, scale_y, canvas_inset=(0, 0)):
     """Real screenshotCrops_binned_2x2/_binned_4x4, captured via
     screencapture and resampled into the game's own coordinate space (see
     the scale_x/scale_y note above build_tree call site -- the game's
@@ -601,6 +665,15 @@ def capture_image_data(window_number, scaled_rect, scale_x, scale_y):
 
     game_w = max(1, scaled_rect["right"] - scaled_rect["left"])
     game_h = max(1, scaled_rect["bottom"] - scaled_rect["top"])
+
+    inset_x, inset_y = canvas_inset
+    if inset_x or inset_y:
+        # The canvas is inset within the window (see calibrate_window_canvas),
+        # and the capture covers the whole window. Cut the canvas out of it
+        # first, or every crop handed to the bot is shifted by the inset while
+        # its declared offset says otherwise. Under the inset model the scale
+        # is the OS backing factor, so one game pixel is one captured pixel.
+        im = im.crop((inset_x, inset_y, inset_x + game_w, inset_y + game_h))
 
     im_2x2 = im.resize((max(1, game_w // 2), max(1, game_h // 2)), Image.BOX)
     crop_2x2 = make_image_crop(im_2x2, scaled_rect["left"] // 2, scaled_rect["top"] // 2)
@@ -1103,6 +1176,12 @@ class TaskDispatcher:
         self.capture_screenshots = capture_screenshots
         self._scale_x = 1.0
         self._scale_y = 1.0
+        # How far the game's canvas sits inside its window, in game pixels.
+        self._canvas_inset = (0, 0)
+        # Last calibration reported, so a stable geometry says its piece once
+        # rather than on every read -- but a geometry that *changes* mid-run
+        # says so again, which is the case that stranded run 22.
+        self._canvas_note = None
         self._cg_input = None
         # Mouse buttons currently held, so cursor motion between a ButtonDown
         # and its ButtonUp is emitted as a drag rather than a plain move.
@@ -1179,6 +1258,42 @@ class TaskDispatcher:
             return inner
         return inner["request"]
 
+    def _report_canvas_calibration(self, root_size, point_w, point_h,
+                                   backing_scale, scale_x, scale_y,
+                                   inset_x, inset_y):
+        """Say how the canvas was reconciled with its window, when that changes.
+
+        Silent for the ordinary case of a canvas that fills its window, loud
+        for both of the others: an inset, and a canvas this cannot explain at
+        all. The second is the one worth a line -- the per-axis divide it falls
+        back to is a fudge, and a wrong coordinate is invisible in a log
+        otherwise, since a click that lands on nothing looks exactly like a
+        click that lands.
+        """
+        if not root_size:
+            return
+        canvas_w, canvas_h = int(root_size[0]), int(root_size[1])
+        if inset_x or inset_y:
+            note = ("inset", canvas_w, canvas_h, point_w, point_h, inset_x, inset_y)
+            message = (f"# window canvas {canvas_w}x{canvas_h} is inset by "
+                       f"({inset_x}, {inset_y}) in a {point_w}x{point_h} pt window "
+                       f"at scale {backing_scale:g} -- coordinates carry the inset")
+        elif abs(scale_x - scale_y) > 1e-9:
+            note = ("per-axis", canvas_w, canvas_h, point_w, point_h)
+            message = (f"# window canvas {canvas_w}x{canvas_h} does not fit a "
+                       f"{point_w}x{point_h} pt window at any single scale "
+                       f"(backing {backing_scale:g}); falling back to per-axis "
+                       f"{scale_x:.4f}/{scale_y:.4f}. If clicks land off target, "
+                       f"this is why")
+        else:
+            note = ("filled", canvas_w, canvas_h, point_w, point_h)
+            message = None
+        if note == self._canvas_note:
+            return
+        self._canvas_note = note
+        if message:
+            print(message, file=sys.stderr)
+
     def _invoke_method_on_window(self, window_id, method):
         (mtag, mpayload), = method.items()
         if mtag == "ReadFromWindowMethod":
@@ -1217,17 +1332,22 @@ class TaskDispatcher:
             point_w = max(1, rect["right"] - rect["left"])
             point_h = max(1, rect["bottom"] - rect["top"])
             root_size = self.volatile.root_display_size.get(self.volatile.game_pid)
-            if root_size:
-                scale_x = root_size[0] / point_w
-                scale_y = root_size[1] / point_h
-            else:
-                # first call, before any ReadFromWindow has populated
-                # root_display_size yet: fall back to the OS backing scale
-                scale_x = scale_y = rect["backing_scale"]
+            scale_x, scale_y, inset_x, inset_y, canvas_w, canvas_h = \
+                calibrate_window_canvas(root_size, point_w, point_h, rect["backing_scale"])
             self._scale_x, self._scale_y = scale_x, scale_y
+            self._canvas_inset = (inset_x, inset_y)
+            self._report_canvas_calibration(root_size, point_w, point_h,
+                                            rect["backing_scale"], scale_x, scale_y,
+                                            inset_x, inset_y)
+            # The canvas origin, not the window origin: the bot adds this to a
+            # UI position that is measured from the canvas, so the inset has to
+            # be in the sum rather than corrected for afterwards. With no inset
+            # this is exactly what it always was.
+            left = int(rect["left"] * scale_x) + inset_x
+            top = int(rect["top"] * scale_y) + inset_y
             scaled_rect = {
-                "left": int(rect["left"] * scale_x), "top": int(rect["top"] * scale_y),
-                "right": int(rect["right"] * scale_x), "bottom": int(rect["bottom"] * scale_y),
+                "left": left, "top": top,
+                "right": left + canvas_w, "bottom": top + canvas_h,
             }
             result = {
                 "readingId": f"screenshot-{int(time.time()*1000)}",
@@ -1247,7 +1367,8 @@ class TaskDispatcher:
                 # unvisited code paths do. Empty crop lists are valid per
                 # the type (List ImageCrop), so this is a correct, cheap
                 # response, not a stub.
-                "imageData": (capture_image_data(window_number, scaled_rect, scale_x, scale_y)
+                "imageData": (capture_image_data(window_number, scaled_rect, scale_x, scale_y,
+                                                 canvas_inset=(inset_x, inset_y))
                               if self.capture_screenshots else
                               {"screenshotCrops_original": [], "screenshotCrops_binned_2x2": [], "screenshotCrops_binned_4x4": []}),
             }
