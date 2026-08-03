@@ -914,9 +914,38 @@ the label alone would have disengaged on an unfinished objective.
 "dock".** That is the label the tracker shows at the start of every mission, so
 a substring rule would read the ship's own departure as "the objective is
 complete" and try to leave from inside the station. The recordings carry ten
-distinct travel labels — `Warp to Location`, `Destination Set`, `Warping`,
-`Dock`, `Set Destination`, `Preparing`, `Start Conversation`, `Undock`, `Abort
-Undock`, `Read Details` — and exactly one of them ends a mission.
+distinct *text* travel labels — `Warp to Location`, `Destination Set`,
+`Warping`, `Dock`, `Set Destination`, `Preparing`, `Start Conversation`,
+`Undock`, `Abort Undock`, `Read Details` — and exactly one of them ends a
+mission.
+
+**The client can render a travel step as a glyph with no text at all, so any
+matcher on this field must fail closed.** Run 11 produced an eleventh "label"
+three times:
+
+```
+U+0002 U+0000 U+AD1D8 U+0001 U+0001 U+0000 U+0001
+```
+
+— six C0 control characters around one codepoint that is **unassigned**
+(category `Cn`, plane 10), *not* private-use. That distinction is the trap: a
+rule that recognised "not text" by private-use membership would classify this as
+text. It arrived on `Recon (3 of 3) -- You need to warp to the mission location`
+and the bot pressed the button carrying it, which is the ordinary travel
+behaviour and not something the Dock change touches.
+
+Both halves of the condition decline it independently, checked by running them
+rather than by reading them: `missionTravelStepIsDock` answers `False` for that
+string, and `missionHasNoOutstandingInstruction` answers `False` for the
+objective beside it. An exact comparison is what makes that automatic — a
+substring or "starts with" rule on a field that can hold arbitrary bytes has no
+such guarantee.
+
+It also has a lesson for the *tests*. Asserting "the set of travel labels is
+exactly these ten" fails the moment the client emits one of these, on a machine
+whose logs happen to contain it — which is what happened, on a run still being
+written. The assertion is over the **printable** labels, with the non-text case
+tested separately as the property that actually matters.
 
 **What still keeps the guns firing after `Dock` appears**, since the point of
 the branch is to stop:
@@ -968,12 +997,20 @@ Two decision-log lines carry it, and an operator should be able to see which:
 run through the real `Bot.elm` in `elm repl` rather than mirrored in Python (copy
 the app to scratch, open `module Bot exposing (..)`, patch `elm-version`, drive
 it — twelve seconds), against every travel label and objective string the
-recordings contain; the travel-label vocabulary is re-checked against
-`~/eve-bot-logs` so a client that starts writing a different label fails loudly;
-and the ordering, the scrambler decline, the drone recall and the absence of a
-counter are read out of the source. Confirmed by mutation: a substring label
-match, re-wrapping the dock step in combat, dropping the scrambler decline,
-skipping the drone recall, and ignoring the objective's instruction each fail it.
+recordings contain, including the non-text one, which is rebuilt inside Elm with
+`Char.fromCode` since a NUL cannot go in a string literal; the *text*
+travel-label vocabulary is re-checked against `~/eve-bot-logs` so a client that
+starts writing a different readable label fails loudly; and the ordering, the
+scrambler decline, the drone recall and the absence of a counter are read out of
+the source. Reading a log a run is still appending to is safe — lines are taken
+one at a time and a trailing partial line is skipped.
+
+Confirmed by mutation, on the code and on the tests' own premises: a substring
+label match, re-wrapping the dock step in combat, dropping the scrambler
+decline, skipping the drone recall and ignoring the objective's instruction each
+fail it — and so do removing a known label from the list (so the drift check is
+live) and making every category count as text (so the glyph is covered by
+classification rather than by luck).
 
 **Not verified: any of this running.** What to watch on the first live run is the
 first line above arriving within a reading or two of `(next step: Dock)` showing

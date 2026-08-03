@@ -31,22 +31,44 @@ reason PR #45 was verified that way: a mirrored rule only ever asserts what its
 author thought the code did.
 
 The travel labels it is checked against are the ones the client actually writes,
-counted across the eleven recorded runs in `~/eve-bot-logs`. Ten distinct labels,
-exactly one of which is the one this change acts on:
+counted across the twelve recorded runs in `~/eve-bot-logs`. Ten of them are
+text, and exactly one of those is the one this change acts on:
 
-    9527  Warp to Location      1092  Set Destination        560  Abort Undock
-    2737  Destination Set        777  Preparing               32  Read Details
-    2679  Warping                752  Start Conversation
-    1738  Dock                   710  Undock
+    9634  Warp to Location      1136  Set Destination        638  Abort Undock
+    2882  Destination Set        932  Undock                  53  Read Details
+    3070  Warping                908  Preparing
+    1929  Dock                   842  Start Conversation
 
 The recordings also say the second half of the condition is load-bearing rather
-than belt-and-braces: 326 of those 1738 "Dock" readings carry a live courier
+than belt-and-braces: 326 of those "Dock" readings carry a live courier
 instruction ("Bring <a ...>The Damsel</a> to ..."), so the label alone would
 have disengaged on a mission whose objective was still asking for something.
 
-Nothing here reads a live game client or drives a bot. The `elm repl` cases need
-`elm` on PATH and the app's dependencies already fetched, which is what
-`compile_bot.sh` leaves behind; they skip if it is not there.
+**And an eleventh label exists that is not text at all.** Run 11 rendered a
+travel step three times as
+
+    U+0002 U+0000 U+AD1D8 U+0001 U+0001 U+0000 U+0001
+
+-- six C0 control characters around one **unassigned** codepoint (category `Cn`,
+plane 10). Not the private-use area, which matters: a test that classified
+non-text by PUA membership would call this text and fail. It appeared on
+`Recon (3 of 3) -- You need to warp to the mission location`, and the bot pressed
+the button carrying it, which is the pre-existing travel behaviour and not
+something this change alters.
+
+The rule fails closed on it, checked by execution rather than by inspection:
+`missionTravelStepIsDock` answers `False` for that string, and so does
+`missionHasNoOutstandingInstruction` for the objective it appeared beside, so
+*both* halves of the condition independently decline. That is why the first
+class below asserts over the *printable* labels and the non-text one is its own
+case: an eleventh **text** label is drift worth failing on, while a glyph with no
+text is now a covered case rather than a broken test.
+
+Nothing here reads a live game client or drives a bot, and nothing here depends
+on a run being finished -- a log still being appended to is read line by line and
+its final partial line skipped. The `elm repl` cases need `elm` on PATH and the
+app's dependencies already fetched, which is what `compile_bot.sh` leaves behind;
+they skip if the repl cannot be run at all.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
@@ -56,6 +78,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -66,7 +89,7 @@ MISSION_RUNNER_DIR = os.path.join(
     "eve-online-mission-runner")
 MISSION_RUNNER_BOT_ELM = os.path.join(MISSION_RUNNER_DIR, "Bot.elm")
 
-# Every travel label the eleven recorded runs contain, quoted from their
+# Every *text* travel label the recorded runs contain, quoted from their
 # `(next step: ...)` status lines. Exactly one of them ends a mission.
 TRAVEL_LABEL_ENDS_THE_MISSION = "Dock"
 TRAVEL_LABELS_SEEN = [
@@ -81,6 +104,27 @@ TRAVEL_LABELS_SEEN = [
     "Warp to Location",
     "Warping",
 ]
+
+# The eleventh, from run 11: a travel step the client rendered as a glyph with
+# no text. Held as codepoints rather than as a literal so this file stays
+# readable and so an editor cannot silently normalise it away.
+NON_TEXT_TRAVEL_LABEL_CODEPOINTS = [0x02, 0x00, 0xAD1D8, 0x01, 0x01, 0x00, 0x01]
+
+# The objective the tracker was carrying on the readings it appeared -- quoted
+# because it is the second half of the condition, and it declines too.
+OBJECTIVE_BESIDE_THE_NON_TEXT_LABEL = "You need to warp to the mission location"
+
+# Categories no rendered label is made of: control, format, surrogate,
+# private-use and unassigned. Deliberately wider than "is it in the PUA" --
+# U+AD1D8 above is unassigned, not private-use, so a PUA test would call it text.
+NON_TEXT_CATEGORIES = frozenset(["Cc", "Cf", "Cs", "Co", "Cn"])
+
+
+def looks_like_text(label):
+    """Whether a label is something the client meant a person to read."""
+    return bool(label) and all(
+        unicodedata.category(character) not in NON_TEXT_CATEGORIES
+        for character in label)
 
 # Objective wording taken verbatim from the same status lines. The first is what
 # a finished mission prints; the rest are trackers still asking for something.
@@ -106,6 +150,16 @@ def elm_string(value):
 def elm_list_of_strings(values):
     return "[ " + ", ".join(elm_string(value) for value in values) + " ]" \
         if values else "[]"
+
+
+def elm_string_from_codepoints(codepoints):
+    """A string literal cannot carry a NUL or a lone unassigned codepoint.
+
+    `Char.fromCode` can, so the label is rebuilt inside Elm from the numbers the
+    log actually holds -- no escaping, and nothing lost in transit.
+    """
+    return "String.fromList (List.map Char.fromCode [ %s ])" % ", ".join(
+        str(codepoint) for codepoint in codepoints)
 
 
 class ElmRepl:
@@ -144,17 +198,33 @@ class ElmRepl:
 
     def evaluate(self, expressions):
         """Answers, one per expression, in order."""
+        answers, plain, stderr = self.ask(expressions)
+        if len(answers) != len(expressions):
+            raise AssertionError(
+                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
+                % (len(answers), len(expressions), plain, stderr))
+        return answers
+
+    def ask(self, expressions):
         script = "import Bot exposing (..)\n" + "".join(
             expression + "\n" for expression in expressions)
         result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
                                 capture_output=True, text=True)
         plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-        answers = re.findall(r"(True|False) : Bool", plain)
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, result.stderr))
-        return [answer == "True" for answer in answers]
+        answers = [answer == "True"
+                   for answer in re.findall(r"(True|False) : Bool", plain)]
+        return answers, plain, result.stderr
+
+    def works(self):
+        """Whether the repl can evaluate anything at all here.
+
+        Distinguishes an environment where `elm repl` cannot run -- no cached
+        dependencies, no writable ELM_HOME -- from the bot answering wrongly.
+        Only the first is a reason to skip: a suite that skipped on any failure
+        would be a check that never fires, which is this repo's own failure mode.
+        """
+        answers, plain, stderr = self.ask(['missionTravelStepIsDock "Dock"'])
+        return answers == [True], plain + "\n" + stderr
 
     def close(self):
         shutil.rmtree(self.scratch, ignore_errors=True)
@@ -171,6 +241,12 @@ class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.repl = ElmRepl()
+        usable, output = cls.repl.works()
+        if not usable:
+            cls.repl.close()
+            raise unittest.SkipTest(
+                "elm repl cannot evaluate here, so the rules are unchecked "
+                "by execution in this environment:\n" + output)
 
     @classmethod
     def tearDownClass(cls):
@@ -215,6 +291,38 @@ class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
         self.assertTrue(answers[0], "an empty objective list is finished")
         self.assertEqual(answers[1:], [False] * len(INSTRUCTIONS_SEEN))
 
+    def test_a_travel_label_that_is_not_text_fails_closed(self):
+        """Run 11's eleventh label: a glyph where a word should be.
+
+        Both halves of the condition are asked, because both have to decline on
+        their own -- the label is not "Dock", and the objective it appeared
+        beside was still asking for something. Neither leans on the other.
+        """
+        label = elm_string_from_codepoints(NON_TEXT_TRAVEL_LABEL_CODEPOINTS)
+        matches_dock, objective_is_finished, control = self.repl.evaluate([
+            "missionTravelStepIsDock (%s)" % label,
+            "missionHasNoOutstandingInstruction "
+            + elm_list_of_strings([OBJECTIVE_BESIDE_THE_NON_TEXT_LABEL]),
+            'missionTravelStepIsDock "Dock"',
+        ])
+        self.assertFalse(matches_dock,
+                         "a label with no text must never end a mission")
+        self.assertFalse(objective_is_finished)
+        self.assertTrue(control, "the control case still matches, so the repl "
+                                 "is answering rather than failing everything")
+
+    def test_control_characters_alone_do_not_match(self):
+        # The recorded label is mostly C0 controls, and `String.trim` removes
+        # some of them -- so a rule that trimmed its way to an empty string and
+        # then compared loosely could still go wrong. It does not.
+        answers = self.repl.evaluate([
+            "missionTravelStepIsDock (%s)" % elm_string_from_codepoints([0x02]),
+            "missionTravelStepIsDock (%s)" % elm_string_from_codepoints([0x00]),
+            "missionTravelStepIsDock (%s)"
+            % elm_string_from_codepoints([0x01, 0x01, 0x00]),
+        ])
+        self.assertEqual(answers, [False, False, False])
+
     def test_a_blank_label_is_not_an_instruction(self):
         # The client renders empty labels; "no instruction" is what the status
         # line prints for them, and treating one as work outstanding would keep
@@ -231,14 +339,29 @@ class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
 class TheRecordedRunsStillSayWhatTheseTestsAssume(unittest.TestCase):
     """The labels above are the client's, not this repo's.
 
-    If the client starts writing a different travel label -- or an eleventh one
-    -- these tests are asserting against a vocabulary that no longer exists, and
-    the failure that would produce (a bot that never disengages, or one that
-    disengages on the wrong step) is silent. So the list is checked against the
-    recordings whenever they are on the machine.
+    If the client starts writing a different travel label these tests are
+    asserting against a vocabulary that no longer exists, and the failure that
+    would produce -- a bot that never disengages, or one that disengages on the
+    wrong step -- is silent. So the list is checked against the recordings
+    whenever they are on the machine.
+
+    **What is asserted is the set of *text* labels.** A label with no text is
+    not drift, it is a case with its own test above, and failing here on one
+    would make this suite depend on which runs happen to be on disk. Run 11
+    produced one and it appeared only in the part of the log written after the
+    change was first measured -- so this failed on someone else's machine, once,
+    for a client behaviour that was real and harmless.
+
+    Reading a log that is still being written is fine: lines are read one at a
+    time and a trailing partial line has no newline, so it is skipped rather
+    than half-matched.
     """
 
-    def status_lines(self):
+    STATUS_LINE = re.compile(
+        r"^# \[\d+\.\d+\] \([\d.]+s\) Mission: (?P<name>.*) -- "
+        r"(?P<instruction>.*) \(next step: (?P<label>[^)]*)\)\n$")
+
+    def recorded_labels(self):
         paths = sorted(glob.glob(os.path.expanduser(
             "~/eve-bot-logs/mission_run*.log")))
         if not paths:
@@ -246,13 +369,13 @@ class TheRecordedRunsStillSayWhatTheseTestsAssume(unittest.TestCase):
         labels = set()
         dock_with_instruction = 0
         dock_without_instruction = 0
-        pattern = re.compile(
-            r"^# \[\d+\.\d+\] \([\d.]+s\) Mission: (?P<name>.*) -- "
-            r"(?P<instruction>.*) \(next step: (?P<label>[^)]*)\)\s*$")
         for path in paths:
             with open(path, encoding="utf-8", errors="replace") as log:
                 for line in log:
-                    match = pattern.match(line)
+                    if not line.endswith("\n"):
+                        # The last line of a run still in progress.
+                        continue
+                    match = self.STATUS_LINE.match(line)
                     if not match:
                         continue
                     labels.add(match.group("label"))
@@ -264,21 +387,36 @@ class TheRecordedRunsStillSayWhatTheseTestsAssume(unittest.TestCase):
                         dock_with_instruction += 1
         return labels, dock_without_instruction, dock_with_instruction
 
-    def test_no_travel_label_has_appeared_that_these_tests_do_not_know(self):
-        labels, _, _ = self.status_lines()
+    def test_no_text_travel_label_has_appeared_that_these_tests_do_not_know(self):
+        labels, _, _ = self.recorded_labels()
         self.assertTrue(labels, "the recordings carry no travel labels at all")
-        self.assertEqual(sorted(labels & set(TRAVEL_LABELS_SEEN)), sorted(labels))
+        text_labels = sorted(label for label in labels if looks_like_text(label))
+        self.assertTrue(text_labels, "the recordings carry no readable labels")
+        self.assertEqual(
+            sorted(set(text_labels) - set(TRAVEL_LABELS_SEEN)), [],
+            "the client is writing a travel label these tests do not know")
+
+    def test_a_label_that_is_not_text_is_a_known_case_and_not_a_failure(self):
+        # Whatever the client renders as a glyph, the rule declines it -- see
+        # the executed test above. All this asserts is that such a label is
+        # classified as non-text, so it never reaches the drift check.
+        labels, _, _ = self.recorded_labels()
+        for label in labels:
+            if looks_like_text(label):
+                continue
+            self.assertNotIn(TRAVEL_LABEL_ENDS_THE_MISSION, label)
+            self.assertNotEqual(label.strip().lower(), "dock")
 
     def test_dock_really_does_appear_with_the_objective_finished(self):
         # The state this change acts on has to be one the bot actually reaches,
         # or the branch is the kind of guard that compiles and never fires.
-        _, without, _ = self.status_lines()
+        _, without, _ = self.recorded_labels()
         self.assertGreater(without, 0)
 
     def test_and_also_appears_with_an_objective_outstanding(self):
         # Which is why the label alone is not the condition: a courier delivery
         # docks too, and its objective is still asking for something.
-        _, _, with_instruction = self.status_lines()
+        _, _, with_instruction = self.recorded_labels()
         self.assertGreater(with_instruction, 0)
 
 
