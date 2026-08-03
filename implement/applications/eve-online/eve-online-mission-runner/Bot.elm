@@ -8257,23 +8257,39 @@ statusTextFromState context =
         -- marker, target-to-unlock icon, loot window) shows up directly
         -- in the per-tick log instead of only being inferable from how
         -- many consecutive ticks repeat the same decision-path text.
+        -- These are settling counters: all zero on a healthy reading, and only
+        -- interesting when one starts climbing. Printing four zeroes every
+        -- reading buried the one that was moving, so each is shown only when
+        -- non-zero and the whole group disappears when nothing is waiting on
+        -- anything. Menus open is kept whenever a menu exists, since a cascade
+        -- in progress is context for whatever decision follows.
         describeMenuAndSettlingCounters =
-            "Context menus open: "
-                ++ (readingFromGameClient.contextMenus |> List.length |> String.fromInt)
-                ++ " (cascade level "
-                ++ (context.contextMenuCascadeLevel |> String.fromInt)
-                ++ ", stuck ticks "
-                ++ (context.memory.contextMenuStuckTicks |> String.fromInt)
-                ++ "). Route marker unchanged ticks: "
-                ++ (context.memory.routeFirstMarkerUnchangedTicks |> String.fromInt)
-                ++ ". Target-to-unlock unchanged ticks: "
-                ++ (context.memory.targetToUnlockUnchangedTicks |> String.fromInt)
-                ++ ". Loot window open ticks: "
-                ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
-                ++ ". "
-                ++ describeModulesToActivateAlways readingFromGameClient
-                ++ " "
-                ++ describeTopRowModuleDictState readingFromGameClient
+            let
+                counter label value =
+                    if value == 0 then
+                        ""
+
+                    else
+                        label ++ " " ++ String.fromInt value
+            in
+            [ if List.isEmpty readingFromGameClient.contextMenus then
+                ""
+
+              else
+                "menus "
+                    ++ (readingFromGameClient.contextMenus |> List.length |> String.fromInt)
+                    ++ " (lvl "
+                    ++ (context.contextMenuCascadeLevel |> String.fromInt)
+                    ++ ")"
+            , counter "menu-stuck" context.memory.contextMenuStuckTicks
+            , counter "route-unchanged" context.memory.routeFirstMarkerUnchangedTicks
+            , counter "unlock-unchanged" context.memory.targetToUnlockUnchangedTicks
+            , counter "loot-open" context.memory.lootWindowOpenTicks
+            , describeModulesToActivateAlways readingFromGameClient
+            , describeTopRowModuleDictState readingFromGameClient
+            ]
+                |> List.filter (String.isEmpty >> not)
+                |> String.join " | "
 
         describeCurrentReading =
             case readingFromGameClient.shipUI of
@@ -8315,23 +8331,32 @@ statusTextFromState context =
                                     "No drones"
 
                                 Just dronesWindow ->
-                                    "I see the drones window: In bay: "
+                                    -- bay+space, then the two counters that
+                                    -- decide whether a recall is landing. The
+                                    -- unanswered count is the one that matters
+                                    -- (see #7) and is dropped when zero, so a
+                                    -- non-zero value stands out.
+                                    "drones "
                                         ++ (dronesWindow.droneGroupInBay
                                                 |> Maybe.andThen (.header >> .quantityFromTitle)
                                                 |> Maybe.map (.current >> String.fromInt)
-                                                |> Maybe.withDefault "Unknown"
+                                                |> Maybe.withDefault "?"
                                            )
-                                        ++ ", in space: "
+                                        ++ "bay/"
                                         ++ (dronesWindow.droneGroupInSpace
                                                 |> Maybe.andThen (.header >> .quantityFromTitle)
                                                 |> Maybe.map (.current >> String.fromInt)
-                                                |> Maybe.withDefault "Unknown"
+                                                |> Maybe.withDefault "?"
                                            )
-                                        ++ ". Out for "
+                                        ++ "sp out "
                                         ++ (context.memory.dronesInSpaceTicks |> String.fromInt)
-                                        ++ " readings, unanswered recall for "
-                                        ++ (context.memory.droneRecallUnansweredTicks |> String.fromInt)
-                                        ++ "."
+                                        ++ (if context.memory.droneRecallUnansweredTicks > 0 then
+                                                " recall-unanswered "
+                                                    ++ (context.memory.droneRecallUnansweredTicks |> String.fromInt)
+
+                                            else
+                                                ""
+                                           )
 
                         namesOfOtherPilotsInOverview =
                             getNamesOfOtherPilotsInOverview readingFromGameClient
@@ -8347,39 +8372,54 @@ statusTextFromState context =
                                 |> Maybe.andThen .objectName
 
                         describeOverview =
-                            ("Seeing "
-                                ++ (namesOfOtherPilotsInOverview |> List.length |> String.fromInt)
-                                ++ " other pilots in the overview"
-                            )
-                                ++ (if namesOfOtherPilotsInOverview == [] then
-                                        ""
+                            -- Only worth a word when someone is actually there:
+                            -- "0 other pilots" was printed on nearly every
+                            -- reading of every run to date and never once
+                            -- changed a decision.
+                            if namesOfOtherPilotsInOverview == [] then
+                                ""
 
-                                    else
-                                        ": " ++ (namesOfOtherPilotsInOverview |> String.join ", ")
-                                   )
-                                ++ "."
+                            else
+                                "pilots "
+                                    ++ (namesOfOtherPilotsInOverview |> List.length |> String.fromInt)
+                                    ++ ": "
+                                    ++ (namesOfOtherPilotsInOverview |> String.join ", ")
 
                         describeRatsInOverview =
-                            "Rats in overview: " ++ (namesOfRatsInOverview |> List.length |> String.fromInt) ++ "."
+                            "rats " ++ (namesOfRatsInOverview |> List.length |> String.fromInt)
 
                         describeCurrentTarget =
-                            "Current target: " ++ (currentTargetName |> Maybe.withDefault "None") ++ "."
+                            case currentTargetName of
+                                Nothing ->
+                                    "no target"
+
+                                Just name ->
+                                    "target " ++ name
                     in
-                    [ [ describeShip ]
-                    , [ describeDrones ]
-                    , [ describeOverview ]
-                    , [ describeRatsInOverview, describeCurrentTarget, describeLockRange context ]
+                    -- Grouped onto two lines rather than five, and joined with
+                    -- " | " so each field is findable by eye in a column of
+                    -- readings. Empty parts are dropped, so a line carries only
+                    -- what is true this reading.
+                    [ [ describeShip, describeDrones ]
+                    , [ describeRatsInOverview, describeCurrentTarget, describeOverview, describeLockRange context ]
                     , [ describeAmmoSwapState context ]
                     ]
-                        |> List.map (String.join " ")
+                        |> List.map (List.filter (String.isEmpty >> not) >> String.join " | ")
+                        |> List.filter (String.isEmpty >> not)
     in
+    -- The mission gets its own line because it is what an operator scanning the
+    -- log is usually looking for. Everything else that is per-reading
+    -- bookkeeping shares one line, and anything empty drops out entirely, so a
+    -- quiet reading is short and a busy one is still complete.
     [ [ describePerformance ]
-    , [ describeMenuAndSettlingCounters ]
-    , [ describeHomeStation context ]
-    , [ describeShipLoss context ]
+    , [ [ describeShipLoss context, describeHomeStation context, describeMenuAndSettlingCounters ]
+            |> List.filter (String.isEmpty >> not)
+            |> String.join " | "
+      ]
     , describeCurrentReading
     ]
         |> List.concat
+        |> List.filter (String.isEmpty >> not)
         |> String.join "\n"
 
 
@@ -8408,17 +8448,22 @@ describeShipLoss context =
                 ++ " readings spent."
 
         Nothing ->
-            "Ship: intact as far as this reading can tell (no-module readings "
+            -- Terse because it prints every reading and says "nothing has
+            -- happened" almost every time. The counter is worth carrying even
+            -- at zero, since it is the only sign the verdict is approaching;
+            -- the game-log caveat is only worth words when the log is missing,
+            -- which is when the module count is the sole remaining signal.
+            "ship ok (no-mod "
                 ++ String.fromInt context.memory.shipUIWithoutModuleButtonsReadings
-                ++ " of "
+                ++ "/"
                 ++ String.fromInt shipLossReadingsWithoutModulesBeforeVerdict
-                ++ "). "
+                ++ ")"
                 ++ (case context.readingFromGameClient.gameLogEntriesSinceLastReading of
                         Nothing ->
-                            "This host is not carrying the client's game log, so the capsule refusal cannot be seen at all and the module count is the only signal left."
+                            " NO GAME LOG -- module count is the only loss signal"
 
                         Just _ ->
-                            "The game log is carried, so the capsule refusal would be seen."
+                            ""
                    )
 
 
@@ -9974,39 +10019,40 @@ describeIncomingDamage context =
             context.eventContext.botSettings.runAwayIncomingDamageThreshold
     in
     if not memory.hostCarriesTheChannel then
-        "Incoming damage: this host is not carrying the client's combat log, so "
-            ++ "the damage-rate retreat and the frozen-reading check are both unarmed."
+        "dmg: NO COMBAT LOG -- damage retreat and frozen-reading check unarmed"
 
     else
-        "Incoming damage: "
+        -- One line per reading, so it is written for scanning a column rather
+        -- than reading a sentence: value against threshold first, then the
+        -- window it was measured over. "hp frozen" is called out only when it
+        -- is true, because that is the condition worth noticing -- a gauge that
+        -- has not moved while damage lands is the run-7 failure.
+        "dmg "
             ++ (incomingDamageInWindow memory |> String.fromInt)
-            ++ " hitpoints over the last "
-            ++ (incomingDamageWindowSeconds |> String.fromInt)
-            ++ " s in "
-            ++ (List.length memory.samples |> String.fromInt)
-            ++ " reading(s), threshold "
+            ++ "/"
             ++ (if threshold < 0 then
-                    "disabled"
+                    "off"
 
                 else
                     String.fromInt threshold
                )
+            ++ " ("
+            ++ (incomingDamageWindowSeconds |> String.fromInt)
+            ++ "s, "
+            ++ (List.length memory.samples |> String.fromInt)
+            ++ "rd)"
             ++ (if memory.retreating then
-                    ", RETREATING"
+                    " RETREATING"
 
                 else
                     ""
                )
-            ++ ". Hitpoints reading moved in the window: "
             ++ (case hitpointsReadingMovedInWindow memory of
-                    Nothing ->
-                        "too few readings to say"
-
-                    Just True ->
-                        "yes"
-
                     Just False ->
-                        "no"
+                        " hp frozen"
+
+                    _ ->
+                        ""
                )
             ++ (case memory.lastAttacker of
                     Nothing ->
