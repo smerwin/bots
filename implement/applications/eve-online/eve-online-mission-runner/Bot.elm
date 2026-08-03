@@ -7743,34 +7743,58 @@ gateKeyWanted context =
         |> Maybe.andThen gateKeyItemNameFromRefusal
 
 
-{-| Whether this weapon is running, and so whether the client will refuse to
+{-| Whether this weapon's toggle is on, and so whether the client will refuse to
 load a charge into it.
 
 EVE does not merely prefer an idle module. Run 5's own game log:
 `You cannot load or unload Focused Modulated Medium Energy Beam I while it is
 active.` -- and that refusal arrives only as a client `(notify)` line, which the
-bot does not read. So a load commanded at a firing gun is discarded in silence,
-and the confirmation that follows finds nothing changed because nothing happened.
+bot does not read. So a load commanded at a switched-on gun is discarded in
+silence, and the confirmation that follows finds nothing changed because nothing
+happened.
 
-`isActive` is `Nothing` when the module has never run, which
-`inactiveModulesToActivateAlways` documents at length; treated as not firing
-here, for the same reason it is treated as off there.
+**It read `ramp_active` until #76, and that is the duty cycle.** #35 measured the
+distinction and #39 wrote it down: on a weapon switched on for a whole 240 s
+sample, `ramp_active` oscillated fourteen times while `isInActiveState` held
+`True` throughout. So a firing gun reads `False` there for a good part of every
+cycle, and this answered "not firing" on most readings of a ship that was
+shooting. Run 21 is the cost, measured on its own module clauses: the first
+weapon read `ramp_active` `True` on 69 of 674 prints and `False` or absent on the
+other 605, so the swap concluded `No weapon reads as firing` on 90 decisions,
+skipped the switch-off entirely, and opened menus on a gun that was switched on.
+`GUNS OFF` appears zero times in that run and no charge was ever loaded. This is
+the field that cost #34, in the last place that still read it.
 
-**Used to choose whether to press the switch-off, and for nothing else.** It was
-also once used to decide whether the gun was _ready_ to be loaded, together with
-`rampRotationMilli`, and that is the pair of readings run 8 hung on: the counter
-in front reset every time this flickered between cycles, and the wait behind it
-never ended because the ramp never went quiet. #35 then measured `ramp_active` --
-which is what this reads -- returning `False` on a module that was switched on.
+**Reading `isInActiveState` positively is a departure from #50's rule and a
+considered one.** That rule -- this entry is used only in the negative -- exists
+because `Just True` is not evidence the gun is _working_: run 11 and run 18 both
+show a weapon firing nothing at all while reading `True`, every outgoing combat
+line in those windows belonging to a drone. Nothing here claims otherwise. The
+question this function asks is not whether the gun is doing its job but whether
+its toggle is on, which is what the entry measurably means and is exactly the
+condition the client's own refusal names: `while it is active`. Treating
+`Just True` as "the guns are working" would be #12 and #34 a third time; treating
+it as "the toggle is on" is what #35 measured it to be.
 
-So nothing here waits on either signal any more. Being wrong about this costs one
-reading: the load is attempted anyway, and the client's own refusal (#31) says if
-the gun was still running.
+**`Nothing` is not `False`.** An entry that did not decode answers `False` here,
+as it did before, so a build that does not carry it behaves exactly as it does
+today: the entry gate below never opens and the swap never starts. The one
+configuration this changes is a build carrying `ramp_active` but not
+`isInActiveState`, where the swap would have run before and now will not -- never
+observed, and the reverse has been (`ramp_active` is absent until a module first
+cycles, `isInActiveState` is there from the start).
+
+**Used to choose whether to press the switch-off, and whether the ship is
+shooting at all.** It was also once used to decide whether the gun was _ready_ to
+be loaded, together with `rampRotationMilli`, and that is the pair of readings
+run 8 hung on. Nothing here waits on either signal any more. Being wrong about
+this costs one reading: the load is attempted anyway, and the client's own
+refusal (#31) says if the gun was still running.
 
 -}
-weaponIsFiring : ShipUIModuleButton -> Bool
-weaponIsFiring moduleButton =
-    moduleButton.isActive == Just True
+weaponIsSwitchedOn : ShipUIModuleButton -> Bool
+weaponIsSwitchedOn moduleButton =
+    moduleReadsSwitchedOn moduleButton.stateFromDictEntries
 
 
 {-| The weapons, left to right.
@@ -8540,13 +8564,21 @@ ensureAmmoSuitsTargetRange context nextStep =
 
                 Nothing ->
                     if
-                        (guns |> List.all weaponIsFiring |> not)
+                        (guns |> List.all weaponIsSwitchedOn |> not)
                             && not (ammoSwapIsActingOnAVerdict ammoSwap)
                     then
                         -- Get the guns going first. Opening a weapon's menu takes
                         -- the mouse and a load takes a gun offline -- both are
                         -- things to do to a ship that is already shooting, not to
                         -- one that has not started.
+                        --
+                        -- #76: this asks whether the guns are switched *on*, and
+                        -- until then it asked `ramp_active`, which goes `False`
+                        -- between cycles on a gun that is firing. So this gate
+                        -- closed on most readings of a ship that was shooting,
+                        -- and the swap could only get past it once
+                        -- `ammoSwapDistanceHoldTicks` had elapsed on the second
+                        -- clause. See `weaponIsSwitchedOn`.
                         --
                         -- The second clause is what stops this becoming a flap.
                         -- Once the swap is under way it switches the guns off on
@@ -8869,7 +8901,7 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
 
                     Nothing ->
                         if ammoSwap.gunsSilencedTicks < 1 then
-                            case fight.guns |> List.filter weaponIsFiring |> List.head of
+                            case fight.guns |> List.filter weaponIsSwitchedOn |> List.head of
                                 Just gunStillFiring ->
                                     -- Switch it off, once. The button is a
                                     -- toggle, so the settling window in
@@ -8890,13 +8922,20 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                                         (clickModuleButtonButWaitIfClickedInPreviousStep context gunStillFiring)
 
                                 Nothing ->
-                                    -- Nothing reads as firing, so there is
+                                    -- No gun says it is switched on, so there is
                                     -- nothing to switch off and the load can be
                                     -- tried directly. If that reading was wrong
-                                    -- -- and #35 gives real reason to think it
-                                    -- can be -- the refusal says so.
+                                    -- -- an entry that did not decode reads this
+                                    -- way -- the refusal says so.
+                                    --
+                                    -- #76: this was run 21's whole failure. It
+                                    -- asked `ramp_active`, so it answered "none"
+                                    -- on 90 decisions of a ship whose guns were
+                                    -- switched on the entire time, and every one
+                                    -- of them opened a menu on a running gun
+                                    -- instead of stopping it first.
                                     describeBranch
-                                        ("No weapon reads as firing, so open one's menu to see whether it already carries '"
+                                        ("No weapon reads as switched on, so open one's menu to see whether it already carries '"
                                             ++ wantedChargeName
                                             ++ "'."
                                         )

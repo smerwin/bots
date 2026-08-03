@@ -238,6 +238,22 @@ class ExposedAndNotActedOnTest(unittest.TestCase):
         sooner, never hold them longer, which is what keeps #34's deadline
         independent of a signal that could stall it.
 
+        **#76 admits a third reader and it is the positive direction**, which
+        the paragraph above deliberately did not allow. `weaponIsSwitchedOn` is
+        what decides whether the swap presses the switch-off at all, and it read
+        `ramp_active` until then -- the duty cycle, `False` for a good part of
+        every cycle on a gun that is firing. Run 21 is what that cost: 90
+        decisions concluding no weapon was firing on a ship whose guns were
+        switched on the whole run, `GUNS OFF` zero times, no charge ever loaded.
+
+        The bound on it is that the *claim* is unchanged. `Just True` still may
+        not mean "this gun is working" -- runs 11 and 18 both show a weapon
+        firing nothing while reading `True` -- and nothing here reads it that
+        way. It means the toggle is on, which is what #35 measured and what the
+        client's own refusal names (`while it is active`). It goes through
+        `moduleReadsSwitchedOn` like every other read, so there is still exactly
+        one place that says what the entry means.
+
         The other eleven entries keep #39's original status exactly: parsed,
         logged, and acted on by nothing.
         """
@@ -253,9 +269,13 @@ class ExposedAndNotActedOnTest(unittest.TestCase):
             describe.count("stateFromDictEntries")
             # The ammo swap maps the accessor over the guns and hands the
             # states to the predicates; it never names a field itself.
-            + self.code.count("guns |> List.map .stateFromDictEntries"),
-            "something outside describeTopRowModuleDictState and the ammo "
-            "swap's one mapping reads the module button's dict entries")
+            + self.code.count("guns |> List.map .stateFromDictEntries")
+            # #76's reader, likewise through a predicate rather than a field.
+            + self.code.count(
+                "moduleReadsSwitchedOn moduleButton.stateFromDictEntries"),
+            "something outside describeTopRowModuleDictState, the ammo swap's "
+            "one mapping and weaponIsSwitchedOn reads the module button's dict "
+            "entries")
         for field in KEYS_IN_THE_STATUS_LINE:
             if field == "isInActiveState":
                 continue
