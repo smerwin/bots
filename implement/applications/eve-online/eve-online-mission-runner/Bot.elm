@@ -519,6 +519,14 @@ abandon the *attempt* and never the feature: the guns go back to firing whatever
 is in them, and the next change of range tries again. Failing to a firing gun
 with the wrong ammo is always better than failing to a silent gun.
 
+`loadRefusedByClient` holds the client's own sentence when it says it discarded
+the load, and it is kept because the entries it came from are not: a reading's
+game log lines are gone by the next reading, so a branch that reads them and
+records nothing sees a refusal once and then behaves exactly as it did before.
+It is a shortcut to the same abandonment those bounds reach, not a new outcome --
+what it changes is that the answer arrives on the reading the client gave it
+rather than twenty-five readings later, and that the log can quote why.
+
 `gunsCommandedThisVerdictAtX` is how the walk across a multi-gun row remembers
 where it got to, keyed on each gun's `x` because the row is not a stable index
 space. A gun goes in the list when its context menu was *opened*, which is the
@@ -543,6 +551,7 @@ type alias AmmoSwapMemory =
     , rangeVerdictTicks : Int
     , verdictSatisfied : Bool
     , verdictAbandoned : Bool
+    , loadRefusedByClient : Maybe String
     , gunsSilencingTicks : Int
     , gunsCommandedThisVerdictAtX : List Int
     , menuOpenOnGunAtX : Maybe Int
@@ -563,6 +572,7 @@ initAmmoSwapMemory =
     , rangeVerdictTicks = 0
     , verdictSatisfied = False
     , verdictAbandoned = False
+    , loadRefusedByClient = Nothing
     , gunsSilencingTicks = 0
     , gunsCommandedThisVerdictAtX = []
     , menuOpenOnGunAtX = Nothing
@@ -5347,6 +5357,49 @@ ammoSwapBootstrapThreshold ammoSwap =
             )
 
 
+{-| The client's own words for having discarded a load, if it said them since
+the last reading.
+
+Matched on the two parts of the sentence that do not vary. The weapon's name sits
+between them -- `You cannot load or unload Focused Modulated Medium Energy Beam I
+while it is active.` -- so a whole-line match would be per-fitting, and matching
+`cannot` alone would catch every other refusal the client makes.
+
+The channel is checked where the host gave one. A `Nothing` channel is a host
+that did not say which, not a line without one, so it is judged on its text alone
+rather than dropped.
+
+Note what this does *not* do. `Nothing` from the game log and `Just []` are
+collapsed here, and that is safe only because of the direction of the inference:
+finding no refusal is never read as the load having been accepted. The menu is
+what says that. Nothing anywhere may conclude "no refusal arrived, so it worked",
+which is the reading of an absent game log that would put this repo's signature
+bug back.
+-}
+loadRefusalFromGameLog : ReadingFromGameClient -> Maybe String
+loadRefusalFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.filter
+            (\entry ->
+                stringContainsIgnoringCase "cannot load or unload" entry.text
+                    && stringContainsIgnoringCase "while it is active" entry.text
+            )
+        |> List.head
+        |> Maybe.map .text
+
+
+gameLogEntryIsFromNotifyChannel : EveOnline.ParseUserInterface.GameLogEntry -> Bool
+gameLogEntryIsFromNotifyChannel entry =
+    case entry.channel of
+        Nothing ->
+            True
+
+        Just channel ->
+            (channel |> String.trim |> String.toLower) == "notify"
+
+
 {-| Whether this weapon is running, and so whether the client will refuse to
 load a charge into it.
 
@@ -5800,6 +5853,29 @@ updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
             else
                 memoryBefore.gunsSilencingTicks + 1
 
+        -- The client's own account of having thrown the load away. Recorded
+        -- rather than acted on where it is read, because the entries carrying it
+        -- are gone by the next reading and this is the only place that can write
+        -- memory.
+        --
+        -- Only while a verdict is live: this wording can only be answering a
+        -- load, and the ammo swap is the only thing here that loads, but a
+        -- refusal with nothing outstanding belongs to whoever provoked it.
+        loadRefusedByClient =
+            if rangeVerdict == Nothing then
+                Nothing
+
+            else if not verdictIsTheSameOneAsBefore then
+                loadRefusalFromGameLog context.readingFromGameClient
+
+            else
+                case loadRefusalFromGameLog context.readingFromGameClient of
+                    Just refusal ->
+                        Just refusal
+
+                    Nothing ->
+                        memoryBefore.loadRefusedByClient
+
         -- Abandoning is per verdict and says nothing about the next one -- see
         -- ammoSwapVerdictGiveUpTicks. The guns go back to firing the moment this
         -- is set, because the branch hands the fight on.
@@ -5809,6 +5885,14 @@ updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
 
             else if verdictSatisfied then
                 False
+
+            else if loadRefusedByClient /= Nothing then
+                -- The client has said the load was discarded, so waiting for the
+                -- menu to confirm it is waiting for something that cannot
+                -- happen. The same outcome the bounds below reach, arrived at on
+                -- the reading the client answered instead of twenty-five
+                -- readings later.
+                True
 
             else if ammoSwapSilenceGunsGiveUpTicks < gunsSilencingTicks then
                 True
@@ -5897,6 +5981,7 @@ updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
     , rangeVerdictTicks = rangeVerdictTicks
     , verdictSatisfied = verdictSatisfied
     , verdictAbandoned = verdictAbandoned
+    , loadRefusedByClient = loadRefusedByClient
     , gunsSilencingTicks = gunsSilencingTicks
     , gunsCommandedThisVerdictAtX = gunsCommandedThisVerdictAtX
     , menuOpenOnGunAtX = menuOpenOnGunAtX
@@ -6111,14 +6196,30 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                 idle
 
             else if ammoSwap.verdictAbandoned then
-                describeBranch
-                    ("Gave up on loading '"
-                        ++ wantedChargeName
-                        ++ "' for this target ("
-                        ++ describeRanges
-                        ++ ") -- back to shooting with what is loaded, rather than standing here with the guns off. The next change of range tries again."
-                    )
-                    nextStep
+                case ammoSwap.loadRefusedByClient of
+                    Just refusal ->
+                        -- The client's own sentence, quoted rather than
+                        -- paraphrased. The whole value of reading its log is
+                        -- that an operator sees what EVE said, not what the bot
+                        -- made of it.
+                        describeBranch
+                            ("The client refused the load. It said: \""
+                                ++ refusal
+                                ++ "\" -- so '"
+                                ++ wantedChargeName
+                                ++ "' is not going in this time. Back to shooting with what is loaded; the next change of range tries again."
+                            )
+                            nextStep
+
+                    Nothing ->
+                        describeBranch
+                            ("Gave up on loading '"
+                                ++ wantedChargeName
+                                ++ "' for this target ("
+                                ++ describeRanges
+                                ++ ") -- back to shooting with what is loaded, rather than standing here with the guns off. The next change of range tries again."
+                            )
+                            nextStep
 
             else if ammoSwap.rangeVerdictTicks < ammoSwapDistanceHoldTicks then
                 describeBranch
@@ -6276,6 +6377,26 @@ hoverWeaponForOptimalRange context referenceGun =
             )
 
 
+{-| Whether this host is carrying the client's game log at all.
+
+Worth a place on the status line because "no refusal was reported" reads exactly
+the same whether the client said nothing or nothing was listening -- and those
+are the two answers `gameLogEntriesSinceLastReading` keeps apart on purpose. An
+operator wondering why a refusal never appeared should not have to guess which
+of the two they are looking at.
+-}
+describeGameLogAvailability : ReadingFromGameClient -> String
+describeGameLogAvailability readingFromGameClient =
+    case readingFromGameClient.gameLogEntriesSinceLastReading of
+        Nothing ->
+            "This host is not carrying the client's game log, so a refusal cannot be seen -- only inferred from the swap not confirming."
+
+        Just entries ->
+            "Game log carried, "
+                ++ String.fromInt (List.length entries)
+                ++ " line(s) this reading."
+
+
 {-| The ammo swap's whole state on one line, so an operator can watch the charge
 the client reports rather than trust the decision log's claim that it swapped.
 -}
@@ -6332,7 +6453,13 @@ describeAmmoSwapState context =
                                 " (satisfied)"
 
                             else if ammoSwap.verdictAbandoned then
-                                " (gave up on this one, will try again on the next change of range)"
+                                (case ammoSwap.loadRefusedByClient of
+                                    Just refusal ->
+                                        " (the client refused it: \"" ++ refusal ++ "\")"
+
+                                    Nothing ->
+                                        " (gave up on this one, will try again on the next change of range)"
+                                )
 
                             else if 0 < ammoSwap.gunsSilencingTicks then
                                 " (waiting "
@@ -6358,7 +6485,8 @@ describeAmmoSwapState context =
                             else
                                 ""
                            )
-                        ++ "."
+                        ++ ". "
+                        ++ describeGameLogAvailability context.readingFromGameClient
 
         _ ->
             "Ammo swap: off (needs both short-range-ammo and long-range-ammo)."

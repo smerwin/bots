@@ -149,6 +149,13 @@ a second source of truth for the same statistic. Everything else is carried,
 including channels never seen here — the list is a deny-list, because a channel
 silently dropped for being unfamiliar is this repo's signature failure.
 
+**A reading's entries are gone by the next reading, and that shapes every
+consumer.** A branch that reads them and writes nothing down sees a refusal once
+and then behaves exactly as it did before — so the verdict has to be recorded in
+`BotMemory`, in `updateMemoryForNewReadingFromGame`, which is the only place that
+can write memory and the one place that never sees the decision. The ammo swap's
+`loadRefusedByClient` is the worked example.
+
 **Scoped to the reading by construction.** `GameLogTail` drains its queue while
 the tree is being built, so the node holds what the client said between the
 previous read and this one, not a growing buffer that would have the bot
@@ -974,6 +981,36 @@ crossover distance at all.
   `ammoSwapMenuEntriesBeforeTrusted` is below any real weapon menu (the five
   commands are always there) and above an empty one.
 
+### The client's refusal, read rather than inferred
+
+Since #28 the bot can read EVE's game log, and the ammo swap is its first
+consumer: a `notify` line matching `cannot load or unload` … `while it is active`
+sets `loadRefusedByClient`, which abandons the attempt on the spot and quotes the
+client's own sentence in the decision log.
+
+**This is not the fix for the refusal — stopping the gun first is, and that
+already landed.** It is two other things. It is a *safety net*, for the case
+where the deactivation does not take: a click swallowed, the toggle pressed
+twice, a module reporting inactive while the client disagrees. And it is
+*legibility* — the difference between "the swap did not confirm" twenty-five
+readings later and "the client refused the load. It said: …" on the reading it
+happened. Only the second is something an operator can act on.
+
+Two things about the matching are deliberate. It tests two substrings rather than
+the whole line, because the weapon's own name sits in the middle of the sentence
+and a whole-line match would be per-fitting; and two rather than one, because
+`cannot` alone catches every other refusal the client makes — across five
+recorded runs those were 17 drone-control refusals, 4 "while warping", 2 "while
+docking" and 1 module-activation, none of which should touch the guns.
+`tools/macos-host/tests/test_ammo_load_refusal.py` reads the substrings out of
+`Bot.elm` and checks them against those real lines, so a matcher that drifts from
+what the client writes fails there rather than in a run.
+
+The one inference never to make from this channel is the reverse one. No refusal
+arriving does **not** mean the load was accepted — that is what the menu says.
+An absent game log and a silent client are different answers, and treating them
+alike is how a bot concludes a command worked because nothing complained.
+
 ### What is verified and what is not
 
 Verified live: the menu's contents and that it omits the loaded charge; the
@@ -1452,10 +1489,15 @@ for why ESI cannot replace it from inside a bot yet.
   system: Unknown" for a name that isn't a plain string in memory.
 - `MouseMoveRelative` and `CharacterDown`/`CharacterUp` (raw Unicode text input)
   aren't implemented in `botlab_host.py`.
-- Nothing reads `gameLogEntriesSinceLastReading` yet, so every guard that infers
-  a refusal indirectly still does — #27's ammo load retries for 50 readings on a
-  swap the client refused outright, and the learned lock range can still only be
-  taught by the first lock of an engagement.
+- The ammo swap is the only consumer of `gameLogEntriesSinceLastReading`, so
+  every other guard that infers a refusal indirectly still does. The candidates
+  the recorded runs actually contain: `You cannot launch Acolyte I because you
+  are already controlling 5 drones` (17 occurrences — the drone launch retries
+  blind), `You cannot do that while warping` and `while docking` (6 between
+  them), and `You cannot activate that module as the target is no longer
+  present`. The learned lock range is a fourth: `You are already managing N
+  targets` would separate "no free slot" from "too far" outright, where today it
+  is inferred from the target bar being empty at both ends of an attempt.
 - No automated Elm-toolchain bootstrap if `elm` isn't on `PATH`.
 - `reload_drones.py` only searches the root Item hangar, no sub-folders. The
   mission runner's port of it inherits that, and also takes the first
