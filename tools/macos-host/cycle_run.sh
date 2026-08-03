@@ -48,6 +48,56 @@ BOT_PATTERNS='run_mission\.sh|run_saxrat\.sh|botlab_host\.py|driver\.js|tree_wal
 
 bot_pids() { pgrep -f "$BOT_PATTERNS" 2>/dev/null | grep -v "^$$\$" || true; }
 
+# Output that means the run is over and no decision is ever coming.
+#
+# `^Traceback` is every way botlab_host.py gives up: an `elm make` type error
+# (the common one -- compile_bot raises RuntimeError("elm make failed") and
+# main() has no handler), a missing Bot.elm, an unsupported host interface.
+# Match the traceback header and not the exception line, because Python colours
+# the exception even when stderr is a pipe -- through `tee` the last line reads
+# `\e[1;35mRuntimeError\e[0m: \e[35melm make failed\e[0m`, so the obvious
+# `grep 'RuntimeError: elm make failed'` finds nothing. The header is plain.
+#
+# `^-- SOMETHING ----` is elm's own error report, printed just above that
+# traceback and unescaped. It is redundant as a trigger but names the culprit
+# where the traceback only names botlab_host.py.
+#
+# `^zsh:` is the launcher never running at all -- a stale absolute path in
+# BOT_LAUNCHER, or python3 missing. Nothing else the run prints starts that way.
+#
+# Checked against a full 4.4 MB log of a healthy run: zero matches. The bot's
+# own status text does wrap onto unprefixed lines, and some of them are rules of
+# dashes, which is why the elm pattern requires a capitalised word after the two.
+FATAL_LOG_PATTERNS='^Traceback \(most recent call last\):|^-- [A-Z][A-Z ]+-+|^zsh:'
+
+# How many consecutive polls of an unchanging log, with nothing matching
+# BOT_PATTERNS alive, it takes to call a run dead. The process check is what
+# carries this -- run_mission.sh is itself in BOT_PATTERNS and lives for the
+# whole session, so a compiling run is never mistaken for a dead one -- and the
+# log check only has to cover the moment between the last process exiting and
+# its final output reaching the file.
+DEAD_STABLE_POLLS=2
+
+# 100 polls of 3s is the five minutes start() will wait. Overridable so the
+# tests can drive the same loop in under a second.
+WAIT_POLL_SECONDS="${BOT_WAIT_POLL_SECONDS:-3}"
+WAIT_POLL_COUNT="${BOT_WAIT_POLL_COUNT:-100}"
+LOG_TAIL_LINES="${BOT_LOG_TAIL_LINES:-15}"
+
+log_size() { [[ -f "$1" ]] && wc -c < "$1" | tr -d ' ' || print 0; }
+
+# Every way of failing to start ends with the operator opening the log, so put
+# its tail in the failure message instead of pointing at it. On stderr with the
+# message it belongs to, so a caller keeping only stdout still sees the whole
+# diagnosis together.
+print_log_tail() {
+    if [[ -s "$1" ]]; then
+        tail -n "$LOG_TAIL_LINES" "$1" | sed 's/^/  | /' >&2
+    else
+        print -u2 "  | ${1:t} is empty or was never created -- nothing the launcher ran wrote a byte"
+    fi
+}
+
 screen_session_pid() {
     screen -ls 2>/dev/null \
         | awk -v name="$SCREEN_SESSION" '$1 ~ "^[0-9]+\\." name "$" { split($1, a, "."); print a[1]; exit }'
@@ -103,8 +153,14 @@ status() {
         print "not running"
     else
         print "running: $pids"
-        local newest; newest="$(ls -t "$LOG_DIR"/${LOG_PREFIX}*.log 2>/dev/null | head -1)"
-        [[ -n "$newest" ]] && print "log: ${newest:t} ($(wc -l < "$newest" | tr -d ' ') lines)"
+        # (Nom) is next_log()'s idiom: empty on no match, newest first. The
+        # `ls -t` this replaces aborted the whole script under `set -e` with
+        # "no matches found" whenever the log directory was still empty, so
+        # --status reported correctly and then exited 1.
+        local newest=( "$LOG_DIR"/${LOG_PREFIX}*.log(Nom) )
+        if (( ${#newest} )); then
+            print "log: ${newest[1]:t} ($(wc -l < "${newest[1]}" | tr -d ' ') lines)"
+        fi
     fi
 }
 
@@ -149,6 +205,57 @@ next_log() {
     print "${LOG_DIR}/${LOG_PREFIX}$(( highest + 1 )).log"
 }
 
+# A run that dies during compilation never writes a decision, so wait on the
+# log rather than on the process, and give up rather than hang forever.
+#
+# That reasoning is right and stays. What it could not do was tell "not yet"
+# from "never": a type error in Bot.elm is diagnosed in seconds by reading the
+# log, and this used to sit on it for the full five minutes before saying only
+# "check the screen session". So each poll now also asks whether the run is
+# provably over, two ways.
+#
+# The second way needs both halves. No process alone is wrong -- `screen -X
+# stuff` returns before the session's shell has even read the line, so there is
+# a window where nothing is running because nothing has started yet. A static
+# log alone is wrong too, since elm can spend a while between lines. Requiring a
+# non-empty log closes the first window from the other side: `tee` creates the
+# file, and the launcher writes to it long before it could plausibly have died.
+#
+# Split out from start() so the tests can drive it against a fake log and a
+# stubbed bot_pids() -- see tests/test_cycle_run.py.
+wait_for_first_decision() {
+    local log="$1"
+    local size last_size=-1 stable=0
+    for _ in {1..$WAIT_POLL_COUNT}; do
+        if [[ -s "$log" ]] && grep -q 'Middle-row modules\|Combat feed\|^+ ' "$log" 2>/dev/null; then
+            print "  live: $(bot_pids | tr '\n' ' ')"
+            grep -E '^\+ ' "$log" | tail -1 | sed 's/^/  /'
+            return 0
+        fi
+        if [[ -s "$log" ]] && grep -qE "$FATAL_LOG_PATTERNS" "$log" 2>/dev/null; then
+            print -u2 "  the run failed before its first decision:"
+            print_log_tail "$log"
+            return 1
+        fi
+        size="$(log_size "$log")"
+        if [[ -s "$log" && "$size" == "$last_size" && -z "$(bot_pids | tr -d ' \n')" ]]; then
+            stable=$(( stable + 1 ))
+            if (( stable >= DEAD_STABLE_POLLS )); then
+                print -u2 "  the run is gone: nothing matching BOT_PATTERNS is alive and the log stopped growing:"
+                print_log_tail "$log"
+                return 1
+            fi
+        else
+            stable=0
+        fi
+        last_size="$size"
+        sleep "$WAIT_POLL_SECONDS"
+    done
+    print -u2 "  no decisions after $(( WAIT_POLL_COUNT * WAIT_POLL_SECONDS ))s -- check the screen session"
+    print_log_tail "$log"
+    return 1
+}
+
 start() {
     if [[ -n "$(bot_pids | tr -d ' \n')" ]]; then
         print -u2 "refusing to start: a bot is still running"
@@ -159,24 +266,17 @@ start() {
     local log; log="$(next_log)"
     print "starting -> ${log:t}"
     screen -S "$SCREEN_SESSION" -X stuff "${LAUNCHER} 2>&1 | tee ${log}$(printf '\r')"
-
-    # A run that dies during compilation never writes a decision, so wait on the
-    # log rather than on the process, and give up rather than hang forever.
-    for _ in {1..100}; do
-        [[ -s "$log" ]] && grep -q 'Middle-row modules\|Combat feed\|^+ ' "$log" 2>/dev/null && {
-            print "  live: $(bot_pids | tr '\n' ' ')"
-            grep -E '^\+ ' "$log" | tail -1 | sed 's/^/  /'
-            return 0
-        }
-        sleep 3
-    done
-    print -u2 "  no decisions after 5 minutes -- check the screen session"
-    return 1
+    wait_for_first_decision "$log"
 }
 
-case "${1:-cycle}" in
-    --status) status ;;
-    --stop)   stop ;;
-    cycle)    stop && start ;;
-    *)        print -u2 "usage: $0 [--stop|--status]"; exit 2 ;;
-esac
+# Sourced (`toplevel:file`) rather than executed (`toplevel`) means a test
+# wants the functions, not a cycle. Without this, sourcing with no arguments
+# defaults to "cycle" and stops the running bot.
+if [[ "$ZSH_EVAL_CONTEXT" == toplevel ]]; then
+    case "${1:-cycle}" in
+        --status) status ;;
+        --stop)   stop ;;
+        cycle)    stop && start ;;
+        *)        print -u2 "usage: $0 [--stop|--status]"; exit 2 ;;
+    esac
+fi
