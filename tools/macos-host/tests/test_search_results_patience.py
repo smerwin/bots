@@ -238,6 +238,67 @@ class TheCounterCanReachItsBound(unittest.TestCase):
         # info window would charge those readings to this budget.
         self.assertNotIn("routeIsSet", self.body)
 
+    def test_the_reset_needs_the_button_the_sequence_exists_to_reach(self):
+        # Any `InfoWindow` would also match a Show Info left open on a ship
+        # beside the results window, which would hold this at zero for as long
+        # as it sat there and disable the bound -- #34's shape, arriving by an
+        # unrelated window rather than by arithmetic.
+        reset = function_body(bot_elm(), "stationInfoWindowIsOpen")
+        self.assertIn('findUiElementWithText "Set Destination"', squeezed(reset))
+
+
+class TheTwoMechanismsAgreeOnWhatStartedMeans(unittest.TestCase):
+    """#73 decides *whether* to use the search bar; this bounds it once used.
+
+    Both read the same two windows, and if they disagreed the bot could hand the
+    episode back and forth between ESI and the search bar. They cannot: the
+    state this counter advances in is a strict *subset* of the state that gives
+    the episode to the search bar.
+
+    | reading | #73 | this counter |
+    |---|---|---|
+    | neither window | ESI preferred | 0 -- nothing in progress |
+    | results window, no info window | search bar owns it | advancing |
+    | results window and info window | search bar owns it | 0 -- it got somewhere |
+    | info window only | search bar owns it | 0 |
+
+    So there is no reading where this counter advances and #73 would still
+    prefer ESI. The judgement of "has the sequence started" stays #73's alone;
+    nothing here re-derives it.
+    """
+
+    def setUp(self):
+        self.source = bot_elm()
+
+    def test_the_esi_gate_still_owns_the_started_judgement(self):
+        preferred = function_body(self.source, "esiRouteIsPreferred")
+        self.assertIn("searchResultsWindow context", preferred)
+        self.assertIn("stationInfoWindowForStation context stationName", preferred)
+
+    def test_this_counter_advances_only_where_the_search_bar_owns_the_episode(self):
+        # The increment is the `else` of a chain whose first branch resets when
+        # no results window is up -- and a results window up is exactly what
+        # `esiRouteIsPreferred` reads as "the sequence has started".
+        counter = record_field_body(self.source,
+                                    "searchResultsWithoutStationInfoTicks")
+        self.assertIn(
+            "if not (searchResultsWindowIsOpen context.readingFromGameClient) then 0",
+            squeezed(counter),
+            "the counter can advance with no results window on screen, which is "
+            "a reading where #73 would still prefer ESI -- the two would then "
+            "disagree about whether the search bar owns the episode")
+
+    def test_nothing_here_re_derives_the_esi_preference(self):
+        # A second copy of "should we be using the search bar at all" is what
+        # would drift. The branch is reached or it is not.
+        body = function_body(self.source, "routeToStationByName")
+        for owned_by_seventy_three in ["routeByEsi", "esiRouteIsPreferred",
+                                       "hostDirectiveSetDestination"]:
+            self.assertNotIn(
+                owned_by_seventy_three, body,
+                "routeToStationByName re-derives " + owned_by_seventy_three +
+                ", which #73 already decided before calling it")
+
 
 class TheThresholdGatesOnlyTheNegative(unittest.TestCase):
     """A half-built window is not believed; a thin one is still acted on."""
