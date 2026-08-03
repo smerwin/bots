@@ -510,6 +510,7 @@ type alias BotMemory =
     , routeFirstMarkerUnchangedTicks : Int
     , routeWasSetInLastReading : Bool
     , routeAppearedWithoutInput : Bool
+    , searchResultsWithoutStationInfoTicks : Int
     , targetToUnlockRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , targetToUnlockUnchangedTicks : Int
     , shipApproachingTicks : Int
@@ -10404,6 +10405,7 @@ initBotMemory =
     , routeFirstMarkerUnchangedTicks = 0
     , routeWasSetInLastReading = False
     , routeAppearedWithoutInput = False
+    , searchResultsWithoutStationInfoTicks = 0
     , targetToUnlockRegion = Nothing
     , targetToUnlockUnchangedTicks = 0
     , shipApproachingTicks = 0
@@ -10697,7 +10699,7 @@ statusTextFromState context =
     -- bookkeeping shares one line, and anything empty drops out entirely, so a
     -- quiet reading is short and a busy one is still complete.
     [ [ describePerformance ]
-    , [ [ describeShipLoss context, describeMissionAbandonment context, describeHomeStation context, describeMenuAndSettlingCounters ]
+    , [ [ describeShipLoss context, describeMissionAbandonment context, describeHomeStation context, describeSearchResults context, describeMenuAndSettlingCounters ]
             |> List.filter (String.isEmpty >> not)
             |> String.join " | "
       ]
@@ -10798,6 +10800,34 @@ be one that cannot occur by accident.
 hostDirectivePrefix : String
 hostDirectivePrefix =
     "@host "
+
+
+{-| What the search-results window is showing, while one is up.
+
+Empty on every reading there is no results window, which is nearly all of them --
+`describeAccelerationGate`'s rule, for `describeAccelerationGate`'s reason. Run
+17 spent 192 readings in front of one and the status line never mentioned it, so
+"the window was open and empty" and "there was no window" read identically.
+
+The two counts differ when the list is virtualised, and the readings counter is
+the branch's own budget, so an operator watching a trip sees the give-up coming
+rather than reconstructing it afterwards.
+
+-}
+describeSearchResults : BotDecisionContext -> String
+describeSearchResults context =
+    case searchResultsWindow context of
+        Nothing ->
+            ""
+
+        Just resultsWindow ->
+            "Search results: "
+                ++ describeSearchResultsContents (searchResultsContents resultsWindow)
+                ++ " ("
+                ++ String.fromInt context.memory.searchResultsWithoutStationInfoTicks
+                ++ " of "
+                ++ String.fromInt searchResultsWithoutStationInfoTicksBeforeGivingUp
+                ++ " readings with no station info window)."
 
 
 {-| What the gate branch can see, and what it has decided about it.
@@ -12318,18 +12348,97 @@ routeToStationByName context stationName =
                                 (doubleClickUiElement row)
 
                         Nothing ->
-                            case withinWindow resultsWindow "Stations (" of
-                                Just stationsGroup ->
-                                    -- The groups come back collapsed, so the rows
-                                    -- are not in the tree at all until this is
-                                    -- clicked -- not merely unrendered.
-                                    describeBranch "Expand the Stations group in the search results."
-                                        (clickUiElement stationsGroup)
+                            let
+                                contents =
+                                    searchResultsContents resultsWindow
 
-                                Nothing ->
-                                    describeBranch
-                                        ("The search results do not offer '" ++ stationName ++ "'.")
-                                        askForHelpToGetUnstuck
+                                stationsGroup =
+                                    withinWindow resultsWindow "Stations ("
+
+                                stationsGroupIsOffered =
+                                    case stationsGroup of
+                                        Just _ ->
+                                            True
+
+                                        Nothing ->
+                                            False
+
+                                readingsSoFar =
+                                    context.memory.searchResultsWithoutStationInfoTicks
+
+                                describeProgress =
+                                    " ("
+                                        ++ String.fromInt readingsSoFar
+                                        ++ " of "
+                                        ++ String.fromInt searchResultsWithoutStationInfoTicksBeforeGivingUp
+                                        ++ " readings, "
+                                        ++ describeSearchResultsContents contents
+                                        ++ ")"
+                            in
+                            if searchResultsWithoutStationInfoTicksBeforeGivingUp <= readingsSoFar then
+                                -- Right once the evidence is in, and only then.
+                                -- The same conclusion on the first reading is
+                                -- what cost run 17 its wind-down.
+                                describeBranch
+                                    ("The search results do not offer '"
+                                        ++ stationName
+                                        ++ "'"
+                                        ++ describeProgress
+                                        ++ ". "
+                                        ++ diagnoseSearchResults
+                                            { stationName = stationName
+                                            , contents = contents
+                                            , stationsGroupIsOffered = stationsGroupIsOffered
+                                            }
+                                    )
+                                    askForHelpToGetUnstuck
+
+                            else
+                                case stationsGroup of
+                                    Just group ->
+                                        -- The groups come back collapsed, so the
+                                        -- rows are not in the tree at all until
+                                        -- this is clicked -- not merely
+                                        -- unrendered.
+                                        --
+                                        -- The settling wait is not decoration:
+                                        -- the header is a toggle, so a second
+                                        -- click before the client has rendered
+                                        -- the expansion closes the group again.
+                                        if previousStepClickedMouse context then
+                                            describeBranch
+                                                ("I just clicked in the search results -- wait for the reading to catch up before deciding again"
+                                                    ++ describeProgress
+                                                    ++ "."
+                                                )
+                                                waitForProgressInGame
+
+                                        else
+                                            describeBranch
+                                                ("Expand the Stations group in the search results"
+                                                    ++ describeProgress
+                                                    ++ "."
+                                                )
+                                                (clickUiElement group)
+
+                                    Nothing ->
+                                        if List.length contents.rendered < searchResultsTextsBeforeTrusted then
+                                            describeBranch
+                                                ("The search results window has too few rows to conclude anything from"
+                                                    ++ describeProgress
+                                                    ++ " -- wait for it to fill in."
+                                                )
+                                                waitForProgressInGame
+
+                                        else
+                                            describeBranch
+                                                ("The search results do not offer '"
+                                                    ++ stationName
+                                                    ++ "' yet"
+                                                    ++ describeProgress
+                                                    ++ " -- wait."
+                                                )
+                                                waitForProgressInGame
 
                 Nothing ->
                     case searchInputField context of
@@ -12414,7 +12523,16 @@ searchInputField context =
 
 searchResultsWindow : BotDecisionContext -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
 searchResultsWindow context =
-    allUiNodesInReading context
+    searchResultsWindowInReading context.readingFromGameClient
+
+
+{-| Split out so `updateMemoryForNewReadingFromGame`, which gets a reading and
+never a decision context, can count the readings this window has been up.
+-}
+searchResultsWindowInReading : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+searchResultsWindowInReading readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
         |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "ListWindow")
         |> List.filter
             (\window ->
@@ -12422,6 +12540,208 @@ searchResultsWindow context =
                     |> List.any (stringContainsIgnoringCase "Search Results")
             )
         |> List.head
+
+
+searchResultsWindowIsOpen : ReadingFromGameClient -> Bool
+searchResultsWindowIsOpen readingFromGameClient =
+    case searchResultsWindowInReading readingFromGameClient of
+        Just _ ->
+            True
+
+        Nothing ->
+            False
+
+
+{-| Whether a `Station: Information` window offering "Set Destination" is up.
+
+`stationInfoWindowForStation` answers the same question for one named station,
+which is what a decision needs. This one is for the memory update, which never
+learns which station anything is looking for -- so it identifies the window by
+the button the whole search-bar sequence exists to reach instead.
+
+**That button is what makes it narrow enough to be a counter's reset.** Any
+`InfoWindow` would do as a description of "the sequence got somewhere", and it
+would also match a Show Info left open on a ship or a module beside the results
+window -- which would hold `searchResultsWithoutStationInfoTicks` at zero for as
+long as it sat there and quietly disable the bound. A counter an unrelated
+window can stall is the shape of #34, and #35 is what measuring one costs.
+
+-}
+stationInfoWindowIsOpen : ReadingFromGameClient -> Bool
+stationInfoWindowIsOpen readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "InfoWindow")
+        |> List.any (\window -> findUiElementWithText "Set Destination" window /= Nothing)
+
+
+{-| How many rendered texts the search-results window has to hold before the bot
+will believe what is _missing_ from it.
+
+Same shape of evidence as `ammoSwapMenuEntriesBeforeTrusted`, and the same trap:
+"the row is not there" is an inference from absence, and a window caught before
+it has finished building says that about every row at once.
+
+Three, from the only live capture of a populated one this repo has -- CLAUDE.md's
+step 2, where the window carried its caption and two collapsed group headers,
+`Corporations (1)` and `Stations (26)`. So three is at the floor of a real window
+and above one that has only just appeared, which carries its caption alone. It is
+a floor rather than a fit: nothing has ever counted the texts of this window in a
+log, because nothing ever printed them. `describeSearchResults` prints the count
+every reading now, so the first run that opens one either confirms this number or
+moves it.
+
+It gates the negative conclusion only. A window offering `Stations (` is acted on
+however few texts it has, so a search matching nothing but stations is not made
+to wait for a threshold it would never reach.
+
+-}
+searchResultsTextsBeforeTrusted : Int
+searchResultsTextsBeforeTrusted =
+    3
+
+
+{-| How many readings a search-results window may be up with no
+`Station: Information` window having come of it.
+
+The bound exists because patience without one is the shape of #34, #41 and #53 --
+a wait nothing ends. What it bounds is every way the results window can fail to
+produce a row to double-click: still filling in, filled in with no `Stations (`
+group, or a group that is expanded and does not render the row. All three spend
+the same budget, because all three are "the results window has not got us to a
+station info window yet" and the bot cannot tell them apart while it is
+happening.
+
+Twenty readings, which run 17 measures at roughly twelve seconds -- its 192
+give-ups spanned the last 119 seconds of the session. That is far longer than any
+window takes to render and small against the 420-second trip allowance, so a
+search that is genuinely dead still leaves the trip most of its budget to fail in
+and be reported.
+
+At the end the branch does what it does today: says so and asks for help. **The
+give-up is right once the evidence is in** -- a results window that has been up
+for twenty readings without offering the station really is not going to. The
+defect was concluding it on the first reading, not concluding it at all.
+
+-}
+searchResultsWithoutStationInfoTicksBeforeGivingUp : Int
+searchResultsWithoutStationInfoTicksBeforeGivingUp =
+    20
+
+
+{-| How many of the results window's rows the decision log spells out.
+
+Enough to recognise a near-miss on the name or a group header in an unexpected
+form, short enough that a window of 26 expanded stations does not push the rest
+of the reading off the screen. The count beside them is the unabridged fact.
+
+-}
+searchResultsTextsToPrint : Int
+searchResultsTextsToPrint =
+    8
+
+
+{-| What a search-results window is showing, in the two senses that differ.
+
+`rendered` is what `findUiElementWithText` can reach and therefore what the bot
+can click -- descendants with a display region. `inTree` is every display text
+under the window, region or none.
+
+They come apart for exactly one reason, and it is the reason #25 listed as
+unverified: a `ListWindow` may virtualise the way the overview does, and
+"Reading the overview" records that only rendered rows are usable. A station name
+in `inTree` and not in `rendered` _is_ that case, decided from a single reading --
+which is why both are carried rather than only the one the click needs.
+
+-}
+type alias SearchResultsContents =
+    { rendered : List String
+    , inTree : List String
+    }
+
+
+searchResultsContents : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> SearchResultsContents
+searchResultsContents window =
+    { rendered =
+        EveOnline.ParseUserInterface.getAllContainedDisplayTextsWithRegion window
+            |> List.map (Tuple.first >> String.trim)
+            |> List.filter (String.isEmpty >> not)
+    , inTree =
+        EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode
+            |> List.map String.trim
+            |> List.filter (String.isEmpty >> not)
+    }
+
+
+{-| The window's contents as a log line: how many rows, and the first few of them
+verbatim.
+
+`The search results do not offer 'X'` said what was not found and never what was,
+so run 17's 192 readings cannot distinguish an unopened window from a collapsed
+group, an unrendered row or a near-miss on the name -- #42's silent `Nothing` and
+#53's unprinted id, a third time, and this one cost a wind-down.
+
+-}
+describeSearchResultsContents : SearchResultsContents -> String
+describeSearchResultsContents contents =
+    String.fromInt (List.length contents.rendered)
+        ++ " rendered of "
+        ++ String.fromInt (List.length contents.inTree)
+        ++ " in the tree"
+        ++ (case contents.rendered |> List.take searchResultsTextsToPrint of
+                [] ->
+                    ""
+
+                shown ->
+                    ": "
+                        ++ (shown |> List.map (\text -> "'" ++ text ++ "'") |> String.join ", ")
+                        ++ (if searchResultsTextsToPrint < List.length contents.rendered then
+                                ", ..."
+
+                            else
+                                ""
+                           )
+           )
+
+
+{-| Which of the four things run 17 could have been, said in the log line rather
+than left for a live client to answer later.
+
+Issue #64 lists them as the questions the recording cannot settle, and each one
+is decidable from the reading in front of the branch:
+
+  - the name is in the tree and not rendered -- the row exists and is scrolled
+    out of the rendered list, so expanding the group was never going to be enough
+    and #25's unverified virtualisation risk is the answer;
+  - the `Stations (` group is offered and the name appears nowhere -- the group
+    is there, the row is not, so the row text does not carry the full name the
+    way the match assumes;
+  - too few rows to believe -- the window never filled in, which is a search that
+    matched nothing or results that never arrived;
+  - rows, but no `Stations (` group -- the search matched other kinds of thing
+    and no station, so the query or the group's label is wrong.
+
+-}
+diagnoseSearchResults :
+    { stationName : String
+    , contents : SearchResultsContents
+    , stationsGroupIsOffered : Bool
+    }
+    -> String
+diagnoseSearchResults { stationName, contents, stationsGroupIsOffered } =
+    if contents.inTree |> List.any (stringContainsIgnoringCase stationName) then
+        "The name is in the window's tree and not among the rendered rows -- the row is there and scrolled out of view, so expanding the group is not enough."
+
+    else if stationsGroupIsOffered then
+        "The Stations group is offered and the name is nowhere in the window -- the rendered row text does not carry the full name."
+
+    else if List.length contents.rendered < searchResultsTextsBeforeTrusted then
+        "The window never filled in -- fewer than "
+            ++ String.fromInt searchResultsTextsBeforeTrusted
+            ++ " rendered rows, so either the search matched nothing or the results never arrived."
+
+    else
+        "There are rows and no 'Stations (' group -- the search matched other things and no station, so either the query or that label is wrong."
 
 
 {-| Once a route exists the search windows have done their job, and a results
@@ -13682,6 +14002,48 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             not botMemoryBefore.routeWasSetInLastReading && previousStepDispatchedNoInput
+    , searchResultsWithoutStationInfoTicks =
+        -- Readings in a row in which a Search Results window was on screen and
+        -- no `Station: Information` window had come of it. That is the whole
+        -- span `routeToStationByName` has to get from a results window to the
+        -- window carrying the "Set Destination" button, and it is the budget
+        -- that stops run 17 repeating: the window there was up for 192
+        -- consecutive readings, offering nothing the branch could act on, and
+        -- nothing counted them.
+        --
+        -- **This counts, it does not choose.** `esiRouteIsPreferred` (#73) owns
+        -- the judgement of whether the search-bar sequence has started, and it
+        -- reads the same two windows -- a results window, or this station's
+        -- info window. Once either exists the search bar owns the episode, and
+        -- this is how long it may hold it. The two can only agree, because the
+        -- state this counts is a strict subset of the state that hands the
+        -- episode to the search bar: a results window is up.
+        --
+        -- It resets on the station info window rather than on the route being
+        -- set, because that window is what the double-click produces and
+        -- therefore the first evidence the results window has done its job. The
+        -- readings after it are spent clicking "Set Destination" and watching
+        -- the route panel, and those must not be charged to this budget -- the
+        -- results window stays open through all of them.
+        --
+        -- The reset is on an info window *offering "Set Destination"*, not on
+        -- any `InfoWindow` at all. The memory update never learns which station
+        -- a decision wants, so it cannot scope the window by name the way
+        -- `esiRouteIsPreferred` does -- but a Show Info window on a ship or a
+        -- module, left open beside the results window, would otherwise hold
+        -- this at zero forever and disable the bound. That is precisely the
+        -- shape #34 shipped and #35 measured: a counter an unrelated reading
+        -- can stall is not a bound. "Set Destination" is the button the
+        -- sequence exists to reach, so a window carrying it is the sequence
+        -- having got somewhere, whichever station it names.
+        if not (searchResultsWindowIsOpen context.readingFromGameClient) then
+            0
+
+        else if stationInfoWindowIsOpen context.readingFromGameClient then
+            0
+
+        else
+            botMemoryBefore.searchResultsWithoutStationInfoTicks + 1
     , lootedWreckIds =
         -- An emptied wreck is supposed to drop off the overview, and the setup
         -- instructions ask for that filter -- but it does not always hold:
