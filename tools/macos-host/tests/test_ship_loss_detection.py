@@ -410,15 +410,26 @@ class AgainstTheRecordedRuns(unittest.TestCase):
         capsule_runs = [run for run, count in empty_rows.items() if count > 0]
         if not capsule_runs:
             self.skipTest("no recorded run flew a capsule")
+        compared = 0
         for run, count in empty_rows.items():
             if run in capsule_runs:
                 continue
             self.assertEqual(
                 count, 0,
                 "a run flying a real ship reported an empty module row: " + run)
-            self.assertGreater(
-                in_space[run], 0,
-                "expected in-space readings to compare against: " + run)
+            if in_space[run] == 0:
+                # A run that never left the station is not evidence either way.
+                # Run 15 is one: started, cycled away seconds later, 256 lines
+                # and never undocked. Failing on it would make this assertion
+                # hostage to how a session happened to be stopped, when what it
+                # is actually about is the discrimination between a capsule and
+                # a real ship *in space*.
+                continue
+            compared += 1
+        self.assertGreater(
+            compared, 0,
+            "no recorded run flying a real ship has in-space readings to "
+            "compare the capsule against")
 
 
 if __name__ == "__main__":

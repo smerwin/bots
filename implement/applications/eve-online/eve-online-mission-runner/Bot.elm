@@ -10268,10 +10268,102 @@ statusTextFromState context =
             |> String.join " | "
       ]
     , describeCurrentReading
+    , -- Last, and on its own line. The host prints the status text inline after
+      -- the tick marker, so the first line is what an operator and
+      -- `stall_watch.py` both read as "what is this reading about" -- and that
+      -- has to stay the mission.
+      [ hostDirectiveExtendSession context ]
     ]
         |> List.concat
         |> List.filter (String.isEmpty >> not)
         |> String.join "\n"
+
+
+{-| How many seconds past the planned session end this bot still needs, asked of
+the state it is actually in.
+
+Every overrun in the wind-down is expressed as "how far past the planned end may
+this run", and until now the bot was the only one who believed those numbers.
+The host stops the run the moment the planned end passes
+(`botlab_host.py`, "the deadline is the host's to enforce, not the bot's"), so
+`homeStationTripSecondsPastSessionEnd` (420 s),
+`homeStationRoutePreparationSecondsPastSessionEnd` (120 s),
+`homeStationRestockGraceSeconds` (60 s) and
+`secondsPastSessionEndBeforeGivingUpOnDocking` (120 s) were all measured in time
+that could not happen. Run 17 died on exactly that: the trip home had 420 s of
+allowance by its own reckoning and was killed at the planned end.
+
+This asks the same two functions the wind-down asks, so the number the host is
+told is the number the bot is using -- not a second constant that can drift from
+it.
+
+-}
+sessionOverrunSecondsNeeded : BotDecisionContext -> Int
+sessionOverrunSecondsNeeded context =
+    case context.readingFromGameClient.shipUI of
+        Nothing ->
+            -- Docked: preparing the trip, or restocking once home.
+            -(dockedWindDownDeadlineSeconds context)
+
+        Just _ ->
+            -- In space: flying it, or getting parked.
+            windDownOverrunAllowanceSeconds context
+
+
+{-| The one thing this bot asks of its host, carried in the status text.
+
+**Why the status text.** `InterfaceToHost.ContinueSession` offers exactly three
+fields -- `statusText`, `startTasks` and `notifyWhenArrivedAtTime` -- and the
+first is the only one that can carry a fact the protocol has no type for. Adding
+a type would mean changing the vendored codecs on both sides, which is the same
+closed-decoder problem that made #30's game log ride the UI tree rather than
+extend `ReadFromWindowResult`. This rides the status text for the same reason,
+in the other direction.
+
+**It is a lease, not a setting.** The line is re-derived every reading from the
+live state, so a bot that stops needing the extension stops asking for it and
+the host stops granting it on the next tick. Nothing latches, and a bot that
+crashes or hangs asks for nothing at all. The host caps whatever is asked, so
+this can lengthen a session but never make one unbounded -- which is the
+property that makes handing a deadline to the thing being bounded safe at all.
+
+**Only while winding down.** Outside the wind-down the answer is the session's
+own length and the question does not arise, so the directive is absent from the
+status text of an ordinary reading rather than present and zero.
+
+-}
+hostDirectiveExtendSession : BotDecisionContext -> String
+hostDirectiveExtendSession context =
+    case secondsToSessionEnd context.eventContext of
+        Nothing ->
+            ""
+
+        Just secondsRemaining ->
+            if secondsBeforeSessionEndToWindDown < secondsRemaining then
+                ""
+
+            else
+                let
+                    needed =
+                        sessionOverrunSecondsNeeded context
+                in
+                if needed <= 0 then
+                    ""
+
+                else
+                    hostDirectivePrefix ++ "extend-session " ++ String.fromInt needed
+
+
+{-| The marker the host scans the status text for.
+
+Deliberately not a word an operator or a mission name could produce: the host
+reads this out of a field that otherwise carries free prose, so the token has to
+be one that cannot occur by accident.
+
+-}
+hostDirectivePrefix : String
+hostDirectivePrefix =
+    "@host "
 
 
 {-| What the gate branch can see, and what it has decided about it.
