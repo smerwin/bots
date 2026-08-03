@@ -12,7 +12,10 @@
 # header): set the UI language to English; open the overview and drones
 # windows; sort the overview by distance (nearest at top); make sure the
 # overview shows acceleration gates, or the bot cannot follow a mission from
-# one pocket to the next; filter empty wrecks out of the overview, so that
+# one pocket to the next; track the mission so it shows in the info panel
+# (Opportunities, Alt-J -> Active -> right-click the card -> Track) -- accepting
+# it is not enough, and untracked there is no travel button and the bot never
+# undocks; filter empty wrecks out of the overview, so that
 # looting cargo out of destroyed ships terminates instead of reopening wrecks
 # it has already emptied; in the ship UI, put combat modules in the top row,
 # the propulsion module first in the middle row, and hide passive modules;
@@ -38,7 +41,7 @@ BOT_SOURCE="${SCRIPT_DIR}/../../implement/applications/eve-online/eve-online-mis
 USAGE='./run_mission.sh                                     # start a run
 ./run_mission.sh --max-ticks 50                      # short run, then stop
 ./run_mission.sh --settings "agent-name=Some Agent"  # replaces the defaults below wholesale
-./run_mission.sh --session-duration-minutes 180      # default is 60
+./run_mission.sh --session-duration-minutes 180      # default is 120
 SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 ./run_mission.sh --help                              # this text'
 
@@ -62,8 +65,9 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # configured value, not a measured one, and it does not follow when you change
 # ships. Set above what the hull can reach, the bot issues locks that simply
 # fail, which reads as it ignoring rats rather than as a misconfiguration.
-# 32000 sits just under this hull's 33 km. Weapon range is a separate limit:
-# locking something does not mean the guns reach it.
+# 66000 is set for the hull currently flown on this account; the previous
+# 32000 was for a Coercer's 33 km and does not carry over. Weapon range is a
+# separate limit: locking something does not mean the guns reach it.
 #
 # The run-away thresholds dock the ship up when it drops below them. Shield
 # is disabled (-1) because shields recharge and dipping into them is normal
@@ -98,18 +102,44 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # inside Kruul's Pleasure Hub" -- but the bot discards it when the conversation
 # window closes, so nothing carries that name into combat.
 #
+# Warehouse is the same case, found the same way: The Hidden Stash asks only for
+# "15 x Small Sealed Cargo Containers in your cargohold", which come from
+# destroying the Warehouse, and names no structure at all. Run 100 sat in the
+# pocket deciding "nothing to fight" 415 times over. Note this is the object the
+# substring warning above is about -- listed here as the exact overview Name
+# ("Warehouse"; its Type is "Starbase Storage Facility"), which is why it no
+# longer also matches stations like "... Expert Distribution Warehouse".
+#
 # Either way the object must be enabled in the overview's type filters
 # (Overview Settings -> Types -> Celestial -> Large Collidable Object), or the
 # bot never sees it in the first place.
 #
-# decline-mission skips a mission by name. The bot uses the agent's "Delay"
-# button rather than "Decline", since declining more than once every four hours
-# costs standing. Matched case-insensitively as a substring, so "Worlds Collide"
-# also covers the higher-level variants of the same mission.
+# decline-mission skips a mission by name, using the agent's "Decline" button.
+# Matched case-insensitively as a substring, so a name here also covers the
+# higher-level variants of the same mission.
 #
-# Worlds Collide: its acceleration gates restrict entry to smaller hulls than
-# the cruiser this is flown in, so the site cannot be completed at all -- not a
-# difficulty judgement, a hard gate restriction.
+# It used to press "Delay" instead, to protect the standing that declining more
+# than once every four hours costs. That is a loop: Delay means "ask me later",
+# so the agent re-offers the same mission on the next request. Run 101 delayed
+# Worlds Collide 87 times and asked for a mission 88 times without ever being
+# offered a different one.
+#
+# Survey Rendezvous is on it because the bot cannot do it at all, and no amount
+# of settings will change that. Its objective item sits inside a *hackable*
+# container -- the "Survey Ship" on the overview -- which needs a Data Analyzer
+# fitted and EVE's hacking minigame played. Run 129 approached it to 0 m, then
+# tried destroying it on a guess of mine: 2,445 gun cycles for "0 to Survey
+# Ship" every time, because a hackable container is not a combat target.
+# Hacking it would also spawn 16-22 drones as reinforcements. It is the first
+# of a three-mission chain (Listening Post, Kicking the Nest), so declining it
+# skips all three.
+#
+# The list is otherwise empty. Worlds Collide was on it because its acceleration gates
+# admit smaller hulls than the cruiser the bot flew at the time; it now flies a
+# Coercer, two classes down, so the premise no longer holds and it is worth
+# letting the bot try. If the gates do refuse the destroyer, the bot finds out
+# at the gate -- gateRefusesThisShipTicks bounds that -- which costs a wasted
+# trip rather than the whole mission type.
 # approach-object covers missions that ask you to get close to something but
 # name the wrong thing: "Athran Exigency" says to approach an Acidic Cloud,
 # which is decoration and is not even on the overview, while the Abandoned
@@ -123,18 +153,50 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # mention. Add that object's name here when a mission strands the bot with
 # "Nothing to fight and no travel step offered".
 #
+# The object is the Amarr-Caldari Mediation Center, confirmed on run 115: 48
+# readings closing on it turned "You need Amarr Diplomat in your cargohold" into
+# "Bring Amarr Diplomat to Uraarala Kigiken", and the mission handed in. It is
+# listed last so it is tried first -- settings prepend, so file order is reverse
+# priority.
+#
+# Survey Ship is the same story on "Survey Rendezvous", which wants Survey Data
+# in the cargohold. The ship carrying it sits on the overview as a plain
+# `Survey Ship` -- not a wreck, not a cargo container, so the looting path does
+# not consider it, and nothing in the objective names it. Run 129 handed in
+# seven missions and then sat next to one at 192 km raising the
+# not-progressing alarm 81 times.
+#
+# The other three are the rest of that pocket, read off the overview in run
+# 114's stall screenshot -- the run that sat on "Nothing to fight" for 14,111
+# decisions, 37% of the session, and never recovered. They are kept as a hedge
+# for the sibling missions in this chain: each candidate is dropped once the
+# ship is inside interactionRangeInMeters, so the bot works down the list rather
+# than stalling on the first wrong guess.
+#
+# Ordering these ahead of Amarr Station is safe. approachConfiguredObjectIfPresent
+# is deliberately last in the decision tree -- it fires only with nothing to
+# shoot, no cargo to fetch, no travel step, no gate and no route -- so a name
+# here cannot pull the ship away from real work, only fill an otherwise idle
+# grid. They also have to be on in Overview Settings -> Types -> Celestial ->
+# Large Collidable Object, which they are: run 114 saw all four.
+#
 # prefer-wreck searches particular hulls first when a mission wants cargo out of
 # destroyed ships. Purely an optimisation -- every other wreck is still opened
 # afterwards, so a wrong guess costs only a wasted trip.
 SETTINGS="orbit-in-combat=no
 keep-at-range=yes
-targeting-range=32000
-attack-object=Kruul's Pleasure Hub, Drone Silo, Repair Station, Habitat, Infested Laboratory, Laboratory, Gallente Broadcast Tower, Athran Ammunitions Depot
-decline-mission=Worlds Collide
+targeting-range=66000
+attack-object=Kruul's Pleasure Hub, Drone Silo, Repair Station, Habitat, Infested Laboratory, Laboratory, Gallente Broadcast Tower, Athran Ammunitions Depot, Warehouse
 prefer-wreck=Personnel Transport
 prefer-wreck=Cargo Container
 approach-object=Abandoned Mining Station
 approach-object=Amarr Station
+approach-object=Circular Construction
+approach-object=Caldari Deadspace Tactical Outpost
+approach-object=Amarr Chapel
+approach-object=Amarr-Caldari Mediation Center
+approach-object=Survey Ship
+decline-mission=Survey Rendezvous
 run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=70"
 
@@ -142,7 +204,7 @@ run-away-armor-hitpoints-threshold-percent=70"
 # once ~200 seconds remain, so it finishes parked in a station rather than
 # being cut off mid-warp with drones out. Override by passing the flag again
 # on the command line.
-SESSION_DURATION_MINUTES="${SESSION_DURATION_MINUTES:-180}"
+SESSION_DURATION_MINUTES="${SESSION_DURATION_MINUTES:-120}"
 
 # Answered before the guard below: asking what the flags are must not kill a
 # session that is already running.

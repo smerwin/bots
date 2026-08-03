@@ -67,6 +67,14 @@ BENIGN_IDLE = re.compile(
 # the universal leaf of the decision tree -- it terminates a healthy branch and a
 # stuck one alike. Treating it as benign reset the counter on every fourth line
 # of the very cycle this exists to catch, and detection dropped to nothing.
+#
+# It cannot simply be counted against a window either. Every benign state reaches
+# the tree's leaf, so "I am in warp" is always followed by this line and a window
+# holding both can never be all-benign -- which is how run 114 raised an alarm,
+# and a 9.7 MB screenshot, for a bot correctly sitting out a warp. So the leaf is
+# passed over when judging a window, and a window of nothing but leaves is not
+# benign, since that carries no evidence of *why* the bot is waiting.
+BENIGN_LEAF = re.compile(r'^Wait for progress in game$')
 
 
 class StallCheck:
@@ -108,8 +116,17 @@ class StallCheck:
     def observe(self, decision):
         """Returns a reason string when stuck, else None."""
         if BENIGN_IDLE.search(decision):
-            self.stuck_for = 0
             self.recent.append(decision)
+            # Reset only while the bot is doing nothing *but* idling. A benign
+            # line interleaved with a recurring action is a loop wearing an idle
+            # line as camouflage, and zeroing on it hides exactly that: run 101
+            # alternated "assume we are docked" with "I see a message box to
+            # close" for 415 decisions, and because every other line was benign
+            # the counter never climbed past one. The watcher sat there, alive
+            # and silent, through the whole thing.
+            judged = [d for d in self.recent if not BENIGN_LEAF.match(d)]
+            if judged and all(BENIGN_IDLE.search(d) for d in judged):
+                self.stuck_for = 0
             return None
         if self.shooting_only and not SHOOTING.search(decision):
             return None
@@ -158,6 +175,47 @@ def capture(window_id, out_dir, label):
     return path if os.path.exists(path) and os.path.getsize(path) > 0 else None
 
 
+class Reporter:
+    """Prints stalls, and screenshots each distinct one exactly once.
+
+    Every shot is a full-resolution Retina grab of the game window -- 7.5 MB on
+    average here, 9.7 MB for the last one. With `--keep-going` and no dedupe, a
+    genuinely wedged run reports on a metronome: the worst pathology on record
+    repeated one decision 8,983 times, which at one shot per 40 is ~225 shots and
+    ~1.7 GB of near-identical pictures of the same frozen screen. The alarm is
+    worth having; the 225th photograph of it is not.
+
+    Distinctness is judged on the reason with its numbers masked, because the
+    same stall reports slightly different text each time -- distances and tick
+    counts appear in the loop it quotes. A repeat still prints, so the log shows
+    the stall persisting; it just does not photograph it again.
+    """
+
+    def __init__(self, window_id, out_dir, max_shots):
+        self.window_id = window_id
+        self.out_dir = out_dir
+        self.max_shots = max_shots
+        self.shots = 0
+        self.counts = {}
+
+    def report(self, label, reason):
+        key = label + "|" + re.sub(r"\d+", "#", reason)
+        self.counts[key] = self.counts.get(key, 0) + 1
+        seen = self.counts[key]
+
+        if seen > 1:
+            print(f"STALL (repeat {seen}, no new screenshot): {reason}", flush=True)
+            return
+        if self.shots >= self.max_shots:
+            print(f"STALL: {reason}\nSCREENSHOT: skipped, already at the "
+                  f"{self.max_shots}-screenshot cap for this run", flush=True)
+            return
+
+        shot = capture(self.window_id, self.out_dir, label)
+        self.shots += 1
+        print(f"STALL: {reason}\nSCREENSHOT: {shot}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("log")
@@ -167,6 +225,14 @@ def main():
                     help="decisions without progress before a stall is called")
     ap.add_argument("--gamelogs", default=os.path.expanduser("~/Documents/EVE/logs/Gamelogs"),
                     help="EVE's own game-log directory, for the silent-guns check")
+    ap.add_argument("--keep-going", action="store_true",
+                    help="report every stall and keep watching, instead of exiting on the first. "
+                         "Without it one invocation gives one alarm and then stops, which looks "
+                         "identical to having crashed.")
+    ap.add_argument("--max-shots", type=int, default=20,
+                    help="hard ceiling on screenshots per invocation (default 20). Distinct "
+                         "stalls are already screenshotted only once each; this bounds the "
+                         "disk cost even when a run finds many genuinely different ones.")
     args = ap.parse_args()
 
     win = game_window_id(args.pid)
@@ -175,6 +241,7 @@ def main():
         return 1
     # Two views of the same evidence. The shooting-only one is narrower and so
     # fires sooner, and names the problem precisely when it does.
+    reporter = Reporter(win, args.out, args.max_shots)
     circling = StallCheck(args.gamelogs, threshold=args.threshold)
     silent_guns = StallCheck(args.gamelogs, threshold=args.threshold, shooting_only=True)
     print(f"watching {os.path.basename(args.log)}; game window {win}; "
@@ -194,9 +261,9 @@ def main():
                 continue
 
             if STUCK_TEXT in line:
-                shot = capture(win, args.out, "askedforhelp")
-                print(f"STALL: bot asked for help\nSCREENSHOT: {shot}", flush=True)
-                return 0
+                reporter.report("askedforhelp", "bot asked for help")
+                if not args.keep_going:
+                    return 0
 
             m = DECISION.match(line.rstrip())
             if not m:
@@ -206,9 +273,9 @@ def main():
             for label, reason in (("circling", circling.observe(text)),
                                   ("silentguns", silent_guns.observe(text))):
                 if reason:
-                    shot = capture(win, args.out, label)
-                    print(f"STALL: {reason}\nSCREENSHOT: {shot}", flush=True)
-                    return 0
+                    reporter.report(label, reason)
+                    if not args.keep_going:
+                        return 0
 
 
 if __name__ == "__main__":

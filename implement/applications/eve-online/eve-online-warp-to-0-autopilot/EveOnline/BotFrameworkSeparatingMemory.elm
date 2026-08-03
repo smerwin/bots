@@ -252,15 +252,37 @@ processEventInBaseFramework config eventContext event stateBefore =
 
                 lastStepsEffects : List (List Common.EffectOnWindow.EffectOnWindowStruct)
                 lastStepsEffects =
-                    List.take 2
-                        (effectsOnGameClientWindow :: stateBefore.lastStepsEffects)
+                    -- Same trap the reading history below fell into: this was
+                    -- capped at 2, so no consumer could look back further than
+                    -- two steps no matter what it asked for. That is not enough
+                    -- to cover a click whose result the client has not shown yet
+                    -- -- see `moduleButtonClickSettlingSteps`, where a too-short
+                    -- window made the bot click a module a second time and
+                    -- toggle it back off.
+                    effectsOnGameClientWindow
+                        :: stateBefore.lastStepsEffects
+                        |> List.take 10
             in
             ( { botMemory = botMemory
               , lastStepsEffects = lastStepsEffects
               , lastReadingsFromGameClient =
+                    -- The "no progress" discard check in
+                    -- useContextMenuCascadeWithCustomConfig looks back up to
+                    -- 8 readings (widened from 4 there, on the strength of
+                    -- live findings about slow-to-render flyouts) -- but
+                    -- this storage cap was never widened to match, so that
+                    -- widening was a no-op the entire time: with at most 4
+                    -- readings ever retained here, `List.take 8` on the
+                    -- consuming side had nothing beyond 4 to find regardless
+                    -- of what its own comment claimed. Caught live: a
+                    -- 3-level-deep flyout (surroundings button -> Stations
+                    -- -> a specific station list) kept discarding and
+                    -- reopening from scratch after only 4 real ticks,
+                    -- visually already rendered on screen (confirmed via
+                    -- screenshot) but not yet visible to our own reads.
                     readingFromGameClientMemory
                         :: stateBefore.lastReadingsFromGameClient
-                        |> List.take 3
+                        |> List.take 8
               }
             , case decisionLeaf of
                 ContinueSession continueSession ->
@@ -331,8 +353,11 @@ filterToDiscardContextMenuOnListSurroundingsButton : FilterToDiscardContextMenu 
 filterToDiscardContextMenuOnListSurroundingsButton =
     \target context cascadeFirstElement ->
         case
+            -- See filterToDiscardContextMenuDefault for why 70, not 40:
+            -- same real per-cycle latency on this host, same on-screen
+            -- drift risk for the target element between read and click.
             discardContextMenuIfTooDistantFromTargetElement
-                { toleratedDistance = 40 }
+                { toleratedDistance = 70 }
                 target
                 context
                 cascadeFirstElement
@@ -360,7 +385,23 @@ filterToDiscardContextMenuOnListSurroundingsButton =
 
 filterToDiscardContextMenuDefault : FilterToDiscardContextMenu a b
 filterToDiscardContextMenuDefault =
-    discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 40 }
+    {-
+       This host's own per-cycle latency (RequestToVolatileProcess dispatch
+       measured at 1.8-2.0s in real runs) is higher than a native
+       Windows/BotLab.exe host's, and the target elements this filter
+       protects (overview rows, target-bar icons) track a moving 3D
+       object's on-screen projection, not a fixed UI panel -- their
+       position can genuinely drift by more than a few pixels in that
+       window. Observed live: a locked-target icon's own previous click
+       fell outside its ~30-40px bounding box entirely (the discard
+       reason's first coordinate showed "none"), forcing the fallback
+       "assume it was the exact center" comparison and discarding a menu
+       that had, in fact, opened correctly. Widened from 40 to reduce
+       these false discards; still tight enough that two distinct UI
+       elements' menus won't plausibly land within tolerance of each
+       other.
+    -}
+    discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 70 }
 
 
 useContextMenuCascade :
@@ -386,6 +427,13 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
         readingFromGameClient =
             context.readingFromGameClient
 
+        describeDisplayRegion : EveOnline.ParseUserInterface.DisplayRegion -> String
+        describeDisplayRegion region =
+            "x=" ++ String.fromInt region.x
+                ++ " y=" ++ String.fromInt region.y
+                ++ " w=" ++ String.fromInt region.width
+                ++ " h=" ++ String.fromInt region.height
+
         beginCascade : Common.DecisionPath.DecisionPathNode EndDecisionPathStructure
         beginCascade =
             let
@@ -408,40 +456,53 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                     |> List.head
             of
                 Nothing ->
-                    let
-                        clickLocationDefault : EveOnline.BotFramework.Location2d
-                        clickLocationDefault =
-                            { x = 4, y = context.readingFromGameClient.uiTree.totalDisplayRegion.height - 30 }
-
-                        clickLocation : EveOnline.BotFramework.Location2d
-                        clickLocation =
-                            case context.readingFromGameClient.neocom of
-                                Nothing ->
-                                    clickLocationDefault
-
-                                Just neocom ->
-                                    case neocom.clock of
-                                        Nothing ->
-                                            clickLocationDefault
-
-                                        Just clock ->
-                                            { x = clock.uiNode.totalDisplayRegion.x + clock.uiNode.totalDisplayRegion.width // 2
-                                            , y = clock.uiNode.totalDisplayRegion.y - 10
-                                            }
-                    in
+                    {-
+                       This used to right-click a computed "somewhere else"
+                       location to dismiss the occluding menu(s) -- either
+                       just above the neocom clock, or a bottom-left
+                       fallback (x=4, y=height-30) when no clock was found.
+                       Feedback from a live run: that location isn't
+                       reliably empty space -- it can land on a real
+                       Neocom icon or another clickable element near the
+                       clock, opening a *different* menu (or acting on
+                       whatever's there) instead of dismissing anything.
+                       When the next step then moves to click its real
+                       target (e.g. an overview entry), it can hit a
+                       button from that stray menu sitting in the way
+                       instead -- observed live wiping the autopilot
+                       route via an accidentally-triggered "Clear All
+                       Waypoints". Escape closes an open context menu
+                       reliably without clicking anywhere at all, so
+                       nothing can be in the way to hit by accident --
+                       same fix already proven for stray menus elsewhere
+                       (see clearStrayContextMenu in Bot.elm).
+                    -}
                     Common.DecisionPath.describeBranch
-                        ("All of " ++ target.targetUIElementName ++ " is occluded by context menus.")
+                        ("All of " ++ target.targetUIElementName
+                            ++ " ("
+                            ++ describeDisplayRegion target.targetUIElement.totalDisplayRegion
+                            ++ ") is occluded by "
+                            ++ String.fromInt (List.length occludingRegionsWithSafetyMargin)
+                            ++ " context menu region(s)."
+                        )
                         (Common.DecisionPath.describeBranch
-                            "Click somewhere else to get rid of the occluding elements."
-                            (clickLocation
-                                |> Common.EffectOnWindow.effectsMouseClickAtLocation Common.EffectOnWindow.MouseButtonRight
-                                |> decideActionForCurrentStep
+                            "Press Escape to get rid of the occluding elements."
+                            (decideActionForCurrentStep
+                                [ Common.EffectOnWindow.KeyDown Common.EffectOnWindow.vkey_ESCAPE
+                                , Common.EffectOnWindow.KeyUp Common.EffectOnWindow.vkey_ESCAPE
+                                ]
                             )
                         )
 
                 Just preferredRegion ->
                     Common.DecisionPath.describeBranch
-                        ("Open context menu on " ++ target.targetUIElementName)
+                        ("Open context menu on " ++ target.targetUIElementName
+                            ++ " (cascade level "
+                            ++ String.fromInt context.contextMenuCascadeLevel
+                            ++ ", "
+                            ++ String.fromInt (List.length readingFromGameClient.contextMenus)
+                            ++ " menu(s) currently open)"
+                        )
                         (preferredRegion
                             |> centerFromDisplayRegion
                             |> Common.EffectOnWindow.effectsMouseClickAtLocation Common.EffectOnWindow.MouseButtonRight
@@ -455,8 +516,22 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                 beginCascade
     in
     case
+        -- "no progress" below compares the current reading against the
+        -- oldest of the last N readings: feedback from a real run was
+        -- that this discard-and-reopen was firing on jumpToNextSystem's
+        -- cascade (the route icon, which sits in a strip that can shift
+        -- slightly between reads) before the menu had genuinely finished
+        -- settling -- widened from 3 to 4 for that. Feedback from a later
+        -- run: still firing too eagerly on two more cascades that expand
+        -- a hover-triggered Photon-UI flyout submenu (enterAnomaly's
+        -- "Warp to Within..." distance list, and the wreck loot menu's
+        -- "Loot All"/"Open Cargo" cascade) -- both got dismissed before
+        -- the flyout had a chance to open, and both "eventually
+        -- succeeded" only after several wasted discard-and-reopen
+        -- cycles. Widened further, from 4 to 8, to give a slow-to-render
+        -- flyout enough real ticks to appear before giving up on it.
         context.previousReadingsFromGameClient
-            |> List.take 3
+            |> List.take 8
             |> List.reverse
             |> List.head
     of
@@ -466,7 +541,50 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
         Just previousReadingFromGameClient ->
             case List.reverse context.readingFromGameClient.contextMenus of
                 [] ->
-                    beginCascade
+                    -- Root-caused live (2026-07-28, via a memory dump
+                    -- correlated with the parsing code): a freshly opened
+                    -- context menu's own widget object can exist in the
+                    -- game -- and be visibly rendered on screen -- before
+                    -- its display-region dict entries are populated.
+                    -- EveOnline.ParseUserInterface.asUITreeNodeWithInheritedOffset
+                    -- drops any node without a parseable display region
+                    -- (ChildWithoutRegion), and parseContextMenusFromUITreeRoot
+                    -- depends on exactly that filtered traversal to find
+                    -- the 'l_menu' layer's children -- so a real, open
+                    -- menu can read back as zero context menus for however
+                    -- many ticks that gap lasts. Immediately right-clicking
+                    -- again in that state (the previous unconditional
+                    -- fallback here) doesn't just fail to help -- a second
+                    -- right-click on an already-open menu commonly
+                    -- dismisses it, turning a few ticks of real rendering
+                    -- lag into a self-inflicted endless open/close loop
+                    -- (confirmed live: repeated identical "click"/"open"
+                    -- decisions with the menu never showing as open, for
+                    -- as long as 10+ real ticks in one observed case).
+                    -- If our own last step or two already fired a
+                    -- right-click, give the game one more reading to
+                    -- finish populating the new menu's layout before
+                    -- concluding it isn't there and clicking again.
+                    --
+                    -- The `List.take` is what makes "a step or two" literal.
+                    -- It used to be implicit in the effects history only ever
+                    -- holding two steps; now that the history is longer (see
+                    -- `lastStepsEffects`), an unbounded search here would keep
+                    -- waiting for ten steps instead of one.
+                    if
+                        context.previousStepsEffects
+                            |> List.take 2
+                            |> List.any
+                                (List.member
+                                    (Common.EffectOnWindow.ButtonDown Common.EffectOnWindow.MouseButtonRight)
+                                )
+                    then
+                        Common.DecisionPath.describeBranch
+                            "No context menu in this reading yet, but we right-clicked within the last couple of steps -- give the game one more reading before assuming it isn't there."
+                            waitForProgressInGame
+
+                    else
+                        beginCascade
 
                 cascadeFirstElement :: cascadeFollowingElements ->
                     case
@@ -479,39 +597,81 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                             discardExistingContextMenu reasonToDiscard
 
                         Nothing ->
-                            if
-                                (context.readingFromGameClient.contextMenus |> List.map identifyingInfoFromContextMenu)
-                                    == (previousReadingFromGameClient.contextMenus |> List.map identifyingInfoFromContextMenu)
-                            then
-                                discardExistingContextMenu "no progress in previous step"
+                            -- Root-caused live (2026-07-28, via `screen -X
+                            -- hardcopy` on a real stuck session plus a
+                            -- memory dump of the actual rendered menu):
+                            -- this used to check "did the open menu(s)'
+                            -- own on-screen region change since N readings
+                            -- ago" *before* ever trying
+                            -- getNextContextMenu (the thing that actually
+                            -- reads the entries and decides what to click)
+                            -- -- so a menu that finished rendering and then
+                            -- sat perfectly stable (the *good*, normal end
+                            -- state once a flyout is done animating) read
+                            -- as "no progress" and got discarded and
+                            -- reopened forever, without getNextContextMenu
+                            -- ever running even once. Confirmed live: for
+                            -- the surroundings-button cascade specifically,
+                            -- whose own 2023-01-12 comment already
+                            -- documents that opening it can auto-expand a
+                            -- second level (here, "Stations") immediately
+                            -- -- exactly the stable-after-one-tick shape
+                            -- this bug silently ate every time.
+                            --
+                            -- Now tries getNextContextMenu unconditionally
+                            -- first, and only consults region-stability
+                            -- to decide *how to react to a failure*: a
+                            -- fresh Err (the menu hasn't rendered deep
+                            -- enough yet, still changing) waits for another
+                            -- reading rather than reopening -- reopening on
+                            -- an incompletely-rendered menu is what risks
+                            -- toggling a real, working menu closed, the
+                            -- same class of self-inflicted loop as the
+                            -- empty-reading case above. Only once the SAME
+                            -- Err persists with the menu(s) themselves
+                            -- unchanged across the lookback does it give up
+                            -- and discard-and-reopen -- preserving the
+                            -- original patience for slow renders while no
+                            -- longer skipping the actual attempt.
+                            case
+                                EveOnline.BotFramework.getNextContextMenu
+                                    useContextMenu
+                                    readingFromGameClient
+                                    (min
+                                        (List.length cascadeFollowingElements)
+                                        (context.contextMenuCascadeLevel - 1)
+                                    )
+                            of
+                                Err err ->
+                                    if
+                                        (context.readingFromGameClient.contextMenus |> List.map identifyingInfoFromContextMenu)
+                                            == (previousReadingFromGameClient.contextMenus |> List.map identifyingInfoFromContextMenu)
+                                    then
+                                        discardExistingContextMenu
+                                            ("failed to continue (" ++ err ++ "), no progress across the last "
+                                                ++ String.fromInt (min 8 (List.length context.previousReadingsFromGameClient))
+                                                ++ " reading(s) -- still "
+                                                ++ String.fromInt (List.length context.readingFromGameClient.contextMenus)
+                                                ++ " menu(s) open at cascade level "
+                                                ++ String.fromInt context.contextMenuCascadeLevel
+                                                ++ ", first menu region ("
+                                                ++ describeDisplayRegion cascadeFirstElement.uiNode.totalDisplayRegion
+                                                ++ ")"
+                                            )
 
-                            else
-                                case
-                                    EveOnline.BotFramework.getNextContextMenu
-                                        useContextMenu
-                                        readingFromGameClient
-                                        {-
-                                           2023-01-12 Adapt to behavior of menu from surroundings button:
-                                           When opening that menu, the game client opens not only the first level but sometimes also expands the 'stations' entry so that we immediately also have the second level on screen.
-                                        -}
-                                        (min
-                                            (List.length cascadeFollowingElements)
-                                            (context.contextMenuCascadeLevel - 1)
-                                        )
-                                of
-                                    Err err ->
+                                    else
                                         Common.DecisionPath.describeBranch
-                                            ("Failed to continue context menu: " ++ err)
-                                            beginCascade
+                                            ("Failed to continue context menu for now (" ++ err ++ ") -- still changing, give it another reading before giving up.")
+                                            waitForProgressInGame
 
-                                    Ok EveOnline.BotFramework.CompletedMenuCascade ->
-                                        Common.DecisionPath.describeBranch
-                                            ("Completed cascade on " ++ target.targetUIElementName)
-                                            beginCascade
+                                Ok EveOnline.BotFramework.CompletedMenuCascade ->
+                                    Common.DecisionPath.describeBranch
+                                        ("Completed cascade on " ++ target.targetUIElementName)
+                                        beginCascade
 
-                                    Ok (EveOnline.BotFramework.ContinueMenuCascade ( stepDescription, effectsToGameClient )) ->
-                                        Common.DecisionPath.describeBranch stepDescription
-                                            (decideActionForCurrentStep effectsToGameClient)
+                                Ok (EveOnline.BotFramework.ContinueMenuCascade ( stepDescription, effectsToGameClient )) ->
+                                    Common.DecisionPath.describeBranch stepDescription
+                                        (decideActionForCurrentStep effectsToGameClient)
 
 
 discardContextMenuIfTooDistantFromTargetElement :
@@ -542,12 +702,24 @@ discardContextMenuIfTooDistantFromTargetElement { toleratedDistance } =
                 projectedTargetClickLocation
                     |> closestPointOnRectangleEdge cascadeFirstElement.uiNode.totalDisplayRegion
 
-            cascadeFirstElementIsCloseToInitialUIElement : Bool
-            cascadeFirstElementIsCloseToInitialUIElement =
+            distanceSquared : Int
+            distanceSquared =
                 EveOnline.BotFramework.distanceSquaredBetweenLocations
                     projectedTargetClickLocation
                     cascadeFirstElementEdgesClosestPointToTargetUIElement
-                    < (toleratedDistance * toleratedDistance)
+
+            -- Rounded pixel distance, purely for the diagnostic message
+            -- below -- the actual pass/fail comparison stays in the
+            -- squared domain (cascadeFirstElementIsCloseToInitialUIElement)
+            -- to avoid a Float round-trip on the value that decides
+            -- behavior.
+            distance : Int
+            distance =
+                distanceSquared |> toFloat |> sqrt |> round
+
+            cascadeFirstElementIsCloseToInitialUIElement : Bool
+            cascadeFirstElementIsCloseToInitialUIElement =
+                distanceSquared < (toleratedDistance * toleratedDistance)
 
             cascadeFirstElementIsInExpectedRegion : Bool
             cascadeFirstElementIsInExpectedRegion =
@@ -558,10 +730,21 @@ discardContextMenuIfTooDistantFromTargetElement { toleratedDistance } =
         in
         if not cascadeFirstElementIsInExpectedRegion then
             Just
-                ("not in expected region ("
+                (String.fromInt distance
+                    ++ "px from target, tolerance "
+                    ++ String.fromInt toleratedDistance
+                    ++ "px (previous click "
                     ++ Maybe.withDefault "none" (Maybe.map describeLocation previousStepClickOnTargetLocation)
-                    ++ ", "
+                    ++ ", projected target "
                     ++ describeLocation projectedTargetClickLocation
+                    ++ ", cascade element x="
+                    ++ String.fromInt cascadeFirstElement.uiNode.totalDisplayRegion.x
+                    ++ " y="
+                    ++ String.fromInt cascadeFirstElement.uiNode.totalDisplayRegion.y
+                    ++ " w="
+                    ++ String.fromInt cascadeFirstElement.uiNode.totalDisplayRegion.width
+                    ++ " h="
+                    ++ String.fromInt cascadeFirstElement.uiNode.totalDisplayRegion.height
                     ++ ")"
                 )
 
@@ -765,27 +948,55 @@ readShipUIModuleButtonTooltipWhereNotYetInMemory context =
             )
 
 
+{-| How many steps to let a module-button click settle before believing a
+reading that still shows the module unchanged.
+
+A module button is a toggle, so a click issued because the module "looks
+inactive" is only safe while that look is current. It is not current
+immediately: the bot decides from a reading taken before the click was sent,
+the client needs a moment to act on it, and the module ramps up rather than
+flipping. Every step inside that gap reads exactly like "still inactive".
+
+The window used to be two steps -- and the framework only stored two, so it was
+really "as long as we can see", with no margin at all. Any module slower than
+that got a second click, which turned it *off*, and a third, which turned it on
+again. That on/off/on flicker is what this number exists to prevent.
+
+Bounded rather than "wait for confirmation forever" because a click genuinely
+can fail to land (a lost input focus, a click that arrives while the client is
+busy), and a module that is still inactive well after the fact is one that never
+got the click at all.
+-}
+moduleButtonClickSettlingSteps : Int
+moduleButtonClickSettlingSteps =
+    5
+
+
 clickModuleButtonButWaitIfClickedInPreviousStep :
     StepDecisionContext s m
     -> EveOnline.ParseUserInterface.ShipUIModuleButton
     -> DecisionPathNode
 clickModuleButtonButWaitIfClickedInPreviousStep context moduleButton =
-    if
+    case
         context.previousStepsEffects
-            |> List.take 2
-            |> List.any (\previousStepEffects -> doEffectsClickModuleButton moduleButton previousStepEffects)
-    then
-        Common.DecisionPath.describeBranch
-            "Already clicked on this module button in previous step."
-            waitForProgressInGame
+            |> List.take moduleButtonClickSettlingSteps
+            |> List.Extra.findIndex (doEffectsClickModuleButton moduleButton)
+    of
+        Just stepsAgo ->
+            Common.DecisionPath.describeBranch
+                ("I clicked this module button "
+                    ++ String.fromInt (stepsAgo + 1)
+                    ++ " step(s) ago and the client has not shown the change yet -- wait rather than click it again, which would toggle it back."
+                )
+                waitForProgressInGame
 
-    else
-        Common.DecisionPath.describeBranch "Click on this module button."
-            (mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft moduleButton.uiNode
-                |> Result.Extra.unpack
-                    (always (Common.DecisionPath.describeBranch "Failed to click" askForHelpToGetUnstuck))
-                    decideActionForCurrentStep
-            )
+        Nothing ->
+            Common.DecisionPath.describeBranch "Click on this module button."
+                (mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft moduleButton.uiNode
+                    |> Result.Extra.unpack
+                        (always (Common.DecisionPath.describeBranch "Failed to click" askForHelpToGetUnstuck))
+                        decideActionForCurrentStep
+                )
 
 
 updateMillisecondsToNextReadingFromGameModifierPercent : (Int -> Int) -> DecisionPathNode -> DecisionPathNode

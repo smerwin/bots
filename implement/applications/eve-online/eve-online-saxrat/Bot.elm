@@ -675,6 +675,26 @@ closeMessageBox readingFromGameClient =
                     )
             )
 
+{-| Shared by `tetherAtStructure`, `alignToStructure` and
+`dockAtRandomStationOrStructure`: the first menu entry whose text matches
+`textToSearch` exactly, ignoring case.
+-}
+withTextContainingIgnoringCase : String -> List EveOnline.ParseUserInterface.ContextMenuEntry -> Maybe EveOnline.ParseUserInterface.ContextMenuEntry
+withTextContainingIgnoringCase textToSearch =
+    List.filter (.text >> String.toLower >> (==) (textToSearch |> String.toLower)) >> List.head
+
+
+{-| Shared by `tetherAtStructure`, `alignToStructure` and
+`dockAtRandomStationOrStructure`: excludes entries that would jump the ship
+through a gate or light a cyno rather than dock/warp/align at a structure.
+-}
+menuEntryIsSuitable : EveOnline.ParseUserInterface.ContextMenuEntry -> Bool
+menuEntryIsSuitable menuEntry =
+    [ "cyno beacon", "jump gate" ]
+        |> List.any (\toAvoid -> menuEntry.text |> stringContainsIgnoringCase toAvoid)
+        |> not
+
+
 jumpToNextSystem : BotDecisionContext -> DecisionPathNode
 jumpToNextSystem context =
     case context.readingFromGameClient |> infoPanelRouteFirstMarkerFromReadingFromGameClient of
@@ -830,14 +850,6 @@ succeed.
 tetherAtStructure : BotDecisionContext -> DecisionPathNode
 tetherAtStructure context =
     let
-        withTextContainingIgnoringCase textToSearch =
-            List.filter (.text >> String.toLower >> (==) (textToSearch |> String.toLower)) >> List.head
-
-        menuEntryIsSuitable menuEntry =
-            [ "cyno beacon", "jump gate" ]
-                |> List.any (\toAvoid -> menuEntry.text |> stringContainsIgnoringCase toAvoid)
-                |> not
-
         chooseNextMenuEntry followingChoice =
             MenuEntryWithCustomChoice
                 { describeChoice = "dock, else warp/approach tether"
@@ -871,16 +883,8 @@ tetherAtStructure context =
         )
 
 alignToStructure : ShipUI -> BotDecisionContext -> Maybe DecisionPathNode
-alignToStructure shipUI context = 
+alignToStructure shipUI context =
     let
-        withTextContainingIgnoringCase textToSearch =
-            List.filter (.text >> String.toLower >> (==) (textToSearch |> String.toLower)) >> List.head
-
-        menuEntryIsSuitable menuEntry =
-            [ "cyno beacon", "jump gate" ]
-                |> List.any (\toAvoid -> menuEntry.text |> stringContainsIgnoringCase toAvoid)
-                |> not
-
         chooseNextMenuEntry followingChoice =
             MenuEntryWithCustomChoice
                 { describeChoice = "align"
@@ -988,14 +992,6 @@ In other words, not all structures appear directly under the "structures" entry.
 dockAtRandomStationOrStructure : BotDecisionContext -> DecisionPathNode
 dockAtRandomStationOrStructure context =
     let
-        withTextContainingIgnoringCase textToSearch =
-            List.filter (.text >> String.toLower >> (==) (textToSearch |> String.toLower)) >> List.head
-
-        menuEntryIsSuitable menuEntry =
-            [ "cyno beacon", "jump gate" ]
-                |> List.any (\toAvoid -> menuEntry.text |> stringContainsIgnoringCase toAvoid)
-                |> not
-
         chooseNextMenuEntry followingChoice =
             MenuEntryWithCustomChoice
                 { describeChoice = "Dock if we can?"
@@ -3299,9 +3295,18 @@ getNamesOfOtherPilotsInOverview readingFromGameClient =
         |> List.map (.objectName >> Maybe.withDefault "do not see name of overview entry")
 
 
+{-| The top (weapon) row, left to right.
+
+Same reasoning as `middleRowLeftToRight`: `moduleButtonsRows.top` arrives in
+UI-tree order, not screen order, and a slot can drop out of the parsed list
+and rejoin without moving on screen. This row's list index feeds directly
+into `weaponHotkeyFromIndex` (F1-F4), so an unsorted list here means the
+hotkey pressed does not reliably correspond to the same physical weapon
+twice -- the same failure mode caught live for the middle row.
+-}
 shipUIModulesToActivateOnTarget : SeeUndockingComplete -> List ShipUIModuleButton
 shipUIModulesToActivateOnTarget =
-    .shipUI >> .moduleButtonsRows >> .top
+    .shipUI >> .moduleButtonsRows >> .top >> List.sortBy (.uiNode >> .totalDisplayRegion >> .x)
 
 {-| Put the middle row into the state the moment calls for, if it is not already.
 

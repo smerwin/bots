@@ -93,6 +93,102 @@ Recovery Mode and running `csrutil enable --without debug`. Current state:
 everything else enabled. **This is a standing, system-wide reduction**, not
 scoped to this project — revert with Recovery Mode and plain `csrutil enable`.
 
+## Host permissions, and what actually blocks a launch
+
+The full macOS permission set the tools need. All four are granted on this
+machine; a failure in any one looks like a different bug, which is why they are
+listed together:
+
+| permission | granted to | what breaks without it |
+|---|---|---|
+| SIP Debugging Restrictions **disabled** | system-wide | `task_for_pid failed: (os/kern) failure (kr=5)` — no memory reads at all |
+| Screen Recording | the terminal app you run from | window titles do not resolve; `screencapture` returns blank |
+| Accessibility | the same terminal app | `cg_input` posts events that go nowhere |
+| Developer Tools (TCC) | the same terminal app | contributes to `task_for_pid` failures |
+
+These are **per-app**, so a run from iTerm2 can fail where the identical command
+from Terminal.app succeeds — that exact mismatch cost a debugging session once.
+
+**What is more often the blocker in practice is none of the above:**
+
+- **The Mac must be unlocked.** Synthetic `CGEventPost` input cannot reach a
+  locked session. The tell is that window captures still succeed but come back
+  *stale* — two `screencapture -l <id>` grabs a minute apart are byte-identical
+  and the launcher's own clock lags wall time. Combined with a WindowServer
+  "Display Shield" window and full-screen `loginwindow` windows in
+  `window_probe --all`, that is a locked screen, not a hung app. Restarting the
+  launcher does not help and costs a re-authentication.
+- **The target window must be frontmost before it will accept a click.** The
+  first press-and-hold on the launcher did nothing but activate it. Run
+  `osascript -e 'tell application "eve-online" to activate'` first, and confirm
+  the gesture is on target by capturing the window and looking for the tooltip
+  ("Click and hold to launch Gal Bistot") before committing to the hold.
+- **`eve_read.py` needs a bot run first.** It reuses `botlab_host`'s UI-root
+  cache and fails with "no usable UI-root cache" until one run has populated it,
+  so it cannot be used to check the client *before* starting a bot.
+
+Launching the client itself: press and hold the character's avatar for ~5s (see
+MACOS.md — PLAY NOW ignores synthetic clicks). On this machine Gal Bistot's
+avatar sits at screen point ~(489, 536) with the launcher window at
+`x=0 y=39 w=1400 h=800`; re-derive it from a capture rather than trusting those
+numbers, since they are per-layout.
+
+This section covers technical prerequisites only. Whether to start a run is the
+operator's call, as it always was.
+
+## Driving a run from a Claude Code session
+
+Claude Code is the wrapper around `cycle_run.sh` in practice: it starts the run,
+watches for stalls, triages them and cycles to the next run. That works well,
+but the harness imposes a few things that are not obvious and each cost real
+time to discover.
+
+**`cycle_run.sh` drives a `screen` session by stuffing keystrokes, so the target
+session matters more than it looks.** `BOT_SCREEN` must never name the session
+hosting the Claude Code terminal — stuffing there types the launcher into
+Claude's own prompt, and `--stop` sends it Ctrl-C. `screen` reports success
+either way. The default is now `evebot`, its own session, and
+`refuse_if_target_is_our_own_terminal` walks this process's ancestry and refuses
+if the target is in it. Note the ancestry check is the reliable test: a session
+can host Claude in one window and an idle shell in another, so inspecting the
+session's direct children finds the shell and misses the problem entirely.
+
+**Start it in the background.** `start()` polls for up to five minutes waiting
+for the first real decision, which overruns the default foreground tool timeout.
+Use `run_in_background`, then wait on a condition rather than a fixed sleep:
+
+```
+until grep -qE '^\+ ' ~/eve-bot-logs/mission_run<N>.log; do sleep 5; done
+```
+
+**Arm two monitors, not one.** `stall_watch.py --keep-going` covers stalls, but
+it says nothing when the bot or the client simply exits — and silence there
+reads exactly like a healthy run:
+
+```
+python3 -u stall_watch.py <log> --pid <client pid> --out <dir> --keep-going
+while true; do pgrep -f 'botlab_host\.py' >/dev/null || { echo "BOT GONE"; break; }; sleep 30; done
+```
+
+**Triage a stall alarm before acting on it.** Most are benign; see issue #3.
+The fast check is whether the game is still moving, which takes one command:
+
+```
+NEWEST=$(ls -t ~/Documents/EVE/logs/Gamelogs/*.txt | head -1)
+stat -f '%Sm' "$NEWEST"; grep -c "(combat)" "$NEWEST"; tail -2 "$NEWEST"
+```
+
+Fresh `(combat)` lines with real damage numbers mean the guns are landing and
+the alarm is noise. Then apply the distance test from `/diagnose-stuck-run`:
+monotonically falling is progress, flat or oscillating is not. Do not retune the
+threshold to quiet the noise — it is calibrated against 55 runs.
+
+**Reading the log by hand is free; typing is not.** The host checks system-wide
+HID idle time before every input sequence, so keystrokes anywhere — including
+in the attached `screen` window — trip the five-second stand-down and the bot
+skips that tick's input. It resumes on its own, but continuous typing holds it
+still. Scrolling costs nothing.
+
 ## CPython struct layouts (this build, arm64, Python 2 semantics)
 
 All addresses are per-process-launch (ASLR): re-derive each session, never
@@ -209,6 +305,18 @@ screenshot read), and later responses offer genuinely new tasks such as the
 `SearchUIRootAddress` → `ReadFromWindow` transition. Drain a queue keyed by
 `taskId`, extended from every response, until empty.
 
+## Skills (`.claude/skills/`)
+
+Slash commands wrapping the workflows that recur here. They carry the
+procedure and its traps; this file carries the facts.
+
+| skill | use it when |
+|---|---|
+| `/diagnose-stuck-run` | a run may be looping — find out, and find the branch |
+| `/check-ui-parse` | the bot seems blind to something on screen, or a guard's premise needs checking against the live client |
+| `/bot-run` | start, stop, cycle or stall-watch a run |
+| `/review-silent-success` | reviewing changes for the failure mode that reports success and does nothing |
+
 ## Tools (`tools/macos-host/`)
 
 | path | purpose |
@@ -225,7 +333,9 @@ screenshot read), and later responses offer genuinely new tasks such as the
 | `run_saxrat.sh`, `run_mission.sh` | launchers for `eve-online-saxrat` / `eve-online-mission-runner`; one-bot-at-a-time guard kills any prior launcher/`botlab_host.py`/`driver.js`/`tree_walker` first |
 | `bot_help.py` | backs `--help` on the launchers |
 | `stall_watch.py` | watches a running bot's log and screenshots the client when it stalls |
-| `eve_read.py` | live reads of the client (overview, targets, modules, combat feed, window id) by reusing botlab_host's UI-root cache -- ~2s instead of rediscovering the root |
+| `web_console.py` + `web_console.html` | tailnet-only status/log/settings console for a running session (`--web-console`) |
+| `eve_read.py` | live reads of the client (overview, targets, modules, combat feed, window id, client pid) by reusing botlab_host's UI-root cache -- ~2s instead of rediscovering the root |
+| `eve_repl.py` | interactive handle on the client for one-offs -- `python3 -i eve_repl.py`, then `eve.dock(...)`, `eve.warp_to(...)`, `eve.menu_click(...)`. See `REPL.md` |
 | `compile_bot.sh` | compiles a bot the way the host does, without running it; verifies the scratch copy matches the source |
 | `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session |
 | `reload_drones.py` | standalone one-off: refill drone bay from station hangar |
@@ -254,6 +364,62 @@ of "I see a message box to close". It screenshots the game **window by id**
 (`screencapture -x -o -l`), not the screen, because the client is usually on
 another macOS Space where a screen grab catches the wrong desktop.
 
+`--keep-going` keeps watching after a stall instead of exiting, and is now safe
+to leave on. Each distinct stall is screenshotted **once** — distinctness judged
+on the reason with its numbers masked, since the quoted loop carries drifting
+distances and tick counts — and `--max-shots` (default 20) caps the run
+regardless. Without that dedupe it reported on a metronome: a shot per 40 stuck
+decisions, and the worst pathology on record repeated one decision 8,983 times,
+which is ~225 near-identical Retina grabs of a frozen screen at ~7.5 MB each,
+or the 1.7 GB that actually accumulated.
+
+The universal leaf `Wait for progress in game` is **passed over** when judging
+whether a window of decisions is benign idling. Every benign state reaches that
+leaf, so a window holding "I am in warp" and its leaf could never be all-benign,
+and run 114 raised an alarm for a bot correctly sitting out a warp. It is still
+never benign on its own — a window of nothing but leaves says nothing about
+*why* the bot is waiting, and treating it as idle is what once dropped detection
+to nothing.
+
+**`--web-console [PORT]`** (default 8787, off unless asked for) serves a live
+console: session stats, the log as a filterable stream, an editable settings
+box, and pause/resume/stop. `./run_mission.sh --web-console` works as-is, since
+the launcher already forwards `"$@"`.
+
+It binds to this machine's **Tailscale address and nothing else**, and **fails
+to start** if no 100.64.0.0/10 address can be found rather than falling back to
+a wider interface — the console can change what the bot does and stop it, so
+guessing wrong means publishing a remote control. Tailscale is the
+authentication; there is no login of its own, which is exactly why the bind must
+stay narrow.
+
+Two design points that are load-bearing rather than stylistic. **HTTP handlers
+never touch the pipe to the bot process** — it is a strict request/response
+conversation with the Elm runtime, and a second writer desynchronises it — so
+handlers only queue intent and `run_bot`'s own loop performs it between ticks.
+And **live settings reload needs no new bot machinery**: re-sending
+`BotSettingsChangedEvent`, the same event the session opens with, makes the bot
+re-read its whole settings string.
+
+Stats come from EVE's game log, which the host already tails: a `(bounty) N ISK
+added to next bounty payout` line is emitted once per rat killed and carries
+what it paid, so kills and ISK are a count and a sum of those. The `(combat)`
+lines are per shot, not per kill, and are no use for a kill count.
+
+**Applying settings live** is the console's most useful trick and needs no
+restart. `GET /api/state` returns the current settings string; `POST
+/api/settings` with `{"settings": "<the whole string>"}` queues a replacement,
+and the loop applies it on its next tick via `BotSettingsChangedEvent` — the
+same event the session opens with, so the bot re-reads *everything* and no code
+in `Bot.elm` need know the console exists. Send the complete string, not a
+patch. The host logs `applying settings change from the console` when it lands.
+
+Proven live on run 129: a bot raising the not-progressing alarm beside an
+unreachable objective started acting on a newly added `approach-object` within
+one tick, saving a session that was otherwise going to be restarted. It is also
+the fastest way to *test* a settings guess — a wrong one is one POST away from
+being undone, where a restart costs the whole session's progress.
+
 **Bot source acquisition** (both tested): a local file or directory path (or
 `file://`), or a GitHub URL — a plain repo, or a `.../tree/<branch>/<subpath>`
 URL, needed since apps in *this* repo live under `implement/applications/...`
@@ -265,6 +431,33 @@ and are **not** part of the bot loop. Never run them alongside a launcher sessio
 — both fight for the same mouse and keyboard, and a stray background run once
 caused a long, confusing debugging detour. Check with `pgrep -f` on the same
 patterns the launchers' guard uses before starting either.
+
+**The bot does yield to a human, though.** Before executing any input sequence
+the host checks how long ago a *person* last touched the mouse or keyboard, and
+if that was under `HUMAN_INPUT_STAND_DOWN_SECONDS` (5.0) it skips the sequence
+and says `standing down: someone used the mouse/keyboard Ns ago`. Nothing needs
+unwinding: the bot re-derives its decision from a fresh reading every step, so a
+skipped sequence costs one tick and is simply decided again once the machine is
+quiet. It resumes on its own five seconds after the last human input, with
+nothing to switch back on.
+
+So taking the mouse mid-run is safe and does not require stopping the bot —
+which is what makes reading the client by hand during a session practical. It is
+*not* a licence to run the input-driving tools alongside it: those keep clicking
+regardless, and each of their clicks also resets the bot's five-second timer, so
+the two simply take turns badly. Read-only tools (`eve_read.py`, and
+`eve_repl.py` as long as you only call its reading methods) touch no input at
+all and are always safe.
+
+**Never print the client's command line.** The launcher starts the game with the
+account's `/ssoToken=` and `/refreshToken=` as arguments, so `ps aux | grep EVE`,
+`pgrep -fl`, or `ps -o command=` dumps live credentials into whatever reads that
+output — a terminal, a run log, a transcript pasted somewhere else. The
+`ssoToken` expires in ten minutes but the `refreshToken` does not. Ask
+`python3 eve_read.py pid` (or `eve_read.client_pid()`), which resolves the pid
+from `lsappinfo`'s bundle id and never touches an argument vector. `pgrep -f`
+without `-l` is also fine — it matches the command line without printing it,
+which is what the launchers' own guard does.
 
 ## Coordinates and input execution
 
@@ -339,6 +532,38 @@ Equally, don't re-verify the window before every individual action in a sequence
 that cannot change between two `CGEventPost` calls milliseconds apart. Check only
 at the sequence's own `BringWindowToForeground`/`AbortIfWindowNotInForeground`
 checkpoints.
+
+## A mission must be *tracked* or the mission runner cannot leave the station
+
+`eve-online-mission-runner` navigates entirely from the mission tracker's own
+travel button in the info panel — Undock, Set Destination, Warp to Location,
+Dock. That entry (`AgentMissionInfoPanelEntry`, under `InfoPanelJobBoard`)
+exists only for a mission that is **tracked**. Accepting one does not track it.
+
+Untracked, the panel entry is absent, and the failure is a loop rather than an
+error: the bot sees no mission, asks the agent for one, the agent offers
+"Complete Mission" because a mission *is* in progress, `Bot.elm` reads that as
+"still in progress — go fly it" and closes the conversation, and the next
+reading starts over. Run 103 did that for 47 ticks — 87 conversation opens, 79
+closes, 221 "assume we are docked", never undocked, and `askForHelpToGetUnstuck`
+never fired because every individual branch believed it was making progress.
+
+To track: **Opportunities (Alt-J) → Active tab → right-click the mission card →
+"Track"**. The right-click menu is the only place it lives; the card's own
+controls and the Agency window do not offer it, and neither does the Journal.
+Confirm it took by checking the info panel gained a fourth
+`ButtonIconInfoPanel` toggle and an `AgentMissionInfoPanelEntry` carrying the
+objective text.
+
+This is per character, and it is why the bot ran for weeks on one character and
+failed instantly on another: missions tracked earlier stay tracked, a fresh
+character's do not. Suspect it whenever a docked bot talks to an agent in a
+loop.
+
+**Only the first mission on a character needs this.** Tracking is inherited:
+run 106 handed in Minmatar Plot (1 of 3), took (2 of 3), and the new mission
+appeared in the info panel by itself with no intervention. So it is a one-time
+setup step per character, not something to repeat each mission.
 
 ## Reading the overview
 

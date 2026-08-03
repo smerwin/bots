@@ -33,6 +33,14 @@ MACOS_HOST_DIR = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(MACOS_HOST_DIR, "re_helper"))
 import re_helper as rh  # noqa: E402
 
+sys.path.insert(0, MACOS_HOST_DIR)
+import web_console  # noqa: E402
+
+# How long a key is held between its KeyDown and KeyUp. Long enough that the
+# client registers the press, and well under macOS's minimum "delay until
+# repeat" (~250ms) so the key never starts auto-repeating.
+KEY_HOLD_SECONDS = 0.03
+
 MAIN_ELM_TEMPLATE = os.path.join(HERE, "Main.elm")
 # A bot's own source fixes which host interface it imports, and the wrappers are
 # not interchangeable -- see Main_2023_02_06.elm's header.
@@ -135,6 +143,9 @@ _VK_TO_CGKEYCODE = {
     0x10: 0x38,  # SHIFT
     0x11: 0x3B,  # CONTROL
     0x12: 0x3A,  # ALT/MENU -> Option
+    0x5B: 0x37,  # LWIN -> Command. The editing shortcuts a macOS text field
+                 # answers to are Command-based; Control+A is "move to start of
+                 # line" here, not "select all".
     0x1B: 0x35,  # ESCAPE
     0x20: 0x31,  # SPACE
     0x21: 0x74,  # PRIOR -> PageUp
@@ -856,6 +867,9 @@ class TaskDispatcher:
         # Mouse buttons currently held, so cursor motion between a ButtonDown
         # and its ButtonUp is emitted as a drag rather than a plain move.
         self._buttons_down = set()
+        # Keys currently held, so the framework's inter-effect wait is not taken
+        # while one is down and macOS never starts auto-repeating it.
+        self._keys_down = set()
         self._last_mouse_pos = None
         # Monotonic time of our own last posted event, so a stand-down check can
         # tell a person's input apart from the bot's own.
@@ -1299,7 +1313,28 @@ class TaskDispatcher:
                             continue
                         next_real_tag_after_wait = later_tag
                         break
-                    if (not self._buttons_down) or next_real_tag_after_wait == "ButtonUp":
+                    #
+                    # A held *key* is worse than a held button: macOS starts
+                    # auto-repeating it. The framework's 210ms between KeyDown
+                    # and KeyUp is longer than the system repeat delay, so every
+                    # typed character came out as a run of itself. Run 115 typed
+                    # "Reports" into the inventory quick filter and left
+                    # "reportreprrrrrr...rrreporteporteporte...".
+                    #
+                    # But a keypress with *no* hold at all is not the answer
+                    # either: the client can miss it, which reads as characters
+                    # dropping at random. So the pause before a KeyUp becomes a
+                    # short, fixed hold -- long enough to register, far below the
+                    # system's repeat delay -- rather than either extreme.
+                    #
+                    # Scoped to the release specifically, not to "any key is
+                    # down". effectsToEnterString holds Shift across a whole run
+                    # of capitals, so keying off the held set would collapse the
+                    # gaps between those characters too, firing them back to back
+                    # with no spacing -- the same shape that loses keystrokes.
+                    if next_real_tag_after_wait in ("KeyUp", "CharacterUp"):
+                        time.sleep(KEY_HOLD_SECONDS)
+                    elif (not self._buttons_down) or next_real_tag_after_wait == "ButtonUp":
                         time.sleep(payload / 1000.0)
                 elif tag == "BringWindowToForeground":
                     window_number = int(payload.split("/")[-1])
@@ -1388,6 +1423,7 @@ class TaskDispatcher:
                             errors.append(f"no macOS key mapping for VK code {code}")
                             continue
                         self._cg(f"keydown {mac_code}")
+                        self._keys_down.add(mac_code)
                     elif tag == "KeyUp":
                         code, extended = payload
                         mac_code = vk_to_cgkeycode(code)
@@ -1395,6 +1431,7 @@ class TaskDispatcher:
                             errors.append(f"no macOS key mapping for VK code {code}")
                             continue
                         self._cg(f"keyup {mac_code}")
+                        self._keys_down.discard(mac_code)
                     elif tag in ("CharacterDown", "CharacterUp"):
                         errors.append(f"{tag} (raw unicode character input) not implemented")
                         continue
@@ -1420,7 +1457,7 @@ class TaskDispatcher:
 # ---------------------------------------------------------------------------
 
 def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_screenshots=False,
-            session_duration_minutes=None, game_log_dir=None):
+            session_duration_minutes=None, game_log_dir=None, console=None):
     proc = subprocess.Popen(
         ["node", DRIVER_JS, bot_js_path],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
@@ -1439,6 +1476,7 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
 
     response = send_event({"BotSettingsChangedEvent": settings or ""})
 
+    session_end_at_milliseconds = None
     if session_duration_minutes is not None:
         # BotFramework.elm's own continueIfShouldHide already docks (and
         # stays docked, via Bot.elm's ifDocked branch) once
@@ -1474,14 +1512,70 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         # grouped.
         elapsed = time.monotonic() - tick_start
         print(f"# [{tick}.{decision_seq}] ({elapsed:.3f}s) {cont['statusText'][:4000]}", file=sys.stderr)
+        if console is not None:
+            console.note_decision(tick, cont["statusText"])
         if game_log is not None:
             for line in game_log.new_lines():
                 print(f"#   game log: {line}", file=sys.stderr)
+                if console is not None:
+                    console.note_game_log(line)
+
+    stop_requested = False
 
     while True:
         if "FinishSession" in response:
             print(f"# FinishSession: {response['FinishSession']['statusText']}", file=sys.stderr)
+            if console is not None:
+                console.note_finished(response["FinishSession"]["statusText"])
             break
+
+        if console is not None:
+            # Apply what the console asked for, here and only here: this is the
+            # thread that owns the pipe to the bot process, and that pipe is a
+            # strict request/response conversation. A handler thread writing to
+            # it would interleave with a task response and desynchronise the
+            # runtime.
+            while True:
+                command = console.take_command()
+                if command is None:
+                    break
+                if command == "pause":
+                    console.set_paused(True)
+                elif command == "resume":
+                    console.set_paused(False)
+                elif command == "stop":
+                    stop_requested = True
+
+            new_settings = console.take_settings()
+            if new_settings is not None:
+                # The bot re-reads its whole settings string from this event --
+                # the same one the session opens with -- so a live change needs
+                # no restart and no special path in the bot.
+                print("# applying settings change from the console", file=sys.stderr)
+                response = send_event({"BotSettingsChangedEvent": new_settings})
+                console.note_host("settings applied")
+                continue
+
+            if stop_requested:
+                print("# stop requested from the console", file=sys.stderr)
+                console.note_finished("stopped from the console")
+                break
+
+            while console.is_paused():
+                # Paused means paused: no reads, no input, nothing sent to the
+                # bot. Held here rather than by skipping work further down, so
+                # a paused session cannot be halfway through a click sequence.
+                time.sleep(0.25)
+                command = console.take_command()
+                if command == "resume":
+                    console.set_paused(False)
+                elif command == "stop":
+                    stop_requested = True
+                    break
+            if stop_requested:
+                print("# stop requested from the console", file=sys.stderr)
+                console.note_finished("stopped from the console")
+                break
 
         cont = response["ContinueSession"]
         decision_seq = 0
@@ -1531,6 +1625,22 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         if max_ticks is not None and tick > max_ticks:
             print("# max_ticks reached, stopping", file=sys.stderr)
             break
+
+        # The deadline is the host's to enforce, not the bot's. The bot is told
+        # when the session ends and is expected to wind down and answer
+        # FinishSession, but that is a decision it can fail to reach -- stuck in
+        # space, unable to dock, or looping on something -- and then nothing
+        # stops the run at all. Left to itself the remaining time just goes
+        # negative and the session carries on indefinitely.
+        #
+        # Checked between ticks rather than mid-tick so a dispatched input
+        # sequence finishes rather than being cut in half.
+        if session_end_at_milliseconds is not None:
+            overrun_seconds = (time.time() * 1000 - session_end_at_milliseconds) / 1000.0
+            if overrun_seconds > 0:
+                print(f"# session duration elapsed {overrun_seconds:.0f}s ago and the bot has not "
+                      f"finished the session -- stopping", file=sys.stderr)
+                break
 
         notify = cont.get("notifyWhenArrivedAtTime")
         if notify:
@@ -1641,6 +1751,12 @@ def main():
                          "echoed under each decision (it is the only timestamped record here)")
     ap.add_argument("--no-game-log", action="store_true",
                     help="do not follow EVE's game log")
+    ap.add_argument("--web-console", nargs="?", const=8787, type=int, default=None,
+                    metavar="PORT",
+                    help="serve a status/log/settings console on the tailnet (default port "
+                         "8787). Bound to this machine's Tailscale address and nowhere else; "
+                         "if there is no tailnet address the run refuses to start rather than "
+                         "falling back to a wider interface.")
     ap.add_argument("--session-duration-minutes", type=float, default=None,
                      help="tell the bot how long this session should run; BotFramework's own "
                           "continueIfShouldHide docks (and stays docked) once ~200s remain "
@@ -1655,10 +1771,20 @@ def main():
         build_dir = prepare_build_dir(bot_dir, workdir)
         bot_js = compile_bot(build_dir)
         print(f"# compiled: {bot_js}", file=sys.stderr)
+        console = None
+        if args.web_console is not None:
+            session_end_at_ms = None
+            if args.session_duration_minutes is not None:
+                session_end_at_ms = int(time.time() * 1000) + int(args.session_duration_minutes * 60 * 1000)
+            console = web_console.ConsoleState(settings_text=args.settings,
+                                               session_end_at_ms=session_end_at_ms)
+            _httpd, url = web_console.start(console, port=args.web_console)
+            print(f"# web console: {url}", file=sys.stderr)
         run_bot(bot_js, args.settings, max_ticks=args.max_ticks, execute_input=args.execute_input,
                 capture_screenshots=args.capture_screenshots,
                 session_duration_minutes=args.session_duration_minutes,
-            game_log_dir=None if args.no_game_log else args.game_log_dir)
+            game_log_dir=None if args.no_game_log else args.game_log_dir,
+            console=console)
     finally:
         if args.keep_build_dir:
             print(f"# left build dir at {workdir}", file=sys.stderr)

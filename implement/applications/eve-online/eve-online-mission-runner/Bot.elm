@@ -16,6 +16,13 @@
    has a label and there is nothing to fight, which removes any need to set
    routes or drive the autopilot itself.
 
+   That tracker is the bot's only route out of the station, and it exists only
+   for a mission that is **tracked** -- see the setup list below. Accepting a
+   mission is not enough. Untracked, the panel entry is simply absent, which
+   the bot reads as "no mission running": it asks the agent for one, the agent
+   answers that a mission is already in progress, it closes the conversation,
+   and it starts over. Run 103 did that 87 times without undocking.
+
    ## Setting up the Game Client
 
    Despite being quite robust, this bot is less intelligent than a human. For
@@ -29,6 +36,13 @@
      nearest entry at the top.
    + Make sure the overview shows acceleration gates, or the bot cannot follow
      a mission from one pocket to the next.
+   + Track the mission, so that it appears in the info panel. Open
+     Opportunities (Alt-J), go to the "Active" tab, right-click the mission's
+     card and choose "Track". Accepting a mission does not track it, and an
+     untracked mission has no info-panel entry at all -- which is where every
+     travel step comes from, so the bot never leaves the station. A character
+     whose missions were tracked before keeps that; a fresh one does not, which
+     is what makes this look like a bot fault rather than client setup.
    + In the ship UI, arrange the modules:
      + Place the modules to use in combat (to activate on targets) in the top row.
      + Place the propulsion module first in the middle row. The bot drives this
@@ -319,8 +333,20 @@ type alias BotMemory =
     , targetToUnlockUnchangedTicks : Int
     , shipApproachingTicks : Int
     , lootedWreckIds : List String
+    , unlootableWreckIds : List String
+    , lootAllRefusedTicks : Int
+    , lootWindowOutOfRangeTicks : Int
+    , dronesInSpaceTicks : Int
+    , dockedWithCargoWantedTicks : Int
+    , nothingToDoTicks : Int
+    , lastObjectiveText : String
     , gateWithinReachTicks : Int
     , siteAdmitsThisShip : Maybe Bool
+    , clearingNotRequired : Bool
+    , agentConversationWithoutTrackerTicks : Int
+    , keepAtRangeUnconfirmedTicks : Int
+    , orbitUnconfirmedTicks : Int
+    , readingsCount : Int
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
     }
@@ -370,6 +396,19 @@ secondsBeforeSessionEndToWindDown =
     200
 
 
+{-| How long past the planned end to keep trying to dock before ending the
+session in space instead.
+
+Generous, because a legitimate trip home is a warp and a dock and can take a
+couple of minutes. Bounded, because every way that trip fails previously ran
+until something else stopped the session -- and the host only announces the
+deadline, it does not enforce it.
+-}
+secondsPastSessionEndBeforeGivingUpOnDocking : Int
+secondsPastSessionEndBeforeGivingUpOnDocking =
+    120
+
+
 {-| Wind the session down cleanly instead of being killed mid-flight: once the
 planned end is close, recall drones and dock rather than starting another leg.
 
@@ -412,15 +451,49 @@ windDownBeforeSessionEnd context =
                                         (Common.DecisionPath.endDecisionPath FinishSession)
 
                                 else
-                                    describeBranch "Already docked. Stay put." waitForProgressInGame
+                                    case maintenanceWhileDocked context of
+                                        Just maintenance ->
+                                            maintenance
+
+                                        Nothing ->
+                                            describeBranch "Already docked. Stay put." waitForProgressInGame
 
                             Just _ ->
-                                returnDronesToBay context
-                                    |> Maybe.withDefault
-                                        (dockAtStation
-                                            context.memory.lastDockedStationNameFromInfoPanel
-                                            context
+                                if secondsRemaining <= -secondsPastSessionEndBeforeGivingUpOnDocking then
+                                    -- Still in space well past the deadline, so
+                                    -- stop trying to park and end the session
+                                    -- where we are.
+                                    --
+                                    -- Docking during wind-down fails in more
+                                    -- ways than can be enumerated here, and each
+                                    -- one previously ran until something else
+                                    -- killed the session. Run 118 could not get
+                                    -- its drones back and overran by five
+                                    -- minutes. Run 121 was in Ebidan, a system
+                                    -- with no station at all, and spent the
+                                    -- whole window right-clicking for a
+                                    -- "Stations" entry the menu cannot contain --
+                                    -- 32 cascades, never docked, never finished.
+                                    --
+                                    -- This is the backstop for all of them: the
+                                    -- session ending is what matters, and ending
+                                    -- it undocked is worth more than not ending
+                                    -- it. It does not repair the underlying
+                                    -- cause, which is why it says what happened.
+                                    describeBranch
+                                        ("Session ended "
+                                            ++ String.fromInt -secondsRemaining
+                                            ++ " seconds ago and I still have not docked -- stop here rather than keep trying."
                                         )
+                                        (Common.DecisionPath.endDecisionPath FinishSession)
+
+                                else
+                                    returnDronesToBay context
+                                        |> Maybe.withDefault
+                                            (dockAtStation
+                                                context.memory.lastDockedStationNameFromInfoPanel
+                                                context
+                                            )
                         )
                     )
 
@@ -480,6 +553,145 @@ selectedAgentEntry context =
            )
 
 
+{-| Work worth doing while parked in station, or Nothing to just sit there.
+
+Called only from the wind-down branch, which is the one stretch where the bot is
+docked and has already decided not to start another leg -- roughly 200 seconds
+per session with the clock running out. Anything here is therefore free: it
+cannot delay a mission, because there is no mission left to delay. That is also
+the constraint. A maintenance task must be interruptible and must finish or give
+up inside that window, and must never be placed anywhere the bot still has work
+to do.
+
+Each task states its own "already done" condition, because this branch is
+re-entered on every reading for the whole window. A task that cannot tell it has
+run would repeat for the rest of the session, which is both useless and exactly
+the shape `stall_watch` calls a stall.
+-}
+maintenanceWhileDocked : BotDecisionContext -> Maybe DecisionPathNode
+maintenanceWhileDocked context =
+    surveyAgentsInStation context
+
+
+{-| Log every agent this station's panel knows about, once per session.
+
+The point is finding agents worth moving to. The panel is not limited to agents
+based here -- `agentLocation` carries a remote agent's system and jump count --
+so this is a genuine survey of what is reachable, not just a list of the room
+we are standing in. It reads what the parser already produces, so it needs no
+new UI work; the Agency window, which reaches further than any one station's
+panel, is the obvious next task to add here.
+
+Reading only. It selects the Agents tab if that is needed to see the list, and
+otherwise clicks nothing -- there is no mission running to disturb, but there is
+also no reason to leave the client in a different state than we found it.
+-}
+surveyAgentsInStation : BotDecisionContext -> Maybe DecisionPathNode
+surveyAgentsInStation context =
+    -- Gated on the session clock, not on bot memory. The memory counter this
+    -- used to rely on was consumed before the window ever opened: the bot docks
+    -- to hand its last mission in, the Agents tab is up and populated for that
+    -- whole conversation, and it then stays docked into wind-down without ever
+    -- undocking -- so the reset never fired. Run 119 parked for 403 readings
+    -- and printed nothing.
+    --
+    -- `UpdateMemoryContext` cannot see the session clock, but the decision can,
+    -- so the window is defined here instead: the opening seconds of wind-down.
+    -- That is self-limiting without any stored state, at the cost of repeating
+    -- for those few readings rather than printing exactly once, and of missing
+    -- the session entirely if the ship has not finished docking by then.
+    if not (withinAgentSurveyWindow context) then
+        Nothing
+
+    else
+        case context.readingFromGameClient.stationWindow of
+            Nothing ->
+                Nothing
+
+            Just stationWindow ->
+                case stationWindow.agentsTab of
+                    Nothing ->
+                        Nothing
+
+                    Just agentsTab ->
+                        if not agentsTab.isSelected then
+                            Just
+                                (describeBranch
+                                    "Maintenance: open the station's Agents tab to survey them."
+                                    (clickUiElement agentsTab.uiNode)
+                                )
+
+                        else if List.isEmpty stationWindow.agentEntries then
+                            Nothing
+
+                        else
+                            Just
+                                (describeBranch
+                                    ("Maintenance: agents this station lists -- "
+                                        ++ (stationWindow.agentEntries
+                                                |> List.map describeStationAgentEntry
+                                                |> String.join " | "
+                                           )
+                                    )
+                                    waitForProgressInGame
+                                )
+
+
+{-| The last seconds before the session ends, which is when the survey runs.
+
+At the *start* of wind-down the ship is still flying home -- run 120 spent that
+stretch on "Head for a station and dock" and did not park until 144 of its 200
+seconds were gone, so a window at that end was evaluated only while there was no
+station window to read. The end of the clock is the one moment the ship is
+reliably parked, because getting there is what wind-down is for.
+
+Still nothing stored: the session clock alone decides, so there is no counter to
+be consumed early and no dependence on whether the memory update runs before or
+after the decision.
+-}
+withinAgentSurveyWindow : BotDecisionContext -> Bool
+withinAgentSurveyWindow context =
+    case secondsToSessionEnd context.eventContext of
+        Nothing ->
+            False
+
+        Just secondsRemaining ->
+            (0 < secondsRemaining) && (secondsRemaining <= agentSurveyWindowSeconds)
+
+
+{-| How long the survey keeps printing. Readings come about twice a second, so
+this is roughly twenty repeated lines -- under stall_watch's threshold of 40,
+and the price of needing no stored state to stop. Wide enough that a slow tick
+cannot step over the window entirely.
+-}
+agentSurveyWindowSeconds : Int
+agentSurveyWindowSeconds =
+    10
+
+
+describeStationAgentEntry : EveOnline.ParseUserInterface.StationAgentEntry -> String
+describeStationAgentEntry agentEntry =
+    [ agentEntry.name |> Maybe.withDefault "(unnamed)"
+    , agentEntry.agentType |> Maybe.withDefault "(type?)"
+    , case agentEntry.agentLocation of
+        Nothing ->
+            "here"
+
+        Just location ->
+            if String.trim location |> String.isEmpty then
+                "here"
+
+            else
+                String.trim location
+    , if agentEntry.isAvailable then
+        "available"
+
+      else
+        "not available"
+    ]
+        |> String.join ", "
+
+
 {-| Agents based elsewhere are listed in the station's Agents panel too, with
 their location and distance in `agentLocation` (e.g. "Sarum Prime 0.9 - 1
 jump"); an agent in this station has that field empty. Talking to a remote
@@ -527,24 +739,41 @@ missionTravelStep context =
         |> Maybe.andThen .locationButton
         |> Maybe.andThen
             (\button ->
-                case button.label of
-                    Just label ->
-                        if labelUndoesStepInProgress label then
+                if not (nodeIsDisplayed button.uiNode.uiNode) then
+                    -- The client keeps this button in the tree when it has no
+                    -- travel step to offer, hiding it with `_display` False and
+                    -- an empty label rather than removing it. Verified live on
+                    -- "After The Seven (3 of 5)": the entry is expanded, the
+                    -- objective renders, and the button is present, hidden and
+                    -- unlabelled.
+                    --
+                    -- Nothing depended on this before, because the empty label
+                    -- already fell through below. That is protection by
+                    -- coincidence: a hidden button that kept a stale label
+                    -- would be clicked, and clicking a control that is not on
+                    -- screen is the same class of mistake as acting on an
+                    -- overview row that is not rendered.
+                    Nothing
+
+                else
+                    case button.label of
+                        Just label ->
+                            if labelUndoesStepInProgress label then
+                                Nothing
+
+                            else if labelReportsRouteAlreadySet label then
+                                -- Nothing to click: the route is already set. In
+                                -- space the caller travels it instead; docked,
+                                -- there is nothing to do but wait for the button to
+                                -- offer "Undock".
+                                Nothing
+
+                            else
+                                Just ( label, button.uiNode )
+
+                        Nothing ->
                             Nothing
-
-                        else if labelReportsRouteAlreadySet label then
-                            -- Nothing to click: the route is already set. In
-                            -- space the caller travels it instead; docked,
-                            -- there is nothing to do but wait for the button to
-                            -- offer "Undock".
-                            Nothing
-
-                        else
-                            Just ( label, button.uiNode )
-
-                    Nothing ->
-                        Nothing
-            )
+                )
 
 
 {-| Whether the autopilot actually has a destination.
@@ -690,13 +919,19 @@ Three ways of asking, because the obvious two both failed on
 `ButtonIcon` whose text lives in `_hint`, and `getDisplayText` reads only
 `_setText`/`_text`, so `findUiElementWithText "Close"` never matches and the
 first version of this stalled the session outright. `parseWindowControlsFromWindow`
-then returned Nothing too -- this window does not parse as a standard one -- and
-the Escape fallback did not close it either, so the bot simply pressed Escape
-forever.
+then returned Nothing too, and the Escape fallback did not close it either, so
+the bot simply pressed Escape forever.
 
-What does work, verified by hand against this exact window, is the icon's own
-`_name`: every window in this client carries a `CloseButtonIcon`, whatever else
-differs about it.
+That second failure was not particular to that window. `parseWindowControls`
+looked for a texture path containing `eveicon/window/close`, which this client
+does not use -- across 112 logged runs the loot window's own close arm matched
+it zero times and missed 77. It now also accepts this client's
+`system_icons/close_16px`, so the standard parse does work here.
+
+The fallback below stays regardless, because it is the more robust question:
+the icon's own `_name`. Every window in this client carries a
+`CloseButtonIcon`, whatever else differs about it, and that is what got
+`ShipRestrictionsWindow` closed when the texture match could not.
 -}
 closeControlOfWindow : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
 closeControlOfWindow window =
@@ -765,6 +1000,7 @@ notAlreadyEmptied context entry =
         && (case entry.objectItemID of
                 Just itemID ->
                     not (List.member itemID context.memory.lootedWreckIds)
+                        && not (List.member itemID context.memory.unlootableWreckIds)
 
                 Nothing ->
                     True
@@ -1079,9 +1315,25 @@ approachOverviewEntry :
     -> EveOnline.ParseUserInterface.OverviewWindowEntry
     -> DecisionPathNode
 approachOverviewEntry context description entry =
+    let
+        -- The range belongs in the decision text, not just in the reading.
+        -- stall_watch calls a stall when the same decisions recur and EVE's
+        -- game log stays silent, and a sublight approach is exactly that: no
+        -- combat, nothing written, one decision repeating. Run 107 raised two
+        -- alarms while the ship was closing perfectly well from 28 km to 2.7
+        -- km, because "approach it" reads identically at every range.
+        --
+        -- With the range in it the text changes as the ship closes, so the
+        -- circling test resets itself and the alarm only survives when the
+        -- distance genuinely stops moving -- which is the case worth waking
+        -- someone for. No special case in the watcher; it already keys on the
+        -- decision changing.
+        withRange =
+            description ++ " (" ++ (entry.objectDistance |> Maybe.withDefault "range unknown") ++ ")"
+    in
     unlessAlreadyClosingIn context
-        description
-        (selectThenPanelAction context "selectedItemApproach" entry description)
+        withRange
+        (selectThenPanelAction context "selectedItemApproach" entry withRange)
 
 
 shipIsAlreadyApproaching : BotDecisionContext -> Bool
@@ -1126,7 +1378,7 @@ approachMissionObjectIfNeeded context =
                         |> List.concatMap .entries
                         |> List.filter (matchesOverviewName name)
                         |> List.filter overviewEntryIsDisplayed
-                        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+                        |> List.sortBy overviewEntryDistanceOrFarInMeters
             in
             candidateNames
                 |> List.concatMap entriesNamed
@@ -1177,9 +1429,9 @@ approachConfiguredObjectIfPresent context =
                     |> List.filter
                         (\entry ->
                             interactionRangeInMeters
-                                < (entry.objectDistanceInMeters |> Result.withDefault 999999)
+                                < (overviewEntryDistanceOrFarInMeters entry)
                         )
-                    |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+                    |> List.sortBy overviewEntryDistanceOrFarInMeters
             )
         |> List.head
         |> Maybe.map
@@ -1217,13 +1469,47 @@ lootMissionItemFromContainerIfPresent context =
                 Just openLootWindow ->
                     Just
                         (describeBranch ("A container is open -- take the " ++ itemName ++ ".")
-                            (case openLootWindow.uiNode |> findUiElementWithText "Loot All" of
-                                Just lootAllButton ->
-                                    describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
+                            (case giveUpOnOpenContainerReason context of
+                                Just reason ->
+                                    -- Close it, do not merely stop acting on it.
+                                    -- An open wreck loot window short-circuits
+                                    -- the whole objective branch above, so
+                                    -- waiting here hangs the bot on a container
+                                    -- it has already decided to abandon.
+                                    case openLootWindow.uiNode |> closeControlOfWindow of
+                                        Just closeButton ->
+                                            describeBranch (reason ++ " Close it and look elsewhere.")
+                                                (clickUiElement closeButton)
+
+                                        Nothing ->
+                                            describeBranch
+                                                (reason ++ " I cannot find its Close button to move on.")
+                                                askForHelpToGetUnstuck
 
                                 Nothing ->
-                                    describeBranch "I see no 'Loot All' in the open container."
-                                        askForHelpToGetUnstuck
+                                    if not (shipIsWithinLootRange context.readingFromGameClient) then
+                                        -- The window opens on the double click,
+                                        -- not on arrival, and the client is still
+                                        -- flying the ship over. Clicking now is
+                                        -- refused outright with "You must be
+                                        -- within 2500 meters of the container",
+                                        -- which the bot cannot see and used to
+                                        -- mistake for a completed loot.
+                                        describeBranch
+                                            ("Still on the way to the container -- wait until inside "
+                                                ++ String.fromInt interactionRangeInMeters
+                                                ++ " m before taking anything."
+                                            )
+                                            waitForProgressInGame
+
+                                    else
+                                        case openLootWindow.uiNode |> findUiElementWithText "Loot All" of
+                                            Just lootAllButton ->
+                                                describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
+
+                                            Nothing ->
+                                                describeBranch "I see no 'Loot All' in the open container."
+                                                    askForHelpToGetUnstuck
                             )
                         )
 
@@ -1238,8 +1524,7 @@ lootMissionItemFromContainerIfPresent context =
                             (\containerEntry ->
                                 let
                                     distanceInMeters =
-                                        containerEntry.objectDistanceInMeters
-                                            |> Result.withDefault 999999
+                                        overviewEntryDistanceOrFarInMeters containerEntry
                                 in
                                 -- One call, whatever the range. A double click
                                 -- is "Open Cargo", and from further out the
@@ -1329,7 +1614,7 @@ lootableHoldingMissionItem context itemName =
                 -- that actually chooses what to open -- still selecting looted
                 -- wrecks, and the loop carried on unchanged.
                 |> List.filter (notAlreadyEmptied context)
-                |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+                |> List.sortBy overviewEntryDistanceOrFarInMeters
 
         textsOfEntry entry =
             [ entry.objectName, entry.objectType ] |> List.filterMap identity
@@ -1430,9 +1715,25 @@ loadCourierCargo context itemName =
                         _ ->
                             False
 
+                -- A prefix, not an exact match. Typing into this field drops
+                -- characters: "reports" lands as "report" every time it was
+                -- tried live. Demanding the whole string back meant the filter
+                -- never looked set, so the bot retyped for the rest of the
+                -- session -- while the filter it had already typed was doing its
+                -- job, since the field is a substring match and "report" finds
+                -- Reports perfectly well. Any non-empty prefix is good enough to
+                -- stop typing; an empty box or unrelated text still is not.
                 filterIsAlreadySet =
                     inventoryWindow.quickFilterText
-                        |> Maybe.map (\current -> String.toLower current == expectedQuickFilterText itemName)
+                        |> Maybe.map
+                            (\current ->
+                                let
+                                    typed =
+                                        current |> String.trim |> String.toLower
+                                in
+                                not (String.isEmpty typed)
+                                    && String.startsWith typed (expectedQuickFilterText itemName)
+                            )
                         |> Maybe.withDefault False
             in
             case ( matchingItem, shipCargoTreeEntry ) of
@@ -1474,17 +1775,34 @@ loadCourierCargo context itemName =
                                             waitForProgressInGame
 
                                     else
-                                        describeBranch
-                                            ("Filter the inventory for '" ++ itemName ++ "'.")
-                                            (decideActionForCurrentStep
-                                                (List.concat
-                                                    [ mouseClickOnUIElement MouseButtonLeft filterBox
-                                                        |> Result.withDefault []
-                                                    , selectAllEffects
-                                                    , typeTextEffects itemName
-                                                    ]
-                                                )
+                                        case
+                                            ( inventoryWindow.quickFilterText
+                                                |> Maybe.withDefault ""
+                                                |> String.trim
+                                                |> String.isEmpty
+                                            , quickFilterClearButton filterBox
                                             )
+                                        of
+                                            ( False, Just clearButton ) ->
+                                                -- Whatever is in there is not
+                                                -- what we want and typing cannot
+                                                -- replace it, so empty it first
+                                                -- and type on the next reading.
+                                                describeBranch
+                                                    "The quick filter holds something else -- clear it before typing."
+                                                    (clickUiElement clearButton)
+
+                                            _ ->
+                                                describeBranch
+                                                    ("Filter the inventory for '" ++ itemName ++ "'.")
+                                                    (decideActionForCurrentStep
+                                                        (List.concat
+                                                            [ mouseClickOnUIElement MouseButtonLeft filterBox
+                                                                |> Result.withDefault []
+                                                            , typeTextEffects itemName
+                                                            ]
+                                                        )
+                                                    )
                                 )
 
                     else if lookingAtACapacityLimitedContainer && itemHangarTreeEntry /= Nothing then
@@ -1557,16 +1875,31 @@ expectedQuickFilterText itemName =
         |> String.toLower
 
 
-{-| Ctrl+A, so typing replaces whatever the filter box already held rather than
-appending to it.
+{-| The quick filter's own Clear button, so typing starts from an empty box.
+
+No select-all shortcut works here, both tried live against this client. Control+A
+is the macOS "move to start of line" binding, so the bot moved the caret and then
+inserted: run 115's filter accumulated "reportreprrrr...reporteporteporte..."
+across retries. Command+A is worse -- it does not select, and it leaves the field
+swallowing every keystroke that follows, so run 116 typed 128 times and changed
+the box by not one character.
+
+Clearing by button is what actually works: verified live, 6,818 characters of
+accumulated junk to empty in one click.
+
+Identified by type rather than by label. It is a `ButtonIcon` whose text lives in
+`_hint`, and `getDisplayText` reads only `_setText`/`_text`, so a text search
+never matches it -- the same trap `closeControlOfWindow` documents. It is the one
+`ButtonIcon` inside the filter box.
 -}
-selectAllEffects : List EffectOnWindow.EffectOnWindowStruct
-selectAllEffects =
-    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL
-    , EffectOnWindow.KeyDown EffectOnWindow.vkey_A
-    , EffectOnWindow.KeyUp EffectOnWindow.vkey_A
-    , EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL
-    ]
+quickFilterClearButton :
+    EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+quickFilterClearButton filterBox =
+    filterBox
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "ButtonIcon")
+        |> List.head
 
 
 {-| Type plain text as individual key presses.
@@ -1719,7 +2052,13 @@ decideActionWhenDockedWithoutConversation context =
             expandTracker
 
         Nothing ->
-            case courierCargoToLoad context |> Maybe.andThen (loadCourierCargoDescribed context) of
+            case
+                if courierLoadHasHadLongEnough context then
+                    Nothing
+
+                else
+                    courierCargoToLoad context |> Maybe.andThen (loadCourierCargoDescribed context)
+            of
                 Just loadCargo ->
                     -- Load freight before travelling: the objective keeps asking
                     -- for it until it is in the hold, and flying on without it
@@ -1866,6 +2205,23 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                 |> List.filterMap buttonNamed
                 |> List.head
 
+        -- How to get rid of an offered mission the bot will never take, with
+        -- the label to report. 'Decline' first: 'Delay' means "ask me later",
+        -- so the agent re-offers the same mission on the next request and a
+        -- permanent skip becomes an endless cycle -- run 101 delayed Worlds
+        -- Collide 87 times, asked for a mission 88 times, and never saw a
+        -- different one. Declining repeatedly inside four hours costs standing
+        -- with the agent, which is the price of actually moving on; delaying
+        -- costs the whole session. 'Delay' stays as the fallback for a
+        -- conversation that offers no Decline at all.
+        skipOfferedMissionButton =
+            [ ( "Decline", "DeclineMission_Button" )
+            , ( "Delay", "DeferMission_Button" )
+            ]
+                |> List.filterMap
+                    (\( label, name ) -> buttonNamed name |> Maybe.map (Tuple.pair label))
+                |> List.head
+
         missionReadyToComplete =
             missionInfoPanelEntry context
                 |> Maybe.map missionIsReadyToComplete
@@ -1896,7 +2252,31 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
             -- "Complete Mission" is offered throughout the mission, not only
             -- once it can succeed, so a mission still in progress means we are
             -- done talking and should go fly it.
-            closeConversation "The mission is still in progress -- go fly it."
+            --
+            -- Unless there is nothing to go and fly. Every travel step comes
+            -- from the mission's info-panel entry, and that entry exists only
+            -- for a *tracked* mission -- accepting one does not track it. With
+            -- the agent saying a mission is in progress and no entry to fly,
+            -- closing the conversation only starts the cycle again: run 103
+            -- opened it 87 times, closed it 79, and never undocked, with every
+            -- branch individually convinced it was making progress.
+            --
+            -- Gated on the counter rather than this reading, because a mission
+            -- just accepted shows in the conversation a reading or two before
+            -- it shows in the panel, and that is not the same condition.
+            if
+                (context.memory.agentConversationWithoutTrackerTicks > missionNotTrackedTicks)
+                    && (missionInfoPanelEntry context == Nothing)
+            then
+                describeBranch
+                    ("The agent says a mission is in progress, but it has no entry in the info panel after "
+                        ++ (context.memory.agentConversationWithoutTrackerTicks |> String.fromInt)
+                        ++ " readings -- it is not tracked, so there is no travel step to follow and nothing here will change that. Track it: Opportunities (Alt-J) -> Active -> right-click the mission -> 'Track'."
+                    )
+                    askForHelpToGetUnstuck
+
+            else
+                closeConversation "The mission is still in progress -- go fly it."
 
         ( Nothing, _ ) ->
             case buttonNamed "AcceptMission_Button" of
@@ -1984,35 +2364,36 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                                         -- Only reached when the answer was "no":
                                         -- an admitted ship falls through to the
                                         -- ordinary accept path above.
-                                        case buttonNamed "DeferMission_Button" of
-                                            Just deferButton ->
+                                        case skipOfferedMissionButton of
+                                            Just ( label, skipButton ) ->
                                                 describeBranch
                                                     ("'"
                                                         ++ (offeredMissionName |> Maybe.withDefault "unnamed")
-                                                        ++ "' does not admit this ship -- skip it with 'Delay'. "
+                                                        ++ "' does not admit this ship -- skip it with '"
+                                                        ++ label
+                                                        ++ "'. "
                                                         ++ missionFinePrint conversation
                                                     )
-                                                    (clickUiElement deferButton)
+                                                    (clickUiElement skipButton)
 
                                             Nothing ->
                                                 closeConversation
-                                                    "This mission does not admit this ship and I see no 'Delay' button to skip it."
+                                                    "This mission does not admit this ship and I see no way to skip it."
 
                     else if shouldDeclineMission context offeredMissionName then
-                        case buttonNamed "DeferMission_Button" of
-                            Just deferButton ->
-                                -- "Delay" rather than "Decline": declining more
-                                -- than once every four hours costs standing
-                                -- with the agent, delaying does not.
+                        case skipOfferedMissionButton of
+                            Just ( label, skipButton ) ->
                                 describeBranch
                                     ("Skip this mission ("
                                         ++ (offeredMissionName |> Maybe.withDefault "unnamed")
-                                        ++ ") using 'Delay'."
+                                        ++ ") using '"
+                                        ++ label
+                                        ++ "'."
                                     )
-                                    (clickUiElement deferButton)
+                                    (clickUiElement skipButton)
 
                             Nothing ->
-                                closeConversation "I want to skip this mission but see no 'Delay' button."
+                                closeConversation "I want to skip this mission but see no way to."
 
                     else
                         describeBranch
@@ -2126,9 +2507,44 @@ decideActionInMissionPocket context seeUndockingComplete =
                                         |> Maybe.withDefault
                                             (case missionInfoPanelEntry context of
                                                 Just _ ->
-                                                    describeBranch
-                                                        "Nothing to fight and no travel step offered -- wait for the mission to catch up."
-                                                        waitForProgressInGame
+                                                    if nothingToDoTicksBeforeCryingStuck < context.memory.nothingToDoTicks then
+                                                        -- Waiting was the right first answer and the wrong
+                                                        -- last one. This branch is the bottom of the tree:
+                                                        -- nothing to shoot, no cargo it can find, no travel
+                                                        -- step, no gate, no route, no configured object on
+                                                        -- grid. If that has not changed in minutes, the
+                                                        -- mission is not "catching up" and nothing here will
+                                                        -- make it.
+                                                        --
+                                                        -- Two runs died in this branch without a word. Run
+                                                        -- 114 sat in it for 14,111 decisions, 37% of the
+                                                        -- session. Run 124 reached it with the tracker
+                                                        -- offering no travel button at all and burned half
+                                                        -- an hour. Neither raised an alarm, because waiting
+                                                        -- looks identical whether the mission is a second
+                                                        -- behind or permanently unreachable.
+                                                        --
+                                                        -- This does not rescue the mission -- it cannot, from
+                                                        -- here. It converts a silently wasted session into
+                                                        -- one that says so, which is what stall_watch
+                                                        -- screenshots and reports.
+                                                        -- Deliberately no reading count in the text. The
+                                                        -- alarm repeats for as long as the state lasts, and
+                                                        -- a counter in the message makes every repeat a
+                                                        -- distinct line -- which defeats stall_watch's
+                                                        -- dedupe and any log filter downstream. Run 126
+                                                        -- emitted 151 unique variants of this one alarm.
+                                                        describeBranch
+                                                            ("Nothing to fight, no travel step, nothing on grid to approach, and over "
+                                                                ++ String.fromInt nothingToDoTicksBeforeCryingStuck
+                                                                ++ " readings of it -- this mission is not going to progress on its own."
+                                                            )
+                                                            askForHelpToGetUnstuck
+
+                                                    else
+                                                        describeBranch
+                                                            "Nothing to fight and no travel step offered -- wait for the mission to catch up."
+                                                            waitForProgressInGame
 
                                                 Nothing ->
                                                     -- No tracker means no mission, a state that could not
@@ -2303,8 +2719,7 @@ closeMessageBox readingFromGameClient =
                             , namedButton "no_dialog_button"
                                 |> Maybe.map (labelled "No")
                             , messageBox.uiNode
-                                |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
-                                |> Maybe.andThen .closeButton
+                                |> closeControlOfWindow
                                 |> Maybe.map (\node -> ( "the window's close button", node ))
                             ]
                      in
@@ -2432,9 +2847,79 @@ runAwayIfLowHealth context shipUI =
     else
         Nothing
 
+{-| How many readings one escape choice stays put.
+
+The choice has to outlive the two-tick select-then-press-the-panel manoeuvre, or
+the bot selects one celestial and warps to whatever the next reading picked
+instead. It also has to keep moving if a warp does not get us out of trouble,
+which is why it rotates at all.
+-}
+runAwayCelestialStickyReadings : Int
+runAwayCelestialStickyReadings =
+    12
+
+
+{-| Somewhere to run to: whatever the overview reports at AU range.
+
+Distance in AU means off this grid, which is the only property that matters when
+leaving. It is also self-correcting -- arriving turns that entry into a km-range
+one that no longer qualifies, so the next warp necessarily picks somewhere else,
+and the ship keeps moving until its armour recovers.
+
+Deliberately *not* "anything whose name contains station". That is what killed
+run 102: an "Angel Asteroid Outpost" carries the object type "Asteroid Station
+- 1", matched as a station, and the bot then waited 119 readings for a Dock
+button that site scenery never offers, while armour drained from 52% to nothing.
+-}
+escapeCelestialsOnOverview : BotDecisionContext -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+escapeCelestialsOnOverview context =
+    context.readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter
+            (.objectDistance
+                >> Maybe.map (String.toUpper >> String.contains "AU")
+                >> Maybe.withDefault False
+            )
+
+
+{-| Leave, and keep leaving until the hitpoints hysteresis says we are safe.
+
+Warping to a celestial beats docking here: it needs no Dock button to exist, no
+station to be a real station, and every grid worth fleeing has something at AU
+range. Which celestial is picked rotates with the reading count, so a retreat
+that has not worked yet tries a different corner of the system rather than
+retrying one that did not help.
+-}
 runAway : BotDecisionContext -> DecisionPathNode
-runAway = 
-    tetherAtStructure
+runAway context =
+    case escapeCelestialsOnOverview context of
+        [] ->
+            describeBranch "Get out -- nothing at AU range on the overview to warp to."
+                (tetherAtStructure context)
+
+        celestials ->
+            case
+                celestials
+                    |> Common.Basics.listElementAtWrappedIndex
+                        (context.memory.readingsCount // runAwayCelestialStickyReadings)
+            of
+                Nothing ->
+                    tetherAtStructure context
+
+                Just celestial ->
+                    returnDronesToBay context
+                        |> Maybe.withDefault
+                            (selectThenPanelAction context
+                                "selectedItemWarpTo"
+                                celestial
+                                ("Get out -- warp to '"
+                                    ++ (celestial.objectName |> Maybe.withDefault "a celestial")
+                                    ++ "' at "
+                                    ++ (celestial.objectDistance |> Maybe.withDefault "range")
+                                )
+                            )
+
 
 tetherAtStructure : BotDecisionContext -> DecisionPathNode
 tetherAtStructure context =
@@ -2731,10 +3216,38 @@ decideActionInCombat :
     -> DecisionPathNode
 decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
     let
-        overviewEntriesToAttack =
+        everythingWorthAttacking =
             overviewEntriesToAttackFromReadingFromGameClient
                 (objectNamesToAttack context)
                 context.readingFromGameClient
+                -- Anything warp-disrupting us goes to the front, ahead of the
+                -- distance order everything else is in. This list drives what
+                -- gets locked and, through clickTargetBeforeShooting, what
+                -- becomes the active target -- so putting the scrambler first
+                -- also points keep-at-range at it, which is the one target
+                -- worth holding range on. Stable sort, so the nearest
+                -- scrambler leads and the rest keep their existing order.
+                |> List.sortBy
+                    (\entry ->
+                        if overviewEntryIsWarpDisruptingMe entry then
+                            0
+
+                        else
+                            1
+                    )
+
+        -- When the briefing says the rooms need not be cleared, drop everything
+        -- that only qualified by looking like a rat. What the objective or the
+        -- settings named by name still stands: those missions ask for a
+        -- structure dead, and "clearing is optional" is about the pirates
+        -- guarding it, not about the target itself.
+        overviewEntriesToAttack =
+            if context.memory.clearingNotRequired then
+                everythingWorthAttacking
+                    |> List.filter (isObjectToAttackByName (objectNamesToAttack context))
+
+            else
+                everythingWorthAttacking
 
         -- Locking clicks the row, so only rows actually rendered can be used: a
         -- hidden one's reported position belongs to whatever row was recycled
@@ -2770,11 +3283,11 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
 
         ensureShipIsOrbitingDecision =
             activeTargetEntry
-                |> Maybe.andThen (ensureShipIsOrbiting seeUndockingComplete.shipUI)
+                |> Maybe.andThen (ensureShipIsOrbiting context seeUndockingComplete.shipUI)
 
         ensureShipIsKeepingRangeDecision =
             activeTargetEntry
-                |> Maybe.andThen (ensureShipIsKeepingRange seeUndockingComplete.shipUI)
+                |> Maybe.andThen (ensureShipIsKeepingRange context seeUndockingComplete.shipUI)
 
         notableWreckEntries =
             context.readingFromGameClient.overviewWindows
@@ -2789,20 +3302,41 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                 -- the same reason; see the note at `notAlreadyEmptied`'s other
                 -- caller.
                 |> List.filter (notAlreadyEmptied context)
-                |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+                |> List.sortBy overviewEntryDistanceOrFarInMeters
 
         decisionIfNoEnemyToAttack =
             case context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.head of
                 Just openLootWindow ->
-                    if context.memory.lootWindowOpenTicks > 2 then
-                        describeBranch "Loot window did not close on its own -- force it shut (Ctrl+W)."
-                            (decideActionForCurrentStep
-                                [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL
-                                , EffectOnWindow.KeyDown EffectOnWindow.vkey_W
-                                , EffectOnWindow.KeyUp EffectOnWindow.vkey_W
-                                , EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL
-                                ]
+                    if context.memory.lootWindowOpenTicks > lootWindowRefusesToCloseTicks then
+                        describeBranch
+                            ("The loot window has stayed open for "
+                                ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
+                                ++ " readings and will not close."
                             )
+                            askForHelpToGetUnstuck
+
+                    else if context.memory.lootWindowOpenTicks > 2 then
+                        -- Click the window's own Close control, not Ctrl+W. That
+                        -- hotkey acts only on the *focused* window and nothing here
+                        -- focuses the loot window first, so it reached the client
+                        -- and closed nothing -- 650 presses in one run while the
+                        -- window sat open. Confirmed live on a window that had been
+                        -- stuck open for hours: Ctrl+W alone left it open, clicking
+                        -- its title bar first then Ctrl+W closed it, and clicking
+                        -- Close closed it with no focus step at all.
+                        case openLootWindow.uiNode |> closeControlOfWindow of
+                            Just closeButton ->
+                                describeBranch "Loot window did not close on its own -- click its Close button."
+                                    (clickUiElement closeButton)
+
+                            Nothing ->
+                                -- Wait rather than cry stuck. The genuine case is
+                                -- already covered above: lootWindowRefusesToCloseTicks
+                                -- gives up after 30 readings however the close fails,
+                                -- so waiting here costs nothing and cannot loop.
+                                describeBranch
+                                    "Loot window did not close on its own, and its Close button is not in this reading -- wait for the next one."
+                                    waitForProgressInGame
 
                     else
                         case openLootWindow.uiNode |> findUiElementWithText "Loot All" of
@@ -2810,11 +3344,7 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                                 describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
 
                             Nothing ->
-                                case
-                                    openLootWindow.uiNode
-                                        |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
-                                        |> Maybe.andThen .closeButton
-                                of
+                                case openLootWindow.uiNode |> closeControlOfWindow of
                                     Just closeButton ->
                                         describeBranch "Nothing left to loot. Close the wreck's cargo window."
                                             (clickUiElement closeButton)
@@ -2947,7 +3477,16 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                                 )
     in
     if overviewEntriesToAttack |> List.isEmpty then
-        decisionIfNoEnemyToAttack
+        if context.memory.clearingNotRequired && not (List.isEmpty everythingWorthAttacking) then
+            describeBranch
+                ("The briefing says clearing is not required -- leaving "
+                    ++ (everythingWorthAttacking |> List.length |> String.fromInt)
+                    ++ " hostile(s) alone and getting on with the objective."
+                )
+                decisionIfNoEnemyToAttack
+
+        else
+            decisionIfNoEnemyToAttack
 
     else if context.eventContext.botSettings.orbitInCombat == AppSettings.Yes then
         ensureShipIsOrbitingDecision |> Maybe.withDefault decisionToKillRats
@@ -2959,9 +3498,32 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
         decisionToKillRats
 
 
-ensureShipIsKeepingRange : ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
-ensureShipIsKeepingRange shipUI overviewEntryToKAR =
-    if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverRange then
+{-| How many readings to keep commanding a manoeuvre the client never confirms
+before letting the ship get on with shooting instead.
+
+Both keep-at-range and orbit report success only through the HUD's manoeuvre
+indicator, and on this client `HudActionIndicationContainer` is often empty --
+so `ManeuverRange`/`ManeuverOrbit` never arrives and the branch re-issues
+forever. Run 111 spent a whole 180-minute session on the range one: 8,941
+keypresses, no missions. Orbit is the same shape and now carries the same
+locked-target check, so this counter is the last line of defence for both
+rather than the only one for orbit.
+
+Give up quietly rather than ask for help. Positioning is an optimisation, not a
+prerequisite -- the guns and drones work regardless -- so the right answer when
+it cannot be confirmed is to stop trying and fight, not to stop the run.
+-}
+maneuverNotConfirmedGiveUpTicks : Int
+maneuverNotConfirmedGiveUpTicks =
+    20
+
+
+ensureShipIsKeepingRange : BotDecisionContext -> ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
+ensureShipIsKeepingRange context shipUI overviewEntryToKAR =
+    if context.memory.keepAtRangeUnconfirmedTicks > maneuverNotConfirmedGiveUpTicks then
+        Nothing
+
+    else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverRange then
         Nothing
 
     else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverAlign then
@@ -2987,9 +3549,15 @@ ensureShipIsKeepingRange shipUI overviewEntryToKAR =
                 )
             )
 
-ensureShipIsOrbiting : ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
-ensureShipIsOrbiting shipUI overviewEntryToOrbit =
-        if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
+ensureShipIsOrbiting : BotDecisionContext -> ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
+ensureShipIsOrbiting context shipUI overviewEntryToOrbit =
+        if context.memory.orbitUnconfirmedTicks > maneuverNotConfirmedGiveUpTicks then
+            Nothing
+
+        else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
+            Nothing
+
+        else if not (overviewEntryToOrbit |> overviewEntryIsTargetedOrTargeting) then
             Nothing
 
         else
@@ -3078,6 +3646,53 @@ launchAndEngageDrones context =
                         Nothing
             )
 
+{-| Whether the client is currently offering to take this gate.
+
+The panel carries `selectedItemActivateGate` only while the gate is in range, so
+its presence answers "are we close enough?" better than any distance we could
+compute -- the overview's own distance lags the ship, which is what made a
+threshold unreliable here and in the loot window.
+
+Requires the panel to be showing this gate, because the button belongs to
+whatever is selected; a button read while something else is selected would
+activate that instead.
+-}
+gateCanBeActivatedNow : BotDecisionContext -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+gateCanBeActivatedNow context entry =
+    selectedItemIsOverviewEntry context entry
+        && (selectedItemButtonNamed context "selectedItemActivateGate" /= Nothing)
+
+
+{-| Readings of drones sitting in space before the recall is treated as not
+landing at all, and before it is abandoned.
+
+Shift+R is a bare keypress: there is nothing to aim it at and nothing in the
+reading that says whether the client took it. So the only evidence available is
+the drones still being out, and these are the two points at which that stops
+looking like latency.
+
+The recovery threshold is generous because a fight legitimately keeps drones out
+for a long stretch, and the cost of hitting it early is only one click.
+-}
+droneRecallFocusRecoveryTicks : Int
+droneRecallFocusRecoveryTicks =
+    20
+
+
+droneRecallGiveUpTicks : Int
+droneRecallGiveUpTicks =
+    60
+
+
+dronesAreInSpace : ReadingFromGameClient -> Bool
+dronesAreInSpace readingFromGameClient =
+    readingFromGameClient.dronesWindow
+        |> Maybe.andThen .droneGroupInSpace
+        |> Maybe.andThen (.header >> .quantityFromTitle)
+        |> Maybe.map (.current >> (<) 0)
+        |> Maybe.withDefault False
+
+
 returnDronesToBay : BotDecisionContext -> Maybe DecisionPathNode
 returnDronesToBay context =
     context.readingFromGameClient.dronesWindow
@@ -3092,6 +3707,51 @@ returnDronesToBay context =
                         < 1
                 then
                     Nothing
+
+                else if droneRecallGiveUpTicks < context.memory.dronesInSpaceTicks then
+                    -- Stop asking. The caller's fallback is what matters here:
+                    -- in the wind-down path it docks, so giving up ends the
+                    -- session with drones abandoned instead of never ending at
+                    -- all. Run 118 held that path open for 150 readings and
+                    -- overran its session by five minutes, which cost the whole
+                    -- remainder of the run; a set of drones does not.
+                    Nothing
+
+                else if droneRecallGiveUpTicks == context.memory.dronesInSpaceTicks then
+                    Just
+                        (describeBranch
+                            ("Drones have been in space for "
+                                ++ String.fromInt context.memory.dronesInSpaceTicks
+                                ++ " readings and will not come back -- give up on them so the ship can move on."
+                            )
+                            waitForProgressInGame
+                        )
+
+                else if
+                    (droneRecallFocusRecoveryTicks < context.memory.dronesInSpaceTicks)
+                        && not (previousStepClickedMouse context)
+                then
+                    -- Shift+R is a bare keypress with nothing to aim at, so it
+                    -- does nothing at all when the client is not taking
+                    -- keyboard input -- and nothing in the reading says so. The
+                    -- decision looks identical whether the key landed or was
+                    -- swallowed, which is how run 118 pressed it 150 times
+                    -- while the drones sat in space.
+                    --
+                    -- Clicking inside the client first is the documented remedy
+                    -- for exactly this: a window that ignored Ctrl+W took it
+                    -- immediately after its title bar was clicked. The drone
+                    -- group header is a real, addressable target inside the
+                    -- window we are already acting on, and clicking it does
+                    -- nothing but move focus.
+                    --
+                    -- Gated on not having just clicked, so this alternates
+                    -- click, press, click, press rather than clicking forever.
+                    Just
+                        (describeBranch
+                            "Drones are not coming back -- click the drones window to put keyboard focus back in the client, then press again."
+                            (clickUiElement droneGroupInLocalSpace.header.uiNode)
+                        )
 
                 else
                     Just
@@ -3180,9 +3840,29 @@ selectThenPanelAction context buttonName entry description =
                 describeBranch description (clickUiElement button)
 
             Nothing ->
-                describeBranch
-                    (description ++ " -- but the selected-item panel offers no '" ++ buttonName ++ "'.")
-                    waitForProgressInGame
+                -- The panel is showing the right object but not the button we
+                -- want. That is normal for a reading or two while the panel
+                -- catches up, and never normal for long: these buttons appear
+                -- with the selection, or depend on range, in which case waiting
+                -- cannot produce them and something has to close the distance.
+                --
+                -- Bounded because the not-progressing alarm does not reach here.
+                -- That one fires from the bottom of the decision tree, and this
+                -- branch is several levels above it -- run 127 sat here for
+                -- 11,964 decisions without tripping anything at all.
+                if nothingToDoTicksBeforeCryingStuck < context.memory.nothingToDoTicks then
+                    describeBranch
+                        (description
+                            ++ " -- the panel still offers no '"
+                            ++ buttonName
+                            ++ "' and the mission has not moved in a long time."
+                        )
+                        askForHelpToGetUnstuck
+
+                else
+                    describeBranch
+                        (description ++ " -- but the selected-item panel offers no '" ++ buttonName ++ "'.")
+                        waitForProgressInGame
 
     else
         describeBranch (description ++ " (selecting it first)")
@@ -3203,7 +3883,7 @@ escapeTargetOnOverview context =
             context.readingFromGameClient.overviewWindows
                 |> List.concatMap .entries
                 |> List.filter overviewEntryIsDisplayed
-                |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+                |> List.sortBy overviewEntryDistanceOrFarInMeters
 
         matching predicate =
             onGrid
@@ -3224,12 +3904,23 @@ escapeTargetOnOverview context =
                 |> Maybe.map (\gate -> ( gate, "selectedItemWarpTo", "warp to it" ))
 
 
-{-| D-click an acceleration gate to activate it.
+{-| Activate an acceleration gate from the Selected Item panel.
 
-The account's own binding for gate activation, and one effect rather than a
-three-step cascade. The cascade this replaces is the one that produced run 81's
-11,882 activation attempts over three hours -- clicked from out of range, where
-nothing ever counted the attempts, against a gate that never opened.
+This held D and left-clicked the overview row before -- "D-click", EVE's own
+gesture for it. That does not work, and it failed silently: run 104 issued 124
+of them against a gate at 0 m and the objective never once changed, and run 99
+managed 88 with the same result. Reproduced by hand, so it is the gesture and
+not the host: the D key reaches the client (no mapping error, and the table has
+0x44) and the click lands (the panel shows the gate selected), yet the gate
+never opens. What a D-click degrades to when the D does nothing is a plain
+select, which is exactly what was observed.
+
+The panel's own `selectedItemActivateGate` button does work -- verified live on
+the gate that had refused 124 D-clicks: the objective went from "You need to
+activate the Acceleration Gate" to "Warping" and the overview turned over from
+17 rows to 22. Same lesson as the loot window and the retreat: where the panel
+offers a named button, press it rather than reaching for a keybind or a
+cascade.
 
 Wrapped in unlessAlreadyClosingIn like the other close-in commands: EVE flies the
 ship to the gate and takes it on arrival, so re-issuing while already on the way
@@ -3243,13 +3934,10 @@ activateGateOnOverviewEntry :
 activateGateOnOverviewEntry context description entry =
     unlessAlreadyClosingIn context
         description
-        (decideActionForCurrentStep
-            ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_D ]
-             , entry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-             , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_D ]
-             ]
-                |> List.concat
-            )
+        (selectThenPanelAction context
+            "selectedItemActivateGate"
+            entry
+            "Activate the gate from the selected-item panel"
         )
 
 
@@ -3343,8 +4031,20 @@ initBotMemory =
     , targetToUnlockUnchangedTicks = 0
     , shipApproachingTicks = 0
     , lootedWreckIds = []
+    , unlootableWreckIds = []
+    , lootAllRefusedTicks = 0
+    , lootWindowOutOfRangeTicks = 0
+    , dronesInSpaceTicks = 0
+    , dockedWithCargoWantedTicks = 0
+    , nothingToDoTicks = 0
+    , lastObjectiveText = ""
     , gateWithinReachTicks = 0
     , siteAdmitsThisShip = Nothing
+    , clearingNotRequired = False
+    , agentConversationWithoutTrackerTicks = 0
+    , keepAtRangeUnconfirmedTicks = 0
+    , orbitUnconfirmedTicks = 0
+    , readingsCount = 0
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
     }
@@ -3486,6 +4186,25 @@ overviewEntryIsActiveTarget =
         >> Set.member "myActiveTargetIndicator"
 
 
+{-| Whether this object is holding the ship in place.
+
+The client says so on the overview entry itself -- the parser has carried
+`isWarpDisruptingMe` all along and nothing ever read it. It matters more than
+any other property of a target, because everything the bot does when a fight
+goes wrong assumes it can leave: the retreat warps to a celestial, and warping
+is precisely what a scrambler prevents. Without this the bot issues warp after
+warp that cannot succeed while its armour drains, which is how the Coercer was
+lost in run 102 -- the retreat rewrite that followed did not fix it, because it
+still only knew how to warp.
+
+So a scrambler is shot first. Killing it is the only thing that restores the
+option to leave.
+-}
+overviewEntryIsWarpDisruptingMe : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsWarpDisruptingMe overviewEntry =
+    overviewEntry.commonIndications.isWarpDisruptingMe
+
+
 {-| Whether to shoot this overview entry. Rats are recognised by their icon
 colour, but some missions require destroying a structure -- a "Drone Silo" and
 other Large Collidable Objects -- and those are neutral objects with no
@@ -3533,6 +4252,17 @@ overviewEntryDistanceIsOnGrid overviewEntry =
 
         Err _ ->
             False
+
+
+{-| An overview entry's distance, or a placeholder standing for "too far to
+act on" when the distance reads in AU and does not parse as meters. Sorting
+with this is safe -- an unreadable distance simply sorts last -- but nothing
+should treat the placeholder as a real number; gate on
+`overviewEntryDistanceIsOnGrid` first wherever that matters.
+-}
+overviewEntryDistanceOrFarInMeters : EveOnline.ParseUserInterface.OverviewWindowEntry -> Int
+overviewEntryDistanceOrFarInMeters overviewEntry =
+    overviewEntry.objectDistanceInMeters |> Result.withDefault 999999
 
 
 {-| Whether the mission's own objective picks this object out.
@@ -3627,8 +4357,66 @@ overviewEntriesToAttackFromReadingFromGameClient : ObjectNamesToAttack -> Readin
 overviewEntriesToAttackFromReadingFromGameClient namesToAttack readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
-        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+        |> List.sortBy overviewEntryDistanceOrFarInMeters
         |> List.filter (shouldAttackOverviewEntry namesToAttack)
+
+
+{-| Targets this mission actually named, as opposed to hostiles that merely
+happen to share the grid. Distinguished by *why* the entry matched: an
+objective- or settings-named structure still has to die when the briefing says
+clearing is optional, a wandering pirate does not.
+-}
+isObjectToAttackByName : ObjectNamesToAttack -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+isObjectToAttackByName namesToAttack overviewEntry =
+    isObjectToAttackFromObjective namesToAttack.fromObjective overviewEntry
+        || isObjectToAttackFromSettings namesToAttack.fromSettings overviewEntry
+
+
+{-| Whether the mission's own briefing says the pirates need not be cleared.
+
+EVE says so in more than one wording, and the first version of this matched
+only the first of them:
+
+  + "The acceleration gates are not locked, hence clearing the pirates in the
+    first two rooms is not required" -- Worlds Collide
+  + "Destroying any pirates found in the area is not a requirement" -- Recon
+
+Worth acting on either way. Run 102 spent over 400 combat decisions shooting
+rats on a mission whose brief said not to bother, and run 106 did the same on
+Recon while the objective read "You need to activate the Acceleration Gate".
+
+So: the briefing must mention pirates *and* say they are not required. That
+keeps it explicit -- getting this wrong the other way strands the ship at a
+gate that will not open -- while not depending on the gates-not-locked clause,
+which only one of the two wordings has. Checked against every briefing in the
+run history: of 46 missions, it matches those two and nothing else.
+-}
+briefingSaysClearingIsOptional : String -> Bool
+briefingSaysClearingIsOptional briefing =
+    let
+        normalised =
+            briefing |> String.toLower
+    in
+    (normalised |> String.contains "pirate")
+        && ([ "not required", "not a requirement" ]
+                |> List.any (\phrase -> normalised |> String.contains phrase)
+           )
+
+
+{-| The answer from any briefing on screen right now, or `Nothing` when no
+briefing is readable and the remembered answer should stand.
+-}
+clearingNotRequiredFromReading : ReadingFromGameClient -> Maybe Bool
+clearingNotRequiredFromReading readingFromGameClient =
+    case
+        readingFromGameClient.agentConversationWindows
+            |> List.filter (.objectiveHtml >> (/=) Nothing)
+    of
+        [] ->
+            Nothing
+
+        conversations ->
+            Just (conversations |> List.any (missionFinePrint >> briefingSaysClearingIsOptional))
 
 
 {-| Whether the ship's own persistent cargo-hold "Inventory" window (open
@@ -3671,6 +4459,232 @@ wreckLootWindowsFromReadingFromGameClient : ReadingFromGameClient -> List EveOnl
 wreckLootWindowsFromReadingFromGameClient readingFromGameClient =
     readingFromGameClient.inventoryWindows
         |> List.filter (.uiNode >> findUiElementWithText "Loot All" >> (/=) Nothing)
+
+
+{-| The overview row the open loot window belongs to: the nearest one that can be
+looted at all. That is necessarily the container just opened, since it is the only
+one the bot ever opens.
+-}
+nearestLootableEntry : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+nearestLootableEntry readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter (\entry -> entry.objectItemID /= Nothing)
+        |> List.sortBy overviewEntryDistanceOrFarInMeters
+        |> List.head
+
+
+{-| The mission's own objective text, for noticing that it has stopped changing.
+
+The first version of this tried to decide from the overview whether there was
+anything worth acting on, using `objectItemID` as the mark of a lootable wreck.
+Every row has one -- stargates, stations, the sun -- so nothing was ever
+"nothing", the counter reset on every reading, and the alarm it gated could not
+fire at all. Run 125 sat in the branch for 7,442 decisions with the fix
+supposedly in place.
+
+What the reading can answer honestly is narrower: has the objective changed. A
+mission that is progressing rewrites this -- a pocket clears, a step completes,
+the cargo lands -- so text that is identical for hundreds of readings while the
+ship is in space means nothing is happening. It does not have to distinguish
+"nothing to do" from "busy", because the branch that consults it is only reached
+when there is nothing to do.
+-}
+missionObjectiveText : ReadingFromGameClient -> String
+missionObjectiveText readingFromGameClient =
+    readingFromGameClient.agentMissionInfoPanelEntries
+        |> List.concatMap .instructionTexts
+        |> String.join " / "
+
+
+{-| Readings at the bottom of the tree before the bot stops calling it waiting.
+
+Generous -- a mission genuinely can take a while to catch up after a warp -- but
+finite, because the two runs that died here waited for the rest of the session.
+-}
+nothingToDoTicksBeforeCryingStuck : Int
+nothingToDoTicksBeforeCryingStuck =
+    300
+
+
+{-| Whether the hangar has had long enough to produce the mission's cargo.
+
+Not every objective that says "you need X in your cargohold" means X is in this
+station. "After The Seven (3 of 5)" wants Phenod's DNA, which comes out of a
+deadspace encounter, and the tracker's own next step is Undock -- but the docked
+branch tries the hangar first and, before this, never stopped. Run 123 spent 86
+readings docked, cycling the inventory quick filter for an item that was never
+going to be there, while the button that would have started the mission sat on
+the info panel.
+
+A load that can succeed succeeds quickly: run 117 filtered, found and dragged in
+about six readings. So this is not a close call, and the generous bound costs
+nothing when the cargo really is in the hangar.
+
+Counted on the reading alone -- docked with the mission asking for cargo -- so
+it resets the moment the ship undocks or the objective moves on.
+-}
+courierLoadHasHadLongEnough : BotDecisionContext -> Bool
+courierLoadHasHadLongEnough context =
+    courierLoadTicksBeforeGivingUpOnTheHangar < context.memory.dockedWithCargoWantedTicks
+
+
+courierLoadTicksBeforeGivingUpOnTheHangar : Int
+courierLoadTicksBeforeGivingUpOnTheHangar =
+    40
+
+
+{-| Docked, with the mission asking for cargo. The state the hangar search runs
+in, counted so it cannot run forever.
+-}
+dockedWithCargoWanted : ReadingFromGameClient -> Bool
+dockedWithCargoWanted readingFromGameClient =
+    let
+        isDocked =
+            case readingFromGameClient.shipUI of
+                Nothing ->
+                    True
+
+                Just _ ->
+                    False
+    in
+    isDocked
+        && (readingFromGameClient.agentMissionInfoPanelEntries
+                |> List.concatMap .objectNamesToCarry
+                |> List.isEmpty
+                |> not
+           )
+
+
+{-| Whether the ship is close enough to take items out of the open container.
+
+Run 113 is why this exists. A double click is "Open Cargo", and from outside range
+the client opens the window immediately and flies the ship over -- so an open loot
+window is not evidence of having arrived, and EVE said so 39 times in one run
+("Cargo is too far away. Ship is on automatic approach to cargo."). The bot clicked
+'Loot All' anyway on the reading the window appeared, and the client refused it 8
+times out of 8 with "You must be within 2500 meters of the container to remove
+items from it". Every wreck that run was left full.
+-}
+shipIsWithinLootRange : ReadingFromGameClient -> Bool
+shipIsWithinLootRange readingFromGameClient =
+    case nearestLootableEntry readingFromGameClient of
+        Nothing ->
+            False
+
+        Just entry ->
+            case entry.objectDistanceInMeters of
+                Ok distance ->
+                    distance <= interactionRangeInMeters
+
+                Err _ ->
+                    False
+
+
+{-| Whether the open container reports itself empty.
+
+The capacity gauge is the only honest answer to "did the loot work". The bot used
+to record a wreck as looted the moment its window opened, which is the one moment
+we have positive evidence it still holds something -- so a refused 'Loot All' was
+remembered as a completed one and the wreck never looked at again. On run 113 that
+lost the Blood Raider Personnel Transport carrying the mission's Militants.
+-}
+openContainerIsEmpty : EveOnline.ParseUserInterface.InventoryWindow -> Bool
+openContainerIsEmpty lootWindow =
+    case lootWindow.selectedContainerCapacityGauge of
+        Just (Ok gauge) ->
+            gauge.used <= 0
+
+        _ ->
+            False
+
+
+{-| The open wreck loot window together with the overview id it belongs to.
+
+Both halves are needed together and neither means anything without the other, so
+the pairing is done once here rather than at each of the three call sites.
+-}
+openWreckLootWindowAndId : ReadingFromGameClient -> Maybe ( EveOnline.ParseUserInterface.InventoryWindow, String )
+openWreckLootWindowAndId readingFromGameClient =
+    case readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.head of
+        Nothing ->
+            Nothing
+
+        Just lootWindow ->
+            readingFromGameClient
+                |> nearestLootableEntry
+                |> Maybe.andThen .objectItemID
+                |> Maybe.map (\wreckId -> ( lootWindow, wreckId ))
+
+
+{-| Readings with the container open and in range, its gauge still not empty,
+before the bot writes the wreck off. Deliberately generous: the gauge lags the
+client by a reading or two after a successful 'Loot All', and the cost of being
+wrong here is abandoning a wreck that may hold the mission item.
+-}
+lootAllRefusedTicksBeforeGivingUp : Int
+lootAllRefusedTicksBeforeGivingUp =
+    12
+
+
+{-| Readings with the container open and the ship still not in range before the
+bot writes the wreck off. An approach across a pocket is legitimately long -- run
+113 spent over a hundred readings covering 30 km -- so this only catches an
+approach that is not happening at all.
+-}
+outOfRangeTicksBeforeGivingUp : Int
+outOfRangeTicksBeforeGivingUp =
+    250
+
+
+{-| Why the bot should stop working on the container it has open, if it should.
+
+Both counters are bounds on waiting, and each names a different failure, so the
+log says which one happened rather than reporting a generic give-up.
+-}
+giveUpOnOpenContainerReason : BotDecisionContext -> Maybe String
+giveUpOnOpenContainerReason context =
+    if context.memory.lootAllRefusedTicks >= lootAllRefusedTicksBeforeGivingUp then
+        Just
+            ("'Loot All' has not emptied this container in "
+                ++ String.fromInt context.memory.lootAllRefusedTicks
+                ++ " readings within range."
+            )
+
+    else if context.memory.lootWindowOutOfRangeTicks >= outOfRangeTicksBeforeGivingUp then
+        Just
+            ("The ship has not reached this container in "
+                ++ String.fromInt context.memory.lootWindowOutOfRangeTicks
+                ++ " readings."
+            )
+
+    else
+        Nothing
+
+
+{-| How many readings an agent conversation may sit there insisting a mission
+is in progress, with no mission tracked at all, before that is called what it
+is rather than retried.
+
+Generous on purpose: a mission just accepted appears in the conversation a
+reading or two before it appears in the info panel, and mistaking that for an
+untracked mission would halt every run at its first mission. The failure it
+catches is unbounded, so waiting a few more readings costs nothing.
+-}
+missionNotTrackedTicks : Int
+missionNotTrackedTicks =
+    15
+
+
+{-| How many readings to keep trying to close a loot window before giving up and
+asking for help. Closing it works on the first attempt when it works at all, so
+anything past a handful means the window is not responding; the version that
+pressed Ctrl+W at it forever managed 650 attempts in one run without ever
+saying so.
+-}
+lootWindowRefusesToCloseTicks : Int
+lootWindowRefusesToCloseTicks =
+    30
 
 
 overviewEntryIsStrayLockTarget : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
@@ -3725,7 +4739,13 @@ clickTargetBeforeShooting context entriesToAttack =
                                 )
                     )
     in
-    [ entriesToAttack |> List.filter overviewEntryIsActiveTarget |> List.head
+    -- A scrambler outranks the target already selected. Everything else prefers
+    -- to stay on the active target rather than flip between them, but a warp
+    -- disruptor is the one thing worth switching for: until it dies the ship
+    -- cannot leave, and it is also what keep-at-range should be holding range
+    -- on, since keep-at-range follows whatever is active.
+    [ entriesToAttack |> List.filter overviewEntryIsWarpDisruptingMe |> List.head
+    , entriesToAttack |> List.filter overviewEntryIsActiveTarget |> List.head
     , entriesToAttack |> List.head
     ]
         |> List.filterMap identity
@@ -3885,7 +4905,7 @@ accelerationGateIsWithinReach readingFromGameClient =
         |> List.filter isAccelerationGate
         |> List.any
             (\entry ->
-                (entry.objectDistanceInMeters |> Result.withDefault 999999)
+                (overviewEntryDistanceOrFarInMeters entry)
                     <= interactionRangeInMeters
             )
 
@@ -3913,27 +4933,38 @@ activateAccelerationGateIfPresent context =
     context.readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.filter isAccelerationGate
-        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+        |> List.sortBy overviewEntryDistanceOrFarInMeters
         |> List.head
         |> Maybe.andThen
             (\accelerationGateEntry ->
                 let
                     distanceInMeters =
-                        accelerationGateEntry.objectDistanceInMeters |> Result.withDefault 999999
+                        overviewEntryDistanceOrFarInMeters accelerationGateEntry
                 in
-                if interactionRangeInMeters < distanceInMeters then
+                if not (gateCanBeActivatedNow context accelerationGateEntry) then
                     Just <|
-                    -- "Activate Gate" from out here does the whole thing: the
-                    -- client flies the ship over and takes the gate on arrival,
-                    -- with no tick spent noticing it has arrived. The drones
-                    -- come home first, since the gate fires with whatever is
-                    -- still in space; the prop mod stays on, so the ship covers
-                    -- the distance fast.
+                    -- Approach until the client says we can take the gate, and
+                    -- let *it* decide when that is. The panel only carries
+                    -- `selectedItemActivateGate` while the gate is genuinely in
+                    -- range, so the button's presence is the range test -- and
+                    -- unlike a distance of our own it cannot be stale.
+                    --
+                    -- A distance threshold was the obvious alternative and it
+                    -- does not work. The overview distance lags the ship's true
+                    -- position: run 128 read "in reach" and shut the prop mod
+                    -- down, and the panel still offered no button. It is the
+                    -- same lag that had the loot window refusing "Loot All" with
+                    -- "you must be within 2500 meters" while the reading said
+                    -- 1,602 m. Tightening interactionRangeInMeters would only
+                    -- move the guess; asking the client removes it.
+                    --
+                    -- Drones come home first: the gate fires with whatever is
+                    -- still in space.
                     ensureDronesRecalledBeforeWarping context
-                        (activateGateOnOverviewEntry context
+                        (approachOverviewEntry context
                             ("The acceleration gate is "
                                 ++ String.fromInt distanceInMeters
-                                ++ " m away -- D-click it from here and let the client fly me in."
+                                ++ " m away and the panel offers no Activate yet -- keep closing."
                             )
                             accelerationGateEntry
                         )
@@ -4096,9 +5127,14 @@ routeToStationByName context stationName =
                                 describeBranch ("Search for '" ++ query ++ "'.")
                                     (decideActionForCurrentStep
                                         (List.concat
+                                            -- No select-all first: neither
+                                            -- Control+A nor Command+A selects in
+                                            -- this client's fields, and Command+A
+                                            -- additionally stops the field taking
+                                            -- keystrokes at all. This one is
+                                            -- normally opened empty.
                                             [ mouseClickOnUIElement MouseButtonLeft searchField
                                                 |> Result.withDefault []
-                                            , selectAllEffects
                                             , typeTextEffects query
                                             , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_RETURN
                                               , EffectOnWindow.KeyUp EffectOnWindow.vkey_RETURN
@@ -4540,6 +5576,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         currentContextMenuDepth =
             context.readingFromGameClient.contextMenus |> List.length
 
+        -- The agent offering to complete a mission is the agent asserting one
+        -- is in progress. Read here rather than in the decision tree so the
+        -- assertion can be counted across readings, including the ones where
+        -- the bot has closed the conversation again.
+        agentSaysMissionInProgress =
+            context.readingFromGameClient.agentConversationWindows
+                |> List.concatMap .buttons
+                |> List.any
+                    (\button ->
+                        [ "CompleteMission_Button", "CompleteRemotely_Button" ]
+                            |> List.member button.name
+                    )
+
         currentRouteFirstMarkerRegion =
             context.readingFromGameClient
                 |> infoPanelRouteFirstMarkerFromReadingFromGameClient
@@ -4602,6 +5651,86 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         lowWaterMark context.readingFromGameClient
             (.armor)
             botMemoryBefore.lowestArmorPercentSinceHealthy
+    , readingsCount = botMemoryBefore.readingsCount + 1
+    , orbitUnconfirmedTicks =
+        -- The orbit twin of keepAtRangeUnconfirmedTicks below; same indicator,
+        -- same way of never arriving.
+        case context.readingFromGameClient.shipUI of
+            Nothing ->
+                0
+
+            Just shipUI ->
+                if
+                    [ EveOnline.ParseUserInterface.ManeuverOrbit
+                    , EveOnline.ParseUserInterface.ManeuverAlign
+                    ]
+                        |> List.member
+                            (shipUI.indication
+                                |> Maybe.andThen .maneuverType
+                                |> Maybe.withDefault EveOnline.ParseUserInterface.ManeuverWarp
+                            )
+                then
+                    0
+
+                else if context.readingFromGameClient.targets |> List.isEmpty then
+                    0
+
+                else
+                    botMemoryBefore.orbitUnconfirmedTicks + 1
+    , keepAtRangeUnconfirmedTicks =
+        -- How long the ship has been told to keep at range without the HUD ever
+        -- saying it is. The command's only confirmation is the manoeuvre
+        -- indicator, and on this client that container is frequently empty --
+        -- so the check that ends the command can simply never come true.
+        case context.readingFromGameClient.shipUI of
+            Nothing ->
+                0
+
+            Just shipUI ->
+                if
+                    [ EveOnline.ParseUserInterface.ManeuverRange
+                    , EveOnline.ParseUserInterface.ManeuverAlign
+                    ]
+                        |> List.member
+                            (shipUI.indication
+                                |> Maybe.andThen .maneuverType
+                                |> Maybe.withDefault EveOnline.ParseUserInterface.ManeuverWarp
+                            )
+                then
+                    0
+
+                else if context.readingFromGameClient.targets |> List.isEmpty then
+                    0
+
+                else
+                    botMemoryBefore.keepAtRangeUnconfirmedTicks + 1
+    , agentConversationWithoutTrackerTicks =
+        -- How many readings the agent has claimed a mission is in progress
+        -- while nothing at all is tracked. Counted from the reading so the
+        -- decision tree can tell "the panel has not caught up yet" from "this
+        -- mission is not tracked", which look identical in any one reading.
+        --
+        -- Deliberately not reset when the conversation closes. The failure this
+        -- catches is a cycle that closes and reopens it every few readings, so
+        -- resetting there would hold the count near zero forever and the check
+        -- would never fire -- which is the same silent-no-op shape it exists to
+        -- report. Only a mission actually appearing in the panel clears it.
+        if context.readingFromGameClient.agentMissionInfoPanelEntries |> List.isEmpty |> not then
+            0
+
+        else if agentSaysMissionInProgress then
+            botMemoryBefore.agentConversationWithoutTrackerTicks + 1
+
+        else
+            botMemoryBefore.agentConversationWithoutTrackerTicks
+    , clearingNotRequired =
+        -- Kept far longer than siteAdmitsThisShip below, and deliberately: the
+        -- briefing is only readable while the conversation is open, but the
+        -- rooms it describes are fought long after it closes. Every briefing
+        -- that appears overwrites the answer, so the next mission replaces this
+        -- one rather than inheriting it.
+        clearingNotRequiredFromReading context.readingFromGameClient
+            |> Maybe.withDefault botMemoryBefore.clearingNotRequired
     , siteAdmitsThisShip =
         -- Read while the restrictions window is up, then kept so the answer
         -- outlives closing it. Forgotten once the conversation ends, since the
@@ -4632,33 +5761,110 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- observed live re-opening the same Coreli Scout Wreck 73 times, hauling
         -- out ammo and scrap while the mission item was never in it. Nothing in
         -- a row's text tells an emptied wreck from a full one, so remember the
-        -- ones already opened by object id.
+        -- ones already emptied by object id.
         --
-        -- The id recorded is the nearest lootable row at the moment a loot
-        -- window is open, which is necessarily the one just opened, since that
-        -- is the only one the bot ever opens. Capped so a long session cannot
-        -- grow this without bound.
-        if context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.isEmpty then
-            botMemoryBefore.lootedWreckIds
+        -- *Emptied*, not *opened*. This used to record the wreck as soon as its
+        -- window appeared, which is precisely the moment we have evidence it
+        -- still holds something. A 'Loot All' the client refused was then
+        -- remembered as a completed one, and the wreck was filtered out of the
+        -- candidate list forever. Run 113 lost the Blood Raider Personnel
+        -- Transport holding the mission's Militants that way, and then waited
+        -- out the rest of the session for an objective that could no longer
+        -- clear. The capacity gauge is the honest signal: the container itself
+        -- says what is left in it.
+        --
+        -- Capped so a long session cannot grow this without bound.
+        case openWreckLootWindowAndId context.readingFromGameClient of
+            Just ( lootWindow, wreckId ) ->
+                if openContainerIsEmpty lootWindow && not (List.member wreckId botMemoryBefore.lootedWreckIds) then
+                    wreckId :: botMemoryBefore.lootedWreckIds |> List.take 200
 
-        else
-            case
-                context.readingFromGameClient.overviewWindows
-                    |> List.concatMap .entries
-                    |> List.filter (\entry -> entry.objectItemID /= Nothing)
-                    |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
-                    |> List.head
-                    |> Maybe.andThen .objectItemID
-            of
-                Nothing ->
+                else
                     botMemoryBefore.lootedWreckIds
 
-                Just nearestId ->
-                    if List.member nearestId botMemoryBefore.lootedWreckIds then
-                        botMemoryBefore.lootedWreckIds
+            Nothing ->
+                botMemoryBefore.lootedWreckIds
+    , lootAllRefusedTicks =
+        -- Readings with the container open, the ship in range, and the gauge
+        -- still not reading empty. In the normal case this is one or two while
+        -- the client catches up. It climbing means 'Loot All' is not working on
+        -- this container for a reason the bot cannot see -- a full cargohold,
+        -- say -- and `unlootableWreckIds` gives up on it rather than letting it
+        -- hold the mission open indefinitely.
+        case openWreckLootWindowAndId context.readingFromGameClient of
+            Just ( lootWindow, _ ) ->
+                if shipIsWithinLootRange context.readingFromGameClient && not (openContainerIsEmpty lootWindow) then
+                    botMemoryBefore.lootAllRefusedTicks + 1
 
-                    else
-                        nearestId :: botMemoryBefore.lootedWreckIds |> List.take 200
+                else
+                    0
+
+            Nothing ->
+                0
+    , lastObjectiveText = missionObjectiveText context.readingFromGameClient
+    , nothingToDoTicks =
+        -- Readings in space with the objective text unchanged. Generous,
+        -- because the branch that reads it is only reached when there is
+        -- genuinely nothing to do -- so this does not have to tell waiting from
+        -- fighting, only tell "the mission moved" from "it did not".
+        if
+            (context.readingFromGameClient.shipUI /= Nothing)
+                && (missionObjectiveText context.readingFromGameClient /= "")
+                && (missionObjectiveText context.readingFromGameClient == botMemoryBefore.lastObjectiveText)
+        then
+            botMemoryBefore.nothingToDoTicks + 1
+
+        else
+            0
+    , dockedWithCargoWantedTicks =
+        if dockedWithCargoWanted context.readingFromGameClient then
+            botMemoryBefore.dockedWithCargoWantedTicks + 1
+
+        else
+            0
+    , dronesInSpaceTicks =
+        -- Consecutive readings with drones out. Reset when the bay has them
+        -- back, so this measures "how long have they been out", which is what
+        -- tells a recall that is not landing from one that simply has not been
+        -- answered yet.
+        if dronesAreInSpace context.readingFromGameClient then
+            botMemoryBefore.dronesInSpaceTicks + 1
+
+        else
+            0
+    , lootWindowOutOfRangeTicks =
+        -- The other half of the same bound. Waiting for the ship to arrive is
+        -- correct, but only the client is steering, and if the approach never
+        -- completes -- or the row leaves the overview entirely, which makes the
+        -- range unanswerable -- the wait has to end somewhere. Generous, because
+        -- a legitimate approach from the far side of a pocket is minutes of
+        -- readings and cutting one short abandons a wreck for no reason.
+        case openWreckLootWindowAndId context.readingFromGameClient of
+            Just _ ->
+                if shipIsWithinLootRange context.readingFromGameClient then
+                    0
+
+                else
+                    botMemoryBefore.lootWindowOutOfRangeTicks + 1
+
+            Nothing ->
+                0
+    , unlootableWreckIds =
+        case openWreckLootWindowAndId context.readingFromGameClient of
+            Just ( _, wreckId ) ->
+                if
+                    ((botMemoryBefore.lootAllRefusedTicks >= lootAllRefusedTicksBeforeGivingUp)
+                        || (botMemoryBefore.lootWindowOutOfRangeTicks >= outOfRangeTicksBeforeGivingUp)
+                    )
+                        && not (List.member wreckId botMemoryBefore.unlootableWreckIds)
+                then
+                    wreckId :: botMemoryBefore.unlootableWreckIds |> List.take 200
+
+                else
+                    botMemoryBefore.unlootableWreckIds
+
+            Nothing ->
+                botMemoryBefore.unlootableWreckIds
     , gateWithinReachTicks =
         -- Readings in a row with an acceleration gate close enough to use. A
         -- gate normally takes a handful; a gate that refuses the ship never

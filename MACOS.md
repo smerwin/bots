@@ -180,6 +180,37 @@ same decision repeating 60 times. It captures the game window by id rather than
 the screen, which matters when the client is on another Space. Run the bot with
 `2>&1 | tee somefile.log` to have a log for it to read.
 
+## Watching and steering a run: the web console
+
+Pass `--web-console` and the host serves a page on your tailnet -- session
+stats, the log as a live filterable stream, and an editable settings box. It
+binds to this machine's Tailscale address and refuses to start without one, so
+it is never exposed beyond the tailnet.
+
+The settings box is the part worth knowing about, because it changes settings
+**without restarting the run**:
+
+```
+# read what the bot is using now
+curl -s http://<tailnet-ip>:8787/api/state | python3 -c 'import json,sys; print(json.load(sys.stdin)["settings"])'
+
+# replace it -- send the whole string, not a patch
+curl -s -X POST http://<tailnet-ip>:8787/api/settings \
+     -H 'Content-Type: application/json' \
+     -d '{"settings": "orbit-in-combat=no\nkeep-at-range=yes\n..."}'
+```
+
+The loop applies it on its next tick and logs `applying settings change from the
+console`. Under the hood it re-sends `BotSettingsChangedEvent`, the same event
+the session opens with, so the bot re-reads every setting and nothing in the bot
+needs to know the console exists.
+
+This is the cheapest way to test a settings guess. A wrong `approach-object` or
+`attack-object` is one POST away from being undone, whereas finding out by
+restarting costs the whole session's progress -- and a two-hour run that has
+already handed in seven missions is not something to throw away over one
+misjudged line.
+
 ## What to expect, realistically
 
 - **`eve-online-mission-runner`** is the most exercised bot here: it takes a
@@ -207,6 +238,61 @@ the screen, which matters when the client is on another Space. Run the bot with
 - **Expect to tune settings against your own fit and overview.** Several of the
   bots' settings match against the overview's *Type* column, so they depend on
   what your overview shows and how it is sorted. The `Bot.elm` headers say which.
+
+## Driving the client by hand
+
+For one-offs -- rescuing a ship, unsticking a window, checking what the bot can
+actually see -- there is an interactive handle on the client:
+
+```
+cd tools/macos-host
+python3 -i eve_repl.py
+>>> eve.dock("Emperor Family Academy")
+```
+
+`REPL.md` covers it, including the coordinate conversion and the conventions
+that have to be right for a click to land where you meant.
+
+## Driving the EVE launcher (switching accounts)
+
+The launcher and the game are separate apps: `/Applications/eve-online.app` (an
+Electron shell) and the client itself out of `SharedCache/tq/EVE.app`. Different
+pids, different windows, and `window_probe --all` sees both. The launcher's main
+window is named `EVE Launcher`; the client's is named for the character, e.g.
+`EVE - Gal Bistot`.
+
+Screenshot a launcher window with `screencapture -x -o -l <window id>`. The
+image is at backing scale 2, so image pixel / 2 = window point, and screen point
+= window origin + window point. The window sits below the menu bar, so its
+origin y is not zero.
+
+**Clicking an account row selects it.** Verified by parking the cursor far away
+afterwards and re-reading: the right-hand panel keeps the new account, so it is
+a real selection and not a hover effect.
+
+**PLAY NOW ignores synthetic clicks.** Three attempts -- centre of the button,
+the play-icon side, and once with an approach gesture so it registered as real
+movement -- left the status bar reading "EVE Online | Ready to play!" with no
+client process and no error dialog. This is not a general problem with clicking
+the launcher: the same mechanism selects accounts perfectly well.
+
+**Press and hold the character's avatar for about five seconds instead.** That
+launches that character directly, and skips the character-selection screen
+entirely.
+
+Quitting the client:
+
+```
+osascript -e 'tell application "EVE" to quit'
+```
+
+This reports `execution error: EVE got an error: User canceled. (-128)` and
+quits anyway. Check with `pgrep -f "SharedCache/tq/EVE.app"` rather than
+trusting the exit status.
+
+One caution: the client's command line carries its SSO and refresh tokens, so
+`ps`/`pgrep -fl` output for that process does not belong in a shared log or
+a pasted transcript.
 
 ## Troubleshooting
 
