@@ -67,6 +67,7 @@ type alias UpdateMemoryContext =
     { timeInMilliseconds : Int
     , readingFromGameClient : ReadingFromGameClient
     , screenshot : ReadingFromGameClientScreenshot
+    , previousStepsEffects : List (List Common.EffectOnWindow.EffectOnWindowStruct)
     }
 
 
@@ -177,6 +178,13 @@ processEventInBaseFramework config eventContext event stateBefore =
                     { timeInMilliseconds = eventContext.timeInMilliseconds
                     , readingFromGameClient = readingFromGameClient
                     , screenshot = screenshot
+
+                    -- The same history the decision context gets. A counter
+                    -- that has to measure how long ago the bot *asked* for
+                    -- something -- rather than what the client currently shows
+                    -- -- cannot be derived from the reading alone, and the
+                    -- reading is all this context used to carry.
+                    , previousStepsEffects = stateBefore.lastStepsEffects
                     }
 
                 botMemory : botMemory

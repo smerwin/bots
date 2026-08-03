@@ -650,6 +650,44 @@ A module button is a **toggle**, so a click repeated before the client has shown
 its result switches the module back off. `moduleButtonClickSettlingSteps` gives a
 click 5 steps to appear in a reading first.
 
+## Drones: how long they have been out says nothing about a recall
+
+Warping with drones in space loses them, so every warp, dock and retreat in
+`eve-online-mission-runner` goes through `returnDronesToBay` first. Shift+R is a
+bare keypress with nothing to aim at and no acknowledgement in the reading, so
+the only evidence a recall landed is the in-space count falling — which means
+the bot has to bound how long it keeps asking, and that bound is where this went
+wrong.
+
+**Time since launch is not evidence about a recall.** The give-up was originally
+gated on `dronesInSpaceTicks`, which counts readings since the drones were
+*launched* — and drones are deliberately left out for a whole fight. Any pocket
+lasting more than 60 readings pushed the counter past the threshold, after which
+`returnDronesToBay` declined for the rest of the session and every subsequent
+warp abandoned whatever was in space. Run 1 lost all ten drones this way in two
+batches of five: 91 readings between the second launch and the next warp, no
+recall decision among them. `droneRecallUnansweredTicks` counts from the first
+recall the client did not answer instead, and resets whenever the in-space count
+falls, since a partial recall is the client answering.
+
+**It was silent because the explanation was on an equality test.** The branch
+that said "give up on them" fired only on the reading where the counter was
+*exactly* 60, and `returnDronesToBay` is only called from the warp and travel
+paths — so if the ship was mid-fight on that one reading, nothing was ever
+logged and the `>` branch then declined forever without a word. A branch that
+declines has to say so every time it declines. `returnDronesToBay` now takes the
+caller's next step rather than returning a `Maybe`, so the give-up can name
+itself in the decision log while handing the step on.
+
+Two consequences worth knowing. The give-up **latches** once reached, because
+giving up is what stops the asking — without the latch the counter resets two
+readings later and the ship alternates forever between abandoning its drones and
+recalling them. And measuring "how long ago did the bot *ask*" needs the
+previous steps' effects, which `UpdateMemoryContext` did not carry; the mission
+runner's copy of `BotFrameworkSeparatingMemory.elm` now passes
+`previousStepsEffects` through, so that file diverges from the other apps'
+copies.
+
 ## Elm toolchain
 
 `brew install elm` (arm64-native bottle) — **not** `npm install -g elm`, which
