@@ -135,6 +135,7 @@ type alias ShipUIModuleButton =
     , isHiliteVisible : Bool
     , isBusy : Bool
     , rampRotationMilli : Maybe Int
+    , stateFromDictEntries : ShipUIModuleButtonState
     }
 
 
@@ -1428,7 +1429,136 @@ parseShipUIModuleButton { slotNode, moduleButtonNode } =
             |> List.isEmpty
             |> not
     , rampRotationMilli = rampRotationMilli
+    , stateFromDictEntries = parseShipUIModuleButtonState moduleButtonNode.uiNode
     }
+
+
+{-| What a module button says about **itself**, straight out of its own
+`dictEntriesOfInterest`.
+
+The module-state fields above this one all read the slot's sprites, and #35
+walked a top-row button's whole subtree to see which sprites are there. One is:
+`underlay`. There is no `hilite` and no `busy` on this build, so
+`isHiliteVisible` and `isBusy` cannot be anything but `False` however the module
+behaves. That much of the note in CLAUDE.md was right. The conclusion drawn from
+it -- that this client does not expose the state -- was not: the state is on the
+button itself, as twelve dict entries nothing had ever read.
+
+**`ramp_active` is a duty cycle, not an on/off state.** That is the correction
+that matters most here, and it is measured rather than argued: 92 read-only
+samples over 240s of run 9 caught the weapon's `ramp_active` flipping fourteen
+times while `isInActiveState` stayed `True` throughout -- the gun never switched
+off. The `False` half of that oscillation is the gap between cycles. `isActive`
+reads this entry and reports it as "running", and #34 is what that costs: a
+counter gated on "no gun reads as firing" resets inside every cycle, and a wait
+for "the ramp to stop" is satisfied by the gap rather than by the guns going
+quiet.
+
+**Absent and `False` are different facts.** For the first ~60s of that sample no
+module carried `ramp_active` at all -- not `False`, missing -- and it appeared
+per module as each one first cycled. `waitingForActiveTarget` did the same later,
+absent until 141s and then `0` on all four modules at once. So every field here
+is a `Maybe`, and an entry that does not decode stays `Nothing` rather than
+becoming a guessed `False`: only one of those two answers is safe to act on.
+
+**Nothing decides anything from these.** The meanings above come from one 240s
+window on one fit, and the leg #34 actually needed has no observations at all:
+`isDeactivating` -- named for exactly the state that wait cared about -- was
+never once `True`, because nothing switched a module off while the sampler ran.
+`effect_activating` was seen pulsing `1` exactly once, 2.6s before a cycle
+began. So these are parsed to be logged and read back, and `isActive`, `isBusy`
+and `isHiliteVisible` keep the meanings they had.
+
+Both decoders accept either JSON shape. This build sends booleans for
+`ramp_active` and its neighbours and plain numbers for `waitingForActiveTarget`
+and the rest, but one that sent `true` where this one sends `1` would otherwise
+turn a field silently into `Nothing` -- which is the same "the signal is dead"
+reading this whole issue is about.
+
+The field names are the client's own keys, unchanged, so that a value in the log
+and a value in the tree are the same name and no translation table has to be
+right. Reading them costs twelve dictionary lookups on a node the caller already
+holds -- no traversal, which each sprite field above does do. That is why this
+takes the bare `UITreeNode` and not the node with its display region: it has
+nothing to walk with.
+
+-}
+type alias ShipUIModuleButtonState =
+    { ramp_active : Maybe Bool
+    , isInActiveState : Maybe Bool
+    , isDeactivating : Maybe Bool
+    , effect_activating : Maybe Int
+    , online : Maybe Bool
+    , blinking : Maybe Bool
+    , grey : Maybe Bool
+    , quantity : Maybe Int
+    , autoreload : Maybe Int
+    , autorepeat : Maybe Int
+    , isMaster : Maybe Bool
+    , waitingForActiveTarget : Maybe Int
+    }
+
+
+parseShipUIModuleButtonState : EveOnline.MemoryReading.UITreeNode -> ShipUIModuleButtonState
+parseShipUIModuleButtonState moduleButtonNode =
+    let
+        flag dictEntryKey =
+            getModuleButtonStateFlagFromDictEntries dictEntryKey moduleButtonNode
+
+        number dictEntryKey =
+            getModuleButtonStateNumberFromDictEntries dictEntryKey moduleButtonNode
+    in
+    { ramp_active = flag "ramp_active"
+    , isInActiveState = flag "isInActiveState"
+    , isDeactivating = flag "isDeactivating"
+    , effect_activating = number "effect_activating"
+    , online = flag "online"
+    , blinking = flag "blinking"
+    , grey = flag "grey"
+    , quantity = number "quantity"
+    , autoreload = number "autoreload"
+    , autorepeat = number "autorepeat"
+    , isMaster = flag "isMaster"
+    , waitingForActiveTarget = number "waitingForActiveTarget"
+    }
+
+
+getModuleButtonStateFlagFromDictEntries : String -> EveOnline.MemoryReading.UITreeNode -> Maybe Bool
+getModuleButtonStateFlagFromDictEntries dictEntryKey uiNode =
+    uiNode.dictEntriesOfInterest
+        |> Dict.get dictEntryKey
+        |> Maybe.andThen (Json.Decode.decodeValue jsonDecodeBoolFromBoolOrInt >> Result.toMaybe)
+
+
+getModuleButtonStateNumberFromDictEntries : String -> EveOnline.MemoryReading.UITreeNode -> Maybe Int
+getModuleButtonStateNumberFromDictEntries dictEntryKey uiNode =
+    uiNode.dictEntriesOfInterest
+        |> Dict.get dictEntryKey
+        |> Maybe.andThen (Json.Decode.decodeValue jsonDecodeIntFromIntOrBool >> Result.toMaybe)
+
+
+jsonDecodeBoolFromBoolOrInt : Json.Decode.Decoder Bool
+jsonDecodeBoolFromBoolOrInt =
+    Json.Decode.oneOf
+        [ Json.Decode.bool
+        , Json.Decode.int |> Json.Decode.map ((/=) 0)
+        ]
+
+
+jsonDecodeIntFromIntOrBool : Json.Decode.Decoder Int
+jsonDecodeIntFromIntOrBool =
+    Json.Decode.oneOf
+        [ Json.Decode.int
+        , Json.Decode.bool
+            |> Json.Decode.map
+                (\asBool ->
+                    if asBool then
+                        1
+
+                    else
+                        0
+                )
+        ]
 
 
 parseShipUICapacitorFromUINode : UITreeNodeWithDisplayRegion -> ShipUICapacitor
