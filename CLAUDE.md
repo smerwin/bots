@@ -2349,6 +2349,56 @@ for why ESI cannot replace it from inside a bot yet.
   glide. Both are bot-authored pacing that the Photon UI genuinely needs —
   shortening either is a live-behaviour risk, not a free win.
 
+## How a change is verified here
+
+This project's signature bug is code that reports success and does nothing, and
+a green compile has now let three of them ship: a maintenance task whose guard
+could never be true (#15), a bound whose counter could never reach it (#34), and
+a matcher on a channel nothing read (#42). Compilation says the code is
+well-typed, not that it can run. The habits below are what caught the next ones,
+and they are cheap.
+
+**Mutate the code and watch a test fail.** A test that passes is not evidence
+until you have seen it fail for the right reason. Breaking a matcher's literal,
+pinning a counter at a constant, or removing a branch from a decision list
+should each break a named test. This found a real hole: `test_ammo_silenced_bound`
+asserted what the counter *mentioned* and would have passed with the counter
+pinned at `1` — which is exactly the defect it existed to prevent. It now
+asserts every branch evaluates to `0`, `1`, `previous`, or `previous + 1`.
+
+**Execute Elm rather than mirroring it in Python.** The test suite is Python and
+reads `Bot.elm` as text, which is fine for structure and a trap for behaviour: a
+Python restatement of a rule tests the restatement. Any pure function can be run
+for real in about two minutes —
+
+    cp -R implement/applications/eve-online/eve-online-mission-runner /tmp/chk
+    # collapse `module Bot exposing (State, botMain)` to `module Bot exposing (..)`
+    # set elm.json's "elm-version" to "0.19.2"
+    cd /tmp/chk && printf 'import Bot\nBot.someFunction "..."\n' | elm repl
+
+Used to confirm gate-key extraction (#45), the `Dock` conditions (#49), and that
+a non-text travel label is declined (#49). A NUL cannot appear in an Elm string
+literal — rebuild such input with `Char.fromCode`.
+
+**Assert client text against recorded logs, not against memory.** Where the bot
+matches something the client wrote, read the literal out of the source and check
+it against real lines in `~/eve-bot-logs`. A matcher that drifts from what the
+client actually writes fails in the direction that looks like success: nothing
+matches, the branch never fires, and nothing complains. The same trick pins
+cross-language couplings — the Elm synthetic-node type name against the host's
+constant (#30), the parser block byte-identical across all six vendored copies
+(#39).
+
+**State reachability, not just correctness.** For every guard, say what makes it
+*true* in the state the code runs in. "I traced the path forward from this state"
+does not establish that the state can be entered, which is precisely how #34's
+bound shipped unreachable.
+
+**Distinguish absent from false.** `ramp_active` is missing until a module has
+cycled, and `Nothing` from the game log means "no game log on this host" while
+`Just []` means "the client said nothing". Collapsing either with
+`Maybe.withDefault` gets the unsafe inference for free.
+
 ## Repo state
 
 `origin` = `Viir/bots` (upstream, untouched); `fork` = `smerwin/bots` (personal,
