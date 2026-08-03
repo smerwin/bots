@@ -805,13 +805,87 @@ the parser drops any node whose display region it cannot read, so a slot can
 leave and rejoin while nothing moves on screen. Identify a module by position —
 sort the row by `x` — not by index. Indexing clicked a neighbouring module live.
 
-`isActive` reads `ramp_active` off the button, and on this client that entry does
-not exist until the module has run: the `ShipModuleButtonRamps` widget holding it
-is created when the module starts cycling and destroyed when it stops. So a
-module reads `Nothing` when off-and-never-run, `Just True` when running, and
-`Just False` only when off after having run. Treat `Nothing` as off. `isBusy` and
-`isHiliteVisible` are permanently `False` here — their sprites don't exist in
-this build — so they are no use as a second opinion.
+`isActive` reads `ramp_active` off the button. **That entry is the module's duty
+cycle, not whether it is switched on**, and the previous version of this
+paragraph — "`Just True` while running" — was wrong in the specific way that
+cost #34.
+
+Measured, read-only, 92 samples over 240s of run 9 (#35): on the weapon,
+`ramp_active` flipped **fourteen times** in those 240 seconds, 5–20s apart,
+while `isInActiveState` stayed `True` across every one of them. The gun never
+switched off. So `ramp_active = False` means *between cycles*, and a module that
+is firing reads `False` for a good part of every cycle. Middle and low slots
+behaved differently and consistently — they went `True` at 60–70s and never came
+back down, which is what a repairer or prop mod cycling continuously looks like.
+
+That is the whole of run 8. `gunsSilencingTicks` reset whenever no gun *read* as
+firing, so it reset inside every cycle and never reached 2; and a wait for "the
+ramp to stop" is satisfied by the gap between cycles rather than by the guns
+going quiet. Both halves of #34 were reading this field. Nothing in the ammo path
+depends on it any more — #38's deadline was deliberately built to hold with this
+reading worthless — but anything new that treats `isActive` as "this module is
+doing its job" is repeating the mistake. `isInActiveState` is the entry that
+means that, and it is not wired to anything yet; see below.
+
+**`Nothing` and `Just False` are still different facts.** The entry is absent
+until the module has cycled at all — for the first ~60s of that sample no module
+carried `ramp_active`, and it then appeared per module as each first cycled
+(low slot 60.3s, mediums 65.5s and 70.7s, the weapon 88.8s). This confirms the
+`ShipModuleButtonRamps` widget being created when cycling starts. Treating
+`Nothing` as off is still the right default, but it conflates "off" with "has
+never run", so never store it as a defaulted `Bool`.
+
+### The sprites really are missing; the state is somewhere else
+
+`isBusy` and `isHiliteVisible` are permanently `False` here, and that much is
+confirmed: a walk of a top-row button's whole subtree finds exactly one sprite,
+`underlay`. There is no `hilite` and no `busy` in this build, so those two
+lookups cannot return anything else however the module behaves.
+
+**The conclusion this file used to draw from that — that the client does not
+expose the state — was wrong.** The button's own `dictEntriesOfInterest` carries
+twelve entries that nothing had ever read: `ramp_active`, `isInActiveState`,
+`isDeactivating`, `effect_activating`, `online`, `blinking`, `grey`, `quantity`,
+`autoreload`, `autorepeat`, `isMaster`, `waitingForActiveTarget`. Same shape as
+#26's tooltip dead end, where the workaround also turned out to be a different
+reading rather than an absent one. Assume the state is present somewhere before
+concluding the client withholds it.
+
+All twelve are now parsed onto `ShipUIModuleButton.stateFromDictEntries`, under
+the client's own key names, and cost twelve dictionary lookups on a node the
+parser already holds — no extra traversal, unlike the two sprite lookups above.
+Every field is a `Maybe`; an entry that does not decode is `Nothing`, never a
+guessed `False`.
+
+What the same 240s sample says about the rest:
+
+| entry | observed | reading |
+|---|---|---|
+| `isInActiveState` | `True` on all four modules, all 92 samples | **switched on** — the flag `isActive` should have been |
+| `isDeactivating` | `False` throughout, never once `True` | **unobserved** — nothing switched a module off in the window |
+| `effect_activating` | `0`, except a single `1` at 175.3s, 2.6s before a cycle began | a brief pulse at **activation** |
+| `waitingForActiveTarget` | absent until 141.3s, then `0` on all four at once | `0` = not waiting; appears late, needs more observation |
+| `online` | `True` throughout | |
+| `blinking` / `grey` / `quantity` | `0` throughout | |
+| `autoreload` / `autorepeat` | `1` / `1000` throughout | settings, not state |
+| `isMaster` | `1` on the high slot only | identifies the weapon group's master |
+
+**Nothing decides anything from them, and that is deliberate.** This is one 240s
+window on one fit, and the leg #34 actually needed has zero observations:
+`isDeactivating` is named for exactly the state that wait cared about and was
+never once `True`, because the bot performed no ammo swap while the sampler ran
+and nothing else switched a module off.
+
+**Capturing that leg is what the status line is for.** The mission runner prints
+five entries every reading —
+`Top-row modules (ramp_active/isInActiveState/isDeactivating/effect_activating/waitingForActiveTarget)`
+— with `T`/`F` for a boolean, the number for a numeric entry, and `-` for an
+entry **absent from the tree**, which is a distinct output from `F` and `0` on
+purpose. So the next run that performs an ammo swap records the switch-off
+without anyone watching: read those columns across idle → activated → firing →
+commanded off → settled. The other seven entries are parsed and available but not
+printed, since this line goes out thousands of times a run and all seven were
+constant across the whole sample.
 
 A module button is a **toggle**, so a click repeated before the client has shown
 its result switches the module back off. `moduleButtonClickSettlingSteps` gives a

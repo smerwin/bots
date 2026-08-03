@@ -8272,6 +8272,8 @@ statusTextFromState context =
                 ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
                 ++ ". "
                 ++ describeModulesToActivateAlways readingFromGameClient
+                ++ " "
+                ++ describeTopRowModuleDictState readingFromGameClient
 
         describeCurrentReading =
             case readingFromGameClient.shipUI of
@@ -10916,6 +10918,16 @@ bot clicked a second time and switched the module back off.
 in the slot, and this client's slots only ever carry "mainshape", "overloadBtn"
 and (on an active slot) "underlay". Same for `isHiliteVisible` and its "hilite"
 sprite. Both are permanently False rather than informative.
+
+What #35 found is that the state is not missing, only elsewhere: twelve entries
+on the button's own `dictEntriesOfInterest`, now parsed onto
+`stateFromDictEntries`. `isInActiveState` is the one that means what this filter
+wants -- it read `True` on all four modules across all 92 samples of a 240s
+live sample, tracking switched-on, while `ramp_active` oscillated fourteen times
+underneath it. It is **not** wired in here, because that sample is one window on
+one fit and it never saw a module switch off, which is the state this filter
+exists to detect. `describeTopRowModuleDictState` logs it every reading so the
+next run settles that leg.
 -}
 inactiveModulesToActivateAlways : SeeUndockingComplete -> List ShipUIModuleButton
 inactiveModulesToActivateAlways seeUndockingComplete =
@@ -10959,6 +10971,88 @@ describeModulesToActivateAlways readingFromGameClient =
                         ++ ", keep-active ["
                         ++ (rest |> List.map describeOne |> String.join ", ")
                         ++ "]."
+
+
+{-| What the guns say about themselves in their own dict entries, verbatim.
+
+#35 found the module state the sprites do not carry sitting unread on every
+module button. A 240s read-only sample of run 9 then measured most of what those
+entries mean -- `ramp_active` is the gun's duty cycle and oscillates all through
+a fight, `isInActiveState` is the switched-on flag -- and left one leg with no
+observations at all: `isDeactivating` was never `True`, because nothing switched
+a module off while the sampler ran. **This line exists to catch that leg**, on
+the next run that performs an ammo swap, without anybody having to be watching.
+The status line is what survives a run to be read back afterwards, which is how
+`Middle-row modules: none.` turned out to be measurable across nine logs (#33).
+
+**Nothing acts on any of it.** One 240s window on one fit is not a licence to
+rewire a decision, and the field #34 hung on is the one still unobserved.
+
+The top row is where the guns are (`shipUIModulesToActivateOnTarget`), and the
+guns are what #34 hung waiting on, so it is the row worth the characters. The
+other seven entries the parser reads are not printed: this line goes out
+thousands of times a run, and `online`, `blinking`, `grey`, `quantity`,
+`autoreload`, `autorepeat` and `isMaster` were each constant across all 92
+samples.
+
+`isInActiveState` is printed beside `ramp_active` rather than left out because
+it is what makes `ramp_active` readable at all: a `False` there means "between
+cycles" while the gun is on and "not running" once it is off, and only the
+switched-on flag separates those two. The switch-off leg is exactly where they
+disagree.
+
+`-` is an entry that is **absent from the tree**, printed differently from `0`
+and `F` on purpose. Absent and `False` are different facts here and both were
+seen: no module carried `ramp_active` for the first ~60s of the sample, and
+`waitingForActiveTarget` appeared on all four modules at once at 141s. A format
+that collapsed them would drop the very transition worth recording. (An entry
+present but undecodable also prints `-`; on this build every key seen decodes.)
+
+-}
+describeTopRowModuleDictState : ReadingFromGameClient -> String
+describeTopRowModuleDictState readingFromGameClient =
+    let
+        describeFlag maybeFlag =
+            case maybeFlag of
+                Just True ->
+                    "T"
+
+                Just False ->
+                    "F"
+
+                Nothing ->
+                    "-"
+
+        describeNumber maybeNumber =
+            case maybeNumber of
+                Just number ->
+                    String.fromInt number
+
+                Nothing ->
+                    "-"
+
+        describeOne moduleButton =
+            [ describeFlag moduleButton.stateFromDictEntries.ramp_active
+            , describeFlag moduleButton.stateFromDictEntries.isInActiveState
+            , describeFlag moduleButton.stateFromDictEntries.isDeactivating
+            , describeNumber moduleButton.stateFromDictEntries.effect_activating
+            , describeNumber moduleButton.stateFromDictEntries.waitingForActiveTarget
+            ]
+                |> String.join "/"
+    in
+    case readingFromGameClient.shipUI of
+        Nothing ->
+            "Top-row modules: no ship UI."
+
+        Just shipUI ->
+            case shipUI.moduleButtonsRows.top |> List.sortBy (.uiNode >> .totalDisplayRegion >> .x) of
+                [] ->
+                    "Top-row modules: none."
+
+                topRowModules ->
+                    "Top-row modules (ramp_active/isInActiveState/isDeactivating/effect_activating/waitingForActiveTarget): "
+                        ++ (topRowModules |> List.map describeOne |> String.join ", ")
+                        ++ "."
 
 
 nothingFromIntIfGreaterThan : Int -> Int -> Maybe Int

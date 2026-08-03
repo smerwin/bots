@@ -51,6 +51,13 @@ MISSION_RUNNER_BOT_ELM = os.path.join(
 # Everything the client says about a module's own state. The parser reads the
 # first two; #35 found the rest sitting unread in the button's dict entries,
 # and found the first one lying. None of them may gate the deadline.
+#
+# #35 has since parsed them onto the button and put four of them in the status
+# line, which is the only reason this list grew rather than shrank: a field the
+# log now shows every reading is a field somebody will be tempted to consult
+# here, and what any of them means during a firing cycle is still unmeasured.
+# `stateFromDictEntries` is the accessor all twelve arrive through, so naming it
+# covers the eight not spelled out.
 MODULE_STATE_READINGS = [
     "weaponIsFiring",
     "rampRotationMilli",
@@ -60,6 +67,9 @@ MODULE_STATE_READINGS = [
     "effect_activating",
     "isHiliteVisible",
     "isBusy",
+    "stateFromDictEntries",
+    "ramp_active",
+    "waitingForActiveTarget",
 ]
 
 
