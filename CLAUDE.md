@@ -161,6 +161,14 @@ Use `run_in_background`, then wait on a condition rather than a fixed sleep:
 until grep -qE '^\+ ' ~/eve-bot-logs/mission_run<N>.log; do sleep 5; done
 ```
 
+**But wait on `cycle_run.sh`'s own exit, not only on that loop.** The loop above
+never terminates for a run that died, which is the case `start()` now detects
+for itself: a `Traceback` or an elm error report in the log fails on the next
+poll, and so does a log that has stopped growing while nothing matching
+`BOT_PATTERNS` is alive. Both print the last 15 log lines with the message, so
+the diagnosis usually needs no second command. A non-zero exit means no bot is
+running and there is nothing to stop before trying again.
+
 **Arm two monitors, not one.** `stall_watch.py --keep-going` covers stalls, but
 it says nothing when the bot or the client simply exits — and silence there
 reads exactly like a healthy run:
@@ -337,7 +345,7 @@ procedure and its traps; this file carries the facts.
 | `eve_read.py` | live reads of the client (overview, targets, modules, combat feed, window id, client pid) by reusing botlab_host's UI-root cache -- ~2s instead of rediscovering the root |
 | `eve_repl.py` | interactive handle on the client for one-offs -- `python3 -i eve_repl.py`, then `eve.dock(...)`, `eve.warp_to(...)`, `eve.menu_click(...)`. See `REPL.md` |
 | `compile_bot.sh` | compiles a bot the way the host does, without running it; verifies the scratch copy matches the source |
-| `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session |
+| `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session, waiting for its first decision and failing fast with the log's tail if the run died instead |
 | `reload_drones.py` | standalone one-off: refill drone bay from station hangar |
 | `route_setter/route_setter.py` | standalone one-off: set the autopilot route from a chat channel's MOTD |
 
