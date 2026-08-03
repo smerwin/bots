@@ -663,6 +663,74 @@ A module button is a **toggle**, so a click repeated before the client has shown
 its result switches the module back off. `moduleButtonClickSettlingSteps` gives a
 click 5 steps to appear in a reading first.
 
+## Lock range is learned from the client, not set
+
+`targeting-range` (default 66000) decides whether `lockTargetFromOverviewEntry`
+locks a target or approaches it. It is a guess about the ship, and wrong in
+either direction costs: too low and the bot flies at rats it could have shot,
+too high and it spends readings asking for locks the client will never grant.
+The client answers that question every time it accepts or refuses a lock, so
+the number is now derived the way the UI scale is — per session, from what the
+client actually did — rather than asserted.
+
+Two bounds in `BotMemory`, each moving one way only, so no oscillation is
+possible: **`lockProvenAtMeters`** is the greatest distance at which a lock was
+accepted and only rises, **`lockRefusedAtMeters`** the smallest at which one
+provably failed and only falls. The threshold is the setting clamped into
+`[proven, refused)`. With no evidence both are `Nothing` and the threshold is
+exactly the setting, so a run where nothing is learned behaves exactly as
+before. Where the two contradict each other, proven wins — a lock that
+completed is unambiguous, a refusal is an inference.
+
+**A refusal only counts on disambiguated evidence**, which is the whole
+difficulty. A lock can fail because the target is out of range, because the
+ship is at maximum locked targets, because the target died, or because the
+click hit a recycled overview row. So it takes all of: the attempt has had
+`lockAttemptReadingsBeforeVerdict` (8) readings to land; the row is still in
+the overview and still `_display`ed; it still does not read targeted or
+targeting; and **the target bar was empty at both ends of the attempt**. That
+last one is what separates "too far" from "no free slot" — an empty bar is the
+only thing a reading can say that proves a slot was free, since the client's
+maximum is not in the reading at all. Without it the number ratchets down every
+time the ship simply fills up. The price is that only the first lock of an
+engagement can teach a refusal, which is also the case that costs the most.
+
+**The attempt is read out of the effects, not the decision.**
+`updateMemoryForNewReadingFromGame` is the only place that can write memory and
+it never sees the decision, so `lockClickLocationFromStepEffects` recognises
+the lock chord in the previous step's effects — Ctrl held over a left click,
+the only place in this bot that presses Ctrl without Shift — and takes the
+`MouseMoveTo` that travels with it. The row is then resolved by screen position
+against the *following* reading, which is the right way round rather than a
+compromise: the client acted on whatever was rendered at that point. Across
+readings the row is tracked by `objectItemID`, falling back to the name only
+when no other row shares it; a pocket of five identically-named rats with no
+item id therefore teaches nothing, which is the correct answer rather than a
+guess.
+
+**Every bound move is logged once**, as a `Learned lock range:` line wrapped
+around the whole decision at `missionBotDecisionRoot`. It is emitted there
+rather than in the branch that learned it because the bounds move in the memory
+update, which runs whatever the bot is doing. Once-per-change needs no "already
+reported" flag: the bounds are monotone, so a repeated verdict moves nothing
+and says nothing. The status line carries the current bounds and the pending
+attempt continuously.
+
+The bounds are **not reset within a session**. Resetting at each dock — the
+other obvious choice — would throw the learning away at the end of every
+mission, which is most of what there is to keep, and this bot does not swap
+ships on its own. A consequence worth knowing: the setting cannot raise the
+threshold back above a learned refusal, so a bound learned wrongly is sticky
+until the session restarts.
+
+Fixing this also had to bound `lockTargetFromOverviewEntry`'s
+`"Locking target is in progress, wait for completion."`, which had no bound at
+all — the same unbounded-wait shape as the drone recall below. Note that
+neither caller can currently reach it, since `overviewEntriesToLock` filters
+targeted and targeting rows out of its candidates; the reachable unbounded
+shape was the *click* repeating every reading, and that is what the learned
+bound ends.
+
 ## Drones: how long they have been out says nothing about a recall
 
 Warping with drones in space loses them, so every warp, dock and retreat in
