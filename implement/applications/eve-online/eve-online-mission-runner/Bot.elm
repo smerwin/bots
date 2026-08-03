@@ -524,6 +524,7 @@ type alias BotMemory =
     , readingsCount : Int
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
+    , hitpoints : HitpointsMemory
     , incomingDamage : IncomingDamageMemory
     , droneBayOpenedFromShipCard : Bool
     , droneBayWillTakeNoMore : Bool
@@ -611,6 +612,70 @@ type alias MissionToAbandon =
     }
 
 
+{-| The two hitpoint gauges, and the reading of each the retreat may act on.
+
+**Issue #56, and the half of #32 that `plausibleHitpointsPercent` cannot reach.**
+That filter rejects a gauge value outside [0, 100]. `0` is a legal armour
+percentage, so a garbage read landing on it is indistinguishable from a hull
+that is gone by value alone -- and it is the worst value to be wrong about,
+because it clears every threshold at once. Run 11 retreated forty printed
+decisions on `Armor reached 0% (now 0%)` with the armour really at 82-96%.
+
+**The rule is that one reading is not evidence.** `believed` is the _healthier_
+of this reading's value and the one before it, so a drop has to survive a second
+look before anything acts on it. Every consumer of the gauges reads this rather
+than the live value: the low-water marks, the frozen-reading guard's samples,
+and the retreat itself.
+
+Measured rather than assumed, over the fourteen recorded runs. Bracketed
+excursions -- a value contradicted by the readings either side of it, which is
+what a read landing on a reallocated object looks like -- number 34 on the
+armour gauge and 200 on the shield, and 22 and 127 of those respectively are
+exactly one reading wide. Against the armour threshold of 70 the raw gauge
+produces 20 firing episodes across the corpus, 16 of them a single reading long;
+this rule leaves exactly one, run 10's genuine decline through
+`75, 75, 70, 65, 68, 60, 63, 60`. All four of run 11's are gone.
+
+**What it costs is one reading, and it is a delay rather than a suppression.**
+For any decline that lasts more than one reading -- which every real one does,
+since a hull does not repair 96% of its armour in three seconds -- `believed`
+equals the previous reading's value, so the retreat fires exactly one reading
+later than it used to and never fails to fire. The largest one-reading armour
+step in the corpus is 8 percentage points, which is what that reading is worth.
+
+**It does not cure the parse**, which is #32's remaining unfinished half and
+still open. A corrupt reading still arrives; nothing acts on it.
+
+`readingsWithheld` and `lastWithheld` are how a gauge that starts lying
+constantly becomes visible rather than silently ignored. They count only the
+readings that would have tripped this gauge's own retreat threshold, because
+that is the event worth counting -- and it means a gauge whose threshold is
+disabled reports nothing, which is correct: nothing is reading it.
+
+-}
+type alias HitpointsMemory =
+    { shield : HitpointsGaugeMemory
+    , armor : HitpointsGaugeMemory
+    }
+
+
+type alias HitpointsGaugeMemory =
+    { previousReading : Maybe Int
+    , believed : Maybe Int
+    , readingsWithheld : Int
+    , lastWithheld : Maybe Int
+    }
+
+
+initHitpointsGaugeMemory : HitpointsGaugeMemory
+initHitpointsGaugeMemory =
+    { previousReading = Nothing
+    , believed = Nothing
+    , readingsWithheld = 0
+    , lastWithheld = Nothing
+    }
+
+
 {-| What the client's combat log has said about incoming fire lately, and what
 the HUD was reading while it said it.
 
@@ -655,9 +720,11 @@ type alias IncomingDamageSample =
     { atMilliseconds : Int
     , damage : Int
 
-    -- The plausible HUD reading on this same reading, or `Nothing` where there
-    -- was none to believe -- no ship UI, or a value `plausibleHitpointsPercent`
-    -- rejected. A `Nothing` is never counted as the gauge moving.
+    -- The HUD reading this sample's own reading was allowed to believe -- see
+    -- `HitpointsMemory` -- or `Nothing` where there was none: no ship UI, a
+    -- value `plausibleHitpointsPercent` rejected, or a value no second reading
+    -- has confirmed yet. A `Nothing` is never counted as the gauge moving, so a
+    -- corrupt reading cannot pass for a gauge that is still working either.
     , hitpoints : Maybe ( Int, Int )
 
     -- Who the client said hit hardest on this reading, kept per sample rather
@@ -5882,7 +5949,9 @@ hull the armour gauge cannot move at all until the shield is spent -- across the
 recorded runs the shield reached 9%, 12% and 44% while armour sat at exactly
 100% in every one of thousands of samples. An armour threshold on such a hull is
 not a conservative guard, it is a guard that fires after the tank is already
-gone.
+gone. Both read a value two readings agree on rather than the live one, because
+a single garbage reading landing inside [0, 100] is what issue #56 was: see
+`HitpointsMemory`.
 
 **The damage rate** needs no gauge at all. It is the client's own combat log,
 summed by the host, and it answers the question the HUD is only a proxy for:
@@ -5985,13 +6054,19 @@ runAwayIfLowHealth context shipUI =
         -- The low-water mark, not the live reading: see runAwayRearmPercent for
         -- why a single threshold flip-flops. Trip on the configured level, stay
         -- committed until hitpoints climb back over the re-arm level.
+        --
+        -- The value folded in is the one two readings agree on rather than this
+        -- reading's own -- see `HitpointsMemory`. It has to be, because `min`
+        -- is what turned one corrupt reading into run 11's forty printed
+        -- retreats: the mark held 0% for ten readings while the gauge read
+        -- 82-86%, none of them high enough to re-arm.
         lowestShield =
-            plausibleHitpointsPercent shipUI.hitpointsPercent.shield
+            context.memory.hitpoints.shield.believed
                 |> Maybe.map (\current -> min current context.memory.lowestShieldPercentSinceHealthy)
                 |> Maybe.withDefault context.memory.lowestShieldPercentSinceHealthy
 
         lowestArmor =
-            plausibleHitpointsPercent shipUI.hitpointsPercent.armor
+            context.memory.hitpoints.armor.believed
                 |> Maybe.map (\current -> min current context.memory.lowestArmorPercentSinceHealthy)
                 |> Maybe.withDefault context.memory.lowestArmorPercentSinceHealthy
 
@@ -10042,6 +10117,10 @@ initBotMemory =
     , readingsCount = 0
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
+    , hitpoints =
+        { shield = initHitpointsGaugeMemory
+        , armor = initHitpointsGaugeMemory
+        }
     , incomingDamage =
         { samples = []
         , hostCarriesTheChannel = False
@@ -10142,7 +10221,12 @@ statusTextFromState context =
                         -- line printing "Shield: 385%" -- which the retreat
                         -- guard had already rejected and never acted on, while
                         -- the log gave every appearance that it had.
-                        describeHitpoint name value =
+                        -- A reading the retreat is not acting on says so here,
+                        -- naming what it is going by instead. Issue #56: a
+                        -- corrupt `0` inside the believable range is invisible
+                        -- in a log otherwise, and "not acting on it" and "not
+                        -- seeing it" have to read differently.
+                        describeHitpoint name threshold gauge value =
                             name
                                 ++ ": "
                                 ++ (value |> String.fromInt)
@@ -10151,16 +10235,47 @@ statusTextFromState context =
                                         Nothing ->
                                             " (not a believable reading -- ignored by the retreat guard)"
 
-                                        Just _ ->
-                                            ""
+                                        Just plausible ->
+                                            if hitpointsReadingWithheld threshold (Just plausible) gauge.believed then
+                                                " (one reading only, and one reading is not evidence -- the retreat is going by "
+                                                    ++ (case gauge.believed of
+                                                            Just believed ->
+                                                                (believed |> String.fromInt) ++ "%)"
+
+                                                            Nothing ->
+                                                                "nothing yet, no second reading agrees)"
+                                                       )
+
+                                            else
+                                                ""
                                    )
 
+                        withheldSoFar =
+                            context.memory.hitpoints.shield.readingsWithheld
+                                + context.memory.hitpoints.armor.readingsWithheld
+
+                        describeWithheldSoFar =
+                            if withheldSoFar < 1 then
+                                ""
+
+                            else
+                                " Readings withheld from the retreat this session: "
+                                    ++ (withheldSoFar |> String.fromInt)
+                                    ++ "."
+
                         describeShip =
-                            describeHitpoint "Shield" shipUI.hitpointsPercent.shield
+                            describeHitpoint "Shield"
+                                context.eventContext.botSettings.runAwayShieldHitpointsThresholdPercent
+                                context.memory.hitpoints.shield
+                                shipUI.hitpointsPercent.shield
                                 ++ "  "
-                                ++ describeHitpoint "Armor" shipUI.hitpointsPercent.armor
+                                ++ describeHitpoint "Armor"
+                                    context.eventContext.botSettings.runAwayArmorHitpointsThresholdPercent
+                                    context.memory.hitpoints.armor
+                                    shipUI.hitpointsPercent.armor
                                 ++ ". "
                                 ++ describeIncomingDamage context
+                                ++ describeWithheldSoFar
 
                         -- The left-behind clause is appended outside the case
                         -- on purpose: the drones window is absent for the whole
@@ -12478,14 +12593,14 @@ runAwayRearmPercent =
     90
 
 
-lowWaterMark : ReadingFromGameClient -> ({ shield : Int, armor : Int, structure : Int } -> Int) -> Int -> Int
-lowWaterMark readingFromGameClient getPercent previous =
+lowWaterMark : ReadingFromGameClient -> Maybe Int -> Int -> Int
+lowWaterMark readingFromGameClient believed previous =
     case readingFromGameClient.shipUI of
         Nothing ->
             100
 
-        Just shipUI ->
-            case plausibleHitpointsPercent (getPercent shipUI.hitpointsPercent) of
+        Just _ ->
+            case believed of
                 Nothing ->
                     previous
 
@@ -12495,6 +12610,91 @@ lowWaterMark readingFromGameClient getPercent previous =
 
                     else
                         min previous current
+
+
+{-| Fold this reading's gauges into what the retreat is allowed to believe.
+
+See `HitpointsMemory` for the rule and the measurements behind it. Both gauges
+go through the same function with their own threshold, because there is nothing
+about the shield the armour does not also do.
+
+-}
+updateHitpointsMemory : UpdateMemoryContext BotSettings -> HitpointsMemory -> HitpointsMemory
+updateHitpointsMemory context memoryBefore =
+    let
+        readingOf getPercent =
+            context.readingFromGameClient.shipUI
+                |> Maybe.andThen
+                    (\shipUI -> plausibleHitpointsPercent (getPercent shipUI.hitpointsPercent))
+    in
+    { shield =
+        updateHitpointsGaugeMemory
+            context.botSettings.runAwayShieldHitpointsThresholdPercent
+            (readingOf .shield)
+            memoryBefore.shield
+    , armor =
+        updateHitpointsGaugeMemory
+            context.botSettings.runAwayArmorHitpointsThresholdPercent
+            (readingOf .armor)
+            memoryBefore.armor
+    }
+
+
+updateHitpointsGaugeMemory : Int -> Maybe Int -> HitpointsGaugeMemory -> HitpointsGaugeMemory
+updateHitpointsGaugeMemory retreatThreshold reading memoryBefore =
+    let
+        -- The healthier of the last two believable readings. `Maybe.map2` is
+        -- what makes an unbelievable value -- or a reading with no ship UI at
+        -- all -- leave nothing behind for the next reading to confirm against,
+        -- so a value straddling a gap in the gauge is never treated as
+        -- agreement across it.
+        believed =
+            Maybe.map2 max reading memoryBefore.previousReading
+
+        wasWithheld =
+            hitpointsReadingWithheld retreatThreshold reading believed
+    in
+    { previousReading = reading
+    , believed = believed
+    , readingsWithheld =
+        memoryBefore.readingsWithheld
+            + (if wasWithheld then
+                1
+
+               else
+                0
+              )
+    , lastWithheld =
+        if wasWithheld then
+            -- `hitpointsReadingWithheld` is only ever true of a reading that
+            -- has a value, so this keeps the withheld one rather than clearing.
+            reading
+
+        else
+            memoryBefore.lastWithheld
+    }
+
+
+{-| A reading that would have tripped this gauge's threshold, and is not being
+acted on because a single reading is not evidence.
+
+One definition with two readers -- the memory update counts it, the status line
+announces it -- for `containerEmptiedThisReading`'s reason: two copies of "was
+this reading withheld" would drift silently, and the one that drifted would be
+the one an operator reads.
+
+An unconfirmed value (`believed` still `Nothing`, on a session's first reading
+or the first after the ship UI came back) counts as withheld, because nothing is
+acting on it either.
+
+-}
+hitpointsReadingWithheld : Int -> Maybe Int -> Maybe Int -> Bool
+hitpointsReadingWithheld retreatThreshold reading believed =
+    let
+        trips value =
+            value |> Maybe.map (\percent -> percent < retreatThreshold) |> Maybe.withDefault False
+    in
+    trips reading && not (trips believed)
 
 
 {-| Fold this reading's incoming fire into the rolling window.
@@ -12526,18 +12726,22 @@ The reading's `topAttacker` rides along on the sample rather than being
 accumulated into a list of its own, so `namesOfRecentAttackers` inherits the
 trimming above and needs no clearing rule -- see `IncomingDamageMemory`.
 
+**#56 changed one field of a sample and nothing else about this channel.**
+`hitpoints` now carries the confirmed HUD reading rather than the live one, and
+`hitpointsReadingMovedInWindow` is its only reader. The damage itself,
+`hostCarriesTheChannel`, `lastAttacker`, the trimming and `retreating` are
+untouched, so `incomingDamageInWindow` answers exactly what it always did and
+the `Nothing`-versus-`Just 0` distinction is where #37 left it. That matters
+because `swapMayDisarmTheGuns` reads the same window for the opposite purpose --
+it must not be blocked by a trivial reading, where the retreat must not be
+tripped by a corrupt one -- and neither rule may quietly move the other's input.
+
 -}
-updateIncomingDamageMemory : UpdateMemoryContext BotSettings -> IncomingDamageMemory -> IncomingDamageMemory
-updateIncomingDamageMemory context memoryBefore =
+updateIncomingDamageMemory : UpdateMemoryContext BotSettings -> HitpointsMemory -> IncomingDamageMemory -> IncomingDamageMemory
+updateIncomingDamageMemory context hitpoints memoryBefore =
     let
         hitpointsNow =
-            context.readingFromGameClient.shipUI
-                |> Maybe.andThen
-                    (\shipUI ->
-                        Maybe.map2 Tuple.pair
-                            (plausibleHitpointsPercent shipUI.hitpointsPercent.shield)
-                            (plausibleHitpointsPercent shipUI.hitpointsPercent.armor)
-                    )
+            Maybe.map2 Tuple.pair hitpoints.shield.believed hitpoints.armor.believed
 
         keptSamples =
             memoryBefore.samples
@@ -12607,13 +12811,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         currentContextMenuDepth =
             context.readingFromGameClient.contextMenus |> List.length
 
+        -- Ahead of everything that reads a gauge, because what those consumers
+        -- read is `believed` rather than the live value. See `HitpointsMemory`.
+        hitpointsNow =
+            updateHitpointsMemory context botMemoryBefore.hitpoints
+
         -- Computed once and read twice. The ammo swap's decision not to disarm
         -- under fire (#50) has to be made against *this* reading's window, not
         -- the previous one: the reading fire first arrives on is exactly the
         -- reading a swap must not begin, and a one-reading-stale window would
         -- give it away.
         incomingDamageNow =
-            updateIncomingDamageMemory context botMemoryBefore.incomingDamage
+            updateIncomingDamageMemory context hitpointsNow botMemoryBefore.incomingDamage
 
         dronesInSpaceCountNow =
             dronesInSpaceCount context.readingFromGameClient
@@ -12782,12 +12991,13 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             botMemoryBefore.lootWindowOpenTicks + 1
     , lowestShieldPercentSinceHealthy =
         lowWaterMark context.readingFromGameClient
-            .shield
+            hitpointsNow.shield.believed
             botMemoryBefore.lowestShieldPercentSinceHealthy
     , lowestArmorPercentSinceHealthy =
         lowWaterMark context.readingFromGameClient
-            .armor
+            hitpointsNow.armor.believed
             botMemoryBefore.lowestArmorPercentSinceHealthy
+    , hitpoints = hitpointsNow
     , incomingDamage = incomingDamageNow
     , readingsCount = botMemoryBefore.readingsCount + 1
     , droneBayOpenedFromShipCard =

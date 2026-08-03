@@ -1400,6 +1400,59 @@ always has; what it cannot do is anything about a garbage value that happens to
 land inside [0, 100], and 0.42 is as reachable as 21328.22. That is the argument
 for a signal that does not come from a sprite at all.
 
+**A single reading is not evidence, and that is now the rule.** `0` is a legal
+armour percentage, so the filter above cannot touch a garbage read that lands on
+it — and it is the worst value to be wrong about, because it clears every
+threshold at once. Run 11 printed `Armor reached 0% (now 0%)` forty times with
+the armour really at 82-96%: one corrupt reading, held by `lowWaterMark`'s `min`
+for ten readings, because none of the real values that followed reached
+`runAwayRearmPercent` and released it.
+
+Every consumer of a gauge now reads `BotMemory.hitpoints.<gauge>.believed`, the
+**healthier of the last two believable readings**, so a drop has to survive a
+second look before the low-water mark, the frozen-reading guard or the retreat
+sees it. Measured across the fourteen recorded runs: of the excursions where a
+value is contradicted by the readings either side of it — 34 on armour, 200 on
+shield — 22 and 127 are exactly one reading wide. Against the armour threshold
+of 70 the raw gauge produces 20 firing episodes and this rule leaves exactly
+one, run 10's genuine decline through `75, 75, 70, 65, 68, 60, 63, 60`.
+
+**It delays; it cannot suppress.** On any non-increasing series the believed
+value is the previous reading's, whatever the size of the step, so a hull losing
+armour retreats one reading later than it used to and a hull genuinely at 0%
+still retreats. The largest one-reading armour step in the corpus is 8 points,
+which is what that reading costs.
+
+**The damage window is deliberately not consulted here**, against the issue's own
+first suggestion. Two reasons, and the first is decisive: armour does not repair
+itself, so a hull sitting at 5% with a quiet 45-second window is a ship that
+nearly died a minute ago, and "no damage, therefore ignore the gauge" would
+disarm the guard exactly there — and on any host with no game log at all, where
+`Nothing` reads as no damage. The second is that it would not have worked: run
+11's three armour zeros arrived with 874, 1288 and 2006 hitpoints in the window.
+
+**What it does not do is cure the parse.** #32's remaining half is still open. A
+corrupt reading still arrives every few hundred readings; nothing acts on it,
+and the status line says so in place and keeps a running count.
+
+**Two-reading corruptions exist, and the rule does not catch them.** Stated
+rather than left to be discovered: run 10's shield went `84, 14, 17, 84` and run
+11's `96, 7, 7, 96`, and a rule wanting three readings would have removed those
+four episodes across the corpus at the cost of a second reading of delay. Two
+was chosen because the armour gauge — the one this issue is about — has exactly
+one such episode in fourteen runs, and because the damage-rate guard is watching
+a ship being taken apart fast either way.
+
+**The shield's 9% and 12% below are single-reading excursions**, found while
+measuring the above, and the calibration that rests on them is worth redoing:
+run 5's shield reads `98, 12, 98` and its lowest confirmed value is 49, and
+run 3's lowest confirmed is 20 against a raw 9. The 25 that `run_mission.sh`
+ships was set from the raw minima. Not changed here — a threshold is its own
+change with its own evidence — but it is not the number it was thought to be.
+The same measurement says no recorded run's armour ever went below 59% for two
+consecutive readings, so the armour threshold of 70 has fired on real evidence
+exactly once in fourteen runs.
+
 **Armour on this hull is not a second opinion, it is a later one.** The ship is
 shield-tanked, so armour takes no damage until the shield is at zero: across
 runs 2-8 the armour gauge read exactly 100% in every one of thousands of samples
@@ -2550,6 +2603,20 @@ exists.
   live client, and by construction unprovable by a run that goes well**: the line
   only appears when the thing it watches for happens, so a quiet run is not
   evidence the instrument works.
+
+  And it now **acts on a hitpoint reading only once a second reading agrees**,
+  rather than on whatever the gauge said this reading. Run 11 retreated forty
+  printed decisions on `Armor reached 0%` with the armour at 82-96%, which is a
+  single corrupt read that `plausibleHitpointsPercent` cannot reject because `0`
+  is a legal percentage. The rule, what it costs and what it deliberately does
+  not consult are in "Retreating: the HUD hitpoint gauge is the weakest
+  instrument here" above. **Untested against a live client**, though what it has
+  to reject is replayed from run 11's own 739 readings through the real
+  `Bot.elm`. Watch the status line for a withheld reading naming what the
+  retreat is going by instead, and for `Readings withheld from the retreat this
+  session` climbing: a couple over a run is the gauge behaving as recorded, a
+  count climbing every few readings is a gauge that has started lying properly
+  and a different problem.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
