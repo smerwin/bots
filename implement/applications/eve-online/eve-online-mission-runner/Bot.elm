@@ -502,6 +502,12 @@ type alias BotMemory =
     , dronesInSpaceTicks : Int
     , dronesInSpaceCount : Int
     , droneRecallUnansweredTicks : Int
+    , dronesInSpaceLastSeen : Maybe DronesInSpaceSighting
+    , dronesLeftBehind : Maybe DronesInSpaceSighting
+    , dronesLeftBehindEvents : Int
+    , dronesLeftBehindTotal : Int
+    , dronesLeftBehindLastChange : Maybe String
+    , dockedInLastReading : Bool
     , dockedWithCargoWantedTicks : Int
     , nothingToDoTicks : Int
     , lastObjectiveText : String
@@ -552,6 +558,25 @@ nothing in `UpdateMemoryContext` carries the session clock.
 type alias ShipLossVerdict =
     { reason : String
     , readingsSince : Int
+    }
+
+
+{-| Drones the client says are in space, and where the ship was when it said so.
+
+The place is recorded with the sighting rather than looked up when it is needed,
+because the reading that shows the ship has left is by definition taken
+somewhere else -- and once docked it cannot see the drones window at all, so
+"how many" has to have been written down before the departure too.
+
+`place` is as fine-grained as a reading gets: the solar system, and the mission
+if one is being tracked. A mission's pockets are all in the same system and the
+client never names the pocket, so this identifies the site to a person reading
+the log and not to a machine trying to fly back there.
+
+-}
+type alias DronesInSpaceSighting =
+    { count : Int
+    , place : String
     }
 
 
@@ -806,18 +831,18 @@ type alias BotDecisionContext =
 
 missionBotDecisionRoot : BotDecisionContext -> DecisionPathNode
 missionBotDecisionRoot context =
-    -- A learned bound announces itself here, at the root, rather than in the
-    -- branch that learned it -- the bounds move in `updateMemoryForNewReading-
-    -- FromGame`, which runs on every reading whatever the bot is doing, and a
-    -- self-adjusting number that adjusts silently is what made #7 take a whole
-    -- session to diagnose. `lockRangeLastChange` holds a message only on the
-    -- reading a bound actually moved, so this is one line per change.
-    (case context.memory.lockRangeLastChange of
-        Just lockRangeChange ->
-            describeBranch lockRangeChange (missionBotDecisionRootBeforeApplyingSettings context)
-
-        Nothing ->
-            missionBotDecisionRootBeforeApplyingSettings context
+    -- Anything the memory update concluded on its own announces itself here, at
+    -- the root, rather than in a branch -- these are settled in
+    -- `updateMemoryForNewReadingFromGame`, which runs on every reading whatever
+    -- the bot is doing, and a self-adjusting number that adjusts silently is
+    -- what made #7 take a whole session to diagnose. Each field holds a message
+    -- only on the reading its conclusion changed, so each is one line per
+    -- change with no separate "already reported" flag to get wrong.
+    ([ context.memory.dronesLeftBehindLastChange
+     , context.memory.lockRangeLastChange
+     ]
+        |> List.filterMap identity
+        |> List.foldr describeBranch (missionBotDecisionRootBeforeApplyingSettings context)
     )
         |> EveOnline.BotFrameworkSeparatingMemory.setMillisecondsToNextReadingFromGameBase
             context.eventContext.botSettings.botStepDelayMilliseconds
@@ -1050,7 +1075,7 @@ whole reason it is a separate number rather than a reuse of
 `homeStationTripSecondsPastSessionEnd`. The in-space branch ends the session at
 `-homeStationTripSecondsPastSessionEnd` whatever the ship is doing, so a
 preparation phase granted the same 420 s could undock at 419 and be cut off one
-second later -- ending the session *in space*, which is the outcome the trip's
+second later -- ending the session _in space_, which is the outcome the trip's
 allowance exists to avoid. Reserving the difference leaves the flight it is
 preparing 300 s, against the 48-65 s an intra-system warp and dock measured
 across run 14's five missions.
@@ -8893,18 +8918,215 @@ droneRecallAskedLookbackSteps =
     3
 
 
-dronesInSpaceCount : ReadingFromGameClient -> Int
-dronesInSpaceCount readingFromGameClient =
+{-| How many drones the client says are in space, or `Nothing` where this
+reading cannot say.
+
+`dronesInSpaceCount` below collapses those two onto 0, which is the right
+default for every decision asking "is there anything to recall" and the wrong
+one for the bookkeeping in `droneAbandonmentAfterReading`: the drones window is
+absent for the whole of a dock, and reading its silence as an empty sky is how
+#15 shipped a guard that was false in the only state that mattered.
+
+-}
+dronesInSpaceCountReadable : ReadingFromGameClient -> Maybe Int
+dronesInSpaceCountReadable readingFromGameClient =
     readingFromGameClient.dronesWindow
         |> Maybe.andThen .droneGroupInSpace
         |> Maybe.andThen (.header >> .quantityFromTitle)
         |> Maybe.map .current
-        |> Maybe.withDefault 0
+
+
+dronesInSpaceCount : ReadingFromGameClient -> Int
+dronesInSpaceCount readingFromGameClient =
+    dronesInSpaceCountReadable readingFromGameClient |> Maybe.withDefault 0
 
 
 dronesAreInSpace : ReadingFromGameClient -> Bool
 dronesAreInSpace readingFromGameClient =
     0 < dronesInSpaceCount readingFromGameClient
+
+
+{-| Where the ship is, in the only words a reading has for it.
+
+The solar system comes from the location info panel and the mission from the
+tracker. Neither names the pocket, so two pockets of one mission are the same
+place here -- said plainly rather than papered over, because this string is read
+by a person and its precision is what a follow-up would have to work with.
+
+-}
+placeFromReading : ReadingFromGameClient -> String
+placeFromReading readingFromGameClient =
+    let
+        solarSystem =
+            readingFromGameClient.infoPanelContainer
+                |> Maybe.andThen .infoPanelLocationInfo
+                |> Maybe.andThen .currentSolarSystemName
+                |> Maybe.withDefault "a system the reading does not name"
+    in
+    case missionNameFromTracker readingFromGameClient of
+        Just missionName ->
+            solarSystem ++ ", on '" ++ missionName ++ "'"
+
+        Nothing ->
+            solarSystem
+
+
+{-| What this reading says about drones the ship has left in space.
+
+Issue #59. Warping or docking with drones out abandons them, and the bot never
+goes back -- but it also never said so. `returnDronesToBay`'s give-up names
+itself since #11, and in the fourteen recorded runs it has never once fired, so
+everything that reached this state reached it some other way and left no trace
+at all. Run 1 warped with five drones in space across 24 readings and the only
+evidence is the counts in the status line, read afterwards by hand.
+
+This is the observation and nothing more: it acts on nothing, and no decision
+consults it.
+
+**The departure is read at its end, not its beginning.** A ship lining up to
+warp still has time to get its drones back, and run 11 used it -- 21 readings of
+`I am in warp` with five drones out, all five in the bay by the reading the warp
+finished. So the trigger is the reading the ship _arrives_ (`shipLeftThisReading`
+carries `weJustFinishedWarping`), where drones still in space are drones that
+are not coming, plus the reading the ship docks, which is the other way a site
+is left and the one where the drones window has already gone.
+
+**The place is the sighting's, not this reading's.** By the time the ship has
+arrived it is somewhere else, and by the time it has docked the window is gone,
+so both halves of "how many, and where" have to have been written down before
+the departure. `Nothing` from the window keeps the previous sighting rather than
+clearing it, for `dronesInSpaceCountReadable`'s reason.
+
+**The sighting is dropped when the verdict latches**, so the warp home and the
+dock that follows it report one event rather than two, while a genuinely second
+abandonment later in the session is still counted -- `dronesLeftBehindEvents`
+and `dronesLeftBehindTotal` only rise, and the verdict itself always names the
+most recent one.
+
+-}
+droneAbandonmentAfterReading : DroneAbandonmentInput -> DroneAbandonmentAfterReading
+droneAbandonmentAfterReading input =
+    let
+        sightingNow =
+            case input.dronesInSpaceNow of
+                Just count ->
+                    if count < 1 then
+                        Nothing
+
+                    else
+                        Just { count = count, place = input.placeNow }
+
+                Nothing ->
+                    input.sightingBefore
+
+        stranded =
+            case input.dronesInSpaceNow of
+                Just count ->
+                    if count < 1 then
+                        Nothing
+
+                    else
+                        Just
+                            { count = count
+                            , place =
+                                input.sightingBefore
+                                    |> Maybe.map .place
+                                    |> Maybe.withDefault input.placeNow
+                            }
+
+                Nothing ->
+                    input.sightingBefore
+
+        unchanged =
+            { sighting = sightingNow
+            , leftBehind = input.leftBehindBefore
+            , events = input.eventsBefore
+            , total = input.totalBefore
+            , change = Nothing
+            }
+    in
+    if not input.shipLeftThisReading then
+        unchanged
+
+    else
+        case stranded of
+            Nothing ->
+                unchanged
+
+            Just left ->
+                { sighting = Nothing
+                , leftBehind = Just left
+                , events = input.eventsBefore + 1
+                , total = input.totalBefore + left.count
+                , change = Just (describeDronesLeftBehind left)
+                }
+
+
+type alias DroneAbandonmentInput =
+    { sightingBefore : Maybe DronesInSpaceSighting
+    , leftBehindBefore : Maybe DronesInSpaceSighting
+    , eventsBefore : Int
+    , totalBefore : Int
+    , dronesInSpaceNow : Maybe Int
+    , placeNow : String
+    , shipLeftThisReading : Bool
+    }
+
+
+type alias DroneAbandonmentAfterReading =
+    { sighting : Maybe DronesInSpaceSighting
+    , leftBehind : Maybe DronesInSpaceSighting
+    , events : Int
+    , total : Int
+    , change : Maybe String
+    }
+
+
+{-| The line the decision log carries on the reading it happens, once.
+
+No reading count in it, and no per-reading repeat, for the reason the mission
+abandonment already documents: a counter makes every repeat a distinct line and
+defeats `stall_watch.py`'s dedupe. The running totals live in the status line.
+
+-}
+describeDronesLeftBehind : DronesInSpaceSighting -> String
+describeDronesLeftBehind left =
+    "Left drones behind: "
+        ++ String.fromInt left.count
+        ++ " drone(s) were still in space at "
+        ++ left.place
+        ++ " when the ship left, and nothing goes back for them."
+
+
+{-| What the session has cost in abandoned drones so far, for the status line.
+
+Absent until it has happened, so a run that never abandons anything reads
+exactly as it did before, and a run that does carries it on every reading
+afterwards -- including the docked ones, where the drones window is gone and the
+counts beside it say nothing.
+
+-}
+describeDronesLeftBehindSoFar : BotDecisionContext -> String
+describeDronesLeftBehindSoFar context =
+    case context.memory.dronesLeftBehind of
+        Nothing ->
+            ""
+
+        Just left ->
+            " | LEFT BEHIND "
+                ++ String.fromInt left.count
+                ++ " at "
+                ++ left.place
+                ++ (if context.memory.dronesLeftBehindEvents > 1 then
+                        " ("
+                            ++ String.fromInt context.memory.dronesLeftBehindEvents
+                            ++ " times this session, "
+                            ++ String.fromInt context.memory.dronesLeftBehindTotal
+                            ++ " drone(s))"
+
+                    else
+                        ""
+                   )
 
 
 {-| Whether one of the last few steps pressed Shift+R at the drones.
@@ -9798,6 +10020,12 @@ initBotMemory =
     , dronesInSpaceTicks = 0
     , dronesInSpaceCount = 0
     , droneRecallUnansweredTicks = 0
+    , dronesInSpaceLastSeen = Nothing
+    , dronesLeftBehind = Nothing
+    , dronesLeftBehindEvents = 0
+    , dronesLeftBehindTotal = 0
+    , dronesLeftBehindLastChange = Nothing
+    , dockedInLastReading = False
     , dockedWithCargoWantedTicks = 0
     , nothingToDoTicks = 0
     , lastObjectiveText = ""
@@ -9934,7 +10162,14 @@ statusTextFromState context =
                                 ++ ". "
                                 ++ describeIncomingDamage context
 
+                        -- The left-behind clause is appended outside the case
+                        -- on purpose: the drones window is absent for the whole
+                        -- of a dock, which is exactly where an operator goes
+                        -- looking for what the last site cost.
                         describeDrones =
+                            describeDronesWindow ++ describeDronesLeftBehindSoFar context
+
+                        describeDronesWindow =
                             case readingFromGameClient.dronesWindow of
                                 Nothing ->
                                     "No drones"
@@ -12345,6 +12580,25 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         weJustFinishedWarping =
             (botMemoryBefore.shipWarpingInLastReading == Just True) && (shipIsWarping == Just False)
 
+        dockedNow =
+            currentStationNameFromInfoPanel /= Nothing
+
+        -- The two ways a site is left. Both are read at the far end of the
+        -- departure rather than at its start: a ship lining up to warp still
+        -- has time to get its drones back, and run 11 spent 21 readings of
+        -- `I am in warp` doing exactly that. See `droneAbandonmentAfterReading`.
+        droneAbandonment =
+            droneAbandonmentAfterReading
+                { sightingBefore = botMemoryBefore.dronesInSpaceLastSeen
+                , leftBehindBefore = botMemoryBefore.dronesLeftBehind
+                , eventsBefore = botMemoryBefore.dronesLeftBehindEvents
+                , totalBefore = botMemoryBefore.dronesLeftBehindTotal
+                , dronesInSpaceNow = dronesInSpaceCountReadable context.readingFromGameClient
+                , placeNow = placeFromReading context.readingFromGameClient
+                , shipLeftThisReading =
+                    weJustFinishedWarping || (dockedNow && not botMemoryBefore.dockedInLastReading)
+                }
+
         lockRangeLearning =
             updateLockRangeLearning context botMemoryBefore
 
@@ -12763,6 +13017,12 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , dronesInSpaceLastSeen = droneAbandonment.sighting
+    , dronesLeftBehind = droneAbandonment.leftBehind
+    , dronesLeftBehindEvents = droneAbandonment.events
+    , dronesLeftBehindTotal = droneAbandonment.total
+    , dronesLeftBehindLastChange = droneAbandonment.change
+    , dockedInLastReading = dockedNow
     , lootWindowOutOfRangeTicks =
         -- The other half of the same bound. Waiting for the ship to arrive is
         -- correct, but only the client is steering, and if the approach never
