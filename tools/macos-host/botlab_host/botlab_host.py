@@ -1778,8 +1778,23 @@ def main():
                 session_end_at_ms = int(time.time() * 1000) + int(args.session_duration_minutes * 60 * 1000)
             console = web_console.ConsoleState(settings_text=args.settings,
                                                session_end_at_ms=session_end_at_ms)
-            _httpd, url = web_console.start(console, port=args.web_console)
-            print(f"# web console: {url}", file=sys.stderr)
+            try:
+                _httpd, url = web_console.start(console, port=args.web_console)
+                print(f"# web console: {url}", file=sys.stderr)
+            except web_console.NoTailnet as exc:
+                # The console is a convenience; the run is the point. Since
+                # run_mission.sh passes --web-console by default, a tailnet that
+                # happens to be down would otherwise abort every run here --
+                # after compiling, before a single decision. Refusing to bind
+                # anywhere else is the safety property and it still holds: we
+                # simply do without the console.
+                #
+                # Loudly, though. A console silently absent is worse than no
+                # console, because the operator goes looking for one.
+                print(f"# WEB CONSOLE NOT STARTED: {exc}", file=sys.stderr)
+                print("# the run continues without it -- no settings box, no "
+                      "remote pause/stop", file=sys.stderr)
+                console = None
         run_bot(bot_js, args.settings, max_ticks=args.max_ticks, execute_input=args.execute_input,
                 capture_screenshots=args.capture_screenshots,
                 session_duration_minutes=args.session_duration_minutes,

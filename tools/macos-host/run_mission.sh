@@ -43,6 +43,7 @@ USAGE='./run_mission.sh                                     # start a run
 ./run_mission.sh --settings "agent-name=Some Agent"  # replaces the defaults below wholesale
 ./run_mission.sh --session-duration-minutes 180      # default is 120
 SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
+./run_mission.sh --web-console 9000                  # console on another port (default 8787)
 ./run_mission.sh --help                              # this text'
 
 # Default settings. All of these are optional -- the bot runs with none of
@@ -250,4 +251,5 @@ sleep 1
 python3 "${SCRIPT_DIR}/botlab_host/botlab_host.py" "$BOT_SOURCE" \
     --settings "$SETTINGS" \
     --session-duration-minutes "$SESSION_DURATION_MINUTES" \
+    --web-console \
     --execute-input "$@"
