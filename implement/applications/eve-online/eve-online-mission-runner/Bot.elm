@@ -23,6 +23,24 @@
    answers that a mission is already in progress, it closes the conversation,
    and it starts over. Run 103 did that 87 times without undocking.
 
+   ## When the ship is lost
+
+   A destroyed ship leaves the character in a capsule, still flying, on the
+   same grid as whatever killed it -- and a capsule reads 100% shield and 100%
+   armour, so nothing about the health line says anything is wrong. Run 7 kept
+   running missions in one for its whole 86 readings, at 0.0 m/s among the pack
+   that had just killed it, and a stationary pod in a hostile pocket is a
+   podding, which costs the clone and its implants.
+
+   The bot now recognises it from two signals and stops. Either the client's own
+   `(notify)` line -- "The ship you are piloting does not have targeting systems
+   installed", which only a capsule ever hears -- or the ship UI carrying no
+   module buttons at all for several consecutive readings. Then it stops trying
+   to fight, flies the pod to `home-station` (or to whatever station this system
+   offers, if none is configured), docks, and **ends the session**, saying why.
+   The run's remaining hours are worthless without a ship, and a ship loss is
+   something the operator has to know about.
+
    ## Setting up the Game Client
 
    Despite being quite robust, this bot is less intelligent than a human. For
@@ -116,6 +134,11 @@
      parentheses and hyphens: the bot never types this string, it types the part
      after the last " - " into the search bar and then matches this full name
      against the rows that come back. See `routeToStationByName`.
+
+     It is also where the pod goes if the ship is destroyed -- see "When the
+     ship is lost" below. Without it the pod docks at whatever station this
+     system offers instead, which is worse but is still not sitting still among
+     the rats that just killed the ship.
    + `drone-type` : Name of the drone to refill the drone bay with while the
      session winds down, as it appears in the station's item hangar -- e.g.
      `drone-type=Hobgoblin I`. Defaults to `Acolyte I`. Fit-specific, which is
@@ -449,11 +472,34 @@ type alias BotMemory =
     , droneRestockLooksWithRoom : Int
     , droneRestockDragsDispatched : Int
     , droneBayEmptyLastSeen : Maybe Bool
+    , shipLoss : Maybe ShipLossVerdict
+    , shipUIWithoutModuleButtonsReadings : Int
     , lockAttempt : Maybe LockAttempt
     , lockProvenAtMeters : Maybe Int
     , lockRefusedAtMeters : Maybe Int
     , lockRangeLastChange : Maybe String
     , ammoSwap : AmmoSwapMemory
+    }
+
+
+{-| The bot's conclusion that the ship it is flying no longer exists, and how
+many readings ago it reached it.
+
+Latched, and never cleared inside a session. That is the cost asymmetry of #33
+written into the type: a false positive parks the pod and ends the run early,
+which costs the rest of the session; a false negative leaves a capsule sitting
+among the rats that just killed the ship, which costs the clone and every
+implant in it. Nothing here may un-conclude a loss on a later reading that
+happens to look normal.
+
+`readingsSince` is what bounds the recovery. It counts readings rather than
+seconds because `bot-step-delay` moves the wall-clock length of a reading and
+nothing in `UpdateMemoryContext` carries the session clock.
+
+-}
+type alias ShipLossVerdict =
+    { reason : String
+    , readingsSince : Int
     }
 
 
@@ -609,7 +655,15 @@ missionBotDecisionRoot context =
 missionBotDecisionRootBeforeApplyingSettings : BotDecisionContext -> DecisionPathNode
 missionBotDecisionRootBeforeApplyingSettings context =
     case
+        -- The pod recovery sits above the wind-down, and above the
+        -- docked-or-in-space split below, because a lost ship outranks both:
+        -- there is no mission left to wind down from, and every branch that
+        -- locks, shoots, approaches or loots lives under the split. See
+        -- `recoverPodAfterShipLoss`. It is below `generalSetupInUserInterface`
+        -- only because the pod still needs the location info panel expanded and
+        -- stray menus cleared to travel at all.
         [ generalSetupInUserInterface context.readingFromGameClient
+        , recoverPodAfterShipLoss context
         , windDownBeforeSessionEnd context
         ]
             |> List.filterMap identity
@@ -1032,27 +1086,50 @@ goToHomeStationWhileInSpace context =
     homeStationToGoTo context
         |> Maybe.map
             (\stationName ->
-                if homeStationRouteIsSet context stationName then
-                    case closeSearchResultsWhenRouteIsSet context of
-                        Just closeResults ->
-                            closeResults
-
-                        Nothing ->
-                            describeBranch
-                                ("Home station: travelling to '"
-                                    ++ stationName
-                                    ++ "' to restock the drone bay."
-                                )
-                                (jumpToNextSystem context)
-
-                else
-                    describeBranch
-                        ("Home station: the drone bay is empty -- set the route to '"
+                travelToStationByName context
+                    stationName
+                    { whileSettingRoute =
+                        "Home station: the drone bay is empty -- set the route to '"
                             ++ stationName
                             ++ "'."
-                        )
-                        (routeToStationByName context stationName)
+                    , whileTravelling =
+                        "Home station: travelling to '"
+                            ++ stationName
+                            ++ "' to restock the drone bay."
+                    }
             )
+
+
+{-| Set a route to a named station and fly it, gate by gate, until the route
+marker's own menu offers "Dock" at the far end.
+
+Split out of `goToHomeStationWhileInSpace` when #33's pod recovery needed the
+same three steps for a different reason, so that there is one travel-and-dock
+path in this bot rather than two that can drift apart. The caller supplies both
+log lines because the *reason* differs and the decision log is where an operator
+reads it -- "the drone bay is empty" and "the ship is gone" want completely
+different words in front of the same mechanism.
+
+`jumpToNextSystem` is what docks at the far end too, which is why nothing here
+has to know the difference between another jump and arrival.
+
+-}
+travelToStationByName :
+    BotDecisionContext
+    -> String
+    -> { whileSettingRoute : String, whileTravelling : String }
+    -> DecisionPathNode
+travelToStationByName context stationName describe =
+    if homeStationRouteIsSet context stationName then
+        case closeSearchResultsWhenRouteIsSet context of
+            Just closeResults ->
+                closeResults
+
+            Nothing ->
+                describeBranch describe.whileTravelling (jumpToNextSystem context)
+
+    else
+        describeBranch describe.whileSettingRoute (routeToStationByName context stationName)
 
 
 {-| Whether the route currently set is *our* route home, rather than a leftover
@@ -1083,6 +1160,293 @@ homeStationRouteIsSet : BotDecisionContext -> String -> Bool
 homeStationRouteIsSet context stationName =
     routeIsSet context
         && (stationInfoWindowForStation context stationName /= Nothing)
+
+
+
+-- The ship is gone: recognising it, and getting the pod out
+
+
+{-| How many consecutive in-space readings a ship UI with no module buttons at
+all has to persist before it counts as a lost ship on its own.
+
+Low, because of the asymmetry #33 is about: docking early costs the rest of the
+session, and being wrong the other way costs the clone. Not one, because the
+module row is not a stable index space -- `ParseUserInterface` drops any slot
+whose display region it cannot read (see CLAUDE.md, "Ship modules"), so a single
+reading finding none is a parse that may simply have missed, where three in a
+row is the ship's shape having changed.
+
+Three *readings*, not three decision lines -- the unit CLAUDE.md keeps a section
+on, and the one `stall_watch.py` got wrong twice. This counter is stepped from
+`updateMemoryForNewReadingFromGame`, which runs once per reading, so three of
+them is roughly twenty-five seconds at the tick rate the recorded runs show
+(run 57: 376 ticks in 3,025s).
+
+-}
+shipLossReadingsWithoutModulesBeforeVerdict : Int
+shipLossReadingsWithoutModulesBeforeVerdict =
+    3
+
+
+{-| How many readings the pod recovery may run before the session ends anyway.
+
+A pod that has been trying to reach a station for this long is not going to, and
+an unbounded retry loop reads in the log exactly like a bot working -- issues #7
+and #14 twice over. When it expires the session *ends*, naming the station the
+pod never reached, so an operator finds out rather than discovering it later.
+
+Calibrated in readings, at the eight seconds a reading the recorded runs
+average -- so this is about twenty minutes of trying, against the roughly fifty
+readings `homeStationTripSecondsPastSessionEnd` (420s) already budgets for the
+same route, jumps and dock. Three times the headroom the trip that works needs.
+
+-}
+podRecoveryGiveUpReadings : Int
+podRecoveryGiveUpReadings =
+    150
+
+
+{-| The client saying, in its own words, that the ship being flown cannot lock
+anything -- which for this bot means the ship is gone and a capsule is in its
+place.
+
+**This is not a destruction announcement, and there is no such thing in this
+client's log.** The whole of run 7's loss reads, in
+`~/Documents/EVE/logs/Gamelogs`, as the last `(combat)` line at 04:26:59 and then
+nothing until:
+
+    [ 2026.08.03 04:27:33 ] (notify) The ship you are piloting does not have targeting systems installed.
+
+repeated 173 times to the end of the run. Issue #33 expected EVE to state the
+loss outright; it does not. What it states is the *consequence*, and only when
+something asks the capsule to lock -- which this bot does on every reading it
+sees a rat, so in the case that matters (a hostile pocket) the answer arrives
+within a reading or two. It is silent for a pod drifting somewhere empty, which
+is why it is not the only signal.
+
+Two things make it usable anyway. It arrives on `(notify)`, which is carried:
+the withheld channels are `(combat)` and `(bounty)`, and a destruction line, if
+one existed, would almost certainly have been on `(combat)` and therefore
+invisible to the bot. And it is the client asserting a fact about the hull rather
+than the bot inferring one from a HUD sprite, which is what the hitpoint reading
+of #32 turned out to be.
+
+Matched on two substrings for #31's reason: the sentence has no variable part
+today, but `targeting systems` alone would also match a rewording about a
+*module*, and the pair pins the subject ("the ship you are piloting") to the
+symptom.
+
+`Nothing` and `Just []` are collapsed here, and that is safe only because of the
+direction of the inference. Finding no such line is never read as the ship being
+intact -- `shipUIHasNoModuleButtons` is the signal that works on a host carrying
+no game log at all. Nothing anywhere may conclude "no loss was reported, so the
+ship is fine", which is exactly the reading of an absent game log #30 built the
+`Maybe` to prevent.
+
+-}
+shipLossFromGameLog : ReadingFromGameClient -> Maybe String
+shipLossFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.filter
+            (\entry ->
+                stringContainsIgnoringCase "ship you are piloting" entry.text
+                    && stringContainsIgnoringCase "does not have targeting systems" entry.text
+            )
+        |> List.head
+        |> Maybe.map .text
+
+
+{-| A ship UI that is showing, and carries no module buttons in any row.
+
+The second signal, and the one that needs no game log. A capsule has no module
+slots at all; every ship this bot is set up to fly has weapons in the top row and
+hardeners in the middle, because its own setup instructions require them.
+
+Run 7 logged `Middle-row modules: none.` on every one of its 724 in-space status
+prints, across all 86 of its readings. Runs 1, 3, 5 and 8, all flying real ships,
+logged it **zero** times between them -- 4,419 readings and 15,836 in-space
+status prints, every one of which named a propulsion module. That is the
+discrimination this rests on, and it is measured rather than assumed.
+
+What is *inferred* rather than observed is the step from that row to this one.
+The status line prints the middle row only, and the middle row is a subset of
+`moduleButtons`, so a non-empty middle row proves `moduleButtons` was non-empty
+on all 15,836 -- the direction that matters for false positives. The other
+direction, a capsule having no module buttons in *any* row, follows from a
+capsule having no slots to fit them in, and from run 7's own `ShipUI` text
+carrying nothing behind its slots. If that turns out to be wrong on some client
+the symptom is this signal never firing, and the game log's capsule refusal
+carrying the whole load.
+
+Note what is *not* used. The drones window disappearing was #33's third suggested
+signal and it does not survive contact with the recordings: run 1 reported "No
+drones" on 8,076 in-space readings while flying a perfectly good ship, so an
+absent drones window says nothing about the hull. Nor are hitpoints used --
+a capsule reads 100% shield and 100% armour, which is the reassuring-and-
+meaningless line that made this failure invisible in the first place.
+
+-}
+shipUIHasNoModuleButtons : ReadingFromGameClient -> Bool
+shipUIHasNoModuleButtons readingFromGameClient =
+    case readingFromGameClient.shipUI of
+        Nothing ->
+            False
+
+        Just shipUI ->
+            List.isEmpty shipUI.moduleButtons
+
+
+{-| The count of consecutive in-space readings whose ship UI carried no modules.
+
+Reset by a reading that shows any module, and by docking -- a docked reading has
+no ship UI at all and so is no evidence either way, and letting it count would
+have every dock accumulate towards a verdict.
+
+-}
+shipUIWithoutModuleButtonsReadingsAfter : ReadingFromGameClient -> Int -> Int
+shipUIWithoutModuleButtonsReadingsAfter readingFromGameClient countBefore =
+    if shipUIHasNoModuleButtons readingFromGameClient then
+        countBefore + 1
+
+    else
+        0
+
+
+{-| The loss verdict for this reading: the one already latched, or a new one if
+this reading is where it becomes clear.
+
+Written from `updateMemoryForNewReadingFromGame` because it has to be. The game
+log entries behind the first signal are gone by the next reading, so a branch
+that read them and recorded nothing would see the loss once and then go back to
+flying the mission -- which is precisely what #30's follow-up section warns
+about, and the shape #31 already had to work around.
+
+Latched: once set it is returned unchanged forever. See `ShipLossVerdict`.
+
+-}
+shipLossVerdictAfter :
+    ReadingFromGameClient
+    -> { withoutModulesReadings : Int, verdictBefore : Maybe ShipLossVerdict }
+    -> Maybe ShipLossVerdict
+shipLossVerdictAfter readingFromGameClient { withoutModulesReadings, verdictBefore } =
+    case verdictBefore of
+        Just latched ->
+            Just { latched | readingsSince = latched.readingsSince + 1 }
+
+        Nothing ->
+            case shipLossFromGameLog readingFromGameClient of
+                Just clientSentence ->
+                    Just
+                        { reason =
+                            "the client said \""
+                                ++ clientSentence
+                                ++ "\", which only a capsule hears"
+                        , readingsSince = 0
+                        }
+
+                Nothing ->
+                    if shipLossReadingsWithoutModulesBeforeVerdict <= withoutModulesReadings then
+                        Just
+                            { reason =
+                                "the ship UI has carried no modules at all for "
+                                    ++ String.fromInt withoutModulesReadings
+                                    ++ " readings, which is the shape of a capsule and not of any ship this bot flies"
+                            , readingsSince = 0
+                            }
+
+                    else
+                        Nothing
+
+
+{-| Stop flying the mission and get the pod to a station, once the ship is gone.
+
+Placed above the wind-down and above everything docked-or-in-space in
+`missionBotDecisionRootBeforeApplyingSettings`, which is what makes "stop
+fighting" structural rather than a list of things not to do: locking, module
+activation, approach and looting all live below this branch and are simply never
+reached. There is nothing aboard a capsule to fight with.
+
+Four outcomes, and every one of them says in the decision log that the ship was
+lost, because that is the one fact an operator has to be able to read back:
+
+  - **Docked.** The pod is safe and the run is over. A ship loss is something the
+    operator has to act on, and the session's remaining hours are worth nothing
+    without a ship, so this ends the session rather than parking.
+  - **In space with a `home-station`.** The same route-travel-dock path #16 built
+    for the drone restock, via `travelToStationByName`.
+  - **In space with no `home-station`.** `dockAtStation` off the surroundings
+    menu, preferring the station last docked at. Weaker -- it can only reach a
+    station in this system, and it says so -- but a pod docked anywhere beats a
+    pod stationary in the pocket that just killed the ship.
+  - **Out of time.** `podRecoveryGiveUpReadings` readings of trying, and the
+    session ends saying so.
+
+-}
+recoverPodAfterShipLoss : BotDecisionContext -> Maybe DecisionPathNode
+recoverPodAfterShipLoss context =
+    context.memory.shipLoss
+        |> Maybe.map
+            (\shipLoss ->
+                describeBranch
+                    ("The ship is gone -- "
+                        ++ shipLoss.reason
+                        ++ ". Stop flying the mission and get the pod out ("
+                        ++ String.fromInt shipLoss.readingsSince
+                        ++ " readings since)."
+                    )
+                    (case context.readingFromGameClient.shipUI of
+                        Nothing ->
+                            describeBranch
+                                ("The pod is docked at "
+                                    ++ (dockedStationNameFromInfoPanel context
+                                            |> Maybe.map (\name -> "'" ++ name ++ "'")
+                                            |> Maybe.withDefault "a station"
+                                       )
+                                    ++ " and safe. Ending the session: there is no ship left to fly the mission with, and that is for the operator to fix."
+                                )
+                                (Common.DecisionPath.endDecisionPath FinishSession)
+
+                        Just _ ->
+                            if podRecoveryGiveUpReadings <= shipLoss.readingsSince then
+                                describeBranch
+                                    ("The pod has been trying to reach a station for "
+                                        ++ String.fromInt shipLoss.readingsSince
+                                        ++ " readings and has not got there. Ending the session in space rather than retrying forever -- the pod needs recovering by hand."
+                                    )
+                                    (Common.DecisionPath.endDecisionPath FinishSession)
+
+                            else
+                                case context.eventContext.botSettings.homeStationName of
+                                    Just stationName ->
+                                        travelToStationByName context
+                                            stationName
+                                            { whileSettingRoute =
+                                                "Pod recovery: set the route to '"
+                                                    ++ stationName
+                                                    ++ "' before anything else."
+                                            , whileTravelling =
+                                                "Pod recovery: travelling to '"
+                                                    ++ stationName
+                                                    ++ "' to get the pod docked."
+                                            }
+
+                                    Nothing ->
+                                        describeBranch
+                                            ("Pod recovery: no 'home-station' is configured, so there is no station this pod can be routed to by name. Docking at whatever this system offers"
+                                                ++ (context.memory.lastDockedStationNameFromInfoPanel
+                                                        |> Maybe.map (\name -> ", preferring '" ++ name ++ "'")
+                                                        |> Maybe.withDefault ""
+                                                   )
+                                                ++ " instead."
+                                            )
+                                            (dockAtStation
+                                                context.memory.lastDockedStationNameFromInfoPanel
+                                                context
+                                            )
+                    )
+            )
 
 
 
@@ -7537,6 +7901,8 @@ initBotMemory =
     , droneRestockLooksWithRoom = 0
     , droneRestockDragsDispatched = 0
     , droneBayEmptyLastSeen = Nothing
+    , shipLoss = Nothing
+    , shipUIWithoutModuleButtonsReadings = 0
     , lockAttempt = Nothing
     , lockProvenAtMeters = Nothing
     , lockRefusedAtMeters = Nothing
@@ -7670,10 +8036,50 @@ statusTextFromState context =
     [ [ describePerformance ]
     , [ describeMenuAndSettlingCounters ]
     , [ describeHomeStation context ]
+    , [ describeShipLoss context ]
     , describeCurrentReading
     ]
         |> List.concat
         |> String.join "\n"
+
+
+{-| Whether the bot thinks it still has a ship, on every reading rather than only
+once it does not.
+
+Carried continuously for the same reason `describeHomeStation` is: both inputs
+are otherwise invisible. Whether the host is carrying the game log at all decides
+whether the first of the two signals can ever fire, and "no capsule refusal was
+seen" reads identically whether the client was silent or nothing was listening --
+the distinction #30's `Maybe` exists to keep. The module counter shows the second
+signal counting up, so a verdict that is about to arrive is visible before it
+does rather than only in hindsight.
+
+-}
+describeShipLoss : BotDecisionContext -> String
+describeShipLoss context =
+    case context.memory.shipLoss of
+        Just shipLoss ->
+            "SHIP LOST: "
+                ++ shipLoss.reason
+                ++ " -- recovering the pod, "
+                ++ String.fromInt shipLoss.readingsSince
+                ++ " of "
+                ++ String.fromInt podRecoveryGiveUpReadings
+                ++ " readings spent."
+
+        Nothing ->
+            "Ship: intact as far as this reading can tell (no-module readings "
+                ++ String.fromInt context.memory.shipUIWithoutModuleButtonsReadings
+                ++ " of "
+                ++ String.fromInt shipLossReadingsWithoutModulesBeforeVerdict
+                ++ "). "
+                ++ (case context.readingFromGameClient.gameLogEntriesSinceLastReading of
+                        Nothing ->
+                            "This host is not carrying the client's game log, so the capsule refusal cannot be seen at all and the module count is the only signal left."
+
+                        Just _ ->
+                            "The game log is carried, so the capsule refusal would be seen."
+                   )
 
 
 {-| The home station and whether the bot currently means to go there.
@@ -9189,6 +9595,11 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
             else
                 droneBayFillWhileSelected context.readingFromGameClient
+
+        shipUIWithoutModuleButtonsReadings =
+            shipUIWithoutModuleButtonsReadingsAfter
+                context.readingFromGameClient
+                botMemoryBefore.shipUIWithoutModuleButtonsReadings
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -9255,6 +9666,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
             Just isEmpty ->
                 Just isEmpty
+    , shipUIWithoutModuleButtonsReadings = shipUIWithoutModuleButtonsReadings
+    , shipLoss =
+        -- Written here and nowhere else. The game log entries the first signal
+        -- reads are gone by the next reading, and this is the only place that
+        -- can write memory -- a branch that recognised the loss in the decision
+        -- tree instead would see it once and forget it.
+        shipLossVerdictAfter context.readingFromGameClient
+            { withoutModulesReadings = shipUIWithoutModuleButtonsReadings
+            , verdictBefore = botMemoryBefore.shipLoss
+            }
     , ammoSwap = updateAmmoSwapMemory context botMemoryBefore.ammoSwap
     , droneBayWillTakeNoMore =
         -- The restock's "already done", in the two forms a docked reading can
