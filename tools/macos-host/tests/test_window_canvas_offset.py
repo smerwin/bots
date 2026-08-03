@@ -60,17 +60,39 @@ def screen_point_for_canvas_position(canvas_x, canvas_y, canvas, points,
                                      origin_x, origin_y, backing):
     """Run a canvas position through the host's whole coordinate path.
 
-    This is deliberately the *composition* the bot and host actually perform --
-    the host reports a rect in game pixels, `BotFramework.elm` adds the UI
-    position to it unscaled, and `_windows_input` divides by the scale on the
-    way out to `cg_input`. Testing the pieces separately would have missed the
-    bug, which lived in how they compose.
+    This is the *composition* the bot and host actually perform: the host
+    reports a rect in game pixels, `BotFramework.elm` adds the UI position to
+    it unscaled, and `_windows_input` divides by the scale on the way out to
+    `cg_input`. The rect half is the real `window_canvas_geometry` rather than
+    a restatement of it -- mutation testing showed a restatement passes happily
+    while the host itself drops the inset entirely.
     """
-    scale_x, scale_y, inset_x, inset_y, _, _ = calibrate(
-        canvas, points[0], points[1], backing)
-    left = int(origin_x * scale_x) + inset_x
-    top = int(origin_y * scale_y) + inset_y
-    return (canvas_x + left) / scale_x, (canvas_y + top) / scale_y
+    rect = {
+        "left": origin_x, "top": origin_y,
+        "right": origin_x + points[0], "bottom": origin_y + points[1],
+        "backing_scale": backing,
+    }
+    scaled_rect, scale_x, scale_y, _ = botlab_host.window_canvas_geometry(rect, canvas)
+    return ((canvas_x + scaled_rect["left"]) / scale_x,
+            (canvas_y + scaled_rect["top"]) / scale_y)
+
+
+class InputConversionTests(unittest.TestCase):
+    """The other half of the composition, pinned by reading the source.
+
+    `_windows_input` divides an outbound coordinate by the same scales this
+    calibration produces. That is one line and cannot be driven without a live
+    `cg_input`, so it is read instead -- if it stops dividing, or starts
+    dividing by something else, the arithmetic above no longer describes what
+    reaches the client.
+    """
+
+    def test_outbound_coordinates_are_divided_by_the_calibrated_scales(self):
+        with open(botlab_host.__file__) as handle:
+            source = handle.read()
+        self.assertIn("x / scale_x, y / scale_y", source)
+        self.assertIn("scale_x = self._scale_x", source)
+        self.assertIn("scale_y = self._scale_y", source)
 
 
 class CalibrationTests(unittest.TestCase):

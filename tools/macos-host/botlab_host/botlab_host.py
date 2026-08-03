@@ -626,6 +626,37 @@ def calibrate_window_canvas(root_size, point_w, point_h, backing_scale):
     return canvas_w / point_w, canvas_h / point_h, 0, 0, canvas_w, canvas_h
 
 
+def window_canvas_geometry(rect, root_size):
+    """The canvas rect in game pixels, with the scales and inset behind it.
+
+    Returns (scaled_rect, scale_x, scale_y, (inset_x, inset_y)).
+
+    This exists as one function rather than inline at the call site so the
+    coordinate path can be tested as the *composition* it is. The bug it was
+    written for lived in how the scale and the origin combine, not in either of
+    them, and a test that restates this arithmetic instead of running it would
+    have passed throughout.
+
+    Note `right`/`bottom` are the canvas's own extent from its origin, which is
+    identical to scaling the window's far corner whenever the canvas fills the
+    window -- and correct rather than merely equal when it does not.
+    """
+    point_w = max(1, rect["right"] - rect["left"])
+    point_h = max(1, rect["bottom"] - rect["top"])
+    scale_x, scale_y, inset_x, inset_y, canvas_w, canvas_h = calibrate_window_canvas(
+        root_size, point_w, point_h, rect["backing_scale"])
+    # The canvas origin, not the window origin: the bot adds this to a UI
+    # position that is measured from the canvas, so the inset belongs in that
+    # sum rather than in a correction applied afterwards.
+    left = int(rect["left"] * scale_x) + inset_x
+    top = int(rect["top"] * scale_y) + inset_y
+    scaled_rect = {
+        "left": left, "top": top,
+        "right": left + canvas_w, "bottom": top + canvas_h,
+    }
+    return scaled_rect, scale_x, scale_y, (inset_x, inset_y)
+
+
 def capture_image_data(window_number, scaled_rect, scale_x, scale_y, canvas_inset=(0, 0)):
     """Real screenshotCrops_binned_2x2/_binned_4x4, captured via
     screencapture and resampled into the game's own coordinate space (see
@@ -1332,23 +1363,13 @@ class TaskDispatcher:
             point_w = max(1, rect["right"] - rect["left"])
             point_h = max(1, rect["bottom"] - rect["top"])
             root_size = self.volatile.root_display_size.get(self.volatile.game_pid)
-            scale_x, scale_y, inset_x, inset_y, canvas_w, canvas_h = \
-                calibrate_window_canvas(root_size, point_w, point_h, rect["backing_scale"])
+            scaled_rect, scale_x, scale_y, (inset_x, inset_y) = \
+                window_canvas_geometry(rect, root_size)
             self._scale_x, self._scale_y = scale_x, scale_y
             self._canvas_inset = (inset_x, inset_y)
             self._report_canvas_calibration(root_size, point_w, point_h,
                                             rect["backing_scale"], scale_x, scale_y,
                                             inset_x, inset_y)
-            # The canvas origin, not the window origin: the bot adds this to a
-            # UI position that is measured from the canvas, so the inset has to
-            # be in the sum rather than corrected for afterwards. With no inset
-            # this is exactly what it always was.
-            left = int(rect["left"] * scale_x) + inset_x
-            top = int(rect["top"] * scale_y) + inset_y
-            scaled_rect = {
-                "left": left, "top": top,
-                "right": left + canvas_w, "bottom": top + canvas_h,
-            }
             result = {
                 "readingId": f"screenshot-{int(time.time()*1000)}",
                 "windowText": "",
