@@ -446,10 +446,13 @@ class TheSwapDoesNotDisarmUnderFire(unittest.TestCase):
         self.assertIn(
             "updateAmmoSwapMemory context incomingDamageNow botMemoryBefore.ammoSwap",
             self.source)
-        self.assertIn(
-            "incomingDamageNow =\n            updateIncomingDamageMemory context "
-            "botMemoryBefore.incomingDamage",
-            self.source)
+        # Matched loosely across the arguments -- #56 added `hitpointsNow` --
+        # and strictly on the two ends that decide whether the window the swap
+        # reads is this reading's: the binding, and the memory it folds into.
+        self.assertRegex(
+            self.source,
+            r"incomingDamageNow\s*=\s*updateIncomingDamageMemory\s+context"
+            r"[^\n]*botMemoryBefore\.incomingDamage")
 
 
 class TheLatchedGiveUpIsSaidOnce(unittest.TestCase):

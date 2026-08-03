@@ -393,13 +393,19 @@ class MissionRunnerGuardTest(unittest.TestCase):
         #50, because the ammo swap reads it too and has to read *this* reading's
         value: the reading fire first arrives on is exactly the reading a swap
         must not begin on. One binding, two readers, still one writer.
+
+        Since #56 it is handed `hitpointsNow` as well, because the HUD reading
+        each sample carries is the one two readings agree on rather than this
+        reading's own -- otherwise a corrupt value passes for an instrument that
+        is still moving. Matched loosely enough to survive `elm-format` and a
+        further argument, and strictly enough to pin what it is called with.
         """
         update = self.source.index("updateMemoryForNewReadingFromGame context botMemoryBefore =")
         body = self.source[update:]
-        self.assertIn(
-            "        incomingDamageNow =\n"
-            "            updateIncomingDamageMemory context botMemoryBefore.incomingDamage",
-            body)
+        self.assertRegex(
+            body,
+            r"incomingDamageNow\s*=\s*updateIncomingDamageMemory\s+context"
+            r"[^\n]*botMemoryBefore\.incomingDamage")
         self.assertIn("    , incomingDamage = incomingDamageNow", body)
         self.assertIn("    , shipLoss =", body)
 
