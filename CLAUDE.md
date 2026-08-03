@@ -1101,7 +1101,10 @@ going quiet. Both halves of #34 were reading this field. Nothing in the ammo pat
 depends on it any more — #38's deadline was deliberately built to hold with this
 reading worthless — but anything new that treats `isActive` as "this module is
 doing its job" is repeating the mistake. `isInActiveState` is the entry that
-means that, and it is not wired to anything yet; see below.
+means *switched on*, and since #50 it backs exactly one decision — whether the
+ammo swap's switch-off landed and whether it has since been undone. Run 11 showed
+it reading `True` for eighteen readings on a gun that fired nothing at all, so it
+is still not evidence the module is doing its job; see below.
 
 **`Nothing` and `Just False` are still different facts.** The entry is absent
 until the module has cycled at all — for the first ~60s of that sample no module
@@ -1138,7 +1141,7 @@ What the same 240s sample says about the rest:
 | entry | observed | reading |
 |---|---|---|
 | `isInActiveState` | `True` on all four modules, all 92 samples | **switched on** — the flag `isActive` should have been |
-| `isDeactivating` | `False` throughout, never once `True` | **unobserved** — nothing switched a module off in the window |
+| `isDeactivating` | `False` throughout that sample; **`True` in run 11**, on every reading a swap had a gun switched off | switching off, cycle not yet finished — see below |
 | `effect_activating` | `0`, except a single `1` at 175.3s, 2.6s before a cycle began | a brief pulse at **activation** |
 | `waitingForActiveTarget` | absent until 141.3s, then `0` on all four at once | `0` = not waiting; appears late, needs more observation |
 | `online` | `True` throughout | |
@@ -1146,22 +1149,50 @@ What the same 240s sample says about the rest:
 | `autoreload` / `autorepeat` | `1` / `1000` throughout | settings, not state |
 | `isMaster` | `1` on the high slot only | identifies the weapon group's master |
 
-**Nothing decides anything from them, and that is deliberate.** This is one 240s
-window on one fit, and the leg #34 actually needed has zero observations:
-`isDeactivating` is named for exactly the state that wait cared about and was
-never once `True`, because the bot performed no ammo swap while the sampler ran
-and nothing else switched a module off.
-
-**Capturing that leg is what the status line is for.** The mission runner prints
-five entries every reading —
+**Capturing the switch-off is what the status line was for.** The mission runner
+prints five entries every reading —
 `Top-row modules (ramp_active/isInActiveState/isDeactivating/effect_activating/waitingForActiveTarget)`
 — with `T`/`F` for a boolean, the number for a numeric entry, and `-` for an
 entry **absent from the tree**, which is a distinct output from `F` and `0` on
-purpose. So the next run that performs an ammo swap records the switch-off
-without anyone watching: read those columns across idle → activated → firing →
-commanded off → settled. The other seven entries are parsed and available but not
+purpose. So a run that performs an ammo swap records the switch-off without
+anyone watching. The other seven entries are parsed and available but not
 printed, since this line goes out thousands of times a run and all seven were
 constant across the whole sample.
+
+### Run 11 recorded the switch-off, and it says the click lands
+
+Four ammo swaps, and all four read identically. The column goes
+`T/T/F` → **`T/F/T`** on the reading straight after the swap clicks the module
+button: `isInActiveState` `True` → `False` and `isDeactivating` `False` → `True`
+together, with `ramp_active` still `True` because the gun is finishing its cycle.
+**The switch-off lands, first time, in one reading**, which is the observation #35
+and #39 both asked for and neither had.
+
+Two readings later the column becomes `F/T/F` and stays there. The guns are
+switched back **on** — by `decisionToKillRats`, which owns activation, because the
+swap's settle hands the fight on and the fight sees an inactive weapon on a
+locked target. That is the intended owner behaving correctly; what was wrong is
+that the swap kept going. Its `gunsSilencedTicks` counter consults nothing the
+module says (deliberately, #38) so it counted to its bound of 20 while the guns
+had been back on since reading 3.
+
+**`isInActiveState` is decisive about the switch-off and says nothing about the
+guns working.** In that same window the weapon fired *not once* — all 33 outgoing
+`(combat)` lines came from a drone, against 195 gun lines across the run — while
+`isInActiveState` read `True` and `ramp_active` sat pinned at `False` for
+eighteen readings. So the flag means the toggle is on, not that the gun is doing
+anything, and treating `Just True` as "the guns are working" would be #12 and #34
+a third time. What it supports is the negative: `Just False` is the client
+confirming a switch-off, and `Just True` after a confirmed `Just False` is the
+client saying it has been undone.
+
+**One field is now wired to a decision; the other eleven are not.** #50 gives the
+ammo swap `moduleReadsSwitchedOff` and `moduleReadsSwitchedOn` over
+`isInActiveState`, and both are `Just`-only so a build without the entry behaves
+exactly as before. The direction is one-way and asserted as such: consulting the
+module can only make the swap release the guns *sooner*, never hold them longer,
+which is what keeps #38's deadline independent of a signal that could stall it.
+`test_module_button_dict_state.py` pins that nothing else reads any of the twelve.
 
 A module button is a **toggle**, so a click repeated before the client has shown
 its result switches the module back off. `moduleButtonClickSettlingSteps` gives a
@@ -1488,6 +1519,60 @@ reaching the silence deadline. That last one is the newcomer and deliberately so
 Having disarmed the ship once and been unable to finish, doing it again is not an
 optimisation worth the risk.
 
+### The bound is a backstop; the policy is not to disarm under fire
+
+Run 11 reached that deadline, latched the feature off, and it still cost most of
+a tank: the swap had begun on a ship at 26% shield with twelve hostiles on grid
+and 1679 hitpoints already in its 45-second window, and by the twentieth reading
+the shield was at zero and the armour had started going. **The bound did exactly
+what it promised. Twenty readings under fire is still most of a tank.** A bound
+answers "what if this never ends"; it does not answer "should this have started".
+
+So `swapMayDisarmTheGuns` is the policy, ahead of the backstop: **the guns do not
+go off while the client says the ship is being shot.** The evidence is the same
+rolling window the damage-rate retreat uses — the client's own combat log rather
+than a HUD sprite, and already summed for every reading.
+
+- **Zero, not a threshold.** `run-away-incoming-damage-threshold` is about how
+  much punishment a hull absorbs before running. This is a different question and
+  the honest answer to "is anything shooting" is any damage at all; a threshold
+  here would license disarming under light fire, which is what heavy fire starts
+  as.
+- **An absent channel declines.** `Nothing` and `Just 0` are different facts and
+  only one may be read as "the grid is quiet". A host that cannot answer gets the
+  answer that keeps the guns firing — which costs the whole feature on such a
+  host, stated rather than hidden.
+- **Deferring is not failing.** Nothing is given up and no counter is spent: the
+  verdict stays live, the guns keep shooting what they have, and
+  `ammoSwapVerdictGiveUpTicks` drops the attempt if the lull never comes.
+- **Fire arriving mid-swap abandons the attempt** rather than waiting out the
+  deadline, because letting go is what re-arms the guns — `decisionToKillRats`
+  presses the hotkey on the very next reading, which run 11 shows it doing.
+
+The cost is real and measured: across runs 10 and 11 the swap held a live verdict
+on 1803 status prints and 465 of them (26%) were on a quiet window. So roughly
+three quarters of the moments the swap wants to fire it now defers, and swaps
+happen between waves instead of during them. Against run 11's own four swaps the
+rule declines the two that began under fire and allows the two that began in a
+lull.
+
+**Separately, the client's confirmation ends the guessing.** `gunsConfirmedOff`
+is `isInActiveState` reading `Just False` on a gun the swap commanded off. It
+shortens the settle — measured landing on the first reading after the click every
+time — and, once it has been true and the gun reads switched on again,
+`switchOffHasBeenUndone` abandons the attempt, since a load into a running gun is
+refused anyway. Replayed against run 11's twenty status-line columns that fires
+at reading 3 rather than 21.
+
+**The deadline itself is unchanged, and so is its independence.** `gunsSilencedTicks`
+still consults nothing the module says. Every use of the module reading can only
+make the swap release the guns *sooner*, never hold them longer, and that
+direction is asserted as a property of the source in
+`tools/macos-host/tests/test_ammo_no_disarm_under_fire.py` — which also executes
+the rules through `elm repl` rather than restating them in Python. The bound's
+size was left at 20 deliberately: shortening a bound on a policy that should not
+have started is treating the symptom.
+
 ### Not oscillating
 
 - **The crossover does not move, so the deadband is simple.** It is
@@ -1547,12 +1632,29 @@ alike is how a bot concludes a command worked because nothing complained.
 
 Verified live: the menu's contents and that it omits the loaded charge; the
 quantity suffix; the client's refusal to load into an active module; that swaps
-land between engagements. Not verified: any of this code running. Watch the
-status line's `loaded charge reads` flipping after a swap, and the game log
-staying free of `cannot load or unload`. `(notify)` lines are a signal the bot
-never reads at all — the host already tails the game log for bounties, so
-surfacing "the client refused what we just asked" would turn a whole class of
-silent discards into something the bot could react to.
+land between engagements. **Run 11 added the switch-off leg** — four swaps, all
+four showing `isInActiveState` going `Just True` → `Just False` on the reading
+after the click, the guns back on by reading 3, and the deadline firing at 21.
+
+Not verified: **#50's own code running.** The rule and the two predicates are
+executed off-line against run 11's recorded numbers, so what is checked is that
+they answer correctly on the inputs that run produced — not that the branches
+carrying them are reached in a live fight. Three things to watch on the next run
+with `short-range-ammo` and `long-range-ammo` set:
+
+1. **`not disarming:` on the status line** while a verdict is live and the ship
+   is being shot, and the swap happening once the window empties. If that clause
+   never appears, the guard is not being reached; if it never *stops* appearing,
+   the ship is never getting a lull and the swap is effectively off.
+2. **`GUNS OFF for N of 20 readings, the client confirmed the switch-off`.** The
+   two halves should agree — N small, and the confirmation arriving by reading 2.
+   A high N beside "has not confirmed the switch-off" is the click not landing,
+   which is a different bug from anything here and nothing has ever seen it.
+3. **That `Ammo swap: given up` appears once** and then as the short flag.
+
+Also watch the game log staying free of `cannot load or unload`: with the
+confirmation in front of the load, a refusal now means the gun read switched off
+and the client disagreed.
 
 One cross-feature invariant, since this and the learned lock range both read the
 previous step's effects. They cannot be confused: the lock chord is Ctrl over a

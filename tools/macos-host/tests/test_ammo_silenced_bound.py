@@ -171,7 +171,12 @@ class EveryCounterCanActuallyAdvance(unittest.TestCase):
     failed, because the shape is what shipped twice, not the instance.
     """
 
-    COUNTERS = ["rangeVerdictTicks", "gunsSilencedTicks", "hoverUnansweredTicks"]
+    # `givenUpReadingsAgo` joins them from #50. It bounds nothing -- it exists
+    # so the latched give-up is printed once rather than 763 times -- but the
+    # property is about the shape a counter in this record has, and a counter
+    # exempted from it because it looked harmless is how the next one drifts.
+    COUNTERS = ["rangeVerdictTicks", "gunsSilencedTicks", "hoverUnansweredTicks",
+                "givenUpReadingsAgo"]
 
     def results_for(self, name):
         return branch_results(definition_body(bot_elm(), name))
