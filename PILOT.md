@@ -158,6 +158,34 @@ To rescue a ship: `python3 -i eve_repl.py`, then `eve.dock("<distinctive part of
 the station name>")`. Docking works from any range; **warp needs 150 km**, so
 anything closer is an approach.
 
+**Flying to another system** is one call per gate, then dock:
+
+```python
+eve.jump("Amarr")                      # selects the gate, presses Jump
+# poll InfoPanelLocationInfo until the system name changes (~40 s)
+eve.dock("Theology Council Tribunal")  # ~40 s more
+```
+
+**Quitting a mission the bot cannot finish** — the path is not where you would
+look for it:
+
+1. `Alt-J` for Opportunities, then click the **Active** tab (the default view is
+   available opportunities, not accepted ones);
+2. right-click the `AgentMissionCard`. Its menu offers `Start Conversation /
+   View Details / Untrack` — **there is no Quit here**;
+3. `Start Conversation`, and the conversation window carries `QuitMission_Button`;
+4. confirm the **Yes/No** dialog;
+5. the info panel's mission entry disappears when it has taken.
+
+Then add the name to `decline-mission` for the next run.
+`shouldDeclineMission` matches with `stringContainsIgnoringCase`, so
+`Illegal Activity` also covers `(2 of 3)` and `(3 of 3)`.
+
+**A stray right-click in station opens a "New Location" bookmark dialog.** It is
+the same hazard CLAUDE.md documents for computed empty space, and it will sit
+over the UI swallowing later clicks. Cancel it before continuing. Aim
+right-clicks at a node's own centre from the tree, never at a guessed point.
+
 ## Handing back
 
 Leave the ship docked if you can -- `cycle_run.sh --stop` mid-mission strands it

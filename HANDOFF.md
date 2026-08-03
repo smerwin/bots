@@ -4,7 +4,7 @@ Transient state: what is in flight, what is unproven, and what to do next.
 Durable facts about the client and the host live in `CLAUDE.md` — this file is
 the part that goes stale, and it should be rewritten rather than appended to.
 
-Last updated at `e2b56b0` (PR #49 merged).
+Last updated at `07e5e07` (PR #57 merged), with **run 14 in flight**.
 
 ## The one thing to know first
 
@@ -20,19 +20,41 @@ and reading the log afterwards, not by inspection — a dead guard that compiled
 under fire (#50). Inspection finds unreachable code; only running finds code
 that is reachable and wrong about the game.
 
+## Running right now
+
+**Run 14**, three hours, started docked at Amarr VI (Zorast). Client pid `74515`
+— note the UI-root cache is keyed to it, so relaunching the client invalidates
+`eve_read`/`eve_repl` until a bot run repopulates it. Console on the tailnet at
+`:8787`. Settings are the launcher defaults **plus**
+`decline-mission=Illegal Activity`, `home-station`, `drone-type` and the ammo
+pair.
+
+Healthy as of the last check: 981 readings, 80 kills, zero `stuck here`.
+
 ## In flight
 
 | issue | what | risk |
 |---|---|---|
-| #50 | ammo swap disarmed the ship mid-fight — shield 98% → 13% with five hostiles on grid, 25 readings of `Stop this weapon before loading` | **high** — safety, and the swap is currently latched off for a session when it fires |
-| #47 | `approach-object` / `prefer-wreck` should take comma-separated lists like `attack-object` | low |
+| #56 | retreat fires on a corrupt `Armor reached 0%` the plausibility filter cannot catch | medium — a false retreat abandons a mission the ship was winning |
+| #54 | quit a mission it cannot progress, instead of asking for help until the session ends | **high leverage** — cause-independent recovery |
 
-Both touch `mission-runner/Bot.elm`; #47 was told to yield to #50 on rebase.
+#54 is the one worth doing first, and the argument is in the issue: every stall
+this session had a *different* cause and the same consequence — a session that
+keeps running while accomplishing nothing. Fixing causes one at a time is
+endless; abandoning unworkable missions converts every future unknown cause from
+"session over" into "one mission skipped".
 
-#50 has two signals available that did not exist when the ammo swap was written,
-and it was pointed at both: `stateFromDictEntries.isInActiveState` from #39
-(ground truth that a switch-off actually landed) and `incomingDamageSinceLastReading`
-from #37 (the bot can know it is being shot *before* it decides to disarm).
+It has a price already measured. Runs 12 and 13 were both lost to one mission
+(`Illegal Activity (1 of 3) -- Retrieve Gallente Light Marines`): run 12 raised
+`askForHelpToGetUnstuck` **817 times**, run 13 reached the same state in 29
+readings from a *fresh* start, and recovery took a human — fly Irnin → Amarr,
+dock, quit the mission, restart. Two runs and an intervention for one mission
+the bot could not do and could not put down.
+
+**The quit path, since it is not obvious and cost time to find:** the mission
+card's own context menu offers only `Start Conversation / View Details /
+Untrack` — **no Quit**. Quit lives in the agent conversation as
+`QuitMission_Button`, behind a Yes/No confirmation.
 
 ## What landed in this batch
 
@@ -106,9 +128,31 @@ the last.
   the run logs, the local `elm`, and access to the live client, which is where
   most diagnoses came from.
 
+## Corrections worth carrying forward
+
+Three diagnoses in this batch were confidently wrong before they were right.
+Recorded because the *mistake* is the reusable part.
+
+- **The hull is armour-tanked, not shield-tanked.** `run_mission.sh` briefly
+  shipped `run-away-shield-hitpoints-threshold-percent=25` on the reasoning that
+  armour cannot be damaged until the shield is gone. It is the other way round:
+  the shield rests at 0 by design, so that threshold fires on the ship's normal
+  condition — run 10 raised the retreat 142 times before it was corrected live
+  through the console. Back to `-1`; armour (70) and the damage guard (3500) are
+  the ones that mean something here.
+- **Armour reading 100% through run 7's death was not a parse failure.** It was
+  a sampling artefact: the ship died between two readings. The gauge does move
+  (run 9 showed 46%, 97%, 99%). The durable lesson is the one #37 acted on — a
+  threshold on a sampled value can never catch a death inside one interval,
+  which is why the damage-rate guard exists.
+- **A stall with an obvious cause may not have it.** #53 was filed blaming a
+  wreck-candidate set that only grows; a restart with empty memory reproduced
+  the stall in 29 readings and disproved it. Check whether a restart clears a
+  suspected state bug *before* writing the diagnosis down.
+
 ## Where the evidence lives
 
-`~/eve-bot-logs/mission_run*.log` — twelve runs, ~100 MB, **not in the repo**
+`~/eve-bot-logs/mission_run*.log` — fourteen runs, **not in the repo**
 and not reproducible. Most of this batch was diagnosed from them. They contain
 the decision log, the status line every reading, and (from #30 onward) EVE's own
 game-log lines echoed as `#   game log:`.
