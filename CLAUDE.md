@@ -166,8 +166,13 @@ never terminates for a run that died, which is the case `start()` now detects
 for itself: a `Traceback` or an elm error report in the log fails on the next
 poll, and so does a log that has stopped growing while nothing matching
 `BOT_PATTERNS` is alive. Both print the last 15 log lines with the message, so
-the diagnosis usually needs no second command. A non-zero exit means no bot is
-running and there is nothing to stop before trying again.
+the diagnosis usually needs no second command. A non-zero exit does **not** mean
+the bot is gone, though: only the "run is gone" verdict checks that nothing is
+alive, while a fatal log pattern and the five-minute timeout both report failure
+without looking — `elm make` can still be running under the first, and a merely
+slow run under the second. So stop before trying again rather than assuming
+there is nothing to stop. Cycling already does that; `start()` on its own
+refuses with "refusing to start: a bot is still running".
 
 **Arm two monitors, not one.** `stall_watch.py --keep-going` covers stalls, but
 it says nothing when the bot or the client simply exits — and silence there
