@@ -7001,6 +7001,132 @@ ammoSwapSilencedGiveUpTicks =
     20
 
 
+{-| Everything the disarm decision weighs, on the reading it is asked.
+
+Both halves, in one value, so that the rule and the sentence explaining it
+cannot be given different inputs -- they take this and nothing else.
+
+`rangeErrorPercent` is the gain and `incomingDamage` the risk;
+`runAwayIncomingDamageThreshold` is the scale the risk is measured against,
+carried rather than read from settings here so the whole thing can be executed
+without a `BotSettings`.
+
+-}
+type alias AmmoSwapDisarmCase =
+    { runAwayIncomingDamageThreshold : Int
+    , rangeErrorPercent : Maybe Int
+    , incomingDamage : IncomingDamageMemory
+    }
+
+
+{-| How wrong the loaded charge's range is, as a percentage of the crossover.
+
+The swap's only measurement of what it stands to _gain_. It is a poor one and
+worth saying so: what actually decides whether the other charge is better here
+is whether the guns are landing, which turns on tracking and angular velocity as
+much as distance. Issue #63 proposes reading that off the client's outgoing
+combat lines and this does not add it, so what is left is the geometry.
+
+**Why half the crossover is the line.** On this fit the two charges' optimal
+ranges are 21000 m and 67000 m, so the midpoint crossover is 44000 m and each
+charge's own optimal sits about 52% away from it. A range error of half the
+crossover is therefore, almost exactly, "the target is at or past the range the
+_other_ charge was designed for" -- the other charge being better not marginally
+but by its own design. Below that the swap is being asked to disarm the ship for
+a charge that is only somewhat better, and it is not worth any risk at all.
+
+`Nothing` where there is no crossover or no target distance, which is a real
+answer and not a zero: the swap cannot tell what it would gain, and the budget
+below gives it nothing.
+
+-}
+ammoSwapRangeErrorPercent : Maybe AmmoSwapThreshold -> Maybe Int -> Maybe Int
+ammoSwapRangeErrorPercent threshold distanceInMeters =
+    case ( threshold, distanceInMeters ) of
+        ( Just crossover, Just distance ) ->
+            if crossover.crossoverInMeters <= 0 then
+                Nothing
+
+            else
+                Just
+                    (abs (distance - crossover.crossoverInMeters)
+                        * 100
+                        // crossover.crossoverInMeters
+                    )
+
+        _ ->
+            Nothing
+
+
+{-| The share of the retreat threshold a swap may spend on getting the guns off.
+
+**An eighth, and the eighth is read out of the recordings rather than chosen.**
+For every reading in the seventeen recorded runs -- 22,452 of them -- take the
+45-second incoming-damage window, then take the worst window reached within the
+next `ammoSwapSilencedGiveUpTicks` readings, which is the longest the swap can
+hold the guns. The curve is flat and then it is not: up to a window of **445**
+the worst that ever followed was 1226 hitpoints, 35% of the retreat threshold;
+from 446 it is 1436, and from 469 it is 1683 -- past the 1679 that run 11's
+fourth swap started on. So 445 is where the recorded data stops saying "this
+does not escalate", and an eighth of the retreat threshold is 437 on this hull,
+just inside it.
+
+A share rather than a number for `defaultRunAwayIncomingDamageThreshold`'s own
+reason: 3500 is a fact about this hull, so anything derived from it has to move
+with it rather than being re-measured by hand on the next ship.
+
+-}
+ammoSwapDisarmDamageBudgetDivisor : Int
+ammoSwapDisarmDamageBudgetDivisor =
+    8
+
+
+{-| How wrong the range has to be before the swap may take any risk at all.
+
+See `ammoSwapRangeErrorPercent` for why half the crossover is the line. Below it
+the budget is zero, which is #50's rule exactly -- so a marginal verdict still
+waits for a lull, and only a badly wrong one buys the swap any room.
+
+-}
+ammoSwapWorthwhileRangeErrorPercent : Int
+ammoSwapWorthwhileRangeErrorPercent =
+    50
+
+
+{-| Hitpoints in the window the swap may disarm through, given what it gains.
+
+Never negative, so it can only ever _permit_ more than #50's rule did. Three
+things reduce it to zero, and each is a case where the swap cannot tell what it
+would be buying:
+
+  - **No gain measurable.** No crossover, or no active target to measure a
+    distance to -- which is also what a fight ending under a swap looks like,
+    and the right answer to "the target I formed this verdict about is gone" is
+    to stop holding the guns.
+  - **A gain too small to be worth risk.** See
+    `ammoSwapWorthwhileRangeErrorPercent`.
+  - **No retreat threshold to take a share of.** `run-away-incoming-damage-
+    threshold` can be set to `-1` to disable the retreat, and a share of a
+    disabled number is not a budget. The swap falls back to needing silence.
+
+-}
+ammoSwapDisarmDamageBudget : AmmoSwapDisarmCase -> Int
+ammoSwapDisarmDamageBudget disarmCase =
+    case disarmCase.rangeErrorPercent of
+        Nothing ->
+            0
+
+        Just rangeErrorPercent ->
+            if rangeErrorPercent < ammoSwapWorthwhileRangeErrorPercent then
+                0
+
+            else
+                max 0
+                    (disarmCase.runAwayIncomingDamageThreshold
+                        // ammoSwapDisarmDamageBudgetDivisor
+                    )
+
+
 {-| Whether the swap is allowed to switch the ship's guns off at all right now.
 
 **A swap is an optimisation; the tank is not.** Loading a charge requires taking
@@ -7012,38 +7138,85 @@ armour had started going. The bound did what it promised -- and twenty readings
 under fire is still most of a tank, because the bound is a backstop and not a
 policy.
 
-So the policy is stated here, once, ahead of the backstop: **the guns do not go
-off while the client says this ship is being shot.** The evidence is the same
-45-second window the damage-rate retreat is built on, which is the client's own
-combat log rather than a HUD sprite, and it is already summed for every reading.
+#50 answered that with **zero**: no disarming while the client reports any
+incoming damage at all. The argument was that a threshold "would license
+disarming under light fire, which is what heavy fire starts as", and it was
+right about run 11. **Run 17 is what it cost.** Across that run the swap held a
+live verdict wanting Multifrequency M on 271 readings and loaded it not once: 52
+of those readings were declined here, blocked by windows of 128, 190, 301, 309
+and 371 hitpoints against a retreat threshold of 3500 -- a rat plinking the
+shield. In a mission pocket there is essentially always _some_ incoming damage,
+so a zero-damage rule fires only between waves, and the ship fought whole
+engagements with the wrong charge while the feature reported itself working.
 
-**Zero, not a threshold.** `runAwayIncomingDamageThreshold` is a number about how
-much punishment a hull can absorb before running; this is a different question,
-and the honest answer to "is anything shooting at us" is any damage at all. A
-threshold here would be a licence to disarm under fire as long as the fire was
-light, and light fire is exactly what turns into heavy fire while the guns are
-off.
+**Run 18 is the other half of the evidence and it says this is not the only
+thing in the way.** Its `not disarming` count is zero -- both of its swaps began
+on an empty window, so #50 permitted them and so does this -- and both still
+failed, one reading after the guns came off, because the client switched the
+weapon back on and `switchOffHasBeenUndone` abandoned the attempt before the menu
+it had asked for arrived. That is a different rule's problem and it is not
+touched here; CLAUDE.md's "The switch-off does not hold" has the columns.
 
-**An absent channel declines the swap.** A host that does not carry the combat
-log cannot answer the question, and the safe answer to not knowing is the one
-that keeps the guns firing -- `Nothing` and `Just 0` being different facts is
+So the question is no longer "is anything shooting" but **is this worth it**:
+what the swap gains, against what the client says it would cost.
+
+**The gain is `ammoSwapRangeErrorPercent`**, and where it cannot be measured the
+budget is zero, which is #50's rule unchanged. It is the weaker half and it is
+the half issue #63 is really about -- see that function for what it does not
+know.
+
+**The risk is the same 45-second window the damage-rate retreat is built on**,
+the client's own combat log rather than a HUD sprite, already summed for every
+reading, and it is compared against a share of the number that window was
+calibrated for. See `ammoSwapDisarmDamageBudgetDivisor` for where the share
+comes from.
+
+**An absent channel still declines the swap.** A host that does not carry the
+combat log cannot answer the question, and the safe answer to not knowing is the
+one that keeps the guns firing -- `Nothing` and `Just 0` being different facts is
 this repo's standing rule, and only one of them may be read as "the grid is
 quiet". The cost is that the swap does nothing at all on a host without the
 channel, which is stated rather than hidden: on this host it is always carried.
 
-The cost on this host is real and measured. Across runs 10 and 11 the swap held a
-live verdict on 1803 status prints, and 465 of them -- 26% -- were on a quiet
-window. So roughly three quarters of the moments the swap wants to fire, it now
-defers, and the swap happens between waves instead of during them. That is the
-trade the issue asks for, and the deferral costs nothing: the verdict stays live,
-the guns keep shooting the charge they have, and `ammoSwapVerdictGiveUpTicks`
-drops the attempt if the lull never comes.
+**Everything #50 permitted is still permitted.** The budget is never negative, so
+a quiet window passes whatever the gain is, and the change can only ever let the
+swap act on readings it previously deferred on. Against run 11's four swaps it
+declines the fourth -- 1679 hitpoints against a budget of 437 -- and permits the
+other three; #50 also declined the first, at 110 hitpoints on a window that was
+_falling_ (329, 282, 220, 162, 110) as that engagement ended.
+
+**Deferring is still not failing.** Nothing is given up and no counter is spent:
+the verdict stays live, the guns keep shooting the charge they have, and
+`ammoSwapVerdictGiveUpTicks` drops the attempt if the moment never comes.
 
 -}
-swapMayDisarmTheGuns : IncomingDamageMemory -> Bool
-swapMayDisarmTheGuns incomingDamage =
-    incomingDamage.hostCarriesTheChannel
-        && (incomingDamageInWindow incomingDamage <= 0)
+swapMayDisarmTheGuns : AmmoSwapDisarmCase -> Bool
+swapMayDisarmTheGuns disarmCase =
+    disarmCase.incomingDamage.hostCarriesTheChannel
+        && (incomingDamageInWindow disarmCase.incomingDamage
+                <= ammoSwapDisarmDamageBudget disarmCase
+           )
+
+
+{-| The same case, for the status line, which runs where no fight is in scope.
+
+`ensureAmmoSuitsTargetRangeWithGuns` builds its own from `fight.distance`, which
+is the same number by a shorter path -- both come from the active target and
+`activeTargetDistanceInMeters` is what put it there. Separate because the status
+line has to answer on readings where the acting path was never reached, and it
+must never report a different verdict from the one the branch took.
+
+-}
+ammoSwapDisarmCaseForStatus : BotDecisionContext -> AmmoSwapDisarmCase
+ammoSwapDisarmCaseForStatus context =
+    { runAwayIncomingDamageThreshold =
+        context.eventContext.botSettings.runAwayIncomingDamageThreshold
+    , rangeErrorPercent =
+        ammoSwapRangeErrorPercent
+            (ammoSwapThreshold context.eventContext.botSettings context.memory.ammoSwap)
+            (activeTargetDistanceInMeters context.readingFromGameClient)
+    , incomingDamage = context.memory.incomingDamage
+    }
 
 
 {-| Does the client say this module is switched off?
@@ -7103,22 +7276,51 @@ switchOffHasBeenUndone confirmedOffBefore moduleStates =
 
 {-| Which half of `swapMayDisarmTheGuns` said no, in the client's own numbers.
 
-The two answers want different actions from an operator -- one is a fight and
-passes on its own, the other is a host that will never carry the channel and
-means the swap is off for good -- and a single "not now" would hide that.
+Three answers, because they want three different things from an operator. A host
+that will never carry the channel means the swap is off for good. A gain too
+small to measure or too small to matter means the swap is waiting for a lull and
+is behaving as #50 did. And a window over the budget is a fight, which passes on
+its own -- and prints both numbers, since "301 hitpoints" says nothing without
+what the swap was willing to sit through.
 
 -}
-describeWhyTheSwapMayNotDisarm : IncomingDamageMemory -> String
-describeWhyTheSwapMayNotDisarm incomingDamage =
-    if not incomingDamage.hostCarriesTheChannel then
+describeWhyTheSwapMayNotDisarm : AmmoSwapDisarmCase -> String
+describeWhyTheSwapMayNotDisarm disarmCase =
+    if not disarmCase.incomingDamage.hostCarriesTheChannel then
         "this host is not carrying the client's combat log, so there is no way to tell whether the ship is under fire, and a guess is not worth the guns."
 
     else
-        "the client's combat log reports "
-            ++ (incomingDamageInWindow incomingDamage |> String.fromInt)
-            ++ " hitpoints of incoming damage in the last "
-            ++ (incomingDamageWindowSeconds |> String.fromInt)
-            ++ " s."
+        let
+            budget =
+                ammoSwapDisarmDamageBudget disarmCase
+
+            window =
+                "the client's combat log reports "
+                    ++ (incomingDamageInWindow disarmCase.incomingDamage |> String.fromInt)
+                    ++ " hitpoints of incoming damage in the last "
+                    ++ (incomingDamageWindowSeconds |> String.fromInt)
+                    ++ " s"
+        in
+        case disarmCase.rangeErrorPercent of
+            Nothing ->
+                window ++ ", and there is no crossover or no target distance to say what a swap would gain, so it waits for silence."
+
+            Just rangeErrorPercent ->
+                if rangeErrorPercent < ammoSwapWorthwhileRangeErrorPercent then
+                    window
+                        ++ ", and the range is only wrong by "
+                        ++ (rangeErrorPercent |> String.fromInt)
+                        ++ "% of the crossover -- under the "
+                        ++ (ammoSwapWorthwhileRangeErrorPercent |> String.fromInt)
+                        ++ "% that buys this swap any room, so it waits for silence."
+
+                else
+                    window
+                        ++ ", over the "
+                        ++ (budget |> String.fromInt)
+                        ++ " this swap may disarm through for a range "
+                        ++ (rangeErrorPercent |> String.fromInt)
+                        ++ "% wrong."
 
 
 {-| How many readings to let a switch-off settle before loading anyway.
@@ -8005,16 +8207,35 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
         switchOffUndone =
             switchOffHasBeenUndone memoryBefore.gunsConfirmedOff gunStates
 
-        -- Fire has arrived while the swap holds the guns. The precondition in
-        -- `ensureAmmoSuitsTargetRangeWithGuns` stops a swap *starting* under
-        -- fire; this is the same rule applied to a swap that started in a lull
-        -- and was interrupted, and it abandons rather than waiting out the
+        -- The same trade the acting path weighs before it starts, re-asked on
+        -- every reading the swap holds the guns, and read off this reading
+        -- rather than the one the verdict was formed on.
+        disarmCase =
+            { runAwayIncomingDamageThreshold =
+                context.botSettings.runAwayIncomingDamageThreshold
+            , rangeErrorPercent =
+                ammoSwapRangeErrorPercent threshold
+                    (activeTargetDistanceInMeters context.readingFromGameClient)
+            , incomingDamage = incomingDamage
+            }
+
+        -- The trade has stopped being worth it while the swap holds the guns.
+        -- The precondition in `ensureAmmoSuitsTargetRangeWithGuns` stops a swap
+        -- *starting* on a bad trade; this is the same rule applied to one that
+        -- started on a good one, and it abandons rather than waiting out the
         -- deadline. Letting go is what re-arms the guns -- `decisionToKillRats`
         -- owns activation and presses the hotkey on the very next reading, which
         -- run 11 shows it doing -- so this hands the ship back its guns roughly
         -- seventeen readings earlier than the backstop would.
+        --
+        -- Since #63 it also covers the fight ending under the swap: a target
+        -- that has gone leaves no distance to measure a gain from, the budget
+        -- falls to zero, and any fire at all lets go. Run 17's third attempt is
+        -- the case this matters for -- the window climbed 309, 362, 436, 505,
+        -- 567, 654 as the shield fell 49% to 0%, and the reading after any
+        -- disarm on that slide is over budget.
         fireArrivedWhileHoldingTheGuns =
-            (gunsSilencedTicks > 0) && not (swapMayDisarmTheGuns incomingDamage)
+            (gunsSilencedTicks > 0) && not (swapMayDisarmTheGuns disarmCase)
 
         -- The client's own account of having thrown the load away. Recorded
         -- rather than acted on where it is read, because the entries carrying it
@@ -8362,6 +8583,18 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
         threshold =
             ammoSwapThreshold context.eventContext.botSettings ammoSwap
 
+        -- What the swap would gain and what the client says it would cost, on
+        -- this reading. `fight.distance` is the active target's own distance and
+        -- is what the verdict was formed from, so gain and verdict cannot
+        -- disagree about which target is being talked about.
+        disarmCase =
+            { runAwayIncomingDamageThreshold =
+                context.eventContext.botSettings.runAwayIncomingDamageThreshold
+            , rangeErrorPercent =
+                ammoSwapRangeErrorPercent threshold (Just fight.distance)
+            , incomingDamage = context.memory.incomingDamage
+            }
+
         -- Reading the optimal range is a refinement now, not the mechanism, and
         -- it is only worth the held mouse while it is the only thing that can
         -- answer. With `ammo-swap-range` set it never is; with the loaded
@@ -8461,11 +8694,11 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                     )
                     nextStep
 
-            else if (ammoSwap.gunsSilencedTicks < 1) && not (swapMayDisarmTheGuns context.memory.incomingDamage) then
-                -- Issue #50, and the whole of it: the guns do not go off while
-                -- the client says this ship is being shot. See
-                -- `swapMayDisarmTheGuns` for the rule and what an absent channel
-                -- means.
+            else if (ammoSwap.gunsSilencedTicks < 1) && not (swapMayDisarmTheGuns disarmCase) then
+                -- Issues #50 and #63, and the whole of both: the guns come off
+                -- only when what the swap gains is worth what the client says it
+                -- would cost. See `swapMayDisarmTheGuns` for the rule, what an
+                -- absent channel means, and why #50's zero had to go.
                 --
                 -- Placed here rather than beside the click, and conditioned on
                 -- the swap not having started, for two reasons. Nothing below
@@ -8473,13 +8706,13 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                 -- open a weapon's context menu, and a menu opened under fire
                 -- would only be closed again on the next reading, which is churn
                 -- with the mouse. And a swap already holding the guns is not
-                -- this branch's business: fire arriving then abandons the
+                -- this branch's business: the trade going bad then abandons the
                 -- verdict in the memory update, which is a stronger response
                 -- than declining, because letting go is what hands the guns
                 -- back.
                 --
                 -- Nothing is given up and no counter is spent. The verdict stays
-                -- live and `rangeVerdictTicks` keeps climbing, so if the lull
+                -- live and `rangeVerdictTicks` keeps climbing, so if the moment
                 -- never comes `ammoSwapVerdictGiveUpTicks` drops this attempt
                 -- with the guns having fired throughout -- which is the right
                 -- ending for an optimisation that never found its moment.
@@ -8487,8 +8720,8 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                     ("Not switching the guns off to load '"
                         ++ wantedChargeName
                         ++ "' -- "
-                        ++ describeWhyTheSwapMayNotDisarm context.memory.incomingDamage
-                        ++ " A swap is worth doing between waves, not during one: wrong ammo still does damage and a disarmed ship does not."
+                        ++ describeWhyTheSwapMayNotDisarm disarmCase
+                        ++ " A swap has to be worth the guns: wrong ammo still does damage and a disarmed ship does not."
                     )
                     nextStep
 
@@ -8801,13 +9034,13 @@ describeAmmoSwapState context =
                                        )
                                     ++ ")"
 
-                            else if (ammoSwap.rangeVerdict /= Nothing) && not (swapMayDisarmTheGuns context.memory.incomingDamage) then
+                            else if (ammoSwap.rangeVerdict /= Nothing) && not (swapMayDisarmTheGuns (ammoSwapDisarmCaseForStatus context)) then
                                 -- Why nothing is happening to a live verdict.
                                 -- A branch that declines has to say so on every
                                 -- reading it declines, and the decision line only
                                 -- appears once the hold ticks are past.
                                 " (not disarming: "
-                                    ++ describeWhyTheSwapMayNotDisarm context.memory.incomingDamage
+                                    ++ describeWhyTheSwapMayNotDisarm (ammoSwapDisarmCaseForStatus context)
                                     ++ ")"
 
                             else
