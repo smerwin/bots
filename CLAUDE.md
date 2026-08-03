@@ -1183,6 +1183,81 @@ narrow on purpose — the travel path asks route-setting exactly two questions,
 `homeStationRouteIsSet` and `routeToStationByName`, and knows nothing else about
 where a destination comes from.
 
+The travel half of it is now shared. `travelToStationByName` is the route-set,
+fly, dock sequence, and both the restock trip and the pod recovery below call
+it — the callers differ only in the two log lines they hand it, because the
+*reason* is what an operator reads and the mechanism is not something this bot
+should have two of.
+
+## Losing the ship: the client never says so, and a capsule reads 100%
+
+Run 7's ship was destroyed mid-mission and the bot carried on for the whole of
+the next 86 readings flying **the capsule**, at 0.0 m/s, among the Sansha pack
+that had just killed it — reporting `Shield: 100%  Armor: 100%` the whole time,
+because that is what a capsule reads. It was stopped by hand and the pod flown
+out manually. A stationary pod in a hostile pocket is a podding, which costs the
+clone and its implants, usually more than the ship.
+
+**EVE does not announce the loss.** Issue #33 assumed it did, and #30 having
+just landed the game log made that look like the clean signal. It is not there.
+Across every recorded game log in `~/Documents/EVE/logs/Gamelogs` there is no
+"destroyed", no "podded", nothing about the hull at all — run 7 reads as the
+last `(combat)` line at 04:26:59 and then silence until:
+
+```
+[ 2026.08.03 04:27:33 ] (notify) The ship you are piloting does not have targeting systems installed.
+```
+
+repeated 173 times to the end of the run. So the client states the
+*consequence*, not the event, and only when something asks the capsule to lock.
+Do not go looking for an announcement; a matcher for one would never fire, and a
+guard that never fires is indistinguishable from a bot that is fine.
+
+**Two signals, and the two that were expected to work do not.**
+
+| signal | verdict |
+|---|---|
+| the `(notify)` capsule refusal | **used.** Arrives on a carried channel — the withheld ones are `(combat)` and `(bounty)`, and a destruction line would almost certainly have been on `(combat)` |
+| ship UI with no module buttons at all | **used**, after 3 consecutive readings |
+| the drones window disappearing | **rejected.** Run 1 printed `No drones` on 8,076 in-space status prints while flying a perfectly good ship |
+| hitpoints | **rejected.** A capsule reads 100/100, and #32 shows the reading is untrustworthy anyway |
+
+The module signal's discrimination is measured rather than assumed:
+`Middle-row modules: none.` appears on all 724 of run 7's in-space status prints
+and on **zero** across runs 1, 3, 5 and 8 — 4,419 readings, 15,836 in-space
+status prints, every one naming a propulsion module. Mind the unit: those are
+prints, not readings, and the counter that decides the verdict is stepped once
+per *reading*, in the memory update. Three readings rather than one because the
+parser drops any slot whose display region it cannot read (see "Ship modules"),
+so one reading finding none may be a parse that missed.
+
+One step in that is inferred rather than observed. The status line prints the
+middle row only; a non-empty middle row proves `moduleButtons` was non-empty,
+which is the direction that governs false positives. A capsule having no module
+buttons in *any* row follows from a capsule having no slots — plausible, and
+consistent with run 7's `ShipUI` text, but not directly measured. If it is wrong
+this signal simply never fires and the capsule refusal carries the guard alone.
+
+**The verdict latches, and it is written in
+`updateMemoryForNewReadingFromGame`.** Both are forced. A reading's game log
+entries are gone by the next reading, so a branch that recognised the refusal
+where it acts on it would see the loss once and go back to flying the mission —
+the failure #30's own follow-up names. And the latch never clears, because the
+cost is asymmetric in one direction only: docking early costs the rest of the
+session, un-concluding a loss on a reading that happens to look normal costs the
+clone.
+
+**The response is placed rather than enumerated.** `recoverPodAfterShipLoss`
+sits above the wind-down and above the docked-or-in-space split in
+`missionBotDecisionRootBeforeApplyingSettings`, so "stop fighting" is structural:
+locking, module activation, approach and looting all live below that split and
+are simply never reached. Then it flies to `home-station` if one is set, docks at
+whatever the surroundings menu offers if not, and **ends the session** — the
+remaining hours are worth nothing without a ship, and the operator has to find
+out. `podRecoveryGiveUpReadings` (150, about twenty minutes at the eight seconds
+a reading the recorded runs average) bounds it and ends the session saying the
+pod is still in space, for the same reason every other bound here exists.
+
 ## Elm toolchain
 
 `brew install elm` (arm64-native bottle) — **not** `npm install -g elm`, which
@@ -1316,6 +1391,21 @@ exists.
   "Set Destination" click, since that window is what tells the bot the route it
   is following is its own. The tell is `Home station: ... set the route to`
   repeating where `Home station: travelling to` should have taken over.
+
+  It also **recognises that the ship has been destroyed and flies the pod out**
+  rather than continuing the mission in a capsule, which is what run 7 did for
+  86 readings. Detection, the two signals that work and the two that do not,
+  and where the guard sits are in "Losing the ship" above. **Untested against a
+  live client**, and deliberately so — staging a real loss is not worth it. What
+  is checked without one: the matcher is read out of `Bot.elm` and asserted
+  against run 7's real line and against fourteen other `(notify)` lines the
+  client wrote, and the module-row discrimination is recounted from the recorded
+  runs. What to watch on the first real loss is the status line's `SHIP LOST:`
+  turning up within a reading or two of the last `(combat)` line, and then
+  `Pod recovery:` reaching a dock. If the verdict never arrives, the thing to
+  check is whether `shipUI.moduleButtons` is genuinely empty on a capsule — the
+  recordings show the *middle* row empty on every capsule reading, and every row
+  being empty is the stronger form of that, inferred rather than observed.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
@@ -1389,14 +1479,21 @@ exists.
   and `getAllContainedDisplayTexts` over the whole tree unchanged by the
   node's presence.
 
-  **What is unproven is that any of it changes what the bot does**, because
-  nothing reads the field yet. A first consumer needs three things: a decision
-  that matches on `channel == Just "notify"` and the refusal's own wording, a
-  `BotMemory` field to carry the verdict (a reading's entries are gone by the
-  next one, so a branch that does not record what it saw sees it once), and a
-  live run that provokes the refusal — for #27's ammo load, guns firing and a
-  swap attempted. A run in which no refusal occurs proves only that nothing
-  broke.
+  **Two consumers now, and neither has been proven live.** #31's ammo-load
+  refusal (`loadRefusedByClient`) and #33's capsule refusal
+  (`shipLossFromGameLog`). Both take the same three parts a consumer needs: a
+  match on `channel == Just "notify"` and the client's own wording, a `BotMemory`
+  field to carry the verdict (a reading's entries are gone by the next one, so a
+  branch that does not record what it saw sees it once), and a live run that
+  provokes the line. A run in which the line does not occur proves only that
+  nothing broke.
+
+  Worth knowing what the two consumers found the channel to be good and bad at.
+  Good: it states things no HUD sprite does, and the timestamp/channel split
+  means neither matcher had to parse a line. Bad: it says far less than expected.
+  #33 went looking for a ship-destruction announcement and there is none — see
+  "Losing the ship" — so a consumer's first job is checking that the client
+  actually writes the sentence, against the recordings, before building on it.
 
 ## `route_setter.py` internals worth knowing before touching it again
 
@@ -1489,7 +1586,8 @@ for why ESI cannot replace it from inside a bot yet.
   system: Unknown" for a name that isn't a plain string in memory.
 - `MouseMoveRelative` and `CharacterDown`/`CharacterUp` (raw Unicode text input)
   aren't implemented in `botlab_host.py`.
-- The ammo swap is the only consumer of `gameLogEntriesSinceLastReading`, so
+- The ammo swap and the ship-loss guard are the only consumers of
+  `gameLogEntriesSinceLastReading`, so
   every other guard that infers a refusal indirectly still does. The candidates
   the recorded runs actually contain: `You cannot launch Acolyte I because you
   are already controlling 5 drones` (17 occurrences — the drone launch retries
