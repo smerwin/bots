@@ -165,6 +165,39 @@ def bot_source():
         return source.read()
 
 
+EVE_BOT_LOGS = os.path.join(os.path.expanduser("~"), "eve-bot-logs")
+
+
+def recorded_runs(*names):
+    """The runs among `names` this machine has, or a skip if it has none.
+
+    Three situations, three different answers, and only the middle one is a
+    skip:
+
+    - the corpus is here and says something -> assert on it;
+    - **the corpus is absent**, as it is on CI -> skip, with the reason stated.
+      A case cannot report on evidence it cannot read, and a suite that goes red
+      for "no data" teaches people to ignore red;
+    - the corpus is here and does *not* say what a case asserts -> **fail**,
+      because that is the evidence for a change having disappeared.
+
+    This is a helper rather than three lines at each call site because the
+    natural shape gets it wrong. Skipping missing files *inside* the loop and
+    then asserting on whatever accumulated silently turns the third case into
+    the second when the loop finds nothing at all: the assertion fires on an
+    empty result and reports a finding where there is only an empty directory.
+    CI caught exactly that, on a case that passed here.
+    """
+    found = [(name, os.path.join(EVE_BOT_LOGS, "mission_run%s.log" % name))
+             for name in names]
+    found = [pair for pair in found if os.path.exists(pair[1])]
+    if not found:
+        raise unittest.SkipTest(
+            "none of mission_run{%s}.log is on this machine, so the recorded "
+            "runs cannot be consulted here" % ",".join(names))
+    return found
+
+
 def let_binding(source, name, indent="        "):
     """The right-hand side of a `let` binding, up to the next binding or `in`.
 
@@ -1034,6 +1067,228 @@ class TheGateIsNotTheOnlyThingBetweenTheSwapAndACharge(unittest.TestCase):
              or "loaded charge reads long-range" in line],
             "run 11 no longer resolves the loaded charge, so the menu read "
             "cannot be shown to work at all")
+
+
+# Run 21's top-row module column for the first weapon, with how many of the
+# run's 674 prints carried it. `isInActiveState` is `T` on every one -- the guns
+# were switched on for the whole run -- while `ramp_active`, which
+# `weaponIsFiring` read until #76, is `True` on barely a tenth of them. That gap
+# is the bug: it is the duty cycle, and #35 measured it oscillating fourteen
+# times in 240 s under an `isInActiveState` that never moved.
+RUN_21_COLUMNS = [
+    ("F/T/F", 322),
+    ("-/T/F", 283),
+    ("T/T/F", 69),
+]
+
+
+@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
+class WhatCountsAsAGunThatNeedsStopping(unittest.TestCase):
+    """Issue #76. `weaponIsSwitchedOn` reads the toggle, not the duty cycle.
+
+    The swap presses the switch-off only for a gun this answers `True` for, and
+    the entry gate only lets the swap start when it answers `True` for all of
+    them. It read `isActive`, which is `ramp_active`, which is `False` for a
+    good part of every cycle on a gun that is firing -- so both gates were being
+    answered by the wrong question, and run 21 is what that cost.
+
+    **The claim is narrower than "the gun works", deliberately.** #50's rule is
+    that `isInActiveState` is used only in the negative, because `Just True` is
+    not evidence a weapon is doing anything: runs 11 and 18 both show one firing
+    nothing at all while reading `True`. This reads it as "the toggle is on",
+    which is what #35 measured and what the client's refusal names -- `while it
+    is active`. That is a considered departure from the letter of #50's rule and
+    not from its reason.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = ElmRepl()
+        usable, output = cls.repl.works()
+        if not usable:
+            cls.repl.close()
+            raise unittest.SkipTest(
+                "elm repl cannot evaluate here, so these rules are unchecked "
+                "by execution in this environment:\n" + output)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_run_21_s_own_columns_read_as_switched_on(self):
+        """Every column that run took, through the bot's own predicate.
+
+        Including `-/T/F`, which is `ramp_active` **absent** rather than
+        `False` -- 283 of the run's 674 prints. That is the entry appearing only
+        once a module has first cycled, and it is why the field it replaced
+        could not answer this question even in principle on a fresh grid.
+        """
+        answers = self.repl.evaluate([
+            "moduleReadsSwitchedOn " + elm_module_state(column)
+            for column, _ in RUN_21_COLUMNS])
+        self.assertEqual(
+            answers, [True] * len(RUN_21_COLUMNS),
+            "a column run 21 actually printed no longer reads as a switched-on "
+            "gun, so the swap would still decline to stop it")
+
+    def test_the_duty_cycle_disagrees_on_the_columns_that_matter(self):
+        """The measurement, rather than an assertion that the fix was needed.
+
+        If `ramp_active` and `isInActiveState` agreed there would be no bug and
+        no reason for this change, so the divergence is executed rather than
+        described. Two of run 21's three columns -- 605 of its 674 prints --
+        are guns that are switched on and read as idle.
+        """
+        columns = [column for column, _ in RUN_21_COLUMNS]
+        duty = self.repl.evaluate([
+            "(%s).ramp_active == Just True" % elm_module_state(column)
+            for column in columns])
+        switched_on = self.repl.evaluate([
+            "moduleReadsSwitchedOn " + elm_module_state(column)
+            for column in columns])
+        disagreed = [column for column, a, b
+                     in zip(columns, duty, switched_on) if a != b]
+        self.assertEqual(
+            sorted(disagreed), ["-/T/F", "F/T/F"],
+            "the two readings no longer diverge on run 21's columns, so the "
+            "evidence this change rests on is not what it was")
+
+    def test_an_entry_that_did_not_decode_is_not_a_gun_to_stop(self):
+        """`Nothing` answers `False`, exactly as `isActive` did.
+
+        So a build that does not carry the entry behaves as it does today --
+        the entry gate never opens and the swap never runs -- rather than
+        pressing a module button on a guess. `Just False` likewise: pressing a
+        gun that is already off would switch it *on*, since the button is a
+        toggle.
+        """
+        self.assertEqual(
+            self.repl.evaluate([
+                "moduleReadsSwitchedOn " + elm_module_state("T/-/F"),
+                "moduleReadsSwitchedOn " + elm_module_state("T/F/T"),
+            ]),
+            [False, False])
+
+
+class TheSwitchOffIsChosenByTheToggleAndNotTheCycle(unittest.TestCase):
+    """Issue #76, as the shape of the source and the run that measured it."""
+
+    def setUp(self):
+        self.source = bot_source()
+
+    def definition(self, name):
+        """A top-level function's own body, up to the blank line after it."""
+        start = self.source.index("\n%s : " % name)
+        return self.source[start:self.source.index("\n\n\n", start)]
+
+    def test_the_predicate_reads_the_toggle_through_the_named_rule(self):
+        body = self.definition("weaponIsSwitchedOn")
+        self.assertIn("moduleReadsSwitchedOn moduleButton.stateFromDictEntries",
+                      collapse(body))
+        for duty_cycle in ["isActive", "ramp_active", "rampRotationMilli"]:
+            self.assertNotIn(
+                duty_cycle, body,
+                duty_cycle + " is back in the predicate that chooses whether "
+                "to stop a gun, which is the field #34 and #76 both cost")
+
+    def test_both_gates_ask_it_and_nothing_asks_the_old_one(self):
+        collapsed = collapse(self.source)
+        self.assertIn("guns |> List.all weaponIsSwitchedOn |> not", collapsed)
+        self.assertIn("fight.guns |> List.filter weaponIsSwitchedOn |> List.head",
+                      collapsed)
+        self.assertNotIn(
+            "weaponIsFiring", self.source,
+            "the old name is still here, so a call site may still be asking "
+            "the duty cycle whether a gun needs stopping")
+
+    def test_the_keep_active_filter_still_reads_isActive(self):
+        """#39's line that this change does *not* cross.
+
+        `inactiveModulesToActivateAlways` and `decisionToKillRats` still consult
+        `isActive`, and #39 refused to rewire them on one 240 s sample. That is
+        still refused here: this changes the ammo swap's question and nothing
+        else, so the two can be reverted independently.
+        """
+        self.assertIn(".isActive", self.source)
+
+    def test_the_branch_taken_is_decided_by_the_duty_cycle_and_nothing_else(self):
+        """The falsifiable form, across every run that reached this branch.
+
+        If `ramp_active` were not what chose between stopping a gun and
+        declaring none was firing, some reading somewhere would disagree. None
+        does: over four runs, **every** `Stop this weapon` decision was taken on
+        a reading where it read `T`, and **every** `No weapon reads as firing`
+        on one where it read `F` -- while `isInActiveState` read `T` on both
+        sides. One counterexample in any recorded run breaks this case, which is
+        what makes it evidence rather than a restatement of the diff.
+
+        Run 22 is why this is worth asserting over the whole corpus rather than
+        over run 21 alone. Same code and same build as run 21, and it reached
+        `GUNS OFF` 29 times where run 21 reached it zero -- because whether a
+        run catches the gun mid-cycle at the moment a verdict comes due is luck.
+        A bug that presents as a run-to-run coin flip is one a single run can
+        neither prove nor disprove.
+
+        Gated on the corpus being *present*, not on the search finding
+        anything. Those are different questions and CI is where they come
+        apart: with no `~/eve-bot-logs` this found no press, concluded the
+        evidence had vanished and failed, when the honest answer is that it
+        cannot say. See `recorded_runs`.
+        """
+        seen = {}
+        for _, path in recorded_runs("11", "18", "21", "22"):
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()
+            column = None
+            for line in lines:
+                match = re.search(r"Top-row modules \([^)]*\): ([^.,]*)", line)
+                if match:
+                    column = match.group(1)
+                elif line.startswith("+ ") and column:
+                    if "Stop this weapon before loading" in line:
+                        seen.setdefault("press", set()).add(column[0])
+                    elif "No weapon reads as firing" in line:
+                        seen.setdefault("skip", set()).add(column[0])
+        self.assertTrue(seen.get("press"), "no run reaches the switch-off")
+        self.assertTrue(seen.get("skip"), "no run reaches the skip")
+        self.assertEqual(
+            seen["press"], {"T"},
+            "a gun was stopped on a reading whose ramp_active was not True, so "
+            "the duty cycle is no longer what chose this branch and the "
+            "evidence for #76 is not what it was")
+        self.assertEqual(
+            seen["skip"], {"F"},
+            "the swap declared no weapon firing on a reading whose ramp_active "
+            "was True, so the two are no longer in lockstep")
+
+    def test_run_21_is_the_measurement(self):
+        """The counts, out of the log, so a retune has to argue with them."""
+        (_, path), = recorded_runs("21")
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            log = handle.read()
+        columns = re.findall(r"Top-row modules \([^)]*\): ([^.,]*)", log)
+        self.assertTrue(columns, "run 21 carries no top-row module clause")
+        switched_on = [column for column in columns
+                       if column.split("/")[1] == "T"]
+        cycling = [column for column in columns
+                   if column.split("/")[0] == "T"]
+        self.assertEqual(
+            len(switched_on), len(columns),
+            "run 21 no longer reads switched-on on every reading, so it is no "
+            "longer the run that separates the two fields")
+        self.assertLess(
+            len(cycling) * 4, len(columns),
+            "run 21's guns now read mid-cycle on most readings, so the gap "
+            "between the duty cycle and the toggle is not what was measured")
+        self.assertEqual(
+            log.count("GUNS OFF for"), 0,
+            "run 21 now reaches GUNS OFF, so it is no longer the run in which "
+            "the swap never switched anything off")
+        self.assertGreater(
+            log.count("No weapon reads as firing"), 0,
+            "run 21 no longer carries the decision line this issue is about "
+            "-- it is the pre-fix wording and the log is a recording, so it "
+            "cannot change unless the file was replaced")
 
 
 if __name__ == "__main__":
