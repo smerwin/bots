@@ -66,6 +66,33 @@ for that sub-protocol; we don't run it at all, and fake a competent volatile
 process in Python instead, dispatching the inner JSON to our own memory-reading
 tools.
 
+**Adding a request the real protocol does not have** — `handle_request` answers
+`SetAutopilotDestinationRequest`, which no BotLab host has ever seen — belongs
+in the Python host and *not* in `EveOnline/VolatileProcessInterface.elm`. The
+`request` field is an opaque `String` at the `InterfaceToHost` boundary; that
+module's encoder is the bot's convenience for building it, not the boundary
+itself, so nothing forces a new request through the vendored codecs. Two costs
+if it went there anyway. Bot source is fetched fresh from a GitHub URL in one of
+the two supported source modes, so a variant that exists only in this fork's
+checkout is simply absent under the other — and absent silently, since a request
+never built is a request never missed. And the response half is worse than the
+request half: `deserializeResponseFromVolatileHost` is a closed
+`Json.Decode.oneOf`, so a response it does not recognise decodes as an `Err`
+that lands in `lastRequestToVolatileProcessResult` — a field `BotFramework.elm`
+writes and never reads. A whole reply class would vanish without a word, which
+is exactly the failure this file keeps a section on.
+
+So the Elm side of this is not merely unwritten, it is **blocked on a channel
+that does not exist**. `OperateBotConfiguration` gives a running bot exactly one
+way out — `buildTaskFromEffectSequence : List EffectOnWindowStruct -> Task` —
+and that vocabulary is mouse moves, buttons, keys and scroll; a station name
+cannot be spelled in it. Every `RequestToVolatileProcess` is issued by
+`getNextSetupTask`'s closed setup state machine, which a decision cannot reach.
+Wiring the bot to this request therefore means changing `BotFramework.elm`
+(a new `OperateBotConfiguration` field and a builder beside
+`buildTaskFromRequestToVolatileProcess`) *and* the vendored decoder — a change
+worth its own live run, not a rider on the host-side plumbing.
+
 Two protocol details worth remembering. `ReadFromWindowResult.Completed
 .memoryReadingSerialRepresentationJson` is `Maybe String`, and the UI tree JSON
 inside it is **double-encoded** — a JSON string containing JSON, decoded via
@@ -353,6 +380,7 @@ procedure and its traps; this file carries the facts.
 | `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session, waiting for its first decision and failing fast with the log's tail if the run died instead |
 | `reload_drones.py` | standalone one-off: refill drone bay from station hangar. Still the way to restock *outside* a session; the mission runner now does the same thing for itself while winding down |
 | `route_setter/route_setter.py` | standalone one-off: set the autopilot route from a chat channel's MOTD |
+| `esi_waypoint.py` | set the client's autopilot destination through ESI, the official API. A CLI (`auth`/`resolve`/`set`) and an importable module -- `botlab_host.py` calls `set_destination` in-process for `SetAutopilotDestinationRequest`, so failures arrive as `EsiError` values rather than exit codes with a reason on stdout |
 
 **Launcher `--help`** is answered *before* the one-bot-at-a-time guard runs, so
 asking what the settings are never kills a session in progress. `bot_help.py`
@@ -369,13 +397,29 @@ python3 stall_watch.py <log> --pid <game pid> --out <dir>
 ```
 
 A stall is either the bot saying *"I am stuck here and need help to continue."*
-(`askForHelpToGetUnstuck`, never normal), or the same decision repeating 60
-times. That threshold is calibrated against 55 past runs, where runs of ≥80
-identical decisions are 0.74% of all decision runs — comfortably above ordinary
-waiting and below the real pathologies, the worst of which reached 8,983 repeats
-of "I see a message box to close". It screenshots the game **window by id**
-(`screencapture -x -o -l`), not the screen, because the client is usually on
-another macOS Space where a screen grab catches the wrong desktop.
+(`askForHelpToGetUnstuck`, never normal), or the decision tree going in circles
+for `CIRCLING_THRESHOLD` **readings** while EVE's own game log stays silent. It
+screenshots the game **window by id** (`screencapture -x -o -l`), not the screen,
+because the client is usually on another macOS Space where a screen grab catches
+the wrong desktop.
+
+**The unit is the reading, not the decision line**, and this is the single
+easiest thing to get wrong here. The bot re-derives its whole decision path on
+every framework event, so one look at the game emits about a dozen decision
+lines — 33,678 across 2,849 readings on the run this was calibrated against, at
+4.7 decisions a second. A threshold of 40 *decisions* was therefore 3.4 readings,
+or **8.5 seconds** of wall clock, and combat legitimately pauses far longer than
+that while switching targets, between pockets, or in warp. Replaying that run
+with the game log pinned silent, the old unit raised 295 alarms — one every 5.3
+seconds — against 10 for the same run counted in readings, all 10 being one
+pattern that dedupes to a single screenshot.
+
+This is CLAUDE.md's own *"a decision in the log is not an action"* biting a tool
+that had carefully calibrated a threshold against the wrong statistic — for the
+second time, the first being the consecutive-identical counter the circling test
+replaced. `stall_watch.py` reflects the unit in its structure: `observe` folds a
+decision into the reading being assembled and reports nothing, and `end_reading`
+judges the reading once, at the `# [tick.substep]` boundary where the tick moves.
 
 `--keep-going` keeps watching after a stall instead of exiting, and is now safe
 to leave on. Each distinct stall is screenshotted **once** — distinctness judged
@@ -407,10 +451,13 @@ one, which is what keeps the documented "target drifting while the ship does
 nothing" case alarming — an oscillating distance sets a new minimum once and
 never again. A wording is forgotten once it leaves the decision window, so a
 second container behind the same sentence is measured on its own rather than
-against the first one's arrival distance. `APPROACH_PATIENCE` (60 decisions)
-bounds it in both directions: a ship gets that long from first sighting, or from
-its last gain, to show it is closing, and a ship that has genuinely stopped is
-caught that much later than before rather than not at all.
+against the first one's arrival distance. `APPROACH_PATIENCE` (20 readings, the
+same unit as the threshold) bounds it in both directions: a ship gets that long
+from first sighting, or from its last gain, to show it is closing, and a ship
+that has genuinely stopped is caught that much later than before rather than not
+at all. The measured worst case inside a real approach was 22 decisions between
+two strict decreases — about two readings — so the headroom is an order of
+magnitude.
 
 Raising `CIRCLING_THRESHOLD` instead would have been the wrong fix — it is
 calibrated to catch an 8,983-repeat pathology, and the problem was the progress
@@ -672,6 +719,146 @@ A module button is a **toggle**, so a click repeated before the client has shown
 its result switches the module back off. `moduleButtonClickSettlingSteps` gives a
 click 5 steps to appear in a reading first.
 
+**Module tooltips cannot be read the framework's way here.**
+`getModuleButtonTooltipFromModuleButton` looks up a dictionary that
+`integrateCurrentReadingsIntoShipModulesMemory` only ever writes to when some
+module button reports `isHiliteVisible` — and that is the same missing "hilite"
+sprite as above, so on this client the dictionary stays empty however long the
+mouse rests on a module. `readShipUIModuleButtonTooltipWhereNotYetInMemory`, the
+framework's own acquisition step, would therefore hover forever and store
+nothing; the mission runner does not call it, and should not start.
+
+The way through is to skip the client's attribution entirely: the bot knows
+which button it hovered, because it decided to. `weaponOptimalRangeFromHover` in
+`eve-online-mission-runner/Bot.elm` reads `readingFromGameClient
+.moduleButtonTooltip` straight out of the reading and attributes it to the module
+the previous step's effects moved the mouse onto. **Whether hovering raises a
+`ModuleButtonTooltip` at all on this client is still unverified** — nothing had
+ever hovered a module here before — which is why the ammo swap that depends on it
+gives up and says so after a few readings rather than waiting.
+
+## Lock range is learned from the client, not set
+
+`targeting-range` (default 66000) decides whether `lockTargetFromOverviewEntry`
+locks a target or approaches it. It is a guess about the ship, and wrong in
+either direction costs: too low and the bot flies at rats it could have shot,
+too high and it spends readings asking for locks the client will never grant.
+The client answers that question every time it accepts or refuses a lock, so
+the number is now derived the way the UI scale is — per session, from what the
+client actually did — rather than asserted.
+
+Two bounds in `BotMemory`, each moving one way only, so no oscillation is
+possible: **`lockProvenAtMeters`** is the greatest distance at which a lock was
+accepted and only rises, **`lockRefusedAtMeters`** the smallest at which one
+provably failed and only falls. The threshold is the setting clamped into
+`[proven, refused)`. With no evidence both are `Nothing` and the threshold is
+exactly the setting, so a run where nothing is learned behaves exactly as
+before. Where the two contradict each other, proven wins — a lock that
+completed is unambiguous, a refusal is an inference.
+
+**A refusal only counts on disambiguated evidence**, which is the whole
+difficulty. A lock can fail because the target is out of range, because the
+ship is at maximum locked targets, because the target died, or because the
+click hit a recycled overview row. So it takes all of: the attempt has had
+`lockAttemptReadingsBeforeVerdict` (8) readings to land; the row is still in
+the overview and still `_display`ed; it still does not read targeted or
+targeting; and **the target bar was empty at both ends of the attempt**. That
+last one is what separates "too far" from "no free slot" — an empty bar is the
+only thing a reading can say that proves a slot was free, since the client's
+maximum is not in the reading at all. Without it the number ratchets down every
+time the ship simply fills up. The price is that only the first lock of an
+engagement can teach a refusal, which is also the case that costs the most.
+
+**The attempt is read out of the effects, not the decision.**
+`updateMemoryForNewReadingFromGame` is the only place that can write memory and
+it never sees the decision, so `lockClickLocationFromStepEffects` recognises
+the lock chord in the previous step's effects — Ctrl held over a left click,
+the only place in this bot that presses Ctrl without Shift — and takes the
+`MouseMoveTo` that travels with it. The row is then resolved by screen position
+against the *following* reading, which is the right way round rather than a
+compromise: the client acted on whatever was rendered at that point. Across
+readings the row is tracked by `objectItemID`, falling back to the name only
+when no other row shares it; a pocket of five identically-named rats with no
+item id therefore teaches nothing, which is the correct answer rather than a
+guess.
+
+**Every bound move is logged once**, as a `Learned lock range:` line wrapped
+around the whole decision at `missionBotDecisionRoot`. It is emitted there
+rather than in the branch that learned it because the bounds move in the memory
+update, which runs whatever the bot is doing. Once-per-change needs no "already
+reported" flag: the bounds are monotone, so a repeated verdict moves nothing
+and says nothing. The status line carries the current bounds and the pending
+attempt continuously.
+
+The bounds are **not reset within a session**. Resetting at each dock — the
+other obvious choice — would throw the learning away at the end of every
+mission, which is most of what there is to keep, and this bot does not swap
+ships on its own. A consequence worth knowing: the setting cannot raise the
+threshold back above a learned refusal, so a bound learned wrongly is sticky
+until the session restarts.
+
+Fixing this also had to bound `lockTargetFromOverviewEntry`'s
+`"Locking target is in progress, wait for completion."`, which had no bound at
+all — the same unbounded-wait shape as the drone recall below. Note that
+neither caller can currently reach it, since `overviewEntriesToLock` filters
+targeted and targeting rows out of its candidates; the reachable unbounded
+shape was the *click* repeating every reading, and that is what the learned
+bound ends.
+
+## Ammo: the weapon's optimal range is what says which charge is loaded
+
+`eve-online-mission-runner` swaps between two charges as the current target's
+distance changes, and the whole design hangs on `ModuleButtonTooltipMemory
+.optimalRange`: a weapon's optimal range moves with the charge in it, so one
+number says which ammo is effectively loaded *and* confirms that a load landed.
+Without it a reload would be the repo's signature bug — an action that reports
+success and changes nothing.
+
+It is **off unless both `short-range-ammo` and `long-range-ammo` are set**, and
+the names must match the weapon's own right-click menu. Discovering the pair from
+that menu instead of being told it would be better and is not implemented:
+nothing has yet observed what a module's context menu contains on this client.
+One charge type, or none, means there is no swap to make, and doing nothing is
+the correct outcome — wrong ammo still does damage.
+
+Not oscillating is the actual work, and each guard answers a specific way this
+goes wrong:
+
+- **Two thresholds, not one**, and the gap between them is not a matter of taste.
+  Swapping moves the optimal range itself, so a deadband narrower than half the
+  distance between the two charges' optimal ranges lets each swap re-arm the
+  opposite one. The two ranges are *learned* — the first swap reveals the second
+  number — and `ammoSwapDeadbandMeters` derives half the spread from them once
+  both are known.
+- **AU distances are excluded, not treated as very far.** An unparsed distance
+  becoming the 999999 placeholder is exactly the input that would argue for
+  long-range ammo forever.
+- **Several consecutive readings** must agree before acting
+  (`ammoSwapDistanceHoldTicks`), because rats die and the "current target" jumps
+  between ranges without the fight changing.
+- **A turning ramp only blocks a reload when the bot just asked for one**
+  (`ammoReloadSettlingTicks`). `rampRotationMilli /= 0` is the client saying the
+  module is mid-cycle, but a weapon that is *shooting* is mid-cycle almost all
+  the time, so refusing to touch a turning ramp would mean never swapping during
+  a fight at all.
+- **Bounded, then quiet** (`ammoSwapNotConfirmedGiveUpTicks`), the way
+  `maneuverNotConfirmedGiveUpTicks` bounds orbit and keep-at-range. The give-up
+  is not silent: the branch names itself in the decision log on every reading it
+  declines — the shape `returnDronesToBay` was changed to after #7 — and the
+  status line carries the reason for the rest of the session.
+
+**None of this has run against a live client.** The first run to use it should
+be watched for the optimal range in the status line actually changing after a
+swap, not for the decision log claiming one.
+
+One cross-feature invariant, since both this and the learned lock range read the
+previous step's effects. They cannot be confused for each other — the lock chord
+is Ctrl over a *left* click, the ammo cascade a plain right click, and the
+tooltip hover a bare mouse move with no button at all. And the hover, which holds
+the mouse still for several readings, cannot age a pending lock attempt into a
+false refusal: a refusal needs the target bar empty at both ends, and the ammo
+path only runs with an active target.
+
 ## Drones: how long they have been out says nothing about a recall
 
 Warping with drones in space loses them, so every warp, dock and retreat in
@@ -709,6 +896,121 @@ previous steps' effects, which `UpdateMemoryContext` did not carry; the mission
 runner's copy of `BotFrameworkSeparatingMemory.elm` now passes
 `previousStepsEffects` through, so that file diverges from the other apps'
 copies.
+
+## The home station: restocking where the drones actually are
+
+The drone restock takes drones from whatever station the ship is docked at, and
+that station is chosen by the mission chain, not by anyone who knows what is in
+it. Observed directly: after run 1 the ship sat in Amarr VI (Zorast); the
+station it was flown to for the restock, Amarr VIII (Oris) - Emperor Family
+Academy, holds 13 item types — all fitting modules and Overseer's Effects, no
+drones of any kind. There was nothing to restock from, and the log would have
+said "this station's item hangar holds no 'Acolyte I'" for the rest of the
+window.
+
+`home-station` names the station that does have them. When the wind-down starts
+and the drone bay is empty, the mission runner sets a route there, flies it,
+docks and restocks; already docked there, it restocks without travelling. It
+also gives the session a predictable end point, which a run that stops wherever
+the last mission left it does not have.
+
+**The name is one setting and is never typed.** `home-station` takes the full
+name as the client writes it, parentheses and hyphens included, because the full
+name is needed twice regardless — to pick the right row out of 26 search results,
+and to tell "am I already home" from the info panel's own station name. What
+gets *typed* is derived from it by `searchQueryForStation`: the tail after the
+last `" - "`, which for an NPC station is the distinctive part and is free of
+the punctuation that cannot be pressed. A second setting carrying the search
+term was the obvious alternative and is worse — the two can silently disagree,
+and a term that does not occur in the full name searches forever and matches no
+row, which is this repo's signature failure rather than an error.
+
+**The trigger cannot read the drone bay where it is asked.** The wind-down
+decision happens while docked, and the drones window is not in the tree while
+docked, so a live read of it answers "not empty" for an empty bay — a guard that
+compiles, runs, and is false in the only state that matters, which is what
+issue #15 was. `droneBayEmptyLastSeen` in `BotMemory` is written **only** from
+readings that can see the bay at all, so it is the last real answer rather than
+an inference: in space the drones window is open (the bot's own setup
+instructions require it), so a run that loses its drones records `Just True` on
+the next reading and carries it through the dock. `Nothing` — no reading this
+session ever saw the bay — declines the trip rather than guessing.
+
+**Two instruments, and they are not redundant.** #15's fix reads the bay's
+capacity gauge out of an inventory window, which is the docked instrument and
+the right one for the restock. It cannot answer this question, because it is
+only readable once the bot has itself opened the bay from the ship's card —
+and the home trip needs its answer *before* undocking, to decide whether to
+leave at all. `droneBayFillWhileSelected` is therefore the docked view and
+`droneBayIsEmptyFromDronesWindow` the in-space one, and they never overlap: the
+drones window is absent while docked, and the inventory does not have the bay
+selected while in space.
+
+**The trip triggers on *empty*; the restock, once there, tops up anything not
+full.** These disagree on purpose, and in two independent ways.
+
+The reading forces it. The drones window titles the bay group with a bare
+count — the `(current/maximum)` form the parser can read is what the *in space*
+group carries, being bandwidth-limited — so there is no capacity to compare
+against and "nothing in the bay" is the strongest thing an in-space reading can
+say.
+
+The cost argues for it too, and would even if the maximum were readable. The
+restock tops up 9 drones of 10 because it is standing in the station and the
+cost of acting is one drag. The trip decides whether to abandon the wind-down,
+undock, fly several jumps and risk ending the session in space; 9 of 10 does not
+justify that and 0 of 10 does. The asymmetry is in the cost of the action, not
+in the reading of the bay. A ship that arrives home with a part-full bay is
+still topped up, because the restock applies its own condition on arrival.
+
+The trip additionally respects `droneBayWillTakeNoMore`, the restock's latched
+verdict: a bay whose gauge already read full, or a drop the client already
+refused, is not a reason to fly anywhere. It resets on undock, so it never
+suppresses a trip decided in space.
+
+**Route first, undock second.** Setting a destination is the step that can fail,
+and failing it while still docked costs nothing; failing it after undocking
+leaves the ship in space with the session ending. The search bar works from
+inside a station, so there is nothing to gain from the other order.
+
+**Whether the route is *ours* is not readable from the route panel.** It reports
+that a destination exists, never which one, so a leftover mission route would be
+followed to the wrong station with every log line reading like success. The
+evidence used instead is the `Station: Information` window for the home station
+— the window `routeToStationByName` clicks "Set Destination" in, which nothing
+afterwards closes. Route panel plus that window is a conjunction only our own
+sequence produces. If a future client closes that window on Set Destination the
+symptom is the search repeating rather than travel starting, which the decision
+log names.
+
+**Bounded in both places, and the bound ends the session.** A trip gets
+`homeStationTripSecondsPastSessionEnd` (420s) past the planned end instead of the
+usual `secondsPastSessionEndBeforeGivingUpOnDocking` (120s), because a couple of
+jumps and a dock do not fit in the 200-second wind-down. Once home, the restock
+gets `homeStationRestockGraceSeconds` (60s) past the end, so arriving late does
+not mean arriving pointlessly — though normally none of it is spent, since the
+grace ends the moment the restock latches `droneBayWillTakeNoMore`. The clock
+covers the case where no verdict arrives at all, which matters because the
+restock's own give-up is to *fall silent* rather than to say anything. Both are
+deadlines, not waits: when either expires the bot ends the session and says
+which station it never reached. That distinction is the whole of issues #7 and
+#14 — a longer bound is fine, a missing one is not.
+
+The trade the setting buys: with `home-station` set, a wind-down that cannot
+reach home ends the session **in space**, where before it would have docked
+somewhere arbitrary. That is the point (an arbitrary dock is what makes the
+restock useless) but it is a real change, and it only happens when the bay is
+empty and a home station is configured.
+
+ESI would need none of this — no typable substring, no row matching, no window
+as evidence — and `botlab_host` already answers a `SetAutopilotDestination-
+Request`. It is not reachable from a bot decision: `OperateBotConfiguration`
+offers only mouse, keys and scroll, so nothing in a decision tree can issue a
+volatile-process request at all. Until that framework gap is closed the search
+bar is not an interim, it is the mechanism. The seam for swapping it later is
+narrow on purpose — the travel path asks route-setting exactly two questions,
+`homeStationRouteIsSet` and `routeToStationByName`, and knows nothing else about
+where a destination comes from.
 
 ## Elm toolchain
 
@@ -784,17 +1086,65 @@ exists.
   standalone tool that fights it for the mouse. The drone is named by the
   `drone-type` setting, default `Acolyte I`.
 
-  **Untested against a live client.** It compiles and the parser now sees
-  `ShipItemCard`, but nothing here has been watched running: it needs a docked
-  ship with an empty bay and the drone in that station's root item hangar. The
-  failure to watch for is the one `reload_drones.py`'s header names -- an
-  inventory not anchored to the ship accepts the drag, shows the quantity
-  dialog, and moves nothing. The bot's only evidence that its "Open Drone Bay"
-  landed is the drone bay showing as the selected container
-  (`droneBayOpenedFromShipCard`), which it remembers until the ship undocks;
-  a client left with that container selected some other way would fool it.
-  Read the decision log for the `Maintenance:` lines and check the drones
-  window afterwards rather than trusting them.
+  Note the dialog is *accepted* only once the reading has been checked for the
+  refusal dialog first. Both are windows with an OK button and nothing else
+  separates them, so clicking whichever OK is on screen and calling it "accept
+  the quantity dialog" reports a success for a drop that moved nothing -- the
+  same defect issue #19 found in the tool, inherited by the port.
+
+  **What ends the task is the bay's own capacity gauge, read while the bay is
+  the selected container.** The first version asked the *drones window* whether
+  the bay was empty, and that window does not exist while docked -- the only
+  state this task runs in. It answered "not empty" for every reading it would
+  ever see, so the guard bailed every time and the whole feature was dead code
+  that compiled and never once ran (issue #15). Nothing in a docked reading can
+  answer the question before the bay is opened, so the first look now happens
+  *after* opening it and costs the readings that takes.
+
+  The gauge is also why the condition is **full**, not non-empty: a bay holding
+  one drone of ten is not restocked, and only `used / maximum` can tell the
+  difference. Its limit is that a drone's own volume is not readable, so a bay
+  with less free space than one drone still reads as having room. That case
+  ends in the client's refusal dialog, which is now recognised on its text and
+  treated as the stronger answer -- it is the client saying directly that no
+  more will fit.
+
+  **Untested against a live client.** It compiles, the pure parts of the guard
+  are unit-checked, and the parser sees `ShipItemCard`, but nothing here has
+  been watched running: it needs a docked ship with a part-empty bay and the
+  drone in that station's root item hangar. Two things to watch, both of which
+  look like success from the log alone:
+
+  - **An inventory not anchored to the ship** accepts the drag, shows the
+    quantity dialog, and moves nothing. The bot's only evidence that its "Open
+    Drone Bay" landed is the drone bay showing as the selected container
+    (`droneBayOpenedFromShipCard`), remembered until the ship undocks; a client
+    left with that container selected some other way would fool it.
+  - **The gauge parsing.** `reload_drones.py` reads `50.0/50.0 m³` off
+    `InvContCapacityGauge` on this build, so the text exists and has the shape
+    the parser wants; what is unverified is the Elm parser picking that node
+    out of an inventory window (it takes the first descendant whose type name
+    contains `CapacityGauge`) and the bay reading `ShipDroneBay` as the
+    selected container. If either misses, every look reads "a capacity gauge
+    that does not say", the bot drags twice on the assumption there is room,
+    and then gives up -- deliberately, because a condition that cannot see the
+    bay must not be allowed to conclude the work is done. That is the failure
+    #15 was.
+
+  Read the decision log for the `Maintenance:` lines: one drag followed by one
+  `look ... of 3` and then silence is a restock that landed. Silence right
+  after the last look is the give-up. The drones window after the session is
+  still the last word on what is actually in the bay.
+
+  With `home-station` set it now also **goes where the drones are** rather than
+  restocking wherever the mission chain left it — route, travel, dock, restock,
+  or restock in place when it is already there. See "The home station" above for
+  the naming, the trigger and the two deadlines. **Untested against a live
+  client**, and the whole path only exists under `--session-duration-minutes`.
+  What to watch first: whether the `Station: Information` window survives the
+  "Set Destination" click, since that window is what tells the bot the route it
+  is following is its own. The tell is `Home station: ... set the route to`
+  repeating where `Home station: travelling to` should have taken over.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
@@ -807,20 +1157,47 @@ exists.
   /ui/autopilot/waypoint/` is the correct way to set a route, and
   `tools/macos-host/esi_waypoint.py` implements it (PKCE, so no client secret
   exists; the refresh token lives in the macOS Keychain and is never printed).
-  Name resolution is verified both ways, and the authenticated half is **proven
-  live**: `esi_waypoint.py set --name "Amarr VI (Zorast) - Moon 2 - Theology
-  Council Tribunal"` resolved it to 60008950 and the client's route panel
-  changed to match, with the credentials taken from the Keychain
-  (`eve-esi-client-id`, `eve-esi-refresh`) and no browser step needed. That name
-  contains both parentheses and hyphens, neither of which can be typed into the
-  search bar — so this is the only way the bot can originate a destination
-  carrying either. Note `/universe/ids/` does not index every NPC
+  Name resolution is verified both ways. The authenticated half is **proven
+  live** and this file's earlier "untested pending a browser login" was stale:
+  issue #17 records `esi_waypoint.py set --name "Amarr VI (Zorast) - Moon 2 -
+  Theology Council Tribunal"` resolving to 60008950 with the client's route
+  panel flipping from `No Destination` to `Route 0 Jumps` immediately after,
+  credentials taken from the Keychain (`eve-esi-client-id`, `eve-esi-refresh`)
+  and no browser step needed. That name carries both a parenthesis and a
+  hyphen, so it is exactly the destination the search bar below cannot express.
+  Note `/universe/ids/` does not index every NPC
   station — the agent's own "Amarr VI (Zorast) - Moon 2 - Theology Council
   Tribunal" comes back empty from it — so the tool falls back to resolving the
   system from the name's first token and enumerating its stations.
   ESI covers navigation only: CCP exposes no endpoint to request, accept or
   complete an agent mission, so the conversation stays UI automation either way.
   The search-bar route below needs no registration at all and is the fallback.
+
+  **`SetAutopilotDestinationRequest`** is the volatile-process request that
+  brings this into the bot loop: `{"name": …}` or `{"destinationId": …}`,
+  answered with `{"Completed": {"destinationId": N}}` or `{"Failed": "why"}`.
+  Two shapes rather than one shape with a flag, because a destination that
+  silently was not set followed by travel logic finding no route is this repo's
+  signature failure — see #7. `handle_request` catches everything, including
+  what it did not expect: an exception escaping to `run_task` becomes
+  `ProcessNotFound`, which `BotFramework` reads as "the volatile process is
+  gone" and answers by tearing it down and re-running root discovery.
+
+  It is **bounded**, because `handle_request` runs inside the host's single
+  request/response loop and an ESI that never answers would hold up the tick
+  that asked and every tick behind it. The budget (15s, `--budget` on the CLI)
+  covers the whole resolve-and-set rather than one request, since the
+  enumerate-a-system fallback costs a round trip per station: measured through
+  the dispatcher, that station resolves cold in 3.1s. Expiry is a `Failed`, not
+  a wait. Resolutions and the universe GETs behind them are memoised for the
+  life of the process — ids never change, and memoising each station the
+  fallback looks at means an attempt that ran out of time gets further next time
+  instead of starting over. The same name resolves in 0.00s after the first.
+
+  **The host side is all of it that exists.** Nothing issues this request yet;
+  see the Architecture section for why the bot has no channel that can carry a
+  station name, and what would have to change to give it one. Until then this is
+  reachable only from Python, and no bot has set a destination through it.
 
 ## `route_setter.py` internals worth knowing before touching it again
 
@@ -893,7 +1270,15 @@ A station name containing parentheses cannot be typed as-is. It does not need to
 be: search on a distinctive parenthesis-free substring and pick the right row by
 full-name match from the rendered list. Note also that `'-'` maps to
 `vkey_SUBTRACT` (0x6D, the numpad key), which is **not** in `botlab_host.py`'s
-`_VK_TO_CGKEYCODE` — a hyphen in a query silently has no key to press.
+`_VK_TO_CGKEYCODE` — a hyphen in a query silently has no key to press. (`0xBD`
+OEM_MINUS *is* in that table; `getKeyboardKeyToEnterChar` simply does not pick
+it. The mission runner's own `typeTextEffects` sidesteps the whole question by
+emitting letters, digits and spaces only and dropping the rest.)
+
+`eve-online-mission-runner`'s `routeToStationByName` is this sequence in Elm,
+and the `home-station` trip is its second caller. Both rely on the substring
+workaround being load-bearing rather than temporary — see "The home station"
+for why ESI cannot replace it from inside a bot yet.
 
 ## Open gaps
 

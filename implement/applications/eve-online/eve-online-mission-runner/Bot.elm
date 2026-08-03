@@ -106,18 +106,43 @@
      that does not cover. Either way the object must be enabled in the
      overview's type filters (Large Collidable Objects are off by default) or
      the bot cannot see it at all. Repeatable.
+   + `home-station` : Full name of the station to go back to when the drone bay
+     has run dry, exactly as the client writes it -- e.g.
+     `home-station=Amarr VIII (Oris) - Emperor Family Academy`. Without it the
+     bot restocks wherever the mission chain happened to leave it, which is a
+     station chosen by the agent and usually holds no drones at all. With it,
+     the wind-down sets a route there, flies it, docks and restocks; if the ship
+     is already there it just restocks. Give the whole name including the
+     parentheses and hyphens: the bot never types this string, it types the part
+     after the last " - " into the search bar and then matches this full name
+     against the rows that come back. See `routeToStationByName`.
    + `drone-type` : Name of the drone to refill the drone bay with while the
      session winds down, as it appears in the station's item hangar -- e.g.
      `drone-type=Hobgoblin I`. Defaults to `Acolyte I`. Fit-specific, which is
      why it is a setting: the wrong name here does not misload anything, it
      just finds nothing in the hangar. The drone has to be in the root item
      hangar of the station the ship is parked in; sub-folders are not searched.
+   + `short-range-ammo` / `long-range-ammo` : Names of the two charges to swap
+     between as the current target's distance changes, exactly as the weapon
+     module's own right-click menu spells them -- e.g.
+     `short-range-ammo=Scorch M`. **Both are needed, or nothing happens at
+     all**: with one charge type, or none, there is no swap to make and the bot
+     leaves the guns alone rather than guessing. Wrong ammo still does damage,
+     so this is an optimisation and doing nothing is always an acceptable
+     outcome. Which name is the longer-ranged one is not taken on trust -- the
+     bot reads the weapon's optimal range from its tooltip before and after a
+     swap and learns which name produces which range from that.
    + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping
      range or aligning.
    + `keep-at-range`: Set this to 'yes' to keep range from the target instead of
      orbiting or aligning.
-   + `targeting-range`: Maximum distance in meters to lock a target from the
-     overview. Beyond this, the bot approaches instead of locking. Defaults to 66000.
+   + `targeting-range`: Distance in meters at which the bot switches from
+     locking a target to approaching it. Defaults to 66000. This is a starting
+     value, not the last word: the bot narrows it during the session from the
+     client's own answers -- the greatest distance at which a lock was accepted
+     and the smallest at which one was provably refused -- and the setting is
+     clamped between the two. Set it to pin the starting point; it still gives
+     way to what the client has actually granted. See `lockRangeThresholdInMeters`.
    + `run-away-shield-hitpoints-threshold-percent` /
      `run-away-armor-hitpoints-threshold-percent`: Dock up when the ship drops
      below these. Disabled by default.
@@ -213,6 +238,9 @@ defaultBotSettings =
     , keepAtRange = AppSettings.No
     , targetingRangeMeters = 66000
     , droneTypeName = "Acolyte I"
+    , homeStationName = Nothing
+    , shortRangeAmmoName = Nothing
+    , longRangeAmmoName = Nothing
     }
 
 
@@ -304,6 +332,18 @@ parseBotSettings =
            , AppSettings.valueTypeString
                 (\droneTypeName settings -> { settings | droneTypeName = String.trim droneTypeName })
            )
+         , ( "home-station"
+           , AppSettings.valueTypeString
+                (\stationName settings -> { settings | homeStationName = nonEmptySettingValue stationName })
+           )
+         , ( "short-range-ammo"
+           , AppSettings.valueTypeString
+                (\ammoName settings -> { settings | shortRangeAmmoName = nonEmptySettingValue ammoName })
+           )
+         , ( "long-range-ammo"
+           , AppSettings.valueTypeString
+                (\ammoName settings -> { settings | longRangeAmmoName = nonEmptySettingValue ammoName })
+           )
          ]
             |> Dict.fromList
         )
@@ -325,7 +365,26 @@ type alias BotSettings =
     , keepAtRange : AppSettings.YesOrNo
     , targetingRangeMeters : Int
     , droneTypeName : String
+    , homeStationName : Maybe String
+    , shortRangeAmmoName : Maybe String
+    , longRangeAmmoName : Maybe String
     }
+
+
+{-| A setting whose absence has to be distinguishable from its being blank.
+
+`short-range-ammo=` with nothing after it is how an operator turns the ammo swap
+back off from the web console without deleting the line, and an empty string
+would otherwise match every context-menu entry.
+-}
+nonEmptySettingValue : String -> Maybe String
+nonEmptySettingValue value =
+    case String.trim value of
+        "" ->
+            Nothing
+
+        trimmed ->
+            Just trimmed
 
 
 type alias State =
@@ -364,6 +423,105 @@ type alias BotMemory =
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
     , droneBayOpenedFromShipCard : Bool
+    , droneBayWillTakeNoMore : Bool
+    , droneRestockLooksWithRoom : Int
+    , droneRestockDragsDispatched : Int
+    , droneBayEmptyLastSeen : Maybe Bool
+    , lockAttempt : Maybe LockAttempt
+    , lockProvenAtMeters : Maybe Int
+    , lockRefusedAtMeters : Maybe Int
+    , lockRangeLastChange : Maybe String
+    , ammoSwap : AmmoSwapMemory
+    }
+
+
+{-| A lock the bot has asked the client for and that the client has not
+answered yet.
+
+Started from the effects of the step just dispatched rather than from the
+decision that produced them, because only the effects are visible from
+`updateMemoryForNewReadingFromGame` -- and the decision tree cannot write
+memory. `handle` is what identifies the row across readings; see
+`overviewEntryLockHandle` for why a screen position will not do.
+
+`distanceInMeters` is the distance the row showed on the reading the attempt
+started, and `targetsCount` the number of locked targets then. Both are needed
+at the verdict, and both can have changed by the time it is rendered.
+-}
+type alias LockAttempt =
+    { handle : String
+    , distanceInMeters : Int
+    , targetsCount : Int
+    , readingsWaited : Int
+    }
+
+
+{-| Which end of the ammo pair a charge sits at. Never derived from a name --
+only from the optimal range the charge produces, which is the one thing about it
+the client actually reports.
+-}
+type AmmoRange
+    = ShortRangeAmmo
+    | LongRangeAmmo
+
+
+{-| Everything the ammo swap knows, kept in one field so the rest of `BotMemory`
+is untouched.
+
+`optimalRangeInMeters` is the whole design: a weapon's optimal range moves with
+the charge in it, so the same number says which ammo is effectively loaded *and*
+confirms that a load landed. It comes from the module button's tooltip, which
+this bot has never read before -- see `weaponOptimalRangeFromHover` for how it is
+attributed to a module without relying on `isHiliteVisible`, which is permanently
+False on this client.
+
+`optimalRangeSeenLow`/`High` are the two ranges observed so far. They are learned
+rather than configured: the first swap shows a second number, and the smaller of
+the pair is by definition the short-range charge's. That is what makes the swap
+fit-agnostic -- no ammo name is ever recognised, only measured.
+
+`rangeVerdictTicks` counts consecutive readings the same verdict has held, and
+carries two of the five guards at once. Below `ammoSwapDistanceHoldTicks` it is
+target churn and nothing is done; above `ammoSwapNotConfirmedGiveUpTicks` the
+swap was commanded and the optimal range never moved, so it is abandoned. The
+same shape as `keepAtRangeUnconfirmedTicks`, and for the same reason: the reading
+is the only evidence either way.
+
+`gunsCommandedThisVerdictAtX` is how the walk across a multi-gun row remembers
+where it got to, keyed on each gun's `x` because the row is not a stable index
+space. Be clear about what it records: a gun goes in the list when its context
+menu was *opened*, which is the bot asking, not the client answering. A cascade
+that opened the menu and then failed to find the charge in it counts the same as
+one that loaded it. Only the reference gun's optimal range is real evidence, and
+that is the last gun in the row -- so a load that silently failed on an earlier
+gun leaves that gun on the old charge without anything noticing. Confirming every
+gun separately would need a tooltip read per gun; it is not done, and the cost of
+being wrong is one weapon firing the charge it already had.
+-}
+type alias AmmoSwapMemory =
+    { optimalRangeInMeters : Maybe Int
+    , optimalRangeSeenLow : Maybe Int
+    , optimalRangeSeenHigh : Maybe Int
+    , rangeVerdict : Maybe AmmoRange
+    , rangeVerdictTicks : Int
+    , gunsCommandedThisVerdictAtX : List Int
+    , hoverAwaitingTooltip : Bool
+    , hoverUnansweredTicks : Int
+    , givenUp : Maybe String
+    }
+
+
+initAmmoSwapMemory : AmmoSwapMemory
+initAmmoSwapMemory =
+    { optimalRangeInMeters = Nothing
+    , optimalRangeSeenLow = Nothing
+    , optimalRangeSeenHigh = Nothing
+    , rangeVerdict = Nothing
+    , rangeVerdictTicks = 0
+    , gunsCommandedThisVerdictAtX = []
+    , hoverAwaitingTooltip = False
+    , hoverUnansweredTicks = 0
+    , givenUp = Nothing
     }
 
 
@@ -373,7 +531,19 @@ type alias BotDecisionContext =
 
 missionBotDecisionRoot : BotDecisionContext -> DecisionPathNode
 missionBotDecisionRoot context =
-    missionBotDecisionRootBeforeApplyingSettings context
+    -- A learned bound announces itself here, at the root, rather than in the
+    -- branch that learned it -- the bounds move in `updateMemoryForNewReading-
+    -- FromGame`, which runs on every reading whatever the bot is doing, and a
+    -- self-adjusting number that adjusts silently is what made #7 take a whole
+    -- session to diagnose. `lockRangeLastChange` holds a message only on the
+    -- reading a bound actually moved, so this is one line per change.
+    (case context.memory.lockRangeLastChange of
+        Just lockRangeChange ->
+            describeBranch lockRangeChange (missionBotDecisionRootBeforeApplyingSettings context)
+
+        Nothing ->
+            missionBotDecisionRootBeforeApplyingSettings context
+    )
         |> EveOnline.BotFrameworkSeparatingMemory.setMillisecondsToNextReadingFromGameBase
             context.eventContext.botSettings.botStepDelayMilliseconds
 
@@ -453,7 +623,7 @@ windDownBeforeSessionEnd context =
                         )
                         (case context.readingFromGameClient.shipUI of
                             Nothing ->
-                                if secondsRemaining <= 0 then
+                                if secondsRemaining <= dockedWindDownDeadlineSeconds context then
                                     -- Parked with the session over, so stop.
                                     -- The host only *announces* the deadline --
                                     -- it does not stop its own loop -- so a bot
@@ -462,19 +632,24 @@ windDownBeforeSessionEnd context =
                                     -- session, printing "Already docked. Stay
                                     -- put." 7,633 times.
                                     describeBranch
-                                        "Session over and docked -- finish."
+                                        (dockedWindDownFinishReason context)
                                         (Common.DecisionPath.endDecisionPath FinishSession)
 
                                 else
-                                    case maintenanceWhileDocked context of
-                                        Just maintenance ->
-                                            maintenance
+                                    case goToHomeStationWhileDocked context of
+                                        Just goHome ->
+                                            goHome
 
                                         Nothing ->
-                                            describeBranch "Already docked. Stay put." waitForProgressInGame
+                                            case maintenanceWhileDocked context of
+                                                Just maintenance ->
+                                                    maintenance
+
+                                                Nothing ->
+                                                    describeBranch "Already docked. Stay put." waitForProgressInGame
 
                             Just _ ->
-                                if secondsRemaining <= -secondsPastSessionEndBeforeGivingUpOnDocking then
+                                if secondsRemaining <= -(windDownOverrunAllowanceSeconds context) then
                                     -- Still in space well past the deadline, so
                                     -- stop trying to park and end the session
                                     -- where we are.
@@ -496,20 +671,360 @@ windDownBeforeSessionEnd context =
                                     -- it. It does not repair the underlying
                                     -- cause, which is why it says what happened.
                                     describeBranch
-                                        ("Session ended "
-                                            ++ String.fromInt -secondsRemaining
-                                            ++ " seconds ago and I still have not docked -- stop here rather than keep trying."
-                                        )
+                                        (inSpaceWindDownFinishReason context secondsRemaining)
                                         (Common.DecisionPath.endDecisionPath FinishSession)
 
                                 else
-                                    returnDronesToBay context
-                                        (dockAtStation
-                                            context.memory.lastDockedStationNameFromInfoPanel
-                                            context
-                                        )
+                                    case goToHomeStationWhileInSpace context of
+                                        Just goHome ->
+                                            goHome
+
+                                        Nothing ->
+                                            returnDronesToBay context
+                                                (dockAtStation
+                                                    context.memory.lastDockedStationNameFromInfoPanel
+                                                    context
+                                                )
                         )
                     )
+
+
+
+-- The home station
+
+
+{-| How long past the planned session end a trip to the home station may run.
+
+The trip is the one thing in the wind-down that legitimately takes longer than
+the window it starts in: `secondsBeforeSessionEndToWindDown` is 200 seconds and
+a couple of jumps plus a dock is several minutes. Rather than let it be cut off
+halfway -- which strands the ship in space, the worst of both outcomes -- the
+trip raises the overrun allowance that
+`secondsPastSessionEndBeforeGivingUpOnDocking` normally sets.
+
+Raising it is only safe because it stays a deadline. Issues #7 and #14 were both
+the same shape: a wait with no end, which reads in the log exactly like a bot
+working. This is a longer bound, not a missing one -- when it expires the
+session *ends*, loudly, naming the station it never reached.
+-}
+homeStationTripSecondsPastSessionEnd : Int
+homeStationTripSecondsPastSessionEnd =
+    420
+
+
+{-| How long past the planned session end the restock at the home station may
+run, once the ship is actually there.
+
+Much smaller than the trip's allowance, and for a different risk. The trip is
+bounded because travel is slow; this is bounded because the restock is what has
+to finish inside it, and the restock's own bound is a count of looks rather than
+a clock (`droneRestockLooksBeforeGivingUp`). Sixty seconds is about ten
+readings, which covers the three looks and two drags that budget allows.
+
+Normally it is not spent: the grace ends as soon as the restock latches
+`droneBayWillTakeNoMore`. The clock is what covers the case where no verdict
+arrives -- a gauge this build renders differently, say -- since a look budget
+that runs out ends the restock by *falling silent*, which on its own would leave
+the session parked here until the deadline.
+-}
+homeStationRestockGraceSeconds : Int
+homeStationRestockGraceSeconds =
+    60
+
+
+{-| The home station, when one is configured *and* there is a reason to go
+there. Both halves are the trigger, so a bot whose bay still holds drones winds
+down exactly as it did before this existed.
+
+**The reason is an empty bay, where the restock's own reason is a bay that is
+not full, and the two are deliberately different questions.**
+`restockDroneBayWhileDocked` tops up 9 drones of 10 because it is standing in
+the station already and the cost of acting is one drag. This decides whether to
+abandon the wind-down, undock, fly several jumps and risk ending the session in
+space -- and 9 of 10 is not worth that, while none of 10 is. The asymmetry is
+in the cost of the action, not in the reading.
+
+It is also what the instrument can say. `droneBayEmptyLastSeen` comes from the
+drones window, the only view of the bay that exists in space, and that window
+titles the bay group with a bare count and no capacity -- so fullness is not a
+question an in-space reading can answer at all. See
+`droneBayIsEmptyFromDronesWindow`.
+
+`droneBayWillTakeNoMore` is #24's verdict from the *other* instrument, and is
+respected here for the case it can arise in: a bay whose gauge already read
+full, or a drop the client already refused, is not a reason to fly anywhere. It
+resets on undock, so it never suppresses a trip decided in space.
+-}
+homeStationToGoTo : BotDecisionContext -> Maybe String
+homeStationToGoTo context =
+    case context.eventContext.botSettings.homeStationName of
+        Nothing ->
+            Nothing
+
+        Just stationName ->
+            if
+                (context.memory.droneBayEmptyLastSeen == Just True)
+                    && not context.memory.droneBayWillTakeNoMore
+            then
+                Just stationName
+
+            else
+                Nothing
+
+
+{-| Which station the info panel says we are docked at, or Nothing when this
+reading does not say.
+
+Read live rather than from `lastDockedStationNameFromInfoPanel`, which is a
+*last seen* and would happily name the previous station while docked at this
+one -- and answering "yes, we are home" about the wrong station would restock in
+the station that has no drones, which is the bug this whole feature is about.
+`generalSetupInUserInterface` runs before the wind-down on every reading and
+expands the location info panel, so the name is normally there.
+-}
+dockedStationNameFromInfoPanel : BotDecisionContext -> Maybe String
+dockedStationNameFromInfoPanel context =
+    context.readingFromGameClient.infoPanelContainer
+        |> Maybe.andThen .infoPanelLocationInfo
+        |> Maybe.andThen .expandedContent
+        |> Maybe.andThen .currentStationName
+
+
+{-| Whether the ship is docked at the home station, or Nothing when the reading
+cannot say.
+
+Three-valued on purpose. "I cannot tell" and "no" want opposite actions -- one
+waits, the other undocks and flies away -- and collapsing them into a Bool means
+picking one of those to do on no evidence.
+
+The name is matched as an exact string, ignoring case and surrounding space, or
+as the configured name appearing inside the panel's. Containment only in that
+direction: the panel decorating the name with something extra should still
+match, but a configured `Amarr` matching every station in the constellation
+should not.
+-}
+dockedAtHomeStation : BotDecisionContext -> String -> Maybe Bool
+dockedAtHomeStation context homeName =
+    dockedStationNameFromInfoPanel context
+        |> Maybe.map
+            (\stationName ->
+                let
+                    normalise =
+                        String.trim >> String.toLower
+                in
+                (normalise stationName == normalise homeName)
+                    || stringContainsIgnoringCase (String.trim homeName) stationName
+            )
+
+
+{-| The overrun the wind-down allows itself while in space, in seconds past the
+planned session end.
+-}
+windDownOverrunAllowanceSeconds : BotDecisionContext -> Int
+windDownOverrunAllowanceSeconds context =
+    case homeStationToGoTo context of
+        Nothing ->
+            secondsPastSessionEndBeforeGivingUpOnDocking
+
+        Just _ ->
+            homeStationTripSecondsPastSessionEnd
+
+
+{-| The point at which a docked bot stops winding down and ends the session.
+
+Normally the planned end itself. A ship that has reached its home station with
+an empty bay gets `homeStationRestockGraceSeconds` past that, because arriving
+and then finishing without restocking would waste the whole trip.
+-}
+dockedWindDownDeadlineSeconds : BotDecisionContext -> Int
+dockedWindDownDeadlineSeconds context =
+    if homeStationRestockGraceApplies context then
+        -homeStationRestockGraceSeconds
+
+    else
+        0
+
+
+{-| Whether the wind-down is being held open for a restock at the home station.
+True only when there is a home station, the bay is known empty, and this is
+that station -- so it can never extend a session that has nothing to gain by it.
+
+It also stops being true the moment the restock latches `droneBayWillTakeNoMore`
+(via `homeStationToGoTo`), so the grace ends on the restock's own verdict rather
+than always running its full length. The clock is the backstop for the case
+where no verdict arrives at all.
+-}
+homeStationRestockGraceApplies : BotDecisionContext -> Bool
+homeStationRestockGraceApplies context =
+    case homeStationToGoTo context of
+        Nothing ->
+            False
+
+        Just stationName ->
+            dockedAtHomeStation context stationName == Just True
+
+
+{-| Why a docked bot is finishing, worded so the log alone says whether the trip
+home succeeded, was never needed, or ran out of time.
+-}
+dockedWindDownFinishReason : BotDecisionContext -> String
+dockedWindDownFinishReason context =
+    case homeStationToGoTo context of
+        Nothing ->
+            "Session over and docked -- finish."
+
+        Just stationName ->
+            if dockedAtHomeStation context stationName == Just True then
+                "Home station: docked at '"
+                    ++ stationName
+                    ++ "' with the restock grace spent -- finish here."
+
+            else
+                "Session over and docked -- finish. The drone bay is still empty and this is not '"
+                    ++ stationName
+                    ++ "'."
+
+
+inSpaceWindDownFinishReason : BotDecisionContext -> Int -> String
+inSpaceWindDownFinishReason context secondsRemaining =
+    case homeStationToGoTo context of
+        Nothing ->
+            "Session ended "
+                ++ String.fromInt -secondsRemaining
+                ++ " seconds ago and I still have not docked -- stop here rather than keep trying."
+
+        Just stationName ->
+            "Home station: gave up -- the session ended "
+                ++ String.fromInt -secondsRemaining
+                ++ " seconds ago and I never reached '"
+                ++ stationName
+                ++ "'. Stopping here rather than flying on past the deadline."
+
+
+{-| Head home while docked somewhere else: set the route first, undock second.
+
+That order is the point. Setting a destination is the step that can fail -- the
+station may not be in the search results, the results window may not open -- and
+failing it while still docked costs nothing, where failing it after undocking
+leaves the ship in space with the session ending. The search bar works from
+inside a station, so nothing is gained by undocking first.
+
+Returns Nothing when the ship is already home, which hands the reading to
+`maintenanceWhileDocked` and its restock: "if already docked there, restock
+without travelling".
+-}
+goToHomeStationWhileDocked : BotDecisionContext -> Maybe DecisionPathNode
+goToHomeStationWhileDocked context =
+    homeStationToGoTo context
+        |> Maybe.andThen
+            (\stationName ->
+                case dockedAtHomeStation context stationName of
+                    Just True ->
+                        Nothing
+
+                    Nothing ->
+                        -- Not knowing where we are is a reason not to undock,
+                        -- and no reason to skip the maintenance that was
+                        -- happening here before this feature existed. Restocking
+                        -- in the wrong station finds no drones and costs a few
+                        -- readings; undocking towards a station we may already
+                        -- be standing in costs the session.
+                        Just
+                            (describeBranch
+                                ("Home station: the info panel does not name the station I am docked at, so I cannot tell whether it is '"
+                                    ++ stationName
+                                    ++ "' -- staying docked rather than undocking on a guess."
+                                )
+                                (maintenanceWhileDocked context
+                                    |> Maybe.withDefault
+                                        (describeBranch "Already docked. Stay put." waitForProgressInGame)
+                                )
+                            )
+
+                    Just False ->
+                        Just
+                            (if homeStationRouteIsSet context stationName then
+                                describeBranch
+                                    ("Home station: the route to '"
+                                        ++ stationName
+                                        ++ "' is set -- undock and travel there."
+                                    )
+                                    (undockUsingStationWindow context)
+
+                             else
+                                describeBranch
+                                    ("Home station: the drone bay is empty and this is not '"
+                                        ++ stationName
+                                        ++ "' -- set the route there before undocking."
+                                    )
+                                    (routeToStationByName context stationName)
+                            )
+            )
+
+
+{-| Head home from space: set the route, then fly it gate by gate.
+
+`jumpToNextSystem` is the same travel step the mission path uses, and it is what
+docks at the far end too -- the route marker's own menu offers "Dock" once the
+destination system is reached, which is why nothing here has to know the
+difference between another jump and arrival.
+-}
+goToHomeStationWhileInSpace : BotDecisionContext -> Maybe DecisionPathNode
+goToHomeStationWhileInSpace context =
+    homeStationToGoTo context
+        |> Maybe.map
+            (\stationName ->
+                if homeStationRouteIsSet context stationName then
+                    case closeSearchResultsWhenRouteIsSet context of
+                        Just closeResults ->
+                            closeResults
+
+                        Nothing ->
+                            describeBranch
+                                ("Home station: travelling to '"
+                                    ++ stationName
+                                    ++ "' to restock the drone bay."
+                                )
+                                (jumpToNextSystem context)
+
+                else
+                    describeBranch
+                        ("Home station: the drone bay is empty -- set the route to '"
+                            ++ stationName
+                            ++ "'."
+                        )
+                        (routeToStationByName context stationName)
+            )
+
+
+{-| Whether the route currently set is *our* route home, rather than a leftover
+from the mission the session was running.
+
+The route panel says a destination exists; it does not say which one, and
+nothing in a reading names it. Following the wrong route is not a visible
+failure either -- the ship travels, docks, and the session ends in the wrong
+station with every log line reading like success.
+
+So the evidence is the window that set it: the `Station: Information` window for
+the home station, which is what `routeToStationByName` clicks "Set Destination"
+in and which nothing afterwards closes. Route panel plus that window is the
+conjunction that only our own sequence produces.
+
+**This is the seam an ESI backend replaces.** The travel-and-dock path below
+asks route-setting exactly two questions -- "is the route mine" (here) and
+"make it so" (`routeToStationByName`) -- and knows nothing else about how a
+destination is originated. A backend that sets the destination by id answers the
+first from its own result instead of from a window, and the undock, the jumps
+and the dock are unchanged. That is not a swap anyone can make today, though:
+`botlab_host` answers a `SetAutopilotDestinationRequest` (PR #23) but no bot can
+issue one, because `OperateBotConfiguration` gives a decision no channel to the
+volatile process at all -- only mouse, keys and scroll. Until that framework gap
+is closed, the search bar is not an interim, it is the mechanism.
+-}
+homeStationRouteIsSet : BotDecisionContext -> String -> Bool
+homeStationRouteIsSet context stationName =
+    routeIsSet context
+        && (stationInfoWindowForStation context stationName /= Nothing)
 
 
 
@@ -760,13 +1275,25 @@ Ordered by what a reading can *see*, the way `loadCourierCargo` is: which
 container the inventory has selected decides the next step, so the sequence
 converges without the bot having to remember where in it we are.
 
-**Telling from the log whether it worked**, which matters because the failure
-this is most exposed to is a drop that is refused without saying so: a restock
-that succeeded logs its drag once and then goes quiet, because the bay stops
-being empty and the whole task retires. One that was refused keeps logging the
-same drag every other reading until the window closes. Two `Maintenance: drag`
-lines in a session is the shape to be suspicious of, and the drones window
-after the session is the answer.
+**What ends it is a look into the bay, and nothing else.** Docked, the drones
+window does not exist, so the bay's contents are only readable as the selected
+container of an inventory window -- which means they are only readable at the
+two moments the sequence deliberately puts the bay there, before the first drag
+and after each one. That is the whole of the fix for issue #15: the check that
+used to sit here read the drones window, which is `Nothing` for every reading
+this task ever sees, and so the task never ran once.
+
+Looking after the drag rather than before it is what distinguishes a restock
+from a refusal, and the refusal is real: the client answers a drop it will not
+take with a "No room for more in destination container" window that carries an
+OK button of its own (issue #19). Nothing else in the reading separates the two.
+
+**Telling from the log whether it worked**: `Maintenance: drag ... (attempt 1)`
+followed by one `select the ship's drone bay ... (look 2 of 3)` and then
+silence is a restock that landed -- the bay was seen holding drones and the
+task retired. A second attempt means the first look found nothing. The log
+falling silent right after `look 3 of 3` is the give-up, and the drones window
+after the session is still the last word on what is actually in there.
 
 Every branch here also names what it saw rather than only what it wanted,
 because the node type names it steers by (`ShipDroneBay`, `StationItems`) are
@@ -778,10 +1305,35 @@ restockDroneBayWhileDocked context =
     if not (withinDroneRestockWindow context) then
         Nothing
 
-    else if not (droneBayIsEmpty context.readingFromGameClient) then
-        -- The "already done" condition. Anything in the bay means either this
-        -- ran or there was nothing to do, and both end the task -- the drop
-        -- accepts the dialog's default, which fills the bay in one go.
+    else if
+        (0 < context.memory.droneRestockDragsDispatched)
+            && dropIntoDroneBayWasRefused context.readingFromGameClient
+    then
+        -- Ahead of the "already done" check below, which the same reading has
+        -- just latched: the dialog is ours and is dismissed rather than left
+        -- sitting over the client for the rest of the session.
+        Just (dismissRefusedDropIntoDroneBay context)
+
+    else if context.memory.droneBayWillTakeNoMore then
+        -- The "already done" condition, in the only two forms a docked reading
+        -- can supply: the bay's own capacity gauge reading full, or the client
+        -- having refused a drop into it.
+        --
+        -- Read from the bay, not from the drones window. That window does not
+        -- exist while docked, which is the only state this task runs in, so
+        -- the check that used to live here answered "not empty" on every
+        -- reading and made the whole task unreachable -- issue #15. Nothing in
+        -- a docked reading can be consulted before the bay is opened, so the
+        -- first look happens after opening it and costs the readings that
+        -- takes.
+        Nothing
+
+    else if droneRestockLooksBeforeGivingUp <= context.memory.droneRestockLooksWithRoom then
+        -- Out of attempts, and deliberately silent from here. The alternative
+        -- is a give-up line repeating for the rest of the window, and
+        -- `stall_watch` counts readings rather than distinct lines, so that
+        -- reads as a stall. Where this stopped is the last
+        -- "look ... of N" line in the log.
         Nothing
 
     else if not context.memory.droneBayOpenedFromShipCard then
@@ -798,7 +1350,8 @@ restockDroneBayWhileDocked context =
                 Just
                     (restockDroneBayFromInventoryWindow
                         context
-                        inventoryWindow
+                        inventoryWindow.window
+                        inventoryWindow.droneBayTreeEntry
                         context.eventContext.botSettings.droneTypeName
                     )
 
@@ -811,24 +1364,39 @@ reading that shows anything else selected only ever clicks the item hangar --
 otherwise a filter typed against the ship's own cargo would come back empty and
 be reported as "the station has no drones", which is a wrong answer rather than
 a missing one.
+
+The bay is looked at before and after every drag, and that is the only thing
+that ever ends this task. The two counters say which of those the current
+reading is for, because the station hangar stays selected across a drag and so
+a reading cannot tell "about to drag" from "just dragged": one look precedes
+each drag, so `dragsDispatched == looksWithRoom` means the drag for this round
+has gone out and the bay is due another look, while one fewer means the drag
+has not happened yet.
+
+Looking after the drag is the point. A drop can be refused -- the client puts
+up "No room for more in destination container", which carries an OK button of
+its own (issue #19) -- and a refusal is indistinguishable from success in
+everything except the bay's own gauge.
+
+The look budget only bounds the paths that reach a drag. The dead ends below --
+this station's hangar holding none of the drone, no item hangar in the
+inventory at all -- still repeat their line until the clock closes the window,
+because no drag ever happens to advance the count and nothing in a reading
+distinguishes "filtered and found nothing" from "the container has not
+rendered yet" well enough to latch on. They dispatch no input, and wind-down
+repeats a line either way -- "Already docked. Stay put." is what fills that
+window otherwise -- so this costs a differently-worded log and nothing else.
 -}
 restockDroneBayFromInventoryWindow :
     BotDecisionContext
     -> EveOnline.ParseUserInterface.InventoryWindow
+    -> EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
     -> String
     -> DecisionPathNode
-restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
+restockDroneBayFromInventoryWindow context inventoryWindow droneBayTreeEntry droneTypeName =
     let
         itemsInView =
-            case inventoryWindow.selectedContainerInventory |> Maybe.andThen .itemsView of
-                Just (EveOnline.ParseUserInterface.InventoryItemsListView listView) ->
-                    listView.items |> List.map .uiNode
-
-                Just (EveOnline.ParseUserInterface.InventoryItemsNotListView notListView) ->
-                    notListView.items
-
-                Nothing ->
-                    []
+            inventoryItemsInView inventoryWindow
 
         -- The first word, not the whole name: the same match
         -- `reload_drones.py` makes. An item cell renders the name with its
@@ -848,24 +1416,50 @@ restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
                     )
                 |> List.head
 
-        droneBayTreeEntry =
-            inventoryWindow |> inventoryTreeEntryWithText "drone bay"
-
         itemHangarTreeEntry =
             inventoryWindow |> inventoryTreeEntryWithText "item hangar"
 
         selectedContainerTypeName =
-            inventoryWindow.selectedContainerInventory
-                |> Maybe.map (.uiNode >> .uiNode >> .pythonObjectTypeName)
+            selectedContainerTypeNameOfWindow inventoryWindow
+
+        looksWithRoom =
+            context.memory.droneRestockLooksWithRoom
+
+        dragsDispatched =
+            context.memory.droneRestockDragsDispatched
     in
-    case quantityDialogAcceptButton context.readingFromGameClient of
+    case okButtonInReading context.readingFromGameClient of
+        -- Only reached once `restockDroneBayWhileDocked` has ruled out the
+        -- refusal dialog, which carries an OK of its own that this cannot
+        -- tell apart -- see `okButtonInReading`.
         Just acceptButton ->
             describeBranch
                 "Maintenance: accept the quantity dialog, whose default already fills the drone bay."
                 (clickUiElement acceptButton)
 
         Nothing ->
-            if selectedContainerTypeName /= Just "StationItems" then
+            if selectedContainerTypeName /= Just "ShipDroneBay" && looksWithRoom <= dragsDispatched then
+                -- The drag for this round has gone out and the bay has not
+                -- been looked at since. Nothing else in the reading says
+                -- whether it landed, so go and look before dragging again.
+                if previousStepClickedMouse context then
+                    describeBranch
+                        "Maintenance: I just clicked -- wait for the reading to catch up before deciding on the inventory again."
+                        waitForProgressInGame
+
+                else
+                    describeBranch
+                        ("Maintenance: dragged "
+                            ++ String.fromInt dragsDispatched
+                            ++ " time(s) -- select the ship's drone bay to read its capacity gauge (look "
+                            ++ String.fromInt (looksWithRoom + 1)
+                            ++ " of "
+                            ++ String.fromInt droneRestockLooksBeforeGivingUp
+                            ++ "; the log goes quiet here if it is the last one and the bay still has room)."
+                        )
+                        (clickUiElement (droneBayTreeEntry.selectRegion |> Maybe.withDefault droneBayTreeEntry.uiNode))
+
+            else if selectedContainerTypeName /= Just "StationItems" then
                 case itemHangarTreeEntry of
                     Nothing ->
                         describeBranch
@@ -882,6 +1476,18 @@ restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
                             describeBranch
                                 ("Maintenance: select the station's item hangar (the inventory shows "
                                     ++ (selectedContainerTypeName |> Maybe.withDefault "nothing")
+                                    ++ (case droneBayFillWhileSelected context.readingFromGameClient of
+                                            -- The outcome of a look, printed
+                                            -- where the look happens: the bay
+                                            -- being selected here is the bot
+                                            -- having just read its gauge and
+                                            -- decided to go and fetch drones.
+                                            Just fill ->
+                                                ", with " ++ describeDroneBayFill fill
+
+                                            Nothing ->
+                                                ""
+                                       )
                                     ++ ")."
                                 )
                                 (clickUiElement (itemHangar.selectRegion |> Maybe.withDefault itemHangar.uiNode))
@@ -892,8 +1498,8 @@ restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
                         filterStep
 
                     Nothing ->
-                        case ( matchingItem, droneBayTreeEntry ) of
-                            ( Just itemNode, Just droneBay ) ->
+                        case matchingItem of
+                            Just itemNode ->
                                 if previousStepClickedMouse context then
                                     -- A repeat drag is not harmless: it can
                                     -- move part of a stack somewhere
@@ -908,21 +1514,17 @@ restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
                                     describeBranch
                                         ("Maintenance: drag '"
                                             ++ droneTypeName
-                                            ++ "' from the item hangar into the ship's drone bay."
+                                            ++ "' from the item hangar into the ship's drone bay (attempt "
+                                            ++ String.fromInt (dragsDispatched + 1)
+                                            ++ ")."
                                         )
                                         (dragFromItemIconOntoUiElement itemNode
-                                            (droneBay.selectRegion |> Maybe.withDefault droneBay.uiNode)
+                                            (droneBayTreeEntry.selectRegion
+                                                |> Maybe.withDefault droneBayTreeEntry.uiNode
+                                            )
                                         )
 
-                            ( Just _, Nothing ) ->
-                                describeBranch
-                                    ("Maintenance: the item hangar holds '"
-                                        ++ droneTypeName
-                                        ++ "' but the inventory shows no drone bay to drop it into -- give up on restocking."
-                                    )
-                                    waitForProgressInGame
-
-                            ( Nothing, _ ) ->
+                            Nothing ->
                                 -- With the count in it, "the hangar has none"
                                 -- can be told from "nothing is being read out
                                 -- of this container at all", which look the
@@ -938,6 +1540,42 @@ restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
                                     waitForProgressInGame
 
 
+{-| Clear the dialog the client puts up when it will not take a drop, and say
+so in the log.
+
+The restock is already over by the time this runs -- the same reading latches
+`droneBayWillTakeNoMore`, because a refusal is the client's own answer to
+"will more fit", and a better one than the gauge. This exists so the dialog
+does not sit over the client until it times out, and so the log carries the
+refusal in its own words rather than as an accepted quantity dialog, which is
+what it used to be reported as.
+-}
+dismissRefusedDropIntoDroneBay : BotDecisionContext -> DecisionPathNode
+dismissRefusedDropIntoDroneBay context =
+    if previousStepClickedMouse context then
+        describeBranch
+            "Maintenance: I just clicked -- wait for the reading to catch up before deciding on the dialog again."
+            waitForProgressInGame
+
+    else
+        case okButtonInReading context.readingFromGameClient of
+            Just okButton ->
+                describeBranch
+                    ("Maintenance: the client refused the drop -- '"
+                        ++ dropRefusedDialogText
+                        ++ " in destination container'. The drone bay will take no more, so dismiss this and stop restocking."
+                    )
+                    (clickUiElement okButton)
+
+            Nothing ->
+                describeBranch
+                    ("Maintenance: the client refused the drop -- '"
+                        ++ dropRefusedDialogText
+                        ++ " in destination container' -- and shows no OK to dismiss it with. It closes itself; stop restocking either way."
+                    )
+                    waitForProgressInGame
+
+
 {-| Right-click the ship's card and choose "Open Drone Bay".
 
 The cards only exist while the station panel is showing them, so a reading
@@ -945,6 +1583,11 @@ without one is answered by opening the tab that has them rather than by giving
 up. `reload_drones.py` clicks "Hangars" and then "Ships" for the same reason;
 here each click is one reading, and the next reading decides again from what it
 sees.
+
+The entry is matched on its whole text, and that is not a detail to relax: the
+same menu carries "Open Cargohold" directly above it (all 14 entries were read
+off a live client, issue #19), and a looser match lands on a container that
+looks the same in the tree and silently takes the drop nowhere useful.
 
 The first card is taken, which is what the tool does. The active ship is the
 one card the panel shows under "Active", and nothing read so far distinguishes
@@ -1018,13 +1661,43 @@ The window is the wind-down branch itself -- docked, roughly 200 seconds on the
 clock -- which at ~5.7s a reading is around 30 readings for a handful of steps.
 This is the far end of it: enough left for the agent survey, and a bound that
 needs no stored state, the same reason `withinAgentSurveyWindow` is written
-against the clock. Every failure here repeats one decision until the window
-closes, which is the shape `stall_watch` reports, so the bound is what keeps
-that under its threshold instead of running for the rest of the session.
+against the clock.
+
+It is the backstop, not the bound that matters. ~30 readings is *over*
+`stall_watch`'s `CIRCLING_THRESHOLD` of 20, so a failure that repeats one
+decision for the whole window does alarm -- what this originally claimed it
+prevented. `droneRestockLooksBeforeGivingUp` is the bound that
+actually stops the task, and it stops it by falling silent rather than by
+repeating a give-up line.
 -}
 droneRestockGiveUpSecondsBeforeSessionEnd : Int
 droneRestockGiveUpSecondsBeforeSessionEnd =
     30
+
+
+{-| How many times the bot reads a drone bay that still has room before it
+stops trying to fill it.
+
+Counted in looks rather than in drags because a look is the only observation
+that ends this task either way, and every drag is bracketed by two of them: the
+sequence is look, drag, look, drag, look. Three therefore allows two drags and
+still spends its last look confirming the second one, so a drop that was
+refused -- which is indistinguishable from success everywhere except in the
+bay's gauge (issue #19) -- costs two attempts rather than the whole window.
+
+A look that cannot read the gauge counts too. It has to: the alternative is
+looking forever at a bay whose capacity text this build renders differently,
+and that is the shape of the bug this whole change exists to fix.
+
+Bound in stored state, not on the clock, because the thing being bounded is a
+drag: it moves items, and a repeat can split a stack while the first drag is
+still catching up. The memory-counter trap `surveyAgentsInStation` documents
+does not apply -- this counter only starts once our own "Open Drone Bay" has
+landed, and nothing else in the bot ever selects that container.
+-}
+droneRestockLooksBeforeGivingUp : Int
+droneRestockLooksBeforeGivingUp =
+    3
 
 
 withinDroneRestockWindow : BotDecisionContext -> Bool
@@ -1034,43 +1707,166 @@ withinDroneRestockWindow context =
             False
 
         Just secondsRemaining ->
-            droneRestockGiveUpSecondsBeforeSessionEnd < secondsRemaining
+            if homeStationRestockGraceApplies context then
+                -- A ship that flew home for this arrives late by design, and
+                -- the ordinary window has closed by then. The grace is the same
+                -- bound the docked wind-down uses, so the restock and the
+                -- session end together rather than one outliving the other.
+                -homeStationRestockGraceSeconds < secondsRemaining
+
+            else
+                droneRestockGiveUpSecondsBeforeSessionEnd < secondsRemaining
 
 
-{-| Whether the ship's drone bay has nothing in it.
-
-Deliberately "nothing", not "not full": the drones window titles its groups
-with a count, and the bay's own capacity is not readable from it, so "full" is
-not a question this reading can answer. It does not need to be -- the quantity
-dialog's default fills the bay in one drop, so any drone in the bay means the
-work is done, and an empty bay is the case that costs a run its drones.
-
-A bay with nothing in it may render no group at all, which is why a missing
-group counts as empty -- as does a group whose title does not parse into a
-number. Reading either as "cannot tell" would leave this maintenance dead in
-exactly the state it exists for, and the cost of being wrong the other way is
-one refused drag inside a bounded window. The drones window being absent
-altogether is the genuinely unanswerable case, and is left alone: the bot's own
-setup instructions ask for that window, so its absence is a client that is not
-set up rather than a bay that is empty.
+{-| What a look into the ship's drone bay says about whether more will fit.
 -}
-droneBayIsEmpty : ReadingFromGameClient -> Bool
-droneBayIsEmpty readingFromGameClient =
-    case readingFromGameClient.dronesWindow of
+type DroneBayFill
+    = DroneBayFull
+    | DroneBayHasRoom
+    | DroneBayFillUnreadable
+
+
+{-| Read the bay's fill state off its capacity gauge.
+
+**Fullness, not emptiness.** The condition this answers is the restock's
+"already done", and "holds something" is too weak for that -- a bay holding one
+drone of ten reads as stocked and never gets topped up. The gauge is the only
+thing in a reading that can tell the difference, and it is the same ground
+truth `reload_drones.py` settled on.
+
+The gauge itself is not a guess: `reload_drones.py` reads `50.0/50.0 m³` off
+`InvContCapacityGauge` on this client build with the bay selected, and an
+unlimited container such as the station hangar is exactly the case that reports
+no maximum. This bot has the stronger handle of the two, since the parser names
+the selected container (`ShipDroneBay`) where the tool had to infer it.
+
+The two ways it declines to answer are both `Unreadable`: the gauge node
+missing or unparsable, and `maximum` absent, which
+`parseInventoryCapacityGaugeText` leaves `Nothing` unless the text carries a
+`used / maximum` slash. Unreadable is treated as "act anyway" by the caller,
+not as "already done" -- reading it the other way is precisely the mistake
+issue #15 was: a condition that cannot see the bay must not conclude the work
+is finished, or the task is dead in the state it exists for.
+
+`maximum <= used` is the honest limit of this test, not a full one. The gauge
+is in cubic metres truncated to an integer, and a drone's own volume is not
+readable, so a bay with 1 m³ free reads as having room while a 5 m³ drone will
+not fit. That case is what the refusal dialog and the bounded attempt count are
+for.
+-}
+droneBayFillFromCapacityGauge : Maybe EveOnline.ParseUserInterface.InventoryWindowCapacityGauge -> DroneBayFill
+droneBayFillFromCapacityGauge capacityGauge =
+    case capacityGauge |> Maybe.andThen (\gauge -> gauge.maximum |> Maybe.map (Tuple.pair gauge.used)) of
         Nothing ->
-            False
+            DroneBayFillUnreadable
 
-        Just dronesWindow ->
-            case dronesWindow.droneGroupInBay of
-                Nothing ->
-                    True
+        Just ( used, maximum ) ->
+            if maximum <= used then
+                DroneBayFull
 
-                Just droneGroupInBay ->
-                    (droneGroupInBay.header.quantityFromTitle
-                        |> Maybe.map .current
-                        |> Maybe.withDefault 0
-                    )
-                        < 1
+            else
+                DroneBayHasRoom
+
+
+{-| The bay's fill state as an inventory window is showing it, or Nothing if no
+window has the ship's drone bay selected -- which is not the same as the gauge
+declining to answer.
+
+Readable only while the bay *is* the selected container: the capacity gauge
+belongs to whatever is selected, and the restock has to select the station
+hangar to reach the drones. So the bay is looked at deliberately, at the
+moments the sequence puts it there, and the verdict is latched into memory
+rather than re-read when the drag comes around.
+-}
+droneBayFillWhileSelected : ReadingFromGameClient -> Maybe DroneBayFill
+droneBayFillWhileSelected readingFromGameClient =
+    readingFromGameClient.inventoryWindows
+        |> List.filter (selectedContainerTypeNameOfWindow >> (==) (Just "ShipDroneBay"))
+        |> List.head
+        |> Maybe.map
+            (.selectedContainerCapacityGauge
+                >> Maybe.andThen Result.toMaybe
+                >> droneBayFillFromCapacityGauge
+            )
+
+
+describeDroneBayFill : DroneBayFill -> String
+describeDroneBayFill fill =
+    case fill of
+        DroneBayFull ->
+            "full"
+
+        DroneBayHasRoom ->
+            "room for more"
+
+        DroneBayFillUnreadable ->
+            "a capacity gauge that does not say"
+
+
+{-| Whether the drones window shows nothing at all in the ship's bay, or
+Nothing when there is no drones window to ask.
+
+**A second instrument, not a second opinion.** `droneBayFillWhileSelected`
+above is the docked one: it reads the inventory's capacity gauge, and it is
+only readable once the bot has deliberately opened the bay from the ship's
+card. This is the in-space one, and the two never overlap -- the drones window
+is absent while docked, and the inventory does not have the bay selected while
+in space.
+
+That is why both exist. The restock asks "will more fit" at a moment it has
+itself arranged; the home trip asks "is it worth flying home" *before*
+undocking, where nothing has opened the bay and nothing can, since the answer
+is needed to decide whether to leave at all.
+
+**Emptiness, not fullness, and that is forced rather than chosen.** The
+drones window titles its bay group with a bare count on this build -- the
+`(current/maximum)` form `parseQuantityFromDroneGroupTitleText` can read is
+what the *in space* group carries, since that one is bandwidth-limited. With
+no maximum there is no fullness to compute, so "nothing in the bay" is the
+strongest thing an in-space reading can say. It is also the right threshold
+for a trip: see `homeStationToGoTo`.
+
+A bay with nothing in it may render no group at all, so a missing group counts
+as empty, as does a group whose title carries no number. Both are the state
+this feature exists for, and the cost of being wrong is a trip home to a bay
+that turns out to have drones -- where the restock's own gauge then retires
+the task on arrival.
+-}
+droneBayIsEmptyFromDronesWindow : ReadingFromGameClient -> Maybe Bool
+droneBayIsEmptyFromDronesWindow readingFromGameClient =
+    readingFromGameClient.dronesWindow
+        |> Maybe.map
+            (\dronesWindow ->
+                case dronesWindow.droneGroupInBay of
+                    Nothing ->
+                        True
+
+                    Just droneGroupInBay ->
+                        (droneGroupInBay.header.quantityFromTitle
+                            |> Maybe.map .current
+                            |> Maybe.withDefault 0
+                        )
+                            < 1
+            )
+
+
+{-| The items an inventory window is currently rendering, whichever of the two
+views it is in. Only the rendered ones: the list is virtualised at roughly 40
+rows, so a count from here is a signal and never a total.
+-}
+inventoryItemsInView :
+    EveOnline.ParseUserInterface.InventoryWindow
+    -> List EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+inventoryItemsInView inventoryWindow =
+    case inventoryWindow.selectedContainerInventory |> Maybe.andThen .itemsView of
+        Just (EveOnline.ParseUserInterface.InventoryItemsListView listView) ->
+            listView.items |> List.map .uiNode
+
+        Just (EveOnline.ParseUserInterface.InventoryItemsNotListView notListView) ->
+            notListView.items
+
+        Nothing ->
+            []
 
 
 {-| Whether the ship's own drone bay is the container an inventory window is
@@ -1083,13 +1879,16 @@ droneBayIsSelectedContainer readingFromGameClient =
         |> List.member "ShipDroneBay"
 
 
+selectedContainerTypeNameOfWindow : EveOnline.ParseUserInterface.InventoryWindow -> Maybe String
+selectedContainerTypeNameOfWindow inventoryWindow =
+    inventoryWindow.selectedContainerInventory
+        |> Maybe.map (.uiNode >> .uiNode >> .pythonObjectTypeName)
+
+
 selectedContainerTypeNames : ReadingFromGameClient -> List String
 selectedContainerTypeNames readingFromGameClient =
     readingFromGameClient.inventoryWindows
-        |> List.filterMap
-            (.selectedContainerInventory
-                >> Maybe.map (.uiNode >> .uiNode >> .pythonObjectTypeName)
-            )
+        |> List.filterMap selectedContainerTypeNameOfWindow
 
 
 {-| What every open inventory window currently has selected, for the decision
@@ -1112,16 +1911,35 @@ all, preferring a window anchored to the active ship if the client opened a
 separate one. Which of those happens is not known from a reading yet -- the
 same client reuses the one window when a wreck is opened -- so this covers
 both rather than assuming.
+
+The drone bay's own sidebar row comes back with the window rather than being
+looked up again inside the sequence. It is the drop target and the row the bot
+clicks to look into the bay, and finding it here is what makes it present by
+construction -- the version this replaces re-derived it and carried a
+"no drone bay to drop it into" branch that this same filter had already made
+unreachable.
 -}
-inventoryWindowShowingDroneBay : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.InventoryWindow
+inventoryWindowShowingDroneBay :
+    ReadingFromGameClient
+    ->
+        Maybe
+            { window : EveOnline.ParseUserInterface.InventoryWindow
+            , droneBayTreeEntry : EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
+            }
 inventoryWindowShowingDroneBay readingFromGameClient =
     let
         windowsShowingDroneBay =
             readingFromGameClient.inventoryWindows
-                |> List.filter (inventoryTreeEntryWithText "drone bay" >> (/=) Nothing)
+                |> List.filterMap
+                    (\window ->
+                        window
+                            |> inventoryTreeEntryWithText "drone bay"
+                            |> Maybe.map
+                                (\treeEntry -> { window = window, droneBayTreeEntry = treeEntry })
+                    )
     in
     [ windowsShowingDroneBay
-        |> List.filter (.uiNode >> .uiNode >> .pythonObjectTypeName >> (==) "ActiveShipCargo")
+        |> List.filter (.window >> .uiNode >> .uiNode >> .pythonObjectTypeName >> (==) "ActiveShipCargo")
     , windowsShowingDroneBay
     ]
         |> List.concat
@@ -1154,15 +1972,24 @@ flattenInventoryTreeEntry entry =
            )
 
 
-{-| The button that confirms how much of a stack to move.
+{-| The one OK button on screen, whichever dialog it belongs to.
 
 Not a `MessageBox`, so `closeMessageBox` does not reach it -- and it carries no
 name of its own either, which leaves its label. `reload_drones.py` finds it the
-same way and accepts the default rather than typing a number, because the
-default is already as much as the bay will take.
+same way.
+
+**It cannot tell one dialog from another, and that mattered.** This used to be
+called `quantityDialogAcceptButton` and was the first thing the restock checked
+on every reading, so a refused drop -- which puts up its own dialog carrying
+its own OK -- was clicked and logged as "accept the quantity dialog, whose
+default already fills the drone bay". The action reported success and moved
+nothing, which is the failure class this whole task was written to avoid
+(issue #19). What separates the two dialogs is their text, so
+`dropIntoDroneBayWasRefused` is asked first and this is only the button; the
+name now says only what it can back up.
 -}
-quantityDialogAcceptButton : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
-quantityDialogAcceptButton readingFromGameClient =
+okButtonInReading : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+okButtonInReading readingFromGameClient =
     [ "OK", "Ok" ]
         |> List.filterMap
             (\label ->
@@ -1170,6 +1997,36 @@ quantityDialogAcceptButton readingFromGameClient =
                     |> widestNodeLabelledExactly { label = label, pythonObjectTypeName = Nothing }
             )
         |> List.head
+
+
+{-| Whether the client is showing its refusal of a drop into the drone bay.
+
+Matched on the dialog's text, because that is the only thing separating it from
+the quantity dialog that a successful drop raises -- both are windows with an
+OK button, and `okButtonInReading` finds either. The wording was read off a live
+client during a manual reload (issue #19): a `FormWnd` captioned "No room for
+more in destination container", up for about four seconds before closing itself.
+
+Only the stable half of that caption is matched, and against every text in the
+reading rather than a scoped subtree. Scoping it would need a container this
+dialog has been observed in, and one wrong guess there would answer "no refusal"
+for a refusal plainly on screen -- the same reason `shipItemCards` is not scoped
+to the panel that holds it.
+
+A single live observation is all the evidence behind the wording. If the client
+ever phrases it differently this reads as "not refused", which puts the restock
+back on the bounded-attempts path rather than into a loop.
+-}
+dropIntoDroneBayWasRefused : ReadingFromGameClient -> Bool
+dropIntoDroneBayWasRefused readingFromGameClient =
+    readingFromGameClient.uiTree.uiNode
+        |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+        |> List.any (stringContainsIgnoringCase dropRefusedDialogText)
+
+
+dropRefusedDialogText : String
+dropRefusedDialogText =
+    "No room for more"
 
 
 {-| The widest node whose first visible text is exactly this label.
@@ -2776,7 +3633,16 @@ the reading is one step behind the UI.
 -}
 previousStepClickedMouse : BotDecisionContext -> Bool
 previousStepClickedMouse context =
-    context.previousStepsEffects
+    previousStepsEffectsPressedMouse context.previousStepsEffects
+
+
+{-| Split out from `previousStepClickedMouse` so that
+`updateMemoryForNewReadingFromGame`, which gets the same effects but not a
+decision context, can ask the same question.
+-}
+previousStepsEffectsPressedMouse : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+previousStepsEffectsPressedMouse previousStepsEffects =
+    previousStepsEffects
         |> List.take 1
         |> List.any
             (List.any
@@ -2789,6 +3655,43 @@ previousStepClickedMouse context =
                             False
                 )
             )
+
+
+{-| Whether the step just dispatched was a drag rather than a click.
+
+The distinction is the pointer moving while a button is held, and it is exact
+rather than a heuristic: `effectsMouseClickAtLocation` emits move, down, up and
+never moves in between, while `effectsForDragAndDrop` always does -- that
+prompt move is the whole reason a drag registers as one. So this separates the
+restock's drag from every click it also issues into the same window, which
+matters because the drag is the step that has to be counted and bounded.
+-}
+previousStepsEffectsDragged : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+previousStepsEffectsDragged previousStepsEffects =
+    previousStepsEffects
+        |> List.take 1
+        |> List.any effectsMovePointerWhileButtonHeld
+
+
+effectsMovePointerWhileButtonHeld : List EffectOnWindow.EffectOnWindowStruct -> Bool
+effectsMovePointerWhileButtonHeld =
+    List.foldl
+        (\effect ( buttonIsHeld, hasMovedWhileHeld ) ->
+            case effect of
+                EffectOnWindow.ButtonDown _ ->
+                    ( True, hasMovedWhileHeld )
+
+                EffectOnWindow.ButtonUp _ ->
+                    ( False, hasMovedWhileHeld )
+
+                EffectOnWindow.MouseMoveTo _ ->
+                    ( buttonIsHeld, hasMovedWhileHeld || buttonIsHeld )
+
+                _ ->
+                    ( buttonIsHeld, hasMovedWhileHeld )
+        )
+        ( False, False )
+        >> Tuple.second
 
 
 decideActionInAgentConversation :
@@ -3985,6 +4888,13 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                         [] ->
                             continueIfCombatComplete
 
+        -- The ammo swap sits in front of the fight rather than beside it: it
+        -- declines on most readings and hands the fight straight on, and the
+        -- readings where it does act are ones where firing this instant matters
+        -- less than firing the right charge for the next minute.
+        decisionToFight =
+            ensureAmmoSuitsTargetRange context decisionToKillRats
+
         decisionToKillRats =
             case targetsToUnlock |> List.head of
                 Just targetToUnlock ->
@@ -4102,13 +5012,13 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
             decisionIfNoEnemyToAttack
 
     else if context.eventContext.botSettings.orbitInCombat == AppSettings.Yes then
-        ensureShipIsOrbitingDecision |> Maybe.withDefault decisionToKillRats
+        ensureShipIsOrbitingDecision |> Maybe.withDefault decisionToFight
 
     else if context.eventContext.botSettings.keepAtRange == AppSettings.Yes then
-        ensureShipIsKeepingRangeDecision |> Maybe.withDefault decisionToKillRats
+        ensureShipIsKeepingRangeDecision |> Maybe.withDefault decisionToFight
 
     else
-        decisionToKillRats
+        decisionToFight
 
 
 {-| How many readings to keep commanding a manoeuvre the client never confirms
@@ -4189,6 +5099,722 @@ ensureShipIsOrbiting context shipUI overviewEntryToOrbit =
                         )
                     )
                 )
+
+{-| How many consecutive readings the distance has to say the same thing before
+the bot swaps ammo.
+
+The "current target" is not a stable thing to measure: rats die, the next one is
+promoted, and the distance jumps from 8 km to 40 km between two readings without
+the ship or the fight changing. Acting on a single reading would therefore let
+target churn drive the guns. This is the same guard as
+`routeFirstMarkerUnchangedTicks`, applied to a number rather than a region.
+-}
+ammoSwapDistanceHoldTicks : Int
+ammoSwapDistanceHoldTicks =
+    4
+
+
+{-| How many readings a swap gets to show up in the weapon's optimal range
+before the bot stops trying for the rest of the session.
+
+Generously bounded rather than tight, because one verdict can mean several
+reloads: each gun in the top row needs its own right-click cascade, several
+readings each, and a reload takes about ten seconds -- roughly two readings -- on
+top of that. Fifty readings is a few minutes, which is long enough for a four-gun
+row to get through the whole sequence twice and short enough that a swap that is
+never going to land does not keep the mouse away from the fight for a whole
+mission.
+
+Giving up quietly and continuing to shoot is the right answer. Wrong ammo still
+does damage, so this is an optimisation, exactly as `maneuverNotConfirmedGiveUpTicks`
+is for orbit and keep-at-range. It is *not* silent, though: the branch names
+itself in the decision log every reading it declines, the way `returnDronesToBay`
+does since #7, and the status line carries the reason for the rest of the session.
+-}
+ammoSwapNotConfirmedGiveUpTicks : Int
+ammoSwapNotConfirmedGiveUpTicks =
+    50
+
+
+{-| How many readings the bot keeps hovering a weapon module waiting for its
+tooltip before deciding this client will not show one.
+
+Nothing in this bot has ever read a module tooltip, and there is a specific
+reason to doubt it works here: the framework only files a tooltip against a
+module button when that button reports `isHiliteVisible`, and on this client the
+"hilite" sprite does not exist, so `getModuleButtonTooltipFromModuleButton` can
+never answer. `weaponOptimalRangeFromHover` sidesteps that by attributing the
+tooltip to the module the bot itself just moved the mouse onto -- but whether
+hovering raises a `ModuleButtonTooltip` at all is unverified against this client.
+
+So this counter is the honest failure path for that unknown: if the tooltip never
+arrives, the whole feature switches itself off with a reason, and the ship keeps
+fighting with whatever is loaded.
+
+Small, because the bot holds the mouse still while it waits -- see
+`hoverWeaponForOptimalRange` -- and holding still is holding off the rest of the
+fight. Five readings is about half a minute, once, and the give-up latches, so
+this is the whole price a session pays for a client that has no tooltip to show.
+-}
+weaponTooltipUnansweredGiveUpTicks : Int
+weaponTooltipUnansweredGiveUpTicks =
+    5
+
+
+{-| How many readings a commanded load gets to start before the bot is willing
+to command another one.
+
+The failure this prevents is the reload restarting: about ten seconds, roughly
+two readings, during which the client is already doing what was asked and a
+second command sends it back to the beginning. That is the same shape as the
+module-button toggle `moduleButtonClickSettlingSteps` exists for.
+
+Paired with the weapon's own ramp rather than used alone, and neither is enough
+by itself. `rampRotationMilli` is the client saying the module is mid-cycle --
+but a weapon that is *shooting* is mid-cycle almost all of the time, so refusing
+to touch a turning ramp would mean never swapping ammo during a fight at all,
+which is a feature that does nothing. Recent commands are the other half: a
+turning ramp only means "wait" when the bot has just asked for a reload, because
+that is when the ramp might be that reload.
+-}
+ammoReloadSettlingTicks : Int
+ammoReloadSettlingTicks =
+    3
+
+
+{-| The narrowest deadband the swap will use, in meters.
+
+A single threshold makes a target sitting near it swap on every reading forever.
+Two thresholds fix that only if the gap between them is wide enough, and how wide
+is "enough" is not a matter of taste: swapping moves the optimal range itself, so
+a deadband narrower than half the distance between the two charges' optimal
+ranges lets each swap re-arm the opposite one. `ammoSwapDeadbandMeters` derives
+the real figure from the two ranges once both have been seen; until then this
+stands in, chosen wide enough to cover the usual short/long spread of a
+cruiser-sized weapon.
+-}
+ammoSwapMinimumDeadbandMeters : Int
+ammoSwapMinimumDeadbandMeters =
+    20000
+
+
+{-| Half the spread between the two charges' optimal ranges, which is the
+narrowest deadband that cannot oscillate.
+
+Going long needs `distance > optimal + deadband` and going short needs
+`distance < optimal - deadband`. After a swap to the long charge the optimal
+becomes `high`, so the short rule re-arms at `distance < high - deadband`; the
+long rule only fired above `low + deadband`. The two cannot both be satisfiable
+as long as `low + deadband >= high - deadband`, which is exactly
+`deadband >= (high - low) / 2`.
+-}
+ammoSwapDeadbandMeters : AmmoSwapMemory -> Int
+ammoSwapDeadbandMeters ammoSwap =
+    case ( ammoSwap.optimalRangeSeenLow, ammoSwap.optimalRangeSeenHigh ) of
+        ( Just low, Just high ) ->
+            max ammoSwapMinimumDeadbandMeters ((high - low) // 2 + 1)
+
+        _ ->
+            ammoSwapMinimumDeadbandMeters
+
+
+{-| The weapons, left to right.
+
+Sorted by `x` rather than taken in list order, because the parser drops any
+module button whose display region it cannot read -- so the row's index space is
+not stable across readings even while nothing moves on screen, and indexing it
+has clicked a neighbouring module live.
+-}
+weaponModuleButtonsLeftToRight : ReadingFromGameClient -> List ShipUIModuleButton
+weaponModuleButtonsLeftToRight readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.map (.moduleButtonsRows >> .top)
+        |> Maybe.withDefault []
+        |> List.sortBy (.uiNode >> .totalDisplayRegion >> .x)
+
+
+{-| The distance to the target the guns are actually shooting at, in meters, or
+nothing at all.
+
+`Nothing` covers three different situations that all mean "do not swap": no
+locked target is active, no overview row belongs to it, or the row shows a
+distance in AU. That last one is the point. AU distances do not parse, and the
+placeholder every other consumer falls back to (999999) reads as merely far,
+which is precisely the input that would argue for long-range ammo. Nothing in AU
+is in weapons range of anything, so it is excluded here rather than converted.
+-}
+activeTargetDistanceInMeters : ReadingFromGameClient -> Maybe Int
+activeTargetDistanceInMeters readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsActiveTarget
+        |> List.head
+        |> Maybe.andThen (.objectDistanceInMeters >> Result.toMaybe)
+
+
+{-| Whether the step just executed moved the mouse onto this element and did
+nothing else.
+
+A hover is the whole of the tooltip request, so "we asked" and "we clicked" have
+to be told apart: a click carries a `ButtonDown` in the same step. The region
+test keeps the context-menu cascade's own hover over a submenu entry from being
+read as a request for a module tooltip.
+-}
+previousStepHoveredElement : List (List EffectOnWindow.EffectOnWindowStruct) -> EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Bool
+previousStepHoveredElement previousStepsEffects element =
+    case previousStepsEffects |> List.head of
+        Nothing ->
+            False
+
+        Just effects ->
+            (effects |> List.any (effectMovesMouseInto element.totalDisplayRegion))
+                && not (effects |> List.any effectPressesAMouseButton)
+
+
+{-| Whether the step just executed right-clicked this element -- which for a
+module button is the bot opening its context menu, and so the one observable
+sign that a load was commanded on that gun.
+-}
+previousStepRightClickedElement : List (List EffectOnWindow.EffectOnWindowStruct) -> EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Bool
+previousStepRightClickedElement previousStepsEffects element =
+    previousStepsEffects
+        |> List.take 1
+        |> List.any (\effects -> effectsRightClickElement effects element)
+
+
+effectsRightClickElement : List EffectOnWindow.EffectOnWindowStruct -> EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Bool
+effectsRightClickElement effects element =
+    (effects |> List.any (effectMovesMouseInto element.totalDisplayRegion))
+        && (effects |> List.member (EffectOnWindow.ButtonDown MouseButtonRight))
+
+
+effectMovesMouseInto : EveOnline.ParseUserInterface.DisplayRegion -> EffectOnWindow.EffectOnWindowStruct -> Bool
+effectMovesMouseInto region effect =
+    case effect of
+        EffectOnWindow.MouseMoveTo location ->
+            (region.x <= location.x)
+                && (location.x <= region.x + region.width)
+                && (region.y <= location.y)
+                && (location.y <= region.y + region.height)
+
+        _ ->
+            False
+
+
+effectMovesTheMouse : EffectOnWindow.EffectOnWindowStruct -> Bool
+effectMovesTheMouse effect =
+    case effect of
+        EffectOnWindow.MouseMoveTo _ ->
+            True
+
+        _ ->
+            False
+
+
+effectPressesAMouseButton : EffectOnWindow.EffectOnWindowStruct -> Bool
+effectPressesAMouseButton effect =
+    case effect of
+        EffectOnWindow.ButtonDown _ ->
+            True
+
+        _ ->
+            False
+
+
+{-| The optimal range the client is showing right now, if this reading's tooltip
+is one the bot asked for.
+
+`getModuleButtonTooltipFromModuleButton` is not used, deliberately. The framework
+files a tooltip against a module button only when some button reports
+`isHiliteVisible`, and on this client that sprite does not exist -- so its
+dictionary stays empty no matter how long the mouse rests on a module. The bot
+does not need the client to tell it which button the tooltip belongs to, though:
+it chose to hover that button itself, and the previous step's effects say where
+the mouse went.
+-}
+weaponOptimalRangeFromHover :
+    List (List EffectOnWindow.EffectOnWindowStruct)
+    -> ReadingFromGameClient
+    -> Bool
+    -> Maybe Int
+weaponOptimalRangeFromHover previousStepsEffects readingFromGameClient hoverWasPending =
+    let
+        weWereHovering =
+            hoverWasPending
+                || (weaponModuleButtonsLeftToRight readingFromGameClient
+                        |> List.any (.uiNode >> previousStepHoveredElement previousStepsEffects)
+                   )
+    in
+    if not weWereHovering then
+        Nothing
+
+    else
+        readingFromGameClient.moduleButtonTooltip
+            |> Maybe.andThen .optimalRange
+            |> Maybe.andThen (.inMeters >> Result.toMaybe)
+
+
+updateAmmoSwapMemory : UpdateMemoryContext -> AmmoSwapMemory -> AmmoSwapMemory
+updateAmmoSwapMemory context memoryBefore =
+    let
+        guns =
+            weaponModuleButtonsLeftToRight context.readingFromGameClient
+
+        freshOptimalRange =
+            weaponOptimalRangeFromHover
+                context.previousStepsEffects
+                context.readingFromGameClient
+                memoryBefore.hoverAwaitingTooltip
+
+        optimalRangeInMeters =
+            case freshOptimalRange of
+                Just fresh ->
+                    Just fresh
+
+                Nothing ->
+                    memoryBefore.optimalRangeInMeters
+
+        optimalRangeSeenLow =
+            [ memoryBefore.optimalRangeSeenLow, freshOptimalRange ]
+                |> List.filterMap identity
+                |> List.minimum
+
+        optimalRangeSeenHigh =
+            [ memoryBefore.optimalRangeSeenHigh, freshOptimalRange ]
+                |> List.filterMap identity
+                |> List.maximum
+
+        deadband =
+            ammoSwapDeadbandMeters
+                { memoryBefore
+                    | optimalRangeSeenLow = optimalRangeSeenLow
+                    , optimalRangeSeenHigh = optimalRangeSeenHigh
+                }
+
+        rangeVerdict =
+            case ( optimalRangeInMeters, activeTargetDistanceInMeters context.readingFromGameClient ) of
+                ( Just optimalRange, Just distance ) ->
+                    if optimalRange + deadband < distance then
+                        Just LongRangeAmmo
+
+                    else if distance < optimalRange - deadband then
+                        Just ShortRangeAmmo
+
+                    else
+                        Nothing
+
+                _ ->
+                    Nothing
+
+        verdictIsTheSameOneAsBefore =
+            (rangeVerdict /= Nothing) && (rangeVerdict == memoryBefore.rangeVerdict)
+
+        rangeVerdictTicks =
+            if rangeVerdict == Nothing then
+                0
+
+            else if verdictIsTheSameOneAsBefore then
+                memoryBefore.rangeVerdictTicks + 1
+
+            else
+                1
+
+        gunsCommandedBefore =
+            if verdictIsTheSameOneAsBefore then
+                memoryBefore.gunsCommandedThisVerdictAtX
+
+            else
+                []
+
+        gunsCommandedThisVerdictAtX =
+            (guns
+                |> List.filter (.uiNode >> previousStepRightClickedElement context.previousStepsEffects)
+                |> List.map (.uiNode >> .totalDisplayRegion >> .x)
+                |> List.filter (\x -> not (List.member x gunsCommandedBefore))
+            )
+                ++ gunsCommandedBefore
+
+        previousStepHoveredAWeapon =
+            guns |> List.any (.uiNode >> previousStepHoveredElement context.previousStepsEffects)
+
+        hoverAwaitingTooltip =
+            if previousStepHoveredAWeapon then
+                True
+
+            else if freshOptimalRange /= Nothing then
+                False
+
+            else if
+                (context.previousStepsEffects |> List.head |> Maybe.withDefault [] |> List.any effectMovesTheMouse)
+                    && not previousStepHoveredAWeapon
+            then
+                -- Something else took the mouse, so the dwell that raises the
+                -- tooltip has been interrupted and there is nothing left to wait
+                -- for. Forgetting that we asked is what lets the bot ask again;
+                -- carrying on waiting would spend the patience below on a hover
+                -- that no longer exists.
+                False
+
+            else
+                memoryBefore.hoverAwaitingTooltip
+
+        hoverUnansweredTicks =
+            if freshOptimalRange /= Nothing then
+                0
+
+            else if hoverAwaitingTooltip then
+                memoryBefore.hoverUnansweredTicks + 1
+
+            else
+                -- Held rather than reset, for the reason droneRecallUnansweredTicks
+                -- holds past its own threshold: the counter measures how long the
+                -- bot has been asking, and a reading in which it did not ask is
+                -- not evidence that the client answered.
+                memoryBefore.hoverUnansweredTicks
+
+        givenUp =
+            case memoryBefore.givenUp of
+                Just reason ->
+                    Just reason
+
+                Nothing ->
+                    if weaponTooltipUnansweredGiveUpTicks < hoverUnansweredTicks then
+                        Just
+                            ("the weapon's tooltip never appeared in "
+                                ++ String.fromInt hoverUnansweredTicks
+                                ++ " readings of hovering it, so there is no optimal range to swap against"
+                            )
+
+                    else if ammoSwapNotConfirmedGiveUpTicks < rangeVerdictTicks then
+                        Just
+                            ("the range has called for the other charge for "
+                                ++ String.fromInt rangeVerdictTicks
+                                ++ " readings and the weapon's optimal range never moved, so the swap is not landing"
+                            )
+
+                    else
+                        Nothing
+    in
+    { optimalRangeInMeters = optimalRangeInMeters
+    , optimalRangeSeenLow = optimalRangeSeenLow
+    , optimalRangeSeenHigh = optimalRangeSeenHigh
+    , rangeVerdict = rangeVerdict
+    , rangeVerdictTicks = rangeVerdictTicks
+    , gunsCommandedThisVerdictAtX = gunsCommandedThisVerdictAtX
+    , hoverAwaitingTooltip = hoverAwaitingTooltip
+    , hoverUnansweredTicks = hoverUnansweredTicks
+    , givenUp = givenUp
+    }
+
+
+{-| Load the charge that suits how far away the current target is, or get on
+with the fight.
+
+Takes the caller's next step rather than returning a `Maybe`, so that every
+branch which declines to swap can still say why in the decision log while handing
+the fight on -- the shape `returnDronesToBay` was changed to after #7, where a
+give-up that only spoke on one exact reading ended up never speaking at all.
+
+Off unless both `short-range-ammo` and `long-range-ammo` are set. Discovering the
+pair by reading the weapon's own right-click menu is the better answer and is not
+implemented here: nothing has yet observed what that menu contains on this
+client, and a wrong guess about which entries are charges would have the bot
+clicking unknown menu items during a fight. Naming both is also the only way to
+be sure there *is* a pair -- a ship carrying one charge type has no swap to make,
+and must do nothing rather than guess.
+-}
+ensureAmmoSuitsTargetRange : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+ensureAmmoSuitsTargetRange context nextStep =
+    let
+        ammoSwap =
+            context.memory.ammoSwap
+
+        guns =
+            weaponModuleButtonsLeftToRight context.readingFromGameClient
+    in
+    case ( context.eventContext.botSettings.shortRangeAmmoName, context.eventContext.botSettings.longRangeAmmoName ) of
+        ( Just shortRangeAmmoName, Just longRangeAmmoName ) ->
+            case ammoSwap.givenUp of
+                Just reason ->
+                    describeBranch
+                        ("Not swapping ammo any more: " ++ reason ++ " -- keep shooting with what is loaded.")
+                        nextStep
+
+                Nothing ->
+                    if guns |> List.all (.isActive >> Maybe.withDefault False) |> not then
+                        -- Get the guns going first. Reading the tooltip means
+                        -- holding the mouse still, and a swap means taking a gun
+                        -- offline for a reload -- both are things to do to a ship
+                        -- that is already shooting, not to one that has not
+                        -- started. This is also the state `decisionToKillRats`
+                        -- reaches as "All guns cycling", so the ammo path only
+                        -- ever runs from the same place.
+                        nextStep
+
+                    else
+                        case ( guns |> List.reverse |> List.head, activeTargetDistanceInMeters context.readingFromGameClient ) of
+                            ( Nothing, _ ) ->
+                                nextStep
+
+                            ( _, Nothing ) ->
+                                -- No active target, or its distance reads in AU
+                                -- and does not parse. Either way there is no
+                                -- number to decide on, and the placeholder the
+                                -- rest of the bot uses for an unparsed distance
+                                -- would argue for long-range ammo every time.
+                                nextStep
+
+                            ( Just referenceGun, Just distance ) ->
+                                case ammoSwap.optimalRangeInMeters of
+                                    Nothing ->
+                                        hoverWeaponForOptimalRange context referenceGun
+
+                                    Just optimalRange ->
+                                        ensureAmmoSuitsTargetRangeKnowingOptimalRange
+                                            context
+                                            { guns = guns
+                                            , referenceGun = referenceGun
+                                            , distance = distance
+                                            , optimalRange = optimalRange
+                                            , shortRangeAmmoName = shortRangeAmmoName
+                                            , longRangeAmmoName = longRangeAmmoName
+                                            }
+                                            nextStep
+
+        _ ->
+            nextStep
+
+
+{-| Rest the mouse on a weapon module until the client shows its tooltip.
+
+Issued once and then left strictly alone. A Photon UI flyout needs uninterrupted
+dwell, so this does two things that look like doing nothing and are not. It does
+not re-issue the same move on the next reading -- re-gliding to the same point
+resets the dwell timer before it can accumulate, which is indistinguishable from
+a tooltip that never appears. And while it waits it holds the whole decision
+here rather than handing the fight on, because the fight is what would move the
+mouse: a click on a target or an overview row ends the dwell just as surely.
+
+Holding costs less than it reads. Guns and drones already engaged keep cycling
+with no further input, so a few readings of issuing nothing is a few readings of
+not *changing* anything, not a ceasefire -- and it is bounded by
+`weaponTooltipUnansweredGiveUpTicks`, after which the whole feature switches
+itself off for the session.
+
+Holding still could in principle age a pending lock attempt past
+`lockAttemptReadingsBeforeVerdict` and have a lock the bot never gave a chance
+recorded as a refusal. It cannot, and the reason is worth keeping if either side
+is changed: a refusal is only counted with the target bar empty at both ends of
+the attempt, and this branch is only reachable with an active target. Letting the
+ammo path run without one would connect them.
+-}
+hoverWeaponForOptimalRange : BotDecisionContext -> ShipUIModuleButton -> DecisionPathNode
+hoverWeaponForOptimalRange context referenceGun =
+    if context.memory.ammoSwap.hoverAwaitingTooltip then
+        describeBranch
+            ("Holding still for the weapon's tooltip to appear ("
+                ++ (context.memory.ammoSwap.hoverUnansweredTicks |> String.fromInt)
+                ++ " of "
+                ++ String.fromInt weaponTooltipUnansweredGiveUpTicks
+                ++ " readings) -- the mouse is already resting on it, and moving anything ends the hover."
+            )
+            waitForProgressInGame
+
+    else
+        describeBranch
+            "Rest the mouse on a weapon to read its optimal range, which is what says which ammo is loaded."
+            (decideActionForCurrentStep
+                (EveOnline.BotFramework.mouseMoveToUIElement referenceGun.uiNode)
+            )
+
+
+ensureAmmoSuitsTargetRangeKnowingOptimalRange :
+    BotDecisionContext
+    ->
+        { guns : List ShipUIModuleButton
+        , referenceGun : ShipUIModuleButton
+        , distance : Int
+        , optimalRange : Int
+        , shortRangeAmmoName : String
+        , longRangeAmmoName : String
+        }
+    -> DecisionPathNode
+    -> DecisionPathNode
+ensureAmmoSuitsTargetRangeKnowingOptimalRange context fight nextStep =
+    let
+        ammoSwap =
+            context.memory.ammoSwap
+
+        describeRanges =
+            "target "
+                ++ String.fromInt fight.distance
+                ++ " m away, optimal "
+                ++ String.fromInt fight.optimalRange
+                ++ " m, deadband "
+                ++ String.fromInt (ammoSwapDeadbandMeters ammoSwap)
+                ++ " m"
+
+        gunsStillToCommand =
+            fight.guns
+                |> List.filter
+                    (\gun ->
+                        ammoSwap.gunsCommandedThisVerdictAtX
+                            |> List.member gun.uiNode.totalDisplayRegion.x
+                            |> not
+                    )
+
+        -- The gun whose context menu is open right now, if one is. A gun counts
+        -- as commanded from the reading its menu was opened, which is several
+        -- readings before the charge in that menu has been clicked -- so without
+        -- this the walk would move on to the next gun and leave the cascade it
+        -- started hanging, every time.
+        gunWithCascadeInFlight =
+            if context.readingFromGameClient.contextMenus |> List.isEmpty then
+                Nothing
+
+            else
+                case ammoSwap.gunsCommandedThisVerdictAtX |> List.head of
+                    Nothing ->
+                        Nothing
+
+                    Just mostRecentlyCommandedX ->
+                        fight.guns
+                            |> List.filter (\gun -> gun.uiNode.totalDisplayRegion.x == mostRecentlyCommandedX)
+                            |> List.head
+
+        -- Whether the bot has asked for a reload recently enough that a turning
+        -- ramp might be that reload rather than an ordinary firing cycle. See
+        -- ammoReloadSettlingTicks for why the ramp alone is not the test.
+        aReloadMayBeInFlight =
+            context.previousStepsEffects
+                |> List.take ammoReloadSettlingTicks
+                |> List.any
+                    (\effects ->
+                        fight.guns |> List.any (\gun -> effectsRightClickElement effects gun.uiNode)
+                    )
+    in
+    case ammoSwap.rangeVerdict of
+        Nothing ->
+            nextStep
+
+        Just verdict ->
+            let
+                ammoName =
+                    case verdict of
+                        ShortRangeAmmo ->
+                            fight.shortRangeAmmoName
+
+                        LongRangeAmmo ->
+                            fight.longRangeAmmoName
+            in
+            if ammoSwap.rangeVerdictTicks < ammoSwapDistanceHoldTicks then
+                describeBranch
+                    ("The range wants '"
+                        ++ ammoName
+                        ++ "' ("
+                        ++ describeRanges
+                        ++ "), but only for "
+                        ++ String.fromInt ammoSwap.rangeVerdictTicks
+                        ++ " reading(s) -- a target dying and being replaced looks exactly like this, so wait."
+                    )
+                    nextStep
+
+            else
+                case gunWithCascadeInFlight of
+                    Just gunMidCascade ->
+                        describeBranch
+                            ("Finish loading '" ++ ammoName ++ "' on the weapon whose menu is already open.")
+                            (useContextMenuCascade
+                                ( "weapon module", gunMidCascade.uiNode )
+                                (useMenuEntryWithTextContaining ammoName menuCascadeCompleted)
+                                context
+                            )
+
+                    Nothing ->
+                        case gunsStillToCommand |> List.head of
+                            Nothing ->
+                                -- Every gun has been told to load. The optimal
+                                -- range has not caught up yet, so re-read it:
+                                -- that number moving is the only evidence the
+                                -- reload happened at all, and a decision log
+                                -- saying "loaded" is not evidence of anything.
+                                hoverWeaponForOptimalRange context fight.referenceGun
+
+                            Just gunToCommand ->
+                                if aReloadMayBeInFlight && ((gunToCommand.rampRotationMilli |> Maybe.withDefault 0) /= 0) then
+                                    describeBranch
+                                        ("Want to load '"
+                                            ++ ammoName
+                                            ++ "' but a reload was just commanded and this weapon's ramp is turning -- asking again now would start it over."
+                                        )
+                                        nextStep
+
+                                else
+                                    describeBranch
+                                        ("Load '"
+                                            ++ ammoName
+                                            ++ "' -- "
+                                            ++ describeRanges
+                                            ++ ". "
+                                            ++ String.fromInt (List.length gunsStillToCommand)
+                                            ++ " of "
+                                            ++ String.fromInt (List.length fight.guns)
+                                            ++ " weapon(s) still to load."
+                                        )
+                                        (useContextMenuCascade
+                                            ( "weapon module", gunToCommand.uiNode )
+                                            (useMenuEntryWithTextContaining ammoName menuCascadeCompleted)
+                                            context
+                                        )
+
+
+{-| The ammo swap's whole state on one line, so an operator can watch the optimal
+range actually move rather than trust the decision log's claim that it swapped.
+-}
+describeAmmoSwapState : BotDecisionContext -> String
+describeAmmoSwapState context =
+    let
+        ammoSwap =
+            context.memory.ammoSwap
+
+        describeOptional label value =
+            label ++ ": " ++ (value |> Maybe.map String.fromInt |> Maybe.withDefault "unknown")
+    in
+    case ( context.eventContext.botSettings.shortRangeAmmoName, context.eventContext.botSettings.longRangeAmmoName ) of
+        ( Just _, Just _ ) ->
+            case ammoSwap.givenUp of
+                Just reason ->
+                    "Ammo swap: given up -- " ++ reason ++ "."
+
+                Nothing ->
+                    "Ammo swap: "
+                        ++ describeOptional "weapon optimal range" ammoSwap.optimalRangeInMeters
+                        ++ " m ("
+                        ++ describeOptional "seen low" ammoSwap.optimalRangeSeenLow
+                        ++ ", "
+                        ++ describeOptional "seen high" ammoSwap.optimalRangeSeenHigh
+                        ++ "), "
+                        ++ describeOptional "target distance" (activeTargetDistanceInMeters context.readingFromGameClient)
+                        ++ " m, verdict "
+                        ++ (case ammoSwap.rangeVerdict of
+                                Nothing ->
+                                    "none"
+
+                                Just ShortRangeAmmo ->
+                                    "short-range"
+
+                                Just LongRangeAmmo ->
+                                    "long-range"
+                           )
+                        ++ " for "
+                        ++ String.fromInt ammoSwap.rangeVerdictTicks
+                        ++ " reading(s), tooltip unanswered "
+                        ++ String.fromInt ammoSwap.hoverUnansweredTicks
+                        ++ "."
+
+        _ ->
+            "Ammo swap: off (needs both short-range-ammo and long-range-ammo)."
+
 
 launchAndEngageDrones : BotDecisionContext -> Maybe DecisionPathNode
 launchAndEngageDrones context =
@@ -4619,59 +6245,567 @@ lockTargetFromOverviewEntry context overviewEntry =
     let
         targetingRange : Int
         targetingRange =
-            context.eventContext.botSettings.targetingRangeMeters
+            lockRangeThresholdInMeters context
+
+        -- Press the panel's own Approach button rather than a modifier
+        -- click. This branch used to hold vkey_E, which is keep-at-range
+        -- on this account -- it is what ensureShipIsKeepingRange presses
+        -- -- so it said "Approach" while asking the client to hold
+        -- station. Switching it to vkey_Q did not help either: measured
+        -- live, the ship sat at 0.0 m/s for 100 seconds with the distance
+        -- frozen, so the keystroke is not producing an approach whatever
+        -- it is bound to. The click itself lands -- the Selected Item
+        -- panel shows the row we clicked -- so only the key is in doubt,
+        -- and the panel's button removes it from the picture.
+        --
+        -- Guarded on the panel actually showing this entry, since its
+        -- buttons act on whatever is selected. When it is showing
+        -- something else, clicking the row selects it and the next
+        -- reading takes the branch above.
+        approachTheObject : String -> DecisionPathNode
+        approachTheObject reason =
+            if selectedItemIsOverviewEntry context overviewEntry then
+                case selectedItemButtonNamed context "selectedItemApproach" of
+                    Just approachButton ->
+                        describeBranch
+                            (reason ++ " Approach from the selected-item panel.")
+                            (clickUiElement approachButton)
+
+                    Nothing ->
+                        describeBranch
+                            (reason ++ " The selected-item panel offers no Approach.")
+                            waitForProgressInGame
+
+            else
+                describeBranch
+                    (reason ++ " Select it so the panel offers Approach.")
+                    (clickUiElement overviewEntry.uiNode)
     in
     case overviewEntry.objectDistanceInMeters of
         Ok distanceInMeters ->
             if distanceInMeters <= targetingRange then
                 if overviewEntry.commonIndications.targetedByMe || overviewEntry.commonIndications.targeting then
+                    if lockAttemptIsSpent context overviewEntry then
+                        -- The bound the wait below used to lack entirely: it
+                        -- said "wait for completion" with nothing deciding when
+                        -- the wait was over, so a lock the client accepted and
+                        -- never finished would hold the ship still for the rest
+                        -- of the session -- the same unbounded-wait shape as the
+                        -- drone recall in #7, and one stall_watch reports as
+                        -- circling rather than as a fault.
+                        --
+                        -- Worth knowing that both of today's callers filter
+                        -- targeted and targeting rows out of their candidates
+                        -- (see `overviewEntriesToLock`), so neither can reach
+                        -- the wait as the tree stands. The bound is here anyway
+                        -- because nothing in the function's signature says so,
+                        -- and a caller that stops filtering would reinstate an
+                        -- unbounded wait without touching this file's logic.
+                        --
+                        -- Approaching is the move because range is the most
+                        -- likely reason a lock does not land, and closing
+                        -- distance is safe whatever the real reason was.
+                        describeBranch
+                            ("Locking '"
+                                ++ (overviewEntry.objectName |> Maybe.withDefault "the target")
+                                ++ "' has not completed in "
+                                ++ (lockAttemptReadingsBeforeVerdict |> String.fromInt)
+                                ++ " readings -- stop waiting for it."
+                            )
+                            (approachTheObject
+                                ("Object is "
+                                    ++ (distanceInMeters |> String.fromInt)
+                                    ++ " m away and the lock has not landed."
+                                )
+                            )
+
+                    else
                         describeBranch "Locking target is in progress, wait for completion." waitForProgressInGame
 
-                    else        
-                        describeBranch ("Lock target from overview entry '" ++ (overviewEntry.objectName |> Maybe.withDefault "") ++ "'")
-                                        (decideActionForCurrentStep
-                                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL ]
-                                        , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-                                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]
-                                        ]
-                                            |> List.concat
-                                        )
-                                    )
-            else
-                -- Press the panel's own Approach button rather than a modifier
-                -- click. This branch used to hold vkey_E, which is keep-at-range
-                -- on this account -- it is what ensureShipIsKeepingRange presses
-                -- -- so it said "Approach" while asking the client to hold
-                -- station. Switching it to vkey_Q did not help either: measured
-                -- live, the ship sat at 0.0 m/s for 100 seconds with the distance
-                -- frozen, so the keystroke is not producing an approach whatever
-                -- it is bound to. The click itself lands -- the Selected Item
-                -- panel shows the row we clicked -- so only the key is in doubt,
-                -- and the panel's button removes it from the picture.
-                --
-                -- Guarded on the panel actually showing this entry, since its
-                -- buttons act on whatever is selected. When it is showing
-                -- something else, clicking the row selects it and the next
-                -- reading takes the branch above.
-                if selectedItemIsOverviewEntry context overviewEntry then
-                    case selectedItemButtonNamed context "selectedItemApproach" of
-                        Just approachButton ->
-                            describeBranch
-                                ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Approach from the selected-item panel.")
-                                (clickUiElement approachButton)
-
-                        Nothing ->
-                            describeBranch
-                                ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away), and the selected-item panel offers no Approach.")
-                                waitForProgressInGame
-
                 else
-                    describeBranch
-                        ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Select it so the panel offers Approach.")
-                        (clickUiElement overviewEntry.uiNode)
+                    describeBranch ("Lock target from overview entry '" ++ (overviewEntry.objectName |> Maybe.withDefault "") ++ "'")
+                        (decideActionForCurrentStep
+                            ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL ]
+                             , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
+                             , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]
+                             ]
+                                |> List.concat
+                            )
+                        )
+
+            else
+                approachTheObject
+                    ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away).")
+
         Err error ->
             describeBranch ("Failed to read the distance: " ++ error) askForHelpToGetUnstuck
-                                
+
+
+{-| How many readings a lock the bot asked for gets to land before the outcome
+is called.
+
+Generous, because a legitimate lock is not instant -- a big ship locking a
+small one takes seconds, and a reading is a couple of seconds -- and calling a
+slow lock a refusal would teach the bot a range that is too short and make it
+fly at rats it could have shot. A refusal, by contrast, is immediate: the
+client answers an out-of-range lock at once and nothing about the row ever
+changes, so waiting longer than necessary costs only how quickly the bounds
+converge, never their correctness.
+-}
+lockAttemptReadingsBeforeVerdict : Int
+lockAttemptReadingsBeforeVerdict =
+    8
+
+
+{-| Whether the lock the bot asked for on this row has run out its readings.
+
+Stays true while the row is still there and still unanswered, because
+`updateLockRangeLearning` holds a spent attempt at the bound rather than
+dropping it. A verdict that moved a bound is announced once -- the bound is
+monotone, so a second verdict on the same evidence moves nothing and says
+nothing -- but the branch that stops waiting has to keep firing for as long as
+there is a wait to stop.
+-}
+lockAttemptIsSpent : BotDecisionContext -> OverviewWindowEntry -> Bool
+lockAttemptIsSpent context overviewEntry =
+    case ( context.memory.lockAttempt, overviewEntryLockHandle (allOverviewEntries context.readingFromGameClient) overviewEntry ) of
+        ( Just attempt, Just handle ) ->
+            (attempt.handle == handle) && (lockAttemptReadingsBeforeVerdict <= attempt.readingsWaited)
+
+        _ ->
+            False
+
+
+{-| The distance at which the bot switches from locking to approaching.
+
+The `targeting-range` setting is a guess about the ship, and a wrong one is
+costly both ways: too low and the bot flies at rats it could simply shoot, too
+high and it spends readings asking for locks the client will never grant. The
+client answers this question every time it accepts or refuses a lock, so the
+setting is treated as a starting value and clamped into the interval the
+client's own answers have established -- `[lockProvenAtMeters,
+lockRefusedAtMeters)`, the same shape as the self-calibrated UI scale the host
+derives per session rather than assuming.
+
+With no evidence yet both bounds are `Nothing` and this is exactly the setting,
+so nothing changes until something is learned. When the two contradict each
+other -- possible after a refit, since the bounds are not reset mid-session --
+the proven distance wins: a lock that completed is unambiguous evidence, where
+a refusal is an inference from several conditions holding at once.
+-}
+lockRangeThresholdInMeters : BotDecisionContext -> Int
+lockRangeThresholdInMeters context =
+    let
+        fromSetting : Int
+        fromSetting =
+            context.eventContext.botSettings.targetingRangeMeters
+
+        loweredByRefusal : Int
+        loweredByRefusal =
+            case context.memory.lockRefusedAtMeters of
+                Nothing ->
+                    fromSetting
+
+                Just refusedAt ->
+                    min fromSetting (refusedAt - 1)
+    in
+    case context.memory.lockProvenAtMeters of
+        Nothing ->
+            loweredByRefusal
+
+        Just provenAt ->
+            max provenAt loweredByRefusal
+
+
+allOverviewEntries : ReadingFromGameClient -> List OverviewWindowEntry
+allOverviewEntries readingFromGameClient =
+    readingFromGameClient.overviewWindows |> List.concatMap .entries
+
+
+{-| A handle on an overview row that survives to the next reading, or nothing
+when this row cannot be told apart from another.
+
+Screen position answers "what did that click hit", but it cannot answer "is
+this the same object as last reading": the overview re-sorts and virtualises,
+so a position is about a row, not about an object, and matching a lock outcome
+to the wrong object is exactly the mistake that would teach the bot a wrong
+range. EVE's own `itemID` is the right answer where the row carries one.
+
+Where it does not, the row's name is used, but only when no other row in the
+overview shares it -- one of five identical rats says nothing about which one
+the client answered. A pocket of same-named rats therefore yields no evidence
+at all, which is the correct outcome rather than a guess.
+-}
+overviewEntryLockHandle : List OverviewWindowEntry -> OverviewWindowEntry -> Maybe String
+overviewEntryLockHandle allEntries entry =
+    case entry.objectItemID of
+        Just itemID ->
+            Just ("id:" ++ itemID)
+
+        Nothing ->
+            case entry.objectName of
+                Nothing ->
+                    Nothing
+
+                Just name ->
+                    if (allEntries |> List.filter (\other -> other.objectName == Just name) |> List.length) == 1 then
+                        Just ("name:" ++ name)
+
+                    else
+                        Nothing
+
+
+{-| The screen point a lock click went to, from the effects of one step.
+
+The lock chord is Ctrl held over a plain left click
+(`lockTargetFromOverviewEntry`), and it is the only place in this bot that
+presses Ctrl without Shift -- `ctrlShiftClickUiElement`, the unlock, holds
+both. So the modifiers alone identify the gesture, and the `MouseMoveTo` that
+travels with every click carries where it went.
+
+Reading the attempt out of the effects rather than out of the decision is not a
+detour: `updateMemoryForNewReadingFromGame` is the only place that can write
+memory, and it sees the previous steps' effects but not the decision that
+produced them.
+-}
+lockClickLocationFromStepEffects : List EffectOnWindow.EffectOnWindowStruct -> Maybe EffectOnWindow.Location2d
+lockClickLocationFromStepEffects effects =
+    if
+        (effects |> List.member (EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL))
+            && not (effects |> List.member (EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT))
+    then
+        effects
+            |> List.filterMap
+                (\effect ->
+                    case effect of
+                        EffectOnWindow.MouseMoveTo location ->
+                            Just location
+
+                        _ ->
+                            Nothing
+                )
+            |> List.head
+
+    else
+        Nothing
+
+
+locationIsInDisplayRegion : EffectOnWindow.Location2d -> EveOnline.ParseUserInterface.DisplayRegion -> Bool
+locationIsInDisplayRegion location region =
+    (region.x <= location.x)
+        && (location.x < region.x + region.width)
+        && (region.y <= location.y)
+        && (location.y < region.y + region.height)
+
+
+{-| What the two learned bounds and the pending attempt look like after this
+reading.
+
+Returned as one record rather than written field by field, so the whole of the
+rule lives in one place and `updateMemoryForNewReadingFromGame` gains four
+lines rather than four blocks that would each have to re-derive the others.
+-}
+type alias LockRangeLearning =
+    { attempt : Maybe LockAttempt
+    , provenAtMeters : Maybe Int
+    , refusedAtMeters : Maybe Int
+    , change : Maybe String
+    }
+
+
+{-| Move the lock-range bounds on what the client has just answered.
+
+Two values, each moving in one direction only, so no oscillation is possible:
+`lockProvenAtMeters` is the greatest distance at which a lock has succeeded and
+only rises, `lockRefusedAtMeters` the smallest distance at which one has
+provably failed and only falls.
+
+Success is unambiguous -- a row that reads `targetedByMe` or `targeting` is the
+client having accepted, and nothing else makes a row read that way. Failure is
+not, which is why it takes all of the following at once:
+
+  - the attempt has had `lockAttemptReadingsBeforeVerdict` readings to land, so
+    a merely slow lock is not read as a refused one;
+  - the row is still in the overview and still `_display`ed, so the object did
+    not die and we are not looking at a different object recycled into that
+    row;
+  - the row still does not read as targeted or targeting;
+  - and the target bar was empty at both ends of the attempt, which covers both
+    "the count of locked targets did not go up" and "the ship had a slot to
+    lock into".
+
+That last one is what separates "too far" from "no free slot". An empty target
+bar is the only thing a reading can say that *proves* a slot was free -- the
+client's maximum is not in the reading at all, and "another target locked in
+this engagement" does not prove it either, since locking the last one is
+precisely what fills the ship up. Without this condition the number would
+ratchet down every time the ship simply reached its limit. The price is that
+only the first lock of an engagement can ever teach a refusal, which is also
+the case that costs the most: everything on the grid out of reach, and the bot
+asking for a lock it will never get, reading after reading.
+
+The bot's own `attack-object` settings are not visible from here, so this does
+not try to work out whether the row *should* have been locked. It only follows
+the click the bot actually made, which also keeps it out of the way of whatever
+the candidate selection in `decideActionInCombat` grows into.
+
+The bounds are not reset within a session: `BotMemory` starts fresh with each
+one, and the ship does not change mid-session in the way this bot flies.
+-}
+updateLockRangeLearning : UpdateMemoryContext -> BotMemory -> LockRangeLearning
+updateLockRangeLearning context botMemoryBefore =
+    let
+        entries : List OverviewWindowEntry
+        entries =
+            allOverviewEntries context.readingFromGameClient
+
+        targetsCount : Int
+        targetsCount =
+            context.readingFromGameClient.targets |> List.length
+
+        unchanged : LockRangeLearning
+        unchanged =
+            { attempt = botMemoryBefore.lockAttempt
+            , provenAtMeters = botMemoryBefore.lockProvenAtMeters
+            , refusedAtMeters = botMemoryBefore.lockRefusedAtMeters
+            , change = Nothing
+            }
+
+        -- Nothing can be locked in warp or from inside a station, so an attempt
+        -- that runs into either is abandoned rather than judged. The bot cannot
+        -- *start* one there -- combat is gated on not warping in
+        -- `decideActionWhenInSpace` -- but it can be halfway through one when
+        -- the ship runs away from low health, and a lock nobody could have
+        -- granted must not read as a lock the ship was too far away for.
+        shipCannotLock : Bool
+        shipCannotLock =
+            case context.readingFromGameClient.shipUI of
+                Nothing ->
+                    True
+
+                Just shipUI ->
+                    shipUIIndicatesShipIsWarpingOrJumping shipUI
+
+        -- The row the step just dispatched aimed its lock click at, if it did.
+        -- Resolved by screen position against this reading, which is a reading
+        -- later than the one the click was decided on -- and that is the right
+        -- way round rather than a compromise: the client acted on whatever was
+        -- rendered at that point, so if the overview re-sorted in between, the
+        -- row found here is the row the click actually hit. Only rendered rows
+        -- are considered, for the reason the whole overview section of CLAUDE.md
+        -- exists: a hidden row's region belongs to whatever was recycled into
+        -- it.
+        entryJustClicked : Maybe OverviewWindowEntry
+        entryJustClicked =
+            context.previousStepsEffects
+                |> List.head
+                |> Maybe.andThen lockClickLocationFromStepEffects
+                |> Maybe.andThen
+                    (\location ->
+                        entries
+                            |> List.filter overviewEntryIsDisplayed
+                            |> List.filter (\entry -> locationIsInDisplayRegion location entry.uiNode.totalDisplayRegion)
+                            |> List.head
+                    )
+
+        attemptAfterClick : Maybe LockAttempt
+        attemptAfterClick =
+            case entryJustClicked of
+                Nothing ->
+                    botMemoryBefore.lockAttempt
+
+                Just entry ->
+                    case ( overviewEntryLockHandle entries entry, entry.objectDistanceInMeters ) of
+                        ( Just handle, Ok distanceInMeters ) ->
+                            case botMemoryBefore.lockAttempt of
+                                Just pending ->
+                                    if pending.handle == handle then
+                                        -- The bot asking again for the same row
+                                        -- is the same attempt, not a new one.
+                                        Just pending
+
+                                    else
+                                        -- It has moved on to another row. The
+                                        -- old attempt is abandoned rather than
+                                        -- judged: nobody is waiting on it.
+                                        Just
+                                            { handle = handle
+                                            , distanceInMeters = distanceInMeters
+                                            , targetsCount = targetsCount
+                                            , readingsWaited = 0
+                                            }
+
+                                Nothing ->
+                                    Just
+                                        { handle = handle
+                                        , distanceInMeters = distanceInMeters
+                                        , targetsCount = targetsCount
+                                        , readingsWaited = 0
+                                        }
+
+                        _ ->
+                            botMemoryBefore.lockAttempt
+    in
+    case attemptAfterClick of
+        Nothing ->
+            unchanged
+
+        Just attempt ->
+            let
+                entryNow : Maybe OverviewWindowEntry
+                entryNow =
+                    if shipCannotLock then
+                        Nothing
+
+                    else
+                        entries
+                            |> List.filter overviewEntryIsDisplayed
+                            |> List.filter (\entry -> overviewEntryLockHandle entries entry == Just attempt.handle)
+                            |> List.head
+            in
+            case entryNow of
+                Nothing ->
+                    -- The row is gone or is no longer rendered, or the ship
+                    -- cannot lock anything just now. It may have died, or
+                    -- scrolled out of view, or the overview may have re-sorted
+                    -- -- none of which says anything about range.
+                    { unchanged | attempt = Nothing }
+
+                Just entry ->
+                    let
+                        -- Held at the bound rather than allowed to run on, for
+                        -- the same reason the drone give-up latches: the number
+                        -- is shown to an operator, and one that climbs forever
+                        -- while nothing is waiting on it reads as a fault.
+                        attemptCarried : Maybe LockAttempt
+                        attemptCarried =
+                            Just
+                                { attempt
+                                    | readingsWaited =
+                                        min lockAttemptReadingsBeforeVerdict (attempt.readingsWaited + 1)
+                                }
+
+                        -- The distance a bound moves to lies somewhere between
+                        -- the reading the attempt started on and this one. Each
+                        -- bound takes the end that makes the weaker claim -- the
+                        -- smaller distance for the one that only rises, the
+                        -- larger for the one that only falls -- so neither is
+                        -- ever moved further than the evidence reaches.
+                        distanceNow : Int
+                        distanceNow =
+                            entry.objectDistanceInMeters |> Result.withDefault attempt.distanceInMeters
+                    in
+                    if overviewEntryIsTargetedOrTargeting entry then
+                        let
+                            provenAt : Int
+                            provenAt =
+                                min attempt.distanceInMeters distanceNow
+
+                            -- A completed lock ends the attempt. One still
+                            -- spooling up does not: `targeting` is the client
+                            -- having accepted the request, not having finished
+                            -- it, and a lock that is accepted and never finishes
+                            -- is exactly the wait this bound exists to end.
+                            attemptAfter : Maybe LockAttempt
+                            attemptAfter =
+                                if entry.commonIndications.targetedByMe then
+                                    Nothing
+
+                                else
+                                    attemptCarried
+                        in
+                        if provenAt > (botMemoryBefore.lockProvenAtMeters |> Maybe.withDefault 0) then
+                            { attempt = attemptAfter
+                            , provenAtMeters = Just provenAt
+                            , refusedAtMeters = botMemoryBefore.lockRefusedAtMeters
+                            , change =
+                                Just
+                                    ("Learned lock range: the client accepted a lock at "
+                                        ++ (provenAt |> String.fromInt)
+                                        ++ " m, further than anything locked before -- lock-proven-at rises from "
+                                        ++ (botMemoryBefore.lockProvenAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "unset")
+                                        ++ " to "
+                                        ++ (provenAt |> String.fromInt)
+                                        ++ " m."
+                                    )
+                            }
+
+                        else
+                            { unchanged | attempt = attemptAfter }
+
+                    else if attempt.readingsWaited < lockAttemptReadingsBeforeVerdict then
+                        { unchanged | attempt = attemptCarried }
+
+                    else if (attempt.targetsCount /= 0) || (targetsCount /= 0) then
+                        -- The ship held a locked target at one end of the
+                        -- attempt or the other, so it may simply have had no free
+                        -- slot -- and it may equally have locked something else
+                        -- while this one was waiting. An empty target bar at both
+                        -- ends is the one reading that rules out both at once,
+                        -- and only then is a lock that never landed evidence
+                        -- about range rather than about capacity.
+                        { unchanged | attempt = attemptCarried }
+
+                    else
+                        let
+                            refusedAt : Int
+                            refusedAt =
+                                max attempt.distanceInMeters distanceNow
+                        in
+                        if refusedAt < (botMemoryBefore.lockRefusedAtMeters |> Maybe.withDefault (refusedAt + 1)) then
+                            { attempt = attemptCarried
+                            , provenAtMeters = botMemoryBefore.lockProvenAtMeters
+                            , refusedAtMeters = Just refusedAt
+                            , change =
+                                Just
+                                    ("Learned lock range: '"
+                                        ++ (entry.objectName |> Maybe.withDefault "a target")
+                                        ++ "' at "
+                                        ++ (refusedAt |> String.fromInt)
+                                        ++ " m did not lock in "
+                                        ++ (lockAttemptReadingsBeforeVerdict |> String.fromInt)
+                                        ++ " readings with the target bar empty throughout -- lock-refused-at falls from "
+                                        ++ (botMemoryBefore.lockRefusedAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "unset")
+                                        ++ " to "
+                                        ++ (refusedAt |> String.fromInt)
+                                        ++ " m."
+                                    )
+                            }
+
+                        else
+                            -- The verdict stands, but the bound is already at
+                            -- least this tight, so nothing moves and nothing is
+                            -- said. That is what keeps the log line one per
+                            -- change rather than one per reading, with no
+                            -- separate "already reported" flag to get wrong.
+                            { unchanged | attempt = attemptCarried }
+
+
+{-| The lock-range bounds, for the status line.
+
+Continuous rather than once-per-change, unlike the decision-log line: a number
+the bot adjusts for itself is worth being able to read at any moment, not only
+on the reading it moved. The pending attempt is here too, because a bot that
+keeps clicking a lock it will never get shows up as an attempt sitting at the
+verdict count long before either bound has anything to say.
+-}
+describeLockRange : BotDecisionContext -> String
+describeLockRange context =
+    "Lock range: "
+        ++ (lockRangeThresholdInMeters context |> String.fromInt)
+        ++ " m (setting "
+        ++ (context.eventContext.botSettings.targetingRangeMeters |> String.fromInt)
+        ++ ", proven "
+        ++ (context.memory.lockProvenAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
+        ++ ", refused "
+        ++ (context.memory.lockRefusedAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
+        ++ ", attempt "
+        ++ (context.memory.lockAttempt
+                |> Maybe.map (\attempt -> String.fromInt attempt.distanceInMeters ++ " m for " ++ String.fromInt attempt.readingsWaited ++ " readings")
+                |> Maybe.withDefault "none"
+           )
+        ++ ")."
+
 
 
 
@@ -4723,6 +6857,15 @@ initBotMemory =
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
     , droneBayOpenedFromShipCard = False
+    , droneBayWillTakeNoMore = False
+    , droneRestockLooksWithRoom = 0
+    , droneRestockDragsDispatched = 0
+    , droneBayEmptyLastSeen = Nothing
+    , lockAttempt = Nothing
+    , lockProvenAtMeters = Nothing
+    , lockRefusedAtMeters = Nothing
+    , lockRangeLastChange = Nothing
+    , ammoSwap = initAmmoSwapMemory
     }
 
 
@@ -4843,16 +6986,58 @@ statusTextFromState context =
                     [ [ describeShip ]
                     , [ describeDrones ]
                     , [ describeOverview ]
-                    , [ describeRatsInOverview, describeCurrentTarget ]
+                    , [ describeRatsInOverview, describeCurrentTarget, describeLockRange context ]
+                    , [ describeAmmoSwapState context ]
                     ]
                         |> List.map (String.join " ")
     in
     [ [ describePerformance ]
     , [ describeMenuAndSettlingCounters ]
+    , [ describeHomeStation context ]
     , describeCurrentReading
     ]
         |> List.concat
         |> String.join "\n"
+
+
+{-| The home station and whether the bot currently means to go there.
+
+Carried continuously rather than only while the trip runs, because the two
+inputs that decide it -- the setting and what the last reading that could see
+the drone bay said -- are both invisible otherwise, and "the trip never
+started" and "the trip finished" look identical in a decision log.
+-}
+describeHomeStation : BotDecisionContext -> String
+describeHomeStation context =
+    case context.eventContext.botSettings.homeStationName of
+        Nothing ->
+            "Home station: not set."
+
+        Just stationName ->
+            "Home station: '"
+                ++ stationName
+                ++ "' (drone bay last seen "
+                ++ (case context.memory.droneBayEmptyLastSeen of
+                        Nothing ->
+                            "never -- no reading has shown the drones window yet"
+
+                        Just True ->
+                            "empty"
+
+                        Just False ->
+                            "stocked"
+                   )
+                ++ (case dockedAtHomeStation context stationName of
+                        Just True ->
+                            ", docked there"
+
+                        Just False ->
+                            ", docked elsewhere"
+
+                        Nothing ->
+                            ""
+                   )
+                ++ ")."
 
 
 overviewEntryIsTargetedOrTargeting : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
@@ -5758,14 +7943,7 @@ routeToStationByName context stationName =
             findUiElementWithText textToFind window
 
         stationInfoWindow =
-            allUiNodesInReading context
-                |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "InfoWindow")
-                |> List.filter
-                    (\window ->
-                        EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode
-                            |> List.any (stringContainsIgnoringCase stationName)
-                    )
-                |> List.head
+            stationInfoWindowForStation context stationName
     in
     case stationInfoWindow |> Maybe.andThen (\window -> withinWindow window "Set Destination") of
         Just setDestination ->
@@ -5825,6 +8003,28 @@ routeToStationByName context stationName =
 
                         Nothing ->
                             describeBranch "I do not see the search bar." askForHelpToGetUnstuck
+
+
+{-| The `Station: Information` window a double-click on a search result opens,
+for one particular station.
+
+Split out of `routeToStationByName` because it is also the evidence that a route
+was set by us rather than left over from a mission -- see
+`homeStationRouteIsSet`. Matched on the name appearing anywhere in the window's
+text, which is how the window titles itself; the tooltip trap does not apply
+here, since that one is drawn outside the *results* window and is not an
+`InfoWindow` at all.
+-}
+stationInfoWindowForStation : BotDecisionContext -> String -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+stationInfoWindowForStation context stationName =
+    allUiNodesInReading context
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "InfoWindow")
+        |> List.filter
+            (\window ->
+                EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode
+                    |> List.any (stringContainsIgnoringCase stationName)
+            )
+        |> List.head
 
 
 {-| A typable search term for a station name -- the tail after the last " - ",
@@ -6300,6 +8500,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         weJustFinishedWarping =
             (botMemoryBefore.shipWarpingInLastReading == Just True) && (shipIsWarping == Just False)
 
+        lockRangeLearning =
+            updateLockRangeLearning context botMemoryBefore
+
+        -- Only settled readings count as a look. The selected container
+        -- renders empty for one reading while it is being switched (40 -> 0 ->
+        -- 40 rendered rows, watched live), so a gauge read on the reading after
+        -- a click can describe a container that is still arriving.
+        settledDroneBayFill =
+            if previousStepsEffectsPressedMouse context.previousStepsEffects then
+                Nothing
+
+            else
+                droneBayFillWhileSelected context.readingFromGameClient
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -6349,6 +8562,74 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         else
             droneBayIsSelectedContainer context.readingFromGameClient
                 || botMemoryBefore.droneBayOpenedFromShipCard
+    , droneBayEmptyLastSeen =
+        -- The last answer a reading was actually able to give about the bay,
+        -- carried forward across the readings that cannot give one.
+        --
+        -- Written only from readings that can see the bay, so this is evidence
+        -- rather than inference: in space the drones window is open (this
+        -- bot's own setup instructions require it), so a run that loses its
+        -- drones records `Just True` on the very next reading and carries it
+        -- into the dock, which is where the home-station decision is made.
+        -- `Nothing` means no reading this session ever saw the bay -- a session
+        -- that never undocked -- and the home trip declines to guess.
+        case droneBayIsEmptyFromDronesWindow context.readingFromGameClient of
+            Nothing ->
+                botMemoryBefore.droneBayEmptyLastSeen
+
+            Just isEmpty ->
+                Just isEmpty
+    , ammoSwap = updateAmmoSwapMemory context botMemoryBefore.ammoSwap
+    , droneBayWillTakeNoMore =
+        -- The restock's "already done", in the two forms a docked reading can
+        -- supply it: the bay's own capacity gauge reading full at a moment the
+        -- bay was the selected container, or the client refusing a drop. The
+        -- refusal is the stronger of the two -- it is the client answering the
+        -- question directly, and it catches the case the gauge cannot, a bay
+        -- with less free volume than one drone.
+        --
+        -- Latched because the restock has to select the station hangar to
+        -- reach the drones, after which the bay is not readable at all.
+        if context.readingFromGameClient.shipUI /= Nothing then
+            False
+
+        else
+            (settledDroneBayFill == Just DroneBayFull)
+                || ((0 < botMemoryBefore.droneRestockDragsDispatched)
+                        && dropIntoDroneBayWasRefused context.readingFromGameClient
+                   )
+                || botMemoryBefore.droneBayWillTakeNoMore
+    , droneRestockLooksWithRoom =
+        -- Counts the readings that read the bay's gauge and did not find it
+        -- full, which is what bounds the restock. A gauge that does not answer
+        -- counts as a look for the same reason the caller acts on it: a
+        -- condition that cannot see the bay must not be allowed to run the
+        -- task forever any more than it may retire it.
+        if context.readingFromGameClient.shipUI /= Nothing then
+            0
+
+        else if (settledDroneBayFill /= Nothing) && (settledDroneBayFill /= Just DroneBayFull) then
+            botMemoryBefore.droneRestockLooksWithRoom + 1
+
+        else
+            botMemoryBefore.droneRestockLooksWithRoom
+    , droneRestockDragsDispatched =
+        -- Scoped to the restock by `droneBayOpenedFromShipCard`: the courier
+        -- load drags too, but it runs during a mission leg, and this flag is
+        -- only ever set by the restock's own "Open Drone Bay" during
+        -- wind-down. A miscount could only end the restock early, never let it
+        -- run longer.
+        if context.readingFromGameClient.shipUI /= Nothing then
+            0
+
+        else if
+            botMemoryBefore.droneBayOpenedFromShipCard
+                && previousStepsEffectsDragged context.previousStepsEffects
+        then
+            botMemoryBefore.droneRestockDragsDispatched + 1
+
+        else
+            botMemoryBefore.droneRestockDragsDispatched
     , orbitUnconfirmedTicks =
         -- The orbit twin of keepAtRangeUnconfirmedTicks below; same indicator,
         -- same way of never arriving.
@@ -6614,6 +8895,10 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , lockAttempt = lockRangeLearning.attempt
+    , lockProvenAtMeters = lockRangeLearning.provenAtMeters
+    , lockRefusedAtMeters = lockRangeLearning.refusedAtMeters
+    , lockRangeLastChange = lockRangeLearning.change
     , targetToUnlockRegion = currentTargetToUnlockRegion
     , targetToUnlockUnchangedTicks =
         if currentTargetToUnlockRegion == Nothing then
