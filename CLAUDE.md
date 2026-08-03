@@ -98,16 +98,39 @@ that lands in `lastRequestToVolatileProcessResult` — a field `BotFramework.elm
 writes and never reads. A whole reply class would vanish without a word, which
 is exactly the failure this file keeps a section on.
 
-So the Elm side of this is not merely unwritten, it is **blocked on a channel
-that does not exist**. `OperateBotConfiguration` gives a running bot exactly one
-way out — `buildTaskFromEffectSequence : List EffectOnWindowStruct -> Task` —
-and that vocabulary is mouse moves, buttons, keys and scroll; a station name
-cannot be spelled in it. Every `RequestToVolatileProcess` is issued by
-`getNextSetupTask`'s closed setup state machine, which a decision cannot reach.
-Wiring the bot to this request therefore means changing `BotFramework.elm`
-(a new `OperateBotConfiguration` field and a builder beside
-`buildTaskFromRequestToVolatileProcess`) *and* the vendored decoder — a change
-worth its own live run, not a rider on the host-side plumbing.
+So the Elm side of this was **blocked on a channel that did not exist**.
+`OperateBotConfiguration` gives a running bot exactly one way out —
+`buildTaskFromEffectSequence : List EffectOnWindowStruct -> Task` — and that
+vocabulary is mouse moves, buttons, keys and scroll; a station name cannot be
+spelled in it. Every `RequestToVolatileProcess` is issued by `getNextSetupTask`'s
+closed setup state machine, which a decision cannot reach. Issuing this *request*
+from a decision therefore still means changing `BotFramework.elm` (a new
+`OperateBotConfiguration` field and a builder beside
+`buildTaskFromRequestToVolatileProcess`) *and* the vendored decoder.
+
+**Nothing has to.** #68 needed a bot to tell the host something the protocol has
+no type for and solved it the way #30 solved the game log — by riding a field
+that already crosses the boundary. `ContinueSession.statusText` is free prose the
+host reads every tick, so the bot writes a directive into it and the host scans
+for a token that ordinary prose cannot produce:
+
+```
+@host extend-session 480
+@host set-destination Amarr VIII (Oris) - Emperor Family Academy
+```
+
+`hostDirectivePrefix` in `Bot.elm` is the token both sides agree on, pinned by a
+cross-language test in each direction — a drift is silent, and reads exactly
+like a bot that never asked. The channel is **one-way and unacknowledged**, which
+is a property rather than a limitation: the bot's confirmation that a route was
+set is the client's own route panel, which is stronger evidence than the host's
+report of what it asked for. The status text is also *printed*, on every reading,
+so a station name may travel this way and a credential may not.
+
+An upstream-sourced bot simply never writes a directive, exactly as it never
+asks for a deadline extension, so the asymmetry #17 rejected does not arise: the
+host side existed and was merged first, and the cost of a bot that does not use
+it is zero.
 
 Two protocol details worth remembering. `ReadFromWindowResult.Completed
 .memoryReadingSerialRepresentationJson` is `Maybe String`, and the UI tree JSON
@@ -2425,13 +2448,28 @@ inside a station, so there is nothing to gain from the other order.
 
 **Whether the route is *ours* is not readable from the route panel.** It reports
 that a destination exists, never which one, so a leftover mission route would be
-followed to the wrong station with every log line reading like success. The
-evidence used instead is the `Station: Information` window for the home station
-— the window `routeToStationByName` clicks "Set Destination" in, which nothing
-afterwards closes. Route panel plus that window is a conjunction only our own
-sequence produces. If a future client closes that window on Set Destination the
-symptom is the search repeating rather than travel starting, which the decision
-log names.
+followed to the wrong station with every log line reading like success. Each
+mechanism brings its own evidence and either will do.
+
+The search bar's evidence is the `Station: Information` window for the home
+station — the window `routeToStationByName` clicks "Set Destination" in, which
+nothing afterwards closes. Route panel plus that window is a conjunction only our
+own sequence produces. If a future client closes that window on Set Destination
+the symptom is the search repeating rather than travel starting, which the
+decision log names.
+
+ESI leaves no window behind, so its evidence is that **nothing was clicked**.
+Setting a destination in the client takes a click — a search result's "Set
+Destination", the tracker's own travel button, a route marker's menu — and the
+`@host set-destination` ask takes none: it is a line of status text and a wait.
+So a route that appears across a step which dispatched no input at all was set
+from outside the client, and the host is the only thing here that can do that.
+`BotMemory.routeAppearedWithoutInput` latches that while the route stands and
+clears the moment the panel is empty, so it can never outlive the route it
+describes. It records that *a* route came from the host and not which one, which
+is why `travelToStationByName` re-asserts the destination on every travelling
+reading: the host acts only on a change, so the cost is a string comparison and
+the client is always holding the station the bot currently wants.
 
 **Bounded in both places, and the bound ends the session.** A trip gets
 `homeStationTripSecondsPastSessionEnd` (420s) past the planned end instead of the
@@ -2452,15 +2490,15 @@ somewhere arbitrary. That is the point (an arbitrary dock is what makes the
 restock useless) but it is a real change, and it only happens when the bay is
 empty and a home station is configured.
 
-ESI would need none of this — no typable substring, no row matching, no window
-as evidence — and `botlab_host` already answers a `SetAutopilotDestination-
-Request`. It is not reachable from a bot decision: `OperateBotConfiguration`
-offers only mouse, keys and scroll, so nothing in a decision tree can issue a
-volatile-process request at all. Until that framework gap is closed the search
-bar is not an interim, it is the mechanism. The seam for swapping it later is
-narrow on purpose — the travel path asks route-setting exactly two questions,
-`homeStationRouteIsSet` and `routeToStationByName`, and knows nothing else about
-where a destination comes from.
+ESI needs none of this — no typable substring, no row matching, no window kept
+open as evidence — and since #69 the bot reaches it, through the status-text
+directive rather than through the volatile-process request a decision still
+cannot issue. That seam was narrow on purpose: the travel path asks route-setting
+exactly two questions, `homeStationRouteIsSet` and `routeToStation`, and knows
+nothing else about where a destination comes from, so adding the second mechanism
+touched those two functions and nothing downstream of them. The search bar
+remains as the fallback, unchanged, and is what runs with `route-by-esi=no`, on a
+host that does not read the directive, or after an ask goes unanswered.
 
 The travel half of it is now shared. `travelToStationByName` is the route-set,
 fly, dock sequence, and both the restock trip and the pod recovery below call
@@ -2742,6 +2780,23 @@ exists.
   session` climbing: a couple over a run is the gauge behaving as recorded, a
   count climbing every few readings is a gauge that has started lying properly
   and a different problem.
+
+  And it now **asks the host to set its route through ESI** rather than driving
+  the search bar, which is the only way it can originate a destination carrying a
+  character it cannot type — `Amarr VIII (Oris) - Emperor Family Academy` has
+  both a parenthesis, which has no key at all, and a hyphen, which maps to a
+  virtual key the host cannot press. The directive, the choice between the two
+  mechanisms and the evidence that a route is the bot's own are in "The home
+  station" and in the ESI bullet below. **Untested against a live client, and
+  deliberately not fired**: setting a destination is an outward action on a live
+  account and a session was running. What to watch on the first run is
+  `@host set-destination '<station>'` in the decision log, then the host's
+  `# the bot asked for the route to …` and `# ESI: destination … set (N)` on
+  stderr, then the client's route panel flipping from `No Destination` — and then
+  `Home station: travelling to` taking over, which is the bot accepting the route
+  as its own. Three readings of the ask followed by `Search for '<tail>'` is the
+  fallback firing, which means the host did not set the route and its own log
+  says why.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
@@ -2791,10 +2846,28 @@ exists.
   fallback looks at means an attempt that ran out of time gets further next time
   instead of starting over. The same name resolves in 0.00s after the first.
 
-  **The host side is all of it that exists.** Nothing issues this request yet;
-  see the Architecture section for why the bot has no channel that can carry a
-  station name, and what would have to change to give it one. Until then this is
-  reachable only from Python, and no bot has set a destination through it.
+  **The bot reaches it through the status text, not through the request.**
+  Issuing a `RequestToVolatileProcess` from a decision is still impossible (see
+  the Architecture section), so the mission runner writes
+  `@host set-destination <full station name>` as a decision line instead and
+  `run_bot` calls the same `_set_autopilot_destination` the request answers with.
+  One code path, so the two ways in cannot report a failure differently. The host
+  acts only when the name *changes* and forgets the name when the ask goes away,
+  so a standing ask is one authenticated call rather than one per tick, and the
+  same station asked for again later is acted on again.
+
+  **Which mechanism the bot uses, and what happens when ESI cannot.** ESI is
+  preferred while `route-by-esi` is on (the default) and the search-bar sequence
+  has not already started; after `esiRouteReadingsBeforeSearchBar` (3) readings
+  in which the bot dispatched nothing and no route appeared, it falls through to
+  the search bar, which is untouched. So a host with no ESI credentials, or
+  BotLab.exe, costs three readings per route and then behaves exactly as before.
+  A failure is loud in the host's log (`# ESI: destination … not set: …`) and
+  attempted once per distinct destination.
+
+  **No route has yet been set this way.** The plumbing and its unit tests are
+  merged; nothing has travelled the full path from a bot decision to a real
+  route change, because firing one is an outward action on a live account.
 - **EVE's own game log reaches the bot**, as
   `ParsedUserInterface.gameLogEntriesSinceLastReading` — the refusals behind
   issues #14, #19 and #27, which those features each had to infer indirectly
@@ -2938,10 +3011,11 @@ OEM_MINUS *is* in that table; `getKeyboardKeyToEnterChar` simply does not pick
 it. The mission runner's own `typeTextEffects` sidesteps the whole question by
 emitting letters, digits and spaces only and dropping the rest.)
 
-`eve-online-mission-runner`'s `routeToStationByName` is this sequence in Elm,
-and the `home-station` trip is its second caller. Both rely on the substring
-workaround being load-bearing rather than temporary — see "The home station"
-for why ESI cannot replace it from inside a bot yet.
+`eve-online-mission-runner`'s `routeToStationByName` is this sequence in Elm, and
+`routeToStation` is what chooses between it and the ESI ask. It is the fallback
+rather than the mechanism since #69, but it is still the only one that works with
+no credentials and from a cold start, so the substring workaround stays
+load-bearing — see "The home station".
 
 ## Open gaps
 
