@@ -888,6 +888,121 @@ runner's copy of `BotFrameworkSeparatingMemory.elm` now passes
 `previousStepsEffects` through, so that file diverges from the other apps'
 copies.
 
+## The home station: restocking where the drones actually are
+
+The drone restock takes drones from whatever station the ship is docked at, and
+that station is chosen by the mission chain, not by anyone who knows what is in
+it. Observed directly: after run 1 the ship sat in Amarr VI (Zorast); the
+station it was flown to for the restock, Amarr VIII (Oris) - Emperor Family
+Academy, holds 13 item types — all fitting modules and Overseer's Effects, no
+drones of any kind. There was nothing to restock from, and the log would have
+said "this station's item hangar holds no 'Acolyte I'" for the rest of the
+window.
+
+`home-station` names the station that does have them. When the wind-down starts
+and the drone bay is empty, the mission runner sets a route there, flies it,
+docks and restocks; already docked there, it restocks without travelling. It
+also gives the session a predictable end point, which a run that stops wherever
+the last mission left it does not have.
+
+**The name is one setting and is never typed.** `home-station` takes the full
+name as the client writes it, parentheses and hyphens included, because the full
+name is needed twice regardless — to pick the right row out of 26 search results,
+and to tell "am I already home" from the info panel's own station name. What
+gets *typed* is derived from it by `searchQueryForStation`: the tail after the
+last `" - "`, which for an NPC station is the distinctive part and is free of
+the punctuation that cannot be pressed. A second setting carrying the search
+term was the obvious alternative and is worse — the two can silently disagree,
+and a term that does not occur in the full name searches forever and matches no
+row, which is this repo's signature failure rather than an error.
+
+**The trigger cannot read the drone bay where it is asked.** The wind-down
+decision happens while docked, and the drones window is not in the tree while
+docked, so a live read of it answers "not empty" for an empty bay — a guard that
+compiles, runs, and is false in the only state that matters, which is what
+issue #15 was. `droneBayEmptyLastSeen` in `BotMemory` is written **only** from
+readings that can see the bay at all, so it is the last real answer rather than
+an inference: in space the drones window is open (the bot's own setup
+instructions require it), so a run that loses its drones records `Just True` on
+the next reading and carries it through the dock. `Nothing` — no reading this
+session ever saw the bay — declines the trip rather than guessing.
+
+**Two instruments, and they are not redundant.** #15's fix reads the bay's
+capacity gauge out of an inventory window, which is the docked instrument and
+the right one for the restock. It cannot answer this question, because it is
+only readable once the bot has itself opened the bay from the ship's card —
+and the home trip needs its answer *before* undocking, to decide whether to
+leave at all. `droneBayFillWhileSelected` is therefore the docked view and
+`droneBayIsEmptyFromDronesWindow` the in-space one, and they never overlap: the
+drones window is absent while docked, and the inventory does not have the bay
+selected while in space.
+
+**The trip triggers on *empty*; the restock, once there, tops up anything not
+full.** These disagree on purpose, and in two independent ways.
+
+The reading forces it. The drones window titles the bay group with a bare
+count — the `(current/maximum)` form the parser can read is what the *in space*
+group carries, being bandwidth-limited — so there is no capacity to compare
+against and "nothing in the bay" is the strongest thing an in-space reading can
+say.
+
+The cost argues for it too, and would even if the maximum were readable. The
+restock tops up 9 drones of 10 because it is standing in the station and the
+cost of acting is one drag. The trip decides whether to abandon the wind-down,
+undock, fly several jumps and risk ending the session in space; 9 of 10 does not
+justify that and 0 of 10 does. The asymmetry is in the cost of the action, not
+in the reading of the bay. A ship that arrives home with a part-full bay is
+still topped up, because the restock applies its own condition on arrival.
+
+The trip additionally respects `droneBayWillTakeNoMore`, the restock's latched
+verdict: a bay whose gauge already read full, or a drop the client already
+refused, is not a reason to fly anywhere. It resets on undock, so it never
+suppresses a trip decided in space.
+
+**Route first, undock second.** Setting a destination is the step that can fail,
+and failing it while still docked costs nothing; failing it after undocking
+leaves the ship in space with the session ending. The search bar works from
+inside a station, so there is nothing to gain from the other order.
+
+**Whether the route is *ours* is not readable from the route panel.** It reports
+that a destination exists, never which one, so a leftover mission route would be
+followed to the wrong station with every log line reading like success. The
+evidence used instead is the `Station: Information` window for the home station
+— the window `routeToStationByName` clicks "Set Destination" in, which nothing
+afterwards closes. Route panel plus that window is a conjunction only our own
+sequence produces. If a future client closes that window on Set Destination the
+symptom is the search repeating rather than travel starting, which the decision
+log names.
+
+**Bounded in both places, and the bound ends the session.** A trip gets
+`homeStationTripSecondsPastSessionEnd` (420s) past the planned end instead of the
+usual `secondsPastSessionEndBeforeGivingUpOnDocking` (120s), because a couple of
+jumps and a dock do not fit in the 200-second wind-down. Once home, the restock
+gets `homeStationRestockGraceSeconds` (60s) past the end, so arriving late does
+not mean arriving pointlessly — though normally none of it is spent, since the
+grace ends the moment the restock latches `droneBayWillTakeNoMore`. The clock
+covers the case where no verdict arrives at all, which matters because the
+restock's own give-up is to *fall silent* rather than to say anything. Both are
+deadlines, not waits: when either expires the bot ends the session and says
+which station it never reached. That distinction is the whole of issues #7 and
+#14 — a longer bound is fine, a missing one is not.
+
+The trade the setting buys: with `home-station` set, a wind-down that cannot
+reach home ends the session **in space**, where before it would have docked
+somewhere arbitrary. That is the point (an arbitrary dock is what makes the
+restock useless) but it is a real change, and it only happens when the bay is
+empty and a home station is configured.
+
+ESI would need none of this — no typable substring, no row matching, no window
+as evidence — and `botlab_host` already answers a `SetAutopilotDestination-
+Request`. It is not reachable from a bot decision: `OperateBotConfiguration`
+offers only mouse, keys and scroll, so nothing in a decision tree can issue a
+volatile-process request at all. Until that framework gap is closed the search
+bar is not an interim, it is the mechanism. The seam for swapping it later is
+narrow on purpose — the travel path asks route-setting exactly two questions,
+`homeStationRouteIsSet` and `routeToStationByName`, and knows nothing else about
+where a destination comes from.
+
 ## Elm toolchain
 
 `brew install elm` (arm64-native bottle) — **not** `npm install -g elm`, which
@@ -1011,6 +1126,16 @@ exists.
   `look ... of 3` and then silence is a restock that landed. Silence right
   after the last look is the give-up. The drones window after the session is
   still the last word on what is actually in the bay.
+
+  With `home-station` set it now also **goes where the drones are** rather than
+  restocking wherever the mission chain left it — route, travel, dock, restock,
+  or restock in place when it is already there. See "The home station" above for
+  the naming, the trigger and the two deadlines. **Untested against a live
+  client**, and the whole path only exists under `--session-duration-minutes`.
+  What to watch first: whether the `Station: Information` window survives the
+  "Set Destination" click, since that window is what tells the bot the route it
+  is following is its own. The tell is `Home station: ... set the route to`
+  repeating where `Home station: travelling to` should have taken over.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
@@ -1136,7 +1261,15 @@ A station name containing parentheses cannot be typed as-is. It does not need to
 be: search on a distinctive parenthesis-free substring and pick the right row by
 full-name match from the rendered list. Note also that `'-'` maps to
 `vkey_SUBTRACT` (0x6D, the numpad key), which is **not** in `botlab_host.py`'s
-`_VK_TO_CGKEYCODE` — a hyphen in a query silently has no key to press.
+`_VK_TO_CGKEYCODE` — a hyphen in a query silently has no key to press. (`0xBD`
+OEM_MINUS *is* in that table; `getKeyboardKeyToEnterChar` simply does not pick
+it. The mission runner's own `typeTextEffects` sidesteps the whole question by
+emitting letters, digits and spaces only and dropping the rest.)
+
+`eve-online-mission-runner`'s `routeToStationByName` is this sequence in Elm,
+and the `home-station` trip is its second caller. Both rely on the substring
+workaround being load-bearing rather than temporary — see "The home station"
+for why ESI cannot replace it from inside a bot yet.
 
 ## Open gaps
 

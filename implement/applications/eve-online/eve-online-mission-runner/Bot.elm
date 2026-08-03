@@ -106,6 +106,16 @@
      that does not cover. Either way the object must be enabled in the
      overview's type filters (Large Collidable Objects are off by default) or
      the bot cannot see it at all. Repeatable.
+   + `home-station` : Full name of the station to go back to when the drone bay
+     has run dry, exactly as the client writes it -- e.g.
+     `home-station=Amarr VIII (Oris) - Emperor Family Academy`. Without it the
+     bot restocks wherever the mission chain happened to leave it, which is a
+     station chosen by the agent and usually holds no drones at all. With it,
+     the wind-down sets a route there, flies it, docks and restocks; if the ship
+     is already there it just restocks. Give the whole name including the
+     parentheses and hyphens: the bot never types this string, it types the part
+     after the last " - " into the search bar and then matches this full name
+     against the rows that come back. See `routeToStationByName`.
    + `drone-type` : Name of the drone to refill the drone bay with while the
      session winds down, as it appears in the station's item hangar -- e.g.
      `drone-type=Hobgoblin I`. Defaults to `Acolyte I`. Fit-specific, which is
@@ -228,6 +238,7 @@ defaultBotSettings =
     , keepAtRange = AppSettings.No
     , targetingRangeMeters = 66000
     , droneTypeName = "Acolyte I"
+    , homeStationName = Nothing
     , shortRangeAmmoName = Nothing
     , longRangeAmmoName = Nothing
     }
@@ -321,6 +332,10 @@ parseBotSettings =
            , AppSettings.valueTypeString
                 (\droneTypeName settings -> { settings | droneTypeName = String.trim droneTypeName })
            )
+         , ( "home-station"
+           , AppSettings.valueTypeString
+                (\stationName settings -> { settings | homeStationName = nonEmptySettingValue stationName })
+           )
          , ( "short-range-ammo"
            , AppSettings.valueTypeString
                 (\ammoName settings -> { settings | shortRangeAmmoName = nonEmptySettingValue ammoName })
@@ -350,6 +365,7 @@ type alias BotSettings =
     , keepAtRange : AppSettings.YesOrNo
     , targetingRangeMeters : Int
     , droneTypeName : String
+    , homeStationName : Maybe String
     , shortRangeAmmoName : Maybe String
     , longRangeAmmoName : Maybe String
     }
@@ -410,6 +426,7 @@ type alias BotMemory =
     , droneBayWillTakeNoMore : Bool
     , droneRestockLooksWithRoom : Int
     , droneRestockDragsDispatched : Int
+    , droneBayEmptyLastSeen : Maybe Bool
     , lockAttempt : Maybe LockAttempt
     , lockProvenAtMeters : Maybe Int
     , lockRefusedAtMeters : Maybe Int
@@ -606,7 +623,7 @@ windDownBeforeSessionEnd context =
                         )
                         (case context.readingFromGameClient.shipUI of
                             Nothing ->
-                                if secondsRemaining <= 0 then
+                                if secondsRemaining <= dockedWindDownDeadlineSeconds context then
                                     -- Parked with the session over, so stop.
                                     -- The host only *announces* the deadline --
                                     -- it does not stop its own loop -- so a bot
@@ -615,19 +632,24 @@ windDownBeforeSessionEnd context =
                                     -- session, printing "Already docked. Stay
                                     -- put." 7,633 times.
                                     describeBranch
-                                        "Session over and docked -- finish."
+                                        (dockedWindDownFinishReason context)
                                         (Common.DecisionPath.endDecisionPath FinishSession)
 
                                 else
-                                    case maintenanceWhileDocked context of
-                                        Just maintenance ->
-                                            maintenance
+                                    case goToHomeStationWhileDocked context of
+                                        Just goHome ->
+                                            goHome
 
                                         Nothing ->
-                                            describeBranch "Already docked. Stay put." waitForProgressInGame
+                                            case maintenanceWhileDocked context of
+                                                Just maintenance ->
+                                                    maintenance
+
+                                                Nothing ->
+                                                    describeBranch "Already docked. Stay put." waitForProgressInGame
 
                             Just _ ->
-                                if secondsRemaining <= -secondsPastSessionEndBeforeGivingUpOnDocking then
+                                if secondsRemaining <= -(windDownOverrunAllowanceSeconds context) then
                                     -- Still in space well past the deadline, so
                                     -- stop trying to park and end the session
                                     -- where we are.
@@ -649,20 +671,360 @@ windDownBeforeSessionEnd context =
                                     -- it. It does not repair the underlying
                                     -- cause, which is why it says what happened.
                                     describeBranch
-                                        ("Session ended "
-                                            ++ String.fromInt -secondsRemaining
-                                            ++ " seconds ago and I still have not docked -- stop here rather than keep trying."
-                                        )
+                                        (inSpaceWindDownFinishReason context secondsRemaining)
                                         (Common.DecisionPath.endDecisionPath FinishSession)
 
                                 else
-                                    returnDronesToBay context
-                                        (dockAtStation
-                                            context.memory.lastDockedStationNameFromInfoPanel
-                                            context
-                                        )
+                                    case goToHomeStationWhileInSpace context of
+                                        Just goHome ->
+                                            goHome
+
+                                        Nothing ->
+                                            returnDronesToBay context
+                                                (dockAtStation
+                                                    context.memory.lastDockedStationNameFromInfoPanel
+                                                    context
+                                                )
                         )
                     )
+
+
+
+-- The home station
+
+
+{-| How long past the planned session end a trip to the home station may run.
+
+The trip is the one thing in the wind-down that legitimately takes longer than
+the window it starts in: `secondsBeforeSessionEndToWindDown` is 200 seconds and
+a couple of jumps plus a dock is several minutes. Rather than let it be cut off
+halfway -- which strands the ship in space, the worst of both outcomes -- the
+trip raises the overrun allowance that
+`secondsPastSessionEndBeforeGivingUpOnDocking` normally sets.
+
+Raising it is only safe because it stays a deadline. Issues #7 and #14 were both
+the same shape: a wait with no end, which reads in the log exactly like a bot
+working. This is a longer bound, not a missing one -- when it expires the
+session *ends*, loudly, naming the station it never reached.
+-}
+homeStationTripSecondsPastSessionEnd : Int
+homeStationTripSecondsPastSessionEnd =
+    420
+
+
+{-| How long past the planned session end the restock at the home station may
+run, once the ship is actually there.
+
+Much smaller than the trip's allowance, and for a different risk. The trip is
+bounded because travel is slow; this is bounded because the restock is what has
+to finish inside it, and the restock's own bound is a count of looks rather than
+a clock (`droneRestockLooksBeforeGivingUp`). Sixty seconds is about ten
+readings, which covers the three looks and two drags that budget allows.
+
+Normally it is not spent: the grace ends as soon as the restock latches
+`droneBayWillTakeNoMore`. The clock is what covers the case where no verdict
+arrives -- a gauge this build renders differently, say -- since a look budget
+that runs out ends the restock by *falling silent*, which on its own would leave
+the session parked here until the deadline.
+-}
+homeStationRestockGraceSeconds : Int
+homeStationRestockGraceSeconds =
+    60
+
+
+{-| The home station, when one is configured *and* there is a reason to go
+there. Both halves are the trigger, so a bot whose bay still holds drones winds
+down exactly as it did before this existed.
+
+**The reason is an empty bay, where the restock's own reason is a bay that is
+not full, and the two are deliberately different questions.**
+`restockDroneBayWhileDocked` tops up 9 drones of 10 because it is standing in
+the station already and the cost of acting is one drag. This decides whether to
+abandon the wind-down, undock, fly several jumps and risk ending the session in
+space -- and 9 of 10 is not worth that, while none of 10 is. The asymmetry is
+in the cost of the action, not in the reading.
+
+It is also what the instrument can say. `droneBayEmptyLastSeen` comes from the
+drones window, the only view of the bay that exists in space, and that window
+titles the bay group with a bare count and no capacity -- so fullness is not a
+question an in-space reading can answer at all. See
+`droneBayIsEmptyFromDronesWindow`.
+
+`droneBayWillTakeNoMore` is #24's verdict from the *other* instrument, and is
+respected here for the case it can arise in: a bay whose gauge already read
+full, or a drop the client already refused, is not a reason to fly anywhere. It
+resets on undock, so it never suppresses a trip decided in space.
+-}
+homeStationToGoTo : BotDecisionContext -> Maybe String
+homeStationToGoTo context =
+    case context.eventContext.botSettings.homeStationName of
+        Nothing ->
+            Nothing
+
+        Just stationName ->
+            if
+                (context.memory.droneBayEmptyLastSeen == Just True)
+                    && not context.memory.droneBayWillTakeNoMore
+            then
+                Just stationName
+
+            else
+                Nothing
+
+
+{-| Which station the info panel says we are docked at, or Nothing when this
+reading does not say.
+
+Read live rather than from `lastDockedStationNameFromInfoPanel`, which is a
+*last seen* and would happily name the previous station while docked at this
+one -- and answering "yes, we are home" about the wrong station would restock in
+the station that has no drones, which is the bug this whole feature is about.
+`generalSetupInUserInterface` runs before the wind-down on every reading and
+expands the location info panel, so the name is normally there.
+-}
+dockedStationNameFromInfoPanel : BotDecisionContext -> Maybe String
+dockedStationNameFromInfoPanel context =
+    context.readingFromGameClient.infoPanelContainer
+        |> Maybe.andThen .infoPanelLocationInfo
+        |> Maybe.andThen .expandedContent
+        |> Maybe.andThen .currentStationName
+
+
+{-| Whether the ship is docked at the home station, or Nothing when the reading
+cannot say.
+
+Three-valued on purpose. "I cannot tell" and "no" want opposite actions -- one
+waits, the other undocks and flies away -- and collapsing them into a Bool means
+picking one of those to do on no evidence.
+
+The name is matched as an exact string, ignoring case and surrounding space, or
+as the configured name appearing inside the panel's. Containment only in that
+direction: the panel decorating the name with something extra should still
+match, but a configured `Amarr` matching every station in the constellation
+should not.
+-}
+dockedAtHomeStation : BotDecisionContext -> String -> Maybe Bool
+dockedAtHomeStation context homeName =
+    dockedStationNameFromInfoPanel context
+        |> Maybe.map
+            (\stationName ->
+                let
+                    normalise =
+                        String.trim >> String.toLower
+                in
+                (normalise stationName == normalise homeName)
+                    || stringContainsIgnoringCase (String.trim homeName) stationName
+            )
+
+
+{-| The overrun the wind-down allows itself while in space, in seconds past the
+planned session end.
+-}
+windDownOverrunAllowanceSeconds : BotDecisionContext -> Int
+windDownOverrunAllowanceSeconds context =
+    case homeStationToGoTo context of
+        Nothing ->
+            secondsPastSessionEndBeforeGivingUpOnDocking
+
+        Just _ ->
+            homeStationTripSecondsPastSessionEnd
+
+
+{-| The point at which a docked bot stops winding down and ends the session.
+
+Normally the planned end itself. A ship that has reached its home station with
+an empty bay gets `homeStationRestockGraceSeconds` past that, because arriving
+and then finishing without restocking would waste the whole trip.
+-}
+dockedWindDownDeadlineSeconds : BotDecisionContext -> Int
+dockedWindDownDeadlineSeconds context =
+    if homeStationRestockGraceApplies context then
+        -homeStationRestockGraceSeconds
+
+    else
+        0
+
+
+{-| Whether the wind-down is being held open for a restock at the home station.
+True only when there is a home station, the bay is known empty, and this is
+that station -- so it can never extend a session that has nothing to gain by it.
+
+It also stops being true the moment the restock latches `droneBayWillTakeNoMore`
+(via `homeStationToGoTo`), so the grace ends on the restock's own verdict rather
+than always running its full length. The clock is the backstop for the case
+where no verdict arrives at all.
+-}
+homeStationRestockGraceApplies : BotDecisionContext -> Bool
+homeStationRestockGraceApplies context =
+    case homeStationToGoTo context of
+        Nothing ->
+            False
+
+        Just stationName ->
+            dockedAtHomeStation context stationName == Just True
+
+
+{-| Why a docked bot is finishing, worded so the log alone says whether the trip
+home succeeded, was never needed, or ran out of time.
+-}
+dockedWindDownFinishReason : BotDecisionContext -> String
+dockedWindDownFinishReason context =
+    case homeStationToGoTo context of
+        Nothing ->
+            "Session over and docked -- finish."
+
+        Just stationName ->
+            if dockedAtHomeStation context stationName == Just True then
+                "Home station: docked at '"
+                    ++ stationName
+                    ++ "' with the restock grace spent -- finish here."
+
+            else
+                "Session over and docked -- finish. The drone bay is still empty and this is not '"
+                    ++ stationName
+                    ++ "'."
+
+
+inSpaceWindDownFinishReason : BotDecisionContext -> Int -> String
+inSpaceWindDownFinishReason context secondsRemaining =
+    case homeStationToGoTo context of
+        Nothing ->
+            "Session ended "
+                ++ String.fromInt -secondsRemaining
+                ++ " seconds ago and I still have not docked -- stop here rather than keep trying."
+
+        Just stationName ->
+            "Home station: gave up -- the session ended "
+                ++ String.fromInt -secondsRemaining
+                ++ " seconds ago and I never reached '"
+                ++ stationName
+                ++ "'. Stopping here rather than flying on past the deadline."
+
+
+{-| Head home while docked somewhere else: set the route first, undock second.
+
+That order is the point. Setting a destination is the step that can fail -- the
+station may not be in the search results, the results window may not open -- and
+failing it while still docked costs nothing, where failing it after undocking
+leaves the ship in space with the session ending. The search bar works from
+inside a station, so nothing is gained by undocking first.
+
+Returns Nothing when the ship is already home, which hands the reading to
+`maintenanceWhileDocked` and its restock: "if already docked there, restock
+without travelling".
+-}
+goToHomeStationWhileDocked : BotDecisionContext -> Maybe DecisionPathNode
+goToHomeStationWhileDocked context =
+    homeStationToGoTo context
+        |> Maybe.andThen
+            (\stationName ->
+                case dockedAtHomeStation context stationName of
+                    Just True ->
+                        Nothing
+
+                    Nothing ->
+                        -- Not knowing where we are is a reason not to undock,
+                        -- and no reason to skip the maintenance that was
+                        -- happening here before this feature existed. Restocking
+                        -- in the wrong station finds no drones and costs a few
+                        -- readings; undocking towards a station we may already
+                        -- be standing in costs the session.
+                        Just
+                            (describeBranch
+                                ("Home station: the info panel does not name the station I am docked at, so I cannot tell whether it is '"
+                                    ++ stationName
+                                    ++ "' -- staying docked rather than undocking on a guess."
+                                )
+                                (maintenanceWhileDocked context
+                                    |> Maybe.withDefault
+                                        (describeBranch "Already docked. Stay put." waitForProgressInGame)
+                                )
+                            )
+
+                    Just False ->
+                        Just
+                            (if homeStationRouteIsSet context stationName then
+                                describeBranch
+                                    ("Home station: the route to '"
+                                        ++ stationName
+                                        ++ "' is set -- undock and travel there."
+                                    )
+                                    (undockUsingStationWindow context)
+
+                             else
+                                describeBranch
+                                    ("Home station: the drone bay is empty and this is not '"
+                                        ++ stationName
+                                        ++ "' -- set the route there before undocking."
+                                    )
+                                    (routeToStationByName context stationName)
+                            )
+            )
+
+
+{-| Head home from space: set the route, then fly it gate by gate.
+
+`jumpToNextSystem` is the same travel step the mission path uses, and it is what
+docks at the far end too -- the route marker's own menu offers "Dock" once the
+destination system is reached, which is why nothing here has to know the
+difference between another jump and arrival.
+-}
+goToHomeStationWhileInSpace : BotDecisionContext -> Maybe DecisionPathNode
+goToHomeStationWhileInSpace context =
+    homeStationToGoTo context
+        |> Maybe.map
+            (\stationName ->
+                if homeStationRouteIsSet context stationName then
+                    case closeSearchResultsWhenRouteIsSet context of
+                        Just closeResults ->
+                            closeResults
+
+                        Nothing ->
+                            describeBranch
+                                ("Home station: travelling to '"
+                                    ++ stationName
+                                    ++ "' to restock the drone bay."
+                                )
+                                (jumpToNextSystem context)
+
+                else
+                    describeBranch
+                        ("Home station: the drone bay is empty -- set the route to '"
+                            ++ stationName
+                            ++ "'."
+                        )
+                        (routeToStationByName context stationName)
+            )
+
+
+{-| Whether the route currently set is *our* route home, rather than a leftover
+from the mission the session was running.
+
+The route panel says a destination exists; it does not say which one, and
+nothing in a reading names it. Following the wrong route is not a visible
+failure either -- the ship travels, docks, and the session ends in the wrong
+station with every log line reading like success.
+
+So the evidence is the window that set it: the `Station: Information` window for
+the home station, which is what `routeToStationByName` clicks "Set Destination"
+in and which nothing afterwards closes. Route panel plus that window is the
+conjunction that only our own sequence produces.
+
+**This is the seam an ESI backend replaces.** The travel-and-dock path below
+asks route-setting exactly two questions -- "is the route mine" (here) and
+"make it so" (`routeToStationByName`) -- and knows nothing else about how a
+destination is originated. A backend that sets the destination by id answers the
+first from its own result instead of from a window, and the undock, the jumps
+and the dock are unchanged. That is not a swap anyone can make today, though:
+`botlab_host` answers a `SetAutopilotDestinationRequest` (PR #23) but no bot can
+issue one, because `OperateBotConfiguration` gives a decision no channel to the
+volatile process at all -- only mouse, keys and scroll. Until that framework gap
+is closed, the search bar is not an interim, it is the mechanism.
+-}
+homeStationRouteIsSet : BotDecisionContext -> String -> Bool
+homeStationRouteIsSet context stationName =
+    routeIsSet context
+        && (stationInfoWindowForStation context stationName /= Nothing)
 
 
 
@@ -1345,7 +1707,15 @@ withinDroneRestockWindow context =
             False
 
         Just secondsRemaining ->
-            droneRestockGiveUpSecondsBeforeSessionEnd < secondsRemaining
+            if homeStationRestockGraceApplies context then
+                -- A ship that flew home for this arrives late by design, and
+                -- the ordinary window has closed by then. The grace is the same
+                -- bound the docked wind-down uses, so the restock and the
+                -- session end together rather than one outliving the other.
+                -homeStationRestockGraceSeconds < secondsRemaining
+
+            else
+                droneRestockGiveUpSecondsBeforeSessionEnd < secondsRemaining
 
 
 {-| What a look into the ship's drone bay says about whether more will fit.
@@ -1431,6 +1801,53 @@ describeDroneBayFill fill =
 
         DroneBayFillUnreadable ->
             "a capacity gauge that does not say"
+
+
+{-| Whether the drones window shows nothing at all in the ship's bay, or
+Nothing when there is no drones window to ask.
+
+**A second instrument, not a second opinion.** `droneBayFillWhileSelected`
+above is the docked one: it reads the inventory's capacity gauge, and it is
+only readable once the bot has deliberately opened the bay from the ship's
+card. This is the in-space one, and the two never overlap -- the drones window
+is absent while docked, and the inventory does not have the bay selected while
+in space.
+
+That is why both exist. The restock asks "will more fit" at a moment it has
+itself arranged; the home trip asks "is it worth flying home" *before*
+undocking, where nothing has opened the bay and nothing can, since the answer
+is needed to decide whether to leave at all.
+
+**Emptiness, not fullness, and that is forced rather than chosen.** The
+drones window titles its bay group with a bare count on this build -- the
+`(current/maximum)` form `parseQuantityFromDroneGroupTitleText` can read is
+what the *in space* group carries, since that one is bandwidth-limited. With
+no maximum there is no fullness to compute, so "nothing in the bay" is the
+strongest thing an in-space reading can say. It is also the right threshold
+for a trip: see `homeStationToGoTo`.
+
+A bay with nothing in it may render no group at all, so a missing group counts
+as empty, as does a group whose title carries no number. Both are the state
+this feature exists for, and the cost of being wrong is a trip home to a bay
+that turns out to have drones -- where the restock's own gauge then retires
+the task on arrival.
+-}
+droneBayIsEmptyFromDronesWindow : ReadingFromGameClient -> Maybe Bool
+droneBayIsEmptyFromDronesWindow readingFromGameClient =
+    readingFromGameClient.dronesWindow
+        |> Maybe.map
+            (\dronesWindow ->
+                case dronesWindow.droneGroupInBay of
+                    Nothing ->
+                        True
+
+                    Just droneGroupInBay ->
+                        (droneGroupInBay.header.quantityFromTitle
+                            |> Maybe.map .current
+                            |> Maybe.withDefault 0
+                        )
+                            < 1
+            )
 
 
 {-| The items an inventory window is currently rendering, whichever of the two
@@ -6443,6 +6860,7 @@ initBotMemory =
     , droneBayWillTakeNoMore = False
     , droneRestockLooksWithRoom = 0
     , droneRestockDragsDispatched = 0
+    , droneBayEmptyLastSeen = Nothing
     , lockAttempt = Nothing
     , lockProvenAtMeters = Nothing
     , lockRefusedAtMeters = Nothing
@@ -6575,10 +6993,51 @@ statusTextFromState context =
     in
     [ [ describePerformance ]
     , [ describeMenuAndSettlingCounters ]
+    , [ describeHomeStation context ]
     , describeCurrentReading
     ]
         |> List.concat
         |> String.join "\n"
+
+
+{-| The home station and whether the bot currently means to go there.
+
+Carried continuously rather than only while the trip runs, because the two
+inputs that decide it -- the setting and what the last reading that could see
+the drone bay said -- are both invisible otherwise, and "the trip never
+started" and "the trip finished" look identical in a decision log.
+-}
+describeHomeStation : BotDecisionContext -> String
+describeHomeStation context =
+    case context.eventContext.botSettings.homeStationName of
+        Nothing ->
+            "Home station: not set."
+
+        Just stationName ->
+            "Home station: '"
+                ++ stationName
+                ++ "' (drone bay last seen "
+                ++ (case context.memory.droneBayEmptyLastSeen of
+                        Nothing ->
+                            "never -- no reading has shown the drones window yet"
+
+                        Just True ->
+                            "empty"
+
+                        Just False ->
+                            "stocked"
+                   )
+                ++ (case dockedAtHomeStation context stationName of
+                        Just True ->
+                            ", docked there"
+
+                        Just False ->
+                            ", docked elsewhere"
+
+                        Nothing ->
+                            ""
+                   )
+                ++ ")."
 
 
 overviewEntryIsTargetedOrTargeting : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
@@ -7484,14 +7943,7 @@ routeToStationByName context stationName =
             findUiElementWithText textToFind window
 
         stationInfoWindow =
-            allUiNodesInReading context
-                |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "InfoWindow")
-                |> List.filter
-                    (\window ->
-                        EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode
-                            |> List.any (stringContainsIgnoringCase stationName)
-                    )
-                |> List.head
+            stationInfoWindowForStation context stationName
     in
     case stationInfoWindow |> Maybe.andThen (\window -> withinWindow window "Set Destination") of
         Just setDestination ->
@@ -7551,6 +8003,28 @@ routeToStationByName context stationName =
 
                         Nothing ->
                             describeBranch "I do not see the search bar." askForHelpToGetUnstuck
+
+
+{-| The `Station: Information` window a double-click on a search result opens,
+for one particular station.
+
+Split out of `routeToStationByName` because it is also the evidence that a route
+was set by us rather than left over from a mission -- see
+`homeStationRouteIsSet`. Matched on the name appearing anywhere in the window's
+text, which is how the window titles itself; the tooltip trap does not apply
+here, since that one is drawn outside the *results* window and is not an
+`InfoWindow` at all.
+-}
+stationInfoWindowForStation : BotDecisionContext -> String -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+stationInfoWindowForStation context stationName =
+    allUiNodesInReading context
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "InfoWindow")
+        |> List.filter
+            (\window ->
+                EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode
+                    |> List.any (stringContainsIgnoringCase stationName)
+            )
+        |> List.head
 
 
 {-| A typable search term for a station name -- the tail after the last " - ",
@@ -8088,6 +8562,23 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         else
             droneBayIsSelectedContainer context.readingFromGameClient
                 || botMemoryBefore.droneBayOpenedFromShipCard
+    , droneBayEmptyLastSeen =
+        -- The last answer a reading was actually able to give about the bay,
+        -- carried forward across the readings that cannot give one.
+        --
+        -- Written only from readings that can see the bay, so this is evidence
+        -- rather than inference: in space the drones window is open (this
+        -- bot's own setup instructions require it), so a run that loses its
+        -- drones records `Just True` on the very next reading and carries it
+        -- into the dock, which is where the home-station decision is made.
+        -- `Nothing` means no reading this session ever saw the bay -- a session
+        -- that never undocked -- and the home trip declines to guess.
+        case droneBayIsEmptyFromDronesWindow context.readingFromGameClient of
+            Nothing ->
+                botMemoryBefore.droneBayEmptyLastSeen
+
+            Just isEmpty ->
+                Just isEmpty
     , ammoSwap = updateAmmoSwapMemory context botMemoryBefore.ammoSwap
     , droneBayWillTakeNoMore =
         -- The restock's "already done", in the two forms a docked reading can
