@@ -43,6 +43,7 @@ USAGE='./run_mission.sh                                     # start a run
 ./run_mission.sh --settings "agent-name=Some Agent"  # replaces the defaults below wholesale
 ./run_mission.sh --session-duration-minutes 180      # default is 120
 SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
+./run_mission.sh --web-console 9000                  # console on another port (default 8787)
 ./run_mission.sh --help                              # this text'
 
 # Default settings. All of these are optional -- the bot runs with none of
@@ -71,21 +72,26 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 #
 # The run-away thresholds pull the ship out when it drops below them.
 #
-# The shield one used to be disabled (-1), on the reasoning that shields
-# recharge and dipping into them is normal while armor damage is not. That
-# reasoning is right about a mission and wrong about this hull, and issue #32
-# is what it cost: the ship is shield-tanked, so armor cannot take a point of
-# damage until the shield is at zero. Across the recorded runs the shield
-# reached 9%, 12% and 44% while the armor gauge sat at exactly 100% in every
-# one of thousands of samples. Disabling shield therefore did not leave one
-# guard, it left none -- the guard that remained was on a value that cannot
-# move until the tank is already gone.
+# The shield one is disabled (-1), and the reasoning that briefly set it to 25
+# had the hull backwards. It read "the ship is shield-tanked, so armor cannot
+# take a point of damage until the shield is at zero", inferred from runs where
+# the shield moved and the armor gauge sat at 100.
 #
-# 25 is set from those same runs: the two sessions that went below it went to
-# 9% and 12%, which is most of the tank spent, and the worst any other run
-# reached was 44%. Both of those two completed their missions, so this will
-# cost an aborted mission on a run like them. That is the trade, taken
-# deliberately.
+# This hull is **armor-tanked**. Its shield is not a buffer being spent, it is
+# an empty slot the ship fights in: 0% shield is the resting state, not a
+# warning. Run 10 showed the signature plainly -- armor walked 96, 93, 89, 87
+# and then repaired back through 95 to 100 while the shield stayed flat at 0.
+# That is an armor repairer cycling, and it is the opposite of what a
+# shield-tanked ship does.
+#
+# So a shield threshold of 25 does not guard anything; it trips on the ship's
+# normal condition. Run 10 raised the retreat 142 times in one session, pulling
+# out of fights it was in no danger in, and had to be corrected live through the
+# web console mid-run.
+#
+# Armor is the gauge that means something here, and the damage guard below is
+# the one that needs no gauge at all. Between them the ship is covered without
+# a threshold on a value that is always zero.
 #
 # run-away-incoming-damage-threshold is the guard that needs no gauge at all:
 # EVE's own combat log, summed by the host, over a rolling 45-second window.
@@ -219,7 +225,7 @@ approach-object=Amarr Chapel
 approach-object=Amarr-Caldari Mediation Center
 approach-object=Survey Ship
 decline-mission=Survey Rendezvous
-run-away-shield-hitpoints-threshold-percent=25
+run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=70
 run-away-incoming-damage-threshold=3500"
 
@@ -273,4 +279,5 @@ sleep 1
 python3 "${SCRIPT_DIR}/botlab_host/botlab_host.py" "$BOT_SOURCE" \
     --settings "$SETTINGS" \
     --session-duration-minutes "$SESSION_DURATION_MINUTES" \
+    --web-console \
     --execute-input "$@"

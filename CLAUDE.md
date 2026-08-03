@@ -11,6 +11,22 @@ input. Remaining work is refinement, not architecture.
 
 ## Start here
 
+**Picking up a session cold — resuming after a context clear, or taking over a
+run someone else started — is `PILOT.md`.** This file is the facts about the
+client, the bot and what has been learned about both; PILOT.md is the procedure
+for operating them: what to check first, how to start a run without silently
+losing its settings, what to watch, how to tell a real stall from noise, and how
+to hand back. Read it before touching a running session.
+
+The short version of it, for orientation:
+
+```
+cd tools/macos-host
+./cycle_run.sh --status                 # is a run going, and which log
+ls -lt ~/eve-bot-logs | head -3         # runs, newest first
+gh issue list --repo smerwin/bots --state open
+```
+
 Run a bot:
 
 ```
@@ -450,6 +466,15 @@ screenshot read), and later responses offer genuinely new tasks such as the
 `SearchUIRootAddress` → `ReadFromWindow` transition. Drain a queue keyed by
 `taskId`, extended from every response, until empty.
 
+## The other documents
+
+| file | what it is for |
+|---|---|
+| `PILOT.md` | **operating a session** — resume cold, start a run, watch it, triage an alarm, hand back. The procedure; this file is the facts |
+| `MACOS.md` | setting the host up from nothing: SIP, permissions, building the native tools, running a bot for the first time |
+| `REPL.md` | driving the client by hand through `eve_repl` |
+| `HOTAS.md` | pinned sketch: flying the client with a stick and throttle |
+
 ## Skills (`.claude/skills/`)
 
 Slash commands wrapping the workflows that recur here. They carry the
@@ -568,17 +593,26 @@ Raising `CIRCLING_THRESHOLD` instead would have been the wrong fix — it is
 calibrated to catch an 8,983-repeat pathology, and the problem was the progress
 signal, not the sensitivity.
 
-**`--web-console [PORT]`** (default 8787, off unless asked for) serves a live
+**`--web-console [PORT]`** (default port 8787; `run_mission.sh` now passes it on
+every run, so it is on unless you are calling `botlab_host.py` directly) serves a live
 console: session stats, the log as a filterable stream, an editable settings
 box, and pause/resume/stop. `./run_mission.sh --web-console` works as-is, since
 the launcher already forwards `"$@"`.
 
-It binds to this machine's **Tailscale address and nothing else**, and **fails
-to start** if no 100.64.0.0/10 address can be found rather than falling back to
+It binds to this machine's **Tailscale address and nothing else**, and **refuses
+to bind** if no 100.64.0.0/10 address can be found rather than falling back to
 a wider interface — the console can change what the bot does and stop it, so
 guessing wrong means publishing a remote control. Tailscale is the
 authentication; there is no login of its own, which is exactly why the bind must
 stay narrow.
+
+That refusal used to abort the whole run, which stopped mattering the moment the
+launcher started passing the flag on every run: a tailnet that happened to be
+down would have killed every session after compiling and before the first
+decision. `NoTailnet` is now caught, logged as `WEB CONSOLE NOT STARTED`, and
+the run continues without a console. The safety property is unchanged — it still
+never binds anywhere else — and the warning is loud because a console silently
+absent is worse than none, since the operator goes looking for one.
 
 Two design points that are load-bearing rather than stylistic. **HTTP handlers
 never touch the pipe to the bot process** — it is a strict request/response

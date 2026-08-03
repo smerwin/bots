@@ -394,17 +394,46 @@ class MissionRunnerGuardTest(unittest.TestCase):
         self.assertIn("    , incomingDamage = updateIncomingDamageMemory context", body)
         self.assertIn("    , shipLoss =", body)
 
-    def test_the_launcher_no_longer_ships_a_disabled_shield_guard(self):
-        # Issue #32: with shield disabled, armour was the only guard left, and
-        # on a shield-tanked hull armour cannot move until the shield is gone.
+    def test_the_launcher_always_ships_at_least_one_armed_guard(self):
+        """At least one retreat guard must be armed, whichever suits the hull.
+
+        This used to assert the *shield* guard specifically was above zero, on
+        the reasoning in #32 that the hull is shield-tanked and armour therefore
+        cannot move until the tank is gone. That had the hull backwards: it is
+        armour-tanked, its shield rests at 0 by design, and a shield threshold
+        fires on the ship's normal condition -- run 10 raised the retreat 142
+        times in one session before it was corrected live.
+
+        So which guard is armed depends on the fit and cannot be asserted. What
+        can be asserted is the thing #32 was really about: the launcher must not
+        ship a set where every guard is disabled, which is what left run 7 with
+        nothing watching. The damage guard needs no gauge at all, so it is the
+        one that holds regardless of tank.
+        """
         with open(os.path.join(MACOS_HOST_DIR, "run_mission.sh"),
                   encoding="utf-8") as handle:
             launcher = handle.read()
-        match = re.search(r"^run-away-shield-hitpoints-threshold-percent=(-?\d+)$",
-                          launcher, re.MULTILINE)
-        self.assertIsNotNone(match)
-        self.assertGreater(int(match.group(1)), 0)
-        self.assertIn("run-away-incoming-damage-threshold=", launcher)
+
+        def threshold(name):
+            # The trailing "? matters: these live inside the quoted SETTINGS
+            # block, so whichever key happens to be last carries the closing
+            # quote and an end-anchored pattern silently misses it.
+            match = re.search(rf'^run-away-{name}=(-?\d+)"?$', launcher, re.MULTILINE)
+            self.assertIsNotNone(match, f"{name} missing from the launcher defaults")
+            return int(match.group(1))
+
+        guards = {
+            "shield": threshold("shield-hitpoints-threshold-percent"),
+            "armor": threshold("armor-hitpoints-threshold-percent"),
+            "damage": threshold("incoming-damage-threshold"),
+        }
+        armed = {name: value for name, value in guards.items() if value > 0}
+        self.assertTrue(armed, f"every retreat guard is disabled: {guards}")
+
+        # The damage guard is the gauge-free one, and the only failure run 7
+        # could not have been saved from is the one where nothing watches at all.
+        self.assertGreater(guards["damage"], 0,
+                           "the damage guard should stay armed whatever the tank is")
 
 
 if __name__ == "__main__":
