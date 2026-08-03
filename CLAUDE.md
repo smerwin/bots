@@ -1806,6 +1806,112 @@ from the log; the 25 km row in the issue is an operator's live read, and if it
 was a working gate then trying the next-nearest gate after one is refused is
 still the follow-up.
 
+## "The nearest lootable object" was the nearest object of any kind
+
+Run 12 raised `askForHelpToGetUnstuck` 817 times on `Illegal Activity (1 of 3)
+-- Retrieve Gallente Light Marines`, having opened six wreck types and taken
+109 loot decisions first. Issue #53 read the overview as 63 rows of wrecks 28 m
+away that the bot had wrongly written off, and proposed expiring the emptied
+set. **All three parts of that are wrong, and reading the live client while it
+was still stuck is what showed it.**
+
+- **"28 m" is the Size column, not Distance.** The overview's headers on this
+  client are `Icon | Distance | Name | Type | Size | Velocity | Angular
+  Velocity`, and a Gallente Small Wreck's radius is 28 m. The wrecks were
+  2,699 m to 57 km away. The bot reads cells by header region and was never
+  confused; the operator's read was.
+- **There were 12 wrecks, not 63.** The other 51 rows are 41 Sharded Rocks,
+  three stargates, a sun, an Azbel, a trade post, a Ruined Neon Sign, a storage
+  silo, a mining post and a beacon.
+- **All twelve carried the texture `wreckLootedNPC.png`.** So
+  `overviewEntryLooksLooted` retired them — statelessly, from the client's own
+  icon, not from anything remembered. They really were empty.
+
+The item was in the mission's own `Cargo Container`, which the bot found at
+43,000 m, ranked first (`prefer-wreck` ships `Cargo Container, Personnel
+Transport` since #52, and that is what put a 43 km container ahead of wrecks at
+11 km), and was flying to when the client wrote
+
+```
+[ 2026.08.03 15:20:42 ] (notify) Cargo Container has just left Irnin as of 2 seconds ago
+```
+
+Sixteen readings, 43,000 m → 42,000 m, and it was gone. The client was still
+rendering `You need Gallente Light Marines in your cargohold` hours later with
+nothing matching "marine" anywhere else in the UI tree.
+
+**Run 13 is the disproof of every accumulating explanation.** Restarted onto the
+same accepted mission with an empty `BotMemory`, it reached the same dead end on
+its *third* reading and stayed there for all 495: 483 `Nothing to fight and no
+travel step offered`, and across 6,069 log lines not one `Look inside`, not one
+`loot-open`, not one `A row I want is off screen`. A fresh process cannot be
+carrying a stale candidate set or a per-type "already opened" record. **The
+objective was unwinnable and the bot was right about the grid.** Recovering from
+an objective that can no longer complete is a separate problem — issue #54.
+
+**What was genuinely broken, found while establishing that:**
+
+```elm
+nearestLootableEntry readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter (\entry -> entry.objectItemID /= Nothing)
+        |> List.sortBy overviewEntryDistanceOrFarInMeters
+        |> List.head
+```
+
+`missionObjectiveText`'s own comment, fifteen lines below it in the same file,
+says why that is not a filter: *"Every row has one — stargates, stations, the
+sun."* The identical mistake, in the identical field, and this copy survived it.
+So "the nearest lootable object" answered with the nearest object of any kind,
+and two callers believed it:
+
+- **`shipIsWithinLootRange`** asks whether the container the bot has open is
+  within 2,000 m and was answered about whatever was physically closest. Its
+  false branch — `Still on the way to the container` — appears **zero times
+  across all thirteen recorded runs**, while run 12 alone decided `Click 'Loot
+  All'` 109 times. A guard that has never once been false is #34's shape again.
+- **`openWreckLootWindowAndId`** hands that row's id to `lootedWreckIds` and
+  `unlootableWreckIds`. On run 12's own grid, 51 of 63 candidate rows could not
+  hold anything, so an emptied wreck could be recorded under an asteroid's id
+  while the wreck itself went unmarked.
+
+The fix is one shared rule, `textNamesALootableObject` (whole words, for
+`containsWords`' reasons — a rogue drone called a "Wrecker" contains "wreck"),
+asked by the picker, the scroller and this function, plus a `_display` filter
+because this sorts by a distance a virtualised row reports staler than it looks.
+The scroller keeps its extra `warehouse` word, written at its own call site
+rather than folded in, since it wants a Cargo Warehouse brought into view and
+the picker does not open one.
+
+**Making a guard answerable makes the branch behind it reachable**, and that
+branch waits. `lootWindowOutOfRangeTicks` bounds it, and it used to reset
+whenever `openWreckLootWindowAndId` could not resolve a row — which is precisely
+the state the fix creates, a loot window open with no lootable row on the
+overview to measure against. Both it and `lootAllRefusedTicks` now count from
+the open *window*; only the two id memories still need a resolved row, because
+an id is what they store.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_lootable_object_identity.py`: the word rule is run
+through the real `Bot.elm` in `elm repl` against all sixteen distinct
+Type/Name pairs the stuck client was holding, plus the traps this repo has
+already paid for; run 13's log is asserted line by line as the cold-start
+disproof; the wiring, the counters' arithmetic and the scroller's extra word are
+read out of the source. Confirmed by mutation: a substring match admits
+"Wrecker", reverting the filter to the item id alone breaks the wiring tests,
+and pointing either counter back at `openWreckLootWindowAndId` breaks its bound.
+
+**Unverified: any of it running.** Nothing in the recordings exercises the fixed
+path, because the branch it makes reachable has never been reached. The first
+run that opens a container from outside 2,000 m should print `Still on the way
+to the container -- wait until inside 2000 m before taking anything.` and then
+`Click 'Loot All'` on arrival; if it instead prints that line for 250 readings
+and gives up, the range read is wrong in the other direction. Whether the
+container id now recorded is the right one cannot be checked from a log at all —
+the bot never prints it — so the tell is negative: no repeat of a wreck already
+emptied.
+
 ## Drones: how long they have been out says nothing about a recall
 
 Warping with drones in space loses them, so every warp, dock and retreat in

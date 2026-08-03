@@ -3015,9 +3015,43 @@ overviewEntryIsDisplayed entry =
     nodeIsDisplayed entry.uiNode.uiNode
 
 
+{-| Whether an overview row's own words say it is a thing that can hold loot.
+
+One definition, because three callers ask it -- the picker, the scroller, and
+`nearestLootableEntry`, which is what decides *which wreck* an open loot window
+belongs to. They used to ask it in three different ways, and the third did not
+ask it at all: it took the nearest row with an `objectItemID`, which every row
+in the overview has (see `missionObjectiveText` for what that cost once
+already). A grid of asteroids, beacons and a stargate therefore answered "the
+nearest lootable object" with whatever happened to be closest.
+-}
+overviewEntryNamesALootableObject : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryNamesALootableObject entry =
+    [ entry.objectName, entry.objectType ]
+        |> List.filterMap identity
+        |> List.any textNamesALootableObject
+
+
+{-| The word rule behind it, separated so it can be run against the strings the
+client actually writes.
+
+Whole words rather than substrings, for `containsWords`' reasons: a rogue drone
+called a "Wrecker" contains "wreck", and this decides what the ship flies to.
+-}
+textNamesALootableObject : String -> Bool
+textNamesALootableObject text =
+    [ "wreck", "cargo container" ]
+        |> List.any (\pattern -> containsWords pattern text)
+
+
 {-| Rows worth opening for a wanted item: one that names the item, or any wreck
 or cargo container. Shared by the picker and by the scroller, so the scroll only
 fires for a row the picker would actually use.
+
+The scroller's set is deliberately one word wider than the picker's -- a Cargo
+Warehouse is worth bringing into view, and `lootableHoldingMissionItem` does not
+open one -- so the extra pattern is written here rather than hidden inside the
+shared rule.
 -}
 isLootableFor : BotDecisionContext -> String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isLootableFor context itemName entry =
@@ -3030,13 +3064,9 @@ isLootableFor context itemName entry =
     in
     (not alreadyOpened)
         && ((texts |> List.any (stringContainsIgnoringCase itemName))
-        || (texts
-                |> List.any
-                    (\text ->
-                        [ "wreck", "cargo container", "warehouse" ]
-                            |> List.any (\pattern -> containsWords pattern text)
-                    )
-           ))
+                || overviewEntryNamesALootableObject entry
+                || (texts |> List.any (containsWords "warehouse"))
+           )
 
 
 {-| Whether `pattern` occurs in `text` as whole words rather than as a substring.
@@ -3621,12 +3651,7 @@ lootableHoldingMissionItem context itemName =
             textsOfEntry entry |> List.any (stringContainsIgnoringCase itemName)
 
         isLootableHulk entry =
-            textsOfEntry entry
-                |> List.any
-                    (\text ->
-                        [ "wreck", "cargo container" ]
-                            |> List.any (\pattern -> containsWords pattern text)
-                    )
+            overviewEntryNamesALootableObject entry
 
         isPreferredWreck entry =
             isLootableHulk entry
@@ -9794,11 +9819,34 @@ wreckLootWindowsFromReadingFromGameClient readingFromGameClient =
 {-| The overview row the open loot window belongs to: the nearest one that can be
 looted at all. That is necessarily the container just opened, since it is the only
 one the bot ever opens.
+
+**"Lootable" has to mean lootable, and for a long time it did not.** The filter
+was `objectItemID /= Nothing`, and `missionObjectiveText`'s own note says why
+that is not a filter: every row has an item id -- stargates, stations, the sun.
+So this answered with whatever object was physically nearest the ship. Two
+callers read it and both were wrong in a way nothing could report:
+
+  * `shipIsWithinLootRange` asked "is the container I have open within 2,000 m"
+    and was answered about a beacon. Across all thirteen recorded runs its false
+    branch -- `Still on the way to the container` -- was reached **zero** times,
+    while `Click 'Loot All'` was decided 109 times in run 12 alone. A guard that
+    has never once been false is not a guard.
+  * `openWreckLootWindowAndId` uses the id to record which wreck was emptied or
+    written off. On run 12's own final grid the nearest row was a Ruined Neon
+    Sign 674 m away and the nearest wreck 2,699 m, so an emptied wreck would
+    have gone into `lootedWreckIds` under the neon sign's id -- the real wreck
+    never marked, and a row that is not a container marked instead.
+
+Displayed rows only, for "Reading the overview"'s reason: a virtualised row
+keeps a stale distance belonging to whatever was recycled into its place, and
+believing one here would put a phantom at the head of a distance sort.
 -}
 nearestLootableEntry : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
 nearestLootableEntry readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
+        |> List.filter overviewEntryNamesALootableObject
+        |> List.filter overviewEntryIsDisplayed
         |> List.filter (\entry -> entry.objectItemID /= Nothing)
         |> List.sortBy overviewEntryDistanceOrFarInMeters
         |> List.head
@@ -11712,8 +11760,14 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- this container for a reason the bot cannot see -- a full cargohold,
         -- say -- and `unlootableWreckIds` gives up on it rather than letting it
         -- hold the mission open indefinitely.
-        case openWreckLootWindowAndId context.readingFromGameClient of
-            Just ( lootWindow, _ ) ->
+        --
+        -- Counted from the *window*, not from `openWreckLootWindowAndId`, which
+        -- also has to resolve which overview row the window belongs to. Now
+        -- that resolving asks for a lootable row rather than any row, it can
+        -- answer `Nothing` -- and a bound that resets whenever the thing it is
+        -- bounding cannot be identified is no bound at all.
+        case context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.head of
+            Just lootWindow ->
                 if shipIsWithinLootRange context.readingFromGameClient && not (openContainerIsEmpty lootWindow) then
                     botMemoryBefore.lootAllRefusedTicks + 1
 
@@ -11789,7 +11843,12 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- range unanswerable -- the wait has to end somewhere. Generous, because
         -- a legitimate approach from the far side of a pocket is minutes of
         -- readings and cutting one short abandons a wreck for no reason.
-        case openWreckLootWindowAndId context.readingFromGameClient of
+        --
+        -- Keyed on the open window for the reason above: "no lootable row on
+        -- the overview to measure against" is exactly the state this has to
+        -- age out of, since `shipIsWithinLootRange` answers `False` there and
+        -- the branch it gates waits.
+        case context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.head of
             Just _ ->
                 if shipIsWithinLootRange context.readingFromGameClient then
                     0
