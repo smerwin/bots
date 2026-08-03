@@ -1476,16 +1476,61 @@ the gate was out of range and the approach path of `1fe6439` had failed — the
 log shows the ship closing 59 km → 9,565 m → 8,076 m → in reach, shutting the
 prop mod down on arrival, exactly as intended.
 
-**Unverified, and the reason the response is "ask for help" rather than "go get
-it".** The item is presumably in a wreck or container on the grid — the mission
-was *Illegal Activity (3 of 3)* and `R.S. Officer` was the hardest hitter of the
-fight — but the objective text names no cargo, so
-`lootMissionItemFromContainerIfPresent` has nothing to look for, and the bot
-reported nothing on the grid to approach for 2,816 readings. Getting the
-passcard is a feature this does not attempt. Nor is a second gate on that grid
-confirmed from the log; the 25 km row in the issue is an operator's live read,
-and if it was a working gate then trying the next-nearest gate after one is
-refused is the follow-up. None of this has been watched running.
+**The client names the key, so the bot fetches it.** #41 stopped at reporting
+the refusal, on the grounds that the objective names no cargo and so
+`lootMissionItemFromContainerIfPresent` had nothing to look for. Half of that
+was wrong, and the operator's own resolution is what showed it: the passcard was
+looted from a nearby wreck and the mission continued. The *objective* names no
+cargo; the *client's sentence* names the item outright, and every piece of the
+retrieval path — `isLootableFor`, `lootableHoldingMissionItem`,
+`scrollOverviewToReveal`, the `prefer-wreck` setting — already takes the item
+name as an argument. The only missing piece was the source of that argument.
+
+`gateKeyItemNameFromRefusal` slices it out between `you need to have` and
+`in your cargo hold`, `itemToFetchFromTheGrid` offers the objective's cargo
+first and the gate key second, and `lootMissionItemFromContainerIfPresent` asks
+that instead of the objective directly. Nothing downstream is new.
+
+Three things hold it together, and each is a way it could have gone wrong.
+
+**The right-hand marker is the substring the matcher already pins.**
+`gateKeyClosingMarker` is one constant used by both, so an extraction can never
+succeed on a sentence the matcher would have rejected — in particular the
+scrambled gate, which wants a fight rather than an errand. The left marker is
+the whole clause `you need to have` rather than something shorter that happens
+to work on the one recorded sentence.
+
+**The name is matched the way every other item name is.** It goes to
+`isLootableFor` as a plain substring, punctuation and all —
+`R.S. Officer's Passcard` carries two periods and an apostrophe, and a second
+matching rule invented for them would rest on one observation. What that costs
+is worth knowing: the *named container* branch only fires when an overview row
+literally contains the name, and a wreck's row carries the dead ship's name, so
+a key inside a wreck is found by the blind wreck-opening branch — exactly as for
+every other mission item that comes out of something destroyed.
+
+**The verdict lets go when a container is emptied.** Otherwise one refusal
+decides the rest of the session: the key goes in the hold and the gate is never
+asked again. Emptying anything clears it, the gate is pressed again, and if it
+is still locked the client says so again and the verdict re-latches on *that*
+reading — never on the strength of a verdict formed before the loot. The loop
+terminates for the reason `lootableHoldingMissionItem` already documents: each
+container emptied drops out of the candidate list, so the search shrinks, and
+when it is exhausted the gate branch asks for help **naming the item it was
+looking for**. `containerEmptiedThisReading` is one definition read by both
+`lootedWreckIds` and the verdict, because two copies of "was this just emptied"
+would drift silently in both directions.
+
+**Unverified.** The loot-then-retry sequence has never run: it needs a live
+mission that locks its gate, and none has been flown since. What is checked
+off-line is the extraction against the real sentence and against the scrambled
+one, that the key reaches the picker, that the verdict is forgotten on a loot,
+and that the give-up names the item — but the *rule* is mirrored in Python
+rather than executed, since the function is not exposed from the `Bot` module
+and this suite reads Elm as text. Nor is a second gate on that grid confirmed
+from the log; the 25 km row in the issue is an operator's live read, and if it
+was a working gate then trying the next-nearest gate after one is refused is
+still the follow-up.
 
 ## Drones: how long they have been out says nothing about a recall
 
@@ -2098,14 +2143,13 @@ for why ESI cannot replace it from inside a bot yet.
   view invisible rather than mis-clicked — the loot path pairs the filter with
   `scrollOverviewToReveal` and the gate path has no such pairing. Both halves
   together, on a run that can be watched.
-- **A mission item the bot cannot fetch stops the run.** #41's locked gate is
-  now recognised and reported, but the response is to ask for help: the client
-  names the item (`R.S. Officer's Passcard`) while the mission objective does
-  not, so `lootMissionItemFromContainerIfPresent` has nothing to look for and
-  nothing goes looking for the wreck or container holding it. Closing that means
-  taking the item name out of the client's sentence and feeding it to the loot
-  path — worth doing on a grid where the container is actually on the overview,
-  which run 10's was not.
+- **The gate key is fetched but the fetch has never run.** #44 wired the item
+  the client names into the existing loot path, so a locked gate now sends the
+  bot looking for its key rather than straight to asking for help. Nothing has
+  watched it: it needs a live mission that locks its gate. The first run that
+  does should show `looking for '<item>'` in the status line, then the ordinary
+  `Open the container` / `Look inside` decisions, then the gate taken — and if
+  the key is not on the grid, one give-up naming what it could not find.
 - The ammo swap, the ship-loss guard and the locked-gate verdict are the only
   consumers of
   `gameLogEntriesSinceLastReading`'s *lines*, so every other guard that infers a
