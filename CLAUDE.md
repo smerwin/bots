@@ -682,6 +682,24 @@ A module button is a **toggle**, so a click repeated before the client has shown
 its result switches the module back off. `moduleButtonClickSettlingSteps` gives a
 click 5 steps to appear in a reading first.
 
+**Module tooltips cannot be read the framework's way here.**
+`getModuleButtonTooltipFromModuleButton` looks up a dictionary that
+`integrateCurrentReadingsIntoShipModulesMemory` only ever writes to when some
+module button reports `isHiliteVisible` — and that is the same missing "hilite"
+sprite as above, so on this client the dictionary stays empty however long the
+mouse rests on a module. `readShipUIModuleButtonTooltipWhereNotYetInMemory`, the
+framework's own acquisition step, would therefore hover forever and store
+nothing; the mission runner does not call it, and should not start.
+
+The way through is to skip the client's attribution entirely: the bot knows
+which button it hovered, because it decided to. `weaponOptimalRangeFromHover` in
+`eve-online-mission-runner/Bot.elm` reads `readingFromGameClient
+.moduleButtonTooltip` straight out of the reading and attributes it to the module
+the previous step's effects moved the mouse onto. **Whether hovering raises a
+`ModuleButtonTooltip` at all on this client is still unverified** — nothing had
+ever hovered a module here before — which is why the ammo swap that depends on it
+gives up and says so after a few readings rather than waiting.
+
 ## Lock range is learned from the client, not set
 
 `targeting-range` (default 66000) decides whether `lockTargetFromOverviewEntry`
@@ -749,6 +767,60 @@ neither caller can currently reach it, since `overviewEntriesToLock` filters
 targeted and targeting rows out of its candidates; the reachable unbounded
 shape was the *click* repeating every reading, and that is what the learned
 bound ends.
+
+## Ammo: the weapon's optimal range is what says which charge is loaded
+
+`eve-online-mission-runner` swaps between two charges as the current target's
+distance changes, and the whole design hangs on `ModuleButtonTooltipMemory
+.optimalRange`: a weapon's optimal range moves with the charge in it, so one
+number says which ammo is effectively loaded *and* confirms that a load landed.
+Without it a reload would be the repo's signature bug — an action that reports
+success and changes nothing.
+
+It is **off unless both `short-range-ammo` and `long-range-ammo` are set**, and
+the names must match the weapon's own right-click menu. Discovering the pair from
+that menu instead of being told it would be better and is not implemented:
+nothing has yet observed what a module's context menu contains on this client.
+One charge type, or none, means there is no swap to make, and doing nothing is
+the correct outcome — wrong ammo still does damage.
+
+Not oscillating is the actual work, and each guard answers a specific way this
+goes wrong:
+
+- **Two thresholds, not one**, and the gap between them is not a matter of taste.
+  Swapping moves the optimal range itself, so a deadband narrower than half the
+  distance between the two charges' optimal ranges lets each swap re-arm the
+  opposite one. The two ranges are *learned* — the first swap reveals the second
+  number — and `ammoSwapDeadbandMeters` derives half the spread from them once
+  both are known.
+- **AU distances are excluded, not treated as very far.** An unparsed distance
+  becoming the 999999 placeholder is exactly the input that would argue for
+  long-range ammo forever.
+- **Several consecutive readings** must agree before acting
+  (`ammoSwapDistanceHoldTicks`), because rats die and the "current target" jumps
+  between ranges without the fight changing.
+- **A turning ramp only blocks a reload when the bot just asked for one**
+  (`ammoReloadSettlingTicks`). `rampRotationMilli /= 0` is the client saying the
+  module is mid-cycle, but a weapon that is *shooting* is mid-cycle almost all
+  the time, so refusing to touch a turning ramp would mean never swapping during
+  a fight at all.
+- **Bounded, then quiet** (`ammoSwapNotConfirmedGiveUpTicks`), the way
+  `maneuverNotConfirmedGiveUpTicks` bounds orbit and keep-at-range. The give-up
+  is not silent: the branch names itself in the decision log on every reading it
+  declines — the shape `returnDronesToBay` was changed to after #7 — and the
+  status line carries the reason for the rest of the session.
+
+**None of this has run against a live client.** The first run to use it should
+be watched for the optimal range in the status line actually changing after a
+swap, not for the decision log claiming one.
+
+One cross-feature invariant, since both this and the learned lock range read the
+previous step's effects. They cannot be confused for each other — the lock chord
+is Ctrl over a *left* click, the ammo cascade a plain right click, and the
+tooltip hover a bare mouse move with no button at all. And the hover, which holds
+the mouse still for several readings, cannot age a pending lock attempt into a
+false refusal: a refusal needs the target bar empty at both ends, and the ammo
+path only runs with an active target.
 
 ## Drones: how long they have been out says nothing about a recall
 
