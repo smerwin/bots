@@ -349,6 +349,8 @@ type alias BotMemory =
     , lootAllRefusedTicks : Int
     , lootWindowOutOfRangeTicks : Int
     , dronesInSpaceTicks : Int
+    , dronesInSpaceCount : Int
+    , droneRecallUnansweredTicks : Int
     , dockedWithCargoWantedTicks : Int
     , nothingToDoTicks : Int
     , lastObjectiveText : String
@@ -502,11 +504,10 @@ windDownBeforeSessionEnd context =
 
                                 else
                                     returnDronesToBay context
-                                        |> Maybe.withDefault
-                                            (dockAtStation
-                                                context.memory.lastDockedStationNameFromInfoPanel
-                                                context
-                                            )
+                                        (dockAtStation
+                                            context.memory.lastDockedStationNameFromInfoPanel
+                                            context
+                                        )
                         )
                     )
 
@@ -3047,7 +3048,7 @@ decideActionWhenInSpace context seeUndockingComplete =
         |> Maybe.withDefault
             (if seeUndockingComplete.shipUI |> shipUIIndicatesShipIsWarpingOrJumping then
                 describeBranch "I am in warp."
-                    (returnDronesToBay context |> Maybe.withDefault waitForProgressInGame)
+                    (returnDronesToBay context waitForProgressInGame)
 
              else
                 -- An agent conversation is not a docked-only state. EVE offers
@@ -3389,7 +3390,6 @@ jumpToNextSystem context =
 
             else
                 returnDronesToBay context
-                 |> Maybe.withDefault
                     ( useContextMenuCascadeWithCustomConfig
                     -- Feedback: "Jump Through Stargate" took 3-4 menu
                     -- opens before being recognized. The route icon is
@@ -3525,16 +3525,15 @@ runAway context =
 
                 Just celestial ->
                     returnDronesToBay context
-                        |> Maybe.withDefault
-                            (selectThenPanelAction context
-                                "selectedItemWarpTo"
-                                celestial
-                                ("Get out -- warp to '"
-                                    ++ (celestial.objectName |> Maybe.withDefault "a celestial")
-                                    ++ "' at "
-                                    ++ (celestial.objectDistance |> Maybe.withDefault "range")
-                                )
+                        (selectThenPanelAction context
+                            "selectedItemWarpTo"
+                            celestial
+                            ("Get out -- warp to '"
+                                ++ (celestial.objectName |> Maybe.withDefault "a celestial")
+                                ++ "' at "
+                                ++ (celestial.objectDistance |> Maybe.withDefault "range")
                             )
+                        )
 
 
 tetherAtStructure : BotDecisionContext -> DecisionPathNode
@@ -3548,16 +3547,15 @@ tetherAtStructure context =
     case escapeTargetOnOverview context of
         Just ( entry, buttonName, what ) ->
             returnDronesToBay context
-                |> Maybe.withDefault
-                    (selectThenPanelAction context
-                        buttonName
-                        entry
-                        ("Get out -- '"
-                            ++ (entry.objectName |> Maybe.withDefault "somewhere off this grid")
-                            ++ "' is on the overview, "
-                            ++ what
-                        )
+                (selectThenPanelAction context
+                    buttonName
+                    entry
+                    ("Get out -- '"
+                        ++ (entry.objectName |> Maybe.withDefault "somewhere off this grid")
+                        ++ "' is on the overview, "
+                        ++ what
                     )
+                )
 
         Nothing ->
             tetherAtStructureViaSurroundings context
@@ -3720,17 +3718,16 @@ dockAtStation preferredStationName context =
                 }
     in
     returnDronesToBay context
-        |> Maybe.withDefault
-            (describeBranch "Head for a station and dock."
-                (useContextMenuCascadeOnListSurroundingsButton
-                    (useMenuEntryWithTextContainingFirstOf [ "structures", "station" ]
-                        (chooseNextMenuEntry
-                            (chooseNextMenuEntry MenuCascadeCompleted)
-                        )
+        (describeBranch "Head for a station and dock."
+            (useContextMenuCascadeOnListSurroundingsButton
+                (useMenuEntryWithTextContainingFirstOf [ "structures", "station" ]
+                    (chooseNextMenuEntry
+                        (chooseNextMenuEntry MenuCascadeCompleted)
                     )
-                    context
                 )
+                context
             )
+        )
 
 
 undockUsingStationWindow : BotDecisionContext -> DecisionPathNode
@@ -4280,37 +4277,94 @@ gateCanBeActivatedNow context entry =
 
 
 {-| Readings of drones sitting in space before the recall is treated as not
-landing at all, and before it is abandoned.
+landing at all.
 
 Shift+R is a bare keypress: there is nothing to aim it at and nothing in the
 reading that says whether the client took it. So the only evidence available is
-the drones still being out, and these are the two points at which that stops
-looking like latency.
+the drones still being out.
 
-The recovery threshold is generous because a fight legitimately keeps drones out
-for a long stretch, and the cost of hitting it early is only one click.
+Generous because a fight legitimately keeps drones out for a long stretch, and
+the cost of hitting it early is only one click.
 -}
 droneRecallFocusRecoveryTicks : Int
 droneRecallFocusRecoveryTicks =
     20
 
 
+{-| Unanswered readings -- see `droneRecallUnansweredTicks` -- before the drones
+are written off and the ship is allowed to leave without them.
+
+This is counted from the first recall the client did not answer, *not* from the
+launch. Run 1 measured it from launch and lost all ten drones in two batches of
+five: drones are deliberately left out for the whole fight, so any pocket
+running longer than this threshold pushed the counter past it, after which
+`returnDronesToBay` declined for the rest of the session and every warp
+abandoned whatever was in space. Log evidence: 91 readings between the second
+launch and the next warp, no recall decision among them, and five drones gone.
+
+Nothing on the wind-down path depends on this being small any more --
+`secondsPastSessionEndBeforeGivingUpOnDocking` ends the session whether or not
+the drones ever come home -- so this can afford to be the patient bound it was
+always described as.
+-}
 droneRecallGiveUpTicks : Int
 droneRecallGiveUpTicks =
     60
 
 
-dronesAreInSpace : ReadingFromGameClient -> Bool
-dronesAreInSpace readingFromGameClient =
+{-| How far back to look for the bot having asked for a recall.
+
+More than one step, because the focus-recovery branch below alternates click,
+press, click, press -- so during a recall that is being pursued every reading,
+only every other step carries the keypress. Short enough that a bot which has
+gone back to fighting stops counting readings against a recall it is no longer
+asking for.
+-}
+droneRecallAskedLookbackSteps : Int
+droneRecallAskedLookbackSteps =
+    3
+
+
+dronesInSpaceCount : ReadingFromGameClient -> Int
+dronesInSpaceCount readingFromGameClient =
     readingFromGameClient.dronesWindow
         |> Maybe.andThen .droneGroupInSpace
         |> Maybe.andThen (.header >> .quantityFromTitle)
-        |> Maybe.map (.current >> (<) 0)
-        |> Maybe.withDefault False
+        |> Maybe.map .current
+        |> Maybe.withDefault 0
 
 
-returnDronesToBay : BotDecisionContext -> Maybe DecisionPathNode
-returnDronesToBay context =
+dronesAreInSpace : ReadingFromGameClient -> Bool
+dronesAreInSpace readingFromGameClient =
+    0 < dronesInSpaceCount readingFromGameClient
+
+
+{-| Whether one of the last few steps pressed Shift+R at the drones.
+
+`vkey_R` is used for nothing else in this bot, so the keypress alone identifies
+the recall.
+-}
+recentStepAskedForDroneRecall : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+recentStepAskedForDroneRecall previousStepsEffects =
+    previousStepsEffects
+        |> List.take droneRecallAskedLookbackSteps
+        |> List.any (List.member (EffectOnWindow.KeyDown EffectOnWindow.vkey_R))
+
+
+{-| Get the drones in, and say what happened when it stops trying.
+
+Takes what to do once there is nothing to recall rather than returning a
+`Maybe`, so the branch that abandons the drones can still name itself in the
+decision log while handing the step on. That branch previously returned nothing
+at all, and only a separate branch testing the counter for *equality* with the
+threshold ever said anything -- so the message landed only if the ship happened
+to be warping on the single reading where the counter hit 60 exactly. In run 1
+it never did: the give-up engaged mid-fight, silently, and the bot reported
+nothing wrong while having disabled its own drone recall for the rest of the
+session.
+-}
+returnDronesToBay : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+returnDronesToBay context ifNothingToRecall =
     context.readingFromGameClient.dronesWindow
         |> Maybe.andThen .droneGroupInSpace
         |> Maybe.andThen
@@ -4324,23 +4378,25 @@ returnDronesToBay context =
                 then
                     Nothing
 
-                else if droneRecallGiveUpTicks < context.memory.dronesInSpaceTicks then
-                    -- Stop asking. The caller's fallback is what matters here:
-                    -- in the wind-down path it docks, so giving up ends the
-                    -- session with drones abandoned instead of never ending at
-                    -- all. Run 118 held that path open for 150 readings and
-                    -- overran its session by five minutes, which cost the whole
-                    -- remainder of the run; a set of drones does not.
-                    Nothing
-
-                else if droneRecallGiveUpTicks == context.memory.dronesInSpaceTicks then
+                else if droneRecallGiveUpTicks < context.memory.droneRecallUnansweredTicks then
+                    -- Stop asking, and go on with whatever the caller wanted to
+                    -- do -- in the wind-down path that is docking, so giving up
+                    -- ends the session with drones abandoned instead of never
+                    -- ending at all. Run 118 held that path open for 150
+                    -- readings and overran its session by five minutes, which
+                    -- cost the whole remainder of the run; a set of drones does
+                    -- not.
+                    --
+                    -- Said every time it declines, not once: an operator
+                    -- reading the log has to be able to see that the ship is
+                    -- leaving without its drones on purpose.
                     Just
                         (describeBranch
-                            ("Drones have been in space for "
-                                ++ String.fromInt context.memory.dronesInSpaceTicks
-                                ++ " readings and will not come back -- give up on them so the ship can move on."
+                            ("Drones have not answered "
+                                ++ String.fromInt context.memory.droneRecallUnansweredTicks
+                                ++ " readings of recall and will not come back -- leave without them so the ship can move on."
                             )
-                            waitForProgressInGame
+                            ifNothingToRecall
                         )
 
                 else if
@@ -4388,6 +4444,7 @@ returnDronesToBay context =
                             -- )
                         )
             )
+        |> Maybe.withDefault ifNothingToRecall
 
 
 {-| A button in the Selected Item panel, by its own `_name`.
@@ -4651,6 +4708,8 @@ initBotMemory =
     , lootAllRefusedTicks = 0
     , lootWindowOutOfRangeTicks = 0
     , dronesInSpaceTicks = 0
+    , dronesInSpaceCount = 0
+    , droneRecallUnansweredTicks = 0
     , dockedWithCargoWantedTicks = 0
     , nothingToDoTicks = 0
     , lastObjectiveText = ""
@@ -4743,6 +4802,10 @@ statusTextFromState context =
                                                 |> Maybe.map (.current >> String.fromInt)
                                                 |> Maybe.withDefault "Unknown"
                                            )
+                                        ++ ". Out for "
+                                        ++ (context.memory.dronesInSpaceTicks |> String.fromInt)
+                                        ++ " readings, unanswered recall for "
+                                        ++ (context.memory.droneRecallUnansweredTicks |> String.fromInt)
                                         ++ "."
 
                         namesOfOtherPilotsInOverview =
@@ -5988,8 +6051,7 @@ ensureDronesRecalledBeforeWarping :
     -> DecisionPathNode
     -> DecisionPathNode
 ensureDronesRecalledBeforeWarping context ifReadyToWarp =
-    returnDronesToBay context
-        |> Maybe.withDefault ifReadyToWarp
+    returnDronesToBay context ifReadyToWarp
 
 
 deactivatePropulsionModuleBeforeWarping :
@@ -6159,9 +6221,9 @@ they got chewed up.
 
 This is the memory half: keep the low-water mark, and forget it once the ship
 is healthy again or docked. `runAwayIfLowHealth` compares it against the
-threshold, because `UpdateMemoryContext` carries only the reading -- the bot
-settings are not visible from here, which is why the re-arm level is a constant
-and the trip level is not.
+threshold, because `UpdateMemoryContext` does not carry the bot settings --
+they are not visible from here, which is why the re-arm level is a constant and
+the trip level is not.
 -}
 runAwayRearmPercent : Int
 runAwayRearmPercent =
@@ -6192,6 +6254,9 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     let
         currentContextMenuDepth =
             context.readingFromGameClient.contextMenus |> List.length
+
+        dronesInSpaceCountNow =
+            dronesInSpaceCount context.readingFromGameClient
 
         -- The agent offering to complete a mission is the agent asserting one
         -- is in progress. Read here rather than in the decision tree so the
@@ -6455,12 +6520,41 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         else
             0
     , dronesInSpaceTicks =
-        -- Consecutive readings with drones out. Reset when the bay has them
-        -- back, so this measures "how long have they been out", which is what
-        -- tells a recall that is not landing from one that simply has not been
-        -- answered yet.
+        -- Consecutive readings with drones out, counted from the launch. This
+        -- is "how long have they been out" and nothing more -- it says nothing
+        -- about whether a recall is landing, because drones are deliberately
+        -- left out for a whole fight. Only `droneRecallUnansweredTicks` below
+        -- can tell those apart.
         if dronesAreInSpace context.readingFromGameClient then
             botMemoryBefore.dronesInSpaceTicks + 1
+
+        else
+            0
+    , dronesInSpaceCount = dronesInSpaceCountNow
+    , droneRecallUnansweredTicks =
+        -- Consecutive readings in which the bot has asked for the drones back
+        -- and the client has not answered. Only two things end it: the drones
+        -- being home, and the in-space count falling at all -- a partial recall
+        -- is the client answering, so the rest deserve the full patience again.
+        --
+        -- It also stops counting when the bot stops asking, so a fight it went
+        -- back to fighting is not held against a recall nobody is making. Past
+        -- the give-up threshold that has to become a hold rather than a reset:
+        -- giving up is precisely what stops the asking, so a reset there would
+        -- unwind the give-up two readings later and the ship would spend the
+        -- rest of the session alternating between abandoning its drones and
+        -- recalling them again.
+        if dronesInSpaceCountNow < 1 then
+            0
+
+        else if dronesInSpaceCountNow < botMemoryBefore.dronesInSpaceCount then
+            0
+
+        else if droneRecallGiveUpTicks < botMemoryBefore.droneRecallUnansweredTicks then
+            botMemoryBefore.droneRecallUnansweredTicks
+
+        else if recentStepAskedForDroneRecall context.previousStepsEffects then
+            botMemoryBefore.droneRecallUnansweredTicks + 1
 
         else
             0

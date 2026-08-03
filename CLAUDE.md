@@ -161,6 +161,19 @@ Use `run_in_background`, then wait on a condition rather than a fixed sleep:
 until grep -qE '^\+ ' ~/eve-bot-logs/mission_run<N>.log; do sleep 5; done
 ```
 
+**But wait on `cycle_run.sh`'s own exit, not only on that loop.** The loop above
+never terminates for a run that died, which is the case `start()` now detects
+for itself: a `Traceback` or an elm error report in the log fails on the next
+poll, and so does a log that has stopped growing while nothing matching
+`BOT_PATTERNS` is alive. Both print the last 15 log lines with the message, so
+the diagnosis usually needs no second command. A non-zero exit does **not** mean
+the bot is gone, though: only the "run is gone" verdict checks that nothing is
+alive, while a fatal log pattern and the five-minute timeout both report failure
+without looking — `elm make` can still be running under the first, and a merely
+slow run under the second. So stop before trying again rather than assuming
+there is nothing to stop. Cycling already does that; `start()` on its own
+refuses with "refusing to start: a bot is still running".
+
 **Arm two monitors, not one.** `stall_watch.py --keep-going` covers stalls, but
 it says nothing when the bot or the client simply exits — and silence there
 reads exactly like a healthy run:
@@ -337,7 +350,7 @@ procedure and its traps; this file carries the facts.
 | `eve_read.py` | live reads of the client (overview, targets, modules, combat feed, window id, client pid) by reusing botlab_host's UI-root cache -- ~2s instead of rediscovering the root |
 | `eve_repl.py` | interactive handle on the client for one-offs -- `python3 -i eve_repl.py`, then `eve.dock(...)`, `eve.warp_to(...)`, `eve.menu_click(...)`. See `REPL.md` |
 | `compile_bot.sh` | compiles a bot the way the host does, without running it; verifies the scratch copy matches the source |
-| `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session |
+| `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session, waiting for its first decision and failing fast with the log's tail if the run died instead |
 | `reload_drones.py` | standalone one-off: refill drone bay from station hangar. Still the way to restock *outside* a session; the mission runner now does the same thing for itself while winding down |
 | `route_setter/route_setter.py` | standalone one-off: set the autopilot route from a chat channel's MOTD |
 
@@ -649,6 +662,44 @@ this build — so they are no use as a second opinion.
 A module button is a **toggle**, so a click repeated before the client has shown
 its result switches the module back off. `moduleButtonClickSettlingSteps` gives a
 click 5 steps to appear in a reading first.
+
+## Drones: how long they have been out says nothing about a recall
+
+Warping with drones in space loses them, so every warp, dock and retreat in
+`eve-online-mission-runner` goes through `returnDronesToBay` first. Shift+R is a
+bare keypress with nothing to aim at and no acknowledgement in the reading, so
+the only evidence a recall landed is the in-space count falling — which means
+the bot has to bound how long it keeps asking, and that bound is where this went
+wrong.
+
+**Time since launch is not evidence about a recall.** The give-up was originally
+gated on `dronesInSpaceTicks`, which counts readings since the drones were
+*launched* — and drones are deliberately left out for a whole fight. Any pocket
+lasting more than 60 readings pushed the counter past the threshold, after which
+`returnDronesToBay` declined for the rest of the session and every subsequent
+warp abandoned whatever was in space. Run 1 lost all ten drones this way in two
+batches of five: 91 readings between the second launch and the next warp, no
+recall decision among them. `droneRecallUnansweredTicks` counts from the first
+recall the client did not answer instead, and resets whenever the in-space count
+falls, since a partial recall is the client answering.
+
+**It was silent because the explanation was on an equality test.** The branch
+that said "give up on them" fired only on the reading where the counter was
+*exactly* 60, and `returnDronesToBay` is only called from the warp and travel
+paths — so if the ship was mid-fight on that one reading, nothing was ever
+logged and the `>` branch then declined forever without a word. A branch that
+declines has to say so every time it declines. `returnDronesToBay` now takes the
+caller's next step rather than returning a `Maybe`, so the give-up can name
+itself in the decision log while handing the step on.
+
+Two consequences worth knowing. The give-up **latches** once reached, because
+giving up is what stops the asking — without the latch the counter resets two
+readings later and the ship alternates forever between abandoning its drones and
+recalling them. And measuring "how long ago did the bot *ask*" needs the
+previous steps' effects, which `UpdateMemoryContext` did not carry; the mission
+runner's copy of `BotFrameworkSeparatingMemory.elm` now passes
+`previousStepsEffects` through, so that file diverges from the other apps'
+copies.
 
 ## Elm toolchain
 
