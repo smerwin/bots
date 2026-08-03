@@ -156,6 +156,19 @@ class CalibrationTests(unittest.TestCase):
         self.assertGreaterEqual(inset_x, 0)
         self.assertGreaterEqual(inset_y, 0)
 
+    def test_a_shortfall_rounding_below_zero_does_not_become_a_negative_inset(self):
+        """The tolerance admits a shortfall just under zero; the clamp catches it.
+
+        The bound is `-1 < short` so that a value which should be exactly zero
+        is not rejected for floating-point dust. That admits shortfalls in
+        (-1, 0), and `round` takes -0.53 to -1 -- an inset that would shift
+        every coordinate the wrong way by half a point. Reachable only with a
+        non-integer backing scale, which is why it needs its own case: with a
+        clean 2.0 every shortfall is a whole number.
+        """
+        _, _, inset_x, inset_y, _, _ = calibrate((3419, 2136), 1710, 1068, 1.9995)
+        self.assertEqual((inset_x, inset_y), (0, 0))
+
     def test_no_canvas_size_yet_falls_back_to_the_backing_scale(self):
         """The first call, before any ReadFromWindow has answered."""
         scale_x, scale_y, inset_x, inset_y, _, _ = calibrate(
