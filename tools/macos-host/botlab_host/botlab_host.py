@@ -35,6 +35,11 @@ import re_helper as rh  # noqa: E402
 
 sys.path.insert(0, MACOS_HOST_DIR)
 import web_console  # noqa: E402
+# Imported, not shelled out to: a subprocess would report failure as an exit
+# code with the reason on a stdout somebody has to parse, and the one thing
+# SetAutopilotDestinationRequest has to get right is telling success from
+# failure. In-process, a failure is an EsiError with a message.
+import esi_waypoint  # noqa: E402
 
 # How long a key is held between its KeyDown and KeyUp. Long enough that the
 # client registers the press, and well under macOS's minimum "delay until
@@ -636,6 +641,11 @@ class VolatileHost:
             body = req["ReadFromWindow"]
             return json.dumps({"ReadFromWindowResult": self._read_from_window(body)})
 
+        if "SetAutopilotDestinationRequest" in req:
+            body = req["SetAutopilotDestinationRequest"]
+            return json.dumps({"SetAutopilotDestinationResult":
+                               self._set_autopilot_destination(body)})
+
         # Nothing else is implemented. This used to answer everything with
         # CompletedEffectSequenceOnWindow, which reported success for requests
         # that never ran -- including, before the 2023_02_06 interface was
@@ -849,6 +859,55 @@ class VolatileHost:
                 "memoryReadingSerialRepresentationJson": json.dumps(tree),
             }
         }
+
+    def _set_autopilot_destination(self, body):
+        """Set the client's autopilot destination through ESI.
+
+        Answers `{"Completed": {"destinationId": N}}` or `{"Failed": "why"}`,
+        and never anything in between. A destination that was not set, followed
+        by travel logic finding no route, is this repo's signature failure --
+        so the two outcomes are different shapes rather than one shape with a
+        flag, and a caller that reads neither gets nothing it can mistake for
+        success.
+
+        Everything is caught here. `run_task`'s own `except` answers
+        `ProcessNotFound`, which BotFramework reads as "the volatile process is
+        gone" and responds to by tearing it down and re-running root discovery
+        -- an expensive, entirely wrong reaction to CCP being slow.
+
+        Bounded, because this runs inside the host's single request/response
+        loop: an ESI that never answers would hold up the tick that asked, and
+        every tick behind it. The budget covers the whole resolve-and-set, not
+        one request, since resolving a station `/universe/ids/` does not index
+        costs a round trip per station in its system.
+
+        Nothing token-shaped is logged or returned. The refresh token stays in
+        the Keychain, `esi_waypoint` hands it straight to the token endpoint,
+        and `EsiError` messages are built from status codes and names -- the
+        same reason this file never prints the client's own command line.
+        """
+        name = body.get("name")
+        destination_id = body.get("destinationId")
+        budget = body.get("budgetSeconds")
+        if budget is None:
+            budget = esi_waypoint.DEFAULT_BUDGET_SECONDS
+        target = name if name is not None else destination_id
+        try:
+            was_set = esi_waypoint.set_destination(
+                name=name,
+                destination_id=destination_id,
+                clear_other=body.get("clearOtherWaypoints", True),
+                add_to_beginning=body.get("addToBeginning", False),
+                budget_seconds=budget,
+            )
+        except esi_waypoint.EsiError as failure:
+            print(f"# ESI: destination {target!r} not set: {failure}", file=sys.stderr)
+            return {"Failed": str(failure)}
+        except Exception as failure:  # noqa: BLE001 -- see the docstring
+            print(f"# ESI: destination {target!r} not set: {failure!r}", file=sys.stderr)
+            return {"Failed": f"unexpected failure setting the destination: {failure!r}"}
+        print(f"# ESI: destination {target!r} set ({was_set})", file=sys.stderr)
+        return {"Completed": {"destinationId": was_set}}
 
 
 # ---------------------------------------------------------------------------

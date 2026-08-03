@@ -66,6 +66,33 @@ for that sub-protocol; we don't run it at all, and fake a competent volatile
 process in Python instead, dispatching the inner JSON to our own memory-reading
 tools.
 
+**Adding a request the real protocol does not have** — `handle_request` answers
+`SetAutopilotDestinationRequest`, which no BotLab host has ever seen — belongs
+in the Python host and *not* in `EveOnline/VolatileProcessInterface.elm`. The
+`request` field is an opaque `String` at the `InterfaceToHost` boundary; that
+module's encoder is the bot's convenience for building it, not the boundary
+itself, so nothing forces a new request through the vendored codecs. Two costs
+if it went there anyway. Bot source is fetched fresh from a GitHub URL in one of
+the two supported source modes, so a variant that exists only in this fork's
+checkout is simply absent under the other — and absent silently, since a request
+never built is a request never missed. And the response half is worse than the
+request half: `deserializeResponseFromVolatileHost` is a closed
+`Json.Decode.oneOf`, so a response it does not recognise decodes as an `Err`
+that lands in `lastRequestToVolatileProcessResult` — a field `BotFramework.elm`
+writes and never reads. A whole reply class would vanish without a word, which
+is exactly the failure this file keeps a section on.
+
+So the Elm side of this is not merely unwritten, it is **blocked on a channel
+that does not exist**. `OperateBotConfiguration` gives a running bot exactly one
+way out — `buildTaskFromEffectSequence : List EffectOnWindowStruct -> Task` —
+and that vocabulary is mouse moves, buttons, keys and scroll; a station name
+cannot be spelled in it. Every `RequestToVolatileProcess` is issued by
+`getNextSetupTask`'s closed setup state machine, which a decision cannot reach.
+Wiring the bot to this request therefore means changing `BotFramework.elm`
+(a new `OperateBotConfiguration` field and a builder beside
+`buildTaskFromRequestToVolatileProcess`) *and* the vendored decoder — a change
+worth its own live run, not a rider on the host-side plumbing.
+
 Two protocol details worth remembering. `ReadFromWindowResult.Completed
 .memoryReadingSerialRepresentationJson` is `Maybe String`, and the UI tree JSON
 inside it is **double-encoded** — a JSON string containing JSON, decoded via
@@ -353,6 +380,7 @@ procedure and its traps; this file carries the facts.
 | `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session, waiting for its first decision and failing fast with the log's tail if the run died instead |
 | `reload_drones.py` | standalone one-off: refill drone bay from station hangar. Still the way to restock *outside* a session; the mission runner now does the same thing for itself while winding down |
 | `route_setter/route_setter.py` | standalone one-off: set the autopilot route from a chat channel's MOTD |
+| `esi_waypoint.py` | set the client's autopilot destination through ESI, the official API. A CLI (`auth`/`resolve`/`set`) and an importable module -- `botlab_host.py` calls `set_destination` in-process for `SetAutopilotDestinationRequest`, so failures arrive as `EsiError` values rather than exit codes with a reason on stdout |
 
 **Launcher `--help`** is answered *before* the one-bot-at-a-time guard runs, so
 asking what the settings are never kills a session in progress. `bot_help.py`
@@ -885,14 +913,47 @@ exists.
   /ui/autopilot/waypoint/` is the correct way to set a route, and
   `tools/macos-host/esi_waypoint.py` implements it (PKCE, so no client secret
   exists; the refresh token lives in the macOS Keychain and is never printed).
-  Name resolution is verified both ways; the authenticated half is untested
-  pending a browser login. Note `/universe/ids/` does not index every NPC
+  Name resolution is verified both ways. The authenticated half is **proven
+  live** and this file's earlier "untested pending a browser login" was stale:
+  issue #17 records `esi_waypoint.py set --name "Amarr VI (Zorast) - Moon 2 -
+  Theology Council Tribunal"` resolving to 60008950 with the client's route
+  panel flipping from `No Destination` to `Route 0 Jumps` immediately after,
+  credentials taken from the Keychain (`eve-esi-client-id`, `eve-esi-refresh`)
+  and no browser step needed. That name carries both a parenthesis and a
+  hyphen, so it is exactly the destination the search bar below cannot express.
+  Note `/universe/ids/` does not index every NPC
   station — the agent's own "Amarr VI (Zorast) - Moon 2 - Theology Council
   Tribunal" comes back empty from it — so the tool falls back to resolving the
   system from the name's first token and enumerating its stations.
   ESI covers navigation only: CCP exposes no endpoint to request, accept or
   complete an agent mission, so the conversation stays UI automation either way.
   The search-bar route below needs no registration at all and is the fallback.
+
+  **`SetAutopilotDestinationRequest`** is the volatile-process request that
+  brings this into the bot loop: `{"name": …}` or `{"destinationId": …}`,
+  answered with `{"Completed": {"destinationId": N}}` or `{"Failed": "why"}`.
+  Two shapes rather than one shape with a flag, because a destination that
+  silently was not set followed by travel logic finding no route is this repo's
+  signature failure — see #7. `handle_request` catches everything, including
+  what it did not expect: an exception escaping to `run_task` becomes
+  `ProcessNotFound`, which `BotFramework` reads as "the volatile process is
+  gone" and answers by tearing it down and re-running root discovery.
+
+  It is **bounded**, because `handle_request` runs inside the host's single
+  request/response loop and an ESI that never answers would hold up the tick
+  that asked and every tick behind it. The budget (15s, `--budget` on the CLI)
+  covers the whole resolve-and-set rather than one request, since the
+  enumerate-a-system fallback costs a round trip per station: measured through
+  the dispatcher, that station resolves cold in 3.1s. Expiry is a `Failed`, not
+  a wait. Resolutions and the universe GETs behind them are memoised for the
+  life of the process — ids never change, and memoising each station the
+  fallback looks at means an attempt that ran out of time gets further next time
+  instead of starting over. The same name resolves in 0.00s after the first.
+
+  **The host side is all of it that exists.** Nothing issues this request yet;
+  see the Architecture section for why the bot has no channel that can carry a
+  station name, and what would have to change to give it one. Until then this is
+  reachable only from Python, and no bot has set a destination through it.
 
 ## `route_setter.py` internals worth knowing before touching it again
 

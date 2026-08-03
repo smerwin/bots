@@ -22,11 +22,18 @@ Setup, once:
     * python3 esi_waypoint.py client-id <the client id>   (kept in the Keychain)
       or export ESI_CLIENT_ID=<the client id> to override it for one run
 
+Also importable. `botlab_host.py` calls `set_destination` in-process for the
+`SetAutopilotDestinationRequest` volatile-process request, so every function
+below that can fail raises `EsiError` rather than calling `sys.exit`, and the
+CLI at the foot is the only thing that turns one into an exit code. A caller
+inside the host loop gets a value it can branch on; nothing has to parse this
+file's stdout.
+
 Secrets. The PKCE flow means no client secret exists at all, so the only
 sensitive artifact is the refresh token, and it goes straight into the macOS
 Keychain -- never a file in the repo, never an argument, never printed. Nothing
 here echoes a token, deliberately: this runs in a terminal whose scrollback ends
-up in bug reports.
+up in bug reports, and the host's own log is tee'd to a file.
 
 The game client must be running and logged in. This endpoint drives that
 client's UI; it does not move the ship by itself.
@@ -41,6 +48,7 @@ import secrets
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -67,6 +75,52 @@ KEYCHAIN_CLIENT_ID_SERVICE = "eve-esi-client-id"
 # blocking a misbehaving client rather than after.
 USER_AGENT = "macos-host-eve-bot (personal, non-commercial)"
 
+# The budget for a whole operation, not for one request. A per-request timeout
+# bounds nothing useful here: resolving an NPC station that `/universe/ids/`
+# misses costs one round trip per station in the system, so a dozen requests
+# that each answer just inside their own timeout still add up past any tick the
+# host has to spare. Fifteen seconds is about one memory read's worth. Running
+# out is a failure the caller branches on, not something to wait through.
+DEFAULT_BUDGET_SECONDS = 15.0
+
+# The ceiling on any single request, applied under whatever the budget has left.
+PER_REQUEST_TIMEOUT_SECONDS = 30.0
+
+
+class EsiError(Exception):
+    """A failure whose message is safe to log.
+
+    Every message here is built from a status code, a name, or our own wording.
+    In particular the token endpoint's error body is never included: that is the
+    one response that can quote a request's own parameters back, and a request
+    to it carries the refresh token. Callers print these straight into a log
+    that is tee'd to a file and pasted into transcripts.
+    """
+
+
+class Deadline:
+    """A wall-clock budget shared across the several requests one call makes."""
+
+    def __init__(self, budget_seconds=DEFAULT_BUDGET_SECONDS):
+        self.expires_at = time.monotonic() + budget_seconds
+
+    def remaining(self):
+        return self.expires_at - time.monotonic()
+
+    def timeout_for(self, what):
+        left = self.remaining()
+        if left <= 0:
+            raise EsiError(f"ESI took too long ({what})")
+        return min(left, PER_REQUEST_TIMEOUT_SECONDS)
+
+
+# Ids never change, so both of these live for the life of the process. Speed is
+# not the only point: the enumerate-a-system fallback is the path most likely to
+# exhaust the budget, and memoising each station it looks at means an attempt
+# that ran out of time gets further next time instead of starting over.
+_ID_BY_NAME = {}      # lowercased name -> (id, kind)
+_UNIVERSE_GET = {}    # GET path -> decoded payload
+
 
 def client_id():
     """The application's client id: the environment first, then the Keychain.
@@ -79,9 +133,9 @@ def client_id():
     if not value:
         value = keychain_load_client_id()
     if not value:
-        sys.exit("no client id -- set ESI_CLIENT_ID, or store one once with "
-                 "`esi_waypoint.py client-id <id>`. See the setup notes at the "
-                 "top of this file.")
+        raise EsiError("no client id -- set ESI_CLIENT_ID, or store one once "
+                       "with `esi_waypoint.py client-id <id>`. See the setup "
+                       "notes at the top of this file.")
     return value.strip()
 
 
@@ -129,17 +183,44 @@ def keychain_load():
 # ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
-def post_form(url, fields):
+def post_form(url, fields, deadline=None):
+    """POST a form and return the decoded body.
+
+    Failures raise `EsiError` carrying the status code alone. This is the call
+    that carries the refresh token, so its error body -- which quotes the
+    request back on at least some CCP errors -- never reaches the message.
+    """
+    deadline = deadline or Deadline()
     body = urllib.parse.urlencode(fields).encode()
     request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("Content-Type", "application/x-www-form-urlencoded")
     request.add_header("Host", urllib.parse.urlparse(url).netloc)
     request.add_header("User-Agent", USER_AGENT)
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=deadline.timeout_for(url)) as response:
+            return json.loads(response.read())
+    # `from None` drops the chained original. Not tidiness: the suppressed
+    # exception keeps the frame that called urlopen alive, and that frame's
+    # locals hold the encoded form body -- the refresh token among them. Nothing
+    # here prints locals today, and nothing should have to stay true for this to
+    # be safe.
+    except urllib.error.HTTPError as error:
+        raise EsiError(f"login.eveonline.com refused the token request ({error.code})") from None
+    except urllib.error.URLError as error:
+        raise EsiError(f"could not reach login.eveonline.com ({error.reason})") from None
+    except OSError as error:
+        raise EsiError(f"could not reach login.eveonline.com ({error})") from None
 
 
-def esi(method, path, token=None, params=None, body=None):
+def esi(method, path, token=None, params=None, body=None, deadline=None):
+    """Call ESI and return `(status, payload)`.
+
+    An HTTP error is a status like any other -- callers here read the code to
+    tell a scope problem from a missing client. Only a request that never got an
+    answer raises, since there is no status to report and no point retrying
+    inside one bounded call.
+    """
+    deadline = deadline or Deadline()
     url = f"{ESI_HOST}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -151,7 +232,7 @@ def esi(method, path, token=None, params=None, body=None):
     if token:
         request.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=deadline.timeout_for(path)) as response:
             raw = response.read()
             return response.status, (json.loads(raw) if raw else None)
     except urllib.error.HTTPError as error:
@@ -161,6 +242,10 @@ def esi(method, path, token=None, params=None, body=None):
         except Exception:
             detail = raw.decode("utf-8", "replace")
         return error.code, detail
+    except urllib.error.URLError as error:
+        raise EsiError(f"could not reach ESI ({error.reason})")
+    except OSError as error:
+        raise EsiError(f"could not reach ESI ({error})")
 
 
 # ---------------------------------------------------------------------------
@@ -288,24 +373,26 @@ def authorize():
     return tokens["access_token"]
 
 
-def access_token():
+def access_token(deadline=None):
     """A fresh access token, from the stored refresh token.
 
     Access tokens last 20 minutes, so there is no point caching one between
-    invocations -- refreshing every run is simpler and cheap.
+    invocations -- refreshing every run is simpler and cheap. The refresh token
+    is read out of the Keychain here and handed straight to `post_form`; it is
+    never returned, stored in an attribute or put in a message.
     """
     refresh = keychain_load()
     if not refresh:
-        sys.exit("no stored refresh token -- run 'esi_waypoint.py auth' first.")
+        raise EsiError("no stored refresh token -- run 'esi_waypoint.py auth' first")
     try:
         tokens = post_form(f"{LOGIN_HOST}/v2/oauth/token", {
             "grant_type": "refresh_token",
             "refresh_token": refresh,
             "client_id": client_id(),
-        })
-    except urllib.error.HTTPError as error:
-        sys.exit(f"refresh failed ({error.code}) -- re-run 'auth'. "
-                 "A revoked or rotated token cannot be repaired here.")
+        }, deadline=deadline)
+    except EsiError as error:
+        raise EsiError(f"{error} -- re-run 'auth'. A revoked or rotated token "
+                       "cannot be repaired here.")
     # CCP rotates refresh tokens: the old one stops working once used.
     if tokens.get("refresh_token"):
         keychain_store(tokens["refresh_token"])
@@ -315,77 +402,124 @@ def access_token():
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
-def resolve_name(name):
-    status, payload = esi("POST", "/universe/ids/", body=[name])
+def _universe_get(path, deadline):
+    """A memoised GET of static universe data. `None` if ESI would not answer."""
+    if path in _UNIVERSE_GET:
+        return _UNIVERSE_GET[path]
+    status, payload = esi("GET", path, deadline=deadline)
     if status != 200:
-        sys.exit(f"name lookup failed ({status}): {payload}")
+        return None
+    _UNIVERSE_GET[path] = payload
+    return payload
+
+
+def resolve_name(name, deadline=None):
+    """The id of a station, structure or system, by name. Raises `EsiError`.
+
+    Returns `(id, kind)` where kind is one of the `/universe/ids/` bucket names.
+    """
+    deadline = deadline or Deadline()
+    cached = _ID_BY_NAME.get(name.lower())
+    if cached:
+        return cached
+
+    status, payload = esi("POST", "/universe/ids/", body=[name], deadline=deadline)
+    if status != 200:
+        raise EsiError(f"name lookup failed ({status}): {payload}")
     for key in ("stations", "structures", "systems"):
         for entry in (payload or {}).get(key) or []:
             if entry.get("name", "").lower() == name.lower():
-                return entry["id"], key
+                return _remember(name, entry["id"], key)
     for key in ("stations", "structures", "systems"):
         entries = (payload or {}).get(key) or []
         if entries:
-            return entries[0]["id"], key
+            return _remember(name, entries[0]["id"], key)
 
     # /universe/ids/ does not index every NPC station: the agent's own
     # "Amarr VI (Zorast) - Moon 2 - Theology Council Tribunal" comes back empty
     # from it while resolving perfectly through the system's station list.
     # NPC station names begin with their system's name, so that first token is
     # enough to find the system and enumerate what is docked in it.
-    found = _resolve_via_system(name)
+    found = _resolve_via_system(name, deadline)
     if found:
-        return found
+        return _remember(name, found[0], found[1])
 
-    sys.exit(f"nothing named {name!r} was found. Structures in player-owned "
-             "space often need the character to have docked there before ESI "
-             "will resolve them.")
+    raise EsiError(f"nothing named {name!r} was found. Structures in "
+                   "player-owned space often need the character to have docked "
+                   "there before ESI will resolve them.")
 
 
-def _resolve_via_system(name):
+def _remember(name, found_id, kind):
+    _ID_BY_NAME[name.lower()] = (found_id, kind)
+    return found_id, kind
+
+
+def _resolve_via_system(name, deadline):
     system_name = name.split()[0] if name.split() else ""
     if not system_name:
         return None
-    status, payload = esi("POST", "/universe/ids/", body=[system_name])
+    status, payload = esi("POST", "/universe/ids/", body=[system_name], deadline=deadline)
     if status != 200:
         return None
     systems = (payload or {}).get("systems") or []
     if not systems:
         return None
 
-    status, system = esi("GET", f"/universe/systems/{systems[0]['id']}/")
-    if status != 200:
+    system = _universe_get(f"/universe/systems/{systems[0]['id']}/", deadline)
+    if system is None:
         return None
     for station_id in system.get("stations") or []:
-        status, station = esi("GET", f"/universe/stations/{station_id}/")
-        if status == 200 and station.get("name", "").lower() == name.lower():
+        station = _universe_get(f"/universe/stations/{station_id}/", deadline)
+        if station and station.get("name", "").lower() == name.lower():
             return station_id, "stations"
     return None
 
 
-def set_waypoint(destination_id, clear_other=True, add_to_beginning=False):
+def set_waypoint(destination_id, clear_other=True, add_to_beginning=False, deadline=None):
+    """Point the logged-in client's autopilot at `destination_id`.
+
+    Returns `destination_id` on success and raises `EsiError` on every failure,
+    including the ones ESI reports as a perfectly ordinary HTTP response. There
+    is no return value that means "probably fine": a caller that does not handle
+    the failure gets an exception, not a route it never set.
+    """
+    deadline = deadline or Deadline()
     status, payload = esi(
         "POST", "/ui/autopilot/waypoint/",
-        token=access_token(),
+        token=access_token(deadline=deadline),
         params={
             "destination_id": destination_id,
             "clear_other_waypoints": str(clear_other).lower(),
             "add_to_beginning": str(add_to_beginning).lower(),
         },
+        deadline=deadline,
     )
     if status in (200, 204):
-        print(f"destination set to {destination_id}")
-        return 0
+        return destination_id
     if status == 403:
-        print(f"refused ({status}): {payload}\n"
-              "  A 403 here is usually the scope: the token needs "
-              "esi-ui.write_waypoint.v1. Re-run 'auth' if the app's scopes changed.",
-              file=sys.stderr)
-        return 1
-    print(f"failed ({status}): {payload}\n"
-          "  This endpoint drives the logged-in client's UI -- it fails if no "
-          "client is running for this character.", file=sys.stderr)
-    return 1
+        raise EsiError(f"refused ({status}): {payload} -- a 403 here is usually "
+                       "the scope: the token needs esi-ui.write_waypoint.v1. "
+                       "Re-run 'auth' if the app's scopes changed.")
+    raise EsiError(f"failed ({status}): {payload} -- this endpoint drives the "
+                   "logged-in client's UI, so it fails if no client is running "
+                   "for this character.")
+
+
+def set_destination(name=None, destination_id=None, clear_other=True,
+                    add_to_beginning=False, budget_seconds=DEFAULT_BUDGET_SECONDS):
+    """Resolve a name if needed and set the destination, under one budget.
+
+    The single entry point for callers outside this file. Returns the id that
+    was set; raises `EsiError` with a loggable reason for every other outcome,
+    expiry included.
+    """
+    if (name is None) == (destination_id is None):
+        raise EsiError("set_destination needs exactly one of name, destination_id")
+    deadline = Deadline(budget_seconds)
+    if destination_id is None:
+        destination_id, _ = resolve_name(name, deadline=deadline)
+    return set_waypoint(destination_id, clear_other=clear_other,
+                        add_to_beginning=add_to_beginning, deadline=deadline)
 
 
 def main():
@@ -412,6 +546,9 @@ def main():
     setter.add_argument("--keep-other-waypoints", action="store_true",
                         help="add to the route instead of replacing it")
     setter.add_argument("--add-to-beginning", action="store_true")
+    setter.add_argument("--budget", type=float, default=DEFAULT_BUDGET_SECONDS,
+                        help="seconds for the whole resolve-and-set, not per request "
+                             f"(default {DEFAULT_BUDGET_SECONDS:g})")
 
     args = parser.parse_args()
 
@@ -432,14 +569,21 @@ def main():
         print(f"{found_id}  ({kind[:-1]})")
         return 0
 
+    deadline = Deadline(args.budget)
     destination = args.id
     if destination is None:
-        destination, kind = resolve_name(args.name)
+        destination, kind = resolve_name(args.name, deadline=deadline)
         print(f"# {args.name!r} -> {destination} ({kind[:-1]})")
-    return set_waypoint(destination,
-                        clear_other=not args.keep_other_waypoints,
-                        add_to_beginning=args.add_to_beginning)
+    set_waypoint(destination,
+                 clear_other=not args.keep_other_waypoints,
+                 add_to_beginning=args.add_to_beginning,
+                 deadline=deadline)
+    print(f"destination set to {destination}")
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except EsiError as failure:
+        sys.exit(str(failure))
