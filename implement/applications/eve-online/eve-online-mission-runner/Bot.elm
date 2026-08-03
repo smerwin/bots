@@ -106,6 +106,12 @@
      that does not cover. Either way the object must be enabled in the
      overview's type filters (Large Collidable Objects are off by default) or
      the bot cannot see it at all. Repeatable.
+   + `drone-type` : Name of the drone to refill the drone bay with while the
+     session winds down, as it appears in the station's item hangar -- e.g.
+     `drone-type=Hobgoblin I`. Defaults to `Acolyte I`. Fit-specific, which is
+     why it is a setting: the wrong name here does not misload anything, it
+     just finds nothing in the hangar. The drone has to be in the root item
+     hangar of the station the ship is parked in; sub-folders are not searched.
    + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping
      range or aligning.
    + `keep-at-range`: Set this to 'yes' to keep range from the target instead of
@@ -206,6 +212,7 @@ defaultBotSettings =
     , orbitInCombat = AppSettings.No
     , keepAtRange = AppSettings.No
     , targetingRangeMeters = 66000
+    , droneTypeName = "Acolyte I"
     }
 
 
@@ -293,6 +300,10 @@ parseBotSettings =
            , AppSettings.valueTypeInteger
                 (\targetingRangeMeters settings -> { settings | targetingRangeMeters = targetingRangeMeters })
            )
+         , ( "drone-type"
+           , AppSettings.valueTypeString
+                (\droneTypeName settings -> { settings | droneTypeName = String.trim droneTypeName })
+           )
          ]
             |> Dict.fromList
         )
@@ -313,6 +324,7 @@ type alias BotSettings =
     , orbitInCombat : AppSettings.YesOrNo
     , keepAtRange : AppSettings.YesOrNo
     , targetingRangeMeters : Int
+    , droneTypeName : String
     }
 
 
@@ -337,6 +349,8 @@ type alias BotMemory =
     , lootAllRefusedTicks : Int
     , lootWindowOutOfRangeTicks : Int
     , dronesInSpaceTicks : Int
+    , dronesInSpaceCount : Int
+    , droneRecallUnansweredTicks : Int
     , dockedWithCargoWantedTicks : Int
     , nothingToDoTicks : Int
     , lastObjectiveText : String
@@ -349,6 +363,7 @@ type alias BotMemory =
     , readingsCount : Int
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
+    , droneBayOpenedFromShipCard : Bool
     }
 
 
@@ -489,11 +504,10 @@ windDownBeforeSessionEnd context =
 
                                 else
                                     returnDronesToBay context
-                                        |> Maybe.withDefault
-                                            (dockAtStation
-                                                context.memory.lastDockedStationNameFromInfoPanel
-                                                context
-                                            )
+                                        (dockAtStation
+                                            context.memory.lastDockedStationNameFromInfoPanel
+                                            context
+                                        )
                         )
                     )
 
@@ -567,10 +581,18 @@ Each task states its own "already done" condition, because this branch is
 re-entered on every reading for the whole window. A task that cannot tell it has
 run would repeat for the rest of the session, which is both useless and exactly
 the shape `stall_watch` calls a stall.
+
+The order below never starves either task: the restock stops with
+`droneRestockGiveUpSecondsBeforeSessionEnd` on the clock and the survey only
+starts inside `agentSurveyWindowSeconds`, so their windows do not overlap.
 -}
 maintenanceWhileDocked : BotDecisionContext -> Maybe DecisionPathNode
 maintenanceWhileDocked context =
-    surveyAgentsInStation context
+    [ restockDroneBayWhileDocked context
+    , surveyAgentsInStation context
+    ]
+        |> List.filterMap identity
+        |> List.head
 
 
 {-| Log every agent this station's panel knows about, once per session.
@@ -690,6 +712,544 @@ describeStationAgentEntry agentEntry =
         "not available"
     ]
         |> String.join ", "
+
+
+{-| Refill the drone bay from this station's item hangar.
+
+A port of `tools/macos-host/reload_drones.py`, which does this reliably but
+drives the real mouse from outside the bot, so it can never run while a session
+is up -- which is exactly when the bay runs dry. A run that loses its drones
+ends with an empty bay, and the next run then starts empty too.
+
+Every step is one of that tool's, and each of those earned its place by failing
+without it:
+
+  * **The bay is opened from the ship's own card in the Hangars/Ships panel**,
+    never with Alt+C. The inventory an Alt+C opens looks identical in the UI
+    tree and *silently refuses the drop*: the quantity dialog still appears and
+    the items stay in the hangar, as if it had worked. No single reading tells
+    the two apart, so the one moment that is evidence our own "Open Drone Bay"
+    click landed -- the ship's drone bay showing as the selected container --
+    is kept in memory until the ship undocks (`droneBayOpenedFromShipCard`).
+  * **Widgets are found by type, not by text near them.** The card is a
+    `ShipItemCard` and the filter box is the parser's `quickFilterInputBox`.
+    Aiming at a fixed offset from a nearby label missed the card entirely, and
+    searching for "Search" hit unrelated tabs -- three bugs in one session of
+    the tool had that shape. The Hangars/Ships tabs are the one thing still
+    found by text, and then only as an exact label on an `EveLabelMedium`.
+  * **The quick filter is cleared before it is typed into**, or the previous
+    text is appended, "Acolyte IAcolyte I" matches nothing, and that looks
+    exactly like the typing having failed. `ensureQuickFilterText` is the same
+    clear-then-type the courier load uses.
+  * **The drag starts on the item's icon, not its label** -- the `InvItem` box
+    covers both -- and it is a drag at all only because
+    `EffectOnWindow.effectsForDragAndDrop` moves the pointer straight after the
+    press, with `botlab_host` suppressing the framework's inter-effect wait
+    while a button is held. Press, pause, then move reads as a click.
+  * **The quantity dialog's default already fills the bay**, so it is accepted
+    rather than typed into.
+
+The tool also clicks empty viewport first, because closing windows leaves EVE
+frontmost with nothing holding keyboard focus and no key then lands. The bot
+does not need that step: every string it types is preceded, inside the same
+effect sequence, by a click on the field being typed into -- which is what the
+courier load does, and run 117 filtered, found and dragged in about six
+readings that way.
+
+Ordered by what a reading can *see*, the way `loadCourierCargo` is: which
+container the inventory has selected decides the next step, so the sequence
+converges without the bot having to remember where in it we are.
+
+**Telling from the log whether it worked**, which matters because the failure
+this is most exposed to is a drop that is refused without saying so: a restock
+that succeeded logs its drag once and then goes quiet, because the bay stops
+being empty and the whole task retires. One that was refused keeps logging the
+same drag every other reading until the window closes. Two `Maintenance: drag`
+lines in a session is the shape to be suspicious of, and the drones window
+after the session is the answer.
+
+Every branch here also names what it saw rather than only what it wanted,
+because the node type names it steers by (`ShipDroneBay`, `StationItems`) are
+this client build's, and a name that is wrong on some future build would
+otherwise look exactly like a slow client.
+-}
+restockDroneBayWhileDocked : BotDecisionContext -> Maybe DecisionPathNode
+restockDroneBayWhileDocked context =
+    if not (withinDroneRestockWindow context) then
+        Nothing
+
+    else if not (droneBayIsEmpty context.readingFromGameClient) then
+        -- The "already done" condition. Anything in the bay means either this
+        -- ran or there was nothing to do, and both end the task -- the drop
+        -- accepts the dialog's default, which fills the bay in one go.
+        Nothing
+
+    else if not context.memory.droneBayOpenedFromShipCard then
+        Just (openDroneBayFromShipCard context)
+
+    else
+        case inventoryWindowShowingDroneBay context.readingFromGameClient of
+            Nothing ->
+                -- The bay was open a moment ago, since that is what set the
+                -- memory flag, so this is the window having been closed since.
+                Just (openDroneBayFromShipCard context)
+
+            Just inventoryWindow ->
+                Just
+                    (restockDroneBayFromInventoryWindow
+                        context
+                        inventoryWindow
+                        context.eventContext.botSettings.droneTypeName
+                    )
+
+
+{-| The steps that run once the ship's drone bay has been opened from its card.
+
+Each branch changes something the next reading can see. The station hangar has
+to be the selected container before anything is dragged out of it, so a
+reading that shows anything else selected only ever clicks the item hangar --
+otherwise a filter typed against the ship's own cargo would come back empty and
+be reported as "the station has no drones", which is a wrong answer rather than
+a missing one.
+-}
+restockDroneBayFromInventoryWindow :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.InventoryWindow
+    -> String
+    -> DecisionPathNode
+restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
+    let
+        itemsInView =
+            case inventoryWindow.selectedContainerInventory |> Maybe.andThen .itemsView of
+                Just (EveOnline.ParseUserInterface.InventoryItemsListView listView) ->
+                    listView.items |> List.map .uiNode
+
+                Just (EveOnline.ParseUserInterface.InventoryItemsNotListView notListView) ->
+                    notListView.items
+
+                Nothing ->
+                    []
+
+        -- The first word, not the whole name: the same match
+        -- `reload_drones.py` makes. An item cell renders the name with its
+        -- quantity and can truncate it, so "Acolyte" survives a rendering that
+        -- "Acolyte I" does not, and the quick filter has already narrowed the
+        -- hangar to this drone anyway.
+        droneNameNeedle =
+            droneTypeName |> String.words |> List.head |> Maybe.withDefault droneTypeName
+
+        matchingItem =
+            itemsInView
+                |> List.filter
+                    (\itemNode ->
+                        itemNode.uiNode
+                            |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+                            |> List.any (stringContainsIgnoringCase droneNameNeedle)
+                    )
+                |> List.head
+
+        droneBayTreeEntry =
+            inventoryWindow |> inventoryTreeEntryWithText "drone bay"
+
+        itemHangarTreeEntry =
+            inventoryWindow |> inventoryTreeEntryWithText "item hangar"
+
+        selectedContainerTypeName =
+            inventoryWindow.selectedContainerInventory
+                |> Maybe.map (.uiNode >> .uiNode >> .pythonObjectTypeName)
+    in
+    case quantityDialogAcceptButton context.readingFromGameClient of
+        Just acceptButton ->
+            describeBranch
+                "Maintenance: accept the quantity dialog, whose default already fills the drone bay."
+                (clickUiElement acceptButton)
+
+        Nothing ->
+            if selectedContainerTypeName /= Just "StationItems" then
+                case itemHangarTreeEntry of
+                    Nothing ->
+                        describeBranch
+                            "Maintenance: the inventory shows no item hangar to take drones out of -- give up on restocking."
+                            waitForProgressInGame
+
+                    Just itemHangar ->
+                        if previousStepClickedMouse context then
+                            describeBranch
+                                "Maintenance: I just clicked -- wait for the reading to catch up before deciding on the inventory again."
+                                waitForProgressInGame
+
+                        else
+                            describeBranch
+                                ("Maintenance: select the station's item hangar (the inventory shows "
+                                    ++ (selectedContainerTypeName |> Maybe.withDefault "nothing")
+                                    ++ ")."
+                                )
+                                (clickUiElement (itemHangar.selectRegion |> Maybe.withDefault itemHangar.uiNode))
+
+            else
+                case ensureQuickFilterText context inventoryWindow droneTypeName of
+                    Just filterStep ->
+                        filterStep
+
+                    Nothing ->
+                        case ( matchingItem, droneBayTreeEntry ) of
+                            ( Just itemNode, Just droneBay ) ->
+                                if previousStepClickedMouse context then
+                                    -- A repeat drag is not harmless: it can
+                                    -- move part of a stack somewhere
+                                    -- unintended while the first drag is still
+                                    -- catching up. Same wait the courier load
+                                    -- takes.
+                                    describeBranch
+                                        "Maintenance: I just dragged -- wait for the reading to catch up before dragging again."
+                                        waitForProgressInGame
+
+                                else
+                                    describeBranch
+                                        ("Maintenance: drag '"
+                                            ++ droneTypeName
+                                            ++ "' from the item hangar into the ship's drone bay."
+                                        )
+                                        (dragFromItemIconOntoUiElement itemNode
+                                            (droneBay.selectRegion |> Maybe.withDefault droneBay.uiNode)
+                                        )
+
+                            ( Just _, Nothing ) ->
+                                describeBranch
+                                    ("Maintenance: the item hangar holds '"
+                                        ++ droneTypeName
+                                        ++ "' but the inventory shows no drone bay to drop it into -- give up on restocking."
+                                    )
+                                    waitForProgressInGame
+
+                            ( Nothing, _ ) ->
+                                -- With the count in it, "the hangar has none"
+                                -- can be told from "nothing is being read out
+                                -- of this container at all", which look the
+                                -- same from a bare sentence and want opposite
+                                -- fixes.
+                                describeBranch
+                                    ("Maintenance: this station's item hangar holds no '"
+                                        ++ droneTypeName
+                                        ++ "' -- nothing to restock the drone bay with ("
+                                        ++ String.fromInt (List.length itemsInView)
+                                        ++ " item(s) in view under the filter)."
+                                    )
+                                    waitForProgressInGame
+
+
+{-| Right-click the ship's card and choose "Open Drone Bay".
+
+The cards only exist while the station panel is showing them, so a reading
+without one is answered by opening the tab that has them rather than by giving
+up. `reload_drones.py` clicks "Hangars" and then "Ships" for the same reason;
+here each click is one reading, and the next reading decides again from what it
+sees.
+
+The first card is taken, which is what the tool does. The active ship is the
+one card the panel shows under "Active", and nothing read so far distinguishes
+the cards from each other -- so this is worth watching on a character with
+several ships in the same hangar.
+-}
+openDroneBayFromShipCard : BotDecisionContext -> DecisionPathNode
+openDroneBayFromShipCard context =
+    case context.readingFromGameClient.shipItemCards |> List.head of
+        Just shipCard ->
+            describeBranch
+                ("Maintenance: the drone bay is empty -- open it from the ship's own card ("
+                    ++ (shipCard.mainText |> Maybe.withDefault "unnamed ship")
+                    ++ "), the only place a drop into it is accepted. Inventory shows: "
+                    -- What the inventory has selected, so that this step
+                    -- repeating is diagnosable from the log rather than only
+                    -- visible as repetition. The bay counting as open is the
+                    -- container reading `ShipDroneBay`; if these lines keep
+                    -- naming something else after the menu entry was clicked,
+                    -- that is the name to check against the client, not a
+                    -- click that did not land.
+                    ++ describeSelectedContainers context.readingFromGameClient
+                    ++ "."
+                )
+                (useContextMenuCascade
+                    ( "ship card", shipCard.uiNode )
+                    (useMenuEntryWithTextContaining "Open Drone Bay" menuCascadeCompleted)
+                    context
+                )
+
+        Nothing ->
+            case shipHangarTabToOpen context.readingFromGameClient of
+                Just ( tabName, tabNode ) ->
+                    if previousStepClickedMouse context then
+                        describeBranch
+                            "Maintenance: I just clicked a hangar tab -- wait for the reading to catch up."
+                            waitForProgressInGame
+
+                    else
+                        describeBranch
+                            ("Maintenance: no ship card in this reading -- open the '"
+                                ++ tabName
+                                ++ "' tab, which is where the cards are."
+                            )
+                            (clickUiElement tabNode)
+
+                Nothing ->
+                    describeBranch
+                        "Maintenance: no ship card and no Hangars/Ships tab to reveal one -- give up on restocking the drone bay."
+                        waitForProgressInGame
+
+
+{-| The tab to click to bring the ship cards into view: "Ships" if the panel is
+already showing that far, otherwise "Hangars" to get to it.
+-}
+shipHangarTabToOpen : ReadingFromGameClient -> Maybe ( String, EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion )
+shipHangarTabToOpen readingFromGameClient =
+    [ "Ships", "Hangars" ]
+        |> List.filterMap
+            (\tabName ->
+                readingFromGameClient
+                    |> widestNodeLabelledExactly { label = tabName, pythonObjectTypeName = Just "EveLabelMedium" }
+                    |> Maybe.map (\node -> ( tabName, node ))
+            )
+        |> List.head
+
+
+{-| How long before the session ends the restock stops trying.
+
+The window is the wind-down branch itself -- docked, roughly 200 seconds on the
+clock -- which at ~5.7s a reading is around 30 readings for a handful of steps.
+This is the far end of it: enough left for the agent survey, and a bound that
+needs no stored state, the same reason `withinAgentSurveyWindow` is written
+against the clock. Every failure here repeats one decision until the window
+closes, which is the shape `stall_watch` reports, so the bound is what keeps
+that under its threshold instead of running for the rest of the session.
+-}
+droneRestockGiveUpSecondsBeforeSessionEnd : Int
+droneRestockGiveUpSecondsBeforeSessionEnd =
+    30
+
+
+withinDroneRestockWindow : BotDecisionContext -> Bool
+withinDroneRestockWindow context =
+    case secondsToSessionEnd context.eventContext of
+        Nothing ->
+            False
+
+        Just secondsRemaining ->
+            droneRestockGiveUpSecondsBeforeSessionEnd < secondsRemaining
+
+
+{-| Whether the ship's drone bay has nothing in it.
+
+Deliberately "nothing", not "not full": the drones window titles its groups
+with a count, and the bay's own capacity is not readable from it, so "full" is
+not a question this reading can answer. It does not need to be -- the quantity
+dialog's default fills the bay in one drop, so any drone in the bay means the
+work is done, and an empty bay is the case that costs a run its drones.
+
+A bay with nothing in it may render no group at all, which is why a missing
+group counts as empty -- as does a group whose title does not parse into a
+number. Reading either as "cannot tell" would leave this maintenance dead in
+exactly the state it exists for, and the cost of being wrong the other way is
+one refused drag inside a bounded window. The drones window being absent
+altogether is the genuinely unanswerable case, and is left alone: the bot's own
+setup instructions ask for that window, so its absence is a client that is not
+set up rather than a bay that is empty.
+-}
+droneBayIsEmpty : ReadingFromGameClient -> Bool
+droneBayIsEmpty readingFromGameClient =
+    case readingFromGameClient.dronesWindow of
+        Nothing ->
+            False
+
+        Just dronesWindow ->
+            case dronesWindow.droneGroupInBay of
+                Nothing ->
+                    True
+
+                Just droneGroupInBay ->
+                    (droneGroupInBay.header.quantityFromTitle
+                        |> Maybe.map .current
+                        |> Maybe.withDefault 0
+                    )
+                        < 1
+
+
+{-| Whether the ship's own drone bay is the container an inventory window is
+showing. The only evidence a reading carries that our "Open Drone Bay" on the
+ship's card landed, since the bot selects that container nowhere else.
+-}
+droneBayIsSelectedContainer : ReadingFromGameClient -> Bool
+droneBayIsSelectedContainer readingFromGameClient =
+    selectedContainerTypeNames readingFromGameClient
+        |> List.member "ShipDroneBay"
+
+
+selectedContainerTypeNames : ReadingFromGameClient -> List String
+selectedContainerTypeNames readingFromGameClient =
+    readingFromGameClient.inventoryWindows
+        |> List.filterMap
+            (.selectedContainerInventory
+                >> Maybe.map (.uiNode >> .uiNode >> .pythonObjectTypeName)
+            )
+
+
+{-| What every open inventory window currently has selected, for the decision
+log. The restock steers by these type names, so a step that repeats says which
+name it is waiting for rather than leaving the operator to guess whether a
+click failed to land or a name is wrong for this client build.
+-}
+describeSelectedContainers : ReadingFromGameClient -> String
+describeSelectedContainers readingFromGameClient =
+    case selectedContainerTypeNames readingFromGameClient of
+        [] ->
+            "no container selected in any inventory window"
+
+        typeNames ->
+            typeNames |> String.join ", "
+
+
+{-| The inventory window to do the restock in: one that lists a drone bay at
+all, preferring a window anchored to the active ship if the client opened a
+separate one. Which of those happens is not known from a reading yet -- the
+same client reuses the one window when a wreck is opened -- so this covers
+both rather than assuming.
+-}
+inventoryWindowShowingDroneBay : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.InventoryWindow
+inventoryWindowShowingDroneBay readingFromGameClient =
+    let
+        windowsShowingDroneBay =
+            readingFromGameClient.inventoryWindows
+                |> List.filter (inventoryTreeEntryWithText "drone bay" >> (/=) Nothing)
+    in
+    [ windowsShowingDroneBay
+        |> List.filter (.uiNode >> .uiNode >> .pythonObjectTypeName >> (==) "ActiveShipCargo")
+    , windowsShowingDroneBay
+    ]
+        |> List.concat
+        |> List.head
+
+
+{-| A row in the inventory's sidebar, found anywhere in that tree rather than
+only among its roots -- the ship's own holds ("Drone Bay", and a wreck opened
+mid-mission) hang off the ship's entry rather than sitting beside it.
+-}
+inventoryTreeEntryWithText :
+    String
+    -> EveOnline.ParseUserInterface.InventoryWindow
+    -> Maybe EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
+inventoryTreeEntryWithText text inventoryWindow =
+    inventoryWindow.leftTreeEntries
+        |> List.concatMap flattenInventoryTreeEntry
+        |> List.filter (.text >> stringContainsIgnoringCase text)
+        |> List.head
+
+
+flattenInventoryTreeEntry :
+    EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
+    -> List EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
+flattenInventoryTreeEntry entry =
+    entry
+        :: (entry.children
+                |> List.map EveOnline.ParseUserInterface.unwrapInventoryWindowLeftTreeEntryChild
+                |> List.concatMap flattenInventoryTreeEntry
+           )
+
+
+{-| The button that confirms how much of a stack to move.
+
+Not a `MessageBox`, so `closeMessageBox` does not reach it -- and it carries no
+name of its own either, which leaves its label. `reload_drones.py` finds it the
+same way and accepts the default rather than typing a number, because the
+default is already as much as the bay will take.
+-}
+quantityDialogAcceptButton : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+quantityDialogAcceptButton readingFromGameClient =
+    [ "OK", "Ok" ]
+        |> List.filterMap
+            (\label ->
+                readingFromGameClient
+                    |> widestNodeLabelledExactly { label = label, pythonObjectTypeName = Nothing }
+            )
+        |> List.head
+
+
+{-| The widest node whose first visible text is exactly this label.
+
+`reload_drones.py`'s `labelled`, ported: exact rather than containing, so
+"Ships" does not match "Ship Hangar", and widest so the click lands on the
+clickable box around the text rather than on a nested fragment of it.
+
+Blank texts are skipped and markup is stripped before comparing, the same two
+things the tool's `texts_of` does. A label rendered as `<center>OK` is the same
+label, and a node whose first text is empty would otherwise hide a real one
+underneath it.
+-}
+widestNodeLabelledExactly :
+    { label : String, pythonObjectTypeName : Maybe String }
+    -> ReadingFromGameClient
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+widestNodeLabelledExactly config readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter
+            (\node ->
+                ((config.pythonObjectTypeName == Nothing)
+                    || (config.pythonObjectTypeName == Just node.uiNode.pythonObjectTypeName)
+                )
+                    && (firstVisibleTextOfNode node == Just config.label)
+            )
+        |> List.sortBy (.totalDisplayRegionVisible >> .width >> negate)
+        |> List.head
+
+
+firstVisibleTextOfNode : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Maybe String
+firstVisibleTextOfNode node =
+    node.uiNode
+        |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+        |> List.map (EveOnline.ParseUserInterface.stripHtmlTags >> String.trim)
+        |> List.filter (String.isEmpty >> not)
+        |> List.head
+
+
+{-| Drag an inventory item onto a sidebar row, taking hold of the item's icon.
+
+`dragAndDropUiElement` starts from the centre of the source, and in the icon
+view that is where the icon meets the label under it -- one `InvItem` box
+covers both, and `reload_drones.py` had to aim 25 px below the top of the box to
+get the icon. The same offset is used here, clamped to half the height so that
+a list-view row, which is shorter than that, is still grabbed inside itself.
+-}
+dragFromItemIconOntoUiElement :
+    EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    -> EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    -> DecisionPathNode
+dragFromItemIconOntoUiElement itemElement targetElement =
+    let
+        itemRegion =
+            itemElement.totalDisplayRegionVisible
+
+        from =
+            { x = itemRegion.x + (itemRegion.width // 2)
+            , y = itemRegion.y + min itemIconOffsetFromTop (itemRegion.height // 2)
+            }
+
+        to =
+            targetElement.totalDisplayRegionVisible
+                |> EveOnline.ParseUserInterface.centerFromDisplayRegion
+    in
+    decideActionForCurrentStep
+        (EffectOnWindow.effectsForDragAndDrop
+            { startLocation = from
+            , mouseButton = MouseButtonLeft
+            , waypointsPositionsInBetween =
+                [ { x = (from.x + to.x) // 2, y = (from.y + to.y) // 2 } ]
+            , endLocation = to
+            }
+        )
+
+
+itemIconOffsetFromTop : Int
+itemIconOffsetFromTop =
+    25
 
 
 {-| Agents based elsewhere are listed in the station's Agents panel too, with
@@ -1714,27 +2274,6 @@ loadCourierCargo context itemName =
 
                         _ ->
                             False
-
-                -- A prefix, not an exact match. Typing into this field drops
-                -- characters: "reports" lands as "report" every time it was
-                -- tried live. Demanding the whole string back meant the filter
-                -- never looked set, so the bot retyped for the rest of the
-                -- session -- while the filter it had already typed was doing its
-                -- job, since the field is a substring match and "report" finds
-                -- Reports perfectly well. Any non-empty prefix is good enough to
-                -- stop typing; an empty box or unrelated text still is not.
-                filterIsAlreadySet =
-                    inventoryWindow.quickFilterText
-                        |> Maybe.map
-                            (\current ->
-                                let
-                                    typed =
-                                        current |> String.trim |> String.toLower
-                                in
-                                not (String.isEmpty typed)
-                                    && String.startsWith typed (expectedQuickFilterText itemName)
-                            )
-                        |> Maybe.withDefault False
             in
             case ( matchingItem, shipCargoTreeEntry ) of
                 ( Just itemNode, Just shipCargo ) ->
@@ -1765,66 +2304,60 @@ loadCourierCargo context itemName =
                         )
 
                 ( Nothing, _ ) ->
-                    if not filterIsAlreadySet then
-                        inventoryWindow.quickFilterInputBox
-                            |> Maybe.map
-                                (\filterBox ->
-                                    if previousStepClickedMouse context then
-                                        describeBranch
-                                            "I just clicked the quick-filter box -- wait for the reading to catch up before typing."
-                                            waitForProgressInGame
+                    case ensureQuickFilterText context inventoryWindow itemName of
+                        Just filterStep ->
+                            Just filterStep
 
-                                    else
-                                        case
-                                            ( inventoryWindow.quickFilterText
-                                                |> Maybe.withDefault ""
-                                                |> String.trim
-                                                |> String.isEmpty
-                                            , quickFilterClearButton filterBox
-                                            )
-                                        of
-                                            ( False, Just clearButton ) ->
-                                                -- Whatever is in there is not
-                                                -- what we want and typing cannot
-                                                -- replace it, so empty it first
-                                                -- and type on the next reading.
-                                                describeBranch
-                                                    "The quick filter holds something else -- clear it before typing."
-                                                    (clickUiElement clearButton)
+                        Nothing ->
+                            loadCourierCargoAfterFiltering
+                                { itemName = itemName
+                                , filterIsAlreadySet = quickFilterIsAlreadySet inventoryWindow itemName
+                                , lookingAtACapacityLimitedContainer = lookingAtACapacityLimitedContainer
+                                , itemHangarTreeEntry = itemHangarTreeEntry
+                                }
 
-                                            _ ->
-                                                describeBranch
-                                                    ("Filter the inventory for '" ++ itemName ++ "'.")
-                                                    (decideActionForCurrentStep
-                                                        (List.concat
-                                                            [ mouseClickOnUIElement MouseButtonLeft filterBox
-                                                                |> Result.withDefault []
-                                                            , typeTextEffects itemName
-                                                            ]
-                                                        )
-                                                    )
-                                )
 
-                    else if lookingAtACapacityLimitedContainer && itemHangarTreeEntry /= Nothing then
-                        -- Filtered, but looking at a hold with a capacity limit
-                        -- (the ship's own, most likely) rather than the station
-                        -- hangar, which reports no maximum. Switch once and let
-                        -- the next reading decide.
-                        itemHangarTreeEntry
-                            |> Maybe.map
-                                (\itemHangar ->
-                                    describeBranch
-                                        ("Look for '" ++ itemName ++ "' in the item hangar.")
-                                        (clickUiElement (itemHangar.selectRegion |> Maybe.withDefault itemHangar.uiNode))
-                                )
+{-| What the courier load does once the quick filter is set and the item is
+still not in view: look in the station hangar rather than the hold we are
+looking at, or give up.
 
-                    else
-                        -- Filtered the station hangar and it is not there, so it
-                        -- is not something we can load here. Give up rather than
-                        -- loop: missions like "Get the Relic" want an item that
-                        -- is in a container out in space, and returning Nothing
-                        -- lets the caller undock and go find it.
-                        Nothing
+Split out only so that `ensureQuickFilterText` can be shared with the drone
+restock; the conditions are the ones that were here before. Note it still gives
+up when the filter is *not* set and there is no filter box to set it with --
+there is no step left to take then, and the caller reads that as "not loadable
+here" and undocks.
+-}
+loadCourierCargoAfterFiltering :
+    { itemName : String
+    , filterIsAlreadySet : Bool
+    , lookingAtACapacityLimitedContainer : Bool
+    , itemHangarTreeEntry : Maybe EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
+    }
+    -> Maybe DecisionPathNode
+loadCourierCargoAfterFiltering { itemName, filterIsAlreadySet, lookingAtACapacityLimitedContainer, itemHangarTreeEntry } =
+    if not filterIsAlreadySet then
+        -- The filter still needs setting and there was no box to set it with,
+        -- so there is no step left to take here.
+        Nothing
+
+    else if lookingAtACapacityLimitedContainer && itemHangarTreeEntry /= Nothing then
+        -- Filtered, but looking at a hold with a capacity limit (the ship's
+        -- own, most likely) rather than the station hangar, which reports no
+        -- maximum. Switch once and let the next reading decide.
+        itemHangarTreeEntry
+            |> Maybe.map
+                (\itemHangar ->
+                    describeBranch
+                        ("Look for '" ++ itemName ++ "' in the item hangar.")
+                        (clickUiElement (itemHangar.selectRegion |> Maybe.withDefault itemHangar.uiNode))
+                )
+
+    else
+        -- Filtered the station hangar and it is not there, so it is not
+        -- something we can load here. Give up rather than loop: missions like
+        -- "Get the Relic" want an item that is in a container out in space, and
+        -- returning Nothing lets the caller undock and go find it.
+        Nothing
 
 
 {-| Open the inventory window with EVE's own Alt+C.
@@ -1859,6 +2392,90 @@ openInventoryWindow context =
                 , EffectOnWindow.KeyUp EffectOnWindow.vkey_MENU
                 ]
             )
+
+
+{-| Get the inventory's quick filter reading the text we want, or Nothing if it
+already does.
+
+Shared by the courier load and the drone restock, because the trap it guards is
+the same for both: the box keeps whatever was typed into it last, and typing
+again appends, so "Acolyte IAcolyte I" matches nothing and looks exactly like
+the typing having failed. Clearing is a click on the box's own Clear button --
+see `quickFilterClearButton` for why no select-all shortcut works here.
+-}
+ensureQuickFilterText :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.InventoryWindow
+    -> String
+    -> Maybe DecisionPathNode
+ensureQuickFilterText context inventoryWindow textToFilterFor =
+    if quickFilterIsAlreadySet inventoryWindow textToFilterFor then
+        Nothing
+
+    else
+        inventoryWindow.quickFilterInputBox
+            |> Maybe.map
+                (\filterBox ->
+                    if previousStepClickedMouse context then
+                        describeBranch
+                            "I just clicked the quick-filter box -- wait for the reading to catch up before typing."
+                            waitForProgressInGame
+
+                    else
+                        case
+                            ( inventoryWindow.quickFilterText
+                                |> Maybe.withDefault ""
+                                |> String.trim
+                                |> String.isEmpty
+                            , quickFilterClearButton filterBox
+                            )
+                        of
+                            ( False, Just clearButton ) ->
+                                -- Whatever is in there is not what we want and
+                                -- typing cannot replace it, so empty it first
+                                -- and type on the next reading.
+                                describeBranch
+                                    "The quick filter holds something else -- clear it before typing."
+                                    (clickUiElement clearButton)
+
+                            _ ->
+                                describeBranch
+                                    ("Filter the inventory for '" ++ textToFilterFor ++ "'.")
+                                    (decideActionForCurrentStep
+                                        (List.concat
+                                            [ mouseClickOnUIElement MouseButtonLeft filterBox
+                                                |> Result.withDefault []
+                                            , typeTextEffects textToFilterFor
+                                            ]
+                                        )
+                                    )
+                )
+
+
+{-| Whether the quick filter already narrows the container down to what we are
+looking for.
+
+A prefix, not an exact match. Typing into this field drops characters:
+"reports" lands as "report" every time it was tried live. Demanding the whole
+string back meant the filter never looked set, so the bot retyped for the rest
+of the session -- while the filter it had already typed was doing its job, since
+the field is a substring match and "report" finds Reports perfectly well. Any
+non-empty prefix is good enough to stop typing; an empty box or unrelated text
+still is not.
+-}
+quickFilterIsAlreadySet : EveOnline.ParseUserInterface.InventoryWindow -> String -> Bool
+quickFilterIsAlreadySet inventoryWindow textToFilterFor =
+    inventoryWindow.quickFilterText
+        |> Maybe.map
+            (\current ->
+                let
+                    typed =
+                        current |> String.trim |> String.toLower
+                in
+                not (String.isEmpty typed)
+                    && String.startsWith typed (expectedQuickFilterText textToFilterFor)
+            )
+        |> Maybe.withDefault False
 
 
 {-| What the quick-filter box will read once `typeTextEffects` has typed the
@@ -2431,7 +3048,7 @@ decideActionWhenInSpace context seeUndockingComplete =
         |> Maybe.withDefault
             (if seeUndockingComplete.shipUI |> shipUIIndicatesShipIsWarpingOrJumping then
                 describeBranch "I am in warp."
-                    (returnDronesToBay context |> Maybe.withDefault waitForProgressInGame)
+                    (returnDronesToBay context waitForProgressInGame)
 
              else
                 -- An agent conversation is not a docked-only state. EVE offers
@@ -2773,7 +3390,6 @@ jumpToNextSystem context =
 
             else
                 returnDronesToBay context
-                 |> Maybe.withDefault
                     ( useContextMenuCascadeWithCustomConfig
                     -- Feedback: "Jump Through Stargate" took 3-4 menu
                     -- opens before being recognized. The route icon is
@@ -2909,16 +3525,15 @@ runAway context =
 
                 Just celestial ->
                     returnDronesToBay context
-                        |> Maybe.withDefault
-                            (selectThenPanelAction context
-                                "selectedItemWarpTo"
-                                celestial
-                                ("Get out -- warp to '"
-                                    ++ (celestial.objectName |> Maybe.withDefault "a celestial")
-                                    ++ "' at "
-                                    ++ (celestial.objectDistance |> Maybe.withDefault "range")
-                                )
+                        (selectThenPanelAction context
+                            "selectedItemWarpTo"
+                            celestial
+                            ("Get out -- warp to '"
+                                ++ (celestial.objectName |> Maybe.withDefault "a celestial")
+                                ++ "' at "
+                                ++ (celestial.objectDistance |> Maybe.withDefault "range")
                             )
+                        )
 
 
 tetherAtStructure : BotDecisionContext -> DecisionPathNode
@@ -2932,16 +3547,15 @@ tetherAtStructure context =
     case escapeTargetOnOverview context of
         Just ( entry, buttonName, what ) ->
             returnDronesToBay context
-                |> Maybe.withDefault
-                    (selectThenPanelAction context
-                        buttonName
-                        entry
-                        ("Get out -- '"
-                            ++ (entry.objectName |> Maybe.withDefault "somewhere off this grid")
-                            ++ "' is on the overview, "
-                            ++ what
-                        )
+                (selectThenPanelAction context
+                    buttonName
+                    entry
+                    ("Get out -- '"
+                        ++ (entry.objectName |> Maybe.withDefault "somewhere off this grid")
+                        ++ "' is on the overview, "
+                        ++ what
                     )
+                )
 
         Nothing ->
             tetherAtStructureViaSurroundings context
@@ -3104,17 +3718,16 @@ dockAtStation preferredStationName context =
                 }
     in
     returnDronesToBay context
-        |> Maybe.withDefault
-            (describeBranch "Head for a station and dock."
-                (useContextMenuCascadeOnListSurroundingsButton
-                    (useMenuEntryWithTextContainingFirstOf [ "structures", "station" ]
-                        (chooseNextMenuEntry
-                            (chooseNextMenuEntry MenuCascadeCompleted)
-                        )
+        (describeBranch "Head for a station and dock."
+            (useContextMenuCascadeOnListSurroundingsButton
+                (useMenuEntryWithTextContainingFirstOf [ "structures", "station" ]
+                    (chooseNextMenuEntry
+                        (chooseNextMenuEntry MenuCascadeCompleted)
                     )
-                    context
                 )
+                context
             )
+        )
 
 
 undockUsingStationWindow : BotDecisionContext -> DecisionPathNode
@@ -3664,37 +4277,94 @@ gateCanBeActivatedNow context entry =
 
 
 {-| Readings of drones sitting in space before the recall is treated as not
-landing at all, and before it is abandoned.
+landing at all.
 
 Shift+R is a bare keypress: there is nothing to aim it at and nothing in the
 reading that says whether the client took it. So the only evidence available is
-the drones still being out, and these are the two points at which that stops
-looking like latency.
+the drones still being out.
 
-The recovery threshold is generous because a fight legitimately keeps drones out
-for a long stretch, and the cost of hitting it early is only one click.
+Generous because a fight legitimately keeps drones out for a long stretch, and
+the cost of hitting it early is only one click.
 -}
 droneRecallFocusRecoveryTicks : Int
 droneRecallFocusRecoveryTicks =
     20
 
 
+{-| Unanswered readings -- see `droneRecallUnansweredTicks` -- before the drones
+are written off and the ship is allowed to leave without them.
+
+This is counted from the first recall the client did not answer, *not* from the
+launch. Run 1 measured it from launch and lost all ten drones in two batches of
+five: drones are deliberately left out for the whole fight, so any pocket
+running longer than this threshold pushed the counter past it, after which
+`returnDronesToBay` declined for the rest of the session and every warp
+abandoned whatever was in space. Log evidence: 91 readings between the second
+launch and the next warp, no recall decision among them, and five drones gone.
+
+Nothing on the wind-down path depends on this being small any more --
+`secondsPastSessionEndBeforeGivingUpOnDocking` ends the session whether or not
+the drones ever come home -- so this can afford to be the patient bound it was
+always described as.
+-}
 droneRecallGiveUpTicks : Int
 droneRecallGiveUpTicks =
     60
 
 
-dronesAreInSpace : ReadingFromGameClient -> Bool
-dronesAreInSpace readingFromGameClient =
+{-| How far back to look for the bot having asked for a recall.
+
+More than one step, because the focus-recovery branch below alternates click,
+press, click, press -- so during a recall that is being pursued every reading,
+only every other step carries the keypress. Short enough that a bot which has
+gone back to fighting stops counting readings against a recall it is no longer
+asking for.
+-}
+droneRecallAskedLookbackSteps : Int
+droneRecallAskedLookbackSteps =
+    3
+
+
+dronesInSpaceCount : ReadingFromGameClient -> Int
+dronesInSpaceCount readingFromGameClient =
     readingFromGameClient.dronesWindow
         |> Maybe.andThen .droneGroupInSpace
         |> Maybe.andThen (.header >> .quantityFromTitle)
-        |> Maybe.map (.current >> (<) 0)
-        |> Maybe.withDefault False
+        |> Maybe.map .current
+        |> Maybe.withDefault 0
 
 
-returnDronesToBay : BotDecisionContext -> Maybe DecisionPathNode
-returnDronesToBay context =
+dronesAreInSpace : ReadingFromGameClient -> Bool
+dronesAreInSpace readingFromGameClient =
+    0 < dronesInSpaceCount readingFromGameClient
+
+
+{-| Whether one of the last few steps pressed Shift+R at the drones.
+
+`vkey_R` is used for nothing else in this bot, so the keypress alone identifies
+the recall.
+-}
+recentStepAskedForDroneRecall : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+recentStepAskedForDroneRecall previousStepsEffects =
+    previousStepsEffects
+        |> List.take droneRecallAskedLookbackSteps
+        |> List.any (List.member (EffectOnWindow.KeyDown EffectOnWindow.vkey_R))
+
+
+{-| Get the drones in, and say what happened when it stops trying.
+
+Takes what to do once there is nothing to recall rather than returning a
+`Maybe`, so the branch that abandons the drones can still name itself in the
+decision log while handing the step on. That branch previously returned nothing
+at all, and only a separate branch testing the counter for *equality* with the
+threshold ever said anything -- so the message landed only if the ship happened
+to be warping on the single reading where the counter hit 60 exactly. In run 1
+it never did: the give-up engaged mid-fight, silently, and the bot reported
+nothing wrong while having disabled its own drone recall for the rest of the
+session.
+-}
+returnDronesToBay : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+returnDronesToBay context ifNothingToRecall =
     context.readingFromGameClient.dronesWindow
         |> Maybe.andThen .droneGroupInSpace
         |> Maybe.andThen
@@ -3708,23 +4378,25 @@ returnDronesToBay context =
                 then
                     Nothing
 
-                else if droneRecallGiveUpTicks < context.memory.dronesInSpaceTicks then
-                    -- Stop asking. The caller's fallback is what matters here:
-                    -- in the wind-down path it docks, so giving up ends the
-                    -- session with drones abandoned instead of never ending at
-                    -- all. Run 118 held that path open for 150 readings and
-                    -- overran its session by five minutes, which cost the whole
-                    -- remainder of the run; a set of drones does not.
-                    Nothing
-
-                else if droneRecallGiveUpTicks == context.memory.dronesInSpaceTicks then
+                else if droneRecallGiveUpTicks < context.memory.droneRecallUnansweredTicks then
+                    -- Stop asking, and go on with whatever the caller wanted to
+                    -- do -- in the wind-down path that is docking, so giving up
+                    -- ends the session with drones abandoned instead of never
+                    -- ending at all. Run 118 held that path open for 150
+                    -- readings and overran its session by five minutes, which
+                    -- cost the whole remainder of the run; a set of drones does
+                    -- not.
+                    --
+                    -- Said every time it declines, not once: an operator
+                    -- reading the log has to be able to see that the ship is
+                    -- leaving without its drones on purpose.
                     Just
                         (describeBranch
-                            ("Drones have been in space for "
-                                ++ String.fromInt context.memory.dronesInSpaceTicks
-                                ++ " readings and will not come back -- give up on them so the ship can move on."
+                            ("Drones have not answered "
+                                ++ String.fromInt context.memory.droneRecallUnansweredTicks
+                                ++ " readings of recall and will not come back -- leave without them so the ship can move on."
                             )
-                            waitForProgressInGame
+                            ifNothingToRecall
                         )
 
                 else if
@@ -3772,6 +4444,7 @@ returnDronesToBay context =
                             -- )
                         )
             )
+        |> Maybe.withDefault ifNothingToRecall
 
 
 {-| A button in the Selected Item panel, by its own `_name`.
@@ -4035,6 +4708,8 @@ initBotMemory =
     , lootAllRefusedTicks = 0
     , lootWindowOutOfRangeTicks = 0
     , dronesInSpaceTicks = 0
+    , dronesInSpaceCount = 0
+    , droneRecallUnansweredTicks = 0
     , dockedWithCargoWantedTicks = 0
     , nothingToDoTicks = 0
     , lastObjectiveText = ""
@@ -4047,6 +4722,7 @@ initBotMemory =
     , readingsCount = 0
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
+    , droneBayOpenedFromShipCard = False
     }
 
 
@@ -4126,6 +4802,10 @@ statusTextFromState context =
                                                 |> Maybe.map (.current >> String.fromInt)
                                                 |> Maybe.withDefault "Unknown"
                                            )
+                                        ++ ". Out for "
+                                        ++ (context.memory.dronesInSpaceTicks |> String.fromInt)
+                                        ++ " readings, unanswered recall for "
+                                        ++ (context.memory.droneRecallUnansweredTicks |> String.fromInt)
                                         ++ "."
 
                         namesOfOtherPilotsInOverview =
@@ -5371,8 +6051,7 @@ ensureDronesRecalledBeforeWarping :
     -> DecisionPathNode
     -> DecisionPathNode
 ensureDronesRecalledBeforeWarping context ifReadyToWarp =
-    returnDronesToBay context
-        |> Maybe.withDefault ifReadyToWarp
+    returnDronesToBay context ifReadyToWarp
 
 
 deactivatePropulsionModuleBeforeWarping :
@@ -5542,9 +6221,9 @@ they got chewed up.
 
 This is the memory half: keep the low-water mark, and forget it once the ship
 is healthy again or docked. `runAwayIfLowHealth` compares it against the
-threshold, because `UpdateMemoryContext` carries only the reading -- the bot
-settings are not visible from here, which is why the re-arm level is a constant
-and the trip level is not.
+threshold, because `UpdateMemoryContext` does not carry the bot settings --
+they are not visible from here, which is why the re-arm level is a constant and
+the trip level is not.
 -}
 runAwayRearmPercent : Int
 runAwayRearmPercent =
@@ -5575,6 +6254,9 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     let
         currentContextMenuDepth =
             context.readingFromGameClient.contextMenus |> List.length
+
+        dronesInSpaceCountNow =
+            dronesInSpaceCount context.readingFromGameClient
 
         -- The agent offering to complete a mission is the agent asserting one
         -- is in progress. Read here rather than in the decision tree so the
@@ -5652,6 +6334,21 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             (.armor)
             botMemoryBefore.lowestArmorPercentSinceHealthy
     , readingsCount = botMemoryBefore.readingsCount + 1
+    , droneBayOpenedFromShipCard =
+        -- Whether our own "Open Drone Bay" on the ship's card has landed since
+        -- the ship docked. Nothing in a reading distinguishes the inventory
+        -- opened that way from the one Alt+C opens, and only the first accepts
+        -- a drop into the bay -- so the one moment that is evidence, the ship's
+        -- drone bay showing as the selected container, is remembered until the
+        -- ship undocks. The bot selects that container nowhere else, and the
+        -- restock has to leave it to reach the item hangar, which is why the
+        -- answer cannot simply be re-read when the drag comes around.
+        if context.readingFromGameClient.shipUI /= Nothing then
+            False
+
+        else
+            droneBayIsSelectedContainer context.readingFromGameClient
+                || botMemoryBefore.droneBayOpenedFromShipCard
     , orbitUnconfirmedTicks =
         -- The orbit twin of keepAtRangeUnconfirmedTicks below; same indicator,
         -- same way of never arriving.
@@ -5823,12 +6520,41 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         else
             0
     , dronesInSpaceTicks =
-        -- Consecutive readings with drones out. Reset when the bay has them
-        -- back, so this measures "how long have they been out", which is what
-        -- tells a recall that is not landing from one that simply has not been
-        -- answered yet.
+        -- Consecutive readings with drones out, counted from the launch. This
+        -- is "how long have they been out" and nothing more -- it says nothing
+        -- about whether a recall is landing, because drones are deliberately
+        -- left out for a whole fight. Only `droneRecallUnansweredTicks` below
+        -- can tell those apart.
         if dronesAreInSpace context.readingFromGameClient then
             botMemoryBefore.dronesInSpaceTicks + 1
+
+        else
+            0
+    , dronesInSpaceCount = dronesInSpaceCountNow
+    , droneRecallUnansweredTicks =
+        -- Consecutive readings in which the bot has asked for the drones back
+        -- and the client has not answered. Only two things end it: the drones
+        -- being home, and the in-space count falling at all -- a partial recall
+        -- is the client answering, so the rest deserve the full patience again.
+        --
+        -- It also stops counting when the bot stops asking, so a fight it went
+        -- back to fighting is not held against a recall nobody is making. Past
+        -- the give-up threshold that has to become a hold rather than a reset:
+        -- giving up is precisely what stops the asking, so a reset there would
+        -- unwind the give-up two readings later and the ship would spend the
+        -- rest of the session alternating between abandoning its drones and
+        -- recalling them again.
+        if dronesInSpaceCountNow < 1 then
+            0
+
+        else if dronesInSpaceCountNow < botMemoryBefore.dronesInSpaceCount then
+            0
+
+        else if droneRecallGiveUpTicks < botMemoryBefore.droneRecallUnansweredTicks then
+            botMemoryBefore.droneRecallUnansweredTicks
+
+        else if recentStepAskedForDroneRecall context.previousStepsEffects then
+            botMemoryBefore.droneRecallUnansweredTicks + 1
 
         else
             0
