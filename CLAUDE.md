@@ -2095,6 +2095,80 @@ runner's copy of `BotFrameworkSeparatingMemory.elm` now passes
 `previousStepsEffects` through, so that file diverges from the other apps'
 copies.
 
+### #11 held, and the seventeen lost drones were three different things
+
+Issue #59 proposed going back for abandoned drones and asked first whether the
+bot still abandons any. Measured across the sixteen finished runs in
+`~/eve-bot-logs`, **it does not, and has not since run 1.**
+
+The runs are separable by their own status lines rather than by when a pull
+request merged: #11 added `unanswered recall for N` beside the drone counts and
+the later status rewrite made it `Nbay/Msp out K`, and both are unconditional.
+Run 1 carries neither; runs 2, 7, 15 and 16 never got to space with a bay to look
+at; every other run carries one.
+
+- **`returnDronesToBay`'s give-up has fired zero times in any recorded run.**
+  Since #11 that branch names itself on every reading it declines, so zero is
+  evidence rather than the silence it was before — the branch was reachable and
+  was never reached.
+- **Only run 1 ever left a grid with drones in space.** 24 readings of
+  `I am in warp` and 12 of `Jump Through Stargate`, all with five drones out.
+- **Recalls land.** Runs 9, 10, 11, 12 and 14 completed 41 between them, each
+  ending with the in-space count at zero and the bay holding what came back.
+
+The seventeen drones the issue counts are three unrelated things, and only the
+first is what it describes:
+
+- **Ten, in run 1, genuinely abandoned** — the pre-#11 failure.
+- **Five, in run 8, not lost at all.** That run *ended* 3 in bay / 5 in space
+  because an operator stopped it mid-pocket, and run 9 started in the same place
+  and had all five back 40 readings later. That is also the only direct evidence
+  here that abandoned drones persist and can be reclaimed.
+- **Two, in run 5, destroyed in space by rats** while the ship was still on grid
+  and fighting, with the survivors recalled normally at tick 450. Run 14 lost
+  three the same way and run 17 its last one, mid-fight, on the reading the
+  client was still logging hits on the rat that killed it.
+
+**Counting the drone bay at the start and end of a run cannot tell those apart**,
+which is what made the issue's estimate look like a recovery opportunity. What
+separates them is where the ship was when the count fell.
+
+So there is nothing yet to build a recovery path *for*, and the observation is
+what landed instead. `droneAbandonmentAfterReading` records what was in space and
+where, and says so on the reading the ship leaves without it — a decision-log
+line once, and a `LEFT BEHIND N at <place>` clause in the status line for the
+rest of the session. Nothing acts on it, which a test pins.
+
+**The departure is read at its far end, and run 11 is why.** A ship lining up to
+warp still has time to get its drones home: run 11 spent 21 readings of
+`I am in warp` with five drones out and had all five in the bay by the reading
+the warp finished. Firing on the *start* of a departure would have reported an
+abandonment that did not happen, which is worse than reporting none. The trigger
+is therefore `weJustFinishedWarping`, plus the reading the info panel first names
+a station — the other way a site is left, and the one where the drones window has
+already gone, which is why the count and the place are written down beforehand.
+
+`Nothing` from the drones window means "this reading cannot say", never "the sky
+is empty": `dronesInSpaceCountReadable` is the `Maybe` the bookkeeping needs and
+`dronesInSpaceCount` is that value defaulted to 0, so every existing caller is
+unchanged. The place is the solar system and the mission, which does not
+distinguish two pockets of one mission — the client never names the pocket, and
+a recovery path would need something this reading cannot give it.
+
+**Two silent routes out remain, and neither has cost anything yet.** The docked
+branch's travel step (`decideActionWhenDockedWithMissionTracker`) does not recall
+drones, correctly while docked — but that branch is entered whenever the ship UI
+fails to parse. Run 11 went through it at tick 232: three consecutive readings
+printing `I see no ship UI, assume we are docked` followed by
+`The mission tracker offers the next travel step: 'Dock'`, and one input
+dispatched. Those readings could see nothing of the drones, because a reading
+with no ship UI prints no drone status — but the readings either side of them
+report `In bay: 3, in space: 5`, and the client's combat log inside the same
+window records this ship's guns hitting a rat, which a docked ship cannot do. The
+other route is an acceleration gate, which changes pocket without a warp. The
+observation covers the consequences of both, since it watches arrivals rather
+than departures; what it does not do is stop either.
+
 ## The home station: restocking where the drones actually are
 
 The drone restock takes drones from whatever station the ship is docked at, and
@@ -2465,6 +2539,17 @@ exists.
   in 29 readings. The threshold, the bound and what is unverified are in "A
   mission that cannot be progressed is given back, not asked about forever"
   above. **Untested against a live client.**
+
+  And it now **says when it leaves drones behind** — how many and where, once in
+  the decision log and then in the status line for the rest of the session. This
+  is issue #59's observation and not its recovery path: the sixteen finished runs
+  say abandonment stopped happening at run 1, so there is nothing to recover yet.
+  The measurement, the three different things the "seventeen lost drones" turn
+  out to be, and the two silent routes out that remain are in "#11 held, and the
+  seventeen lost drones were three different things" above. **Untested against a
+  live client, and by construction unprovable by a run that goes well**: the line
+  only appears when the thing it watches for happens, so a quiet run is not
+  evidence the instrument works.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
