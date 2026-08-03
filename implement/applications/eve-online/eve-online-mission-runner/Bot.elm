@@ -477,6 +477,7 @@ type alias BotMemory =
     , nothingToDoTicks : Int
     , lastObjectiveText : String
     , gateWithinReachTicks : Int
+    , gateLockedForWantOfAnItem : Maybe String
     , siteAdmitsThisShip : Maybe Bool
     , clearingNotRequired : Bool
     , agentConversationWithoutTrackerTicks : Int
@@ -5987,6 +5988,63 @@ gameLogEntryIsFromNotifyChannel entry =
             (channel |> String.trim |> String.toLower) == "notify"
 
 
+gameLogEntryIsFromInfoChannel : EveOnline.ParseUserInterface.GameLogEntry -> Bool
+gameLogEntryIsFromInfoChannel entry =
+    case entry.channel of
+        Nothing ->
+            True
+
+        Just channel ->
+            (channel |> String.trim |> String.toLower) == "info"
+
+
+{-| The client saying this acceleration gate wants an item the ship is not
+carrying, in its own words.
+
+Run 10 pressed the panel's Activate on a gate 32 m away, nine times over two
+minutes, and the client answered every one of them on the `info` channel:
+
+    This gate is locked! To activate it, you need to have R.S. Officer's
+    Passcard in your cargo hold. By all signs it will not be consumed upon use,
+    so the only problem is to locate the thing!
+
+The bot read none of it. The refusal also arrives as a message box, which
+`closeMessageBox` dismissed as generic noise, so the whole exchange was a press,
+a dismissal and another press -- until `gateWithinReachTicks` ran out and the
+gate branch fell silent. See `activateAccelerationGateIfPresent`.
+
+**Two substrings, and here the second one carries the whole distinction rather
+than merely guarding a rewording.** The recorded game logs hold two different
+sentences opening "This gate is locked!", and they want opposite responses:
+
+    ... There are synchronized gate scramblers on all hostile entities in this
+    area ... you must simply clear the vicinity of enemy ships.
+
+That one is transient and the bot already answers it correctly by fighting; a
+matcher on the exclamation alone would fire on it and stop a run that was about
+to succeed. `in your cargo hold` is what separates a standing requirement the
+bot cannot meet from a fight it is already winning, so it is not optional and
+`This gate is locked` must never be matched on its own.
+
+`Nothing` and `Just []` are collapsed, safely and in the same direction as
+#31's and #33's matchers: finding no such line is never read as the gate being
+open. What says the gate opened is the pocket changing.
+
+-}
+gateLockedForWantOfAnItemFromGameLog : ReadingFromGameClient -> Maybe String
+gateLockedForWantOfAnItemFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromInfoChannel
+        |> List.filter
+            (\entry ->
+                stringContainsIgnoringCase "gate is locked" entry.text
+                    && stringContainsIgnoringCase "in your cargo hold" entry.text
+            )
+        |> List.head
+        |> Maybe.map .text
+
+
 {-| Whether this weapon is running, and so whether the client will refuse to
 load a charge into it.
 
@@ -7248,7 +7306,26 @@ activate that instead.
 gateCanBeActivatedNow : BotDecisionContext -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 gateCanBeActivatedNow context entry =
     selectedItemIsOverviewEntry context entry
-        && (selectedItemButtonNamed context "selectedItemActivateGate" /= Nothing)
+        && selectedItemOffersActivateGate context.readingFromGameClient
+
+
+{-| Whether the panel is offering to open a gate, whoever it is showing.
+
+The half of `gateCanBeActivatedNow` that needs no decision context, so that
+`updateMemoryForNewReadingFromGame` -- which never sees a decision -- can count
+the readings on which the client made the offer and the gate did not open.
+
+-}
+selectedItemOffersActivateGate : ReadingFromGameClient -> Bool
+selectedItemOffersActivateGate readingFromGameClient =
+    readingFromGameClient.selectedItemWindow
+        |> Maybe.map (.uiNode >> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion)
+        |> Maybe.withDefault []
+        |> List.any
+            (\node ->
+                (node.uiNode |> EveOnline.ParseUserInterface.getNameFromDictEntries)
+                    == Just "selectedItemActivateGate"
+            )
 
 
 {-| Readings of drones sitting in space before the recall is treated as not
@@ -8197,6 +8274,7 @@ initBotMemory =
     , nothingToDoTicks = 0
     , lastObjectiveText = ""
     , gateWithinReachTicks = 0
+    , gateLockedForWantOfAnItem = Nothing
     , siteAdmitsThisShip = Nothing
     , clearingNotRequired = False
     , agentConversationWithoutTrackerTicks = 0
@@ -8369,6 +8447,7 @@ statusTextFromState context =
                     , [ describeDrones ]
                     , [ describeOverview ]
                     , [ describeRatsInOverview, describeCurrentTarget, describeLockRange context ]
+                    , describeAccelerationGate context
                     , [ describeAmmoSwapState context ]
                     ]
                         |> List.map (String.join " ")
@@ -8381,6 +8460,63 @@ statusTextFromState context =
     ]
         |> List.concat
         |> String.join "\n"
+
+
+{-| What the gate branch can see, and what it has decided about it.
+
+Empty on a reading with no acceleration gate on the overview, which is most of
+them; a gate branch with nothing to act on has nothing to report.
+
+This exists because `activateAccelerationGateIfPresent`'s "the gate refuses this
+ship" answer is a `Nothing` -- deliberately, so the caller's own fallbacks get
+their turn -- and a `Nothing` cannot carry a decision line. Run 10 is what that
+costs unreported: the branch gave up on a gate 32 m away and the log said only
+"nothing to fight and no travel step offered", 1,325 times. The counter and the
+verdict are named here every reading instead, so the give-up is visible while it
+is happening rather than reconstructable afterwards.
+
+The gate count is carried for its own reason. Two gates on one grid at very
+different ranges is a real configuration, and the decision log alone could not
+distinguish it from one gate.
+
+-}
+describeAccelerationGate : BotDecisionContext -> List String
+describeAccelerationGate context =
+    case accelerationGatesOnOverview context.readingFromGameClient of
+        [] ->
+            []
+
+        gates ->
+            [ "Acceleration gates on the overview: "
+                ++ (gates
+                        |> List.map
+                            (\gate ->
+                                (gate.objectName |> Maybe.withDefault "unnamed")
+                                    ++ " at "
+                                    ++ String.fromInt (overviewEntryDistanceOrFarInMeters gate)
+                                    ++ " m"
+                            )
+                        |> String.join ", "
+                   )
+                ++ ". Offered and not opened for "
+                ++ String.fromInt context.memory.gateWithinReachTicks
+                ++ " of "
+                ++ String.fromInt gateRefusesThisShipTicks
+                ++ " readings"
+                ++ (if gateRefusesThisShipTicks < context.memory.gateWithinReachTicks then
+                        " -- the gate branch has given up and is declining to act."
+
+                    else
+                        "."
+                   )
+                ++ (case context.memory.gateLockedForWantOfAnItem of
+                        Just clientSentence ->
+                            " The client says it is locked: \"" ++ clientSentence ++ "\""
+
+                        Nothing ->
+                            ""
+                   )
+            ]
 
 
 {-| Whether the bot thinks it still has a ship, on every reading rather than only
@@ -9187,9 +9323,7 @@ to contribute.
 -}
 accelerationGateIsWithinReach : ReadingFromGameClient -> Bool
 accelerationGateIsWithinReach readingFromGameClient =
-    readingFromGameClient.overviewWindows
-        |> List.concatMap .entries
-        |> List.filter isAccelerationGate
+    accelerationGatesOnOverview readingFromGameClient
         |> List.any
             (\entry ->
                 (overviewEntryDistanceOrFarInMeters entry)
@@ -9217,10 +9351,7 @@ pocket.
 -}
 activateAccelerationGateIfPresent : BotDecisionContext -> Maybe DecisionPathNode
 activateAccelerationGateIfPresent context =
-    context.readingFromGameClient.overviewWindows
-        |> List.concatMap .entries
-        |> List.filter isAccelerationGate
-        |> List.sortBy overviewEntryDistanceOrFarInMeters
+    accelerationGatesOnOverview context.readingFromGameClient
         |> List.head
         |> Maybe.andThen
             (\accelerationGateEntry ->
@@ -9228,7 +9359,36 @@ activateAccelerationGateIfPresent context =
                     distanceInMeters =
                         overviewEntryDistanceOrFarInMeters accelerationGateEntry
                 in
-                if not (gateCanBeActivatedNow context accelerationGateEntry) then
+                if context.memory.gateLockedForWantOfAnItem /= Nothing then
+                    Just <|
+                    -- The client has already said, in answer to this bot's own
+                    -- press, that it will not open this gate without an item in
+                    -- the hold. Nothing below can produce that item: the
+                    -- objective names no cargo, so `lootMissionItemFromContainer-
+                    -- IfPresent` has nothing to look for, and it is checked
+                    -- ahead of this branch anyway. Pressing again is the
+                    -- press/refuse/dismiss loop run 10 spent two minutes in.
+                    --
+                    -- Checked before the range test rather than after it, so
+                    -- the ship does not fly at a gate it has been told is shut.
+                    -- Nothing is lost by that: only the nearest gate is ever
+                    -- considered, and the verdict is cleared the moment the ship
+                    -- is no longer within reach of one.
+                    --
+                    -- Asking for help immediately, on one line from the client,
+                    -- rather than waiting for the bottom of the tree to notice.
+                    -- That give-up did fire in run 10 and did its job -- but 20
+                    -- minutes and 1,325 readings later, and saying only that
+                    -- nothing was happening. The client had said why on the
+                    -- first attempt.
+                    describeBranch
+                        ("This acceleration gate will not open for this ship, and the client said why: \""
+                            ++ (context.memory.gateLockedForWantOfAnItem |> Maybe.withDefault "")
+                            ++ "\" -- there is nothing on this grid the bot knows how to do about that."
+                        )
+                        askForHelpToGetUnstuck
+
+                else if not (gateCanBeActivatedNow context accelerationGateEntry) then
                     Just <|
                     -- Approach until the client says we can take the gate, and
                     -- let *it* decide when that is. The panel only carries
@@ -9268,16 +9428,71 @@ activateAccelerationGateIfPresent context =
                     -- fallbacks run -- travelling a set route, then
                     -- approachConfiguredObjectIfPresent -- which is the move that
                     -- mission actually needs.
+                    --
+                    -- Declining without a decision line is the one thing this
+                    -- may not do silently, and it did: run 10 landed here and
+                    -- the log went on saying "nothing to fight and no travel
+                    -- step" for 1,325 readings with no hint that a gate had been
+                    -- given up on. `describeAccelerationGate` carries it in the
+                    -- status line every reading instead, since saying it here
+                    -- would mean returning a step and losing the fallbacks.
                     Nothing
 
                 else
                     Just <|
                     ensureDronesRecalledBeforeWarping context
                         (activateGateOnOverviewEntry context
-                            "I see an acceleration gate -- D-click it to move to the next pocket."
+                            -- Says which gate. The bare version of this line was
+                            -- printed 135 times in run 10 without ever revealing
+                            -- that the overview held two acceleration gates at
+                            -- very different ranges, which is what made the
+                            -- diagnosis take a manual read of the client. The
+                            -- distance deliberately does not read "N m away":
+                            -- stall_watch treats that wording as an approach in
+                            -- progress and a falling number as progress, and
+                            -- nothing is approaching here.
+                            (describeAccelerationGateChosen context accelerationGateEntry
+                                ++ " -- D-click it to move to the next pocket."
+                            )
                             accelerationGateEntry
                         )
             )
+
+
+{-| Which gate the gate branch is acting on, for the decision log.
+-}
+describeAccelerationGateChosen :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> String
+describeAccelerationGateChosen context entry =
+    let
+        gatesOnOverview =
+            accelerationGatesOnOverview context.readingFromGameClient
+    in
+    "I see an acceleration gate ("
+        ++ (entry.objectName |> Maybe.withDefault "unnamed")
+        ++ ", "
+        ++ String.fromInt (overviewEntryDistanceOrFarInMeters entry)
+        ++ " m, nearest of "
+        ++ String.fromInt (List.length gatesOnOverview)
+        ++ " on the overview)"
+
+
+{-| Every acceleration gate the overview is showing, nearest first.
+
+Across all overview windows, because more than one is a supported setup and the
+gates of a pocket are not obliged to share one.
+
+-}
+accelerationGatesOnOverview :
+    ReadingFromGameClient
+    -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+accelerationGatesOnOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter isAccelerationGate
+        |> List.sortBy overviewEntryDistanceOrFarInMeters
 
 
 {-| The "Opportunities" panel (e.g. "Sansha's Command Relay Outpost") is a
@@ -10595,16 +10810,63 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             Nothing ->
                 botMemoryBefore.unlootableWreckIds
     , gateWithinReachTicks =
-        -- Readings in a row with an acceleration gate close enough to use. A
-        -- gate normally takes a handful; a gate that refuses the ship never
-        -- takes any, and there is no error dialog to notice -- see
-        -- `missionNeedsADifferentShip`. Counting them is what turns that into
-        -- something the bot can act on.
-        if accelerationGateIsWithinReach context.readingFromGameClient then
+        -- Readings in a row in which the client was offering to open the gate
+        -- and it did not open. A gate normally takes a handful; a gate that
+        -- refuses the ship never takes any, and there is no error dialog to
+        -- notice -- see `missionNeedsADifferentShip`. Counting them is what
+        -- turns that into something the bot can act on.
+        --
+        -- It counts the *offer*, not the proximity, and the difference is the
+        -- same one `droneRecallUnansweredTicks` had to make: time spent near a
+        -- gate is not evidence that the gate refuses the ship. This budget is
+        -- spent by declining it, so anything else that keeps the ship parked
+        -- there was spending it too -- a fight beside the gate lasts far longer
+        -- than 40 readings, and the pocket that ends with a scrambled gate
+        -- ("clear the vicinity of enemy ships") is precisely a long fight
+        -- within `interactionRangeInMeters` of one. That would have exhausted
+        -- the budget before the last rat died and left the gate permanently
+        -- declined on a grid where it was about to work.
+        --
+        -- So a reading with the gate in reach but no Activate on the panel
+        -- *holds* the count rather than resetting it: the message box run 10
+        -- had to dismiss between every attempt is one of those, and a reset
+        -- there is the shape that held `gunsSilencingTicks` at 1 forever.
+        -- Leaving reach is what resets, since that is the ship no longer
+        -- asking this gate for anything.
+        if selectedItemOffersActivateGate context.readingFromGameClient then
             botMemoryBefore.gateWithinReachTicks + 1
+
+        else if accelerationGateIsWithinReach context.readingFromGameClient then
+            botMemoryBefore.gateWithinReachTicks
 
         else
             0
+    , gateLockedForWantOfAnItem =
+        -- The client's own sentence, kept from the reading it arrived on --
+        -- a reading's game log entries are gone by the next one, and the
+        -- branch that acts on this is several readings away from the press
+        -- that provoked it.
+        --
+        -- Cleared when no gate is within reach, which is the same reset
+        -- `gateWithinReachTicks` uses and for the same reason: it is the ship
+        -- having left this gate. Latching it for the session instead would be
+        -- wrong here in a way it is not for `shipLoss` -- that verdict ends the
+        -- session, this one asks for help and the run continues, so a gate
+        -- unlocked by hand in the next pocket must not still read as locked.
+        --
+        -- Reachable in both directions: it is set from a line the client writes
+        -- in answer to the Activate press below, which only happens with the
+        -- gate in reach, and cleared by the first reading after the ship leaves.
+        if not (accelerationGateIsWithinReach context.readingFromGameClient) then
+            Nothing
+
+        else
+            case botMemoryBefore.gateLockedForWantOfAnItem of
+                Just latched ->
+                    Just latched
+
+                Nothing ->
+                    gateLockedForWantOfAnItemFromGameLog context.readingFromGameClient
     , shipApproachingTicks =
         if
             context.readingFromGameClient.shipUI
