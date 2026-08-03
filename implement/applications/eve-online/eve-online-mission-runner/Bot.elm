@@ -94,8 +94,11 @@
      the agent's "Delay" button rather than "Decline", since declining more than
      once every four hours costs standing. Repeatable.
    + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. Repeatable.
-   + `approach-object` : Name (or type) of an object to fly up to, e.g.
-     `approach-object=Abandoned Mining Station`. Used in two places. When an
+   + `approach-object` : Names (or types) of objects to fly up to, as a
+     comma-separated list -- `approach-object=Abandoned Mining Station, Amarr
+     Chapel`. The key may also be repeated; both accumulate, and surrounding
+     space is trimmed, so a single name with spaces in it still works exactly as
+     it did. Used in two places. When an
      objective says to approach something, these are tried after the name the
      objective gives, because its wording can name a decorative object rather
      than the one that actually satisfies it. And when the bot has run out of
@@ -104,11 +107,12 @@
      resort, which covers the objectives that are satisfied by proximity without
      ever saying so ("Interstellar Railroad" asks only for cargo, and the way to
      get it is to fly at a Large Collidable Object the brief never mentions).
-     Repeatable.
-   + `prefer-wreck` : Name (or type) of a wreck to search first when a mission
-     wants cargo out of destroyed ships, e.g. `prefer-wreck=Personnel Transport`.
-     Purely an optimisation -- the bot still opens every other wreck afterwards,
-     so a wrong guess costs nothing but a wasted trip. Repeatable.
+   + `prefer-wreck` : Names (or types) of wrecks to search first when a mission
+     wants cargo out of destroyed ships, as a comma-separated list --
+     `prefer-wreck=Personnel Transport, Cargo Container`. The key may also be
+     repeated; both accumulate. Purely an optimisation -- the bot still opens
+     every other wreck afterwards, so a wrong guess costs nothing but a wasted
+     trip.
    + `attack-object` : Non-rat objects the bot should also shoot, as a
      comma-separated list -- `attack-object=Drone Silo, Repair Station`. The key
      may also be repeated; both accumulate. Each entry is matched **exactly**
@@ -307,18 +311,28 @@ defaultBotSettings =
 
 {-| One setting line, many values: `attack-object=Drone Silo, Repair Station`.
 
-The list of structures a bot should shoot grows one mission at a time, and a
-column of near-identical `attack-object=` lines is a poor way to hold it. Commas
-separate, surrounding space is trimmed, and empties are dropped, so the line can
-be edited like the list it is.
+Shared by the three settings that each hold a list of overview names --
+`attack-object`, `approach-object` and `prefer-wreck`. Each of those lists grows
+one mission at a time, and a column of near-identical `approach-object=` lines is
+a poor way to hold one. Commas separate, surrounding space is trimmed, and
+empties are dropped, so the line can be edited like the list it is.
+
+**Dropping the empties is the load-bearing part.** All three lists are matched
+against an overview row as substrings -- `matchesOverviewName` for the first two,
+`stringContainsIgnoringCase` for the wrecks -- and the empty string is a
+substring of every row, so one empty entry is a filter that matches everything.
+A trailing comma is the ordinary way to produce one.
 
 Comma rather than a JSON array because these settings reach the bot through a
 shell string in the launcher: `["a","b"]` would need its quotes escaped there,
 which is exactly the kind of punctuation that gets silently mangled. No EVE
 object name in use contains a comma.
 
-Repeating the key still works and still accumulates, so an existing settings
-string keeps behaving as it did.
+Repeating the key still works and still accumulates, and a value with no comma
+yields that one name with its spaces intact, so an existing settings string
+keeps behaving as it did. Note the two orderings that produces: names on one
+line stay in the order they are written, while repeated keys prepend, so across
+lines the last line is tried first.
 -}
 splitSettingIntoNames : String -> List String
 splitSettingIntoNames =
@@ -366,14 +380,20 @@ parseBotSettings =
            )
          , ( "approach-object"
            , AppSettings.valueTypeString
-                (\objectName settings ->
-                    { settings | approachObjectNames = String.trim objectName :: settings.approachObjectNames }
+                (\objectNames settings ->
+                    { settings
+                        | approachObjectNames =
+                            splitSettingIntoNames objectNames ++ settings.approachObjectNames
+                    }
                 )
            )
          , ( "prefer-wreck"
            , AppSettings.valueTypeString
-                (\wreckName settings ->
-                    { settings | preferWreckNames = String.trim wreckName :: settings.preferWreckNames }
+                (\wreckNames settings ->
+                    { settings
+                        | preferWreckNames =
+                            splitSettingIntoNames wreckNames ++ settings.preferWreckNames
+                    }
                 )
            )
          , ( "orbit-in-combat"
