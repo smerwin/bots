@@ -28,6 +28,13 @@ threshold of 60, while the four-line cycle repeated 62 times. The old test could
 not have fired, and its threshold had been carefully calibrated -- against the
 wrong statistic.
 
+A long flight looks like circling and is not. The decision quantises distance to
+the nearest 1000 m at range, so one line repeats for a whole plateau, and EVE's
+game log only notes an approach every 20-100 seconds -- both stall signals, while
+the ship flies perfectly. So a distance falling inside the repeated decision
+counts as progress alongside the other two, which needs no new plumbing because
+the bot already prints the number.
+
 Screenshots the game window by id rather than the screen, since the client is
 often on another macOS Space where a plain screen grab catches the wrong thing.
 """
@@ -47,8 +54,36 @@ DECISION_WINDOW = 24
 # raising it past 40 only delays the alarm without buying accuracy.
 CIRCLING_THRESHOLD = 40
 
+# How many decisions may pass after a distance last fell before the ship stops
+# counting as under way. Measured over a four-mission run: within a single
+# approach the longest gap between two strict decreases was 22 decisions
+# (median 7, p90 13), and the two gaps above that -- 62 and 72 -- fall between
+# separate approaches rather than inside one.
+#
+# What has to hold is weaker than "patience covers the gap": a plateau only
+# alarms if it outlasts the patience by a further CIRCLING_THRESHOLD, since the
+# distance changing is itself a new line and resets the count. So 60 covers a
+# gap of just under 100 -- a plateau of 50 identical readings, against 22
+# measured and the 15 the issue reported. Raising it further only delays the
+# alarm on a ship that has genuinely stopped: a wedge is caught this many
+# decisions later than before, which on the recorded run's pace (~11 decisions
+# per tick, ~5.7s a tick) is about half a minute.
+APPROACH_PATIENCE = 60
+
 STUCK_TEXT = "I am stuck here and need help to continue."
 DECISION = re.compile(r'^\++ (.*)$')
+
+# A distance the bot prints in its own decision, e.g. "Look inside Cargo
+# Container for the The Damsel, 84000 m away." Only metres appear: the parser
+# in Bot.elm reports `distanceInMeters` with String.fromInt, and an object far
+# enough away to be shown in AU fails to parse and never reaches this text.
+DISTANCE = re.compile(r'\b(\d+) m away\b')
+
+
+def wording_of(decision):
+    """The decision with its distance blanked, so one sentence about one object
+    stays a single key however far away the ship currently is."""
+    return DISTANCE.sub("<d> m away", decision)
 
 # Deciding to fire is the bot's claim that it is shooting something; a new
 # (combat) line in EVE's own game log is the client agreeing. The two coming
@@ -93,6 +128,14 @@ class StallCheck:
 
     `shooting_only` narrows it further to decisions that claim to be shooting,
     which is the same evidence arriving sooner because the claim is specific.
+
+    A third signal answers the case neither of those can: a distance falling
+    inside the repeated decision. On a long approach both stall conditions hold
+    honestly -- the quantised distance repeats for a plateau, and the game log
+    only remarks on the approach every 20-100 seconds -- so the ship's own
+    closing range is the evidence that it is working. Raising the threshold
+    instead would have blunted a detector calibrated to catch an 8,983-repeat
+    pathology; the problem was the progress signal, not the sensitivity.
     """
 
     def __init__(self, gamelog_dir, threshold, shooting_only=False):
@@ -102,6 +145,10 @@ class StallCheck:
         self.recent = deque(maxlen=DECISION_WINDOW)
         self.stuck_for = 0
         self.last_size = None
+        # Smallest distance seen so far for each decision wording, and how many
+        # decisions have passed since any of them last improved.
+        self.closest = {}
+        self.since_closer = None
 
     def _newest_gamelog_size(self):
         """Size of EVE's current game log. Size rather than contents: it grows on
@@ -112,6 +159,57 @@ class StallCheck:
             return os.path.getsize(max(logs, key=os.path.getmtime)) if logs else None
         except OSError:
             return None
+
+    def _note_distance(self, decision):
+        """Record any distance this decision carries, and say whether the ship
+        has closed on something recently enough to still count as under way.
+
+        Judged against the smallest distance seen for that wording rather than
+        against the previous one, which matters for the case the threshold is
+        there to catch: a distance oscillating between two values sets a new
+        minimum once and never again, so patience runs out and counting resumes,
+        while a real approach keeps setting new minima and keeps resetting. The
+        four approaches on record fell strictly -- 21 decreases, no increases --
+        so the minimum is also simply the last value in the ordinary case.
+
+        A wording is forgotten once it drops out of the decision window, which is
+        what separates one approach from the next. Without that, a second
+        container behind the same sentence would be measured against the first
+        one's arrival distance and could never improve on it.
+
+        The first sighting of a distance starts the patience running rather than
+        proving anything, because at that moment there is nothing to compare
+        against and the quantised number will not move for a whole plateau. Left
+        to prove itself first, a slow approach spent its opening plateau being
+        counted and raised one alarm before its distance had ever changed. The
+        grace is symmetric -- a ship already stopped when it is first seen also
+        gets it, and is simply caught a patience later.
+        """
+        found = DISTANCE.findall(decision)
+        if not found:
+            return self._under_way()
+
+        meters = int(found[-1])                      # the last one, if several
+        wording = wording_of(decision)
+        closest = self.closest.get(wording)
+        if closest is None:
+            self.closest[wording] = meters
+            self.since_closer = 0                    # a fresh approach, fresh patience
+        elif meters < closest:
+            self.closest[wording] = meters
+            self.since_closer = 0
+        return self._under_way()
+
+    def _under_way(self):
+        if self.since_closer is None:
+            return False
+        under_way = self.since_closer < APPROACH_PATIENCE
+        self.since_closer += 1
+        return under_way
+
+    def _forget_departed_wordings(self):
+        live = {wording_of(d) for d in self.recent}
+        self.closest = {w: d for w, d in self.closest.items() if w in live}
 
     def observe(self, decision):
         """Returns a reason string when stuck, else None."""
@@ -135,10 +233,13 @@ class StallCheck:
         game_moved = size is not None and size != self.last_size
         self.last_size = size
 
+        under_way = self._note_distance(decision)
+
         nothing_new = decision in self.recent
         self.recent.append(decision)
+        self._forget_departed_wordings()
 
-        if game_moved or not nothing_new:
+        if game_moved or not nothing_new or under_way:
             self.stuck_for = 0
             return None
 

@@ -381,6 +381,28 @@ never benign on its own — a window of nothing but leaves says nothing about
 *why* the bot is waiting, and treating it as idle is what once dropped detection
 to nothing.
 
+**A falling distance counts as progress**, alongside a growing game log and a
+changed decision. A long approach holds both of the original stall conditions
+while the ship flies perfectly: the decision quantises distance to the nearest
+1000 m at range, so one line repeats for a whole plateau, and EVE's game log
+remarks on the approach only every 20-100 seconds. The bot already prints the
+number, so the watcher parses the trailing `<N> m away` out of the decision and
+treats a new smallest value as the ship working.
+
+Judged against the **smallest** distance seen for that wording, not the previous
+one, which is what keeps the documented "target drifting while the ship does
+nothing" case alarming — an oscillating distance sets a new minimum once and
+never again. A wording is forgotten once it leaves the decision window, so a
+second container behind the same sentence is measured on its own rather than
+against the first one's arrival distance. `APPROACH_PATIENCE` (60 decisions)
+bounds it in both directions: a ship gets that long from first sighting, or from
+its last gain, to show it is closing, and a ship that has genuinely stopped is
+caught that much later than before rather than not at all.
+
+Raising `CIRCLING_THRESHOLD` instead would have been the wrong fix — it is
+calibrated to catch an 8,983-repeat pathology, and the problem was the progress
+signal, not the sensitivity.
+
 **`--web-console [PORT]`** (default 8787, off unless asked for) serves a live
 console: session stats, the log as a filterable stream, an editable settings
 box, and pause/resume/stop. `./run_mission.sh --web-console` works as-is, since
