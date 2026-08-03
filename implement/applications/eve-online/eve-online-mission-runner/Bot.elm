@@ -116,8 +116,13 @@
      range or aligning.
    + `keep-at-range`: Set this to 'yes' to keep range from the target instead of
      orbiting or aligning.
-   + `targeting-range`: Maximum distance in meters to lock a target from the
-     overview. Beyond this, the bot approaches instead of locking. Defaults to 66000.
+   + `targeting-range`: Distance in meters at which the bot switches from
+     locking a target to approaching it. Defaults to 66000. This is a starting
+     value, not the last word: the bot narrows it during the session from the
+     client's own answers -- the greatest distance at which a lock was accepted
+     and the smallest at which one was provably refused -- and the setting is
+     clamped between the two. Set it to pin the starting point; it still gives
+     way to what the client has actually granted. See `lockRangeThresholdInMeters`.
    + `run-away-shield-hitpoints-threshold-percent` /
      `run-away-armor-hitpoints-threshold-percent`: Dock up when the ship drops
      below these. Disabled by default.
@@ -364,6 +369,31 @@ type alias BotMemory =
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
     , droneBayOpenedFromShipCard : Bool
+    , lockAttempt : Maybe LockAttempt
+    , lockProvenAtMeters : Maybe Int
+    , lockRefusedAtMeters : Maybe Int
+    , lockRangeLastChange : Maybe String
+    }
+
+
+{-| A lock the bot has asked the client for and that the client has not
+answered yet.
+
+Started from the effects of the step just dispatched rather than from the
+decision that produced them, because only the effects are visible from
+`updateMemoryForNewReadingFromGame` -- and the decision tree cannot write
+memory. `handle` is what identifies the row across readings; see
+`overviewEntryLockHandle` for why a screen position will not do.
+
+`distanceInMeters` is the distance the row showed on the reading the attempt
+started, and `targetsCount` the number of locked targets then. Both are needed
+at the verdict, and both can have changed by the time it is rendered.
+-}
+type alias LockAttempt =
+    { handle : String
+    , distanceInMeters : Int
+    , targetsCount : Int
+    , readingsWaited : Int
     }
 
 
@@ -373,7 +403,19 @@ type alias BotDecisionContext =
 
 missionBotDecisionRoot : BotDecisionContext -> DecisionPathNode
 missionBotDecisionRoot context =
-    missionBotDecisionRootBeforeApplyingSettings context
+    -- A learned bound announces itself here, at the root, rather than in the
+    -- branch that learned it -- the bounds move in `updateMemoryForNewReading-
+    -- FromGame`, which runs on every reading whatever the bot is doing, and a
+    -- self-adjusting number that adjusts silently is what made #7 take a whole
+    -- session to diagnose. `lockRangeLastChange` holds a message only on the
+    -- reading a bound actually moved, so this is one line per change.
+    (case context.memory.lockRangeLastChange of
+        Just lockRangeChange ->
+            describeBranch lockRangeChange (missionBotDecisionRootBeforeApplyingSettings context)
+
+        Nothing ->
+            missionBotDecisionRootBeforeApplyingSettings context
+    )
         |> EveOnline.BotFrameworkSeparatingMemory.setMillisecondsToNextReadingFromGameBase
             context.eventContext.botSettings.botStepDelayMilliseconds
 
@@ -4619,59 +4661,567 @@ lockTargetFromOverviewEntry context overviewEntry =
     let
         targetingRange : Int
         targetingRange =
-            context.eventContext.botSettings.targetingRangeMeters
+            lockRangeThresholdInMeters context
+
+        -- Press the panel's own Approach button rather than a modifier
+        -- click. This branch used to hold vkey_E, which is keep-at-range
+        -- on this account -- it is what ensureShipIsKeepingRange presses
+        -- -- so it said "Approach" while asking the client to hold
+        -- station. Switching it to vkey_Q did not help either: measured
+        -- live, the ship sat at 0.0 m/s for 100 seconds with the distance
+        -- frozen, so the keystroke is not producing an approach whatever
+        -- it is bound to. The click itself lands -- the Selected Item
+        -- panel shows the row we clicked -- so only the key is in doubt,
+        -- and the panel's button removes it from the picture.
+        --
+        -- Guarded on the panel actually showing this entry, since its
+        -- buttons act on whatever is selected. When it is showing
+        -- something else, clicking the row selects it and the next
+        -- reading takes the branch above.
+        approachTheObject : String -> DecisionPathNode
+        approachTheObject reason =
+            if selectedItemIsOverviewEntry context overviewEntry then
+                case selectedItemButtonNamed context "selectedItemApproach" of
+                    Just approachButton ->
+                        describeBranch
+                            (reason ++ " Approach from the selected-item panel.")
+                            (clickUiElement approachButton)
+
+                    Nothing ->
+                        describeBranch
+                            (reason ++ " The selected-item panel offers no Approach.")
+                            waitForProgressInGame
+
+            else
+                describeBranch
+                    (reason ++ " Select it so the panel offers Approach.")
+                    (clickUiElement overviewEntry.uiNode)
     in
     case overviewEntry.objectDistanceInMeters of
         Ok distanceInMeters ->
             if distanceInMeters <= targetingRange then
                 if overviewEntry.commonIndications.targetedByMe || overviewEntry.commonIndications.targeting then
+                    if lockAttemptIsSpent context overviewEntry then
+                        -- The bound the wait below used to lack entirely: it
+                        -- said "wait for completion" with nothing deciding when
+                        -- the wait was over, so a lock the client accepted and
+                        -- never finished would hold the ship still for the rest
+                        -- of the session -- the same unbounded-wait shape as the
+                        -- drone recall in #7, and one stall_watch reports as
+                        -- circling rather than as a fault.
+                        --
+                        -- Worth knowing that both of today's callers filter
+                        -- targeted and targeting rows out of their candidates
+                        -- (see `overviewEntriesToLock`), so neither can reach
+                        -- the wait as the tree stands. The bound is here anyway
+                        -- because nothing in the function's signature says so,
+                        -- and a caller that stops filtering would reinstate an
+                        -- unbounded wait without touching this file's logic.
+                        --
+                        -- Approaching is the move because range is the most
+                        -- likely reason a lock does not land, and closing
+                        -- distance is safe whatever the real reason was.
+                        describeBranch
+                            ("Locking '"
+                                ++ (overviewEntry.objectName |> Maybe.withDefault "the target")
+                                ++ "' has not completed in "
+                                ++ (lockAttemptReadingsBeforeVerdict |> String.fromInt)
+                                ++ " readings -- stop waiting for it."
+                            )
+                            (approachTheObject
+                                ("Object is "
+                                    ++ (distanceInMeters |> String.fromInt)
+                                    ++ " m away and the lock has not landed."
+                                )
+                            )
+
+                    else
                         describeBranch "Locking target is in progress, wait for completion." waitForProgressInGame
 
-                    else        
-                        describeBranch ("Lock target from overview entry '" ++ (overviewEntry.objectName |> Maybe.withDefault "") ++ "'")
-                                        (decideActionForCurrentStep
-                                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL ]
-                                        , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-                                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]
-                                        ]
-                                            |> List.concat
-                                        )
-                                    )
-            else
-                -- Press the panel's own Approach button rather than a modifier
-                -- click. This branch used to hold vkey_E, which is keep-at-range
-                -- on this account -- it is what ensureShipIsKeepingRange presses
-                -- -- so it said "Approach" while asking the client to hold
-                -- station. Switching it to vkey_Q did not help either: measured
-                -- live, the ship sat at 0.0 m/s for 100 seconds with the distance
-                -- frozen, so the keystroke is not producing an approach whatever
-                -- it is bound to. The click itself lands -- the Selected Item
-                -- panel shows the row we clicked -- so only the key is in doubt,
-                -- and the panel's button removes it from the picture.
-                --
-                -- Guarded on the panel actually showing this entry, since its
-                -- buttons act on whatever is selected. When it is showing
-                -- something else, clicking the row selects it and the next
-                -- reading takes the branch above.
-                if selectedItemIsOverviewEntry context overviewEntry then
-                    case selectedItemButtonNamed context "selectedItemApproach" of
-                        Just approachButton ->
-                            describeBranch
-                                ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Approach from the selected-item panel.")
-                                (clickUiElement approachButton)
-
-                        Nothing ->
-                            describeBranch
-                                ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away), and the selected-item panel offers no Approach.")
-                                waitForProgressInGame
-
                 else
-                    describeBranch
-                        ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Select it so the panel offers Approach.")
-                        (clickUiElement overviewEntry.uiNode)
+                    describeBranch ("Lock target from overview entry '" ++ (overviewEntry.objectName |> Maybe.withDefault "") ++ "'")
+                        (decideActionForCurrentStep
+                            ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL ]
+                             , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
+                             , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]
+                             ]
+                                |> List.concat
+                            )
+                        )
+
+            else
+                approachTheObject
+                    ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away).")
+
         Err error ->
             describeBranch ("Failed to read the distance: " ++ error) askForHelpToGetUnstuck
-                                
+
+
+{-| How many readings a lock the bot asked for gets to land before the outcome
+is called.
+
+Generous, because a legitimate lock is not instant -- a big ship locking a
+small one takes seconds, and a reading is a couple of seconds -- and calling a
+slow lock a refusal would teach the bot a range that is too short and make it
+fly at rats it could have shot. A refusal, by contrast, is immediate: the
+client answers an out-of-range lock at once and nothing about the row ever
+changes, so waiting longer than necessary costs only how quickly the bounds
+converge, never their correctness.
+-}
+lockAttemptReadingsBeforeVerdict : Int
+lockAttemptReadingsBeforeVerdict =
+    8
+
+
+{-| Whether the lock the bot asked for on this row has run out its readings.
+
+Stays true while the row is still there and still unanswered, because
+`updateLockRangeLearning` holds a spent attempt at the bound rather than
+dropping it. A verdict that moved a bound is announced once -- the bound is
+monotone, so a second verdict on the same evidence moves nothing and says
+nothing -- but the branch that stops waiting has to keep firing for as long as
+there is a wait to stop.
+-}
+lockAttemptIsSpent : BotDecisionContext -> OverviewWindowEntry -> Bool
+lockAttemptIsSpent context overviewEntry =
+    case ( context.memory.lockAttempt, overviewEntryLockHandle (allOverviewEntries context.readingFromGameClient) overviewEntry ) of
+        ( Just attempt, Just handle ) ->
+            (attempt.handle == handle) && (lockAttemptReadingsBeforeVerdict <= attempt.readingsWaited)
+
+        _ ->
+            False
+
+
+{-| The distance at which the bot switches from locking to approaching.
+
+The `targeting-range` setting is a guess about the ship, and a wrong one is
+costly both ways: too low and the bot flies at rats it could simply shoot, too
+high and it spends readings asking for locks the client will never grant. The
+client answers this question every time it accepts or refuses a lock, so the
+setting is treated as a starting value and clamped into the interval the
+client's own answers have established -- `[lockProvenAtMeters,
+lockRefusedAtMeters)`, the same shape as the self-calibrated UI scale the host
+derives per session rather than assuming.
+
+With no evidence yet both bounds are `Nothing` and this is exactly the setting,
+so nothing changes until something is learned. When the two contradict each
+other -- possible after a refit, since the bounds are not reset mid-session --
+the proven distance wins: a lock that completed is unambiguous evidence, where
+a refusal is an inference from several conditions holding at once.
+-}
+lockRangeThresholdInMeters : BotDecisionContext -> Int
+lockRangeThresholdInMeters context =
+    let
+        fromSetting : Int
+        fromSetting =
+            context.eventContext.botSettings.targetingRangeMeters
+
+        loweredByRefusal : Int
+        loweredByRefusal =
+            case context.memory.lockRefusedAtMeters of
+                Nothing ->
+                    fromSetting
+
+                Just refusedAt ->
+                    min fromSetting (refusedAt - 1)
+    in
+    case context.memory.lockProvenAtMeters of
+        Nothing ->
+            loweredByRefusal
+
+        Just provenAt ->
+            max provenAt loweredByRefusal
+
+
+allOverviewEntries : ReadingFromGameClient -> List OverviewWindowEntry
+allOverviewEntries readingFromGameClient =
+    readingFromGameClient.overviewWindows |> List.concatMap .entries
+
+
+{-| A handle on an overview row that survives to the next reading, or nothing
+when this row cannot be told apart from another.
+
+Screen position answers "what did that click hit", but it cannot answer "is
+this the same object as last reading": the overview re-sorts and virtualises,
+so a position is about a row, not about an object, and matching a lock outcome
+to the wrong object is exactly the mistake that would teach the bot a wrong
+range. EVE's own `itemID` is the right answer where the row carries one.
+
+Where it does not, the row's name is used, but only when no other row in the
+overview shares it -- one of five identical rats says nothing about which one
+the client answered. A pocket of same-named rats therefore yields no evidence
+at all, which is the correct outcome rather than a guess.
+-}
+overviewEntryLockHandle : List OverviewWindowEntry -> OverviewWindowEntry -> Maybe String
+overviewEntryLockHandle allEntries entry =
+    case entry.objectItemID of
+        Just itemID ->
+            Just ("id:" ++ itemID)
+
+        Nothing ->
+            case entry.objectName of
+                Nothing ->
+                    Nothing
+
+                Just name ->
+                    if (allEntries |> List.filter (\other -> other.objectName == Just name) |> List.length) == 1 then
+                        Just ("name:" ++ name)
+
+                    else
+                        Nothing
+
+
+{-| The screen point a lock click went to, from the effects of one step.
+
+The lock chord is Ctrl held over a plain left click
+(`lockTargetFromOverviewEntry`), and it is the only place in this bot that
+presses Ctrl without Shift -- `ctrlShiftClickUiElement`, the unlock, holds
+both. So the modifiers alone identify the gesture, and the `MouseMoveTo` that
+travels with every click carries where it went.
+
+Reading the attempt out of the effects rather than out of the decision is not a
+detour: `updateMemoryForNewReadingFromGame` is the only place that can write
+memory, and it sees the previous steps' effects but not the decision that
+produced them.
+-}
+lockClickLocationFromStepEffects : List EffectOnWindow.EffectOnWindowStruct -> Maybe EffectOnWindow.Location2d
+lockClickLocationFromStepEffects effects =
+    if
+        (effects |> List.member (EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL))
+            && not (effects |> List.member (EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT))
+    then
+        effects
+            |> List.filterMap
+                (\effect ->
+                    case effect of
+                        EffectOnWindow.MouseMoveTo location ->
+                            Just location
+
+                        _ ->
+                            Nothing
+                )
+            |> List.head
+
+    else
+        Nothing
+
+
+locationIsInDisplayRegion : EffectOnWindow.Location2d -> EveOnline.ParseUserInterface.DisplayRegion -> Bool
+locationIsInDisplayRegion location region =
+    (region.x <= location.x)
+        && (location.x < region.x + region.width)
+        && (region.y <= location.y)
+        && (location.y < region.y + region.height)
+
+
+{-| What the two learned bounds and the pending attempt look like after this
+reading.
+
+Returned as one record rather than written field by field, so the whole of the
+rule lives in one place and `updateMemoryForNewReadingFromGame` gains four
+lines rather than four blocks that would each have to re-derive the others.
+-}
+type alias LockRangeLearning =
+    { attempt : Maybe LockAttempt
+    , provenAtMeters : Maybe Int
+    , refusedAtMeters : Maybe Int
+    , change : Maybe String
+    }
+
+
+{-| Move the lock-range bounds on what the client has just answered.
+
+Two values, each moving in one direction only, so no oscillation is possible:
+`lockProvenAtMeters` is the greatest distance at which a lock has succeeded and
+only rises, `lockRefusedAtMeters` the smallest distance at which one has
+provably failed and only falls.
+
+Success is unambiguous -- a row that reads `targetedByMe` or `targeting` is the
+client having accepted, and nothing else makes a row read that way. Failure is
+not, which is why it takes all of the following at once:
+
+  - the attempt has had `lockAttemptReadingsBeforeVerdict` readings to land, so
+    a merely slow lock is not read as a refused one;
+  - the row is still in the overview and still `_display`ed, so the object did
+    not die and we are not looking at a different object recycled into that
+    row;
+  - the row still does not read as targeted or targeting;
+  - and the target bar was empty at both ends of the attempt, which covers both
+    "the count of locked targets did not go up" and "the ship had a slot to
+    lock into".
+
+That last one is what separates "too far" from "no free slot". An empty target
+bar is the only thing a reading can say that *proves* a slot was free -- the
+client's maximum is not in the reading at all, and "another target locked in
+this engagement" does not prove it either, since locking the last one is
+precisely what fills the ship up. Without this condition the number would
+ratchet down every time the ship simply reached its limit. The price is that
+only the first lock of an engagement can ever teach a refusal, which is also
+the case that costs the most: everything on the grid out of reach, and the bot
+asking for a lock it will never get, reading after reading.
+
+The bot's own `attack-object` settings are not visible from here, so this does
+not try to work out whether the row *should* have been locked. It only follows
+the click the bot actually made, which also keeps it out of the way of whatever
+the candidate selection in `decideActionInCombat` grows into.
+
+The bounds are not reset within a session: `BotMemory` starts fresh with each
+one, and the ship does not change mid-session in the way this bot flies.
+-}
+updateLockRangeLearning : UpdateMemoryContext -> BotMemory -> LockRangeLearning
+updateLockRangeLearning context botMemoryBefore =
+    let
+        entries : List OverviewWindowEntry
+        entries =
+            allOverviewEntries context.readingFromGameClient
+
+        targetsCount : Int
+        targetsCount =
+            context.readingFromGameClient.targets |> List.length
+
+        unchanged : LockRangeLearning
+        unchanged =
+            { attempt = botMemoryBefore.lockAttempt
+            , provenAtMeters = botMemoryBefore.lockProvenAtMeters
+            , refusedAtMeters = botMemoryBefore.lockRefusedAtMeters
+            , change = Nothing
+            }
+
+        -- Nothing can be locked in warp or from inside a station, so an attempt
+        -- that runs into either is abandoned rather than judged. The bot cannot
+        -- *start* one there -- combat is gated on not warping in
+        -- `decideActionWhenInSpace` -- but it can be halfway through one when
+        -- the ship runs away from low health, and a lock nobody could have
+        -- granted must not read as a lock the ship was too far away for.
+        shipCannotLock : Bool
+        shipCannotLock =
+            case context.readingFromGameClient.shipUI of
+                Nothing ->
+                    True
+
+                Just shipUI ->
+                    shipUIIndicatesShipIsWarpingOrJumping shipUI
+
+        -- The row the step just dispatched aimed its lock click at, if it did.
+        -- Resolved by screen position against this reading, which is a reading
+        -- later than the one the click was decided on -- and that is the right
+        -- way round rather than a compromise: the client acted on whatever was
+        -- rendered at that point, so if the overview re-sorted in between, the
+        -- row found here is the row the click actually hit. Only rendered rows
+        -- are considered, for the reason the whole overview section of CLAUDE.md
+        -- exists: a hidden row's region belongs to whatever was recycled into
+        -- it.
+        entryJustClicked : Maybe OverviewWindowEntry
+        entryJustClicked =
+            context.previousStepsEffects
+                |> List.head
+                |> Maybe.andThen lockClickLocationFromStepEffects
+                |> Maybe.andThen
+                    (\location ->
+                        entries
+                            |> List.filter overviewEntryIsDisplayed
+                            |> List.filter (\entry -> locationIsInDisplayRegion location entry.uiNode.totalDisplayRegion)
+                            |> List.head
+                    )
+
+        attemptAfterClick : Maybe LockAttempt
+        attemptAfterClick =
+            case entryJustClicked of
+                Nothing ->
+                    botMemoryBefore.lockAttempt
+
+                Just entry ->
+                    case ( overviewEntryLockHandle entries entry, entry.objectDistanceInMeters ) of
+                        ( Just handle, Ok distanceInMeters ) ->
+                            case botMemoryBefore.lockAttempt of
+                                Just pending ->
+                                    if pending.handle == handle then
+                                        -- The bot asking again for the same row
+                                        -- is the same attempt, not a new one.
+                                        Just pending
+
+                                    else
+                                        -- It has moved on to another row. The
+                                        -- old attempt is abandoned rather than
+                                        -- judged: nobody is waiting on it.
+                                        Just
+                                            { handle = handle
+                                            , distanceInMeters = distanceInMeters
+                                            , targetsCount = targetsCount
+                                            , readingsWaited = 0
+                                            }
+
+                                Nothing ->
+                                    Just
+                                        { handle = handle
+                                        , distanceInMeters = distanceInMeters
+                                        , targetsCount = targetsCount
+                                        , readingsWaited = 0
+                                        }
+
+                        _ ->
+                            botMemoryBefore.lockAttempt
+    in
+    case attemptAfterClick of
+        Nothing ->
+            unchanged
+
+        Just attempt ->
+            let
+                entryNow : Maybe OverviewWindowEntry
+                entryNow =
+                    if shipCannotLock then
+                        Nothing
+
+                    else
+                        entries
+                            |> List.filter overviewEntryIsDisplayed
+                            |> List.filter (\entry -> overviewEntryLockHandle entries entry == Just attempt.handle)
+                            |> List.head
+            in
+            case entryNow of
+                Nothing ->
+                    -- The row is gone or is no longer rendered, or the ship
+                    -- cannot lock anything just now. It may have died, or
+                    -- scrolled out of view, or the overview may have re-sorted
+                    -- -- none of which says anything about range.
+                    { unchanged | attempt = Nothing }
+
+                Just entry ->
+                    let
+                        -- Held at the bound rather than allowed to run on, for
+                        -- the same reason the drone give-up latches: the number
+                        -- is shown to an operator, and one that climbs forever
+                        -- while nothing is waiting on it reads as a fault.
+                        attemptCarried : Maybe LockAttempt
+                        attemptCarried =
+                            Just
+                                { attempt
+                                    | readingsWaited =
+                                        min lockAttemptReadingsBeforeVerdict (attempt.readingsWaited + 1)
+                                }
+
+                        -- The distance a bound moves to lies somewhere between
+                        -- the reading the attempt started on and this one. Each
+                        -- bound takes the end that makes the weaker claim -- the
+                        -- smaller distance for the one that only rises, the
+                        -- larger for the one that only falls -- so neither is
+                        -- ever moved further than the evidence reaches.
+                        distanceNow : Int
+                        distanceNow =
+                            entry.objectDistanceInMeters |> Result.withDefault attempt.distanceInMeters
+                    in
+                    if overviewEntryIsTargetedOrTargeting entry then
+                        let
+                            provenAt : Int
+                            provenAt =
+                                min attempt.distanceInMeters distanceNow
+
+                            -- A completed lock ends the attempt. One still
+                            -- spooling up does not: `targeting` is the client
+                            -- having accepted the request, not having finished
+                            -- it, and a lock that is accepted and never finishes
+                            -- is exactly the wait this bound exists to end.
+                            attemptAfter : Maybe LockAttempt
+                            attemptAfter =
+                                if entry.commonIndications.targetedByMe then
+                                    Nothing
+
+                                else
+                                    attemptCarried
+                        in
+                        if provenAt > (botMemoryBefore.lockProvenAtMeters |> Maybe.withDefault 0) then
+                            { attempt = attemptAfter
+                            , provenAtMeters = Just provenAt
+                            , refusedAtMeters = botMemoryBefore.lockRefusedAtMeters
+                            , change =
+                                Just
+                                    ("Learned lock range: the client accepted a lock at "
+                                        ++ (provenAt |> String.fromInt)
+                                        ++ " m, further than anything locked before -- lock-proven-at rises from "
+                                        ++ (botMemoryBefore.lockProvenAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "unset")
+                                        ++ " to "
+                                        ++ (provenAt |> String.fromInt)
+                                        ++ " m."
+                                    )
+                            }
+
+                        else
+                            { unchanged | attempt = attemptAfter }
+
+                    else if attempt.readingsWaited < lockAttemptReadingsBeforeVerdict then
+                        { unchanged | attempt = attemptCarried }
+
+                    else if (attempt.targetsCount /= 0) || (targetsCount /= 0) then
+                        -- The ship held a locked target at one end of the
+                        -- attempt or the other, so it may simply have had no free
+                        -- slot -- and it may equally have locked something else
+                        -- while this one was waiting. An empty target bar at both
+                        -- ends is the one reading that rules out both at once,
+                        -- and only then is a lock that never landed evidence
+                        -- about range rather than about capacity.
+                        { unchanged | attempt = attemptCarried }
+
+                    else
+                        let
+                            refusedAt : Int
+                            refusedAt =
+                                max attempt.distanceInMeters distanceNow
+                        in
+                        if refusedAt < (botMemoryBefore.lockRefusedAtMeters |> Maybe.withDefault (refusedAt + 1)) then
+                            { attempt = attemptCarried
+                            , provenAtMeters = botMemoryBefore.lockProvenAtMeters
+                            , refusedAtMeters = Just refusedAt
+                            , change =
+                                Just
+                                    ("Learned lock range: '"
+                                        ++ (entry.objectName |> Maybe.withDefault "a target")
+                                        ++ "' at "
+                                        ++ (refusedAt |> String.fromInt)
+                                        ++ " m did not lock in "
+                                        ++ (lockAttemptReadingsBeforeVerdict |> String.fromInt)
+                                        ++ " readings with the target bar empty throughout -- lock-refused-at falls from "
+                                        ++ (botMemoryBefore.lockRefusedAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "unset")
+                                        ++ " to "
+                                        ++ (refusedAt |> String.fromInt)
+                                        ++ " m."
+                                    )
+                            }
+
+                        else
+                            -- The verdict stands, but the bound is already at
+                            -- least this tight, so nothing moves and nothing is
+                            -- said. That is what keeps the log line one per
+                            -- change rather than one per reading, with no
+                            -- separate "already reported" flag to get wrong.
+                            { unchanged | attempt = attemptCarried }
+
+
+{-| The lock-range bounds, for the status line.
+
+Continuous rather than once-per-change, unlike the decision-log line: a number
+the bot adjusts for itself is worth being able to read at any moment, not only
+on the reading it moved. The pending attempt is here too, because a bot that
+keeps clicking a lock it will never get shows up as an attempt sitting at the
+verdict count long before either bound has anything to say.
+-}
+describeLockRange : BotDecisionContext -> String
+describeLockRange context =
+    "Lock range: "
+        ++ (lockRangeThresholdInMeters context |> String.fromInt)
+        ++ " m (setting "
+        ++ (context.eventContext.botSettings.targetingRangeMeters |> String.fromInt)
+        ++ ", proven "
+        ++ (context.memory.lockProvenAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
+        ++ ", refused "
+        ++ (context.memory.lockRefusedAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
+        ++ ", attempt "
+        ++ (context.memory.lockAttempt
+                |> Maybe.map (\attempt -> String.fromInt attempt.distanceInMeters ++ " m for " ++ String.fromInt attempt.readingsWaited ++ " readings")
+                |> Maybe.withDefault "none"
+           )
+        ++ ")."
+
 
 
 
@@ -4723,6 +5273,10 @@ initBotMemory =
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
     , droneBayOpenedFromShipCard = False
+    , lockAttempt = Nothing
+    , lockProvenAtMeters = Nothing
+    , lockRefusedAtMeters = Nothing
+    , lockRangeLastChange = Nothing
     }
 
 
@@ -4843,7 +5397,7 @@ statusTextFromState context =
                     [ [ describeShip ]
                     , [ describeDrones ]
                     , [ describeOverview ]
-                    , [ describeRatsInOverview, describeCurrentTarget ]
+                    , [ describeRatsInOverview, describeCurrentTarget, describeLockRange context ]
                     ]
                         |> List.map (String.join " ")
     in
@@ -6300,6 +6854,9 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         weJustFinishedWarping =
             (botMemoryBefore.shipWarpingInLastReading == Just True) && (shipIsWarping == Just False)
 
+        lockRangeLearning =
+            updateLockRangeLearning context botMemoryBefore
+
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -6614,6 +7171,10 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , lockAttempt = lockRangeLearning.attempt
+    , lockProvenAtMeters = lockRangeLearning.provenAtMeters
+    , lockRefusedAtMeters = lockRangeLearning.refusedAtMeters
+    , lockRangeLastChange = lockRangeLearning.change
     , targetToUnlockRegion = currentTargetToUnlockRegion
     , targetToUnlockUnchangedTicks =
         if currentTargetToUnlockRegion == Nothing then
