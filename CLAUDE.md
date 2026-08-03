@@ -369,13 +369,29 @@ python3 stall_watch.py <log> --pid <game pid> --out <dir>
 ```
 
 A stall is either the bot saying *"I am stuck here and need help to continue."*
-(`askForHelpToGetUnstuck`, never normal), or the same decision repeating 60
-times. That threshold is calibrated against 55 past runs, where runs of ≥80
-identical decisions are 0.74% of all decision runs — comfortably above ordinary
-waiting and below the real pathologies, the worst of which reached 8,983 repeats
-of "I see a message box to close". It screenshots the game **window by id**
-(`screencapture -x -o -l`), not the screen, because the client is usually on
-another macOS Space where a screen grab catches the wrong desktop.
+(`askForHelpToGetUnstuck`, never normal), or the decision tree going in circles
+for `CIRCLING_THRESHOLD` **readings** while EVE's own game log stays silent. It
+screenshots the game **window by id** (`screencapture -x -o -l`), not the screen,
+because the client is usually on another macOS Space where a screen grab catches
+the wrong desktop.
+
+**The unit is the reading, not the decision line**, and this is the single
+easiest thing to get wrong here. The bot re-derives its whole decision path on
+every framework event, so one look at the game emits about a dozen decision
+lines — 33,678 across 2,849 readings on the run this was calibrated against, at
+4.7 decisions a second. A threshold of 40 *decisions* was therefore 3.4 readings,
+or **8.5 seconds** of wall clock, and combat legitimately pauses far longer than
+that while switching targets, between pockets, or in warp. Replaying that run
+with the game log pinned silent, the old unit raised 295 alarms — one every 5.3
+seconds — against 10 for the same run counted in readings, all 10 being one
+pattern that dedupes to a single screenshot.
+
+This is CLAUDE.md's own *"a decision in the log is not an action"* biting a tool
+that had carefully calibrated a threshold against the wrong statistic — for the
+second time, the first being the consecutive-identical counter the circling test
+replaced. `stall_watch.py` reflects the unit in its structure: `observe` folds a
+decision into the reading being assembled and reports nothing, and `end_reading`
+judges the reading once, at the `# [tick.substep]` boundary where the tick moves.
 
 `--keep-going` keeps watching after a stall instead of exiting, and is now safe
 to leave on. Each distinct stall is screenshotted **once** — distinctness judged
@@ -407,10 +423,13 @@ one, which is what keeps the documented "target drifting while the ship does
 nothing" case alarming — an oscillating distance sets a new minimum once and
 never again. A wording is forgotten once it leaves the decision window, so a
 second container behind the same sentence is measured on its own rather than
-against the first one's arrival distance. `APPROACH_PATIENCE` (60 decisions)
-bounds it in both directions: a ship gets that long from first sighting, or from
-its last gain, to show it is closing, and a ship that has genuinely stopped is
-caught that much later than before rather than not at all.
+against the first one's arrival distance. `APPROACH_PATIENCE` (20 readings, the
+same unit as the threshold) bounds it in both directions: a ship gets that long
+from first sighting, or from its last gain, to show it is closing, and a ship
+that has genuinely stopped is caught that much later than before rather than not
+at all. The measured worst case inside a real approach was 22 decisions between
+two strict decreases — about two readings — so the headroom is an order of
+magnitude.
 
 Raising `CIRCLING_THRESHOLD` instead would have been the wrong fix — it is
 calibrated to catch an 8,983-repeat pathology, and the problem was the progress

@@ -35,6 +35,17 @@ the ship flies perfectly. So a distance falling inside the repeated decision
 counts as progress alongside the other two, which needs no new plumbing because
 the bot already prints the number.
 
+**The counter works in readings, not decision lines.** The bot re-derives its
+whole decision path on every framework event, so one look at the game emits about
+a dozen decisions -- 33,678 across 2,849 readings on the run this was calibrated
+against. Counting them individually made a threshold of 40 mean 3.4 readings, or
+8.5 seconds of wall clock, and healthy combat pauses for longer than that between
+targets and between pockets. Replaying that run with the game log pinned silent,
+the old unit raised 295 alarms, one every 5.3 seconds; the same run counted in
+readings raises 10, all of them the same pattern. `observe` therefore folds a
+decision into the reading being assembled and reports nothing; `end_reading`
+judges the reading, once, at the tick boundary.
+
 Screenshots the game window by id rather than the screen, since the client is
 often on another macOS Space where a plain screen grab catches the wrong thing.
 """
@@ -47,31 +58,50 @@ from collections import deque
 # one.
 DECISION_WINDOW = 24
 
-# How many decisions may arrive with nothing new in the window and nothing new in
-# EVE's game log before it counts as a stall. Chosen by replaying three real
-# runs: at 40, the fifteen-minute stall raises 99 alarms while a run that
-# completed 12 missions raises none. 30 starts catching a healthy run, and
-# raising it past 40 only delays the alarm without buying accuracy.
-CIRCLING_THRESHOLD = 40
-
-# How many decisions may pass after a distance last fell before the ship stops
-# counting as under way. Measured over a four-mission run: within a single
-# approach the longest gap between two strict decreases was 22 decisions
-# (median 7, p90 13), and the two gaps above that -- 62 and 72 -- fall between
-# separate approaches rather than inside one.
+# How many *readings* may arrive with nothing new in the window and nothing new
+# in EVE's game log before it counts as a stall.
 #
-# What has to hold is weaker than "patience covers the gap": a plateau only
-# alarms if it outlasts the patience by a further CIRCLING_THRESHOLD, since the
-# distance changing is itself a new line and resets the count. So 60 covers a
-# gap of just under 100 -- a plateau of 50 identical readings, against 22
-# measured and the 15 the issue reported. Raising it further only delays the
-# alarm on a ship that has genuinely stopped: a wedge is caught this many
-# decisions later than before, which on the recorded run's pace (~11 decisions
-# per tick, ~5.7s a tick) is about half a minute.
-APPROACH_PATIENCE = 60
+# This counted raw decisions until it was measured. The bot re-derives its whole
+# decision path on every framework event, so one game reading emits about a
+# dozen decision lines -- 33,678 decisions across 2,849 readings on the run this
+# was calibrated against, 11.8 apiece. The old threshold of 40 decisions was
+# therefore about 3.4 readings, or 8.5 seconds of wall clock at that run's 4.7
+# decisions a second. Combat legitimately pauses far longer than eight seconds
+# while switching targets, between pockets, or in warp, and every one of those
+# pauses landed on a repeated decision and alarmed.
+#
+# Counting readings makes the threshold mean what its name implies, and keeps it
+# comparable across bots whose step delays differ. CLAUDE.md states the principle
+# this used to trip over: "A decision in the log is not an action."
+CIRCLING_THRESHOLD = 20
+
+# How many readings may pass after a distance last fell before the ship stops
+# counting as under way. In readings for the same reason the threshold above is:
+# a reading emits about a dozen decisions, and they are all one observation of
+# one distance, so spending patience per decision spent it twelve times too fast.
+#
+# What has to hold is weaker than "patience covers the gap between decreases": a
+# plateau only alarms if it outlasts the patience by a further
+# CIRCLING_THRESHOLD, since the distance changing is itself a new line and resets
+# the count. Measured over a four-mission run, the longest gap between two strict
+# decreases within one approach was 22 decisions -- about two readings -- so 20
+# readings is an order of magnitude of headroom, and the cost of the headroom is
+# only that a ship which has genuinely stopped is caught this many readings
+# later than it otherwise would be.
+APPROACH_PATIENCE = 20
 
 STUCK_TEXT = "I am stuck here and need help to continue."
 DECISION = re.compile(r'^\++ (.*)$')
+
+# `# [tick.substep] (Ns)`. The tick is one look at the game; the substeps are the
+# framework re-deriving the same decision path over that one look.
+READING = re.compile(r'^# \[(\d+)\.\d+\]')
+
+# Object names the bot quotes back, e.g. `overview entry 'Kruul's Henchman'`.
+# Masked when judging whether two stalls are the same one, alongside the numbers
+# -- a benign pattern already dismissed for one rat should not be re-reported,
+# and re-photographed, for the next rat of a different name.
+QUOTED_NAME = re.compile(r"'[^']*'")
 
 # A distance the bot prints in its own decision, e.g. "Look inside Cargo
 # Container for the The Damsel, 84000 m away." Only metres appear: the parser
@@ -146,9 +176,14 @@ class StallCheck:
         self.stuck_for = 0
         self.last_size = None
         # Smallest distance seen so far for each decision wording, and how many
-        # decisions have passed since any of them last improved.
+        # readings have passed since any of them last improved.
         self.closest = {}
         self.since_closer = None
+        # What the reading currently being assembled has shown. Judged, and
+        # cleared, at its boundary -- see `end_reading`.
+        self.judged_a_decision = False
+        self.something_new = False
+        self.only_idling = False
 
     def _newest_gamelog_size(self):
         """Size of EVE's current game log. Size rather than contents: it grows on
@@ -187,7 +222,7 @@ class StallCheck:
         """
         found = DISTANCE.findall(decision)
         if not found:
-            return self._under_way()
+            return
 
         meters = int(found[-1])                      # the last one, if several
         wording = wording_of(decision)
@@ -198,9 +233,12 @@ class StallCheck:
         elif meters < closest:
             self.closest[wording] = meters
             self.since_closer = 0
-        return self._under_way()
 
     def _under_way(self):
+        """Whether the ship has closed on something recently enough to still
+        count as flying. The patience is spent per reading, not per decision --
+        a reading emits about a dozen decisions and they are all one observation
+        of one distance."""
         if self.since_closer is None:
             return False
         under_way = self.since_closer < APPROACH_PATIENCE
@@ -212,7 +250,13 @@ class StallCheck:
         self.closest = {w: d for w, d in self.closest.items() if w in live}
 
     def observe(self, decision):
-        """Returns a reason string when stuck, else None."""
+        """Fold one decision into the reading being assembled.
+
+        Reports nothing: a stall is counted in readings, so the judgement
+        belongs at the reading's boundary, in `end_reading`. Every decision
+        still updates the window and the distances, because those are about
+        content rather than time.
+        """
         if BENIGN_IDLE.search(decision):
             self.recent.append(decision)
             # Reset only while the bot is doing nothing *but* idling. A benign
@@ -224,22 +268,40 @@ class StallCheck:
             # and silent, through the whole thing.
             judged = [d for d in self.recent if not BENIGN_LEAF.match(d)]
             if judged and all(BENIGN_IDLE.search(d) for d in judged):
-                self.stuck_for = 0
-            return None
+                self.only_idling = True
+            return
         if self.shooting_only and not SHOOTING.search(decision):
+            return
+
+        self.judged_a_decision = True
+        self._note_distance(decision)
+
+        if decision not in self.recent:
+            self.something_new = True
+        self.recent.append(decision)
+        self._forget_departed_wordings()
+
+    def end_reading(self):
+        """Close the reading and judge it. Returns a reason when stuck, else None.
+
+        A reading that offered nothing to judge -- no decision at all, or none
+        that this view cares about -- is not evidence either way and is passed
+        over rather than counted as progress. Counting it as progress would
+        reset the counter on the readings a wedged bot spends saying nothing.
+        """
+        if not self.judged_a_decision:
+            self._end_reading_state()
             return None
 
         size = self._newest_gamelog_size()
         game_moved = size is not None and size != self.last_size
         self.last_size = size
 
-        under_way = self._note_distance(decision)
+        under_way = self._under_way()
+        something_new, only_idling = self.something_new, self.only_idling
+        self._end_reading_state()
 
-        nothing_new = decision in self.recent
-        self.recent.append(decision)
-        self._forget_departed_wordings()
-
-        if game_moved or not nothing_new or under_way:
+        if game_moved or something_new or under_way or only_idling:
             self.stuck_for = 0
             return None
 
@@ -248,9 +310,14 @@ class StallCheck:
             self.stuck_for = 0                       # report once, keep watching
             loop = " | ".join(dict.fromkeys(self.recent))
             what = "shooting with nothing landing" if self.shooting_only else "going in circles"
-            return (f"{what}: {self.threshold} decisions with no new line in EVE's "
+            return (f"{what}: {self.threshold} readings with no new line in EVE's "
                     f"game log -- {loop[:200]}")
         return None
+
+    def _end_reading_state(self):
+        self.judged_a_decision = False
+        self.something_new = False
+        self.only_idling = False
 
 
 def game_window_id(pid):
@@ -300,7 +367,7 @@ class Reporter:
         self.counts = {}
 
     def report(self, label, reason):
-        key = label + "|" + re.sub(r"\d+", "#", reason)
+        key = label + "|" + QUOTED_NAME.sub("'x'", re.sub(r"\d+", "#", reason))
         self.counts[key] = self.counts.get(key, 0) + 1
         seen = self.counts[key]
 
@@ -323,7 +390,7 @@ def main():
     ap.add_argument("--pid", type=int, required=True, help="game client pid")
     ap.add_argument("--out", required=True, help="directory for screenshots")
     ap.add_argument("--threshold", type=int, default=CIRCLING_THRESHOLD,
-                    help="decisions without progress before a stall is called")
+                    help="readings without progress before a stall is called")
     ap.add_argument("--gamelogs", default=os.path.expanduser("~/Documents/EVE/logs/Gamelogs"),
                     help="EVE's own game-log directory, for the silent-guns check")
     ap.add_argument("--keep-going", action="store_true",
@@ -346,9 +413,10 @@ def main():
     circling = StallCheck(args.gamelogs, threshold=args.threshold)
     silent_guns = StallCheck(args.gamelogs, threshold=args.threshold, shooting_only=True)
     print(f"watching {os.path.basename(args.log)}; game window {win}; "
-          f"threshold {args.threshold} decisions without progress", flush=True)
+          f"threshold {args.threshold} readings without progress", flush=True)
 
     # Start at the end: only stalls from now on are interesting.
+    reading = None
     with open(args.log, errors="replace") as fh:
         fh.seek(0, os.SEEK_END)
         while True:
@@ -366,17 +434,30 @@ def main():
                 if not args.keep_going:
                     return 0
 
+            # A reading ends when the tick number moves. The substeps within one
+            # tick are the framework re-deriving the same decision path several
+            # times over one look at the game, so they are one observation, not
+            # a dozen.
+            m = READING.match(line)
+            if m:
+                tick = int(m.group(1))
+                if reading is not None and tick != reading:
+                    for label, check in (("circling", circling),
+                                         ("silentguns", silent_guns)):
+                        reason = check.end_reading()
+                        if reason:
+                            reporter.report(label, reason)
+                            if not args.keep_going:
+                                return 0
+                reading = tick
+                continue
+
             m = DECISION.match(line.rstrip())
             if not m:
                 continue
             text = m.group(1)
-
-            for label, reason in (("circling", circling.observe(text)),
-                                  ("silentguns", silent_guns.observe(text))):
-                if reason:
-                    reporter.report(label, reason)
-                    if not args.keep_going:
-                        return 0
+            circling.observe(text)
+            silent_guns.observe(text)
 
 
 if __name__ == "__main__":
