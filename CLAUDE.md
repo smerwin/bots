@@ -777,6 +777,110 @@ consumer turned into a `999999` placeholder that reads as merely far rather than
 unreachable — one run logged "Failed to read the distance" 444 times. Exclude
 those objects from anything the ship might act on.
 
+## What the bot is willing to shoot
+
+For a long time this was two rules, and both required somebody to have predicted
+the object: the overview's icon colour (`iconSpriteHasColorOfRat`, a sprite
+palette test) and a list of names in the `attack-object` setting. Anything
+matching neither was invisible — **including things actively shooting the ship**,
+and the failure is silent in the worst available direction, since "nothing to
+fight" is what the bot prints either way. Issue #40's principle: whatever is
+shooting the ship is a valid target, whatever colour its icon is and whether or
+not anyone remembered to name it in a setting.
+
+**Issue #40's headline incident is not this, and the recordings say so.** It
+attributes run 10's long "Nothing to fight and no travel step offered" stretch to
+this blindness; the log has that stretch running 900 decision blocks on
+`Illegal Activity (3 of 3) -- You need to activate the Acceleration Gate`, with
+**zero** incoming damage in the window, zero rats and a full shield throughout.
+That is #41's gate-locked refusal, fixed in #42. The frigates the issue quotes
+were engaged normally in the same run —
+`Lock target from overview entry 'Federation Navy Delta II Support Frigate'`
+appears throughout the pocket they were in — so the icon rule matched them.
+
+What the recordings do support is the gap itself, quantified: across them there
+are **1,198 readings taken under fire and 299 of those where the icon rule
+counted zero rats**, a quarter. Most are in warp, retreating or travelling with
+nothing on grid, but 26 sit at an acceleration gate absorbing 320-370 hitpoints
+a window from something the client names `R.S. Officer` while the bot engages
+nothing. Whether that attacker had an overview row the colour rule missed, or
+simply had no row at all, **the recordings cannot say** — the bot prints the
+count, never the rows. That is the one thing a live run has to settle.
+
+**The third rule is the client's own statement of fact.** EVE's combat log names
+every attacker — `49 from Centior Monster - Penetrates` — and the host already
+aggregates that channel into `incomingDamageSinceLastReading`, whose
+`topAttacker` field *is* the attacker's name. So the widening cost no new
+plumbing: the raw `(combat)` lines stay withheld, and `isObjectShootingAtUs`
+matches an overview row against the names the window already holds.
+
+**The two names are the same string**, checked rather than assumed. Across all
+ten recorded runs the combat log names 37 distinct attackers and **33 appear
+byte for byte** as an overview entry's Name in the bot's own
+`Lock target from overview entry '…'` and `Current target: …` lines — same case,
+same spacing, apostrophes and full stops intact
+("Kruul's Henchman", "R.S. Officer"). Of the four that do not, three are rats the
+bot never locked, so no overview-side string was ever printed for them; the
+fourth is `Toxic Cloud Environment`, the pocket's own damage cloud, which has no
+overview row and therefore matches nothing. `test_shoot_back_at_attackers.py`
+pins that round-trip against the recorded lines, #31's pattern.
+
+**Matched exactly, never as a substring.** `attack-object` already learned this
+in both directions, and there is a worse case here: a wreck's Type is its
+owner's name with " Wreck" appended, so a substring rule would have the bot open
+fire on the corpse of the thing that stopped shooting it — forever, since a
+wreck cannot die. Name and Type are both accepted, which exactness makes safe;
+the recorded evidence is for the Name column specifically.
+
+**`topAttacker` is one name, and a pocket has several attackers.** Rather than
+widen the host's aggregation into a list, the name rides on each
+`IncomingDamageSample` and the *window* of them is the set. Measured over the
+recorded runs, accumulating the per-reading top attacker across 45 seconds
+recovers **1674 of 1717** name-in-window pairs (97.5%) that carrying every name
+would have — a reading is one to three seconds, so a second attacker takes the
+top slot within a few of them. Run 10's own pocket shows it directly: two
+consecutive readings, one topped by `Federation Navy Delta II Support Frigate`
+and the next by `Federation Navy Soldier`. Holding the names inside `samples`
+also means **no new counter and no new clearing rule**: they are trimmed by the
+same clock, capped by the same `incomingDamageSampleLimit`, and gone 45 s after
+the last hit — one condition covering the rat dying, the ship warping out and
+the pocket ending.
+
+**It widens the set; it does not reorder it.** An entry qualifying only because
+it shot us enters the same list at its own distance rank, and every existing
+guard still applies by placement: `overviewEntryDistanceIsOnGrid` (so an AU
+distance is still excluded), `overviewEntryIsDisplayed` at the lock site (so a
+virtualised row is still never clicked), and the scrambler-first sort — being
+unable to *leave* still outranks being shot. When the colour rule and this one
+agree they produce one entry, not two.
+
+**The one place it stops is a briefing saying clearing is optional.** Attackers
+are deliberately absent from `isObjectToAttackByName`, which is what survives
+that filter. A briefing that says the pirates need not be cleared is the client
+saying in writing that the fight is not the job, and ignoring that cost run 102
+over 400 combat decisions and run 106 a session on Recon. The cost is stated
+rather than hidden: on such a mission the bot travels to the objective while
+being shot and does not shoot back, and what covers that is the damage-rate
+retreat, not this.
+
+**Webbing is not damage, and that case is not covered.** A webifier can apply no
+damage at all, and then it writes no combat line, so a signal built on damage
+cannot see it — which is precisely run 10's two frigates, whose rows the issue
+reports rendering "Pilot is webifying me". They happened also to deal damage, so
+run 10 itself is covered; a pure webifier would not be. That string appears
+**nowhere in the ten recorded runs** — nothing had ever printed these hints — so
+matching it would be a guard resting on a premise no evidence supports. The
+hints are printed instead (`Overview indications:` in the status line, distinct
+strings from rendered rows only), which is what turns the next run into the
+evidence a follow-up can be built on. `commonIndications` still reads exactly
+the two literals it inherited, `is jamming me` and `is warp disrupting me`.
+
+Every engagement of this kind names itself in the decision log —
+`Shooting back at '…': the client's combat log names it as having hit this ship
+in the last 45 s, and nothing else here marks it as a target.` — and only when
+nothing else would have selected the row, so the line means "this is new" rather
+than appearing beside every rat in the pocket.
+
 ## Context-menu cascade robustness
 
 `EveOnline.BotFrameworkSeparatingMemory.elm`'s shared cascade logic
@@ -1745,6 +1849,20 @@ exists.
   is following is its own. The tell is `Home station: ... set the route to`
   repeating where `Home station: travelling to` should have taken over.
 
+  It now also **shoots back at whatever the client says is shooting it**, rather
+  than only at what the overview colours as a rat or an operator remembered to
+  name — see "What the bot is willing to shoot" for the evidence that the combat
+  log's attacker name and the overview's Name are the same string, for why the
+  set is accumulated per reading rather than carried as a list by the host, and
+  for the two cases deliberately left out (an optional-clearing briefing, and a
+  webifier that deals no damage). **Untested against a live client**: the
+  matching, the bounding and every existing guard it has to keep are unit-checked
+  against the recorded runs, but no run has yet engaged anything this way. What
+  to watch is the status line's `Attackers named in the window:` clause carrying
+  names that the overview also shows — a window naming attackers while no
+  `Shooting back at` line ever appears means the two strings are not matching
+  after all, which is the failure this whole change would fail silently as.
+
   It also **recognises that the ship has been destroyed and flies the pod out**
   rather than continuing the mission in a capsule, which is what run 7 did for
   86 readings. Detection, the two signals that work and the two that do not,
@@ -2009,6 +2127,13 @@ for why ESI cannot replace it from inside a bot yet.
   whole window, so a bot driven out of a pocket will be brought back into it by
   the mission logic and driven out again. Survivable, and better than the
   alternative it replaced, but it is a loop and it has not been seen live.
+- **A webifier that deals no damage is still invisible to the bot.** #40's
+  attacker set is built from the combat log, and an EWAR module that applies no
+  damage writes no line there. The overview row carries the answer — the client
+  renders "Pilot is webifying me" on it — but that string occurs in none of the
+  recorded runs, so there is nothing to derive a matcher from without a live
+  reading. The status line now prints the rendered rows'
+  `rightAlignedIconsHints`, so the next run that meets one records the literal.
 - No automated Elm-toolchain bootstrap if `elm` isn't on `PATH`.
 - `reload_drones.py` only searches the root Item hangar, no sub-folders. The
   mission runner's port of it inherits that, and also takes the first
