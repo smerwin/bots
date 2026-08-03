@@ -124,6 +124,13 @@
      that does not cover. Either way the object must be enabled in the
      overview's type filters (Large Collidable Objects are off by default) or
      the bot cannot see it at all. Repeatable.
+
+     **It is also not what covers a hostile the icon colour misses.** Anything
+     the client's combat log names as having hit this ship inside
+     `incomingDamageWindowSeconds` is a target for as long as that window holds
+     it, with no setting involved -- see `isObjectShootingAtUs`. Listing rats
+     here is unnecessary and, because this list never expires, worse than
+     leaving them out.
    + `home-station` : Full name of the station to go back to when the drone bay
      has run dry, exactly as the client writes it -- e.g.
      `home-station=Amarr VIII (Oris) - Emperor Family Academy`. Without it the
@@ -537,6 +544,14 @@ on the same reading, because the two questions this memory answers are "how hard
 are we being hit" and "is the instrument that is supposed to notice moving at
 all", and the second is only answerable by looking at both together.
 
+Each sample also carries the reading's own `topAttacker`, and the set of those
+names across the window is what issue #40's target selection reads. Holding the
+names *inside* `samples` rather than in a list of their own is what bounds and
+clears them without a second rule: they are trimmed by the same clock, capped by
+the same `incomingDamageSampleLimit`, and gone `incomingDamageWindowSeconds`
+after the last hit -- which covers a rat dying, the ship warping out and a
+pocket ending, in one condition none of which has to be detected separately.
+
 `hostCarriesTheChannel` is the `Nothing`-versus-`Just` distinction from the
 parser, kept so the status line can say when this whole guard is unarmed. A
 host without the channel reports no damage, which reads exactly like a peaceful
@@ -562,6 +577,11 @@ type alias IncomingDamageSample =
     -- was none to believe -- no ship UI, or a value `plausibleHitpointsPercent`
     -- rejected. A `Nothing` is never counted as the gauge moving.
     , hitpoints : Maybe ( Int, Int )
+
+    -- Who the client said hit hardest on this reading, kept per sample rather
+    -- than only in `lastAttacker`, because the window of these names is what
+    -- `namesOfRecentAttackers` hands to the target selection. See issue #40.
+    , attacker : Maybe String
     }
 
 
@@ -5397,6 +5417,41 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                 scrollOverviewToReveal context
                     (shouldAttackOverviewEntry (objectNamesToAttack context))
 
+        -- Issue #40: name what is in the list *only* because the client said it
+        -- hit us. Without this an operator reading the decision log sees the bot
+        -- engage something the overview does not colour as a rat and nothing
+        -- names in the settings, with no way to tell learning from misfiring.
+        -- Recomputed here rather than carried on the entry because
+        -- `shouldAttackOverviewEntry` returns a Bool and widening it to report
+        -- which disjunct matched would change every call site for one log line.
+        entriesEngagedOnlyBecauseTheyShotUs =
+            overviewEntriesToAttack
+                |> List.filter
+                    (\entry ->
+                        isObjectShootingAtUs (objectNamesToAttack context).fromIncomingDamage entry
+                            && not (iconSpriteHasColorOfRat entry)
+                            && not (isObjectToAttackByName (objectNamesToAttack context) entry)
+                    )
+
+        describeShootingBack decision =
+            case
+                entriesEngagedOnlyBecauseTheyShotUs
+                    |> List.filterMap .objectName
+                    |> Common.Basics.listUnique
+            of
+                [] ->
+                    decision
+
+                names ->
+                    describeBranch
+                        ("Shooting back at "
+                            ++ (names |> List.map (\name -> "'" ++ name ++ "'") |> String.join ", ")
+                            ++ ": the client's combat log names it as having hit this ship in the last "
+                            ++ (incomingDamageWindowSeconds |> String.fromInt)
+                            ++ " s, and nothing else here marks it as a target."
+                        )
+                        decision
+
         targetsToUnlock =
             targetsToUnlockFromReadingFromGameClient context.readingFromGameClient
 
@@ -5620,13 +5675,13 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
             decisionIfNoEnemyToAttack
 
     else if context.eventContext.botSettings.orbitInCombat == AppSettings.Yes then
-        ensureShipIsOrbitingDecision |> Maybe.withDefault decisionToFight
+        describeShootingBack (ensureShipIsOrbitingDecision |> Maybe.withDefault decisionToFight)
 
     else if context.eventContext.botSettings.keepAtRange == AppSettings.Yes then
-        ensureShipIsKeepingRangeDecision |> Maybe.withDefault decisionToFight
+        describeShootingBack (ensureShipIsKeepingRangeDecision |> Maybe.withDefault decisionToFight)
 
     else
-        decisionToFight
+        describeShootingBack decisionToFight
 
 
 {-| How many readings to keep commanding a manoeuvre the client never confirms
@@ -8448,6 +8503,7 @@ statusTextFromState context =
                     , [ describeOverview ]
                     , [ describeRatsInOverview, describeCurrentTarget, describeLockRange context ]
                     , describeAccelerationGate context
+                    , [ describeOverviewIndicationHints readingFromGameClient ]
                     , [ describeAmmoSwapState context ]
                     ]
                         |> List.map (String.join " ")
@@ -8628,6 +8684,45 @@ overviewEntryIsWarpDisruptingMe overviewEntry =
     overviewEntry.commonIndications.isWarpDisruptingMe
 
 
+{-| The hint text behind the little icons on the right of each overview row.
+
+Reported rather than acted on, and here for one specific reason: issue #40 says
+run 10's two frigates showed "Pilot is webifying me", and **a webifier that
+applies no damage produces no combat-log line at all**, so the attacker set in
+`namesOfRecentAttackers` cannot see it. That case is not covered by this change
+and this line is what would let it be.
+
+The parser has carried `rightAlignedIconsHints` all along and
+`commonIndications` reads exactly two literals out of it -- "is jamming me" and
+"is warp disrupting me" -- both inherited from upstream. The webifier's literal
+is not among them, and **it appears nowhere in the ten recorded runs**, because
+nothing has ever printed these hints. Guessing at the string and matching it
+would be a guard whose premise no evidence supports, which is how this repo
+gets guards that quietly never fire. Printing them instead costs one status
+line and turns the next run into the evidence a follow-up can be built on.
+
+Capped and deduplicated: distinct strings across rendered rows only, since an
+undisplayed row's contents belong to whatever was recycled into its place.
+-}
+describeOverviewIndicationHints : ReadingFromGameClient -> String
+describeOverviewIndicationHints readingFromGameClient =
+    case
+        readingFromGameClient.overviewWindows
+            |> List.concatMap .entries
+            |> List.filter overviewEntryIsDisplayed
+            |> List.concatMap .rightAlignedIconsHints
+            |> Common.Basics.listUnique
+            |> List.take 8
+    of
+        [] ->
+            "Overview indications: none on any rendered row."
+
+        hints ->
+            "Overview indications: "
+                ++ (hints |> List.map (\hint -> "'" ++ hint ++ "'") |> String.join ", ")
+                ++ "."
+
+
 {-| Whether to shoot this overview entry. Rats are recognised by their icon
 colour, but some missions require destroying a structure -- a "Drone Silo" and
 other Large Collidable Objects -- and those are neutral objects with no
@@ -8637,14 +8732,79 @@ be named explicitly via the `attack-object` setting.
 Note the structure must also be *visible*: Large Collidable Objects are off by
 default in the overview's type filters, and the bot can only act on what the
 overview shows it.
+
+The third disjunct is issue #40's: whatever the client says has been shooting
+this ship. The first two require someone to have predicted the object -- the
+sprite palette to cover it, or an operator to have named it -- and when both
+miss, the failure is silent in the worst available direction: the bot reports
+"nothing to fight" while its armour drains. This one is not a prediction. It is
+the client's own statement that the object hit us, and it needs no
+configuration. See `namesOfRecentAttackers`.
+
+**This widens the set; it does not reorder it.** An entry that qualifies only
+because it shot us enters the same list at its own distance rank and is subject
+to every guard the other two are: `overviewEntryDistanceIsOnGrid` below (so an
+AU distance is still excluded), `overviewEntryIsDisplayed` at the lock site (so
+a virtualised row is still never clicked), and the scrambler-first sort in
+`decideActionInCombat` (so being unable to *leave* still outranks being shot).
+When the colour rule and this one agree they produce one entry, not two, and
+nothing downstream can tell which disjunct matched. The one place that can, and
+must, is `isObjectToAttackByName` -- see the note there.
 -}
 shouldAttackOverviewEntry : ObjectNamesToAttack -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 shouldAttackOverviewEntry namesToAttack overviewEntry =
     (iconSpriteHasColorOfRat overviewEntry
         || isObjectToAttackFromObjective namesToAttack.fromObjective overviewEntry
         || isObjectToAttackFromSettings namesToAttack.fromSettings overviewEntry
+        || isObjectShootingAtUs namesToAttack.fromIncomingDamage overviewEntry
     )
         && overviewEntryDistanceIsOnGrid overviewEntry
+
+
+{-| Whether the client's combat log has named this overview row as having hit us.
+
+**The two strings are the same string.** Established against the recorded runs
+rather than assumed: across all ten sessions the combat log names 37 distinct
+attackers, and 33 of them appear byte for byte -- same case, same spacing, same
+punctuation -- as an overview entry's Name, in the bot's own
+`Lock target from overview entry '...'` and `Current target: ...` lines, which
+read `objectName` directly. "Federation Navy Delta II Support Frigate",
+"Tower Sentry Sansha I", "Kruul's Henchman", "R.S. Officer" and "Centii Savage"
+all round-trip unchanged. Of the four that do not appear, three are rats the bot
+never locked, so the log has no overview-side string for them at all; the fourth
+is "Toxic Cloud Environment", which is the pocket's own damage cloud and has no
+overview row to match -- the harmless case, since a name with no row engages
+nothing.
+
+**Matched exactly, not as a substring**, for `isObjectToAttackFromSettings`'s
+reason and one of its own. A substring match on the attacker "Kruul" would
+select "Kruul's Pleasure Hub" and "Kruul's Henchman", and a wreck's Type is its
+owner's name with " Wreck" appended -- so substring matching would have the bot
+open fire on the corpse of the thing that just stopped shooting it, forever,
+since a wreck never dies. Exactness is what makes accepting the Type column safe
+too. Comparison trims and lowercases, matching the setting's rule, so nothing
+here depends on the client's capitalisation being stable.
+
+Both columns are accepted for the same reason the other two matchers accept
+both: which one carries the identifying label varies. The recorded evidence
+above is for the Name column specifically -- no recorded line shows an
+attacker's name in the Type column -- so Type is the unverified half of this,
+and it is included because the failure it guards against (a row whose Name cell
+is empty) is the silent one.
+-}
+isObjectShootingAtUs : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+isObjectShootingAtUs attackerNames overviewEntry =
+    let
+        normalize =
+            String.trim >> String.toLower
+
+        labels =
+            [ overviewEntry.objectName, overviewEntry.objectType ]
+                |> List.filterMap identity
+                |> List.map normalize
+    in
+    attackerNames
+        |> List.any (\attackerName -> labels |> List.member (normalize attackerName))
 
 
 {-| Whether the entry's distance is one the bot can act on at all.
@@ -8746,17 +8906,21 @@ isObjectToAttackFromSettings namesToAttack overviewEntry =
 
 
 {-| Non-rat objects worth shooting: whatever the mission objective names as a
-destruction target, plus anything listed in the settings. The objective is the
-primary source -- it already says which structure the mission means -- and the
-`attack-object` setting stays as a manual override for cases it does not cover.
+destruction target, whatever the settings list, and whatever the client says has
+been shooting us. The objective is the primary source -- it already says which
+structure the mission means -- and the `attack-object` setting stays as a manual
+override for cases it does not cover.
 
-The two are kept apart rather than concatenated because they are matched
-differently -- see `isObjectToAttackFromObjective` and
-`isObjectToAttackFromSettings`.
+The three are kept apart rather than concatenated because they are matched
+differently and, more importantly, mean different things. See
+`isObjectToAttackFromObjective`, `isObjectToAttackFromSettings` and
+`isObjectShootingAtUs` for the matching, and `isObjectToAttackByName` for the
+one decision that has to tell the third apart from the other two.
 -}
 type alias ObjectNamesToAttack =
     { fromObjective : List String
     , fromSettings : List String
+    , fromIncomingDamage : List String
     }
 
 
@@ -8767,6 +8931,7 @@ objectNamesToAttack context =
             |> Maybe.map .objectNamesToDestroy
             |> Maybe.withDefault []
     , fromSettings = context.eventContext.botSettings.attackObjectNames
+    , fromIncomingDamage = namesOfRecentAttackers context.memory.incomingDamage
     }
 
 
@@ -8788,6 +8953,22 @@ overviewEntriesToAttackFromReadingFromGameClient namesToAttack readingFromGameCl
 happen to share the grid. Distinguished by *why* the entry matched: an
 objective- or settings-named structure still has to die when the briefing says
 clearing is optional, a wandering pirate does not.
+
+**Issue #40's attackers are deliberately not here**, which is the one place the
+widening in `shouldAttackOverviewEntry` stops. A briefing that says the pirates
+need not be cleared is the client telling us, in writing, that the fight is not
+the job -- and the bot has already lost two whole sessions to ignoring that:
+run 102 spent over 400 combat decisions on a mission whose brief said not to
+bother, and run 106 did the same on Recon while the objective asked for an
+acceleration gate. A rat shooting at the ship on such a mission is exactly the
+rat those briefings are about, so admitting it here would reinstate that failure
+with a better excuse for it.
+
+The cost is real and is not hidden: on an optional-clearing mission the bot will
+now travel to the objective while being shot and will not shoot back. What
+covers that is the damage-rate retreat -- see `runAwayIfLowHealth` -- not this,
+and if the fire is light enough that the retreat never trips, taking it while
+finishing the mission is the intended outcome rather than an oversight.
 -}
 isObjectToAttackByName : ObjectNamesToAttack -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isObjectToAttackByName namesToAttack overviewEntry =
@@ -10145,6 +10326,44 @@ incomingDamageInWindow memory =
     memory.samples |> List.map .damage |> List.sum
 
 
+{-| Everything the client has named as having hit this ship inside the window.
+
+**Issue #40.** The bot decided what to shoot from the overview's icon colour
+plus whatever an operator had remembered to list in `attack-object`, so anything
+matching neither was invisible to it -- including things actively shooting it,
+and "nothing to fight" is what it prints either way. What is shooting the ship
+is a valid target whether or not anyone predicted it, and the client says so on
+every damage line it writes.
+
+The gap is measured rather than assumed, and it is smaller than the issue
+claims: of 1198 recorded readings taken under fire, 299 found no rat by icon
+colour, and 26 of those sit at an acceleration gate absorbing 320-370 hitpoints
+a window from something named "R.S. Officer". Whether that attacker had an
+overview row is not knowable from a recording -- the bot prints the count, never
+the rows. Run 10's long "Nothing to fight" stretch, which the issue attributes
+here, took no damage at all and belongs to #41's locked gate.
+
+The list is the window's `topAttacker` values, deduplicated. It is one name per
+reading rather than every attacker in the reading, which is what the host
+already aggregates -- and measured over the recorded runs that is enough:
+accumulating the per-reading top attacker across a 45-second window recovers
+**1674 of the 1717** attacker-name-in-window pairs the full set would have,
+97.5%, because a reading is one to three seconds and a second attacker takes the
+top slot within a few of them. Widening the host's aggregation to carry every
+name would buy the remaining 2.5% at the cost of a list where a single string
+is, and the names it misses are ones the icon-colour rule already covers.
+
+Order is not meaningful and nothing reads it as a priority: see
+`shouldAttackOverviewEntry`, where this is one disjunct of three and the
+resulting list keeps its existing distance ordering.
+-}
+namesOfRecentAttackers : IncomingDamageMemory -> List String
+namesOfRecentAttackers memory =
+    memory.samples
+        |> List.filterMap .attacker
+        |> Common.Basics.listUnique
+
+
 {-| Did the HUD's hitpoints reading move at all across the window?
 
 Only a *believed* value counts as evidence of movement: two different `Just`
@@ -10231,6 +10450,21 @@ describeIncomingDamage context =
                         ". Hardest hitter seen: '" ++ attacker ++ "'"
                )
             ++ "."
+            -- Issue #40: the set the target selection is actually reading, not
+            -- just the single hardest hitter above. Printed every reading and
+            -- not only when it matches something, because the useful diagnosis
+            -- on a run that fails this way is "the client named an attacker and
+            -- no overview row carried that name", and a clause that appears only
+            -- on success cannot say that.
+            ++ (case namesOfRecentAttackers memory of
+                    [] ->
+                        " Attackers named in the window: none."
+
+                    names ->
+                        " Attackers named in the window: "
+                            ++ (names |> List.map (\name -> "'" ++ name ++ "'") |> String.join ", ")
+                            ++ " (any overview row with one of these names is a target)."
+               )
 
 
 {-| Where the retreat's hysteresis actually lives.
@@ -10298,6 +10532,10 @@ hit at all for `incomingDamageWindowSeconds`. Trip and release are different
 conditions on purpose: one threshold with the reading walking back and forth
 across it is the flicker `runAwayRearmPercent` exists to prevent, and here there
 is no "healthy" reading to re-arm against, only the fire having stopped.
+
+The reading's `topAttacker` rides along on the sample rather than being
+accumulated into a list of its own, so `namesOfRecentAttackers` inherits the
+trimming above and needs no clearing rule -- see `IncomingDamageMemory`.
 -}
 updateIncomingDamageMemory : UpdateMemoryContext BotSettings -> IncomingDamageMemory -> IncomingDamageMemory
 updateIncomingDamageMemory context memoryBefore =
@@ -10329,6 +10567,7 @@ updateIncomingDamageMemory context memoryBefore =
                     { atMilliseconds = context.timeInMilliseconds
                     , damage = reading.damage
                     , hitpoints = hitpointsNow
+                    , attacker = reading.topAttacker
                     }
                         :: keptSamples
 
