@@ -1717,7 +1717,7 @@ reaching the silence deadline. That last one is the newcomer and deliberately so
 Having disarmed the ship once and been unable to finish, doing it again is not an
 optimisation worth the risk.
 
-### The bound is a backstop; the policy is not to disarm under fire
+### The bound is a backstop; the policy is gain against risk
 
 Run 11 reached that deadline, latched the feature off, and it still cost most of
 a tank: the swap had begun on a ship at 26% shield with twelve hostiles on grid
@@ -1726,33 +1726,91 @@ the shield was at zero and the armour had started going. **The bound did exactly
 what it promised. Twenty readings under fire is still most of a tank.** A bound
 answers "what if this never ends"; it does not answer "should this have started".
 
-So `swapMayDisarmTheGuns` is the policy, ahead of the backstop: **the guns do not
-go off while the client says the ship is being shot.** The evidence is the same
-rolling window the damage-rate retreat uses — the client's own combat log rather
-than a HUD sprite, and already summed for every reading.
+So `swapMayDisarmTheGuns` is the policy, ahead of the backstop. #50 wrote it as
+**zero** — no disarming while the client reports any incoming damage at all — on
+the argument that a threshold "would license disarming under light fire, which is
+what heavy fire starts as". That was right about run 11 and it made the feature
+unable to fire.
 
-- **Zero, not a threshold.** `run-away-incoming-damage-threshold` is about how
-  much punishment a hull absorbs before running. This is a different question and
-  the honest answer to "is anything shooting" is any damage at all; a threshold
-  here would license disarming under light fire, which is what heavy fire starts
-  as.
+**Run 17 is what zero cost.** Three verdict attempts wanting Multifrequency M,
+271 readings holding one, and the charge never loaded: `GUNS OFF` appears **zero
+times** in the run, and 188 status prints carry `not disarming` instead, blocked
+by windows of 128, 190, 301, 309 and 371 hitpoints against a retreat threshold of
+3500 — a rat plinking the shield. (Counts are a snapshot of a run still being
+written; the shape is what matters, not the totals.) In a mission pocket there is
+always *some* incoming damage, so a zero-damage rule fires only between waves,
+and the ship fought whole engagements with the wrong charge while the feature
+reported itself working. #50 measured that itself and called it the trade: 26% of
+the moments the swap wanted to act.
+
+So the question is no longer "is anything shooting" but **is this worth it**.
+
+- **The risk is the same rolling window**, the client's own combat log rather
+  than a HUD sprite and already summed for every reading, compared against
+  `ammoSwapDisarmDamageBudget` — **an eighth of `run-away-incoming-damage-
+  threshold`**, 437 on this hull. A share rather than a number, for the same
+  reason 3500 is a fact about this hull: the next ship re-derives it.
+- **The eighth is read out of the recordings.** For all 22,452 readings in the
+  seventeen recorded runs, take the window and then the worst window reached
+  within the next 20 readings — `ammoSwapSilencedGiveUpTicks`, the longest the
+  swap can hold the guns. The curve is flat and then it is not: up to a window of
+  **445** the worst that ever followed was 1226 hitpoints (35% of the threshold);
+  at 446 it is 1436, and at 469 it is 1683 — past the 1679 run 11's fourth swap
+  began on. 445 is where the recorded data stops saying "this does not escalate",
+  and an eighth is 437, just inside it.
+- **The gain is `ammoSwapRangeErrorPercent`** — how wrong the loaded charge's
+  range is, as a share of the crossover — and below
+  `ammoSwapWorthwhileRangeErrorPercent` (50%) the budget is zero. Half the
+  crossover is where the target sits at or past the *other* charge's own optimal:
+  the two ranges on this fit are 21000 and 67000 about a 44000 midpoint, so each
+  is about 52% away from it. **It is the weak half and #63 says so** — what
+  actually decides whether the other charge is better is whether the guns are
+  landing, which the client states on its outgoing combat lines and which this
+  does not read.
+- **Where the gain cannot be measured the budget is zero**, which is #50's rule
+  exactly. No crossover, no active target to measure a distance to, or a retreat
+  threshold set to `-1` and so not a scale to take a share of. That also answers
+  "worth nothing if the fight ends first": a target that has gone leaves no
+  distance, so a swap already holding the guns lets go on any fire at all.
 - **An absent channel declines.** `Nothing` and `Just 0` are different facts and
   only one may be read as "the grid is quiet". A host that cannot answer gets the
   answer that keeps the guns firing — which costs the whole feature on such a
   host, stated rather than hidden.
 - **Deferring is not failing.** Nothing is given up and no counter is spent: the
   verdict stays live, the guns keep shooting what they have, and
-  `ammoSwapVerdictGiveUpTicks` drops the attempt if the lull never comes.
-- **Fire arriving mid-swap abandons the attempt** rather than waiting out the
-  deadline, because letting go is what re-arms the guns — `decisionToKillRats`
-  presses the hotkey on the very next reading, which run 11 shows it doing.
+  `ammoSwapVerdictGiveUpTicks` drops the attempt if the moment never comes.
+- **The trade going bad mid-swap abandons the attempt** rather than waiting out
+  the deadline, because letting go is what re-arms the guns — `decisionToKillRats`
+  presses the hotkey on the very next reading, which run 11 shows it doing. It is
+  the *same* rule as the entry, deliberately: keeping #50's zero here while
+  relaxing the entry would disarm and abandon on the next reading, which is churn
+  with the guns rather than a swap.
 
-The cost is real and measured: across runs 10 and 11 the swap held a live verdict
-on 1803 status prints and 465 of them (26%) were on a quiet window. So roughly
-three quarters of the moments the swap wants to fire it now defers, and swaps
-happen between waves instead of during them. Against run 11's own four swaps the
-rule declines the two that began under fire and allows the two that began in a
-lull.
+**Nothing #50 permitted is refused.** The budget is never negative, so a quiet
+window passes whatever the gain is, and the change can only add readings. Against
+run 11's four swaps it declines the fourth — 1679 against a budget of 437 — and
+permits the other three; #50 also declined the first, at 110 hitpoints on a window
+that was *falling* (329, 282, 220, 162, 110) as that engagement ended.
+
+**Run 17 separates within itself, which is what makes it evidence.** Its first
+attempt is permitted at the fourth reading, the first the hold ticks allow. Its
+third attempt is a shield collapse — window 309, 362, 436, 505, 567, 654 while
+the shield fell 49% to 0% and the armour started going — and the rule permits
+exactly one reading of it, the 436 that sits one hitpoint under the budget, then
+abandons on the 505. One reading of disarmament on the worst slide in the
+recorded corpus, against run 11's twenty.
+
+**And the gate is not the only thing in the way — run 18 says so.** That run's
+`not disarming` count is **zero**: both of its swaps began on an empty window, so
+#50 permitted them and this permits them unchanged. They still failed, one
+reading later, and how is in "The switch-off does not hold" below. So the two
+runs answer different questions and both are needed: run 17 measures what the
+gate costs, run 18 measures that the gate is not all of it.
+
+**The deadline is the invariant and is untouched.** `ammoSwapSilencedGiveUpTicks`
+is still 20 and still consults nothing above. *Failing to a firing gun with the
+wrong ammo beats failing to a silent gun*, and the mid-swap release is an early
+exit from the bound rather than a replacement for it.
 
 **Separately, the client's confirmation ends the guessing.** `gunsConfirmedOff`
 is `isInActiveState` reading `Just False` on a gun the swap commanded off. It
@@ -1770,6 +1828,53 @@ direction is asserted as a property of the source in
 the rules through `elm repl` rather than restating them in Python. The bound's
 size was left at 20 deliberately: shortening a bound on a policy that should not
 have started is treating the symptom.
+
+### The switch-off does not hold, and that is what stops the swap now
+
+**Run 18 is the first run in which a swap got past the disarm gate and was
+watched.** Two swaps, both on an empty window, and both dead two readings later.
+The top-row module column is the whole story, identically on each:
+
+```
+T/T/F   the reading the swap clicks the module button   switched on
+T/F/T   GUNS OFF for 1 of 20, "the client confirmed the switch-off"
+F/T/F   "gave up on this one"                           switched on again
+```
+
+The gun is back on **the reading after the confirmation**, with the swap still
+holding the fight and its own decision line reading `Open this weapon's menu`.
+Nothing in the bot pressed the hotkey in between — `decisionToKillRats` is not
+reached while the ammo path holds the fight — so this is the *client* turning the
+weapon back on. Auto-repeat is the obvious candidate: `autorepeat` reads `1000`
+on these guns and has since #39 parsed it, and a weapon with auto-repeat on and a
+locked target is exactly what re-activates itself the moment a cycle ends. The
+weapon's own context menu offers `Set Auto-Repeat Off`, so the client can be told
+not to, and nothing has tried it.
+
+**`switchOffHasBeenUndone` then abandons the attempt on the reading the menu
+would have arrived on.** The right-click was issued on the confirmation reading;
+a context menu is in the tree on the *next* one; and that is the reading the
+verdict is abandoned, so the menu is never read. That matters more than losing
+one swap, because menu membership is the swap's only answer to *which charge is
+loaded* — which is why runs 17 and 18 print `loaded charge reads unknown` on
+every ammo status line they have, while run 11, which predates the confirmation,
+resolved it on 358 of its 488.
+
+**So `loaded charge reads unknown` is a symptom with two different causes**, and
+neither is a fault in the menu read itself:
+
+| run | live verdicts | declined by the gate | reached `GUNS OFF` | what stops it |
+|---|---:|---:|---:|---|
+| 11 | 149 | — (predates #50) | 37 | the silence deadline |
+| 17 | 271 | 52 | **0** | the disarm gate |
+| 18 | 25 | **0** | 2 | the switch-off being undone |
+
+Run 17 is gate-bound and run 18 is not, which is why a change to the gate has to
+name which run it answers. #63 answers run 17. Run 18's failure is #50's
+confirmation logic meeting a client that re-arms the gun by itself, and it wants
+its own issue: the choice is between not abandoning until the outstanding menu
+has been read (menu membership is free while the guns fire — only the *load* is
+refused), and turning auto-repeat off first so the switch-off holds.
 
 ### Not oscillating
 
@@ -1834,21 +1939,41 @@ land between engagements. **Run 11 added the switch-off leg** — four swaps, al
 four showing `isInActiveState` going `Just True` → `Just False` on the reading
 after the click, the guns back on by reading 3, and the deadline firing at 21.
 
-Not verified: **#50's own code running.** The rule and the two predicates are
-executed off-line against run 11's recorded numbers, so what is checked is that
-they answer correctly on the inputs that run produced — not that the branches
-carrying them are reached in a live fight. Three things to watch on the next run
+**Run 17 settles the module tooltip, which this file has called unverified since
+#26.** It raises one: eight `Rest the mouse on a weapon to read its optimal range`
+prints, then `Optimal range now: 67000 m` on the remaining 2,079 ammo status
+lines, with `tooltip unanswered` reading `0` on every one of the run's 2,473 —
+so the tooltip came back on the reading straight after the hover and
+`optimalRangeGivenUp` never latched. `weaponOptimalRangeFromHover` works on this
+client, and the crossover in that run is derived rather than configured.
+
+Not verified: **the disarm rule's own code running, in either version.** Run 17
+did reach #50's guard — 188 readings of `not disarming` are the evidence #63 was
+filed on — but nothing below it has ever run, and #63's rule is executed off-line
+against runs 11 and 17's recorded numbers, so what is checked is that it answers
+correctly on the inputs those runs produced. Four things to watch on the next run
 with `short-range-ammo` and `long-range-ammo` set:
 
-1. **`not disarming:` on the status line** while a verdict is live and the ship
-   is being shot, and the swap happening once the window empties. If that clause
-   never appears, the guard is not being reached; if it never *stops* appearing,
-   the ship is never getting a lull and the swap is effectively off.
+1. **The swap actually firing.** That is the whole of #63, and the tell is
+   `GUNS OFF` appearing at all: run 17 printed it zero times across 2,473 ammo
+   status prints. The `not disarming` clause now carries the budget beside the
+   window, so a run that still never swaps says which half refused.
 2. **`GUNS OFF for N of 20 readings, the client confirmed the switch-off`.** The
    two halves should agree — N small, and the confirmation arriving by reading 2.
    A high N beside "has not confirmed the switch-off" is the click not landing,
    which is a different bug from anything here and nothing has ever seen it.
-3. **That `Ammo swap: given up` appears once** and then as the short flag.
+3. **A swap starting and then abandoning on the next reading**, repeatedly. That
+   is the budget sitting where the fire in this pocket oscillates across it, and
+   it is churn with the guns rather than a swap — the case that argues for a
+   smaller share, which no recorded run shows.
+4. **That `Ammo swap: given up` appears once** and then as the short flag.
+
+**`loaded charge reads unknown` is not fixed here and is not one bug.** It
+printed on all 2,473 of run 17's ammo status lines and all of run 18's, and the
+two runs got there differently — run 17 never opened a menu because the gate
+never let it, run 18 opened one and abandoned the verdict before reading it. See
+"The switch-off does not hold" above. The gate change addresses only the first,
+so a run that now reaches `GUNS OFF` and still reads `unknown` is the second.
 
 Also watch the game log staying free of `cannot load or unload`: with the
 confirmation in front of the load, a refusal now means the gun read switched off

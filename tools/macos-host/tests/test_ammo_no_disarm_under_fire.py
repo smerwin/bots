@@ -1,22 +1,27 @@
 """The ammo swap's policy about when it may take the ship's guns offline.
 
-Issue #50. #38 bounded the period the swap leaves the guns off and the bound
-worked: run 11's fourth swap reached it and latched the feature off for the
+Issues #50 and #63. #38 bounded the period the swap leaves the guns off and the
+bound worked: run 11's fourth swap reached it and latched the feature off for the
 session, exactly as designed. It was not enough. The swap had begun while the
 ship was already absorbing 1679 hitpoints a window from twelve hostiles at 26%
 shield, and by the time the bound fired the shield was at zero and the armour had
 started going. **A bound is a backstop; what was missing was a policy.**
 
-Two rules are checked here, and they come from two signals that did not exist
-when the swap was written.
+#50's policy was **zero** -- no disarming while the client reports any incoming
+damage at all -- and #63 is what that cost. Run 17 held a live verdict wanting
+Multifrequency M on 271 readings and loaded it not once, blocked by windows of
+128, 190, 301, 309 and 371 hitpoints against a retreat threshold of 3500. In a
+mission pocket there is always *some* incoming damage, so a zero rule fires only
+between waves.
 
-**The guns do not go off while the client says the ship is being shot.** #37
-exposed `incomingDamageSinceLastReading` and the mission runner already sums it
-over a rolling 45-second window, so "am I being shot right now" is a number the
-bot holds on every reading. `swapMayDisarmTheGuns` is that rule. The separation
-it produces is measured against run 11's own four swaps rather than asserted: the
-two that began under fire are declined and the two that began in a lull are
-allowed.
+**So the rule weighs what the swap gains against what the client says it would
+cost.** The gain is `ammoSwapRangeErrorPercent`, how wrong the loaded charge's
+range is as a share of the crossover; the risk is the same 45-second window,
+compared against `ammoSwapDisarmDamageBudget` -- an eighth of the retreat
+threshold, and only when the range is badly enough wrong to be worth any risk at
+all. The separation is measured against the two runs that produced the two
+issues, rather than asserted: run 11's fourth swap is declined, run 17's first
+attempt is permitted, and run 17's own shield collapse is declined too.
 
 **A switch-off the client confirmed and then contradicted ends the attempt.** #39
 parsed `isInActiveState` onto the module button and deliberately wired it to
@@ -59,15 +64,77 @@ MISSION_RUNNER_DIR = os.path.join(
     "eve-online-mission-runner")
 MISSION_RUNNER_BOT_ELM = os.path.join(MISSION_RUNNER_DIR, "Bot.elm")
 
-# Run 11's four ammo swaps, by the incoming-damage window on the reading each
-# one first told a gun to stop. Read out of `~/eve-bot-logs/mission_run11.log`'s
-# own status lines, beside the `GUNS OFF for 1 of 20 readings` that marks the
-# switch-off. The fourth is the one the issue was filed on.
+# The retreat threshold every case below is measured against. It is the value
+# `run_mission.sh` ships and `defaultRunAwayIncomingDamageThreshold` carries, and
+# it is what both recorded runs were flown with.
+RETREAT_THRESHOLD = 3500
+
+# Run 11's four ammo swaps, by the incoming-damage window, the crossover and the
+# target distance on the reading each one first told a gun to stop. Read out of
+# `~/eve-bot-logs/mission_run11.log`'s own status lines, beside the `GUNS OFF for
+# 1 of 20 readings` that marks the switch-off. The fourth is the one #50 was
+# filed on and it stays declined; the first is the one #63 changes, at 110
+# hitpoints on a window that was *falling* (329, 282, 220, 162, 110) as that
+# engagement ended.
 RUN_11_SWAPS = [
-    ("swap 1, shield 2%, 41 rats", 110, False),
-    ("swap 2, shield 47%, 36 rats", 0, True),
-    ("swap 3, shield 100%, 6 rats", 0, True),
-    ("swap 4, shield 15%, 12 rats -- the one that cost the tank", 1679, False),
+    ("swap 1, shield 2%, 41 rats", 110, 21000, 54000, True),
+    ("swap 2, shield 47%, 36 rats", 0, 21000, 53000, True),
+    ("swap 3, shield 100%, 6 rats", 0, 21000, 42000, True),
+    ("swap 4, shield 15%, 12 rats -- the one that cost the tank",
+     1679, 44000, 8480, False),
+]
+
+# Run 17, which never swapped at all. Three verdict attempts; the first is the
+# one #63 is about and the third is a shield collapse inside the same run, so the
+# rule has to separate them. Window, crossover and distance read out of
+# `~/eve-bot-logs/mission_run17.log`'s own status lines, by the verdict's own
+# reading count -- nothing may act before `ammoSwapDistanceHoldTicks` (4).
+#
+# Attempt 3's fourth reading sits one hitpoint under the budget and is permitted.
+# That is stated rather than tuned away: the reading after it is 505 and over
+# budget, so `fireArrivedWhileHoldingTheGuns` abandons and the guns come back --
+# one reading of disarmament on the worst slide in the recorded corpus, against
+# run 11's twenty.
+RUN_17_READINGS = [
+    ("attempt 1, tick 4, shield 82%", 371, 67000, 12000, True),
+    ("attempt 1, tick 9, shield 77%", 301, 67000, 29000, True),
+    ("attempt 1, tick 14, shield 75%", 190, 67000, 31000, True),
+    ("attempt 3, tick 4, shield 42%, the slide beginning", 436, 67000, 30000, True),
+    ("attempt 3, tick 5, shield 39%", 505, 67000, 29000, False),
+    ("attempt 3, tick 9, shield 29%", 724, 67000, 31000, False),
+    ("attempt 3, tick 22, shield 0%, armour going", 1245, 67000, 30000, False),
+]
+
+# Every reading of run 17's first attempt, in order, as the status line printed
+# it -- ticks 1 to 25, then the give-up. The point is not any one of them but
+# that the attempt reaches an acting tick with a permitted window, which is the
+# whole of the issue: #50's rule permitted none of these.
+RUN_17_FIRST_ATTEMPT = [
+    (1, 257, 12000), (2, 371, 12000), (3, 371, 13000), (4, 371, 12000),
+    (5, 371, 11000), (6, 371, 11000), (7, 499, 11000), (8, 433, 23000),
+    (9, 301, 29000), (10, 301, 28000), (11, 301, 28000), (12, 301, 28000),
+    (13, 304, 30000), (14, 190, 31000), (15, 190, 30000), (16, 190, 19000),
+    (17, 256, 17000), (18, 256, 15000), (19, 128, 15000), (20, 128, 15000),
+    (21, 128, 15000), (22, 128, 16000), (23, 128, 16000), (24, 128, 30000),
+    (25, 128, 29000),
+]
+RUN_17_FIRST_ATTEMPT_CROSSOVER = 67000
+
+# `ammoSwapDistanceHoldTicks`, restated here because these cases are about which
+# reading the swap first *could* act on and that is the reading it starts from.
+AMMO_SWAP_DISTANCE_HOLD_TICKS = 4
+
+# Run 18's two swaps, at the reading each told a gun to stop. Both began on an
+# empty window, so #50's rule permitted them and this one does too -- run 18 is
+# the run where **the disarm gate is not what fails**: `not disarming` appears
+# zero times in it, and the swap reached `GUNS OFF` twice.
+#
+# They are here as the no-regression case. What stopped them is one reading
+# later and is not this rule's business -- see
+# `TheGateIsNotTheOnlyThingBetweenTheSwapAndACharge`.
+RUN_18_SWAPS = [
+    ("swap 1, shield 61%, 3 rats", 0, 21000, 51000, True),
+    ("swap 2, shield 79%, 7 rats", 0, 21000, 64000, True),
 ]
 
 # Run 11's fatal window, reading by reading, as the status line printed the
@@ -127,6 +194,40 @@ def elm_incoming_damage(damage, host_carries_the_channel=True):
     return ("{ samples = %s, hostCarriesTheChannel = %s, lastAttacker = Nothing,"
             " retreating = False }"
             % (samples, elm_bool(host_carries_the_channel)))
+
+
+def elm_maybe_int(value):
+    return "Nothing" if value is None else "(Just %d)" % value
+
+
+def elm_disarm_case(damage, range_error_percent,
+                    retreat_threshold=RETREAT_THRESHOLD,
+                    host_carries_the_channel=True):
+    """An `AmmoSwapDisarmCase`: what is gained, and what it would cost."""
+    return ("{ runAwayIncomingDamageThreshold = %d, rangeErrorPercent = %s, "
+            "incomingDamage = %s }"
+            % (retreat_threshold, elm_maybe_int(range_error_percent),
+               elm_incoming_damage(damage, host_carries_the_channel)))
+
+
+def range_error_percent(crossover, distance):
+    """`ammoSwapRangeErrorPercent`, restated here only to build the input.
+
+    The rule itself is executed rather than mirrored; this is arithmetic on two
+    numbers read off a status line, and the Elm version is checked against it
+    directly in `TheGainIsMeasuredFromTheCrossover`.
+    """
+    return abs(distance - crossover) * 100 // crossover
+
+
+def collapse(text):
+    """Whitespace-collapsed source, so `elm-format` cannot break an assertion.
+
+    #58's reformat broke three source-reading assertions that were pinned on
+    exact indentation. Everything asserted about the shape of `Bot.elm` below
+    goes through this.
+    """
+    return " ".join(text.split())
 
 
 def elm_module_state(column):
@@ -199,10 +300,33 @@ class ElmRepl:
                    for answer in re.findall(r"(True|False) : Bool", plain)]
         return answers, plain, result.stderr
 
+    def evaluate_values(self, expressions, pattern):
+        """The repl's own printed answers, for the ones that are not `Bool`."""
+        _, plain, stderr = self.ask(expressions)
+        answers = re.findall(pattern, plain)
+        if len(answers) != len(expressions):
+            raise AssertionError(
+                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
+                % (len(answers), len(expressions), plain, stderr))
+        return answers
+
     def works(self):
+        """Whether the repl can evaluate here at all -- not what it answered.
+
+        This decides whether the whole executed-behaviour class is skipped, so
+        it must not depend on the rule being right. It used to: it asserted the
+        smoke-test expression came back `True`, so a mutation that flipped that
+        one answer skipped every case in the class instead of failing one, and
+        the suite reported OK for a rule nothing had executed. Found by
+        mutating `<=` to `<`, which is exactly the boundary the cases exist to
+        pin.
+
+        So the question asked here is only "did Elm compile this and print a
+        `Bool`", and the answer it gave belongs to a case.
+        """
         answers, plain, stderr = self.ask(
-            ["swapMayDisarmTheGuns " + elm_incoming_damage(None)])
-        return answers == [True], plain + "\n" + stderr
+            ["swapMayDisarmTheGuns " + elm_disarm_case(None, None)])
+        return len(answers) == 1, plain + "\n" + stderr
 
     def close(self):
         shutil.rmtree(self.scratch, ignore_errors=True)
@@ -228,42 +352,198 @@ class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
     def tearDownClass(cls):
         cls.repl.close()
 
-    def test_run_11_s_two_swaps_under_fire_are_the_two_it_declines(self):
-        # The separation the whole change rests on, measured against the run
-        # that produced the issue rather than against invented numbers.
-        answers = self.repl.evaluate(
-            ["swapMayDisarmTheGuns " + elm_incoming_damage(damage)
-             for _, damage, _ in RUN_11_SWAPS])
-        self.assertEqual(
-            answers, [allowed for _, _, allowed in RUN_11_SWAPS],
-            "the rule no longer separates run 11's swaps the way the issue "
-            "asks: " + repr(list(zip(
-                [name for name, _, _ in RUN_11_SWAPS], answers))))
+    def _verdicts(self, readings):
+        return self.repl.evaluate([
+            "swapMayDisarmTheGuns "
+            + elm_disarm_case(damage, range_error_percent(crossover, distance))
+            for _, damage, crossover, distance, _ in readings])
 
-    def test_any_damage_at_all_declines(self):
-        # Zero, not a threshold. `runAwayIncomingDamageThreshold` answers a
-        # different question -- how much punishment a hull absorbs before
-        # running -- and a threshold here would license disarming under light
-        # fire, which is what heavy fire starts as.
-        one_hitpoint, quiet = self.repl.evaluate([
-            "swapMayDisarmTheGuns " + elm_incoming_damage(1),
-            "swapMayDisarmTheGuns " + elm_incoming_damage(0),
+    def test_run_11_s_expensive_swap_is_still_the_one_it_declines(self):
+        # The case #50 was built to prevent and the one #63 must not regress:
+        # 1679 hitpoints a window, twelve hostiles, and the swap took the shield
+        # from 26% to zero. Measured against the run rather than invented.
+        answers = self._verdicts(RUN_11_SWAPS)
+        self.assertEqual(
+            answers, [allowed for _, _, _, _, allowed in RUN_11_SWAPS],
+            "the rule no longer separates run 11's swaps the way the issues "
+            "ask: " + repr(list(zip(
+                [name for name, _, _, _, _ in RUN_11_SWAPS], answers))))
+
+    def test_run_17_s_plinking_is_permitted_and_its_collapse_is_not(self):
+        # Both halves come out of the same run, which is what makes it evidence
+        # rather than a threshold chosen to pass one case: the readings that
+        # blocked the swap for the whole of run 17 are permitted, and the
+        # readings where that run's shield went 49% to 0% are not.
+        answers = self._verdicts(RUN_17_READINGS)
+        self.assertEqual(
+            answers, [allowed for _, _, _, _, allowed in RUN_17_READINGS],
+            "the rule no longer separates run 17's light fire from its "
+            "collapse: " + repr(list(zip(
+                [name for name, _, _, _, _ in RUN_17_READINGS], answers))))
+
+    def test_run_17_s_first_attempt_reaches_a_reading_it_may_act_on(self):
+        # The issue itself: 25 readings wanting Multifrequency M, every one of
+        # them declined, the verdict given up, and the cycle repeating. What has
+        # to change is that at least one reading at or past the hold ticks
+        # permits -- otherwise the fix fixes nothing.
+        answers = self.repl.evaluate([
+            "swapMayDisarmTheGuns " + elm_disarm_case(
+                damage,
+                range_error_percent(RUN_17_FIRST_ATTEMPT_CROSSOVER, distance))
+            for _, damage, distance in RUN_17_FIRST_ATTEMPT])
+        acting = [tick for (tick, _, _), permitted
+                  in zip(RUN_17_FIRST_ATTEMPT, answers)
+                  if permitted and AMMO_SWAP_DISTANCE_HOLD_TICKS <= tick]
+        self.assertTrue(
+            acting,
+            "run 17's first attempt still never reaches a reading it may act "
+            "on, which is issue #63 unfixed")
+        self.assertEqual(
+            acting[0], AMMO_SWAP_DISTANCE_HOLD_TICKS,
+            "the attempt should act on the first reading the hold allows; it "
+            "acts at tick %d instead" % acting[0])
+
+    def test_run_18_s_two_swaps_are_permitted_exactly_as_before(self):
+        # The no-regression case, from the run where this rule is *not* what
+        # fails: both swaps began on an empty window, so #50 permitted them and
+        # so does this. A change that permitted more where it mattered and less
+        # here would have bought run 17 at run 18's expense.
+        answers = self._verdicts(RUN_18_SWAPS)
+        self.assertEqual(
+            answers, [allowed for _, _, _, _, allowed in RUN_18_SWAPS],
+            "run 18's swaps no longer pass the gate they already passed: "
+            + repr(list(zip([name for name, _, _, _, _ in RUN_18_SWAPS],
+                            answers))))
+
+    def test_a_quiet_window_is_permitted_whatever_the_gain(self):
+        # The compatibility property, and the reason this cannot be a
+        # regression: the budget is never negative, so everything #50 permitted
+        # is still permitted and the change only ever adds readings.
+        #
+        # This is also where the comparison's boundary lives. With no gain the
+        # budget is zero and the window is zero, so `<=` rather than `<` is the
+        # whole difference between "#50's rule survives" and "the swap never
+        # fires on a quiet grid either" -- and no other case here distinguishes
+        # them.
+        no_gain, marginal_gain, no_threshold, no_channel_entry = \
+            self.repl.evaluate([
+                "swapMayDisarmTheGuns " + elm_disarm_case(0, None),
+                "swapMayDisarmTheGuns " + elm_disarm_case(0, 1),
+                "swapMayDisarmTheGuns " + elm_disarm_case(
+                    0, 90, retreat_threshold=-1),
+                "swapMayDisarmTheGuns " + elm_disarm_case(None, None),
+            ])
+        self.assertTrue(no_gain)
+        self.assertTrue(marginal_gain)
+        self.assertTrue(no_threshold)
+        self.assertTrue(no_channel_entry)
+
+    def test_a_window_exactly_on_the_budget_is_permitted(self):
+        # The other end of the same boundary, where the budget is not zero.
+        # `< budget` would decline here and permit one hitpoint less, which is
+        # a rule nobody wrote down and a difference no other case would show.
+        budget = int(self.repl.evaluate_values(
+            ["ammoSwapDisarmDamageBudget " + elm_disarm_case(0, 90)],
+            r"(-?\d+) : Int")[0])
+        on_it, one_over = self.repl.evaluate([
+            "swapMayDisarmTheGuns " + elm_disarm_case(budget, 90),
+            "swapMayDisarmTheGuns " + elm_disarm_case(budget + 1, 90),
         ])
-        self.assertFalse(one_hitpoint)
-        self.assertTrue(quiet)
+        self.assertTrue(on_it)
+        self.assertFalse(one_over)
 
     def test_an_absent_channel_declines_rather_than_reading_as_quiet(self):
         # `Nothing` and `Just 0` are different facts and only one of them may be
         # read as "the grid is quiet". A host that cannot answer gets the answer
-        # that keeps the guns firing.
-        absent_empty, absent_quiet_sample = self.repl.evaluate([
-            "swapMayDisarmTheGuns " + elm_incoming_damage(
-                None, host_carries_the_channel=False),
-            "swapMayDisarmTheGuns " + elm_incoming_damage(
-                0, host_carries_the_channel=False),
-        ])
+        # that keeps the guns firing -- and it declines on a window that would
+        # otherwise be well inside the budget, so it is the channel being absent
+        # that decides and not the number.
+        absent_empty, absent_quiet_sample, absent_inside_budget = \
+            self.repl.evaluate([
+                "swapMayDisarmTheGuns " + elm_disarm_case(
+                    None, 90, host_carries_the_channel=False),
+                "swapMayDisarmTheGuns " + elm_disarm_case(
+                    0, 90, host_carries_the_channel=False),
+                "swapMayDisarmTheGuns " + elm_disarm_case(
+                    100, 90, host_carries_the_channel=False),
+            ])
         self.assertFalse(absent_empty)
         self.assertFalse(absent_quiet_sample)
+        self.assertFalse(absent_inside_budget)
+
+    def test_the_budget_is_a_share_of_the_retreat_threshold(self):
+        # The number the whole risk half rests on, and it has to move with the
+        # setting rather than being a constant somebody re-measures by hand:
+        # 3500 is a fact about this hull.
+        budgets = self.repl.evaluate_values(
+            ["ammoSwapDisarmDamageBudget " + elm_disarm_case(
+                0, 90, retreat_threshold=threshold)
+             for threshold in (RETREAT_THRESHOLD, 7000, 1750)],
+            r"(-?\d+) : Int")
+        self.assertEqual(
+            [int(budget) for budget in budgets],
+            [RETREAT_THRESHOLD // 8, 7000 // 8, 1750 // 8])
+
+    def test_the_budget_is_below_the_window_that_cost_run_11_its_tank(self):
+        # Stated as the relation rather than as two numbers, because the whole
+        # argument for the share is that it stays below that window on any hull.
+        budget = int(self.repl.evaluate_values(
+            ["ammoSwapDisarmDamageBudget " + elm_disarm_case(0, 90)],
+            r"(-?\d+) : Int")[0])
+        run_11_expensive_swap = RUN_11_SWAPS[3][1]
+        self.assertLess(budget, run_11_expensive_swap)
+
+    def test_a_gain_that_cannot_be_measured_buys_nothing(self):
+        # And neither does one too small to matter, nor a disabled retreat
+        # threshold to take a share of. Each collapses the rule back to #50's,
+        # which is the honest answer to not being able to tell.
+        budgets = self.repl.evaluate_values(
+            ["ammoSwapDisarmDamageBudget " + case for case in [
+                elm_disarm_case(0, None),
+                elm_disarm_case(0, 0),
+                elm_disarm_case(0, 49),
+                elm_disarm_case(0, 50),
+                elm_disarm_case(0, 90, retreat_threshold=-1),
+                elm_disarm_case(0, 90, retreat_threshold=0),
+            ]],
+            r"(-?\d+) : Int")
+        expected = [0, 0, 0, RETREAT_THRESHOLD // 8, 0, 0]
+        self.assertEqual([int(budget) for budget in budgets], expected)
+
+    def test_the_budget_is_never_negative(self):
+        # The property that makes this a superset of #50 rather than a retune.
+        # A negative budget would decline a quiet window, which is the one thing
+        # the old rule always allowed.
+        #
+        # `-1` alone does not test it: Elm's `//` truncates towards zero, so
+        # `-1 // 8` is already `0` and a missing `max` survives. The settings
+        # parser takes any integer, so the case that bites is a threshold past
+        # the divisor.
+        budgets = self.repl.evaluate_values(
+            ["ammoSwapDisarmDamageBudget " + elm_disarm_case(
+                0, gain, retreat_threshold=threshold)
+             for threshold in (-RETREAT_THRESHOLD, -8, -1, 0, 1, 7,
+                               RETREAT_THRESHOLD)
+             for gain in (None, 0, 49, 50, 1000)],
+            r"(-?\d+) : Int")
+        self.assertTrue(all(0 <= int(budget) for budget in budgets), budgets)
+
+    def test_the_gain_is_measured_from_the_crossover_both_ways(self):
+        # A target too close and a target too far are the same magnitude of
+        # wrong, and the crossover is the scale -- so the same rule reads on a
+        # 21 km fit and a 67 km one.
+        answers = self.repl.evaluate_values(
+            ["ammoSwapRangeErrorPercent (Just { crossoverInMeters = %d, "
+             "deadbandInMeters = 3000, source = \"\" }) %s"
+             % (crossover, elm_maybe_int(distance))
+             for crossover, distance in [
+                 (44000, 8480), (44000, 66000), (44000, 22000),
+                 (67000, 29000), (44000, None)]]
+            + ["ammoSwapRangeErrorPercent Nothing (Just 29000)"],
+            r"(Nothing|Just -?\d+) : Maybe Int")
+        self.assertEqual(
+            answers,
+            ["Just 80", "Just 50", "Just 50", "Just 56", "Nothing", "Nothing"])
 
     def test_the_module_only_reports_itself_off_when_it_says_so(self):
         # Three answers, not two. An entry that did not decode is not a module
@@ -386,11 +666,17 @@ class TheModuleReadingCanOnlyShortenTheDisarmedPeriod(unittest.TestCase):
             self.assertNotIn(reading, body)
 
 
-class TheSwapDoesNotDisarmUnderFire(unittest.TestCase):
+class TheSwapDoesNotDisarmUnlessItIsWorthIt(unittest.TestCase):
     """Where the rule is applied, as opposed to what it answers."""
 
     def setUp(self):
         self.source = bot_source()
+
+    def acting_path(self):
+        body = self.source[self.source.index(
+            "ensureAmmoSuitsTargetRangeWithGuns context fight nextStep ="):]
+        return body[:body.index(
+            "\n{-| Rest the mouse on a weapon module until the client shows")]
 
     def test_the_acting_path_asks_before_it_switches_a_gun_off(self):
         """The guard's whole condition, not two substrings of it.
@@ -401,16 +687,78 @@ class TheSwapDoesNotDisarmUnderFire(unittest.TestCase):
         function. A guard that compiles and never fires is this repo's
         signature failure, so the condition is pinned as written.
         """
-        body = self.source[self.source.index(
-            "ensureAmmoSuitsTargetRangeWithGuns context fight nextStep ="):]
-        body = body[:body.index(
-            "\n{-| Rest the mouse on a weapon module until the client shows")]
-        conditions = [" ".join(line.split())
-                      for line in body.split("\n") if line.strip()]
+        conditions = [collapse(line)
+                      for line in self.acting_path().split("\n") if line.strip()]
         self.assertIn(
             "else if (ammoSwap.gunsSilencedTicks < 1) "
-            "&& not (swapMayDisarmTheGuns context.memory.incomingDamage) then",
+            "&& not (swapMayDisarmTheGuns disarmCase) then",
             conditions)
+
+    def test_the_case_the_guard_is_asked_carries_this_reading_s_gain_and_risk(self):
+        """The guard is only as good as what it is handed.
+
+        Pinning the condition alone passes happily with `disarmCase` built from
+        a constant gain, a stale window, or a hard-coded threshold -- and a
+        `rangeErrorPercent` wired to `Just 100` would make the budget
+        unconditional, which is the whole of the risk half gone while every
+        other case here still passes.
+        """
+        body = collapse(let_binding(self.acting_path(), "disarmCase"))
+        self.assertIn(
+            "{ runAwayIncomingDamageThreshold = "
+            "context.eventContext.botSettings.runAwayIncomingDamageThreshold",
+            body)
+        self.assertIn(
+            ", rangeErrorPercent = ammoSwapRangeErrorPercent threshold "
+            "(Just fight.distance)",
+            body)
+        self.assertIn(", incomingDamage = context.memory.incomingDamage", body)
+
+    def test_the_mid_swap_case_is_built_from_this_reading_too(self):
+        # The memory update's copy. Reading the *previous* reading's distance
+        # here would have the swap letting go on a gain it no longer has, or
+        # holding on one it does not.
+        body = collapse(let_binding(
+            self.source[self.source.index(
+                "updateAmmoSwapMemoryWithChargeNames context incomingDamage "
+                "chargeNames memoryBefore ="):],
+            "disarmCase"))
+        self.assertIn(
+            "{ runAwayIncomingDamageThreshold = "
+            "context.botSettings.runAwayIncomingDamageThreshold",
+            body)
+        self.assertIn(
+            ", rangeErrorPercent = ammoSwapRangeErrorPercent threshold "
+            "(activeTargetDistanceInMeters context.readingFromGameClient)",
+            body)
+        self.assertIn(", incomingDamage = incomingDamage", body)
+
+    def test_the_status_line_reports_the_same_verdict_the_branch_took(self):
+        # Two callers of one rule, and a status line that answered from a
+        # different case would report `not disarming` on readings the branch
+        # acted on -- which is the failure #50's own status clause exists to
+        # prevent, one level up.
+        status = self.source[self.source.index("describeAmmoSwapState context ="):]
+        status = status[:status.index("\n\n\n")]
+        self.assertIn(
+            "swapMayDisarmTheGuns (ammoSwapDisarmCaseForStatus context)",
+            collapse(status))
+        self.assertIn(
+            "describeWhyTheSwapMayNotDisarm (ammoSwapDisarmCaseForStatus context)",
+            collapse(status))
+
+        shared = collapse(self.source[self.source.index(
+            "ammoSwapDisarmCaseForStatus context ="):][:600])
+        self.assertIn(
+            "runAwayIncomingDamageThreshold = "
+            "context.eventContext.botSettings.runAwayIncomingDamageThreshold",
+            shared)
+        self.assertIn(
+            "rangeErrorPercent = ammoSwapRangeErrorPercent "
+            "(ammoSwapThreshold context.eventContext.botSettings "
+            "context.memory.ammoSwap) "
+            "(activeTargetDistanceInMeters context.readingFromGameClient)",
+            shared)
 
     def test_the_guard_precedes_the_branch_that_opens_a_menu(self):
         # A menu opened under fire is only closed again on the next reading,
@@ -435,10 +783,23 @@ class TheSwapDoesNotDisarmUnderFire(unittest.TestCase):
         self.assertNotIn("givenUp", clause)
         self.assertIn("nextStep", clause)
 
-    def test_the_verdict_is_abandoned_when_fire_arrives_mid_swap(self):
-        body = let_binding(self.source, "fireArrivedWhileHoldingTheGuns")
+    def test_the_verdict_is_abandoned_when_the_trade_goes_bad_mid_swap(self):
+        body = collapse(let_binding(self.source, "fireArrivedWhileHoldingTheGuns"))
         self.assertIn("gunsSilencedTicks > 0", body)
-        self.assertIn("not (swapMayDisarmTheGuns incomingDamage)", body)
+        self.assertIn("not (swapMayDisarmTheGuns disarmCase)", body)
+
+    def test_the_deadline_is_the_invariant_and_nothing_here_touches_it(self):
+        # #38's bound over the whole disarmed period, unchanged and still
+        # independent of everything above. The mid-swap release is an early exit
+        # from it, not a replacement for it -- so the bound must not have grown,
+        # and must still consult neither the module nor the new rule.
+        constant = self.source[self.source.index(
+            "\nammoSwapSilencedGiveUpTicks : Int"):]
+        self.assertIn("ammoSwapSilencedGiveUpTicks =\n    20\n", constant)
+        body = let_binding(self.source, "gunsSilencedTicks")
+        for reading in ["swapMayDisarmTheGuns", "disarmCase",
+                        "ammoSwapDisarmDamageBudget", "incomingDamage"]:
+            self.assertNotIn(reading, body)
 
     def test_the_window_the_rule_reads_is_this_reading_s(self):
         # The reading fire first arrives on is exactly the reading a swap must
@@ -497,6 +858,182 @@ class TheLatchedGiveUpIsSaidOnce(unittest.TestCase):
         self.assertIn("if ammoSwap.givenUpReadingsAgo <= 1 then", decision)
         self.assertIn(
             "Not swapping ammo any more (see the status line)", decision)
+
+
+class TheRecordedRunsStillSayWhatTheseCasesAssume(unittest.TestCase):
+    """The numbers above are read off two logs, so read them off again.
+
+    A case list transcribed by hand and never re-checked is a case list that
+    drifts away from the run it claims to be evidence from -- and every argument
+    for the budget's size rests on these being the run's own figures. Skips
+    where the logs are not present, since they are not in the repo.
+    """
+
+    @staticmethod
+    def log_lines(name, prefix):
+        path = os.path.join(
+            os.path.expanduser("~"), "eve-bot-logs", "mission_run%s.log" % name)
+        if not os.path.exists(path):
+            raise unittest.SkipTest("no recorded " + os.path.basename(path))
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return [line for line in handle if line.startswith(prefix)]
+
+    def status_lines(self, name):
+        return self.log_lines(name, "Ammo swap:")
+
+    def test_run_11_s_fourth_swap_began_where_these_cases_say(self):
+        # The crossover and the distance, from the reading the swap first told a
+        # gun to stop -- which is where the gain half is measured.
+        _, damage, crossover, distance, _ = RUN_11_SWAPS[3]
+        wanted = ("crossover %d m" % crossover,
+                  "target distance: %d m" % distance,
+                  "GUNS OFF for 1 of 20 readings")
+        matching = [line for line in self.status_lines("11")
+                    if all(fragment in line for fragment in wanted)]
+        self.assertTrue(
+            matching,
+            "run 11's fourth swap no longer reads crossover %d m at %d m"
+            % (crossover, distance))
+
+        # And the window it began on, off the run's own health line.
+        self.assertTrue(
+            [line for line in self.log_lines("11", "Shield: ")
+             if "Incoming damage: %d hitpoints" % damage in line],
+            "run 11 no longer reports the %d hitpoint window" % damage)
+
+    def test_run_17_blocked_the_swap_on_the_readings_these_cases_use(self):
+        # The whole triple, on one status line: the window, the crossover the
+        # gain is measured against and the distance it is measured from. Any one
+        # of them alone would pass on a reading from somewhere else in the run,
+        # and the cases are only evidence if they are the same reading.
+        lines = self.status_lines("17")
+        self.assertTrue(
+            [line for line in lines if "not disarming" in line],
+            "run 17 no longer carries a `not disarming` clause")
+        for name, damage, crossover, distance, _ in RUN_17_READINGS:
+            wanted = ("not disarming: the client's combat log reports "
+                      "%d hitpoints" % damage,
+                      "crossover %d m" % crossover,
+                      "target distance: %d m" % distance)
+            self.assertTrue(
+                [line for line in lines
+                 if all(fragment in line for fragment in wanted)],
+                "run 17 has no declined reading matching this case: " + name)
+
+    def test_run_17_s_first_attempt_reads_as_these_cases_replay_it(self):
+        # The reading-by-reading replay above, checked against the run it was
+        # transcribed from -- window and distance on the reading the verdict's
+        # own count names.
+        lines = self.status_lines("17")
+        for tick, damage, distance in RUN_17_FIRST_ATTEMPT:
+            wanted = ("wants short-range for %d reading(s)" % tick,
+                      "reports %d hitpoints" % damage,
+                      "target distance: %d m" % distance,
+                      "crossover %d m" % RUN_17_FIRST_ATTEMPT_CROSSOVER)
+            self.assertTrue(
+                [line for line in lines
+                 if all(fragment in line for fragment in wanted)],
+                "run 17's first attempt no longer reads %d hitpoints at %d m on "
+                "reading %d" % (damage, distance, tick))
+
+    def test_run_17_wanted_short_range_and_kept_being_declined(self):
+        # The shape of the issue rather than a count: verdicts that stay live,
+        # get declined, and are given up on. The counts themselves are not
+        # asserted -- run 17 was still being written when these cases were
+        # taken, so a number here would drift with the log.
+        lines = self.status_lines("17")
+        for clause in ["wants short-range",
+                       "not disarming: the client's combat log reports",
+                       "gave up on this one, will try again on the next change "
+                       "of range"]:
+            self.assertTrue(
+                [line for line in lines if clause in line],
+                "run 17 no longer carries `%s`, so it is not the run these "
+                "cases were read from" % clause)
+
+
+class TheGateIsNotTheOnlyThingBetweenTheSwapAndACharge(unittest.TestCase):
+    """What run 18 says, and why it is recorded rather than fixed here.
+
+    Run 17 is gate-bound: 271 readings holding a live verdict, 52 of them
+    declined by `swapMayDisarmTheGuns`, and `GUNS OFF` never once. Run 18 is
+    **not**: `not disarming` appears zero times in it and the swap reached
+    `GUNS OFF` twice. So the gate's cost is real and it is also not the only
+    thing in the way, and a change to the gate must be able to say which run it
+    is answering.
+
+    What stops run 18 is one reading later. Both swaps read, on the top-row
+    module column:
+
+        T/T/F  -> the click        (switched on)
+        T/F/T  -> GUNS OFF for 1   (switched off, the client confirmed it)
+        F/T/F  -> gave up          (switched on again)
+
+    The gun is back on the reading after the confirmation, with the swap still
+    holding the fight and nothing in the bot having pressed the hotkey, so
+    `switchOffHasBeenUndone` abandons -- on the very reading the context menu it
+    asked for would have arrived. That menu is the swap's only answer to "which
+    charge is loaded", which is why run 18 reads `loaded charge reads unknown`
+    on all of its ammo status lines while run 11, which predates the
+    confirmation, resolved the charge on 358 of its 488.
+
+    That is #50's confirmation logic and a different argument from this one, so
+    it is measured here and left alone. These cases exist so that the next
+    change to either rule has the run in front of it.
+    """
+
+    @staticmethod
+    def lines(name, prefix):
+        path = os.path.join(
+            os.path.expanduser("~"), "eve-bot-logs", "mission_run%s.log" % name)
+        if not os.path.exists(path):
+            raise unittest.SkipTest("no recorded " + os.path.basename(path))
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return [line for line in handle if line.startswith(prefix)]
+
+    def test_run_18_was_never_stopped_by_the_gate(self):
+        status = self.lines("18", "Ammo swap:")
+        self.assertTrue(status, "run 18 carries no ammo status line at all")
+        self.assertEqual(
+            [line for line in status if "not disarming" in line], [],
+            "run 18 now has the gate declining, so it is no longer the run that "
+            "shows the gate is not the only constraint")
+        self.assertTrue(
+            [line for line in status if "GUNS OFF" in line],
+            "run 18 no longer reaches GUNS OFF, so it no longer shows a swap "
+            "getting past the gate")
+
+    def test_run_18_s_swaps_died_one_reading_after_the_confirmation(self):
+        # The counter never reaches 2 -- which is the whole finding, and is why
+        # loosening the gate alone cannot be watched completing a swap.
+        status = self.lines("18", "Ammo swap:")
+        reached = {int(match.group(1))
+                   for match in (re.search(r"GUNS OFF for (\d+) of", line)
+                                 for line in status) if match}
+        self.assertEqual(
+            reached, {1},
+            "run 18's swaps now hold the guns for more than one reading, which "
+            "is a different run from the one these cases describe")
+
+    def test_neither_run_that_reached_the_menu_could_read_the_charge(self):
+        # And the run that predates the confirmation could. Stated as the
+        # comparison rather than as three counts, because the counts drift.
+        for name in ("17", "18"):
+            status = self.lines(name, "Ammo swap:")
+            self.assertEqual(
+                [line for line in status
+                 if "loaded charge reads " in line
+                 and "loaded charge reads unknown" not in line],
+                [],
+                "run %s now resolves the loaded charge, so the symptom these "
+                "cases were written from is gone" % name)
+        run_11 = self.lines("11", "Ammo swap:")
+        self.assertTrue(
+            [line for line in run_11
+             if "loaded charge reads short-range" in line
+             or "loaded charge reads long-range" in line],
+            "run 11 no longer resolves the loaded charge, so the menu read "
+            "cannot be shown to work at all")
 
 
 if __name__ == "__main__":
