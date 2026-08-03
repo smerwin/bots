@@ -11,6 +11,22 @@ input. Remaining work is refinement, not architecture.
 
 ## Start here
 
+**Picking up a session cold — resuming after a context clear, or taking over a
+run someone else started — is `PILOT.md`.** This file is the facts about the
+client, the bot and what has been learned about both; PILOT.md is the procedure
+for operating them: what to check first, how to start a run without silently
+losing its settings, what to watch, how to tell a real stall from noise, and how
+to hand back. Read it before touching a running session.
+
+The short version of it, for orientation:
+
+```
+cd tools/macos-host
+./cycle_run.sh --status                 # is a run going, and which log
+ls -lt ~/eve-bot-logs | head -3         # runs, newest first
+gh issue list --repo smerwin/bots --state open
+```
+
 Run a bot:
 
 ```
@@ -449,6 +465,15 @@ response's `startTasks`: a real cycle offers several at once (memory read plus
 screenshot read), and later responses offer genuinely new tasks such as the
 `SearchUIRootAddress` → `ReadFromWindow` transition. Drain a queue keyed by
 `taskId`, extended from every response, until empty.
+
+## The other documents
+
+| file | what it is for |
+|---|---|
+| `PILOT.md` | **operating a session** — resume cold, start a run, watch it, triage an alarm, hand back. The procedure; this file is the facts |
+| `MACOS.md` | setting the host up from nothing: SIP, permissions, building the native tools, running a bot for the first time |
+| `REPL.md` | driving the client by hand through `eve_repl` |
+| `HOTAS.md` | pinned sketch: flying the client with a stick and throttle |
 
 ## Skills (`.claude/skills/`)
 
