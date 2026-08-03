@@ -435,7 +435,13 @@ class TheOrderingIsThePoint(unittest.TestCase):
         end = self.source.index("\ndockOutranksTheFight :", start)
         body = self.source[start:end]
         override = body.index("dockOutranksTheFight context")
-        combat = body.index("decideActionInCombat context seeUndockingComplete")
+        # Located by tokens, not by line: elm-format wraps this application as
+        # `(decideActionInCombat context` / `seeUndockingComplete`, so a literal
+        # one-line match finds nothing. The ordering is what this pins, and the
+        # ordering is unaffected by where the formatter breaks the line.
+        combat = re.search(
+            r"decideActionInCombat\s+context\s+seeUndockingComplete", body
+        ).start()
         self.assertLess(override, combat,
                         "the fight must be the fallback, not the wrapper")
 

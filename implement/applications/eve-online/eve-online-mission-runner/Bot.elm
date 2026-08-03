@@ -1,224 +1,224 @@
 {- EVE Online combat mission bot version 2026-07-29
 
-   Runs security missions for an agent end to end: takes the mission from the
-   agent in station, flies out to the site, clears each pocket, follows the
-   acceleration gates between them, returns, and turns the mission in. Forked
-   from the combat anomaly bot ("saxrat"), whose combat, looting and travel
-   logic it reuses; what is new here is the agent conversation, the mission
-   tracker in the info panel, and the decision tree that ties them together.
+      Runs security missions for an agent end to end: takes the mission from the
+      agent in station, flies out to the site, clears each pocket, follows the
+      acceleration gates between them, returns, and turns the mission in. Forked
+      from the combat anomaly bot ("saxrat"), whose combat, looting and travel
+      logic it reuses; what is new here is the agent conversation, the mission
+      tracker in the info panel, and the decision tree that ties them together.
 
-   ## How it navigates
+      ## How it navigates
 
-   The mission tracker in the info panel carries a single button whose label is
-   always the next travel step -- "Undock", "Set Destination", "Warp to
-   Location", "Dock" -- and which carries no label at all while the ship is on
-   grid and it is the bot's turn to act. The bot clicks that button whenever it
-   has a label and there is nothing to fight, which removes any need to set
-   routes or drive the autopilot itself.
+      The mission tracker in the info panel carries a single button whose label is
+      always the next travel step -- "Undock", "Set Destination", "Warp to
+      Location", "Dock" -- and which carries no label at all while the ship is on
+      grid and it is the bot's turn to act. The bot clicks that button whenever it
+      has a label and there is nothing to fight, which removes any need to set
+      routes or drive the autopilot itself.
 
-   That tracker is the bot's only route out of the station, and it exists only
-   for a mission that is **tracked** -- see the setup list below. Accepting a
-   mission is not enough. Untracked, the panel entry is simply absent, which
-   the bot reads as "no mission running": it asks the agent for one, the agent
-   answers that a mission is already in progress, it closes the conversation,
-   and it starts over. Run 103 did that 87 times without undocking.
+      That tracker is the bot's only route out of the station, and it exists only
+      for a mission that is **tracked** -- see the setup list below. Accepting a
+      mission is not enough. Untracked, the panel entry is simply absent, which
+      the bot reads as "no mission running": it asks the agent for one, the agent
+      answers that a mission is already in progress, it closes the conversation,
+      and it starts over. Run 103 did that 87 times without undocking.
 
-   ## When the ship is lost
+      ## When the ship is lost
 
-   A destroyed ship leaves the character in a capsule, still flying, on the
-   same grid as whatever killed it -- and a capsule reads 100% shield and 100%
-   armour, so nothing about the health line says anything is wrong. Run 7 kept
-   running missions in one for its whole 86 readings, at 0.0 m/s among the pack
-   that had just killed it, and a stationary pod in a hostile pocket is a
-   podding, which costs the clone and its implants.
+      A destroyed ship leaves the character in a capsule, still flying, on the
+      same grid as whatever killed it -- and a capsule reads 100% shield and 100%
+      armour, so nothing about the health line says anything is wrong. Run 7 kept
+      running missions in one for its whole 86 readings, at 0.0 m/s among the pack
+      that had just killed it, and a stationary pod in a hostile pocket is a
+      podding, which costs the clone and its implants.
 
-   The bot now recognises it from two signals and stops. Either the client's own
-   `(notify)` line -- "The ship you are piloting does not have targeting systems
-   installed", which only a capsule ever hears -- or the ship UI carrying no
-   module buttons at all for several consecutive readings. Then it stops trying
-   to fight, flies the pod to `home-station` (or to whatever station this system
-   offers, if none is configured), docks, and **ends the session**, saying why.
-   The run's remaining hours are worthless without a ship, and a ship loss is
-   something the operator has to know about.
+      The bot now recognises it from two signals and stops. Either the client's own
+      `(notify)` line -- "The ship you are piloting does not have targeting systems
+      installed", which only a capsule ever hears -- or the ship UI carrying no
+      module buttons at all for several consecutive readings. Then it stops trying
+      to fight, flies the pod to `home-station` (or to whatever station this system
+      offers, if none is configured), docks, and **ends the session**, saying why.
+      The run's remaining hours are worthless without a ship, and a ship loss is
+      something the operator has to know about.
 
-   ## Setting up the Game Client
+      ## Setting up the Game Client
 
-   Despite being quite robust, this bot is less intelligent than a human. For
-   example, its perception is more limited than ours, so we need to set up the
-   game to ensure that the bot can see everything it needs. Following is the
-   list of setup instructions for the EVE Online client:
+      Despite being quite robust, this bot is less intelligent than a human. For
+      example, its perception is more limited than ours, so we need to set up the
+      game to ensure that the bot can see everything it needs. Following is the
+      list of setup instructions for the EVE Online client:
 
-   + Set the UI language to English.
-   + Open the overview window and the drones window, and keep them open.
-   + Set the Overview window to sort objects in space by distance with the
-     nearest entry at the top.
-   + Make sure the overview shows acceleration gates, or the bot cannot follow
-     a mission from one pocket to the next.
-   + Track the mission, so that it appears in the info panel. Open
-     Opportunities (Alt-J), go to the "Active" tab, right-click the mission's
-     card and choose "Track". Accepting a mission does not track it, and an
-     untracked mission has no info-panel entry at all -- which is where every
-     travel step comes from, so the bot never leaves the station. A character
-     whose missions were tracked before keeps that; a fresh one does not, which
-     is what makes this look like a bot fault rather than client setup.
-   + In the ship UI, arrange the modules:
-     + Place the modules to use in combat (to activate on targets) in the top row.
-     + Place the propulsion module first in the middle row. The bot drives this
-       slot on its own rule -- running while the ship crosses distance, off at a
-       gate -- so it has to know which slot it is.
-     + Place the modules to keep running (hardeners and the like) in the rest of
-       the middle row.
-     + Hide passive modules by disabling the check-box `Display Passive Modules`.
-   + Keep the default drone keybinds: Shift+F launches, F engages, Shift+R recalls.
-   + Configure the keyboard key 'W' to make the ship orbit.
+      + Set the UI language to English.
+      + Open the overview window and the drones window, and keep them open.
+      + Set the Overview window to sort objects in space by distance with the
+        nearest entry at the top.
+      + Make sure the overview shows acceleration gates, or the bot cannot follow
+        a mission from one pocket to the next.
+      + Track the mission, so that it appears in the info panel. Open
+        Opportunities (Alt-J), go to the "Active" tab, right-click the mission's
+        card and choose "Track". Accepting a mission does not track it, and an
+        untracked mission has no info-panel entry at all -- which is where every
+        travel step comes from, so the bot never leaves the station. A character
+        whose missions were tracked before keeps that; a fresh one does not, which
+        is what makes this look like a bot fault rather than client setup.
+      + In the ship UI, arrange the modules:
+        + Place the modules to use in combat (to activate on targets) in the top row.
+        + Place the propulsion module first in the middle row. The bot drives this
+          slot on its own rule -- running while the ship crosses distance, off at a
+          gate -- so it has to know which slot it is.
+        + Place the modules to keep running (hardeners and the like) in the rest of
+          the middle row.
+        + Hide passive modules by disabling the check-box `Display Passive Modules`.
+      + Keep the default drone keybinds: Shift+F launches, F engages, Shift+R recalls.
+      + Configure the keyboard key 'W' to make the ship orbit.
 
-   ## Configuration Settings
+      ## Configuration Settings
 
-   All settings are optional; you only need them in case the defaults don't fit
-   your use-case.
+      All settings are optional; you only need them in case the defaults don't fit
+      your use-case.
 
-   There is no setting for which modules to keep running: the bot takes that
-   from where the modules sit in the ship UI. The middle row after its first
-   slot is kept active whenever there is something to fight. The first slot is
-   the propulsion module, which runs on a different rule -- on whenever the ship
-   is actually covering distance, off once an acceleration gate is in reach or a
-   warp is being set up. (An `activate-module-always` setting used to be listed
-   here. It
-   named modules by their tooltip text, which this bot never reads, so it did
-   nothing at all -- removed rather than left as a setting that looks like it
-   works.)
+      There is no setting for which modules to keep running: the bot takes that
+      from where the modules sit in the ship UI. The middle row after its first
+      slot is kept active whenever there is something to fight. The first slot is
+      the propulsion module, which runs on a different rule -- on whenever the ship
+      is actually covering distance, off once an acceleration gate is in reach or a
+      warp is being set up. (An `activate-module-always` setting used to be listed
+      here. It
+      named modules by their tooltip text, which this bot never reads, so it did
+      nothing at all -- removed rather than left as a setting that looks like it
+      works.)
 
-   + `agent-name` : Name of the agent to run missions for, as it appears in the
-     station's Agents tab. Defaults to the first agent listed as available.
-   + `decline-mission` : Name of a mission to skip rather than run. The bot uses
-     the agent's "Delay" button rather than "Decline", since declining more than
-     once every four hours costs standing. Repeatable.
-   + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. Repeatable.
-   + `approach-object` : Names (or types) of objects to fly up to, as a
-     comma-separated list -- `approach-object=Abandoned Mining Station, Amarr
-     Chapel`. The key may also be repeated; both accumulate, and surrounding
-     space is trimmed, so a single name with spaces in it still works exactly as
-     it did. Used in two places. When an
-     objective says to approach something, these are tried after the name the
-     objective gives, because its wording can name a decorative object rather
-     than the one that actually satisfies it. And when the bot has run out of
-     anything else to do on a grid -- nothing to shoot, no cargo it can find, no
-     travel step, no gate, no route -- it closes on one of these as a last
-     resort, which covers the objectives that are satisfied by proximity without
-     ever saying so ("Interstellar Railroad" asks only for cargo, and the way to
-     get it is to fly at a Large Collidable Object the brief never mentions).
-   + `prefer-wreck` : Names (or types) of wrecks to search first when a mission
-     wants cargo out of destroyed ships, as a comma-separated list --
-     `prefer-wreck=Personnel Transport, Cargo Container`. The key may also be
-     repeated; both accumulate. Purely an optimisation -- the bot still opens
-     every other wreck afterwards, so a wrong guess costs nothing but a wasted
-     trip.
-   + `attack-object` : Non-rat objects the bot should also shoot, as a
-     comma-separated list -- `attack-object=Drone Silo, Repair Station`. The key
-     may also be repeated; both accumulate. Each entry is matched **exactly**
-     against the overview's Name or Type -- not as a substring of
-     either. Give the full label as the overview shows it, e.g.
-     `attack-object=Kruul's Pleasure Hub`. Substrings were tried and are a trap
-     in both directions: `Warehouse` matched a station called "Bhizheba VIII -
-     Moon 5 - Expert Distribution Warehouse", and `Habitat` matched every
-     Habitation Module on every grid rather than the one the mission is about.
-     Usually unnecessary: when a mission objective names a structure to destroy
-     ("You need to destroy the <a ...>Drone Silo</a>"), the bot takes the name
-     from the objective itself; this setting is the manual override for what
-     that does not cover. Either way the object must be enabled in the
-     overview's type filters (Large Collidable Objects are off by default) or
-     the bot cannot see it at all. Repeatable.
+      + `agent-name` : Name of the agent to run missions for, as it appears in the
+        station's Agents tab. Defaults to the first agent listed as available.
+      + `decline-mission` : Name of a mission to skip rather than run. The bot uses
+        the agent's "Delay" button rather than "Decline", since declining more than
+        once every four hours costs standing. Repeatable.
+      + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. Repeatable.
+      + `approach-object` : Names (or types) of objects to fly up to, as a
+        comma-separated list -- `approach-object=Abandoned Mining Station, Amarr
+        Chapel`. The key may also be repeated; both accumulate, and surrounding
+        space is trimmed, so a single name with spaces in it still works exactly as
+        it did. Used in two places. When an
+        objective says to approach something, these are tried after the name the
+        objective gives, because its wording can name a decorative object rather
+        than the one that actually satisfies it. And when the bot has run out of
+        anything else to do on a grid -- nothing to shoot, no cargo it can find, no
+        travel step, no gate, no route -- it closes on one of these as a last
+        resort, which covers the objectives that are satisfied by proximity without
+        ever saying so ("Interstellar Railroad" asks only for cargo, and the way to
+        get it is to fly at a Large Collidable Object the brief never mentions).
+      + `prefer-wreck` : Names (or types) of wrecks to search first when a mission
+        wants cargo out of destroyed ships, as a comma-separated list --
+        `prefer-wreck=Personnel Transport, Cargo Container`. The key may also be
+        repeated; both accumulate. Purely an optimisation -- the bot still opens
+        every other wreck afterwards, so a wrong guess costs nothing but a wasted
+        trip.
+      + `attack-object` : Non-rat objects the bot should also shoot, as a
+        comma-separated list -- `attack-object=Drone Silo, Repair Station`. The key
+        may also be repeated; both accumulate. Each entry is matched **exactly**
+        against the overview's Name or Type -- not as a substring of
+        either. Give the full label as the overview shows it, e.g.
+        `attack-object=Kruul's Pleasure Hub`. Substrings were tried and are a trap
+        in both directions: `Warehouse` matched a station called "Bhizheba VIII -
+        Moon 5 - Expert Distribution Warehouse", and `Habitat` matched every
+        Habitation Module on every grid rather than the one the mission is about.
+        Usually unnecessary: when a mission objective names a structure to destroy
+        ("You need to destroy the <a ...>Drone Silo</a>"), the bot takes the name
+        from the objective itself; this setting is the manual override for what
+        that does not cover. Either way the object must be enabled in the
+        overview's type filters (Large Collidable Objects are off by default) or
+        the bot cannot see it at all. Repeatable.
 
-     **It is also not what covers a hostile the icon colour misses.** Anything
-     the client's combat log names as having hit this ship inside
-     `incomingDamageWindowSeconds` is a target for as long as that window holds
-     it, with no setting involved -- see `isObjectShootingAtUs`. Listing rats
-     here is unnecessary and, because this list never expires, worse than
-     leaving them out.
-   + `home-station` : Full name of the station to go back to when the drone bay
-     has run dry, exactly as the client writes it -- e.g.
-     `home-station=Amarr VIII (Oris) - Emperor Family Academy`. Without it the
-     bot restocks wherever the mission chain happened to leave it, which is a
-     station chosen by the agent and usually holds no drones at all. With it,
-     the wind-down sets a route there, flies it, docks and restocks; if the ship
-     is already there it just restocks. Give the whole name including the
-     parentheses and hyphens: the bot never types this string, it types the part
-     after the last " - " into the search bar and then matches this full name
-     against the rows that come back. See `routeToStationByName`.
+        **It is also not what covers a hostile the icon colour misses.** Anything
+        the client's combat log names as having hit this ship inside
+        `incomingDamageWindowSeconds` is a target for as long as that window holds
+        it, with no setting involved -- see `isObjectShootingAtUs`. Listing rats
+        here is unnecessary and, because this list never expires, worse than
+        leaving them out.
+      + `home-station` : Full name of the station to go back to when the drone bay
+        has run dry, exactly as the client writes it -- e.g.
+        `home-station=Amarr VIII (Oris) - Emperor Family Academy`. Without it the
+        bot restocks wherever the mission chain happened to leave it, which is a
+        station chosen by the agent and usually holds no drones at all. With it,
+        the wind-down sets a route there, flies it, docks and restocks; if the ship
+        is already there it just restocks. Give the whole name including the
+        parentheses and hyphens: the bot never types this string, it types the part
+        after the last " - " into the search bar and then matches this full name
+        against the rows that come back. See `routeToStationByName`.
 
-     It is also where the pod goes if the ship is destroyed -- see "When the
-     ship is lost" below. Without it the pod docks at whatever station this
-     system offers instead, which is worse but is still not sitting still among
-     the rats that just killed the ship.
-   + `drone-type` : Name of the drone to refill the drone bay with while the
-     session winds down, as it appears in the station's item hangar -- e.g.
-     `drone-type=Hobgoblin I`. Defaults to `Acolyte I`. Fit-specific, which is
-     why it is a setting: the wrong name here does not misload anything, it
-     just finds nothing in the hangar. The drone has to be in the root item
-     hangar of the station the ship is parked in; sub-folders are not searched.
-   + `short-range-ammo` / `long-range-ammo` : Names of the two charges to swap
-     between as the current target's distance changes, as the weapon module's
-     own right-click menu spells them -- e.g. `short-range-ammo=Scorch M`. The
-     menu appends a quantity (`Multifrequency M [4]`), which the bot strips, so
-     give the plain name. **Both are needed, or nothing happens at all**: with
-     one charge type, or none, there is no swap to make and the bot leaves the
-     guns alone rather than guessing. Wrong ammo still does damage, so this is
-     an optimisation and doing nothing is always an acceptable outcome.
+        It is also where the pod goes if the ship is destroyed -- see "When the
+        ship is lost" below. Without it the pod docks at whatever station this
+        system offers instead, which is worse but is still not sitting still among
+        the rats that just killed the ship.
+      + `drone-type` : Name of the drone to refill the drone bay with while the
+        session winds down, as it appears in the station's item hangar -- e.g.
+        `drone-type=Hobgoblin I`. Defaults to `Acolyte I`. Fit-specific, which is
+        why it is a setting: the wrong name here does not misload anything, it
+        just finds nothing in the hangar. The drone has to be in the root item
+        hangar of the station the ship is parked in; sub-folders are not searched.
+      + `short-range-ammo` / `long-range-ammo` : Names of the two charges to swap
+        between as the current target's distance changes, as the weapon module's
+        own right-click menu spells them -- e.g. `short-range-ammo=Scorch M`. The
+        menu appends a quantity (`Multifrequency M [4]`), which the bot strips, so
+        give the plain name. **Both are needed, or nothing happens at all**: with
+        one charge type, or none, there is no swap to make and the bot leaves the
+        guns alone rather than guessing. Wrong ammo still does damage, so this is
+        an optimisation and doing nothing is always an acceptable outcome.
 
-     Which charge is loaded is read from that same menu, which lists what the
-     gun can be switched **to** and omits what is already in it -- so the
-     charge that is *missing* is the one loaded. Nothing has to be recognised
-     by name beyond the two given here, and no tooltip is involved.
+        Which charge is loaded is read from that same menu, which lists what the
+        gun can be switched **to** and omits what is already in it -- so the
+        charge that is *missing* is the one loaded. Nothing has to be recognised
+        by name beyond the two given here, and no tooltip is involved.
 
-     Note the bot switches the guns off to load, because the client refuses a
-     load into a running module and says so only in its own game log, which the
-     bot cannot read. That costs a few seconds of damage; it is bounded, and a
-     weapon that will not go quiet keeps firing what it already has.
-   + `ammo-swap-range` : Distance in meters at which to change over between the
-     two charges -- shorter than this the short-range charge, beyond it the
-     long-range one. Optional but **recommended**: without it the bot has to
-     derive the crossover from the weapons' optimal ranges, which it can only
-     read by resting the mouse on a module until a tooltip appears, and whether
-     this client shows one at all is unverified. Setting this skips the hover
-     entirely. Left unset and the tooltip never appearing, the swap says so and
-     does nothing rather than picking a distance out of the air.
-   + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping
-     range or aligning.
-   + `keep-at-range`: Set this to 'yes' to keep range from the target instead of
-     orbiting or aligning.
-   + `targeting-range`: Distance in meters at which the bot switches from
-     locking a target to approaching it. Defaults to 66000. This is a starting
-     value, not the last word: the bot narrows it during the session from the
-     client's own answers -- the greatest distance at which a lock was accepted
-     and the smallest at which one was provably refused -- and the setting is
-     clamped between the two. Set it to pin the starting point; it still gives
-     way to what the client has actually granted. See `lockRangeThresholdInMeters`.
-   + `run-away-shield-hitpoints-threshold-percent` /
-     `run-away-armor-hitpoints-threshold-percent`: Dock up when the ship drops
-     below these. Disabled by default. Both read the ship's HUD gauges, which
-     are not a reliable instrument -- see `plausibleHitpointsPercent` -- and on
-     a shield-tanked hull the armour gauge cannot move until the shield is
-     already gone, so armour alone is not a guard. Set the shield one.
-   + `run-away-incoming-damage-threshold`: Dock up when the client's own combat
-     log reports this much damage taken inside
-     `incomingDamageWindowSeconds` (45 s). Defaults to 3500 and `-1` disables
-     it. This is the retreat that needs no HUD gauge at all: the number comes
-     from EVE's own log rather than from a widget read out of live memory. The
-     default is calibrated for the hull flown on this account -- across sixteen
-     recorded client sessions the worst 45-second window the ship *survived*
-     was 3114, and the one it died in peaked at 4101 -- so re-derive it for a
-     different hull rather than carrying it over.
+        Note the bot switches the guns off to load, because the client refuses a
+        load into a running module and says so only in its own game log, which the
+        bot cannot read. That costs a few seconds of damage; it is bounded, and a
+        weapon that will not go quiet keeps firing what it already has.
+      + `ammo-swap-range` : Distance in meters at which to change over between the
+        two charges -- shorter than this the short-range charge, beyond it the
+        long-range one. Optional but **recommended**: without it the bot has to
+        derive the crossover from the weapons' optimal ranges, which it can only
+        read by resting the mouse on a module until a tooltip appears, and whether
+        this client shows one at all is unverified. Setting this skips the hover
+        entirely. Left unset and the tooltip never appearing, the swap says so and
+        does nothing rather than picking a distance out of the air.
+      + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping
+        range or aligning.
+      + `keep-at-range`: Set this to 'yes' to keep range from the target instead of
+        orbiting or aligning.
+      + `targeting-range`: Distance in meters at which the bot switches from
+        locking a target to approaching it. Defaults to 66000. This is a starting
+        value, not the last word: the bot narrows it during the session from the
+        client's own answers -- the greatest distance at which a lock was accepted
+        and the smallest at which one was provably refused -- and the setting is
+        clamped between the two. Set it to pin the starting point; it still gives
+        way to what the client has actually granted. See `lockRangeThresholdInMeters`.
+      + `run-away-shield-hitpoints-threshold-percent` /
+        `run-away-armor-hitpoints-threshold-percent`: Dock up when the ship drops
+        below these. Disabled by default. Both read the ship's HUD gauges, which
+        are not a reliable instrument -- see `plausibleHitpointsPercent` -- and on
+        a shield-tanked hull the armour gauge cannot move until the shield is
+        already gone, so armour alone is not a guard. Set the shield one.
+      + `run-away-incoming-damage-threshold`: Dock up when the client's own combat
+        log reports this much damage taken inside
+        `incomingDamageWindowSeconds` (45 s). Defaults to 3500 and `-1` disables
+        it. This is the retreat that needs no HUD gauge at all: the number comes
+        from EVE's own log rather than from a widget read out of live memory. The
+        default is calibrated for the hull flown on this account -- across sixteen
+        recorded client sessions the worst 45-second window the ship *survived*
+        was 3114, and the one it died in peaked at 4101 -- so re-derive it for a
+        different hull rather than carrying it over.
 
-   When using more than one setting, start a new line for each setting in the
-   text input field. Here is an example of a complete settings string:
+      When using more than one setting, start a new line for each setting in the
+      text input field. Here is an example of a complete settings string:
 
-   ```
-agent-name=Nehrnah Gorouyar
-orbit-in-combat=yes
-run-away-shield-hitpoints-threshold-percent=50
-run-away-armor-hitpoints-threshold-percent=80
-run-away-incoming-damage-threshold=3500
-   ```
+      ```
+   agent-name=Nehrnah Gorouyar
+   orbit-in-combat=yes
+   run-away-shield-hitpoints-threshold-percent=50
+   run-away-armor-hitpoints-threshold-percent=80
+   run-away-incoming-damage-threshold=3500
+      ```
 
 -}
 {-
@@ -238,8 +238,6 @@ import Common.Basics exposing (listElementAtWrappedIndex, stringContainsIgnoring
 import Common.DecisionPath exposing (describeBranch)
 import Common.EffectOnWindow as EffectOnWindow exposing (MouseButton(..))
 import Dict
-import EveOnline.MemoryReading
-import Json.Decode
 import EveOnline.BotFramework
     exposing
         ( ReadingFromGameClient
@@ -247,9 +245,9 @@ import EveOnline.BotFramework
         , ShipModulesMemory
         , UseContextMenuCascadeNode(..)
         , doEffectsClickModuleButton
+        , infoPanelRouteFirstMarkerFromReadingFromGameClient
         , localChatWindowFromUserInterface
         , menuCascadeCompleted
-        , infoPanelRouteFirstMarkerFromReadingFromGameClient
         , mouseClickOnUIElement
         , pickEntryFromLastContextMenuInCascade
         , secondsToSessionEnd
@@ -267,22 +265,24 @@ import EveOnline.BotFrameworkSeparatingMemory
         , branchDependingOnDockedOrInSpace
         , clickModuleButtonButWaitIfClickedInPreviousStep
         , decideActionForCurrentStep
-        , ensureInfoPanelLocationInfoIsExpanded
         , discardContextMenuIfTooDistantFromTargetElement
+        , ensureInfoPanelLocationInfoIsExpanded
         , useContextMenuCascade
         , useContextMenuCascadeOnListSurroundingsButton
         , useContextMenuCascadeOnOverviewEntry
         , useContextMenuCascadeWithCustomConfig
         , waitForProgressInGame
         )
+import EveOnline.MemoryReading
 import EveOnline.ParseUserInterface
     exposing
-        ( OverviewWindowEntry
+        ( FleetWindow
+        , OverviewWindowEntry
         , ShipUI
         , ShipUIModuleButton
         )
+import Json.Decode
 import Set
-import EveOnline.ParseUserInterface exposing (FleetWindow)
 
 
 defaultBotSettings : BotSettings
@@ -333,6 +333,7 @@ yields that one name with its spaces intact, so an existing settings string
 keeps behaving as it did. Note the two orderings that produces: names on one
 line stay in the order they are written, while repeated keys prepend, so across
 lines the last line is tried first.
+
 -}
 splitSettingIntoNames : String -> List String
 splitSettingIntoNames =
@@ -466,6 +467,7 @@ type alias BotSettings =
 `short-range-ammo=` with nothing after it is how an operator turns the ammo swap
 back off from the web console without deleting the line, and an empty string
 would otherwise match every context-menu entry.
+
 -}
 nonEmptySettingValue : String -> Maybe String
 nonEmptySettingValue value =
@@ -566,7 +568,7 @@ all", and the second is only answerable by looking at both together.
 
 Each sample also carries the reading's own `topAttacker`, and the set of those
 names across the window is what issue #40's target selection reads. Holding the
-names *inside* `samples` rather than in a list of their own is what bounds and
+names _inside_ `samples` rather than in a list of their own is what bounds and
 clears them without a second rule: they are trimmed by the same clock, capped by
 the same `incomingDamageSampleLimit`, and gone `incomingDamageWindowSeconds`
 after the last hit -- which covers a rat dying, the ship warping out and a
@@ -580,6 +582,7 @@ failure.
 
 `retreating` is the latch. See `runAwayIfLowHealth` for why the trip and the
 release are different conditions rather than one threshold.
+
 -}
 type alias IncomingDamageMemory =
     { samples : List IncomingDamageSample
@@ -617,6 +620,7 @@ memory. `handle` is what identifies the row across readings; see
 `distanceInMeters` is the distance the row showed on the reading the attempt
 started, and `targetsCount` the number of locked targets then. Both are needed
 at the verdict, and both can have changed by the time it is rendered.
+
 -}
 type alias LockAttempt =
     { handle : String
@@ -641,13 +645,13 @@ is untouched.
 `chargeLoaded` is the primary reading and it comes from the weapon's own context
 menu, which lists the charges the gun can be switched **to** and omits the one
 already in it. Verified live: a weapon holding Radio M offered `Multifrequency M
-[4]` and no Radio M at all. So the charge that is *absent* is the charge that is
+[4]` and no Radio M at all. So the charge that is _absent_ is the charge that is
 loaded, and that answer needs no tooltip, no hover, and none of the sprites this
 client does not have.
 
 `optimalRangeInMeters` and the `optimalRangeSeen` pair are the secondary reading
 and are now a refinement rather than the mechanism. A weapon's optimal range
-moves with the charge in it, so it confirms the *effect* where menu membership
+moves with the charge in it, so it confirms the _effect_ where menu membership
 confirms only that the client changed its mind about what can be loaded -- and
 the midpoint of the two is the crossover distance the swap uses when
 `ammo-swap-range` is unset. They come from `weaponOptimalRangeFromHover`, which
@@ -655,7 +659,7 @@ may never answer on this client; `optimalRangeGivenUp` records that, and it
 disables only this, not the swap.
 
 `rangeVerdictTicks` counts consecutive readings the same verdict has gone
-*unsatisfied*, and carries two guards at once. Below `ammoSwapDistanceHoldTicks`
+_unsatisfied_, and carries two guards at once. Below `ammoSwapDistanceHoldTicks`
 it is target churn and nothing is done; above `ammoSwapVerdictGiveUpTicks` the
 load has been commanded and the menu still offers the charge, so this attempt is
 abandoned. It resets the moment the verdict is satisfied, so that a struggle
@@ -664,7 +668,7 @@ cannot leave a count behind for the next verdict to inherit.
 `gunsSilencedTicks` is the one bound over the whole period the ship's guns are
 switched off, counted from the reading the swap first told one to stop and
 advanced on every reading until it lets go. It answers a question every waiting
-state in this path has to answer -- *and what if this never comes?* -- once, for
+state in this path has to answer -- _and what if this never comes?_ -- once, for
 all of them, rather than each remembering to. Issue #34 is what it is for: the
 previous shape bounded one phase and left the next unbounded, and a ship sat
 disarmed in a hostile pocket for 298 readings.
@@ -687,7 +691,7 @@ one exception is that same silence deadline, which switches the swap off for the
 session -- having disarmed the ship once and been unable to finish, doing it
 again is not worth the ammo it might save.
 
-`givenUpReadingsAgo` exists only so the latch is *said* once. The give-up is a
+`givenUpReadingsAgo` exists only so the latch is _said_ once. The give-up is a
 permanent state, and printing its two-hundred-character sentence on every reading
 for the rest of the session -- 763 times in run 11 -- buries the readings that
 carry news. The full sentence goes out on the reading it latches and a short flag
@@ -703,7 +707,7 @@ rather than twenty-five readings later, and that the log can quote why.
 
 `gunsCommandedThisVerdictAtX` is how the walk across a multi-gun row remembers
 where it got to, keyed on each gun's `x` because the row is not a stable index
-space. A gun goes in the list when its context menu was *opened*, which is the
+space. A gun goes in the list when its context menu was _opened_, which is the
 bot asking rather than the client answering -- but unlike the previous design
 each gun's own menu then says whether it carries the charge, so a gun that was
 visited and did not take the load is visible rather than assumed. What is still
@@ -715,6 +719,7 @@ already had.
 `menuOpenOnGunAtX` is how the bot knows an open context menu is a weapon's, and
 which weapon's: nothing in the menu itself says where it came from, but the bot
 opened it and the previous step's effects say where it clicked.
+
 -}
 type alias AmmoSwapMemory =
     { chargeLoaded : Maybe AmmoRange
@@ -815,7 +820,6 @@ missionBotDecisionRootBeforeApplyingSettings context =
                 context.readingFromGameClient
 
 
-
 {-| How long before the planned session end to stop taking new work and park.
 Enough time to finish a warp and a dock, not so much that a short session
 never gets anything done.
@@ -832,6 +836,7 @@ Generous, because a legitimate trip home is a warp and a dock and can take a
 couple of minutes. Bounded, because every way that trip fails previously ran
 until something else stopped the session -- and the host only announces the
 deadline, it does not enforce it.
+
 -}
 secondsPastSessionEndBeforeGivingUpOnDocking : Int
 secondsPastSessionEndBeforeGivingUpOnDocking =
@@ -843,10 +848,11 @@ planned end is close, recall drones and dock rather than starting another leg.
 
 This only does anything when the host was given `--session-duration-minutes`;
 without it `secondsToSessionEnd` is Nothing and this never fires. Worth knowing
-that the host merely *announces* the deadline -- it does not stop its own loop
+that the host merely _announces_ the deadline -- it does not stop its own loop
 -- so if nothing here acted on it the flag would be inert. The anomaly bot this
 was forked from reacted to it inside `continueIfShouldHide`, which this bot does
 not have (its hide-when-neutral behaviour did not apply to running missions).
+
 -}
 windDownBeforeSessionEnd : BotDecisionContext -> Maybe DecisionPathNode
 windDownBeforeSessionEnd context =
@@ -949,7 +955,8 @@ trip raises the overrun allowance that
 Raising it is only safe because it stays a deadline. Issues #7 and #14 were both
 the same shape: a wait with no end, which reads in the log exactly like a bot
 working. This is a longer bound, not a missing one -- when it expires the
-session *ends*, loudly, naming the station it never reached.
+session _ends_, loudly, naming the station it never reached.
+
 -}
 homeStationTripSecondsPastSessionEnd : Int
 homeStationTripSecondsPastSessionEnd =
@@ -968,15 +975,16 @@ readings, which covers the three looks and two drags that budget allows.
 Normally it is not spent: the grace ends as soon as the restock latches
 `droneBayWillTakeNoMore`. The clock is what covers the case where no verdict
 arrives -- a gauge this build renders differently, say -- since a look budget
-that runs out ends the restock by *falling silent*, which on its own would leave
+that runs out ends the restock by _falling silent_, which on its own would leave
 the session parked here until the deadline.
+
 -}
 homeStationRestockGraceSeconds : Int
 homeStationRestockGraceSeconds =
     60
 
 
-{-| The home station, when one is configured *and* there is a reason to go
+{-| The home station, when one is configured _and_ there is a reason to go
 there. Both halves are the trigger, so a bot whose bay still holds drones winds
 down exactly as it did before this existed.
 
@@ -994,10 +1002,11 @@ titles the bay group with a bare count and no capacity -- so fullness is not a
 question an in-space reading can answer at all. See
 `droneBayIsEmptyFromDronesWindow`.
 
-`droneBayWillTakeNoMore` is #24's verdict from the *other* instrument, and is
+`droneBayWillTakeNoMore` is #24's verdict from the _other_ instrument, and is
 respected here for the case it can arise in: a bay whose gauge already read
 full, or a drop the client already refused, is not a reason to fly anywhere. It
 resets on undock, so it never suppresses a trip decided in space.
+
 -}
 homeStationToGoTo : BotDecisionContext -> Maybe String
 homeStationToGoTo context =
@@ -1020,11 +1029,12 @@ homeStationToGoTo context =
 reading does not say.
 
 Read live rather than from `lastDockedStationNameFromInfoPanel`, which is a
-*last seen* and would happily name the previous station while docked at this
+_last seen_ and would happily name the previous station while docked at this
 one -- and answering "yes, we are home" about the wrong station would restock in
 the station that has no drones, which is the bug this whole feature is about.
 `generalSetupInUserInterface` runs before the wind-down on every reading and
 expands the location info panel, so the name is normally there.
+
 -}
 dockedStationNameFromInfoPanel : BotDecisionContext -> Maybe String
 dockedStationNameFromInfoPanel context =
@@ -1046,6 +1056,7 @@ as the configured name appearing inside the panel's. Containment only in that
 direction: the panel decorating the name with something extra should still
 match, but a configured `Amarr` matching every station in the constellation
 should not.
+
 -}
 dockedAtHomeStation : BotDecisionContext -> String -> Maybe Bool
 dockedAtHomeStation context homeName =
@@ -1079,6 +1090,7 @@ windDownOverrunAllowanceSeconds context =
 Normally the planned end itself. A ship that has reached its home station with
 an empty bay gets `homeStationRestockGraceSeconds` past that, because arriving
 and then finishing without restocking would waste the whole trip.
+
 -}
 dockedWindDownDeadlineSeconds : BotDecisionContext -> Int
 dockedWindDownDeadlineSeconds context =
@@ -1097,6 +1109,7 @@ It also stops being true the moment the restock latches `droneBayWillTakeNoMore`
 (via `homeStationToGoTo`), so the grace ends on the restock's own verdict rather
 than always running its full length. The clock is the backstop for the case
 where no verdict arrives at all.
+
 -}
 homeStationRestockGraceApplies : BotDecisionContext -> Bool
 homeStationRestockGraceApplies context =
@@ -1156,6 +1169,7 @@ inside a station, so nothing is gained by undocking first.
 Returns Nothing when the ship is already home, which hands the reading to
 `maintenanceWhileDocked` and its restock: "if already docked there, restock
 without travelling".
+
 -}
 goToHomeStationWhileDocked : BotDecisionContext -> Maybe DecisionPathNode
 goToHomeStationWhileDocked context =
@@ -1212,6 +1226,7 @@ goToHomeStationWhileDocked context =
 docks at the far end too -- the route marker's own menu offers "Dock" once the
 destination system is reached, which is why nothing here has to know the
 difference between another jump and arrival.
+
 -}
 goToHomeStationWhileInSpace : BotDecisionContext -> Maybe DecisionPathNode
 goToHomeStationWhileInSpace context =
@@ -1238,7 +1253,7 @@ marker's own menu offers "Dock" at the far end.
 Split out of `goToHomeStationWhileInSpace` when #33's pod recovery needed the
 same three steps for a different reason, so that there is one travel-and-dock
 path in this bot rather than two that can drift apart. The caller supplies both
-log lines because the *reason* differs and the decision log is where an operator
+log lines because the _reason_ differs and the decision log is where an operator
 reads it -- "the drone bay is empty" and "the ship is gone" want completely
 different words in front of the same mechanism.
 
@@ -1264,7 +1279,7 @@ travelToStationByName context stationName describe =
         describeBranch describe.whileSettingRoute (routeToStationByName context stationName)
 
 
-{-| Whether the route currently set is *our* route home, rather than a leftover
+{-| Whether the route currently set is _our_ route home, rather than a leftover
 from the mission the session was running.
 
 The route panel says a destination exists; it does not say which one, and
@@ -1287,6 +1302,7 @@ and the dock are unchanged. That is not a swap anyone can make today, though:
 issue one, because `OperateBotConfiguration` gives a decision no channel to the
 volatile process at all -- only mouse, keys and scroll. Until that framework gap
 is closed, the search bar is not an interim, it is the mechanism.
+
 -}
 homeStationRouteIsSet : BotDecisionContext -> String -> Bool
 homeStationRouteIsSet context stationName =
@@ -1308,7 +1324,7 @@ whose display region it cannot read (see CLAUDE.md, "Ship modules"), so a single
 reading finding none is a parse that may simply have missed, where three in a
 row is the ship's shape having changed.
 
-Three *readings*, not three decision lines -- the unit CLAUDE.md keeps a section
+Three _readings_, not three decision lines -- the unit CLAUDE.md keeps a section
 on, and the one `stall_watch.py` got wrong twice. This counter is stepped from
 `updateMemoryForNewReadingFromGame`, which runs once per reading, so three of
 them is roughly twenty-five seconds at the tick rate the recorded runs show
@@ -1324,7 +1340,7 @@ shipLossReadingsWithoutModulesBeforeVerdict =
 
 A pod that has been trying to reach a station for this long is not going to, and
 an unbounded retry loop reads in the log exactly like a bot working -- issues #7
-and #14 twice over. When it expires the session *ends*, naming the station the
+and #14 twice over. When it expires the session _ends_, naming the station the
 pod never reached, so an operator finds out rather than discovering it later.
 
 Calibrated in readings, at the eight seconds a reading the recorded runs
@@ -1350,7 +1366,7 @@ nothing until:
     [ 2026.08.03 04:27:33 ] (notify) The ship you are piloting does not have targeting systems installed.
 
 repeated 173 times to the end of the run. Issue #33 expected EVE to state the
-loss outright; it does not. What it states is the *consequence*, and only when
+loss outright; it does not. What it states is the _consequence_, and only when
 something asks the capsule to lock -- which this bot does on every reading it
 sees a rat, so in the case that matters (a hostile pocket) the answer arrives
 within a reading or two. It is silent for a pod drifting somewhere empty, which
@@ -1365,7 +1381,7 @@ of #32 turned out to be.
 
 Matched on two substrings for #31's reason: the sentence has no variable part
 today, but `targeting systems` alone would also match a rewording about a
-*module*, and the pair pins the subject ("the ship you are piloting") to the
+_module_, and the pair pins the subject ("the ship you are piloting") to the
 symptom.
 
 `Nothing` and `Just []` are collapsed here, and that is safe only because of the
@@ -1402,17 +1418,17 @@ logged it **zero** times between them -- 4,419 readings and 15,836 in-space
 status prints, every one of which named a propulsion module. That is the
 discrimination this rests on, and it is measured rather than assumed.
 
-What is *inferred* rather than observed is the step from that row to this one.
+What is _inferred_ rather than observed is the step from that row to this one.
 The status line prints the middle row only, and the middle row is a subset of
 `moduleButtons`, so a non-empty middle row proves `moduleButtons` was non-empty
 on all 15,836 -- the direction that matters for false positives. The other
-direction, a capsule having no module buttons in *any* row, follows from a
+direction, a capsule having no module buttons in _any_ row, follows from a
 capsule having no slots to fit them in, and from run 7's own `ShipUI` text
 carrying nothing behind its slots. If that turns out to be wrong on some client
 the symptom is this signal never firing, and the game log's capsule refusal
 carrying the whole load.
 
-Note what is *not* used. The drones window disappearing was #33's third suggested
+Note what is _not_ used. The drones window disappearing was #33's third suggested
 signal and it does not survive contact with the recordings: run 1 reported "No
 drones" on 8,076 in-space readings while flying a perfectly good ship, so an
 absent drones window says nothing about the hull. Nor are hitpoints used --
@@ -1654,6 +1670,7 @@ the shape `stall_watch` calls a stall.
 The order below never starves either task: the restock stops with
 `droneRestockGiveUpSecondsBeforeSessionEnd` on the clock and the survey only
 starts inside `agentSurveyWindowSeconds`, so their windows do not overlap.
+
 -}
 maintenanceWhileDocked : BotDecisionContext -> Maybe DecisionPathNode
 maintenanceWhileDocked context =
@@ -1676,6 +1693,7 @@ panel, is the obvious next task to add here.
 Reading only. It selects the Agents tab if that is needed to see the list, and
 otherwise clicks nothing -- there is no mission running to disturb, but there is
 also no reason to leave the client in a different state than we found it.
+
 -}
 surveyAgentsInStation : BotDecisionContext -> Maybe DecisionPathNode
 surveyAgentsInStation context =
@@ -1730,7 +1748,7 @@ surveyAgentsInStation context =
 
 {-| The last seconds before the session ends, which is when the survey runs.
 
-At the *start* of wind-down the ship is still flying home -- run 120 spent that
+At the _start_ of wind-down the ship is still flying home -- run 120 spent that
 stretch on "Head for a station and dock" and did not park until 144 of its 200
 seconds were gone, so a window at that end was evaluated only while there was no
 station window to read. The end of the clock is the one moment the ship is
@@ -1739,6 +1757,7 @@ reliably parked, because getting there is what wind-down is for.
 Still nothing stored: the session clock alone decides, so there is no counter to
 be consumed early and no dependence on whether the memory update runs before or
 after the decision.
+
 -}
 withinAgentSurveyWindow : BotDecisionContext -> Bool
 withinAgentSurveyWindow context =
@@ -1751,7 +1770,7 @@ withinAgentSurveyWindow context =
 
 
 {-| How long the survey keeps printing. Readings come about twice a second, so
-this is roughly twenty repeated lines -- under stall_watch's threshold of 40,
+this is roughly twenty repeated lines -- under stall\_watch's threshold of 40,
 and the price of needing no stored state to stop. Wide enough that a slow tick
 cannot step over the window entirely.
 -}
@@ -1793,29 +1812,29 @@ ends with an empty bay, and the next run then starts empty too.
 Every step is one of that tool's, and each of those earned its place by failing
 without it:
 
-  * **The bay is opened from the ship's own card in the Hangars/Ships panel**,
+  - **The bay is opened from the ship's own card in the Hangars/Ships panel**,
     never with Alt+C. The inventory an Alt+C opens looks identical in the UI
-    tree and *silently refuses the drop*: the quantity dialog still appears and
+    tree and _silently refuses the drop_: the quantity dialog still appears and
     the items stay in the hangar, as if it had worked. No single reading tells
     the two apart, so the one moment that is evidence our own "Open Drone Bay"
     click landed -- the ship's drone bay showing as the selected container --
     is kept in memory until the ship undocks (`droneBayOpenedFromShipCard`).
-  * **Widgets are found by type, not by text near them.** The card is a
+  - **Widgets are found by type, not by text near them.** The card is a
     `ShipItemCard` and the filter box is the parser's `quickFilterInputBox`.
     Aiming at a fixed offset from a nearby label missed the card entirely, and
     searching for "Search" hit unrelated tabs -- three bugs in one session of
     the tool had that shape. The Hangars/Ships tabs are the one thing still
     found by text, and then only as an exact label on an `EveLabelMedium`.
-  * **The quick filter is cleared before it is typed into**, or the previous
+  - **The quick filter is cleared before it is typed into**, or the previous
     text is appended, "Acolyte IAcolyte I" matches nothing, and that looks
     exactly like the typing having failed. `ensureQuickFilterText` is the same
     clear-then-type the courier load uses.
-  * **The drag starts on the item's icon, not its label** -- the `InvItem` box
+  - **The drag starts on the item's icon, not its label** -- the `InvItem` box
     covers both -- and it is a drag at all only because
     `EffectOnWindow.effectsForDragAndDrop` moves the pointer straight after the
     press, with `botlab_host` suppressing the framework's inter-effect wait
     while a button is held. Press, pause, then move reads as a click.
-  * **The quantity dialog's default already fills the bay**, so it is accepted
+  - **The quantity dialog's default already fills the bay**, so it is accepted
     rather than typed into.
 
 The tool also clicks empty viewport first, because closing windows leaves EVE
@@ -1825,7 +1844,7 @@ effect sequence, by a click on the field being typed into -- which is what the
 courier load does, and run 117 filtered, found and dragged in about six
 readings that way.
 
-Ordered by what a reading can *see*, the way `loadCourierCargo` is: which
+Ordered by what a reading can _see_, the way `loadCourierCargo` is: which
 container the inventory has selected decides the next step, so the sequence
 converges without the bot having to remember where in it we are.
 
@@ -1853,6 +1872,7 @@ Every branch here also names what it saw rather than only what it wanted,
 because the node type names it steers by (`ShipDroneBay`, `StationItems`) are
 this client build's, and a name that is wrong on some future build would
 otherwise look exactly like a slow client.
+
 -}
 restockDroneBayWhileDocked : BotDecisionContext -> Maybe DecisionPathNode
 restockDroneBayWhileDocked context =
@@ -1940,6 +1960,7 @@ distinguishes "filtered and found nothing" from "the container has not
 rendered yet" well enough to latch on. They dispatch no input, and wind-down
 repeats a line either way -- "Already docked. Stay put." is what fills that
 window otherwise -- so this costs a differently-worded log and nothing else.
+
 -}
 restockDroneBayFromInventoryWindow :
     BotDecisionContext
@@ -2103,6 +2124,7 @@ The restock is already over by the time this runs -- the same reading latches
 does not sit over the client until it times out, and so the log carries the
 refusal in its own words rather than as an accepted quantity dialog, which is
 what it used to be reported as.
+
 -}
 dismissRefusedDropIntoDroneBay : BotDecisionContext -> DecisionPathNode
 dismissRefusedDropIntoDroneBay context =
@@ -2147,6 +2169,7 @@ The first card is taken, which is what the tool does. The active ship is the
 one card the panel shows under "Active", and nothing read so far distinguishes
 the cards from each other -- so this is worth watching on a character with
 several ships in the same hangar.
+
 -}
 openDroneBayFromShipCard : BotDecisionContext -> DecisionPathNode
 openDroneBayFromShipCard context =
@@ -2217,12 +2240,13 @@ This is the far end of it: enough left for the agent survey, and a bound that
 needs no stored state, the same reason `withinAgentSurveyWindow` is written
 against the clock.
 
-It is the backstop, not the bound that matters. ~30 readings is *over*
+It is the backstop, not the bound that matters. ~30 readings is _over_
 `stall_watch`'s `CIRCLING_THRESHOLD` of 20, so a failure that repeats one
 decision for the whole window does alarm -- what this originally claimed it
 prevented. `droneRestockLooksBeforeGivingUp` is the bound that
 actually stops the task, and it stops it by falling silent rather than by
 repeating a give-up line.
+
 -}
 droneRestockGiveUpSecondsBeforeSessionEnd : Int
 droneRestockGiveUpSecondsBeforeSessionEnd =
@@ -2248,6 +2272,7 @@ drag: it moves items, and a repeat can split a stack while the first drag is
 still catching up. The memory-counter trap `surveyAgentsInStation` documents
 does not apply -- this counter only starts once our own "Open Drone Bay" has
 landed, and nothing else in the bot ever selects that container.
+
 -}
 droneRestockLooksBeforeGivingUp : Int
 droneRestockLooksBeforeGivingUp =
@@ -2307,6 +2332,7 @@ is in cubic metres truncated to an integer, and a drone's own volume is not
 readable, so a bay with 1 m³ free reads as having room while a 5 m³ drone will
 not fit. That case is what the refusal dialog and the bounded attempt count are
 for.
+
 -}
 droneBayFillFromCapacityGauge : Maybe EveOnline.ParseUserInterface.InventoryWindowCapacityGauge -> DroneBayFill
 droneBayFillFromCapacityGauge capacityGauge =
@@ -2326,11 +2352,12 @@ droneBayFillFromCapacityGauge capacityGauge =
 window has the ship's drone bay selected -- which is not the same as the gauge
 declining to answer.
 
-Readable only while the bay *is* the selected container: the capacity gauge
+Readable only while the bay _is_ the selected container: the capacity gauge
 belongs to whatever is selected, and the restock has to select the station
 hangar to reach the drones. So the bay is looked at deliberately, at the
 moments the sequence puts it there, and the verdict is latched into memory
 rather than re-read when the drag comes around.
+
 -}
 droneBayFillWhileSelected : ReadingFromGameClient -> Maybe DroneBayFill
 droneBayFillWhileSelected readingFromGameClient =
@@ -2368,14 +2395,14 @@ is absent while docked, and the inventory does not have the bay selected while
 in space.
 
 That is why both exist. The restock asks "will more fit" at a moment it has
-itself arranged; the home trip asks "is it worth flying home" *before*
+itself arranged; the home trip asks "is it worth flying home" _before_
 undocking, where nothing has opened the bay and nothing can, since the answer
 is needed to decide whether to leave at all.
 
 **Emptiness, not fullness, and that is forced rather than chosen.** The
 drones window titles its bay group with a bare count on this build -- the
 `(current/maximum)` form `parseQuantityFromDroneGroupTitleText` can read is
-what the *in space* group carries, since that one is bandwidth-limited. With
+what the _in space_ group carries, since that one is bandwidth-limited. With
 no maximum there is no fullness to compute, so "nothing in the bay" is the
 strongest thing an in-space reading can say. It is also the right threshold
 for a trip: see `homeStationToGoTo`.
@@ -2385,6 +2412,7 @@ as empty, as does a group whose title carries no number. Both are the state
 this feature exists for, and the cost of being wrong is a trip home to a bay
 that turns out to have drones -- where the restock's own gauge then retires
 the task on arrival.
+
 -}
 droneBayIsEmptyFromDronesWindow : ReadingFromGameClient -> Maybe Bool
 droneBayIsEmptyFromDronesWindow readingFromGameClient =
@@ -2472,6 +2500,7 @@ clicks to look into the bay, and finding it here is what makes it present by
 construction -- the version this replaces re-derived it and carried a
 "no drone bay to drop it into" branch that this same filter had already made
 unreachable.
+
 -}
 inventoryWindowShowingDroneBay :
     ReadingFromGameClient
@@ -2541,6 +2570,7 @@ nothing, which is the failure class this whole task was written to avoid
 (issue #19). What separates the two dialogs is their text, so
 `dropIntoDroneBayWasRefused` is asked first and this is only the button; the
 name now says only what it can back up.
+
 -}
 okButtonInReading : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
 okButtonInReading readingFromGameClient =
@@ -2570,6 +2600,7 @@ to the panel that holds it.
 A single live observation is all the evidence behind the wording. If the client
 ever phrases it differently this reads as "not refused", which puts the restock
 back on the bounded-attempts path rather than into a loop.
+
 -}
 dropIntoDroneBayWasRefused : ReadingFromGameClient -> Bool
 dropIntoDroneBayWasRefused readingFromGameClient =
@@ -2593,6 +2624,7 @@ Blank texts are skipped and markup is stripped before comparing, the same two
 things the tool's `texts_of` does. A label rendered as `<center>OK` is the same
 label, and a node whose first text is empty would otherwise hide a real one
 underneath it.
+
 -}
 widestNodeLabelledExactly :
     { label : String, pythonObjectTypeName : Maybe String }
@@ -2628,6 +2660,7 @@ view that is where the icon meets the label under it -- one `InvItem` box
 covers both, and `reload_drones.py` had to aim 25 px below the top of the box to
 get the icon. The same offset is used here, clamped to half the height so that
 a list-view row, which is shorter than that, is still grabbed inside itself.
+
 -}
 dragFromItemIconOntoUiElement :
     EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
@@ -2703,6 +2736,7 @@ cancel its own undock and then start it again, forever. Observed live as an
 Undock/Abort Undock loop. Labels that undo the step in progress are therefore
 not travel steps at all -- while one is showing, the right move is to wait for
 the action already under way to finish.
+
 -}
 missionTravelStep : BotDecisionContext -> Maybe ( String, EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion )
 missionTravelStep context =
@@ -2744,7 +2778,7 @@ missionTravelStep context =
 
                         Nothing ->
                             Nothing
-                )
+            )
 
 
 {-| Whether the autopilot actually has a destination.
@@ -2752,7 +2786,7 @@ missionTravelStep context =
 Neither of the obvious tests works. `AutopilotDestinationIcon` is present in the
 route panel whether or not a route exists, so the framework's
 `infoPanelRouteFirstMarkerFromReadingFromGameClient` is always Just. And the
-"No Destination" label keeps its *text* even once a route is set -- an earlier
+"No Destination" label keeps its _text_ even once a route is set -- an earlier
 attempt at this read that text and was simply wrong.
 
 What does change is visibility: the panel hides `noDestinationLabel` and shows
@@ -2761,6 +2795,7 @@ readings of the same panel, with and without a destination:
 
     no route:   NextWaypointPanel _display=False,  noDestinationLabel _display=True
     route set:  NextWaypointPanel _display=True,   noDestinationLabel _display=False
+
 -}
 routeIsSet : BotDecisionContext -> Bool
 routeIsSet context =
@@ -2813,7 +2848,6 @@ clickMissionTravelButton context label buttonNode =
             (clickUiElement buttonNode)
 
 
-
 {-| The mission cargo a courier objective wants in the hold, if any. Empty for
 combat missions, and empty again once the objective moves on -- which is what
 tells the bot the load succeeded, without having to re-select the ship in the
@@ -2850,12 +2884,12 @@ two were conflated for a long time and it was expensive. "After The Seven
 (4 of 5)" reads "special ship restrictions" and grants a Caldari Shuttle because
 its gates admit nothing larger; flown in a cruiser the bot sat at the gate and
 clicked Activate Gate 741 times. But "Communications Cold War" carries the same
-phrase and its restriction list *includes* the Omen Navy Issue we fly, and it
+phrase and its restriction list _includes_ the Omen Navy Issue we fly, and it
 grants no ship at all. Treating the phrase as a refusal skipped a mission we
 could fly and jammed the agent behind it -- 153 Delay clicks in one run, since a
 deferred mission stays in the journal and stops the agent offering another.
 
-So the phrase only decides whether to *ask*. `restrictionsAdmitThisShip` reads
+So the phrase only decides whether to _ask_. `restrictionsAdmitThisShip` reads
 the answer.
 
 -}
@@ -2903,6 +2937,7 @@ The fallback below stays regardless, because it is the more robust question:
 the icon's own `_name`. Every window in this client carries a
 `CloseButtonIcon`, whatever else differs about it, and that is what got
 `ShipRestrictionsWindow` closed when the texture match could not.
+
 -}
 closeControlOfWindow : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
 closeControlOfWindow window =
@@ -2941,6 +2976,7 @@ clause needs no ship database here, and it names our own ship, so it cannot be
 confused by the list of alternatives below it. A wording we fail to match reads
 as "not admitted", which is the conservative direction -- it skips a mission we
 might have flown rather than committing to one we cannot.
+
 -}
 restrictionsAdmitThisShip : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Bool
 restrictionsAdmitThisShip restrictionsWindow =
@@ -2989,6 +3025,7 @@ about wrecks emptied by someone else.
 The id memory is kept as a backstop. This test depends on the icon updating
 promptly, and if it ever does not, the memory is what stops a repeat of the
 73-times-into-the-same-wreck loop rather than merely making it less likely.
+
 -}
 overviewEntryLooksLooted : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 overviewEntryLooksLooted entry =
@@ -3009,6 +3046,7 @@ approached an Asteroid Factory 18 times while trying to reach a Cargo Warehouse
 that was scrolled out of sight, and parked at the factory.
 
 `_display` is what distinguishes them; the region does not.
+
 -}
 overviewEntryIsDisplayed : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 overviewEntryIsDisplayed entry =
@@ -3018,12 +3056,13 @@ overviewEntryIsDisplayed entry =
 {-| Whether an overview row's own words say it is a thing that can hold loot.
 
 One definition, because three callers ask it -- the picker, the scroller, and
-`nearestLootableEntry`, which is what decides *which wreck* an open loot window
+`nearestLootableEntry`, which is what decides _which wreck_ an open loot window
 belongs to. They used to ask it in three different ways, and the third did not
 ask it at all: it took the nearest row with an `objectItemID`, which every row
 in the overview has (see `missionObjectiveText` for what that cost once
 already). A grid of asteroids, beacons and a stargate therefore answered "the
 nearest lootable object" with whatever happened to be closest.
+
 -}
 overviewEntryNamesALootableObject : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 overviewEntryNamesALootableObject entry =
@@ -3037,6 +3076,7 @@ client actually writes.
 
 Whole words rather than substrings, for `containsWords`' reasons: a rogue drone
 called a "Wrecker" contains "wreck", and this decides what the ship flies to.
+
 -}
 textNamesALootableObject : String -> Bool
 textNamesALootableObject text =
@@ -3052,6 +3092,7 @@ The scroller's set is deliberately one word wider than the picker's -- a Cargo
 Warehouse is worth bringing into view, and `lootableHoldingMissionItem` does not
 open one -- so the extra pattern is written here rather than hidden inside the
 shared rule.
+
 -}
 isLootableFor : BotDecisionContext -> String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isLootableFor context itemName entry =
@@ -3062,7 +3103,7 @@ isLootableFor context itemName entry =
         alreadyOpened =
             not (notAlreadyEmptied context entry)
     in
-    (not alreadyOpened)
+    not alreadyOpened
         && ((texts |> List.any (stringContainsIgnoringCase itemName))
                 || overviewEntryNamesALootableObject entry
                 || (texts |> List.any (containsWords "warehouse"))
@@ -3087,6 +3128,7 @@ sequence.
 Note this cannot help where the unwanted match really is a whole word: the
 "Warehouse" station above still contains the word. That one is handled by
 `attack-object` matching Name or Type exactly instead.
+
 -}
 containsWords : String -> String -> Bool
 containsWords pattern text =
@@ -3114,7 +3156,7 @@ moved. Two reasons, either fatal on its own.
 
 The arithmetic collapsed. `(rank - rowsOnScreen / 2) / scrollableRows` is
 negative for anything in the first half-page, so it clamped to 0 -- and with the
-handle already at the top of its track, the computed destination *was* where the
+handle already at the top of its track, the computed destination _was_ where the
 handle already sat. The drag was zero-length, and a zero-length drag emits no
 movement at all, so nothing was ever sent.
 
@@ -3127,6 +3169,7 @@ only which way to look, and it re-reads after every notch. Direction comes from
 where the handle sits in its track: room below means scroll down, otherwise turn
 around and sweep back up, so a list gets swept rather than pinned against one
 end.
+
 -}
 scrollOverviewToReveal :
     BotDecisionContext
@@ -3225,12 +3268,13 @@ each time. The ship's own indication reports `ManeuverApproach` while one is in
 flight, which is the cheapest way to tell.
 
 `ManeuverApproach` alone is not enough to trust indefinitely, though: it stays
-set while the ship approaches *something*, which need not be the thing the
+set while the ship approaches _something_, which need not be the thing the
 mission wants. Seen live sitting 29 km from a Cargo Warehouse, moving at
 304 m/s, distance unchanged over 12 seconds -- approaching, but not that. With
 no bound, the guard suppressed every re-issue and the bot never redirected. So
 the indication is only believed for a bounded run of readings; past that the
 approach is re-issued, which retargets the ship.
+
 -}
 approachIndicationTrustedForTicks : Int
 approachIndicationTrustedForTicks =
@@ -3243,8 +3287,9 @@ acts on an object the ship has not reached yet.
 The command puts the ship into an approach, and re-issuing it while that
 approach is running restarts the manoeuvre and burns a step every tick for
 nothing. `ManeuverApproach` is believed for a bounded run of readings only,
-since it stays set while the ship approaches *something*, which need not be this
+since it stays set while the ship approaches _something_, which need not be this
 object.
+
 -}
 unlessAlreadyClosingIn : BotDecisionContext -> String -> DecisionPathNode -> DecisionPathNode
 unlessAlreadyClosingIn context description action =
@@ -3267,6 +3312,7 @@ being re-run as the ship closed, once per distance step. One live pickup of a
 single container spent thirty cascade clicks getting from 70 km to 8 km, each
 one an open-menu / wait-for-render / find-entry / click sequence. A double click
 is one step.
+
 -}
 openCargoOnOverviewEntry :
     BotDecisionContext
@@ -3350,13 +3396,14 @@ shipIsAlreadyApproaching context =
 need to approach <a ...>Fire Cloud</a>". The objective clears itself once the
 ship is near enough, so there is nothing to detect beyond "is it still asking".
 
-What the objective *names*, though, cannot be trusted to be what you approach.
+What the objective _names_, though, cannot be trusted to be what you approach.
 On "Athran Exigency" the instruction points at an Acidic Cloud (typeID 10131)
 which is flavour and is not even on the overview; the thing that actually
 satisfies it is an Abandoned Mining Station (typeID 23615) sitting on the same
 grid. Matching by the link's id would be no better than matching by its text --
 both identify the cloud. So the objective's own name is tried first, and
 `approach-object` from the settings covers the missions where it lies.
+
 -}
 approachMissionObjectIfNeeded : BotDecisionContext -> Maybe DecisionPathNode
 approachMissionObjectIfNeeded context =
@@ -3416,6 +3463,7 @@ travel step offered, no gate to take and no route to fly. A named object sitting
 on the grid would otherwise pull the ship away from all of those. Skipped once
 the ship is already there, so arriving ends the manoeuvre rather than re-issuing
 it forever if the objective turns out not to clear.
+
 -}
 approachConfiguredObjectIfPresent : BotDecisionContext -> Maybe DecisionPathNode
 approachConfiguredObjectIfPresent context =
@@ -3430,7 +3478,7 @@ approachConfiguredObjectIfPresent context =
                     |> List.filter
                         (\entry ->
                             interactionRangeInMeters
-                                < (overviewEntryDistanceOrFarInMeters entry)
+                                < overviewEntryDistanceOrFarInMeters entry
                         )
                     |> List.sortBy overviewEntryDistanceOrFarInMeters
             )
@@ -3485,6 +3533,7 @@ finds the loot entries once in range.
 Since #44 the wanted item can also be the key a locked acceleration gate named,
 which is why this asks `itemToFetchFromTheGrid` rather than the objective
 directly -- see `gateKeyItemNameFromRefusal`.
+
 -}
 lootMissionItemFromContainerIfPresent : BotDecisionContext -> Maybe DecisionPathNode
 lootMissionItemFromContainerIfPresent context =
@@ -3543,53 +3592,53 @@ lootMissionItemFromContainerIfPresent context =
 
                 Nothing ->
                     case scrollOverviewToReveal context (isLootableFor context itemName) of
-                      Just scrollIntoView ->
-                        Just scrollIntoView
+                        Just scrollIntoView ->
+                            Just scrollIntoView
 
-                      Nothing ->
-                        lootableHoldingMissionItem context itemName
-                            |> Maybe.map
-                            (\containerEntry ->
-                                let
-                                    distanceInMeters =
-                                        overviewEntryDistanceOrFarInMeters containerEntry
-                                in
-                                -- One call, whatever the range. A double click
-                                -- is "Open Cargo", and from further out the
-                                -- client answers it by flying over and opening
-                                -- on arrival, so there is no separate approach
-                                -- and no in-range case to wait for. The
-                                -- distance only colours the description.
-                                openCargoOnOverviewEntry context
-                                    (if
-                                        [ containerEntry.objectName, containerEntry.objectType ]
-                                            |> List.filterMap identity
-                                            |> List.any (stringContainsIgnoringCase itemName)
-                                     then
-                                        "Open the container holding the "
-                                            ++ itemName
-                                            ++ ", "
-                                            ++ String.fromInt distanceInMeters
-                                            ++ " m away."
+                        Nothing ->
+                            lootableHoldingMissionItem context itemName
+                                |> Maybe.map
+                                    (\containerEntry ->
+                                        let
+                                            distanceInMeters =
+                                                overviewEntryDistanceOrFarInMeters containerEntry
+                                        in
+                                        -- One call, whatever the range. A double click
+                                        -- is "Open Cargo", and from further out the
+                                        -- client answers it by flying over and opening
+                                        -- on arrival, so there is no separate approach
+                                        -- and no in-range case to wait for. The
+                                        -- distance only colours the description.
+                                        openCargoOnOverviewEntry context
+                                            (if
+                                                [ containerEntry.objectName, containerEntry.objectType ]
+                                                    |> List.filterMap identity
+                                                    |> List.any (stringContainsIgnoringCase itemName)
+                                             then
+                                                "Open the container holding the "
+                                                    ++ itemName
+                                                    ++ ", "
+                                                    ++ String.fromInt distanceInMeters
+                                                    ++ " m away."
 
-                                     else
-                                        -- Nothing on the overview names the
-                                        -- item, so this is a blind look inside
-                                        -- a wreck. Said plainly, because a log
-                                        -- claiming a precise match here would
-                                        -- be misleading.
-                                        "Look inside "
-                                            ++ (containerEntry.objectName
-                                                    |> Maybe.withDefault "this wreck"
-                                               )
-                                            ++ " for the "
-                                            ++ itemName
-                                            ++ ", "
-                                            ++ String.fromInt distanceInMeters
-                                            ++ " m away."
+                                             else
+                                                -- Nothing on the overview names the
+                                                -- item, so this is a blind look inside
+                                                -- a wreck. Said plainly, because a log
+                                                -- claiming a precise match here would
+                                                -- be misleading.
+                                                "Look inside "
+                                                    ++ (containerEntry.objectName
+                                                            |> Maybe.withDefault "this wreck"
+                                                       )
+                                                    ++ " for the "
+                                                    ++ itemName
+                                                    ++ ", "
+                                                    ++ String.fromInt distanceInMeters
+                                                    ++ " m away."
+                                            )
+                                            containerEntry
                                     )
-                                    containerEntry
-                            )
 
 
 {-| How close the ship has to be before it can act on an object out in space --
@@ -3604,7 +3653,7 @@ interactionRangeInMeters =
 
 {-| Where to look next for a wanted item, nearest first.
 
-Two cases, and the distinction matters. A container the mission *placed* names its
+Two cases, and the distinction matters. A container the mission _placed_ names its
 contents in its own overview row ("Cargo Container - Ancient Amarrian Relic"), so
 it can be picked out precisely by the item name. A wreck cannot: its overview row
 carries the name of the ship that died, never a hint of what is inside it. So for
@@ -3623,6 +3672,7 @@ This terminates because the overview is configured to hide empty wrecks (see the
 setup instructions at the top of this file): each one the bot empties drops out
 of the candidate list, so the search shrinks rather than cycling. That setting is
 load-bearing here, not cosmetic.
+
 -}
 lootableHoldingMissionItem :
     BotDecisionContext
@@ -3673,13 +3723,14 @@ lootableHoldingMissionItem context itemName =
 {-| Put the mission cargo in the ship's hold: narrow the hangar down with the
 quick filter, then drag the item onto the ship's own inventory entry.
 
-The steps are ordered by what is *observable* rather than by what a human would
+The steps are ordered by what is _observable_ rather than by what a human would
 do, because this client build gives no way to tell which container is currently
 selected -- it has no `subCaptionLabel` node, so `subCaptionLabelText` is always
 Nothing here. So instead of "select hangar, then filter, then drag", the order is
 "drag if the item is visible; if not, fix the filter; if that is already right,
 switch container". Each branch changes something the next reading can see, so the
 sequence converges without ever needing to know the selection directly.
+
 -}
 loadCourierCargo : BotDecisionContext -> String -> Maybe DecisionPathNode
 loadCourierCargo context itemName =
@@ -3741,23 +3792,23 @@ loadCourierCargo context itemName =
             case ( matchingItem, shipCargoTreeEntry ) of
                 ( Just itemNode, Just shipCargo ) ->
                     Just <|
-                    if previousStepClickedMouse context then
-                        -- A drag needs the same one-reading pause a click does.
-                        -- Observed live: the first drag landed, but two more
-                        -- went out before the reading caught up with it. Harmless
-                        -- for a single indivisible item, not harmless for a
-                        -- stack, where a repeat drag can open a quantity dialog
-                        -- or move part of it somewhere unintended.
-                        describeBranch
-                            "I just dragged -- wait for the reading to catch up before dragging again."
-                            waitForProgressInGame
+                        if previousStepClickedMouse context then
+                            -- A drag needs the same one-reading pause a click does.
+                            -- Observed live: the first drag landed, but two more
+                            -- went out before the reading caught up with it. Harmless
+                            -- for a single indivisible item, not harmless for a
+                            -- stack, where a repeat drag can open a quantity dialog
+                            -- or move part of it somewhere unintended.
+                            describeBranch
+                                "I just dragged -- wait for the reading to catch up before dragging again."
+                                waitForProgressInGame
 
-                    else
-                        describeBranch
-                            ("Drag '" ++ itemName ++ "' into the ship's cargo hold.")
-                            (dragAndDropUiElement itemNode
-                                (shipCargo.selectRegion |> Maybe.withDefault shipCargo.uiNode)
-                            )
+                        else
+                            describeBranch
+                                ("Drag '" ++ itemName ++ "' into the ship's cargo hold.")
+                                (dragAndDropUiElement itemNode
+                                    (shipCargo.selectRegion |> Maybe.withDefault shipCargo.uiNode)
+                                )
 
                 ( Just _, Nothing ) ->
                     Just
@@ -3786,9 +3837,10 @@ looking at, or give up.
 
 Split out only so that `ensureQuickFilterText` can be shared with the drone
 restock; the conditions are the ones that were here before. Note it still gives
-up when the filter is *not* set and there is no filter box to set it with --
+up when the filter is _not_ set and there is no filter box to set it with --
 there is no step left to take then, and the caller reads that as "not loadable
 here" and undocks.
+
 -}
 loadCourierCargoAfterFiltering :
     { itemName : String
@@ -3833,6 +3885,7 @@ other toggle the bot presses.
 The window is part of this bot's setup instructions and is normally already
 open; this is for the case where it is not, which otherwise leaves a courier
 pickup quietly unable to proceed.
+
 -}
 openInventoryWindow : BotDecisionContext -> DecisionPathNode
 openInventoryWindow context =
@@ -3865,6 +3918,7 @@ the same for both: the box keeps whatever was typed into it last, and typing
 again appends, so "Acolyte IAcolyte I" matches nothing and looks exactly like
 the typing having failed. Clearing is a click on the box's own Clear button --
 see `quickFilterClearButton` for why no select-all shortcut works here.
+
 -}
 ensureQuickFilterText :
     BotDecisionContext
@@ -3925,6 +3979,7 @@ of the session -- while the filter it had already typed was doing its job, since
 the field is a substring match and "report" finds Reports perfectly well. Any
 non-empty prefix is good enough to stop typing; an empty box or unrelated text
 still is not.
+
 -}
 quickFilterIsAlreadySet : EveOnline.ParseUserInterface.InventoryWindow -> String -> Bool
 quickFilterIsAlreadySet inventoryWindow textToFilterFor =
@@ -3971,6 +4026,7 @@ Identified by type rather than by label. It is a `ButtonIcon` whose text lives i
 `_hint`, and `getDisplayText` reads only `_setText`/`_text`, so a text search
 never matches it -- the same trap `closeControlOfWindow` documents. It is the one
 `ButtonIcon` inside the filter box.
+
 -}
 quickFilterClearButton :
     EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
@@ -3990,6 +4046,7 @@ letter, digit or space is just the character's own uppercase code point, and
 those the host does map. Unsupported characters are dropped rather than guessed:
 the filter is a substring match, so a name that loses its punctuation still
 narrows the hangar down.
+
 -}
 typeTextEffects : String -> List EffectOnWindow.EffectOnWindowStruct
 typeTextEffects text =
@@ -4019,6 +4076,7 @@ covered node is refused rather than dragged from a place the player cannot see.
 The waypoint in the middle is what makes EVE read this as a drag at all -- see
 the host's own `_cg_move`, which only emits macOS drag events while a button is
 held.
+
 -}
 dragAndDropUiElement :
     EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
@@ -4151,31 +4209,31 @@ decideActionWhenDockedWithoutConversation context =
 
 decideActionWhenDockedWithMissionTracker : BotDecisionContext -> DecisionPathNode
 decideActionWhenDockedWithMissionTracker context =
-            case missionInfoPanelEntry context of
-                Just mission ->
-                    -- The tracker's button is consulted before anything else,
-                    -- including the "ready to hand in" case: once docked with a
-                    -- finished mission it reads "Start Conversation", and going
-                    -- through it guarantees we talk to the agent whose mission
-                    -- this actually is rather than picking one out of the
-                    -- station's list and hoping.
-                    case missionTravelStep context of
-                        Just ( label, buttonNode ) ->
-                            clickMissionTravelButton context label buttonNode
-
-                        Nothing ->
-                            if missionIsReadyToComplete mission then
-                                describeBranch "The mission is done -- talk to the agent to hand it in."
-                                    (openAgentConversation context)
-
-                            else
-                                describeBranch
-                                    "A mission is running but the tracker offers no travel step from here."
-                                    waitForProgressInGame
+    case missionInfoPanelEntry context of
+        Just mission ->
+            -- The tracker's button is consulted before anything else,
+            -- including the "ready to hand in" case: once docked with a
+            -- finished mission it reads "Start Conversation", and going
+            -- through it guarantees we talk to the agent whose mission
+            -- this actually is rather than picking one out of the
+            -- station's list and hoping.
+            case missionTravelStep context of
+                Just ( label, buttonNode ) ->
+                    clickMissionTravelButton context label buttonNode
 
                 Nothing ->
-                    describeBranch "No mission running -- get one from the agent."
-                        (openAgentConversation context)
+                    if missionIsReadyToComplete mission then
+                        describeBranch "The mission is done -- talk to the agent to hand it in."
+                            (openAgentConversation context)
+
+                    else
+                        describeBranch
+                            "A mission is running but the tracker offers no travel step from here."
+                            waitForProgressInGame
+
+        Nothing ->
+            describeBranch "No mission running -- get one from the agent."
+                (openAgentConversation context)
 
 
 {-| Opens the conversation with the chosen agent. The lobby keeps the Agents
@@ -4236,6 +4294,7 @@ Observed live on the first real run. Waiting a step after any click, rather
 than trusting the coordinates, is the only thing that makes this safe --
 re-reading is not enough on its own, because the danger is precisely that
 the reading is one step behind the UI.
+
 -}
 previousStepClickedMouse : BotDecisionContext -> Bool
 previousStepClickedMouse context =
@@ -4271,6 +4330,7 @@ never moves in between, while `effectsForDragAndDrop` always does -- that
 prompt move is the whole reason a drag registers as one. So this separates the
 restock's drag from every click it also issues into the same window, which
 matters because the drag is the step that has to be counted and bounded.
+
 -}
 previousStepsEffectsDragged : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
 previousStepsEffectsDragged previousStepsEffects =
@@ -4592,6 +4652,7 @@ wins over a gate that is still sitting on the overview.
 and `dockOutranksTheFight` is the whole of that exception -- see there for why
 it is the only label that gets one, and for what still keeps the guns firing
 after it appears.
+
 -}
 decideActionInMissionPocket : BotDecisionContext -> SeeUndockingComplete -> DecisionPathNode
 decideActionInMissionPocket context seeUndockingComplete =
@@ -4604,7 +4665,8 @@ decideActionInMissionPocket context seeUndockingComplete =
                 (jumpToNextSystem context)
     in
     dockOutranksTheFight context
-        (decideActionInCombat context seeUndockingComplete
+        (decideActionInCombat context
+            seeUndockingComplete
             (case expandMissionTrackerIfCollapsed context of
                 Just expandTracker ->
                     expandTracker
@@ -4617,98 +4679,98 @@ decideActionInMissionPocket context seeUndockingComplete =
                             |> List.filterMap identity
                             |> List.head
                     of
-                      Just objectiveAction ->
-                        objectiveAction
-
-                      Nothing ->
-                        case missionTravelStep context of
-                        Just ( label, buttonNode ) ->
-                            ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
-                                (clickMissionTravelButton context label buttonNode)
+                        Just objectiveAction ->
+                            objectiveAction
 
                         Nothing ->
-                            activateAccelerationGateIfPresent context
-                                |> Maybe.withDefault
-                                    (closeSearchResultsWhenRouteIsSet context
+                            case missionTravelStep context of
+                                Just ( label, buttonNode ) ->
+                                    ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
+                                        (clickMissionTravelButton context label buttonNode)
+
+                                Nothing ->
+                                    activateAccelerationGateIfPresent context
                                         |> Maybe.withDefault
-                                     (if routeIsSet context then
-                                        travelTheRoute
+                                            (closeSearchResultsWhenRouteIsSet context
+                                                |> Maybe.withDefault
+                                                    (if routeIsSet context then
+                                                        travelTheRoute
 
-                                     else
-                                        approachConfiguredObjectIfPresent context
-                                            |> Maybe.withDefault
-                                                (case missionInfoPanelEntry context of
-                                                    Just _ ->
-                                                        if nothingToDoTicksBeforeCryingStuck < context.memory.nothingToDoTicks then
-                                                            -- Waiting was the right first answer and the wrong
-                                                            -- last one. This branch is the bottom of the tree:
-                                                            -- nothing to shoot, no cargo it can find, no travel
-                                                            -- step, no gate, no route, no configured object on
-                                                            -- grid. If that has not changed in minutes, the
-                                                            -- mission is not "catching up" and nothing here will
-                                                            -- make it.
-                                                            --
-                                                            -- Two runs died in this branch without a word. Run
-                                                            -- 114 sat in it for 14,111 decisions, 37% of the
-                                                            -- session. Run 124 reached it with the tracker
-                                                            -- offering no travel button at all and burned half
-                                                            -- an hour. Neither raised an alarm, because waiting
-                                                            -- looks identical whether the mission is a second
-                                                            -- behind or permanently unreachable.
-                                                            --
-                                                            -- This does not rescue the mission -- it cannot, from
-                                                            -- here. It converts a silently wasted session into
-                                                            -- one that says so, which is what stall_watch
-                                                            -- screenshots and reports.
-                                                            -- Deliberately no reading count in the text. The
-                                                            -- alarm repeats for as long as the state lasts, and
-                                                            -- a counter in the message makes every repeat a
-                                                            -- distinct line -- which defeats stall_watch's
-                                                            -- dedupe and any log filter downstream. Run 126
-                                                            -- emitted 151 unique variants of this one alarm.
-                                                            describeBranch
-                                                                ("Nothing to fight, no travel step, nothing on grid to approach, and over "
-                                                                    ++ String.fromInt nothingToDoTicksBeforeCryingStuck
-                                                                    ++ " readings of it -- this mission is not going to progress on its own."
+                                                     else
+                                                        approachConfiguredObjectIfPresent context
+                                                            |> Maybe.withDefault
+                                                                (case missionInfoPanelEntry context of
+                                                                    Just _ ->
+                                                                        if nothingToDoTicksBeforeCryingStuck < context.memory.nothingToDoTicks then
+                                                                            -- Waiting was the right first answer and the wrong
+                                                                            -- last one. This branch is the bottom of the tree:
+                                                                            -- nothing to shoot, no cargo it can find, no travel
+                                                                            -- step, no gate, no route, no configured object on
+                                                                            -- grid. If that has not changed in minutes, the
+                                                                            -- mission is not "catching up" and nothing here will
+                                                                            -- make it.
+                                                                            --
+                                                                            -- Two runs died in this branch without a word. Run
+                                                                            -- 114 sat in it for 14,111 decisions, 37% of the
+                                                                            -- session. Run 124 reached it with the tracker
+                                                                            -- offering no travel button at all and burned half
+                                                                            -- an hour. Neither raised an alarm, because waiting
+                                                                            -- looks identical whether the mission is a second
+                                                                            -- behind or permanently unreachable.
+                                                                            --
+                                                                            -- This does not rescue the mission -- it cannot, from
+                                                                            -- here. It converts a silently wasted session into
+                                                                            -- one that says so, which is what stall_watch
+                                                                            -- screenshots and reports.
+                                                                            -- Deliberately no reading count in the text. The
+                                                                            -- alarm repeats for as long as the state lasts, and
+                                                                            -- a counter in the message makes every repeat a
+                                                                            -- distinct line -- which defeats stall_watch's
+                                                                            -- dedupe and any log filter downstream. Run 126
+                                                                            -- emitted 151 unique variants of this one alarm.
+                                                                            describeBranch
+                                                                                ("Nothing to fight, no travel step, nothing on grid to approach, and over "
+                                                                                    ++ String.fromInt nothingToDoTicksBeforeCryingStuck
+                                                                                    ++ " readings of it -- this mission is not going to progress on its own."
+                                                                                )
+                                                                                askForHelpToGetUnstuck
+
+                                                                        else
+                                                                            describeBranch
+                                                                                "Nothing to fight and no travel step offered -- wait for the mission to catch up."
+                                                                                waitForProgressInGame
+
+                                                                    Nothing ->
+                                                                        -- No tracker means no mission, a state that could not
+                                                                        -- arise while every hand-in happened docked, since the
+                                                                        -- mission then ended with the ship already at the agent.
+                                                                        -- Completing remotely ends it in space instead, and the
+                                                                        -- agent will only offer the next one in person -- asked
+                                                                        -- remotely it answers "Please drop by, so we can
+                                                                        -- formalize the mission contract" and offers no buttons.
+                                                                        --
+                                                                        -- So route back to the station we last undocked from,
+                                                                        -- which is the agent's, and let the docked flow ask for
+                                                                        -- the next mission. dockAtStation is not the way: it
+                                                                        -- reads the surroundings menu, which lists only the
+                                                                        -- current system, so it cannot reach an agent two jumps
+                                                                        -- out, and inside a deadspace pocket it offers no
+                                                                        -- stations at all -- live, it fell through to clicking
+                                                                        -- "Approach" and "Warp to Within (0 m)" on whatever was
+                                                                        -- in the menu.
+                                                                        case context.memory.lastDockedStationNameFromInfoPanel of
+                                                                            Just stationName ->
+                                                                                routeToStationByName context stationName
+
+                                                                            Nothing ->
+                                                                                -- Only before the first dock of a session, so
+                                                                                -- there is nothing to aim at yet.
+                                                                                describeBranch
+                                                                                    "No mission, and I have not docked anywhere this session to head back to."
+                                                                                    waitForProgressInGame
                                                                 )
-                                                                askForHelpToGetUnstuck
-
-                                                        else
-                                                            describeBranch
-                                                                "Nothing to fight and no travel step offered -- wait for the mission to catch up."
-                                                                waitForProgressInGame
-
-                                                    Nothing ->
-                                                        -- No tracker means no mission, a state that could not
-                                                        -- arise while every hand-in happened docked, since the
-                                                        -- mission then ended with the ship already at the agent.
-                                                        -- Completing remotely ends it in space instead, and the
-                                                        -- agent will only offer the next one in person -- asked
-                                                        -- remotely it answers "Please drop by, so we can
-                                                        -- formalize the mission contract" and offers no buttons.
-                                                        --
-                                                        -- So route back to the station we last undocked from,
-                                                        -- which is the agent's, and let the docked flow ask for
-                                                        -- the next mission. dockAtStation is not the way: it
-                                                        -- reads the surroundings menu, which lists only the
-                                                        -- current system, so it cannot reach an agent two jumps
-                                                        -- out, and inside a deadspace pocket it offers no
-                                                        -- stations at all -- live, it fell through to clicking
-                                                        -- "Approach" and "Warp to Within (0 m)" on whatever was
-                                                        -- in the menu.
-                                                        case context.memory.lastDockedStationNameFromInfoPanel of
-                                                            Just stationName ->
-                                                                routeToStationByName context stationName
-
-                                                            Nothing ->
-                                                                -- Only before the first dock of a session, so
-                                                                -- there is nothing to aim at yet.
-                                                                describeBranch
-                                                                    "No mission, and I have not docked anywhere this session to head back to."
-                                                                    waitForProgressInGame
-                                                )
-                                     )
-                                    )
+                                                    )
+                                            )
             )
         )
 
@@ -4750,7 +4812,7 @@ this branch is to stop:
     wreck holding the mission item is not optional the way ordinary salvage is,
     and it deserves its own answer rather than being folded into this one. The
     one thing skipped that is not vacuous under "no instruction" is a gate key
-    the *client* named (`gateKeyWanted`), and a gate key is only ever wanted for
+    the _client_ named (`gateKeyWanted`), and a gate key is only ever wanted for
     a pocket this mission no longer has to enter.
   - **A lost ship, and the retreats.** Both already sit above this and neither
     is touched. `recoverPodAfterShipLoss` answers `Just` on every reading its
@@ -4788,6 +4850,7 @@ turn under combat as before. And it clears itself, with no counter and nothing
 latched: every condition is re-derived from the live reading, so the moment the
 button stops reading "Dock" -- the ship docked, the mission moved on, the
 tracker was collapsed -- the fight is the bot's job again on that same reading.
+
 -}
 dockOutranksTheFight : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
 dockOutranksTheFight context ifTheFightIsStillOurs =
@@ -4828,6 +4891,7 @@ finished and only the trip home is left.
 Both halves are needed. The label alone would disengage on a courier mission
 whose delivery step is also a dock, and the empty objective alone would
 disengage while the tracker still had a gate or a warp to offer.
+
 -}
 travelStepThatEndsTheFight :
     BotDecisionContext
@@ -4867,6 +4931,7 @@ Trimmed and lowercased for `isObjectShootingAtUs`'s reason -- nothing here
 should depend on the client's spacing or capitalisation staying put -- and
 checked against the labels the recorded runs actually carry in
 `tools/macos-host/tests/test_dock_outranks_the_fight.py`.
+
 -}
 missionTravelStepIsDock : String -> Bool
 missionTravelStepIsDock label =
@@ -4885,6 +4950,7 @@ instruction", which is how run 11 reported it for the whole ten minutes.
 Blank strings count as empty because a label the client rendered with no text is
 not an instruction; `List.all` over an empty list is True, which is the intended
 answer for a tracker whose objectives are all done.
+
 -}
 missionHasNoOutstandingInstruction : List String -> Bool
 missionHasNoOutstandingInstruction instructionTexts =
@@ -4899,11 +4965,12 @@ cell the parser cannot read holds the ship just as firmly; the name is only for
 the log line.
 
 Deliberately **not** filtered by `overviewEntryIsDisplayed`, unlike anything
-that clicks a row. That filter exists because a virtualised row's *position*
+that clicks a row. That filter exists because a virtualised row's _position_
 belongs to whatever was recycled into its place, and nothing here clicks
 anything -- while a scrambler that has scrolled off the overview stops the ship
 leaving exactly as well as one in view. Being wrong in this direction costs one
 more fight, which is what the bot does today anyway.
+
 -}
 scramblerHoldingTheShipHere : BotDecisionContext -> Maybe String
 scramblerHoldingTheShipHere context =
@@ -4964,10 +5031,11 @@ from this by hand: a mouse move straight to the button's coordinates (no
 intermediate points) did nothing at all, not even register a hover
 tooltip -- only worked once the cursor got there via a real multi-step
 glide. That was diagnosed against `cg_input` directly, bypassing
-botlab_host.py's own input path entirely; a normal bot-driven click here
+botlab\_host.py's own input path entirely; a normal bot-driven click here
 goes through `_windows_input`'s `_move_mouse_eased`, which already glides
 every `MouseMoveAbsolute` by default, so plain `mouseClickOnUIElement` is
 sufficient -- nothing extra needed on the Elm side for this.
+
 -}
 closeSystemSettingsMenu : ReadingFromGameClient -> Maybe DecisionPathNode
 closeSystemSettingsMenu readingFromGameClient =
@@ -5077,7 +5145,7 @@ jumpToNextSystem : BotDecisionContext -> DecisionPathNode
 jumpToNextSystem context =
     case context.readingFromGameClient |> infoPanelRouteFirstMarkerFromReadingFromGameClient of
         Nothing ->
-         tetherAtStructure context
+            tetherAtStructure context
 
         Just infoPanelRouteFirstMarker ->
             -- Feedback: right after the route is reset and a new
@@ -5108,27 +5176,29 @@ jumpToNextSystem context =
 
             else
                 returnDronesToBay context
-                    ( useContextMenuCascadeWithCustomConfig
-                    -- Feedback: "Jump Through Stargate" took 3-4 menu
-                    -- opens before being recognized. The route icon is
-                    -- small and sits in a strip that can shift as the
-                    -- route updates, so the default distance tolerance
-                    -- (70, already once widened from 40 for this same
-                    -- kind of drift on other elements) was plausibly
-                    -- discarding a menu that had, in fact, opened
-                    -- correctly. Widened just for this one cascade
-                    -- rather than the shared default, since other
-                    -- cascades' tolerance is already tuned from past
-                    -- observations and this is a different UI element.
-                    (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
-                    { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
-                    (useMenuEntryWithTextContainingFirstOf
-                        [ "dock"
-                        , "jump"
-                        ]
-                        menuCascadeCompleted
+                    (useContextMenuCascadeWithCustomConfig
+                        -- Feedback: "Jump Through Stargate" took 3-4 menu
+                        -- opens before being recognized. The route icon is
+                        -- small and sits in a strip that can shift as the
+                        -- route updates, so the default distance tolerance
+                        -- (70, already once widened from 40 for this same
+                        -- kind of drift on other elements) was plausibly
+                        -- discarding a menu that had, in fact, opened
+                        -- correctly. Widened just for this one cascade
+                        -- rather than the shared default, since other
+                        -- cascades' tolerance is already tuned from past
+                        -- observations and this is a different UI element.
+                        (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
+                        { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
+                        (useMenuEntryWithTextContainingFirstOf
+                            [ "dock"
+                            , "jump"
+                            ]
+                            menuCascadeCompleted
+                        )
+                        context
                     )
-                    context )
+
 
 {-| Every reason this bot has to stop fighting and leave.
 
@@ -5162,12 +5232,12 @@ rather than by a condition here. `recoverPodAfterShipLoss` sits in
 `context.memory.shipLoss` -- so once #33's verdict latches, the whole
 docked-or-in-space split below it is unreachable and this function is never
 called again. That is the right order and not merely a convenient one: a retreat
-manoeuvre is something a *ship* does, and the correct response to no longer
+manoeuvre is something a _ship_ does, and the correct response to no longer
 having one is #33's, which flies the pod home and ends the session saying why.
 Warping a capsule between celestials would keep it alive and never finish.
 
 The interaction that makes this worth stating rather than leaving to the layout:
-a capsule *does* get shot, and being shot is exactly what arms the damage guard.
+a capsule _does_ get shot, and being shot is exactly what arms the damage guard.
 `updateIncomingDamageMemory` keeps running through a pod recovery, so the window
 fills and the latch can set -- harmlessly, because nothing reads it from up
 there, and usefully, because the status line still reports whether the pod is
@@ -5187,6 +5257,7 @@ would have fired in the session the ship was lost (peak 4101 in 45 s) and in
 none of the fifteen it survived (worst 3114); the frozen-reading guard would not
 have fired in any of the three runs whose gauge was live, where the most damage
 absorbed during an unchanged reading was 595.
+
 -}
 runAwayIfLowHealth : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> Maybe DecisionPathNode
 runAwayIfLowHealth context shipUI =
@@ -5237,7 +5308,7 @@ runAwayIfLowHealth context shipUI =
                 )
                 (runAway context)
 
-        runAwayArmorThreshold = 
+        runAwayArmorThreshold =
             context.eventContext.botSettings.runAwayArmorHitpointsThresholdPercent
 
         -- The low-water mark, not the live reading: see runAwayRearmPercent for
@@ -5296,12 +5367,14 @@ runAwayIfLowHealth context shipUI =
     else
         Nothing
 
+
 {-| How many readings one escape choice stays put.
 
 The choice has to outlive the two-tick select-then-press-the-panel manoeuvre, or
 the bot selects one celestial and warps to whatever the next reading picked
 instead. It also has to keep moving if a warp does not get us out of trouble,
 which is why it rotates at all.
+
 -}
 runAwayCelestialStickyReadings : Int
 runAwayCelestialStickyReadings =
@@ -5315,10 +5388,12 @@ leaving. It is also self-correcting -- arriving turns that entry into a km-range
 one that no longer qualifies, so the next warp necessarily picks somewhere else,
 and the ship keeps moving until its armour recovers.
 
-Deliberately *not* "anything whose name contains station". That is what killed
+Deliberately _not_ "anything whose name contains station". That is what killed
 run 102: an "Angel Asteroid Outpost" carries the object type "Asteroid Station
-- 1", matched as a station, and the bot then waited 119 readings for a Dock
-button that site scenery never offers, while armour drained from 52% to nothing.
+
+  - 1", matched as a station, and the bot then waited 119 readings for a Dock
+    button that site scenery never offers, while armour drained from 52% to nothing.
+
 -}
 escapeCelestialsOnOverview : BotDecisionContext -> List EveOnline.ParseUserInterface.OverviewWindowEntry
 escapeCelestialsOnOverview context =
@@ -5339,6 +5414,7 @@ station to be a real station, and every grid worth fleeing has something at AU
 range. Which celestial is picked rotates with the reading count, so a retreat
 that has not worked yet tries a different corner of the system rather than
 retrying one that did not help.
+
 -}
 runAway : BotDecisionContext -> DecisionPathNode
 runAway context =
@@ -5426,7 +5502,7 @@ tetherAtStructureViaSurroundings context =
                         , withTextContainingIgnoringCase "Warp Squad"
                         , withTextContainingIgnoringCase "Warp"
                         , withTextContainingIgnoringCase "Approach"
-                        , Common.Basics.listElementAtWrappedIndex (0)
+                        , Common.Basics.listElementAtWrappedIndex 0
                         ]
                             |> List.filterMap (\priority -> suitableMenuEntries |> priority)
                             |> List.head
@@ -5443,8 +5519,9 @@ tetherAtStructureViaSurroundings context =
             context
         )
 
+
 alignToStructure : ShipUI -> BotDecisionContext -> Maybe DecisionPathNode
-alignToStructure shipUI context = 
+alignToStructure shipUI context =
     let
         withTextContainingIgnoringCase textToSearch =
             List.filter (.text >> String.toLower >> (==) (textToSearch |> String.toLower)) >> List.head
@@ -5464,8 +5541,8 @@ alignToStructure shipUI context =
                                 List.filter menuEntryIsSuitable currentMenu.entries
                         in
                         [ withTextContainingIgnoringCase "Align to"
-                         , Common.Basics.listElementAtWrappedIndex (0)
-                         , withTextContainingIgnoringCase "Track"
+                        , Common.Basics.listElementAtWrappedIndex 0
+                        , withTextContainingIgnoringCase "Track"
                         ]
                             |> List.filterMap (\priority -> suitableMenuEntries |> priority)
                             |> List.head
@@ -5474,14 +5551,18 @@ alignToStructure shipUI context =
     in
     -- this is what case statements are for, dude
     if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverAlign then
-            Nothing
+        Nothing
+
     else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverRange then
-            Nothing
+        Nothing
+
     else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
-            Nothing
+        Nothing
+
     else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverWarp then
-            Nothing
-    else 
+        Nothing
+
+    else
         Just
             (useContextMenuCascadeOnListSurroundingsButton
                 (useMenuEntryWithTextContainingFirstOf [ "structures" ]
@@ -5489,7 +5570,9 @@ alignToStructure shipUI context =
                         (chooseNextMenuEntry MenuCascadeCompleted)
                     )
                 )
-                context)
+                context
+            )
+
 
 {-| Dock, preferring a particular station by name when one is given.
 
@@ -5503,6 +5586,7 @@ staying in space, and at session end there is not necessarily time to fly home.
 twice: the entries for structures in the menu from the SurroundingsButton can be
 nested one level deeper than the ones for stations, so not all structures appear
 directly under the "structures" entry.
+
 -}
 dockAtStation : Maybe String -> BotDecisionContext -> DecisionPathNode
 dockAtStation preferredStationName context =
@@ -5591,7 +5675,6 @@ undockUsingStationWindow context =
 
                         Just _ ->
                             describeBranch "I see we are already undocking." waitForProgressInGame
-                    
 
 
 {-| The combat messages currently faded onto the screen, oldest first.
@@ -5609,6 +5692,7 @@ needing history should read the gamelog file instead.
 
 The markup is EVE's own colour and font tagging, stripped here because the
 status text is read by a human in a terminal.
+
 -}
 visibleCombatMessages : ReadingFromGameClient -> List String
 visibleCombatMessages readingFromGameClient =
@@ -5636,13 +5720,14 @@ Current target: None." -- six lines of screen space suggesting a fight that had
 finished. A stale display reported faithfully, not stale data.
 
 The host now follows EVE's own game log instead (GameLogTail in
-botlab_host.py), which carries real wall-clock timestamps and cannot go stale,
+botlab\_host.py), which carries real wall-clock timestamps and cannot go stale,
 so nothing is lost by leaving it out here.
 
 `visibleCombatMessages` above is now unused, kept deliberately rather than
 deleted: it encodes which UI nodes carry combat text and how to read them, which
 is the expensive part to rediscover, and any future in-decision use of combat
 state wants exactly that.
+
 -}
 combatFeedIsReportedByTheHostGameLog : ()
 combatFeedIsReportedByTheHostGameLog =
@@ -6000,6 +6085,7 @@ rather than the only one for orbit.
 Give up quietly rather than ask for help. Positioning is an optimisation, not a
 prerequisite -- the guns and drones work regardless -- so the right answer when
 it cannot be confirmed is to stop trying and fight, not to stop the run.
+
 -}
 maneuverNotConfirmedGiveUpTicks : Int
 maneuverNotConfirmedGiveUpTicks =
@@ -6027,43 +6113,47 @@ ensureShipIsKeepingRange context shipUI overviewEntryToKAR =
                     ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_E ]
                      , overviewEntryToKAR.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
                      , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_E ]
-                    --  , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_C ]
-                    --  , overviewEntryToKAR.uiNode |> mouseClickOnUIElement MouseButtonLeft
-                    --  , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_C ]
-                    --  , overviewEntryToKAR.uiNode |> mouseClickOnUIElement MouseButtonLeft
+
+                     --  , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_C ]
+                     --  , overviewEntryToKAR.uiNode |> mouseClickOnUIElement MouseButtonLeft
+                     --  , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_C ]
+                     --  , overviewEntryToKAR.uiNode |> mouseClickOnUIElement MouseButtonLeft
                      ]
                         |> List.concat
                     )
                 )
             )
 
+
 ensureShipIsOrbiting : BotDecisionContext -> ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
 ensureShipIsOrbiting context shipUI overviewEntryToOrbit =
-        if context.memory.orbitUnconfirmedTicks > maneuverNotConfirmedGiveUpTicks then
-            Nothing
+    if context.memory.orbitUnconfirmedTicks > maneuverNotConfirmedGiveUpTicks then
+        Nothing
 
-        else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
-            Nothing
+    else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
+        Nothing
 
-        else if not (overviewEntryToOrbit |> overviewEntryIsTargetedOrTargeting) then
-            Nothing
+    else if not (overviewEntryToOrbit |> overviewEntryIsTargetedOrTargeting) then
+        Nothing
 
-        else
-            Just
-                (describeBranch "Press the 'W' key and click on the overview entry."
-                    (decideActionForCurrentStep
-                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_W ]
-                        , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_W ]
-                        -- , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_C ]
-                        -- , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft
-                        -- , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_C ]
-                        -- , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft
-                        ]
-                            |> List.concat
-                        )
+    else
+        Just
+            (describeBranch "Press the 'W' key and click on the overview entry."
+                (decideActionForCurrentStep
+                    ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_W ]
+                     , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
+                     , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_W ]
+
+                     -- , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_C ]
+                     -- , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft
+                     -- , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_C ]
+                     -- , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft
+                     ]
+                        |> List.concat
                     )
                 )
+            )
+
 
 {-| How many consecutive readings the distance has to say the same thing before
 the bot swaps ammo.
@@ -6073,6 +6163,7 @@ promoted, and the distance jumps from 8 km to 40 km between two readings without
 the ship or the fight changing. Acting on a single reading would therefore let
 target churn drive the guns. This is the same guard as
 `routeFirstMarkerUnchangedTicks`, applied to a number rather than a region.
+
 -}
 ammoSwapDistanceHoldTicks : Int
 ammoSwapDistanceHoldTicks =
@@ -6098,6 +6189,7 @@ crossover distance to decide against.
 
 Sized for the whole sequence on a multi-gun row -- silence the guns, then a menu
 per gun, several readings each -- with enough headroom for one retry.
+
 -}
 ammoSwapVerdictGiveUpTicks : Int
 ammoSwapVerdictGiveUpTicks =
@@ -6110,7 +6202,7 @@ before deciding this client will not show one.
 This used to disable the whole ammo swap, because the tooltip's `optimalRange`
 was the only thing that said which charge was loaded. It is not any more -- the
 weapon's own context menu says that, and says it without a hover -- so failing
-here now costs only the *refinement*: the crossover distance the swap would
+here now costs only the _refinement_: the crossover distance the swap would
 otherwise have derived from the two charges' optimal ranges. With
 `ammo-swap-range` set, nothing is lost at all.
 
@@ -6118,6 +6210,7 @@ Small, because the bot holds the mouse still while it waits -- see
 `hoverWeaponForOptimalRange` -- and holding still is holding off the rest of the
 fight. It is also attempted at most twice a session: once per charge, after which
 both optimal ranges are known and there is nothing left to learn.
+
 -}
 weaponTooltipUnansweredGiveUpTicks : Int
 weaponTooltipUnansweredGiveUpTicks =
@@ -6129,7 +6222,7 @@ reading it first told one to stop.
 
 **One deadline over the whole silent period, not one per phase.** That is the
 correction issue #34 forced, and the distinction is the whole point. The previous
-version bounded *getting the guns quiet* and left the phase after it -- waiting
+version bounded _getting the guns quiet_ and left the phase after it -- waiting
 for the ramp to finish -- with no counter at all. Run 8 sat in that second phase
 for 298 readings with the guns off and eleven hostiles on the overview, because
 the branch that would have handed the fight back is downstream of the wedge: the
@@ -6155,6 +6248,7 @@ is not an optimisation worth retrying.
 Comfortably longer than the sequence needs -- a settle plus a cascade or two --
 and comfortably shorter than `ammoSwapVerdictGiveUpTicks`, so that the dangerous
 state is always the first one to time out.
+
 -}
 ammoSwapSilencedGiveUpTicks : Int
 ammoSwapSilencedGiveUpTicks =
@@ -6198,6 +6292,7 @@ defers, and the swap happens between waves instead of during them. That is the
 trade the issue asks for, and the deferral costs nothing: the verdict stays live,
 the guns keep shooting the charge they have, and `ammoSwapVerdictGiveUpTicks`
 drops the attempt if the lull never comes.
+
 -}
 swapMayDisarmTheGuns : IncomingDamageMemory -> Bool
 swapMayDisarmTheGuns incomingDamage =
@@ -6219,6 +6314,7 @@ distinction is why every field #39 parsed is a `Maybe` and it is the difference
 between "the switch-off landed" and "we cannot tell". Both of these are therefore
 `Just`-only, and both answer `False` for `Nothing`, so on a build that does not
 carry the entry every caller behaves as though the signal did not exist.
+
 -}
 moduleReadsSwitchedOff : EveOnline.ParseUserInterface.ShipUIModuleButtonState -> Bool
 moduleReadsSwitchedOff state =
@@ -6239,7 +6335,7 @@ the previous answer to that is the first argument -- with no confirmation there
 is no undoing to detect, whatever the modules read.
 
 Run 11 is what this is for. On every one of that run's four swaps the guns read
-switched off for two readings and switched *on* from the third, because the
+switched off for two readings and switched _on_ from the third, because the
 settle hands the fight on and `decisionToKillRats` presses the weapon hotkey on
 the locked target. The swap went on for another seventeen readings re-opening
 menus and issuing loads the client had nothing to load into: the weapon fired not
@@ -6250,6 +6346,7 @@ switched off keeps a reading whose entries simply did not decode from being read
 as the guns coming back; requiring that something reads switched on keeps a
 second weapon in the row -- one the swap never commanded off, since it commands
 exactly one -- from answering for the one it did.
+
 -}
 switchOffHasBeenUndone : Bool -> List EveOnline.ParseUserInterface.ShipUIModuleButtonState -> Bool
 switchOffHasBeenUndone confirmedOffBefore moduleStates =
@@ -6263,6 +6360,7 @@ switchOffHasBeenUndone confirmedOffBefore moduleStates =
 The two answers want different actions from an operator -- one is a fight and
 passes on its own, the other is a host that will never carry the channel and
 means the swap is off for good -- and a single "not now" would hide that.
+
 -}
 describeWhyTheSwapMayNotDisarm : IncomingDamageMemory -> String
 describeWhyTheSwapMayNotDisarm incomingDamage =
@@ -6287,17 +6385,18 @@ reading `False` on a module that was switched **on**. A wait on a signal that ma
 never say what it is being asked is a wait that may never end, however patient.
 
 A count always ends. And it can afford to be short, because the bot no longer has
-to be *sure* the gun is quiet before trying: since #31 the client's own refusal
+to be _sure_ the gun is quiet before trying: since #31 the client's own refusal
 says when a load was thrown away, so an attempt made too early is answered in one
 reading rather than guessed at. Being wrong costs a reading; waiting to be
 certain cost run 8 nearly three hundred.
 
 **It is now an upper bound rather than the whole settle.** `gunsConfirmedOff`
 ends it early when the client says the switch-off landed, which run 11 measured
-happening on the *first* reading after the click every time. Only ever earlier:
+happening on the _first_ reading after the click every time. Only ever earlier:
 the count still applies unchanged, so a module that says nothing about itself
 settles exactly as it did before, and no reading of the module can make this
 wait longer than it already does.
+
 -}
 ammoSwapSilenceSettleTicks : Int
 ammoSwapSilenceSettleTicks =
@@ -6307,11 +6406,12 @@ ammoSwapSilenceSettleTicks =
 {-| How many entries a weapon's context menu must have before the bot will
 believe what is missing from it.
 
-The whole design reads the *absence* of a charge as proof that it is loaded, so
+The whole design reads the _absence_ of a charge as proof that it is loaded, so
 a menu caught half-built would say every charge is loaded at once. Verified live,
 a weapon's menu carries seven entries; the five commands are there whatever is
 loadable, so this is comfortably below any real menu and above a menu that has
 not arrived.
+
 -}
 ammoSwapMenuEntriesBeforeTrusted : Int
 ammoSwapMenuEntriesBeforeTrusted =
@@ -6322,15 +6422,16 @@ ammoSwapMenuEntriesBeforeTrusted =
 fires, in meters.
 
 A single threshold makes a target sitting near it swap on every reading. Two
-thresholds fix that, and where the crossover is a *fixed* number -- the setting,
+thresholds fix that, and where the crossover is a _fixed_ number -- the setting,
 or the midpoint of the two optimal ranges -- any positive deadband is stable, so
 a plain constant is enough.
 
 That is worth saying because the first version of this needed an argument about
 half the spread between the two charges' optimal ranges. It needed it because the
-threshold there was the *currently loaded* charge's optimal range, so every swap
+threshold there was the _currently loaded_ charge's optimal range, so every swap
 moved the threshold and could re-arm the opposite one. That case still exists,
 but only as the bootstrap below, and it carries its own wider deadband.
+
 -}
 ammoSwapDeadbandMeters : Int
 ammoSwapDeadbandMeters =
@@ -6350,6 +6451,7 @@ a cruiser-sized weapon.
 
 Worst case it costs one extra swap, after which both ranges are known, the
 crossover becomes the fixed midpoint, and this is never used again.
+
 -}
 ammoSwapBootstrapDeadbandMeters : Int
 ammoSwapBootstrapDeadbandMeters =
@@ -6376,8 +6478,9 @@ a configured number from a derived one.
 
 `Nothing` is a real answer and is handled rather than defaulted: no setting and
 no tooltip means the bot knows which charge is loaded but has nothing to say
-about which one *should* be, so it does not swap and says so. Guessing a distance
+about which one _should_ be, so it does not swap and says so. Guessing a distance
 would be worse than doing nothing, since wrong ammo still does damage.
+
 -}
 type alias AmmoSwapThreshold =
     { crossoverInMeters : Int
@@ -6437,12 +6540,13 @@ The channel is checked where the host gave one. A `Nothing` channel is a host
 that did not say which, not a line without one, so it is judged on its text alone
 rather than dropped.
 
-Note what this does *not* do. `Nothing` from the game log and `Just []` are
+Note what this does _not_ do. `Nothing` from the game log and `Just []` are
 collapsed here, and that is safe only because of the direction of the inference:
 finding no refusal is never read as the load having been accepted. The menu is
 what says that. Nothing anywhere may conclude "no refusal arrived, so it worked",
 which is the reading of an absent game log that would put this repo's signature
 bug back.
+
 -}
 loadRefusalFromGameLog : ReadingFromGameClient -> Maybe String
 loadRefusalFromGameLog readingFromGameClient =
@@ -6532,7 +6636,7 @@ gateLockedForWantOfAnItemFromGameLog readingFromGameClient =
 
 #41 stopped at reporting the refusal, on the grounds that the objective names no
 cargo so the loot path had nothing to look for. Half of that was wrong: the
-*client* names it, and the whole retrieval path -- `isLootableFor`,
+_client_ names it, and the whole retrieval path -- `isLootableFor`,
 `lootableHoldingMissionItem`, `scrollOverviewToReveal`, the `prefer-wreck`
 setting -- already takes the item name as an argument. This is the missing
 source of that argument, and nothing downstream of it is new. The passcard was
@@ -6549,8 +6653,8 @@ The name is returned exactly as the client wrote it, punctuation and all, and
 handed to `isLootableFor` to match the same way every other item name is.
 "R.S. Officer's Passcard" carries two periods and an apostrophe, and inventing a
 second matching rule for them would be a rule with one observation behind it.
-What that costs is worth naming: a plain substring match means the *named
-container* branch only fires if an overview row literally contains the name, and
+What that costs is worth naming: a plain substring match means the _named
+container_ branch only fires if an overview row literally contains the name, and
 a wreck's row carries the dead ship's name instead -- so a key inside a wreck is
 found by the blind wreck-opening branch, exactly as for every other mission item
 that comes out of something destroyed.
@@ -6620,7 +6724,7 @@ and the confirmation that follows finds nothing changed because nothing happened
 here, for the same reason it is treated as off there.
 
 **Used to choose whether to press the switch-off, and for nothing else.** It was
-also once used to decide whether the gun was *ready* to be loaded, together with
+also once used to decide whether the gun was _ready_ to be loaded, together with
 `rampRotationMilli`, and that is the pair of readings run 8 hung on: the counter
 in front reset every time this flickered between cycles, and the wait behind it
 never ended because the ramp never went quiet. #35 then measured `ramp_active` --
@@ -6629,6 +6733,7 @@ which is what this reads -- returning `False` on a module that was switched on.
 So nothing here waits on either signal any more. Being wrong about this costs one
 reading: the load is attempted anyway, and the client's own refusal (#31) says if
 the gun was still running.
+
 -}
 weaponIsFiring : ShipUIModuleButton -> Bool
 weaponIsFiring moduleButton =
@@ -6641,6 +6746,7 @@ Sorted by `x` rather than taken in list order, because the parser drops any
 module button whose display region it cannot read -- so the row's index space is
 not stable across readings even while nothing moves on screen, and indexing it
 has clicked a neighbouring module live.
+
 -}
 weaponModuleButtonsLeftToRight : ReadingFromGameClient -> List ShipUIModuleButton
 weaponModuleButtonsLeftToRight readingFromGameClient =
@@ -6659,6 +6765,7 @@ distance in AU. That last one is the point. AU distances do not parse, and the
 placeholder every other consumer falls back to (999999) reads as merely far,
 which is precisely the input that would argue for long-range ammo. Nothing in AU
 is in weapons range of anything, so it is excluded here rather than converted.
+
 -}
 activeTargetDistanceInMeters : ReadingFromGameClient -> Maybe Int
 activeTargetDistanceInMeters readingFromGameClient =
@@ -6674,6 +6781,7 @@ activeTargetDistanceInMeters readingFromGameClient =
 Observed live: right-clicking a weapon holding Radio M offered
 `Multifrequency M [4]`, twice. So an entry's text is the charge name plus a
 count, and a setting naming the charge will never equal it.
+
 -}
 stripChargeQuantitySuffix : String -> String
 stripChargeQuantitySuffix text =
@@ -6696,6 +6804,7 @@ degrades rather than failing outright.
 Duplicates need no handling beyond using `any`: the same charge is listed twice
 in the one menu observed, and two entries for one charge must not read as two
 different charges.
+
 -}
 weaponMenuOffersCharge : String -> List String -> Bool
 weaponMenuOffersCharge chargeName entryTexts =
@@ -6722,6 +6831,7 @@ A hover is the whole of the tooltip request, so "we asked" and "we clicked" have
 to be told apart: a click carries a `ButtonDown` in the same step. The region
 test keeps the context-menu cascade's own hover over a submenu entry from being
 read as a request for a module tooltip.
+
 -}
 previousStepHoveredElement : List (List EffectOnWindow.EffectOnWindowStruct) -> EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Bool
 previousStepHoveredElement previousStepsEffects element =
@@ -6794,6 +6904,7 @@ dictionary stays empty no matter how long the mouse rests on a module. The bot
 does not need the client to tell it which button the tooltip belongs to, though:
 it chose to hover that button itself, and the previous step's effects say where
 the mouse went.
+
 -}
 weaponOptimalRangeFromHover :
     List (List EffectOnWindow.EffectOnWindowStruct)
@@ -7298,8 +7409,7 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
 
                     else if optimalRangeGivenUp && (threshold == Nothing) then
                         Just
-                            ("no crossover distance: 'ammo-swap-range' is not set and the weapon's tooltip never appeared, so there is no distance to swap at even though the menu says which charge is loaded"
-                            )
+                            "no crossover distance: 'ammo-swap-range' is not set and the weapon's tooltip never appeared, so there is no distance to swap at even though the menu says which charge is loaded"
 
                     else
                         -- A load that does not land is *not* here. It abandons
@@ -7346,7 +7456,8 @@ pair by reading the menu is possible now that the menu is read at all, and is
 still not done: the menu lists every charge the ship carries that fits, which is
 not the same as the two the operator wants alternated, and picking two of them by
 guess is a swap nobody asked for. Naming both is also the only way to be sure
-there *is* a pair.
+there _is_ a pair.
+
 -}
 ensureAmmoSuitsTargetRange : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
 ensureAmmoSuitsTargetRange context nextStep =
@@ -7428,6 +7539,7 @@ by its ordinary route -- there is no separate re-activation step, and there
 should not be one: the branch that already knows how to start a weapon on a
 target is the right owner of that, and a second one would be two controllers for
 the same button.
+
 -}
 ammoSwapIsActingOnAVerdict : AmmoSwapMemory -> Bool
 ammoSwapIsActingOnAVerdict ammoSwap =
@@ -7799,7 +7911,7 @@ while `ammo-swap-range` is unset, and at most until
 `weaponTooltipUnansweredGiveUpTicks` readings have gone by without an answer.
 Holding costs less than it reads: guns and drones already engaged keep cycling
 with no further input, so a few readings of issuing nothing is a few readings of
-not *changing* anything, not a ceasefire.
+not _changing_ anything, not a ceasefire.
 
 Holding still could in principle age a pending lock attempt past
 `lockAttemptReadingsBeforeVerdict` and have a lock the bot never gave a chance
@@ -7807,6 +7919,7 @@ recorded as a refusal. It cannot, and the reason is worth keeping if either side
 is changed: a refusal is only counted with the target bar empty at both ends of
 the attempt, and this branch is only reachable with an active target. Letting the
 ammo path run without one would connect them.
+
 -}
 hoverWeaponForOptimalRange : BotDecisionContext -> ShipUIModuleButton -> DecisionPathNode
 hoverWeaponForOptimalRange context referenceGun =
@@ -7835,6 +7948,7 @@ the same whether the client said nothing or nothing was listening -- and those
 are the two answers `gameLogEntriesSinceLastReading` keeps apart on purpose. An
 operator wondering why a refusal never appeared should not have to guess which
 of the two they are looking at.
+
 -}
 describeGameLogAvailability : ReadingFromGameClient -> String
 describeGameLogAvailability readingFromGameClient =
@@ -7913,13 +8027,12 @@ describeAmmoSwapState context =
                                 " (satisfied)"
 
                             else if ammoSwap.verdictAbandoned then
-                                (case ammoSwap.loadRefusedByClient of
+                                case ammoSwap.loadRefusedByClient of
                                     Just refusal ->
                                         " (the client refused it: \"" ++ refusal ++ "\")"
 
                                     Nothing ->
                                         " (gave up on this one, will try again on the next change of range)"
-                                )
 
                             else if 0 < ammoSwap.gunsSilencedTicks then
                                 -- The number an operator should be watching: how
@@ -8023,18 +8136,18 @@ launchAndEngageDrones context =
                                 (describeBranch "Launch drones"
                                     (decideActionForCurrentStep
                                         ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT ]
-                                        , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_F ]
-                                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_F ]
-                                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_SHIFT ]
-                                        ]
+                                         , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_F ]
+                                         , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_F ]
+                                         , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_SHIFT ]
+                                         ]
                                             |> List.concat
                                         )
                                     )
-                                    -- (useContextMenuCascade
-                                    --     ( "drones group", droneGroupInBay.header.uiNode )
-                                    --     (useMenuEntryWithTextContaining "Launch drone" menuCascadeCompleted)
-                                    --     context
-                                    -- )
+                                 -- (useContextMenuCascade
+                                 --     ( "drones group", droneGroupInBay.header.uiNode )
+                                 --     (useMenuEntryWithTextContaining "Launch drone" menuCascadeCompleted)
+                                 --     context
+                                 -- )
                                 )
 
                         else
@@ -8043,6 +8156,7 @@ launchAndEngageDrones context =
                     _ ->
                         Nothing
             )
+
 
 {-| Whether the client is currently offering to take this gate.
 
@@ -8054,6 +8168,7 @@ threshold unreliable here and in the loot window.
 Requires the panel to be showing this gate, because the button belongs to
 whatever is selected; a button read while something else is selected would
 activate that instead.
+
 -}
 gateCanBeActivatedNow : BotDecisionContext -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 gateCanBeActivatedNow context entry =
@@ -8089,6 +8204,7 @@ the drones still being out.
 
 Generous because a fight legitimately keeps drones out for a long stretch, and
 the cost of hitting it early is only one click.
+
 -}
 droneRecallFocusRecoveryTicks : Int
 droneRecallFocusRecoveryTicks =
@@ -8098,7 +8214,7 @@ droneRecallFocusRecoveryTicks =
 {-| Unanswered readings -- see `droneRecallUnansweredTicks` -- before the drones
 are written off and the ship is allowed to leave without them.
 
-This is counted from the first recall the client did not answer, *not* from the
+This is counted from the first recall the client did not answer, _not_ from the
 launch. Run 1 measured it from launch and lost all ten drones in two batches of
 five: drones are deliberately left out for the whole fight, so any pocket
 running longer than this threshold pushed the counter past it, after which
@@ -8110,6 +8226,7 @@ Nothing on the wind-down path depends on this being small any more --
 `secondsPastSessionEndBeforeGivingUpOnDocking` ends the session whether or not
 the drones ever come home -- so this can afford to be the patient bound it was
 always described as.
+
 -}
 droneRecallGiveUpTicks : Int
 droneRecallGiveUpTicks =
@@ -8123,6 +8240,7 @@ press, click, press -- so during a recall that is being pursued every reading,
 only every other step carries the keypress. Short enough that a bot which has
 gone back to fighting stops counting readings against a recall it is no longer
 asking for.
+
 -}
 droneRecallAskedLookbackSteps : Int
 droneRecallAskedLookbackSteps =
@@ -8147,6 +8265,7 @@ dronesAreInSpace readingFromGameClient =
 
 `vkey_R` is used for nothing else in this bot, so the keypress alone identifies
 the recall.
+
 -}
 recentStepAskedForDroneRecall : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
 recentStepAskedForDroneRecall previousStepsEffects =
@@ -8160,12 +8279,13 @@ recentStepAskedForDroneRecall previousStepsEffects =
 Takes what to do once there is nothing to recall rather than returning a
 `Maybe`, so the branch that abandons the drones can still name itself in the
 decision log while handing the step on. That branch previously returned nothing
-at all, and only a separate branch testing the counter for *equality* with the
+at all, and only a separate branch testing the counter for _equality_ with the
 threshold ever said anything -- so the message landed only if the ship happened
 to be warping on the single reading where the counter hit 60 exactly. In run 1
 it never did: the give-up engaged mid-fight, silently, and the bot reported
 nothing wrong while having disabled its own drone recall for the rest of the
 session.
+
 -}
 returnDronesToBay : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
 returnDronesToBay context ifNothingToRecall =
@@ -8233,19 +8353,19 @@ returnDronesToBay context ifNothingToRecall =
                     Just
                         (describeBranch "I see there are drones in space. Return those to bay."
                             (decideActionForCurrentStep
-                                    ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT ]
-                                    , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_R ]
-                                    , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_R ]
-                                    , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_SHIFT ]
-                                    ]
-                                        |> List.concat
-                                    )
+                                ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT ]
+                                 , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_R ]
+                                 , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_R ]
+                                 , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_SHIFT ]
+                                 ]
+                                    |> List.concat
+                                )
                             )
-                            -- (useContextMenuCascade
-                            --     ( "drones group", droneGroupInLocalSpace.header.uiNode )
-                            --     (useMenuEntryWithTextContaining "Assist" menuCascadeCompleted)
-                            --     context
-                            -- )
+                         -- (useContextMenuCascade
+                         --     ( "drones group", droneGroupInLocalSpace.header.uiNode )
+                         --     (useMenuEntryWithTextContaining "Assist" menuCascadeCompleted)
+                         --     context
+                         -- )
                         )
             )
         |> Maybe.withDefault ifNothingToRecall
@@ -8258,6 +8378,7 @@ buttons are name-addressable, always in the same place, and need nothing to
 render before they can be clicked. `ParseUserInterface` only exposes
 `orbitButton`, so the rest are reached by name -- `selectedItemApproach`,
 `selectedItemWarpTo`, `selectedItemJump`, `selectedItemDock` and friends.
+
 -}
 selectedItemButtonNamed : BotDecisionContext -> String -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
 selectedItemButtonNamed context name =
@@ -8275,6 +8396,7 @@ selectedItemButtonNamed context name =
 
 Checked before pressing any of its buttons: they act on whatever is selected,
 which is not necessarily what this decision is about.
+
 -}
 selectedItemIsOverviewEntry : BotDecisionContext -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 selectedItemIsOverviewEntry context entry =
@@ -8303,6 +8425,7 @@ Two ticks by design. The panel acts on whatever is selected, so this presses its
 button only once the panel is showing the row we mean, and otherwise spends a
 tick selecting. That is still far quicker than a cascade, and it cannot act on
 the wrong object.
+
 -}
 selectThenPanelAction :
     BotDecisionContext
@@ -8352,6 +8475,7 @@ stargate to warp to.
 Used by the retreat, which previously drove the surroundings-button cascade and
 was measured taking armor from 58% to 31% while it tried. Docking beats warping
 -- it ends the fight outright rather than moving it -- so stations come first.
+
 -}
 escapeTargetOnOverview : BotDecisionContext -> Maybe ( EveOnline.ParseUserInterface.OverviewWindowEntry, String, String )
 escapeTargetOnOverview context =
@@ -8402,6 +8526,7 @@ cascade.
 Wrapped in unlessAlreadyClosingIn like the other close-in commands: EVE flies the
 ship to the gate and takes it on arrival, so re-issuing while already on the way
 just restarts the manoeuvre.
+
 -}
 activateGateOnOverviewEntry :
     BotDecisionContext
@@ -8529,6 +8654,7 @@ fly at rats it could have shot. A refusal, by contrast, is immediate: the
 client answers an out-of-range lock at once and nothing about the row ever
 changes, so waiting longer than necessary costs only how quickly the bounds
 converge, never their correctness.
+
 -}
 lockAttemptReadingsBeforeVerdict : Int
 lockAttemptReadingsBeforeVerdict =
@@ -8543,6 +8669,7 @@ dropping it. A verdict that moved a bound is announced once -- the bound is
 monotone, so a second verdict on the same evidence moves nothing and says
 nothing -- but the branch that stops waiting has to keep firing for as long as
 there is a wait to stop.
+
 -}
 lockAttemptIsSpent : BotDecisionContext -> OverviewWindowEntry -> Bool
 lockAttemptIsSpent context overviewEntry =
@@ -8570,6 +8697,7 @@ so nothing changes until something is learned. When the two contradict each
 other -- possible after a refit, since the bounds are not reset mid-session --
 the proven distance wins: a lock that completed is unambiguous evidence, where
 a refusal is an inference from several conditions holding at once.
+
 -}
 lockRangeThresholdInMeters : BotDecisionContext -> Int
 lockRangeThresholdInMeters context =
@@ -8613,6 +8741,7 @@ Where it does not, the row's name is used, but only when no other row in the
 overview shares it -- one of five identical rats says nothing about which one
 the client answered. A pocket of same-named rats therefore yields no evidence
 at all, which is the correct outcome rather than a guess.
+
 -}
 overviewEntryLockHandle : List OverviewWindowEntry -> OverviewWindowEntry -> Maybe String
 overviewEntryLockHandle allEntries entry =
@@ -8645,6 +8774,7 @@ Reading the attempt out of the effects rather than out of the decision is not a
 detour: `updateMemoryForNewReadingFromGame` is the only place that can write
 memory, and it sees the previous steps' effects but not the decision that
 produced them.
+
 -}
 lockClickLocationFromStepEffects : List EffectOnWindow.EffectOnWindowStruct -> Maybe EffectOnWindow.Location2d
 lockClickLocationFromStepEffects effects =
@@ -8682,6 +8812,7 @@ reading.
 Returned as one record rather than written field by field, so the whole of the
 rule lives in one place and `updateMemoryForNewReadingFromGame` gains four
 lines rather than four blocks that would each have to re-derive the others.
+
 -}
 type alias LockRangeLearning =
     { attempt : Maybe LockAttempt
@@ -8713,7 +8844,7 @@ not, which is why it takes all of the following at once:
     lock into".
 
 That last one is what separates "too far" from "no free slot". An empty target
-bar is the only thing a reading can say that *proves* a slot was free -- the
+bar is the only thing a reading can say that _proves_ a slot was free -- the
 client's maximum is not in the reading at all, and "another target locked in
 this engagement" does not prove it either, since locking the last one is
 precisely what fills the ship up. Without this condition the number would
@@ -8723,12 +8854,13 @@ the case that costs the most: everything on the grid out of reach, and the bot
 asking for a lock it will never get, reading after reading.
 
 The bot's own `attack-object` settings are not visible from here, so this does
-not try to work out whether the row *should* have been locked. It only follows
+not try to work out whether the row _should_ have been locked. It only follows
 the click the bot actually made, which also keeps it out of the way of whatever
 the candidate selection in `decideActionInCombat` grows into.
 
 The bounds are not reset within a session: `BotMemory` starts fresh with each
 one, and the ship does not change mid-session in the way this bot flies.
+
 -}
 updateLockRangeLearning : UpdateMemoryContext BotSettings -> BotMemory -> LockRangeLearning
 updateLockRangeLearning context botMemoryBefore =
@@ -8966,6 +9098,7 @@ the bot adjusts for itself is worth being able to read at any moment, not only
 on the reading it moved. The pending attempt is here too, because a bot that
 keeps clicking a lock it will never get shows up as an attempt sitting at the
 verdict count long before either bound has anything to say.
+
 -}
 describeLockRange : BotDecisionContext -> String
 describeLockRange context =
@@ -8983,9 +9116,6 @@ describeLockRange context =
                 |> Maybe.withDefault "none"
            )
         ++ ")."
-
-
-
 
 
 botMain : InterfaceToHost.BotConfig State
@@ -9371,6 +9501,7 @@ Carried continuously rather than only while the trip runs, because the two
 inputs that decide it -- the setting and what the last reading that could see
 the drone bay said -- are both invisible otherwise, and "the trip never
 started" and "the trip finished" look identical in a decision log.
+
 -}
 describeHomeStation : BotDecisionContext -> String
 describeHomeStation context =
@@ -9429,6 +9560,7 @@ still only knew how to warp.
 
 So a scrambler is shot first. Killing it is the only thing that restores the
 option to leave.
+
 -}
 overviewEntryIsWarpDisruptingMe : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 overviewEntryIsWarpDisruptingMe overviewEntry =
@@ -9454,6 +9586,7 @@ line and turns the next run into the evidence a follow-up can be built on.
 
 Capped and deduplicated: distinct strings across rendered rows only, since an
 undisplayed row's contents belong to whatever was recycled into its place.
+
 -}
 describeOverviewIndicationHints : ReadingFromGameClient -> String
 describeOverviewIndicationHints readingFromGameClient =
@@ -9480,7 +9613,7 @@ other Large Collidable Objects -- and those are neutral objects with no
 hostile colouring at all, so no colour test will ever match them. They have to
 be named explicitly via the `attack-object` setting.
 
-Note the structure must also be *visible*: Large Collidable Objects are off by
+Note the structure must also be _visible_: Large Collidable Objects are off by
 default in the overview's type filters, and the bot can only act on what the
 overview shows it.
 
@@ -9497,10 +9630,11 @@ because it shot us enters the same list at its own distance rank and is subject
 to every guard the other two are: `overviewEntryDistanceIsOnGrid` below (so an
 AU distance is still excluded), `overviewEntryIsDisplayed` at the lock site (so
 a virtualised row is still never clicked), and the scrambler-first sort in
-`decideActionInCombat` (so being unable to *leave* still outranks being shot).
+`decideActionInCombat` (so being unable to _leave_ still outranks being shot).
 When the colour rule and this one agree they produce one entry, not two, and
 nothing downstream can tell which disjunct matched. The one place that can, and
 must, is `isObjectToAttackByName` -- see the note there.
+
 -}
 shouldAttackOverviewEntry : ObjectNamesToAttack -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 shouldAttackOverviewEntry namesToAttack overviewEntry =
@@ -9542,6 +9676,7 @@ above is for the Name column specifically -- no recorded line shows an
 attacker's name in the Type column -- so Type is the unverified half of this,
 and it is included because the failure it guards against (a row whose Name cell
 is empty) is the silent one.
+
 -}
 isObjectShootingAtUs : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isObjectShootingAtUs attackerNames overviewEntry =
@@ -9577,6 +9712,7 @@ that would otherwise try to lock, approach or wait for it.
 `attack-object` names are gated by this too: a mission structure is on the
 grid you are sent to, never AU away, so a name match at that distance is a
 different object with the same name elsewhere in the system.
+
 -}
 overviewEntryDistanceIsOnGrid : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 overviewEntryDistanceIsOnGrid overviewEntry =
@@ -9606,6 +9742,7 @@ mission means -- it is quoting the thing's own label -- and which column carries
 that label varies: "Amarr Chapel" is both, while an Amarr Trade Post on the same
 grid is named "Amarr-Caldari Mediation Center". Narrowing this to Type would
 leave the bot unable to shoot what the mission just told it to shoot.
+
 -}
 isObjectToAttackFromObjective : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isObjectToAttackFromObjective namesToAttack overviewEntry =
@@ -9640,6 +9777,7 @@ out of the overview works whatever its capitalisation.
 Either column is accepted because which one carries the identifying label
 varies -- see `isObjectToAttackFromObjective`, where the same is true of the
 names a mission gives.
+
 -}
 isObjectToAttackFromSettings : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isObjectToAttackFromSettings namesToAttack overviewEntry =
@@ -9667,6 +9805,7 @@ differently and, more importantly, mean different things. See
 `isObjectToAttackFromObjective`, `isObjectToAttackFromSettings` and
 `isObjectShootingAtUs` for the matching, and `isObjectToAttackByName` for the
 one decision that has to tell the third apart from the other two.
+
 -}
 type alias ObjectNamesToAttack =
     { fromObjective : List String
@@ -9701,7 +9840,7 @@ overviewEntriesToAttackFromReadingFromGameClient namesToAttack readingFromGameCl
 
 
 {-| Targets this mission actually named, as opposed to hostiles that merely
-happen to share the grid. Distinguished by *why* the entry matched: an
+happen to share the grid. Distinguished by _why_ the entry matched: an
 objective- or settings-named structure still has to die when the briefing says
 clearing is optional, a wandering pirate does not.
 
@@ -9720,6 +9859,7 @@ now travel to the objective while being shot and will not shoot back. What
 covers that is the damage-rate retreat -- see `runAwayIfLowHealth` -- not this,
 and if the fire is light enough that the retreat never trips, taking it while
 finishing the mission is the intended outcome rather than an oversight.
+
 -}
 isObjectToAttackByName : ObjectNamesToAttack -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isObjectToAttackByName namesToAttack overviewEntry =
@@ -9732,19 +9872,20 @@ isObjectToAttackByName namesToAttack overviewEntry =
 EVE says so in more than one wording, and the first version of this matched
 only the first of them:
 
-  + "The acceleration gates are not locked, hence clearing the pirates in the
+  - "The acceleration gates are not locked, hence clearing the pirates in the
     first two rooms is not required" -- Worlds Collide
-  + "Destroying any pirates found in the area is not a requirement" -- Recon
+  - "Destroying any pirates found in the area is not a requirement" -- Recon
 
 Worth acting on either way. Run 102 spent over 400 combat decisions shooting
 rats on a mission whose brief said not to bother, and run 106 did the same on
 Recon while the objective read "You need to activate the Acceleration Gate".
 
-So: the briefing must mention pirates *and* say they are not required. That
+So: the briefing must mention pirates _and_ say they are not required. That
 keeps it explicit -- getting this wrong the other way strands the ship at a
 gate that will not open -- while not depending on the gates-not-locked clause,
 which only one of the two wordings has. Checked against every briefing in the
 run history: of 46 missions, it matches those two and nothing else.
+
 -}
 briefingSaysClearingIsOptional : String -> Bool
 briefingSaysClearingIsOptional briefing =
@@ -9781,7 +9922,7 @@ loot showing, as opposed to just sitting on the ship's own hangar view.
 `EveOnline.ParseUserInterface.InventoryWindow` has no dedicated field for
 this (same gap noted at the "Loot All" text-search call site), and
 `readingFromGameClient.inventoryWindows |> List.head` used to just grab
-the window unconditionally -- since it's *always* present, that meant the
+the window unconditionally -- since it's _always_ present, that meant the
 looting logic thought a wreck was open even when nothing had ever been
 opened at all, forcing it to Ctrl+W-close a window the player never
 wanted closed (stuck 650+ seconds live with zero rats and zero commander
@@ -9790,8 +9931,8 @@ wrecks anywhere in the overview).
 First fix attempt here checked `leftTreeEntries |> List.isEmpty`, on the
 assumption that opening a wreck's cargo shows a separate flat popup with
 no hangar tree. Wrong, confirmed live immediately after shipping it: a
-wreck opened via "Open Cargo" shows up as one more row *in the same
-sidebar tree* as the ship's own hangar (Drone Bay, PLEX Vault, etc.), not
+wreck opened via "Open Cargo" shows up as one more row _in the same
+sidebar tree_ as the ship's own hangar (Drone Bay, PLEX Vault, etc.), not
 a separate window -- so `leftTreeEntries` is non-empty either way, and
 that check excluded the real, already-open loot view every single tick,
 which made the bot think "Open Cargo" had never been clicked and re-click
@@ -9800,7 +9941,7 @@ button) were sitting right there on screen.
 
 Checking for a findable "Loot All" button instead: not a structural
 property of the window, but the actual thing this code needs to already
-be true before it can act -- present only once a wreck is both open *and*
+be true before it can act -- present only once a wreck is both open _and_
 selected in the tree (confirmed live: "Open Cargo" both adds and selects
 the row in one step, so this becomes findable immediately, no separate
 select-click needed). Doesn't cover the fully-looted-and-emptied case (no
@@ -9809,6 +9950,7 @@ button left to find) as elegantly -- that degrades to the existing
 same already-empty wreck, bounded by `lootWreckTimeRemainingSeconds`
 elsewhere in this file, rather than a clean close -- but that's a correct,
 bounded, wasted-tick nuisance, not a real stall like the two bugs above.
+
 -}
 wreckLootWindowsFromReadingFromGameClient : ReadingFromGameClient -> List EveOnline.ParseUserInterface.InventoryWindow
 wreckLootWindowsFromReadingFromGameClient readingFromGameClient =
@@ -9826,12 +9968,12 @@ that is not a filter: every row has an item id -- stargates, stations, the sun.
 So this answered with whatever object was physically nearest the ship. Two
 callers read it and both were wrong in a way nothing could report:
 
-  * `shipIsWithinLootRange` asked "is the container I have open within 2,000 m"
+  - `shipIsWithinLootRange` asked "is the container I have open within 2,000 m"
     and was answered about a beacon. Across all thirteen recorded runs its false
     branch -- `Still on the way to the container` -- was reached **zero** times,
     while `Click 'Loot All'` was decided 109 times in run 12 alone. A guard that
     has never once been false is not a guard.
-  * `openWreckLootWindowAndId` uses the id to record which wreck was emptied or
+  - `openWreckLootWindowAndId` uses the id to record which wreck was emptied or
     written off. On run 12's own final grid the nearest row was a Ruined Neon
     Sign 674 m away and the nearest wreck 2,699 m, so an emptied wreck would
     have gone into `lootedWreckIds` under the neon sign's id -- the real wreck
@@ -9840,6 +9982,7 @@ callers read it and both were wrong in a way nothing could report:
 Displayed rows only, for "Reading the overview"'s reason: a virtualised row
 keeps a stale distance belonging to whatever was recycled into its place, and
 believing one here would put a phantom at the head of a distance sort.
+
 -}
 nearestLootableEntry : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
 nearestLootableEntry readingFromGameClient =
@@ -9867,6 +10010,7 @@ the cargo lands -- so text that is identical for hundreds of readings while the
 ship is in space means nothing is happening. It does not have to distinguish
 "nothing to do" from "busy", because the branch that consults it is only reached
 when there is nothing to do.
+
 -}
 missionObjectiveText : ReadingFromGameClient -> String
 missionObjectiveText readingFromGameClient =
@@ -9879,6 +10023,7 @@ missionObjectiveText readingFromGameClient =
 
 Generous -- a mission genuinely can take a while to catch up after a warp -- but
 finite, because the two runs that died here waited for the rest of the session.
+
 -}
 nothingToDoTicksBeforeCryingStuck : Int
 nothingToDoTicksBeforeCryingStuck =
@@ -9901,6 +10046,7 @@ nothing when the cargo really is in the hangar.
 
 Counted on the reading alone -- docked with the mission asking for cargo -- so
 it resets the moment the ship undocks or the objective moves on.
+
 -}
 courierLoadHasHadLongEnough : BotDecisionContext -> Bool
 courierLoadHasHadLongEnough context =
@@ -9943,6 +10089,7 @@ window is not evidence of having arrived, and EVE said so 39 times in one run
 'Loot All' anyway on the reading the window appeared, and the client refused it 8
 times out of 8 with "You must be within 2500 meters of the container to remove
 items from it". Every wreck that run was left full.
+
 -}
 shipIsWithinLootRange : ReadingFromGameClient -> Bool
 shipIsWithinLootRange readingFromGameClient =
@@ -9966,6 +10113,7 @@ to record a wreck as looted the moment its window opened, which is the one momen
 we have positive evidence it still holds something -- so a refused 'Loot All' was
 remembered as a completed one and the wreck never looked at again. On run 113 that
 lost the Blood Raider Personnel Transport carrying the mission's Militants.
+
 -}
 openContainerIsEmpty : EveOnline.ParseUserInterface.InventoryWindow -> Bool
 openContainerIsEmpty lootWindow =
@@ -9981,6 +10129,7 @@ openContainerIsEmpty lootWindow =
 
 Both halves are needed together and neither means anything without the other, so
 the pairing is done once here rather than at each of the three call sites.
+
 -}
 openWreckLootWindowAndId : ReadingFromGameClient -> Maybe ( EveOnline.ParseUserInterface.InventoryWindow, String )
 openWreckLootWindowAndId readingFromGameClient =
@@ -10019,6 +10168,7 @@ outOfRangeTicksBeforeGivingUp =
 
 Both counters are bounds on waiting, and each names a different failure, so the
 log says which one happened rather than reporting a generic give-up.
+
 -}
 giveUpOnOpenContainerReason : BotDecisionContext -> Maybe String
 giveUpOnOpenContainerReason context =
@@ -10048,6 +10198,7 @@ Generous on purpose: a mission just accepted appears in the conversation a
 reading or two before it appears in the info panel, and mistaking that for an
 untracked mission would halt every run at its first mission. The failure it
 catches is unbounded, so waiting a few more readings costs nothing.
+
 -}
 missionNotTrackedTicks : Int
 missionNotTrackedTicks =
@@ -10093,7 +10244,8 @@ the bot locks from anyway.
 
 Returns Nothing once the click has gone out, so the guns follow on the next
 step rather than the row being re-clicked every tick -- a click is also how you
-*change* the active target, so repeating it is not free.
+_change_ the active target, so repeating it is not free.
+
 -}
 clickTargetBeforeShooting :
     BotDecisionContext
@@ -10147,7 +10299,7 @@ clickTargetBeforeShooting context entriesToAttack =
 
 {-| Promote one of the locked targets to being the active one, if none is.
 
-Locking a target and *aiming* at it are separate things in EVE, and they can
+Locking a target and _aiming_ at it are separate things in EVE, and they can
 come apart: seen live with a full set of locks and no active target at all,
 which quietly makes every weapon hotkey a no-op -- F1 fires whatever is fitted
 at whatever is active, and nothing was. The bot went on pressing it and hitting
@@ -10161,6 +10313,7 @@ target's portrait in the target bar promotes it to active.
 
 Nearest first, so the ship shoots what is closest rather than whichever target
 happens to sit leftmost in the bar.
+
 -}
 activateOneOfTheLockedTargets : BotDecisionContext -> Maybe DecisionPathNode
 activateOneOfTheLockedTargets context =
@@ -10249,13 +10402,16 @@ anyAttackableInOverview namesToAttack readingFromGameClient =
 
 
 shouldAttackOverviewEntryFirst : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
-shouldAttackOverviewEntryFirst overviewEntry = case overviewEntry.objectName of
-    Nothing -> False
-    Just objectName ->
-        objectName |> String.contains "Tower"
+shouldAttackOverviewEntryFirst overviewEntry =
+    case overviewEntry.objectName of
+        Nothing ->
+            False
+
+        Just objectName ->
+            objectName |> String.contains "Tower"
 
 
-{-| Matches the "Ancient Acceleration Gate" (and any other "* Acceleration
+{-| Matches the "Ancient Acceleration Gate" (and any other "\* Acceleration
 Gate") objects that link the separate rooms ("pockets") inside a multi-room
 site like the "Sansha's Command Relay Outpost" opportunity: checks both
 `objectName` and `objectType` the same defensive way `isNotableWreck`
@@ -10275,13 +10431,14 @@ Shared by the memory counter that notices a gate refusing the ship and by the
 propulsion-module rule, which switches the module off on arrival -- a gate is
 taken from a standstill, so once the ship is here the module has nothing left
 to contribute.
+
 -}
 accelerationGateIsWithinReach : ReadingFromGameClient -> Bool
 accelerationGateIsWithinReach readingFromGameClient =
     accelerationGatesOnOverview readingFromGameClient
         |> List.any
             (\entry ->
-                (overviewEntryDistanceOrFarInMeters entry)
+                overviewEntryDistanceOrFarInMeters entry
                     <= interactionRangeInMeters
             )
 
@@ -10303,6 +10460,7 @@ gate is often tens of km away. Leaving it running costs a slower align into the
 gate's own warp; that is the cheaper end of the trade and the one deliberately
 chosen here. Drones get no such choice -- ones left in space stay in the old
 pocket.
+
 -}
 activateAccelerationGateIfPresent : BotDecisionContext -> Maybe DecisionPathNode
 activateAccelerationGateIfPresent context =
@@ -10316,80 +10474,80 @@ activateAccelerationGateIfPresent context =
                 in
                 if context.memory.gateLockedForWantOfAnItem /= Nothing then
                     Just <|
-                    -- The client has said, in answer to this bot's own press,
-                    -- that it will not open this gate without an item in the
-                    -- hold. Pressing again is the press/refuse/dismiss loop run
-                    -- 10 spent two minutes in.
-                    --
-                    -- **Reaching this branch means the search is already over.**
-                    -- `lootMissionItemFromContainerIfPresent` is checked ahead
-                    -- of the whole gate path in `decideActionInMissionPocket`,
-                    -- and since #44 it is driven by the key the client named as
-                    -- well as by the objective's own cargo -- so if anything on
-                    -- the overview could still be holding it, that branch won
-                    -- this reading and this one was never called. Arriving here
-                    -- is the loot path answering "nothing left to open".
-                    --
-                    -- Checked before the range test rather than after it, so
-                    -- the ship does not fly at a gate it has been told is shut.
-                    -- Nothing is lost by that: only the nearest gate is ever
-                    -- considered, and the verdict is cleared the moment the ship
-                    -- leaves reach or empties a container.
-                    --
-                    -- Asking for help on one line from the client rather than
-                    -- waiting for the bottom of the tree to notice. That give-up
-                    -- did fire in run 10 and did its job -- but 20 minutes and
-                    -- 1,325 readings later, and saying only that nothing was
-                    -- happening. The client had said why on the first attempt.
-                    describeBranch
-                        ("This acceleration gate will not open for this ship, and the client said why: \""
-                            ++ (context.memory.gateLockedForWantOfAnItem |> Maybe.withDefault "")
-                            ++ "\" -- "
-                            ++ (case gateKeyWanted context of
-                                    Just itemName ->
-                                        "and nothing left on the overview looks like it might hold '"
-                                            ++ itemName
-                                            ++ "'."
+                        -- The client has said, in answer to this bot's own press,
+                        -- that it will not open this gate without an item in the
+                        -- hold. Pressing again is the press/refuse/dismiss loop run
+                        -- 10 spent two minutes in.
+                        --
+                        -- **Reaching this branch means the search is already over.**
+                        -- `lootMissionItemFromContainerIfPresent` is checked ahead
+                        -- of the whole gate path in `decideActionInMissionPocket`,
+                        -- and since #44 it is driven by the key the client named as
+                        -- well as by the objective's own cargo -- so if anything on
+                        -- the overview could still be holding it, that branch won
+                        -- this reading and this one was never called. Arriving here
+                        -- is the loot path answering "nothing left to open".
+                        --
+                        -- Checked before the range test rather than after it, so
+                        -- the ship does not fly at a gate it has been told is shut.
+                        -- Nothing is lost by that: only the nearest gate is ever
+                        -- considered, and the verdict is cleared the moment the ship
+                        -- leaves reach or empties a container.
+                        --
+                        -- Asking for help on one line from the client rather than
+                        -- waiting for the bottom of the tree to notice. That give-up
+                        -- did fire in run 10 and did its job -- but 20 minutes and
+                        -- 1,325 readings later, and saying only that nothing was
+                        -- happening. The client had said why on the first attempt.
+                        describeBranch
+                            ("This acceleration gate will not open for this ship, and the client said why: \""
+                                ++ (context.memory.gateLockedForWantOfAnItem |> Maybe.withDefault "")
+                                ++ "\" -- "
+                                ++ (case gateKeyWanted context of
+                                        Just itemName ->
+                                            "and nothing left on the overview looks like it might hold '"
+                                                ++ itemName
+                                                ++ "'."
 
-                                    Nothing ->
-                                        -- The sentence matched but named nothing
-                                        -- extractable, so there is no errand to
-                                        -- run. Said differently from the case
-                                        -- above, because "we looked and found
-                                        -- nothing" and "we never had anything to
-                                        -- look for" are different problems.
-                                        "and it named no item this bot could pick out of that sentence."
-                               )
-                        )
-                        askForHelpToGetUnstuck
+                                        Nothing ->
+                                            -- The sentence matched but named nothing
+                                            -- extractable, so there is no errand to
+                                            -- run. Said differently from the case
+                                            -- above, because "we looked and found
+                                            -- nothing" and "we never had anything to
+                                            -- look for" are different problems.
+                                            "and it named no item this bot could pick out of that sentence."
+                                   )
+                            )
+                            askForHelpToGetUnstuck
 
                 else if not (gateCanBeActivatedNow context accelerationGateEntry) then
                     Just <|
-                    -- Approach until the client says we can take the gate, and
-                    -- let *it* decide when that is. The panel only carries
-                    -- `selectedItemActivateGate` while the gate is genuinely in
-                    -- range, so the button's presence is the range test -- and
-                    -- unlike a distance of our own it cannot be stale.
-                    --
-                    -- A distance threshold was the obvious alternative and it
-                    -- does not work. The overview distance lags the ship's true
-                    -- position: run 128 read "in reach" and shut the prop mod
-                    -- down, and the panel still offered no button. It is the
-                    -- same lag that had the loot window refusing "Loot All" with
-                    -- "you must be within 2500 meters" while the reading said
-                    -- 1,602 m. Tightening interactionRangeInMeters would only
-                    -- move the guess; asking the client removes it.
-                    --
-                    -- Drones come home first: the gate fires with whatever is
-                    -- still in space.
-                    ensureDronesRecalledBeforeWarping context
-                        (approachOverviewEntry context
-                            ("The acceleration gate is "
-                                ++ String.fromInt distanceInMeters
-                                ++ " m away and the panel offers no Activate yet -- keep closing."
+                        -- Approach until the client says we can take the gate, and
+                        -- let *it* decide when that is. The panel only carries
+                        -- `selectedItemActivateGate` while the gate is genuinely in
+                        -- range, so the button's presence is the range test -- and
+                        -- unlike a distance of our own it cannot be stale.
+                        --
+                        -- A distance threshold was the obvious alternative and it
+                        -- does not work. The overview distance lags the ship's true
+                        -- position: run 128 read "in reach" and shut the prop mod
+                        -- down, and the panel still offered no button. It is the
+                        -- same lag that had the loot window refusing "Loot All" with
+                        -- "you must be within 2500 meters" while the reading said
+                        -- 1,602 m. Tightening interactionRangeInMeters would only
+                        -- move the guess; asking the client removes it.
+                        --
+                        -- Drones come home first: the gate fires with whatever is
+                        -- still in space.
+                        ensureDronesRecalledBeforeWarping context
+                            (approachOverviewEntry context
+                                ("The acceleration gate is "
+                                    ++ String.fromInt distanceInMeters
+                                    ++ " m away and the panel offers no Activate yet -- keep closing."
+                                )
+                                accelerationGateEntry
                             )
-                            accelerationGateEntry
-                        )
 
                 else if gateRefusesThisShipTicks < context.memory.gateWithinReachTicks then
                     -- Hand the turn back rather than end the session. This used to
@@ -10415,22 +10573,22 @@ activateAccelerationGateIfPresent context =
 
                 else
                     Just <|
-                    ensureDronesRecalledBeforeWarping context
-                        (activateGateOnOverviewEntry context
-                            -- Says which gate. The bare version of this line was
-                            -- printed 135 times in run 10 without ever revealing
-                            -- that the overview held two acceleration gates at
-                            -- very different ranges, which is what made the
-                            -- diagnosis take a manual read of the client. The
-                            -- distance deliberately does not read "N m away":
-                            -- stall_watch treats that wording as an approach in
-                            -- progress and a falling number as progress, and
-                            -- nothing is approaching here.
-                            (describeAccelerationGateChosen context accelerationGateEntry
-                                ++ " -- D-click it to move to the next pocket."
+                        ensureDronesRecalledBeforeWarping context
+                            (activateGateOnOverviewEntry context
+                                -- Says which gate. The bare version of this line was
+                                -- printed 135 times in run 10 without ever revealing
+                                -- that the overview held two acceleration gates at
+                                -- very different ranges, which is what made the
+                                -- diagnosis take a manual read of the client. The
+                                -- distance deliberately does not read "N m away":
+                                -- stall_watch treats that wording as an approach in
+                                -- progress and a falling number as progress, and
+                                -- nothing is approaching here.
+                                (describeAccelerationGateChosen context accelerationGateEntry
+                                    ++ " -- D-click it to move to the next pocket."
+                                )
+                                accelerationGateEntry
                             )
-                            accelerationGateEntry
-                        )
             )
 
 
@@ -10624,8 +10782,9 @@ Split out of `routeToStationByName` because it is also the evidence that a route
 was set by us rather than left over from a mission -- see
 `homeStationRouteIsSet`. Matched on the name appearing anywhere in the window's
 text, which is how the window titles itself; the tooltip trap does not apply
-here, since that one is drawn outside the *results* window and is not an
+here, since that one is drawn outside the _results_ window and is not an
 `InfoWindow` at all.
+
 -}
 stationInfoWindowForStation : BotDecisionContext -> String -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
 stationInfoWindowForStation context stationName =
@@ -10841,6 +11000,7 @@ own explicit `returnDronesToBay` step.
 
 Acceleration gates are the exception and use `ensureDronesRecalledBeforeWarping`
 instead -- see `activateAccelerationGateIfPresent` for why.
+
 -}
 ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping :
     BotDecisionContext
@@ -10857,6 +11017,7 @@ The half of the preparation above that is never optional: drones still in space
 when the ship leaves are simply lost, whereas an active propulsion module only
 costs a slower align. Acceleration gates use this on its own -- see
 `activateAccelerationGateIfPresent`.
+
 -}
 ensureDronesRecalledBeforeWarping :
     BotDecisionContext
@@ -10922,7 +11083,7 @@ deactivatePropulsionModuleBeforeWarping context ifReadyToWarp =
             )
 
 
-{-| Number of consecutive ticks *any* context menu has been open before we
+{-| Number of consecutive ticks _any_ context menu has been open before we
 treat it as stray rather than as a cascade we (or the framework's own
 `useContextMenuCascade`) are actively progressing through.
 
@@ -10940,27 +11101,28 @@ rendered position while animating open, which would defeat an
 exact-`==` comparison indefinitely without ever looking different in a
 screenshot.
 
-First replacement: count consecutive ticks where *some* menu -- any
+First replacement: count consecutive ticks where _some_ menu -- any
 menu, open regardless of whether it's literally the same instance --
 has been open at all, resetting to 0 whenever `contextMenus` is empty.
 That also turned out wrong, the opposite way: a genuine multi-level
-cascade (e.g. a 3-deep menu select) keeps *some* menu open continuously
+cascade (e.g. a 3-deep menu select) keeps _some_ menu open continuously
 across every level, by design, until the final entry is clicked -- if
 that takes more ticks than the threshold (real render/network latency
 per level adds up over 3 levels), this fired mid-cascade and cancelled
 real progress.
 
-The actual fix: track cascade *depth*, not just presence. Context menus
+The actual fix: track cascade _depth_, not just presence. Context menus
 nest -- descending a level adds one more entry to
 `readingFromGameClient.contextMenus` rather than replacing it (this is
 also how the framework's own `contextMenuCascadeLevel` works). So
 `BotMemory.contextMenuStuckTicks` only increments when the menu count
 has stayed the same (or dropped without reaching zero) since the last
-reading; any tick that goes *deeper* than before resets it to 0,
+reading; any tick that goes _deeper_ than before resets it to 0,
 regardless of how many ticks the cascade has taken in total. A
 genuinely stuck cascade -- sitting at the same depth, unable to find its
 next entry -- still trips this after a few ticks; a cascade that keeps
 advancing, no matter how many levels or how slowly, never does.
+
 -}
 strayContextMenuStuckTicksThreshold : Int
 strayContextMenuStuckTicksThreshold =
@@ -11021,6 +11183,7 @@ easily produce 0.42. A garbage value inside [0, 100] is indistinguishable from a
 real one and this function cannot help with it. That is the argument for
 `run-away-incoming-damage-threshold`, which reads a number the client states
 outright rather than a float scraped off a sprite.
+
 -}
 plausibleHitpointsPercent : Int -> Maybe Int
 plausibleHitpointsPercent value =
@@ -11049,6 +11212,7 @@ so a run that trips this guard is worth reading rather than assuming spurious.
 on this account. Flying anything else means re-deriving it, and the failure mode
 of carrying it over is silent in the dangerous direction: on a bigger hull it
 retreats from fights it would win, and on a smaller one it never fires.
+
 -}
 defaultRunAwayIncomingDamageThreshold : Int
 defaultRunAwayIncomingDamageThreshold =
@@ -11064,6 +11228,7 @@ surviving run absorbed was 3114 hitpoints; the session the ship died in peaked
 at 4101. Shorter windows separate slightly better still in relative terms and
 carry more noise; longer ones close the gap -- at four minutes it is 8689
 against 9286, which no threshold could tell apart.
+
 -}
 incomingDamageWindowSeconds : Int
 incomingDamageWindowSeconds =
@@ -11085,6 +11250,7 @@ hitpoints, over 21 seconds. 1500 is two and a half times that.
 
 Deliberately below `run-away-incoming-damage-threshold`: a ship that can see
 what is happening to it is given more room than one that cannot.
+
 -}
 damageThatMustMoveTheHitpointsReading : Int
 damageThatMustMoveTheHitpointsReading =
@@ -11096,6 +11262,7 @@ damageThatMustMoveTheHitpointsReading =
 Without this, the first reading of a session is a window of one, which trivially
 "has not changed", and a bot that undocked into a fight would retreat on its
 first look. Four readings is roughly ten seconds here.
+
 -}
 readingsBeforeAFrozenHitpointsReadingCounts : Int
 readingsBeforeAFrozenHitpointsReadingCounts =
@@ -11107,6 +11274,7 @@ readingsBeforeAFrozenHitpointsReadingCounts =
 The window is bounded by time, and 200 samples is far more than
 `incomingDamageWindowSeconds` can hold at any tick rate this bot runs at. It
 exists so a clock that jumps backwards cannot grow the list without limit.
+
 -}
 incomingDamageSampleLimit : Int
 incomingDamageSampleLimit =
@@ -11150,6 +11318,7 @@ is, and the names it misses are ones the icon-colour rule already covers.
 Order is not meaningful and nothing reads it as a priority: see
 `shouldAttackOverviewEntry`, where this is one disjunct of three and the
 resulting list keeps its existing distance ordering.
+
 -}
 namesOfRecentAttackers : IncomingDamageMemory -> List String
 namesOfRecentAttackers memory =
@@ -11160,13 +11329,14 @@ namesOfRecentAttackers memory =
 
 {-| Did the HUD's hitpoints reading move at all across the window?
 
-Only a *believed* value counts as evidence of movement: two different `Just`
+Only a _believed_ value counts as evidence of movement: two different `Just`
 readings. A window of nothing but `Nothing` -- no ship UI, or every value
 rejected as impossible -- has not moved, which is the conservative reading and
 the intended one. So is a window mixing `Just 100` with `Nothing`.
 
 `Nothing` here means the question cannot be asked yet, because the window is
 still shorter than `readingsBeforeAFrozenHitpointsReadingCounts`.
+
 -}
 hitpointsReadingMovedInWindow : IncomingDamageMemory -> Maybe Bool
 hitpointsReadingMovedInWindow memory =
@@ -11191,6 +11361,7 @@ is quiet or nothing is watching -- and two guards below depend on the
 difference. This follows the ammo swap's line for the same reason: a safety net
 that is not armed has to say so, since its silence is otherwise indistinguishable
 from its working.
+
 -}
 describeIncomingDamage : BotDecisionContext -> String
 describeIncomingDamage context =
@@ -11278,6 +11449,7 @@ This is the memory half: keep the low-water mark, and forget it once the ship
 is healthy again or docked. `runAwayIfLowHealth` compares it against the
 threshold, so the re-arm level is a constant here while the trip level is a
 setting read at the decision.
+
 -}
 runAwayRearmPercent : Int
 runAwayRearmPercent =
@@ -11331,6 +11503,7 @@ is no "healthy" reading to re-arm against, only the fire having stopped.
 The reading's `topAttacker` rides along on the sample rather than being
 accumulated into a list of its own, so `namesOfRecentAttackers` inherits the
 trimming above and needs no clearing rule -- see `IncomingDamageMemory`.
+
 -}
 updateIncomingDamageMemory : UpdateMemoryContext BotSettings -> IncomingDamageMemory -> IncomingDamageMemory
 updateIncomingDamageMemory context memoryBefore =
@@ -11348,8 +11521,10 @@ updateIncomingDamageMemory context memoryBefore =
             memoryBefore.samples
                 |> List.filter
                     (\sample ->
-                        context.timeInMilliseconds - sample.atMilliseconds
-                            < incomingDamageWindowSeconds * 1000
+                        context.timeInMilliseconds
+                            - sample.atMilliseconds
+                            < incomingDamageWindowSeconds
+                            * 1000
                     )
                 |> List.take incomingDamageSampleLimit
 
@@ -11520,11 +11695,11 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             botMemoryBefore.lootWindowOpenTicks + 1
     , lowestShieldPercentSinceHealthy =
         lowWaterMark context.readingFromGameClient
-            (.shield)
+            .shield
             botMemoryBefore.lowestShieldPercentSinceHealthy
     , lowestArmorPercentSinceHealthy =
         lowWaterMark context.readingFromGameClient
-            (.armor)
+            .armor
             botMemoryBefore.lowestArmorPercentSinceHealthy
     , incomingDamage = incomingDamageNow
     , readingsCount = botMemoryBefore.readingsCount + 1
@@ -12025,6 +12200,7 @@ shipUIModulesToActivateOnTarget : SeeUndockingComplete -> List ShipUIModuleButto
 shipUIModulesToActivateOnTarget =
     .shipUI >> .moduleButtonsRows >> .top
 
+
 {-| Put the middle row into the state the moment calls for, if it is not already.
 
 Tank modules first: they matter while something is shooting back, and are left
@@ -12035,6 +12211,7 @@ while covering distance, off once a gate is in reach. Both directions are
 handled, because "should be off and is on" is a real state here: the module gets
 switched on out in the middle of a pocket and has to come off again at the far
 end.
+
 -}
 manageMiddleRowModules : BotDecisionContext -> SeeUndockingComplete -> Maybe DecisionPathNode
 manageMiddleRowModules context seeUndockingComplete =
@@ -12107,6 +12284,7 @@ waste of capacitor otherwise, which is the `anyAttackableInOverview` gate above.
 The propulsion module is the reverse -- it earns its capacitor while the ship is
 crossing distance, which is usually when there is nothing to shoot at all. See
 `propulsionModuleShouldBeRunning`.
+
 -}
 shipUIModulesToActivateAlways : SeeUndockingComplete -> List ShipUIModuleButton
 shipUIModulesToActivateAlways =
@@ -12123,10 +12301,11 @@ index therefore does not reliably mean the same module twice.
 
 Caught live: with both tank modules already running, the bot decided three times
 in a row to switch on what it called the propulsion module, the propulsion module
-never came on, and a *tank* module went off instead -- an odd number of toggles
+never came on, and a _tank_ module went off instead -- an odd number of toggles
 landing on a neighbour. Sorting by x is what makes "first in the middle row" mean
 the thing the setup instructions point at, and it cannot be shifted by a slot
 dropping out of the list.
+
 -}
 middleRowLeftToRight : SeeUndockingComplete -> List ShipUIModuleButton
 middleRowLeftToRight =
@@ -12155,6 +12334,7 @@ module was never switched on in the one place it matters most.
 
 Align, Warp and Jump are deliberately absent: those are the ship leaving, and
 `shipIsEnteringWarp` exists to switch the module off for them.
+
 -}
 shipIsUnderway : ReadingFromGameClient -> Bool
 shipIsUnderway readingFromGameClient =
@@ -12184,6 +12364,7 @@ short-circuit on `shipUIIndicatesShipIsWarpingOrJumping` before the module logic
 is reached, so by the time the indication reads Warp this step no longer runs at
 all -- Warp and Jump are listed anyway, so the rule says what it means instead of
 depending on that ordering holding.
+
 -}
 shipIsEnteringWarp : ReadingFromGameClient -> Bool
 shipIsEnteringWarp readingFromGameClient =
@@ -12223,6 +12404,7 @@ which switches the module off ahead of an ordinary warp. Without it, a ship stil
 showing `ManeuverApproach` in the moment after that deliberate shutdown would
 have this rule turn it straight back on -- the same two-controllers flicker that
 splitting the row was meant to end.
+
 -}
 propulsionModuleShouldBeRunning : BotDecisionContext -> Bool -> Bool
 propulsionModuleShouldBeRunning context somethingToFight =
@@ -12272,6 +12454,7 @@ underneath it. It is **not** wired in here, because that sample is one window on
 one fit and it never saw a module switch off, which is the state this filter
 exists to detect. `describeTopRowModuleDictState` logs it every reading so the
 next run settles that leg.
+
 -}
 inactiveModulesToActivateAlways : SeeUndockingComplete -> List ShipUIModuleButton
 inactiveModulesToActivateAlways seeUndockingComplete =

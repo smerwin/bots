@@ -47,6 +47,7 @@ Whether this reaches the application as a genuine double click rather than two
 unrelated clicks is up to the host -- on macOS the second press has to carry a
 click-state of 2, which is not something this list can express. The macOS host
 recognises this exact shape and posts it as one double-click event.
+
 -}
 effectsMouseDoubleClickAtLocation : MouseButton -> Location2d -> List EffectOnWindowStruct
 effectsMouseDoubleClickAtLocation mouseButton location =
@@ -63,6 +64,7 @@ in wheel notches.
 
 The wheel goes wherever the cursor is, so the move is part of the gesture rather
 than something the caller has to remember to do first.
+
 -}
 effectsMouseScrollAtLocation : Location2d -> Int -> List EffectOnWindowStruct
 effectsMouseScrollAtLocation location notches =
