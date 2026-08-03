@@ -102,6 +102,81 @@ ReadFromWindowMethod` (screenshot-based, returning `windowRect`/`clientRect`/
 `clientRectLeftUpperToScreen`/`imageData`). The latter supplies the rect that
 translates memory-read UI positions into screen coordinates, so both are needed.
 
+**A reading carries one node the client never wrote.** EVE explains every
+refusal in its own game log — `You cannot load or unload
+<weapon> while it is active`, `You are already managing 6 targets, as many as
+you have skill to`, `You cannot launch Acolyte I because you are already
+controlling 5 drones` — and until issue #28 the bot could not read a word of it,
+while `stall_watch.py` read the same file as ground truth. The watchdog watching
+the bot had better information than the bot. The host now appends a
+`MacOsHostSyntheticGameLog` node to the tree it emits, one
+`MacOsHostSyntheticGameLogEntry` child per line carrying `timestamp`, `channel`
+and `text`, and `ParseUserInterface.elm` lifts it into
+`ParsedUserInterface.gameLogEntriesSinceLastReading : Maybe (List GameLogEntry)`.
+
+**It rides the UI tree rather than extending the protocol**, for the same reason
+#17 could not extend it either. `ReadFromWindowResult` is decoded by the closed
+`deserializeResponseFromVolatileHost` `oneOf`, so a new field or a new response
+shape needs the vendored decoder changed *and* `BotFramework.elm` changed to
+carry it as far as a decision. Riding the tree needs neither: every bot already
+calls the parser on every reading.
+
+Four properties are what make injecting a fiction into a structure that
+otherwise mirrors real memory safe rather than merely untested:
+
+- **The type name says it is a fiction**, in full, because nothing else in the
+  tree is one.
+- **It has no display region.** `asUITreeNodeWithInheritedOffset` files a node
+  with no `_displayX`/`_displayY`/`_displayWidth`/`_displayHeight` as a
+  `ChildWithoutRegion`, and every existing parser here navigates by display
+  region, so none of them can reach it.
+- **The text sits under `text`, never `_setText` or `_text`.** Those two are
+  what `getDisplayText` reads, and `getAllContainedDisplayTexts` runs over the
+  raw tree with no region filtering — the mission runner asks it whether the
+  whole reading contains "No room for more". A game log line landing in that
+  answer would be a refusal dialog the client never showed.
+- **`Nothing` and `Just []` are different answers.** The node is emitted even
+  with nothing to report, so its absence means "this host provides no game log"
+  (BotLab.exe, or `--no-game-log`) rather than "the client said nothing".
+  Collapsing those two is how a bot concludes a command was accepted because no
+  refusal arrived.
+
+`(combat)` and `(bounty)` are withheld from the bot. Combat is per-shot and
+4,484 of the 4,852 lines across five recorded runs, so carrying it would put the
+whole cost of this channel in noise no decision uses; bounty is already the
+host's own source for kills and ISK, and a second reader of those lines would be
+a second source of truth for the same statistic. Everything else is carried,
+including channels never seen here — the list is a deny-list, because a channel
+silently dropped for being unfamiliar is this repo's signature failure.
+
+**Scoped to the reading by construction.** `GameLogTail` drains its queue while
+the tree is being built, so the node holds what the client said between the
+previous read and this one, not a growing buffer that would have the bot
+answering a refusal from four minutes ago. The tail fans one file offset out to
+two queues, because the stderr echo consuming the lines is exactly what kept
+them from the bot in the first place — a second caller of a single-cursor tail
+would have given whichever ran first that cycle's lines and the other nothing,
+intermittently and without a word.
+
+**`ParseUserInterface.elm` is vendored six times, and the policy is all six,
+identically.** Nothing in this parser is app-specific, and a change that lands
+in one copy while the others silently lack it is its own bug. The one deliberate
+divergence in this repo — `BotFrameworkSeparatingMemory.elm`'s
+`previousStepsEffects`, mission-runner only — is documented as such below. The
+consistency is *checked* rather than remembered: `test_game_log_channel.py`
+compares the block byte for byte across the six copies and pins the type-name
+string the host and the parser have to agree on across languages.
+
+**Why a fork-local Elm change is acceptable here when #17 rejected one.** The
+GitHub-URL source mode fetches a whole app directory, so the vendored parser and
+the bot's decision logic travel together: a bot fetched from upstream has
+neither the field nor anything reading it, and one fetched from this fork has
+both. #17's case was the asymmetric one — the host would have answered a request
+only fork-local Elm could build, so under the other source mode the host-side
+machinery would exist complete and nothing would ever issue the request. There
+is no such asymmetry here, and the node costs an upstream-sourced bot nothing:
+having no display region, upstream's parser cannot see it either.
+
 The native Apple Silicon client (`~/Library/Application Support/EVE
 Online/SharedCache/tq/EVE.app/.../bin64/exefile`, launched from the separate
 Electron launcher) is a real Metal build, not Wine — but still embeds a **Python
@@ -495,7 +570,9 @@ re-read its whole settings string.
 Stats come from EVE's game log, which the host already tails: a `(bounty) N ISK
 added to next bounty payout` line is emitted once per rat killed and carries
 what it paid, so kills and ISK are a count and a sum of those. The `(combat)`
-lines are per shot, not per kill, and are no use for a kill count.
+lines are per shot, not per kill, and are no use for a kill count. Those two
+channels are the ones deliberately withheld from the bot's own view of this log
+(see the Architecture section), so this stays the only reader of them.
 
 **Applying settings live** is the console's most useful trick and needs no
 restart. `GET /api/state` returns the current settings string; `POST
@@ -734,8 +811,9 @@ which button it hovered, because it decided to. `weaponOptimalRangeFromHover` in
 .moduleButtonTooltip` straight out of the reading and attributes it to the module
 the previous step's effects moved the mouse onto. **Whether hovering raises a
 `ModuleButtonTooltip` at all on this client is still unverified** — nothing had
-ever hovered a module here before — which is why the ammo swap that depends on it
-gives up and says so after a few readings rather than waiting.
+ever hovered a module here before. Nothing depends on the answer any more: the
+ammo swap reads the module's own context menu instead, and uses the tooltip only
+to derive a crossover distance when `ammo-swap-range` is unset.
 
 ## Lock range is learned from the client, not set
 
@@ -805,59 +883,124 @@ targeted and targeting rows out of its candidates; the reachable unbounded
 shape was the *click* repeating every reading, and that is what the learned
 bound ends.
 
-## Ammo: the weapon's optimal range is what says which charge is loaded
+## Ammo: the module's own menu says which charge is loaded
 
 `eve-online-mission-runner` swaps between two charges as the current target's
-distance changes, and the whole design hangs on `ModuleButtonTooltipMemory
-.optimalRange`: a weapon's optimal range moves with the charge in it, so one
-number says which ammo is effectively loaded *and* confirms that a load landed.
-Without it a reload would be the repo's signature bug — an action that reports
-success and changes nothing.
+distance changes. **The signal is the weapon's right-click menu, which lists the
+charges the gun can be switched *to* and omits the one already in it.** Verified
+live: a weapon holding Radio M offered `Multifrequency M [4]`, twice, then Show
+Info / Unload to Cargo / Set Auto-Reload Off / Set Auto-Repeat Off / Clear group,
+and no Radio M at all. So the charge that is *absent* is the charge that is
+loaded — read from the same cascade the swap opens anyway, with no hover, no held
+mouse, and no dependency on sprites this build does not have.
 
-It is **off unless both `short-range-ammo` and `long-range-ammo` are set**, and
-the names must match the weapon's own right-click menu. Discovering the pair from
-that menu instead of being told it would be better and is not implemented:
-nothing has yet observed what a module's context menu contains on this client.
-One charge type, or none, means there is no swap to make, and doing nothing is
-the correct outcome — wrong ammo still does damage.
+That replaced the original design, which read `optimalRange` off a module
+tooltip. The tooltip is still read where it can be, as a *refinement*: a weapon's
+optimal range moves with the charge, so the midpoint of the two ranges is a
+crossover distance the bot can derive rather than be told. But it can only be
+obtained by resting the mouse on a module until a tooltip appears, and whether
+this client raises one at all remains unverified — so the swap no longer depends
+on it.
 
-Not oscillating is the actual work, and each guard answers a specific way this
-goes wrong:
+**Which signal governs which decision** is the distinction to keep straight:
 
-- **Two thresholds, not one**, and the gap between them is not a matter of taste.
-  Swapping moves the optimal range itself, so a deadband narrower than half the
-  distance between the two charges' optimal ranges lets each swap re-arm the
-  opposite one. The two ranges are *learned* — the first swap reveals the second
-  number — and `ammoSwapDeadbandMeters` derives half the spread from them once
-  both are known.
-- **AU distances are excluded, not treated as very far.** An unparsed distance
-  becoming the 999999 placeholder is exactly the input that would argue for
-  long-range ammo forever.
-- **Several consecutive readings** must agree before acting
-  (`ammoSwapDistanceHoldTicks`), because rats die and the "current target" jumps
-  between ranges without the fight changing.
-- **A turning ramp only blocks a reload when the bot just asked for one**
-  (`ammoReloadSettlingTicks`). `rampRotationMilli /= 0` is the client saying the
-  module is mid-cycle, but a weapon that is *shooting* is mid-cycle almost all
-  the time, so refusing to touch a turning ramp would mean never swapping during
-  a fight at all.
-- **Bounded, then quiet** (`ammoSwapNotConfirmedGiveUpTicks`), the way
-  `maneuverNotConfirmedGiveUpTicks` bounds orbit and keep-at-range. The give-up
-  is not silent: the branch names itself in the decision log on every reading it
-  declines — the shape `returnDronesToBay` was changed to after #7 — and the
-  status line carries the reason for the rest of the session.
+| question | answered by |
+|---|---|
+| which charge is loaded | menu membership — free, and safe to read at any time |
+| did the load land | menu membership on the next read — the charge has gone from the list |
+| where to change over | `ammo-swap-range`, else the midpoint of the two optimal ranges |
+| may a load be issued *now* | the module's `isActive` and ramp — see below |
 
-**None of this has run against a live client.** The first run to use it should
-be watched for the optimal range in the status line actually changing after a
-swap, not for the decision log claiming one.
+### The client refuses a load into a running module, silently
 
-One cross-feature invariant, since both this and the learned lock range read the
-previous step's effects. They cannot be confused for each other — the lock chord
-is Ctrl over a *left* click, the ammo cascade a plain right click, and the
-tooltip hover a bare mouse move with no button at all. And the hover, which holds
-the mouse still for several readings, cannot age a pending lock attempt into a
-false refusal: a refusal needs the target bar empty at both ends, and the ammo
-path only runs with an active target.
+Run 5's own game log:
+
+```
+[ 03:41:03 ] (notify) You cannot load or unload Focused Modulated Medium Energy Beam I while it is active.
+```
+
+The first version reasoned that a firing weapon is mid-cycle almost all the time,
+so gating on the ramp would mean never swapping during a fight — "a feature that
+does nothing". The observation was right and the conclusion was wrong: EVE does
+not prefer an idle module, it **refuses outright**, so proceeding anyway was not a
+way to swap during a fight but a way to issue a command the client discards.
+
+It was invisible because the refusal arrives only as a `(notify)` line and the
+bot does not read EVE's game log. Nothing learned the command was discarded, so
+it fell through to the swap's own confirmation, found nothing changed, and
+retried until the give-up latched the feature off — logging "the swap did not
+confirm" when the truth was "the swap was never accepted". It looked intermittent
+rather than broken because swaps between engagements landed: run 5 learned both
+ranges (16000 and 67000) and completed swaps in both directions.
+
+So the sequence is now **switch the gun off, load, and let the fight switch it
+back on**. Three things hold it together:
+
+- **Nothing re-activates the guns but the branch that always did.**
+  `decisionToKillRats` already presses an inactive top-row module on a target, so
+  the swap simply stops holding the fight and the guns come back by themselves. A
+  second re-activation step would be two controllers for one button, which is the
+  flicker `manageMiddleRowModules` was split up to end.
+- **`ammoSwapIsActingOnAVerdict` keeps the ammo path in control while the guns
+  are off**, because it is what switched them off. Without it the entry gate
+  ("only act on a ship already shooting") would hand the fight straight back to
+  the branch that turns them on again, every reading.
+- **The module button is a toggle**, so the switch-off goes through
+  `clickModuleButtonButWaitIfClickedInPreviousStep` and its settling window. A
+  second click before the client shows the result turns the gun back on.
+
+**Failing to a firing gun with the wrong ammo is always better than failing to a
+silent gun.** That is the invariant, and it is why every bound here abandons the
+*attempt* rather than the feature: `ammoSwapSilenceGunsGiveUpTicks` if the guns
+will not go quiet, `ammoSwapVerdictGiveUpTicks` if the whole verdict drags on.
+Either way the guns resume and the next change of range tries again. Only two
+things latch the swap off for the session, because only they are permanent: the
+menu offering neither charge (the ship carries neither), and there being no
+crossover distance at all.
+
+### Not oscillating
+
+- **The crossover does not move, so the deadband is simple.** It is
+  `ammo-swap-range`, or the midpoint of the two optimal ranges once both have
+  been seen — a fixed number either way, and with a fixed threshold any positive
+  deadband is stable. The original needed an argument about half the spread
+  between the two ranges, because its threshold was the *loaded* charge's optimal
+  range and therefore moved with every swap. That case survives only as
+  `ammoSwapBootstrapThreshold`, which exists to break a chicken-and-egg — seeing
+  the second optimal range requires a swap, deciding a swap requires a crossover
+  — and carries a much wider deadband for exactly one swap.
+- **AU distances are excluded**, not treated as very far. An unparsed distance
+  becoming the 999999 placeholder is the input that would argue for long-range
+  ammo forever.
+- **Several consecutive readings** must agree (`ammoSwapDistanceHoldTicks`),
+  because rats die and the "current target" jumps between ranges without the
+  fight changing.
+- **A verdict that arrives already satisfied costs nothing.** The range re-arms
+  every time a target drifts back out through the deadband; without this the bot
+  would re-open every gun's menu mid-fight to be told nothing had changed.
+- **A half-built menu is not believed.** The design reads *absence* as proof, so
+  a menu caught mid-populate would say every charge was loaded at once.
+  `ammoSwapMenuEntriesBeforeTrusted` is below any real weapon menu (the five
+  commands are always there) and above an empty one.
+
+### What is verified and what is not
+
+Verified live: the menu's contents and that it omits the loaded charge; the
+quantity suffix; the client's refusal to load into an active module; that swaps
+land between engagements. Not verified: any of this code running. Watch the
+status line's `loaded charge reads` flipping after a swap, and the game log
+staying free of `cannot load or unload`. `(notify)` lines are a signal the bot
+never reads at all — the host already tails the game log for bounties, so
+surfacing "the client refused what we just asked" would turn a whole class of
+silent discards into something the bot could react to.
+
+One cross-feature invariant, since this and the learned lock range both read the
+previous step's effects. They cannot be confused: the lock chord is Ctrl over a
+*left* click, the ammo cascade a plain right click, the module switch-off a left
+click inside a module button, and the tooltip hover a bare mouse move with no
+button at all. And the hover, which holds the mouse still for several readings,
+cannot age a pending lock attempt into a false refusal: a refusal needs the
+target bar empty at both ends, and the ammo path only runs with an active target.
 
 ## Drones: how long they have been out says nothing about a recall
 
@@ -1198,6 +1341,34 @@ exists.
   see the Architecture section for why the bot has no channel that can carry a
   station name, and what would have to change to give it one. Until then this is
   reachable only from Python, and no bot has set a destination through it.
+- **EVE's own game log reaches the bot**, as
+  `ParsedUserInterface.gameLogEntriesSinceLastReading` — the refusals behind
+  issues #14, #19 and #27, which those features each had to infer indirectly
+  from something failing to change. The shape, the safety properties and the
+  vendoring policy are in the Architecture section.
+
+  **Verified without a live client, and that is most of what a live client
+  would have added.** 30 unit tests in
+  `tools/macos-host/tests/test_game_log_channel.py` cover the tail, the
+  filtering, the node and `_read_from_window`, replaying the real lines the
+  host echoed during five recorded runs — including a check that every one of
+  those ~4,850 recorded lines parses. The Elm half was driven end to end
+  off-line: a host-built reading, double-encoded exactly as the real one is,
+  through `decodeMemoryReadingFromString` and the real vendored
+  `parseUserInterfaceFromUITree` (mission-runner's copy and saxrat's), giving
+  the three lines back with their timestamps and channels intact, `Just []`
+  for a reading with nothing to report, `Nothing` for a host with no game log,
+  and `getAllContainedDisplayTexts` over the whole tree unchanged by the
+  node's presence.
+
+  **What is unproven is that any of it changes what the bot does**, because
+  nothing reads the field yet. A first consumer needs three things: a decision
+  that matches on `channel == Just "notify"` and the refusal's own wording, a
+  `BotMemory` field to carry the verdict (a reading's entries are gone by the
+  next one, so a branch that does not record what it saw sees it once), and a
+  live run that provokes the refusal — for #27's ammo load, guns firing and a
+  swap attempted. A run in which no refusal occurs proves only that nothing
+  broke.
 
 ## `route_setter.py` internals worth knowing before touching it again
 
@@ -1290,6 +1461,10 @@ for why ESI cannot replace it from inside a bot yet.
   system: Unknown" for a name that isn't a plain string in memory.
 - `MouseMoveRelative` and `CharacterDown`/`CharacterUp` (raw Unicode text input)
   aren't implemented in `botlab_host.py`.
+- Nothing reads `gameLogEntriesSinceLastReading` yet, so every guard that infers
+  a refusal indirectly still does — #27's ammo load retries for 50 readings on a
+  swap the client refused outright, and the learned lock range can still only be
+  taught by the first lock of an engagement.
 - No automated Elm-toolchain bootstrap if `elm` isn't on `PATH`.
 - `reload_drones.py` only searches the root Item hangar, no sub-folders. The
   mission runner's port of it inherits that, and also takes the first

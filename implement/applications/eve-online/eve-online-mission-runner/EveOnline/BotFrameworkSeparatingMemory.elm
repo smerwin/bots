@@ -63,11 +63,12 @@ type alias DecisionPathNode =
     Common.DecisionPath.DecisionPathNode EndDecisionPathStructure
 
 
-type alias UpdateMemoryContext =
+type alias UpdateMemoryContext botSettings =
     { timeInMilliseconds : Int
     , readingFromGameClient : ReadingFromGameClient
     , screenshot : ReadingFromGameClientScreenshot
     , previousStepsEffects : List (List Common.EffectOnWindow.EffectOnWindowStruct)
+    , botSettings : botSettings
     }
 
 
@@ -97,7 +98,7 @@ type alias BotState botMemory =
 type alias BotConfiguration botSettings botMemory =
     { parseBotSettings : String -> Result String botSettings
     , selectGameClientInstance : Maybe botSettings -> List EveOnline.BotFramework.GameClientProcessSummary -> Result String { selectedProcess : EveOnline.BotFramework.GameClientProcessSummary, report : List String }
-    , updateMemoryForNewReadingFromGame : UpdateMemoryContext -> botMemory -> botMemory
+    , updateMemoryForNewReadingFromGame : UpdateMemoryContext botSettings -> botMemory -> botMemory
     , statusTextFromDecisionContext : StepDecisionContext botSettings botMemory -> String
     , decideNextStep : StepDecisionContext botSettings botMemory -> DecisionPathNode
     }
@@ -155,7 +156,7 @@ processEvent botConfiguration =
 
 
 processEventInBaseFramework :
-    { updateMemoryForNewReadingFromGame : UpdateMemoryContext -> botMemory -> botMemory
+    { updateMemoryForNewReadingFromGame : UpdateMemoryContext botSettings -> botMemory -> botMemory
     , statusTextFromDecisionContext : StepDecisionContext botSettings botMemory -> String
     , decideNextStep : StepDecisionContext botSettings botMemory -> DecisionPathNode
     }
@@ -185,6 +186,15 @@ processEventInBaseFramework config eventContext event stateBefore =
                     -- -- cannot be derived from the reading alone, and the
                     -- reading is all this context used to carry.
                     , previousStepsEffects = stateBefore.lastStepsEffects
+
+                    -- Some readings only mean something against the settings.
+                    -- A weapon's context menu lists the charges the gun can be
+                    -- switched to and omits the one already loaded, so which
+                    -- charge is in the gun is only legible to something that
+                    -- knows the two charge names -- and memory is the only
+                    -- place that can remember the answer across the readings
+                    -- where no menu is open.
+                    , botSettings = eventContext.botSettings
                     }
 
                 botMemory : botMemory

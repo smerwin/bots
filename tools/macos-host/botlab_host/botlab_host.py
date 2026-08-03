@@ -14,6 +14,7 @@ project's own macOS memory-reading tools (`re_helper.py`, `live_reader`,
 See CLAUDE.md for the full protocol writeup this implements against.
 """
 import argparse
+import collections
 import json
 import os
 import random
@@ -600,8 +601,59 @@ def bring_window_to_foreground(pid, window_number, retries=4, delay=0.35):
 # EveOnline.VolatileProcessInterface's JSON shapes exactly.
 # ---------------------------------------------------------------------------
 
+# The one node in a reading that was never read out of the client. The type
+# name says so in full, because everything around it in this structure mirrors
+# a real Python object in the game's memory and a later reader has no other way
+# to tell -- see CLAUDE.md's architecture section.
+SYNTHETIC_GAME_LOG_TYPE_NAME = "MacOsHostSyntheticGameLog"
+SYNTHETIC_GAME_LOG_ENTRY_TYPE_NAME = "MacOsHostSyntheticGameLogEntry"
+
+
+def synthetic_game_log_node(entries):
+    """A UI-tree node carrying what the client said since the last reading.
+
+    Three properties this shape has to hold, each of them load-bearing:
+
+    **It has no display region.** No `_displayX`/`_displayY`/`_displayWidth`/
+    `_displayHeight`, so `asUITreeNodeWithInheritedOffset` files it as a
+    `ChildWithoutRegion` and every existing parser -- all of which navigate by
+    display region -- cannot reach it. That is what makes attaching it to a real
+    reading safe rather than merely untested.
+
+    **The text is under `text`, never `_setText` or `_text`.** Those two are
+    what `getDisplayText` reads, and `getAllContainedDisplayTexts` runs over the
+    raw tree without any region filtering -- the mission runner asks it whether
+    the whole reading contains "No room for more". A game log line landing in
+    that answer would be a refusal dialog the client never showed.
+
+    **The node exists even with nothing to report.** Its absence is the only way
+    a bot can tell "this host does not provide the channel" (BotLab.exe, or
+    `--no-game-log`) from "the client said nothing this reading", and inferring
+    the second from the first is how a bot concludes a command was accepted
+    because no refusal arrived.
+    """
+    return {
+        "pythonObjectAddress": "macos-host-synthetic-game-log",
+        "pythonObjectTypeName": SYNTHETIC_GAME_LOG_TYPE_NAME,
+        "dictEntriesOfInterest": {},
+        "children": [
+            {
+                "pythonObjectAddress": f"macos-host-synthetic-game-log-{index}",
+                "pythonObjectTypeName": SYNTHETIC_GAME_LOG_ENTRY_TYPE_NAME,
+                "dictEntriesOfInterest": {
+                    "timestamp": entry["timestamp"],
+                    "channel": entry["channel"],
+                    "text": entry["text"],
+                },
+                "children": [],
+            }
+            for index, entry in enumerate(entries)
+        ],
+    }
+
+
 class VolatileHost:
-    def __init__(self):
+    def __init__(self, game_log=None):
         self.roots = {}          # processId -> ui root address (int)
         self.root_search = {}    # processId -> {"begin": ms, "thread": Thread, "result": addr|None|"pending"}
         self.metatype = {}       # processId -> metatype addr
@@ -610,6 +662,7 @@ class VolatileHost:
         self.tree_walkers = {}   # processId -> TreeWalkerClient (the fast, native ReadFromWindow path)
         self.root_display_size = {}  # processId -> (width, height) in "game pixel" units, from UIRoot's own _displayWidth/_displayHeight
         self.game_pid = None
+        self.game_log = game_log  # GameLogTail, or None when there is no channel to give
 
     def _get_live(self, process_id):
         live = self.live.get(process_id)
@@ -852,6 +905,14 @@ class VolatileHost:
         w, h = entries.get("_displayWidth"), entries.get("_displayHeight")
         if isinstance(w, (int, float)) and isinstance(h, (int, float)) and w > 0 and h > 0:
             self.root_display_size[process_id] = (w, h)
+        if self.game_log is not None:
+            # Scoped to this reading by construction: the queue is drained here
+            # and nowhere else, so what the node carries is what the client said
+            # between the previous read and this one. A buffer that grew instead
+            # would have the bot answering a refusal from four minutes ago.
+            tree.setdefault("children", []).append(
+                synthetic_game_log_node(self.game_log.entries_for_reading())
+            )
         return {
             "Completed": {
                 "processId": process_id,
@@ -915,8 +976,8 @@ class VolatileHost:
 # ---------------------------------------------------------------------------
 
 class TaskDispatcher:
-    def __init__(self, execute_input=False, capture_screenshots=False):
-        self.volatile = VolatileHost()
+    def __init__(self, execute_input=False, capture_screenshots=False, game_log=None):
+        self.volatile = VolatileHost(game_log=game_log)
         self._process_ids = {}
         self.execute_input = execute_input
         self.capture_screenshots = capture_screenshots
@@ -1522,7 +1583,9 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
         text=True, bufsize=1,
     )
-    dispatcher = TaskDispatcher(execute_input=execute_input, capture_screenshots=capture_screenshots)
+    game_log = GameLogTail(game_log_dir) if game_log_dir else None
+    dispatcher = TaskDispatcher(execute_input=execute_input, capture_screenshots=capture_screenshots,
+                                game_log=game_log)
 
     def send_event(event_at_time):
         event = {"timeInMilliseconds": int(time.time() * 1000), "eventAtTime": event_at_time}
@@ -1554,7 +1617,6 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
 
     tick = 0
     tick_start = time.monotonic()
-    game_log = GameLogTail(game_log_dir) if game_log_dir else None
 
     def log_decision(cont, decision_seq):
         # Every ContinueSession response carries its own freshly computed
@@ -1574,7 +1636,7 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         if console is not None:
             console.note_decision(tick, cont["statusText"])
         if game_log is not None:
-            for line in game_log.new_lines():
+            for line in game_log.lines_for_echo():
                 print(f"#   game log: {line}", file=sys.stderr)
                 if console is not None:
                     console.note_game_log(line)
@@ -1719,6 +1781,41 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
 
 _GAME_LOG_MARKUP = re.compile(r"<[^>]*>")
 
+# "[ 2026.08.02 23:56:34 ] (notify) You cannot launch Acolyte I because ..."
+_GAME_LOG_LINE = re.compile(r"^\[ (?P<timestamp>[^\]]+?) \] \((?P<channel>[^)]*)\) (?P<text>.*)$")
+
+# Channels the bot is deliberately *not* given. `(combat)` is per-shot and
+# 4,484 of the 4,852 lines across five recorded runs -- carrying it would put
+# the cost of this channel entirely in noise the decision path has no use for.
+# `(bounty)` is the host's own source for kills and ISK (see the web console),
+# and a second reader of the same lines in the bot would be a second source of
+# truth for the same statistic. Everything else is carried, including channels
+# never seen here: a channel silently dropped for being unfamiliar is this
+# repo's signature failure, so the list is a deny-list rather than an allow-list.
+GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT = frozenset({"combat", "bounty"})
+
+# A backstop on each queue, not a policy. Both are drained once per reading, so
+# reaching either means nothing drained for a long time (a paused session, or a
+# run still searching for the UI root) rather than a busy client.
+GAME_LOG_QUEUE_LIMIT = 500
+
+
+def parse_game_log_line(line):
+    """Split one already-de-markup'd game log line into its three parts.
+
+    Returns `None` for anything not in the client's own line shape -- the file
+    opens with a header block, and a line wrapped mid-write has no reason to
+    parse. A caller wanting the raw text has it already.
+    """
+    match = _GAME_LOG_LINE.match(line)
+    if match is None:
+        return None
+    return {
+        "timestamp": match.group("timestamp"),
+        "channel": match.group("channel"),
+        "text": match.group("text"),
+    }
+
 
 class GameLogTail:
     """Follow EVE's own game log, the only timestamped record in this system.
@@ -1727,8 +1824,7 @@ class GameLogTail:
     that text lingers on screen after a fight ends -- so the status keeps
     reprinting the last exchange long after it stopped meaning anything, which
     reads as alarming when nothing is happening. It is a stale display being
-    reported faithfully, not stale data, and the bot cannot do better: it only
-    ever sees the UI tree, never the filesystem.
+    reported faithfully, not stale data.
 
     The client writes a real log with wall-clock timestamps
     ("[ 2026.07.31 03:56:19 ] (None) Jumping from Hedion to Amarr"), which also
@@ -1738,12 +1834,23 @@ class GameLogTail:
     re-checked as we go rather than pinned at startup. On first sight of a file
     we start at its end: the point is what happened since the last decision, not
     a replay of the session so far.
+
+    **Two readers, one file offset.** This used to serve the stderr echo alone,
+    and that echo consuming the lines is precisely what kept them from the bot
+    (issue #28). `_poll` is now the only thing that moves the offset, and it
+    fans each line out to two independent queues -- so `lines_for_echo` and
+    `entries_for_reading` each see every line exactly once and neither can eat
+    the other's. Adding a second caller of a single-cursor tail would have given
+    whichever ran first that cycle's lines and the other nothing, intermittently
+    and without a word.
     """
 
     def __init__(self, directory):
         self.directory = os.path.expanduser(directory)
         self.path = None
         self.offset = 0
+        self._echo_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
+        self._reading_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
 
     def _newest_file(self):
         try:
@@ -1754,17 +1861,17 @@ class GameLogTail:
         paths = [p for p in paths if os.path.isfile(p)]
         return max(paths, key=os.path.getmtime) if paths else None
 
-    def new_lines(self, limit=25):
+    def _poll(self):
         path = self._newest_file()
         if path is None:
-            return []
+            return
         if path != self.path:
             self.path = path
             try:
                 self.offset = os.path.getsize(path)
             except OSError:
                 self.offset = 0
-            return []
+            return
         try:
             size = os.path.getsize(path)
             # Truncated or replaced under us -- read from the top rather than
@@ -1776,16 +1883,41 @@ class GameLogTail:
                 data = handle.read()
                 self.offset = handle.tell()
         except OSError:
-            return []
+            return
         # Combat lines arrive wrapped in colour and font markup
         # ("<color=0xffcc0000><b>133</b> ... <b>Tower Sentry Gallente I</b> ...
         # - Smashes"), which is unreadable at a glance and drowns the numbers.
-        lines = [_GAME_LOG_MARKUP.sub("", line) for line in data.splitlines()]
-        lines = [" ".join(line.split()) for line in lines]
-        lines = [line for line in lines if line]
+        for line in data.splitlines():
+            line = " ".join(_GAME_LOG_MARKUP.sub("", line).split())
+            if not line:
+                continue
+            self._echo_queue.append(line)
+            entry = parse_game_log_line(line)
+            if entry is not None and entry["channel"] not in GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT:
+                self._reading_queue.append(entry)
+
+    def lines_for_echo(self, limit=25):
+        """The stderr/web-console echo: whole lines, capped for readability."""
+        self._poll()
+        lines = list(self._echo_queue)
+        self._echo_queue.clear()
         if len(lines) > limit:
             lines = [f"({len(lines) - limit} earlier lines not shown)"] + lines[-limit:]
         return lines
+
+    def entries_for_reading(self):
+        """What the client said since the last reading, for the bot.
+
+        Split into `timestamp`/`channel`/`text` here rather than in Elm, since
+        the regex belongs beside the markup stripping that produced the line.
+        No cap and no placeholder line: a "(N earlier lines not shown)" marker
+        is fine in a log a human reads and would be a fabricated game log entry
+        in a channel a decision branches on.
+        """
+        self._poll()
+        entries = list(self._reading_queue)
+        self._reading_queue.clear()
+        return entries
 
 
 def main():
@@ -1806,10 +1938,13 @@ def main():
     ap.add_argument("--capture-screenshots", action="store_true",
                      help="capture real screenshot pixel data for ReadFromWindowMethod (off by default: ~1.6s/cycle cost most bots don't need; see CLAUDE.md)")
     ap.add_argument("--game-log-dir", default="~/Documents/EVE/logs/Gamelogs",
-                    help="EVE's own game log directory; its newest file is followed and "
-                         "echoed under each decision (it is the only timestamped record here)")
+                    help="EVE's own game log directory; its newest file is followed, echoed "
+                         "under each decision (it is the only timestamped record here) and "
+                         "carried into each reading for the bot to parse")
     ap.add_argument("--no-game-log", action="store_true",
-                    help="do not follow EVE's game log")
+                    help="do not follow EVE's game log -- no echo, and no game log in the "
+                         "reading, which a bot reads as the channel being absent rather than "
+                         "as the client having said nothing")
     ap.add_argument("--web-console", nargs="?", const=8787, type=int, default=None,
                     metavar="PORT",
                     help="serve a status/log/settings console on the tailnet (default port "

@@ -123,15 +123,31 @@
      just finds nothing in the hangar. The drone has to be in the root item
      hangar of the station the ship is parked in; sub-folders are not searched.
    + `short-range-ammo` / `long-range-ammo` : Names of the two charges to swap
-     between as the current target's distance changes, exactly as the weapon
-     module's own right-click menu spells them -- e.g.
-     `short-range-ammo=Scorch M`. **Both are needed, or nothing happens at
-     all**: with one charge type, or none, there is no swap to make and the bot
-     leaves the guns alone rather than guessing. Wrong ammo still does damage,
-     so this is an optimisation and doing nothing is always an acceptable
-     outcome. Which name is the longer-ranged one is not taken on trust -- the
-     bot reads the weapon's optimal range from its tooltip before and after a
-     swap and learns which name produces which range from that.
+     between as the current target's distance changes, as the weapon module's
+     own right-click menu spells them -- e.g. `short-range-ammo=Scorch M`. The
+     menu appends a quantity (`Multifrequency M [4]`), which the bot strips, so
+     give the plain name. **Both are needed, or nothing happens at all**: with
+     one charge type, or none, there is no swap to make and the bot leaves the
+     guns alone rather than guessing. Wrong ammo still does damage, so this is
+     an optimisation and doing nothing is always an acceptable outcome.
+
+     Which charge is loaded is read from that same menu, which lists what the
+     gun can be switched **to** and omits what is already in it -- so the
+     charge that is *missing* is the one loaded. Nothing has to be recognised
+     by name beyond the two given here, and no tooltip is involved.
+
+     Note the bot switches the guns off to load, because the client refuses a
+     load into a running module and says so only in its own game log, which the
+     bot cannot read. That costs a few seconds of damage; it is bounded, and a
+     weapon that will not go quiet keeps firing what it already has.
+   + `ammo-swap-range` : Distance in meters at which to change over between the
+     two charges -- shorter than this the short-range charge, beyond it the
+     long-range one. Optional but **recommended**: without it the bot has to
+     derive the crossover from the weapons' optimal ranges, which it can only
+     read by resting the mouse on a module until a tooltip appears, and whether
+     this client shows one at all is unverified. Setting this skips the hover
+     entirely. Left unset and the tooltip never appearing, the swap says so and
+     does nothing rather than picking a distance out of the air.
    + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping
      range or aligning.
    + `keep-at-range`: Set this to 'yes' to keep range from the target instead of
@@ -241,6 +257,7 @@ defaultBotSettings =
     , homeStationName = Nothing
     , shortRangeAmmoName = Nothing
     , longRangeAmmoName = Nothing
+    , ammoSwapRangeMeters = Nothing
     }
 
 
@@ -344,6 +361,10 @@ parseBotSettings =
            , AppSettings.valueTypeString
                 (\ammoName settings -> { settings | longRangeAmmoName = nonEmptySettingValue ammoName })
            )
+         , ( "ammo-swap-range"
+           , AppSettings.valueTypeInteger
+                (\rangeMeters settings -> { settings | ammoSwapRangeMeters = Just rangeMeters })
+           )
          ]
             |> Dict.fromList
         )
@@ -368,6 +389,7 @@ type alias BotSettings =
     , homeStationName : Maybe String
     , shortRangeAmmoName : Maybe String
     , longRangeAmmoName : Maybe String
+    , ammoSwapRangeMeters : Maybe Int
     }
 
 
@@ -468,59 +490,85 @@ type AmmoRange
 {-| Everything the ammo swap knows, kept in one field so the rest of `BotMemory`
 is untouched.
 
-`optimalRangeInMeters` is the whole design: a weapon's optimal range moves with
-the charge in it, so the same number says which ammo is effectively loaded *and*
-confirms that a load landed. It comes from the module button's tooltip, which
-this bot has never read before -- see `weaponOptimalRangeFromHover` for how it is
-attributed to a module without relying on `isHiliteVisible`, which is permanently
-False on this client.
+`chargeLoaded` is the primary reading and it comes from the weapon's own context
+menu, which lists the charges the gun can be switched **to** and omits the one
+already in it. Verified live: a weapon holding Radio M offered `Multifrequency M
+[4]` and no Radio M at all. So the charge that is *absent* is the charge that is
+loaded, and that answer needs no tooltip, no hover, and none of the sprites this
+client does not have.
 
-`optimalRangeSeenLow`/`High` are the two ranges observed so far. They are learned
-rather than configured: the first swap shows a second number, and the smaller of
-the pair is by definition the short-range charge's. That is what makes the swap
-fit-agnostic -- no ammo name is ever recognised, only measured.
+`optimalRangeInMeters` and the `optimalRangeSeen` pair are the secondary reading
+and are now a refinement rather than the mechanism. A weapon's optimal range
+moves with the charge in it, so it confirms the *effect* where menu membership
+confirms only that the client changed its mind about what can be loaded -- and
+the midpoint of the two is the crossover distance the swap uses when
+`ammo-swap-range` is unset. They come from `weaponOptimalRangeFromHover`, which
+may never answer on this client; `optimalRangeGivenUp` records that, and it
+disables only this, not the swap.
 
-`rangeVerdictTicks` counts consecutive readings the same verdict has held, and
-carries two of the five guards at once. Below `ammoSwapDistanceHoldTicks` it is
-target churn and nothing is done; above `ammoSwapNotConfirmedGiveUpTicks` the
-swap was commanded and the optimal range never moved, so it is abandoned. The
-same shape as `keepAtRangeUnconfirmedTicks`, and for the same reason: the reading
-is the only evidence either way.
+`rangeVerdictTicks` counts consecutive readings the same verdict has gone
+*unsatisfied*, and carries two guards at once. Below `ammoSwapDistanceHoldTicks`
+it is target churn and nothing is done; above `ammoSwapVerdictGiveUpTicks` the
+load has been commanded and the menu still offers the charge, so this attempt is
+abandoned. It resets the moment the verdict is satisfied, so that a struggle
+cannot leave a count behind for the next verdict to inherit.
+
+`verdictAbandoned` and `gunsSilencingTicks` are the bounds around switching the
+guns off, which the client requires before it will accept a load at all. Both
+abandon the *attempt* and never the feature: the guns go back to firing whatever
+is in them, and the next change of range tries again. Failing to a firing gun
+with the wrong ammo is always better than failing to a silent gun.
 
 `gunsCommandedThisVerdictAtX` is how the walk across a multi-gun row remembers
 where it got to, keyed on each gun's `x` because the row is not a stable index
-space. Be clear about what it records: a gun goes in the list when its context
-menu was *opened*, which is the bot asking, not the client answering. A cascade
-that opened the menu and then failed to find the charge in it counts the same as
-one that loaded it. Only the reference gun's optimal range is real evidence, and
-that is the last gun in the row -- so a load that silently failed on an earlier
-gun leaves that gun on the old charge without anything noticing. Confirming every
-gun separately would need a tooltip read per gun; it is not done, and the cost of
-being wrong is one weapon firing the charge it already had.
+space. A gun goes in the list when its context menu was *opened*, which is the
+bot asking rather than the client answering -- but unlike the previous design
+each gun's own menu then says whether it carries the charge, so a gun that was
+visited and did not take the load is visible rather than assumed. What is still
+assumed is the guns before the last one: `verdictSatisfied` is decided on the
+last gun's menu, so a load that silently failed on an earlier gun leaves that gun
+on the old charge. The cost of being wrong is one weapon firing the charge it
+already had.
+
+`menuOpenOnGunAtX` is how the bot knows an open context menu is a weapon's, and
+which weapon's: nothing in the menu itself says where it came from, but the bot
+opened it and the previous step's effects say where it clicked.
 -}
 type alias AmmoSwapMemory =
-    { optimalRangeInMeters : Maybe Int
+    { chargeLoaded : Maybe AmmoRange
+    , optimalRangeInMeters : Maybe Int
     , optimalRangeSeenLow : Maybe Int
     , optimalRangeSeenHigh : Maybe Int
     , rangeVerdict : Maybe AmmoRange
     , rangeVerdictTicks : Int
+    , verdictSatisfied : Bool
+    , verdictAbandoned : Bool
+    , gunsSilencingTicks : Int
     , gunsCommandedThisVerdictAtX : List Int
+    , menuOpenOnGunAtX : Maybe Int
     , hoverAwaitingTooltip : Bool
     , hoverUnansweredTicks : Int
+    , optimalRangeGivenUp : Bool
     , givenUp : Maybe String
     }
 
 
 initAmmoSwapMemory : AmmoSwapMemory
 initAmmoSwapMemory =
-    { optimalRangeInMeters = Nothing
+    { chargeLoaded = Nothing
+    , optimalRangeInMeters = Nothing
     , optimalRangeSeenLow = Nothing
     , optimalRangeSeenHigh = Nothing
     , rangeVerdict = Nothing
     , rangeVerdictTicks = 0
+    , verdictSatisfied = False
+    , verdictAbandoned = False
+    , gunsSilencingTicks = 0
     , gunsCommandedThisVerdictAtX = []
+    , menuOpenOnGunAtX = Nothing
     , hoverAwaitingTooltip = False
     , hoverUnansweredTicks = 0
+    , optimalRangeGivenUp = False
     , givenUp = Nothing
     }
 
@@ -5114,108 +5162,223 @@ ammoSwapDistanceHoldTicks =
     4
 
 
-{-| How many readings a swap gets to show up in the weapon's optimal range
-before the bot stops trying for the rest of the session.
+{-| How many readings one verdict gets before the bot abandons that swap and
+gets back to shooting.
 
-Generously bounded rather than tight, because one verdict can mean several
-reloads: each gun in the top row needs its own right-click cascade, several
-readings each, and a reload takes about ten seconds -- roughly two readings -- on
-top of that. Fifty readings is a few minutes, which is long enough for a four-gun
-row to get through the whole sequence twice and short enough that a swap that is
-never going to land does not keep the mouse away from the fight for a whole
-mission.
+This bounds **one attempt**, not the feature. That distinction is the correction
+issue #27 forced. The number it replaces was fifty readings and it latched the
+whole ammo swap off for the session, on the theory that a swap which never
+confirms is a swap that cannot work here. What it was actually measuring was the
+client discarding every load because the guns were active -- a transient,
+fixable condition that it read as a permanent one, and then disabled the feature
+over.
 
-Giving up quietly and continuing to shoot is the right answer. Wrong ammo still
-does damage, so this is an optimisation, exactly as `maneuverNotConfirmedGiveUpTicks`
-is for orbit and keep-at-range. It is *not* silent, though: the branch names
-itself in the decision log every reading it declines, the way `returnDronesToBay`
-does since #7, and the status line carries the reason for the rest of the session.
+So a failed attempt now costs one verdict. The guns go back to firing whatever is
+in them, and the next time the range calls for a change the bot tries again. Only
+the two structural impossibilities latch for the session, because only they are
+genuinely permanent: the ship carrying neither charge, and there being no
+crossover distance to decide against.
+
+Sized for the whole sequence on a multi-gun row -- silence the guns, then a menu
+per gun, several readings each -- with enough headroom for one retry.
 -}
-ammoSwapNotConfirmedGiveUpTicks : Int
-ammoSwapNotConfirmedGiveUpTicks =
-    50
+ammoSwapVerdictGiveUpTicks : Int
+ammoSwapVerdictGiveUpTicks =
+    25
 
 
-{-| How many readings the bot keeps hovering a weapon module waiting for its
-tooltip before deciding this client will not show one.
+{-| How many readings the bot keeps hovering a weapon waiting for its tooltip
+before deciding this client will not show one.
 
-Nothing in this bot has ever read a module tooltip, and there is a specific
-reason to doubt it works here: the framework only files a tooltip against a
-module button when that button reports `isHiliteVisible`, and on this client the
-"hilite" sprite does not exist, so `getModuleButtonTooltipFromModuleButton` can
-never answer. `weaponOptimalRangeFromHover` sidesteps that by attributing the
-tooltip to the module the bot itself just moved the mouse onto -- but whether
-hovering raises a `ModuleButtonTooltip` at all is unverified against this client.
-
-So this counter is the honest failure path for that unknown: if the tooltip never
-arrives, the whole feature switches itself off with a reason, and the ship keeps
-fighting with whatever is loaded.
+This used to disable the whole ammo swap, because the tooltip's `optimalRange`
+was the only thing that said which charge was loaded. It is not any more -- the
+weapon's own context menu says that, and says it without a hover -- so failing
+here now costs only the *refinement*: the crossover distance the swap would
+otherwise have derived from the two charges' optimal ranges. With
+`ammo-swap-range` set, nothing is lost at all.
 
 Small, because the bot holds the mouse still while it waits -- see
 `hoverWeaponForOptimalRange` -- and holding still is holding off the rest of the
-fight. Five readings is about half a minute, once, and the give-up latches, so
-this is the whole price a session pays for a client that has no tooltip to show.
+fight. It is also attempted at most twice a session: once per charge, after which
+both optimal ranges are known and there is nothing left to learn.
 -}
 weaponTooltipUnansweredGiveUpTicks : Int
 weaponTooltipUnansweredGiveUpTicks =
     5
 
 
-{-| How many readings a commanded load gets to start before the bot is willing
-to command another one.
+{-| How many readings the bot will spend getting the guns to stop firing before
+it abandons the swap and lets them carry on.
 
-The failure this prevents is the reload restarting: about ten seconds, roughly
-two readings, during which the client is already doing what was asked and a
-second command sends it back to the beginning. That is the same shape as the
-module-button toggle `moduleButtonClickSettlingSteps` exists for.
+**A weapon that will not go quiet keeps shooting the wrong charge.** That is the
+invariant this number exists to hold, and it is worth stating plainly because the
+sequence here deliberately switches the ship's guns off: failing to a firing gun
+with the wrong ammo is always better than failing to a silent gun. Everything
+below is bounded so that the worst case is a few seconds of lost damage, never a
+ship standing still.
 
-Paired with the weapon's own ramp rather than used alone, and neither is enough
-by itself. `rampRotationMilli` is the client saying the module is mid-cycle --
-but a weapon that is *shooting* is mid-cycle almost all of the time, so refusing
-to touch a turning ramp would mean never swapping ammo during a fight at all,
-which is a feature that does nothing. Recent commands are the other half: a
-turning ramp only means "wait" when the bot has just asked for a reload, because
-that is when the ramp might be that reload.
+Generous enough for a cycle to finish -- a beam cycle is a few seconds, roughly a
+reading -- plus the settling window a module-button click needs before the client
+shows the result.
 -}
-ammoReloadSettlingTicks : Int
-ammoReloadSettlingTicks =
+ammoSwapSilenceGunsGiveUpTicks : Int
+ammoSwapSilenceGunsGiveUpTicks =
+    8
+
+
+{-| How many entries a weapon's context menu must have before the bot will
+believe what is missing from it.
+
+The whole design reads the *absence* of a charge as proof that it is loaded, so
+a menu caught half-built would say every charge is loaded at once. Verified live,
+a weapon's menu carries seven entries; the five commands are there whatever is
+loadable, so this is comfortably below any real menu and above a menu that has
+not arrived.
+-}
+ammoSwapMenuEntriesBeforeTrusted : Int
+ammoSwapMenuEntriesBeforeTrusted =
     3
 
 
-{-| The narrowest deadband the swap will use, in meters.
+{-| How far past the crossover distance the target has to be before the swap
+fires, in meters.
 
-A single threshold makes a target sitting near it swap on every reading forever.
-Two thresholds fix that only if the gap between them is wide enough, and how wide
-is "enough" is not a matter of taste: swapping moves the optimal range itself, so
-a deadband narrower than half the distance between the two charges' optimal
-ranges lets each swap re-arm the opposite one. `ammoSwapDeadbandMeters` derives
-the real figure from the two ranges once both have been seen; until then this
-stands in, chosen wide enough to cover the usual short/long spread of a
-cruiser-sized weapon.
+A single threshold makes a target sitting near it swap on every reading. Two
+thresholds fix that, and where the crossover is a *fixed* number -- the setting,
+or the midpoint of the two optimal ranges -- any positive deadband is stable, so
+a plain constant is enough.
+
+That is worth saying because the first version of this needed an argument about
+half the spread between the two charges' optimal ranges. It needed it because the
+threshold there was the *currently loaded* charge's optimal range, so every swap
+moved the threshold and could re-arm the opposite one. That case still exists,
+but only as the bootstrap below, and it carries its own wider deadband.
 -}
-ammoSwapMinimumDeadbandMeters : Int
-ammoSwapMinimumDeadbandMeters =
+ammoSwapDeadbandMeters : Int
+ammoSwapDeadbandMeters =
+    3000
+
+
+{-| The deadband used while the crossover is still the loaded charge's own
+optimal range, in meters.
+
+This is the one case where the threshold moves when the swap fires, so the
+deadband has to cover it: after swapping to the long-range charge the optimal
+becomes the higher number, and the short-range rule re-arms unless the deadband
+is at least half the distance between the two. Half the spread is not knowable
+before the second range has been seen -- that is the whole reason this case
+exists -- so it is a fixed figure wide enough for the usual short/long spread of
+a cruiser-sized weapon.
+
+Worst case it costs one extra swap, after which both ranges are known, the
+crossover becomes the fixed midpoint, and this is never used again.
+-}
+ammoSwapBootstrapDeadbandMeters : Int
+ammoSwapBootstrapDeadbandMeters =
     20000
 
 
-{-| Half the spread between the two charges' optimal ranges, which is the
-narrowest deadband that cannot oscillate.
+{-| Where the swap changes its mind, and how far past it a target has to be.
 
-Going long needs `distance > optimal + deadband` and going short needs
-`distance < optimal - deadband`. After a swap to the long charge the optimal
-becomes `high`, so the short rule re-arms at `distance < high - deadband`; the
-long rule only fired above `low + deadband`. The two cannot both be satisfiable
-as long as `low + deadband >= high - deadband`, which is exactly
-`deadband >= (high - low) / 2`.
+Three sources, in order, and which one answered matters enough to carry: the
+deadband differs, and an operator reading the status line should be able to tell
+a configured number from a derived one.
+
+1.  **`ammo-swap-range`.** The only source that does not depend on a tooltip,
+    and therefore the only one that works on a client that shows no module
+    tooltip at all -- which this one may well be.
+2.  **The midpoint of the two optimal ranges**, once both have been seen. The
+    natural crossover: shoot the short-range charge inside it and the long-range
+    charge outside. Fixed, so the ordinary deadband is enough.
+3.  **The loaded charge's own optimal range**, when only one has been seen. This
+    is the bootstrap, and it exists because otherwise the second range could
+    never be learned: seeing it requires a swap, deciding a swap requires a
+    crossover, and a crossover would require both ranges. One swap on this
+    breaks the cycle, after which source 2 takes over for good.
+
+`Nothing` is a real answer and is handled rather than defaulted: no setting and
+no tooltip means the bot knows which charge is loaded but has nothing to say
+about which one *should* be, so it does not swap and says so. Guessing a distance
+would be worse than doing nothing, since wrong ammo still does damage.
 -}
-ammoSwapDeadbandMeters : AmmoSwapMemory -> Int
-ammoSwapDeadbandMeters ammoSwap =
-    case ( ammoSwap.optimalRangeSeenLow, ammoSwap.optimalRangeSeenHigh ) of
-        ( Just low, Just high ) ->
-            max ammoSwapMinimumDeadbandMeters ((high - low) // 2 + 1)
+type alias AmmoSwapThreshold =
+    { crossoverInMeters : Int
+    , deadbandInMeters : Int
+    , source : String
+    }
 
-        _ ->
-            ammoSwapMinimumDeadbandMeters
+
+ammoSwapThreshold : BotSettings -> AmmoSwapMemory -> Maybe AmmoSwapThreshold
+ammoSwapThreshold botSettings ammoSwap =
+    case botSettings.ammoSwapRangeMeters of
+        Just fromSettings ->
+            Just
+                { crossoverInMeters = fromSettings
+                , deadbandInMeters = ammoSwapDeadbandMeters
+                , source = "the ammo-swap-range setting"
+                }
+
+        Nothing ->
+            case ( ammoSwap.optimalRangeSeenLow, ammoSwap.optimalRangeSeenHigh ) of
+                ( Just low, Just high ) ->
+                    if low < high then
+                        Just
+                            { crossoverInMeters = (low + high) // 2
+                            , deadbandInMeters = ammoSwapDeadbandMeters
+                            , source = "the midpoint of the two optimal ranges seen"
+                            }
+
+                    else
+                        ammoSwapBootstrapThreshold ammoSwap
+
+                _ ->
+                    ammoSwapBootstrapThreshold ammoSwap
+
+
+ammoSwapBootstrapThreshold : AmmoSwapMemory -> Maybe AmmoSwapThreshold
+ammoSwapBootstrapThreshold ammoSwap =
+    ammoSwap.optimalRangeInMeters
+        |> Maybe.map
+            (\optimalRange ->
+                { crossoverInMeters = optimalRange
+                , deadbandInMeters = ammoSwapBootstrapDeadbandMeters
+                , source = "the loaded charge's own optimal range, no second range seen yet"
+                }
+            )
+
+
+{-| Whether this weapon is running, and so whether the client will refuse to
+load a charge into it.
+
+EVE does not merely prefer an idle module. Run 5's own game log:
+`You cannot load or unload Focused Modulated Medium Energy Beam I while it is
+active.` -- and that refusal arrives only as a client `(notify)` line, which the
+bot does not read. So a load commanded at a firing gun is discarded in silence,
+and the confirmation that follows finds nothing changed because nothing happened.
+
+`isActive` is `Nothing` when the module has never run, which
+`inactiveModulesToActivateAlways` documents at length; treated as not firing
+here, for the same reason it is treated as off there.
+-}
+weaponIsFiring : ShipUIModuleButton -> Bool
+weaponIsFiring moduleButton =
+    moduleButton.isActive == Just True
+
+
+{-| Whether this weapon will accept a charge: switched off, and no longer
+turning.
+
+The ramp is read here as the client's own answer to a question the bot has
+actually asked -- has the cycle finished -- which it can be, now that the gun has
+been told to stop. That is a different use from testing the ramp on a gun nobody
+switched off, where a turning ramp means only that the weapon is doing its job.
+It also subsumes the reload guard the previous version needed: a reload in flight
+turns the ramp, so a gun mid-reload is not quiet and will not be asked twice.
+-}
+weaponWillAcceptACharge : ShipUIModuleButton -> Bool
+weaponWillAcceptACharge moduleButton =
+    not (weaponIsFiring moduleButton)
+        && ((moduleButton.rampRotationMilli |> Maybe.withDefault 0) == 0)
 
 
 {-| The weapons, left to right.
@@ -5252,6 +5415,52 @@ activeTargetDistanceInMeters readingFromGameClient =
         |> Maybe.andThen (.objectDistanceInMeters >> Result.toMaybe)
 
 
+{-| Strip the quantity a charge entry carries in a weapon's context menu.
+
+Observed live: right-clicking a weapon holding Radio M offered
+`Multifrequency M [4]`, twice. So an entry's text is the charge name plus a
+count, and a setting naming the charge will never equal it.
+-}
+stripChargeQuantitySuffix : String -> String
+stripChargeQuantitySuffix text =
+    case text |> String.split "[" of
+        beforeBracket :: _ :: _ ->
+            String.trim beforeBracket
+
+        _ ->
+            String.trim text
+
+
+{-| Whether a weapon's context menu offers this charge.
+
+Exact match after stripping the quantity, because a substring test is a trap in
+both directions -- `attack-object` learned that live, where `Warehouse` matched
+a station's full name. The substring test is kept only as a fallback for a menu
+where nothing matched exactly, so a client that formats the quantity differently
+degrades rather than failing outright.
+
+Duplicates need no handling beyond using `any`: the same charge is listed twice
+in the one menu observed, and two entries for one charge must not read as two
+different charges.
+-}
+weaponMenuOffersCharge : String -> List String -> Bool
+weaponMenuOffersCharge chargeName entryTexts =
+    let
+        wantedNormalised : String
+        wantedNormalised =
+            chargeName |> String.trim |> String.toLower
+
+        matchesAfterStrippingQuantity : String -> Bool
+        matchesAfterStrippingQuantity entryText =
+            (entryText |> stripChargeQuantitySuffix |> String.toLower) == wantedNormalised
+    in
+    if entryTexts |> List.any matchesAfterStrippingQuantity then
+        True
+
+    else
+        entryTexts |> List.any (stringContainsIgnoringCase chargeName)
+
+
 {-| Whether the step just executed moved the mouse onto this element and did
 nothing else.
 
@@ -5273,7 +5482,7 @@ previousStepHoveredElement previousStepsEffects element =
 
 {-| Whether the step just executed right-clicked this element -- which for a
 module button is the bot opening its context menu, and so the one observable
-sign that a load was commanded on that gun.
+sign that this gun has been visited.
 -}
 previousStepRightClickedElement : List (List EffectOnWindow.EffectOnWindowStruct) -> EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Bool
 previousStepRightClickedElement previousStepsEffects element =
@@ -5354,11 +5563,103 @@ weaponOptimalRangeFromHover previousStepsEffects readingFromGameClient hoverWasP
             |> Maybe.andThen (.inMeters >> Result.toMaybe)
 
 
-updateAmmoSwapMemory : UpdateMemoryContext -> AmmoSwapMemory -> AmmoSwapMemory
+updateAmmoSwapMemory : UpdateMemoryContext BotSettings -> AmmoSwapMemory -> AmmoSwapMemory
 updateAmmoSwapMemory context memoryBefore =
+    case ( context.botSettings.shortRangeAmmoName, context.botSettings.longRangeAmmoName ) of
+        ( Just shortRangeAmmoName, Just longRangeAmmoName ) ->
+            updateAmmoSwapMemoryWithChargeNames context
+                { shortRangeAmmoName = shortRangeAmmoName, longRangeAmmoName = longRangeAmmoName }
+                memoryBefore
+
+        _ ->
+            -- The swap is off, so nothing here means anything. Reset rather than
+            -- freeze, so that turning it on from the web console mid-session
+            -- starts from a clean state instead of one assembled before the
+            -- charge names existed.
+            initAmmoSwapMemory
+
+
+updateAmmoSwapMemoryWithChargeNames :
+    UpdateMemoryContext BotSettings
+    -> { shortRangeAmmoName : String, longRangeAmmoName : String }
+    -> AmmoSwapMemory
+    -> AmmoSwapMemory
+updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
     let
         guns =
             weaponModuleButtonsLeftToRight context.readingFromGameClient
+
+        gunJustRightClickedAtX =
+            guns
+                |> List.filter (.uiNode >> previousStepRightClickedElement context.previousStepsEffects)
+                |> List.map (.uiNode >> .totalDisplayRegion >> .x)
+                |> List.head
+
+        -- Which gun the open context menu belongs to. The bot opened it, so it
+        -- knows: nothing in the menu itself says which module it came from.
+        menuOpenOnGunAtX =
+            if context.readingFromGameClient.contextMenus |> List.isEmpty then
+                Nothing
+
+            else
+                case gunJustRightClickedAtX of
+                    Just justClicked ->
+                        Just justClicked
+
+                    Nothing ->
+                        memoryBefore.menuOpenOnGunAtX
+
+        weaponMenuEntryTexts =
+            if menuOpenOnGunAtX == Nothing then
+                []
+
+            else
+                context.readingFromGameClient.contextMenus
+                    |> List.head
+                    |> Maybe.map (.entries >> List.map .text)
+                    |> Maybe.withDefault []
+
+        menuWasRead =
+            weaponMenuEntryTexts |> List.isEmpty |> not
+
+        shortRangeOffered =
+            weaponMenuOffersCharge chargeNames.shortRangeAmmoName weaponMenuEntryTexts
+
+        longRangeOffered =
+            weaponMenuOffersCharge chargeNames.longRangeAmmoName weaponMenuEntryTexts
+
+        -- The menu lists what the gun can be switched *to*, so the charge that
+        -- is absent is the charge that is in it. Verified live: a weapon holding
+        -- Radio M offered Multifrequency M and not Radio M.
+        --
+        -- Both offered means some third charge is loaded, and neither means the
+        -- ship is carrying neither -- handled separately below, because that one
+        -- is worth saying rather than retrying.
+        chargeLoaded =
+            if not menuWasRead then
+                memoryBefore.chargeLoaded
+
+            else if shortRangeOffered && not longRangeOffered then
+                Just LongRangeAmmo
+
+            else if longRangeOffered && not shortRangeOffered then
+                Just ShortRangeAmmo
+
+            else
+                Nothing
+
+        -- A weapon's menu offering neither charge means the ship carries
+        -- neither, which is worth saying rather than retrying for fifty
+        -- readings. The entry count keeps a half-built menu from latching that
+        -- for the session: the menu observed live had seven entries, and a
+        -- weapon with no loadable charge at all still has Show Info, Unload to
+        -- Cargo, the two auto- toggles and Clear group, so three is below any
+        -- real menu and above an empty one.
+        neitherChargeCarried =
+            menuWasRead
+                && (ammoSwapMenuEntriesBeforeTrusted <= List.length weaponMenuEntryTexts)
+                && not shortRangeOffered
+                && not longRangeOffered
 
         freshOptimalRange =
             weaponOptimalRangeFromHover
@@ -5367,12 +5668,20 @@ updateAmmoSwapMemory context memoryBefore =
                 memoryBefore.hoverAwaitingTooltip
 
         optimalRangeInMeters =
-            case freshOptimalRange of
-                Just fresh ->
-                    Just fresh
+            if chargeLoaded /= memoryBefore.chargeLoaded then
+                -- The number belongs to the charge that was in the gun, so a
+                -- different charge makes it stale. Forgetting it is what sends
+                -- the bot back to read the new one, which is how the second of
+                -- the two optimal ranges is ever learned.
+                freshOptimalRange
 
-                Nothing ->
-                    memoryBefore.optimalRangeInMeters
+            else
+                case freshOptimalRange of
+                    Just fresh ->
+                        Just fresh
+
+                    Nothing ->
+                        memoryBefore.optimalRangeInMeters
 
         optimalRangeSeenLow =
             [ memoryBefore.optimalRangeSeenLow, freshOptimalRange ]
@@ -5384,20 +5693,21 @@ updateAmmoSwapMemory context memoryBefore =
                 |> List.filterMap identity
                 |> List.maximum
 
-        deadband =
-            ammoSwapDeadbandMeters
+        threshold =
+            ammoSwapThreshold context.botSettings
                 { memoryBefore
-                    | optimalRangeSeenLow = optimalRangeSeenLow
+                    | optimalRangeInMeters = optimalRangeInMeters
+                    , optimalRangeSeenLow = optimalRangeSeenLow
                     , optimalRangeSeenHigh = optimalRangeSeenHigh
                 }
 
         rangeVerdict =
-            case ( optimalRangeInMeters, activeTargetDistanceInMeters context.readingFromGameClient ) of
-                ( Just optimalRange, Just distance ) ->
-                    if optimalRange + deadband < distance then
+            case ( threshold, activeTargetDistanceInMeters context.readingFromGameClient ) of
+                ( Just crossover, Just distance ) ->
+                    if crossover.crossoverInMeters + crossover.deadbandInMeters < distance then
                         Just LongRangeAmmo
 
-                    else if distance < optimalRange - deadband then
+                    else if distance < crossover.crossoverInMeters - crossover.deadbandInMeters then
                         Just ShortRangeAmmo
 
                     else
@@ -5409,16 +5719,6 @@ updateAmmoSwapMemory context memoryBefore =
         verdictIsTheSameOneAsBefore =
             (rangeVerdict /= Nothing) && (rangeVerdict == memoryBefore.rangeVerdict)
 
-        rangeVerdictTicks =
-            if rangeVerdict == Nothing then
-                0
-
-            else if verdictIsTheSameOneAsBefore then
-                memoryBefore.rangeVerdictTicks + 1
-
-            else
-                1
-
         gunsCommandedBefore =
             if verdictIsTheSameOneAsBefore then
                 memoryBefore.gunsCommandedThisVerdictAtX
@@ -5427,12 +5727,97 @@ updateAmmoSwapMemory context memoryBefore =
                 []
 
         gunsCommandedThisVerdictAtX =
-            (guns
-                |> List.filter (.uiNode >> previousStepRightClickedElement context.previousStepsEffects)
-                |> List.map (.uiNode >> .totalDisplayRegion >> .x)
-                |> List.filter (\x -> not (List.member x gunsCommandedBefore))
-            )
-                ++ gunsCommandedBefore
+            case gunJustRightClickedAtX of
+                Just justClicked ->
+                    if gunsCommandedBefore |> List.member justClicked then
+                        gunsCommandedBefore
+
+                    else
+                        justClicked :: gunsCommandedBefore
+
+                Nothing ->
+                    gunsCommandedBefore
+
+        everyGunVisited =
+            (guns |> List.isEmpty |> not)
+                && (guns |> List.all (\gun -> gunsCommandedThisVerdictAtX |> List.member gun.uiNode.totalDisplayRegion.x))
+
+        -- The swap is done when the last gun's own menu says so: the wanted
+        -- charge has gone from the list, which is the client reporting the
+        -- effect rather than the bot reporting its intent.
+        --
+        -- A verdict that arrives with the wanted charge already loaded is
+        -- satisfied on the spot, without opening a menu to find that out. This
+        -- matters more than it looks: the verdict re-arms every time a target's
+        -- distance wanders back out through the deadband, and without this the
+        -- bot would re-open every gun's menu, mid-fight, to be told nothing had
+        -- changed. The evidence is the client's own last word about what is
+        -- loaded, and nothing changes it but a load the bot performed.
+        verdictSatisfied =
+            if not verdictIsTheSameOneAsBefore then
+                (chargeLoaded /= Nothing) && (chargeLoaded == rangeVerdict)
+
+            else if everyGunVisited && menuWasRead && (chargeLoaded == rangeVerdict) then
+                True
+
+            else
+                memoryBefore.verdictSatisfied
+
+        -- Counts only the readings a verdict has gone *unsatisfied*, which is
+        -- what the give-up is about. Reset rather than held once satisfied, so
+        -- that a long struggle cannot leave a count behind for the next verdict
+        -- to inherit and trip over.
+        rangeVerdictTicks =
+            if rangeVerdict == Nothing then
+                0
+
+            else if verdictSatisfied then
+                0
+
+            else if not verdictIsTheSameOneAsBefore then
+                1
+
+            else if memoryBefore.verdictAbandoned then
+                memoryBefore.rangeVerdictTicks
+
+            else
+                memoryBefore.rangeVerdictTicks + 1
+
+        -- Readings spent waiting for the guns to stop firing, for this verdict.
+        -- Counted only while the bot is actually acting on one, so a weapon that
+        -- is firing because nothing has asked it to stop does not spend this
+        -- budget.
+        gunsSilencingTicks =
+            if not verdictIsTheSameOneAsBefore then
+                0
+
+            else if verdictSatisfied || memoryBefore.verdictAbandoned then
+                0
+
+            else if (rangeVerdictTicks < ammoSwapDistanceHoldTicks) || not (guns |> List.any weaponIsFiring) then
+                0
+
+            else
+                memoryBefore.gunsSilencingTicks + 1
+
+        -- Abandoning is per verdict and says nothing about the next one -- see
+        -- ammoSwapVerdictGiveUpTicks. The guns go back to firing the moment this
+        -- is set, because the branch hands the fight on.
+        verdictAbandoned =
+            if not verdictIsTheSameOneAsBefore then
+                False
+
+            else if verdictSatisfied then
+                False
+
+            else if ammoSwapSilenceGunsGiveUpTicks < gunsSilencingTicks then
+                True
+
+            else if ammoSwapVerdictGiveUpTicks < rangeVerdictTicks then
+                True
+
+            else
+                memoryBefore.verdictAbandoned
 
         previousStepHoveredAWeapon =
             guns |> List.any (.uiNode >> previousStepHoveredElement context.previousStepsEffects)
@@ -5444,10 +5829,7 @@ updateAmmoSwapMemory context memoryBefore =
             else if freshOptimalRange /= Nothing then
                 False
 
-            else if
-                (context.previousStepsEffects |> List.head |> Maybe.withDefault [] |> List.any effectMovesTheMouse)
-                    && not previousStepHoveredAWeapon
-            then
+            else if context.previousStepsEffects |> List.head |> Maybe.withDefault [] |> List.any effectMovesTheMouse then
                 -- Something else took the mouse, so the dwell that raises the
                 -- tooltip has been interrupted and there is nothing left to wait
                 -- for. Forgetting that we asked is what lets the bot ask again;
@@ -5472,37 +5854,55 @@ updateAmmoSwapMemory context memoryBefore =
                 -- not evidence that the client answered.
                 memoryBefore.hoverUnansweredTicks
 
+        optimalRangeGivenUp =
+            memoryBefore.optimalRangeGivenUp
+                || (weaponTooltipUnansweredGiveUpTicks < hoverUnansweredTicks)
+
         givenUp =
             case memoryBefore.givenUp of
                 Just reason ->
                     Just reason
 
                 Nothing ->
-                    if weaponTooltipUnansweredGiveUpTicks < hoverUnansweredTicks then
+                    if neitherChargeCarried then
                         Just
-                            ("the weapon's tooltip never appeared in "
-                                ++ String.fromInt hoverUnansweredTicks
-                                ++ " readings of hovering it, so there is no optimal range to swap against"
+                            ("the weapon's own menu offers neither '"
+                                ++ chargeNames.shortRangeAmmoName
+                                ++ "' nor '"
+                                ++ chargeNames.longRangeAmmoName
+                                ++ "', so the ship is carrying neither and there is nothing to swap between"
                             )
 
-                    else if ammoSwapNotConfirmedGiveUpTicks < rangeVerdictTicks then
+                    else if optimalRangeGivenUp && (threshold == Nothing) then
                         Just
-                            ("the range has called for the other charge for "
-                                ++ String.fromInt rangeVerdictTicks
-                                ++ " readings and the weapon's optimal range never moved, so the swap is not landing"
+                            ("no crossover distance: 'ammo-swap-range' is not set and the weapon's tooltip never appeared, so there is no distance to swap at even though the menu says which charge is loaded"
                             )
 
                     else
+                        -- A load that does not land is *not* here. It abandons
+                        -- the one verdict (`verdictAbandoned`) and the guns go
+                        -- back to shooting; only the two impossibilities above
+                        -- are permanent enough to switch the feature off for the
+                        -- session. Issue #27 is why: the old latch fired on a
+                        -- client that was refusing every load because the guns
+                        -- were active, which is a condition the bot can fix
+                        -- rather than a client that cannot do this at all.
                         Nothing
     in
-    { optimalRangeInMeters = optimalRangeInMeters
+    { chargeLoaded = chargeLoaded
+    , optimalRangeInMeters = optimalRangeInMeters
     , optimalRangeSeenLow = optimalRangeSeenLow
     , optimalRangeSeenHigh = optimalRangeSeenHigh
     , rangeVerdict = rangeVerdict
     , rangeVerdictTicks = rangeVerdictTicks
+    , verdictSatisfied = verdictSatisfied
+    , verdictAbandoned = verdictAbandoned
+    , gunsSilencingTicks = gunsSilencingTicks
     , gunsCommandedThisVerdictAtX = gunsCommandedThisVerdictAtX
+    , menuOpenOnGunAtX = menuOpenOnGunAtX
     , hoverAwaitingTooltip = hoverAwaitingTooltip
     , hoverUnansweredTicks = hoverUnansweredTicks
+    , optimalRangeGivenUp = optimalRangeGivenUp
     , givenUp = givenUp
     }
 
@@ -5516,12 +5916,11 @@ the fight on -- the shape `returnDronesToBay` was changed to after #7, where a
 give-up that only spoke on one exact reading ended up never speaking at all.
 
 Off unless both `short-range-ammo` and `long-range-ammo` are set. Discovering the
-pair by reading the weapon's own right-click menu is the better answer and is not
-implemented here: nothing has yet observed what that menu contains on this
-client, and a wrong guess about which entries are charges would have the bot
-clicking unknown menu items during a fight. Naming both is also the only way to
-be sure there *is* a pair -- a ship carrying one charge type has no swap to make,
-and must do nothing rather than guess.
+pair by reading the menu is possible now that the menu is read at all, and is
+still not done: the menu lists every charge the ship carries that fits, which is
+not the same as the two the operator wants alternated, and picking two of them by
+guess is a swap nobody asked for. Naming both is also the only way to be sure
+there *is* a pair.
 -}
 ensureAmmoSuitsTargetRange : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
 ensureAmmoSuitsTargetRange context nextStep =
@@ -5541,14 +5940,19 @@ ensureAmmoSuitsTargetRange context nextStep =
                         nextStep
 
                 Nothing ->
-                    if guns |> List.all (.isActive >> Maybe.withDefault False) |> not then
-                        -- Get the guns going first. Reading the tooltip means
-                        -- holding the mouse still, and a swap means taking a gun
-                        -- offline for a reload -- both are things to do to a ship
-                        -- that is already shooting, not to one that has not
-                        -- started. This is also the state `decisionToKillRats`
-                        -- reaches as "All guns cycling", so the ammo path only
-                        -- ever runs from the same place.
+                    if
+                        (guns |> List.all weaponIsFiring |> not)
+                            && not (ammoSwapIsActingOnAVerdict ammoSwap)
+                    then
+                        -- Get the guns going first. Opening a weapon's menu takes
+                        -- the mouse and a load takes a gun offline -- both are
+                        -- things to do to a ship that is already shooting, not to
+                        -- one that has not started.
+                        --
+                        -- The second clause is what stops this becoming a flap.
+                        -- Once the swap is under way it switches the guns off on
+                        -- purpose, and bailing out here would hand the fight back
+                        -- to the branch that switches them straight on again.
                         nextStep
 
                     else
@@ -5565,24 +5969,267 @@ ensureAmmoSuitsTargetRange context nextStep =
                                 nextStep
 
                             ( Just referenceGun, Just distance ) ->
-                                case ammoSwap.optimalRangeInMeters of
-                                    Nothing ->
-                                        hoverWeaponForOptimalRange context referenceGun
-
-                                    Just optimalRange ->
-                                        ensureAmmoSuitsTargetRangeKnowingOptimalRange
-                                            context
-                                            { guns = guns
-                                            , referenceGun = referenceGun
-                                            , distance = distance
-                                            , optimalRange = optimalRange
-                                            , shortRangeAmmoName = shortRangeAmmoName
-                                            , longRangeAmmoName = longRangeAmmoName
-                                            }
-                                            nextStep
+                                ensureAmmoSuitsTargetRangeWithGuns context
+                                    { guns = guns
+                                    , referenceGun = referenceGun
+                                    , distance = distance
+                                    , shortRangeAmmoName = shortRangeAmmoName
+                                    , longRangeAmmoName = longRangeAmmoName
+                                    }
+                                    nextStep
 
         _ ->
             nextStep
+
+
+{-| Whether the swap has taken charge of the guns for a verdict it is working
+on.
+
+While this holds, the ammo path keeps control even with every weapon switched
+off, because it is the thing that switched them off. It stops holding the moment
+the verdict is satisfied or abandoned, and the fight then switches them back on
+by its ordinary route -- there is no separate re-activation step, and there
+should not be one: the branch that already knows how to start a weapon on a
+target is the right owner of that, and a second one would be two controllers for
+the same button.
+-}
+ammoSwapIsActingOnAVerdict : AmmoSwapMemory -> Bool
+ammoSwapIsActingOnAVerdict ammoSwap =
+    (ammoSwap.rangeVerdict /= Nothing)
+        && not ammoSwap.verdictSatisfied
+        && not ammoSwap.verdictAbandoned
+        && (ammoSwapDistanceHoldTicks <= ammoSwap.rangeVerdictTicks)
+
+
+ensureAmmoSuitsTargetRangeWithGuns :
+    BotDecisionContext
+    ->
+        { guns : List ShipUIModuleButton
+        , referenceGun : ShipUIModuleButton
+        , distance : Int
+        , shortRangeAmmoName : String
+        , longRangeAmmoName : String
+        }
+    -> DecisionPathNode
+    -> DecisionPathNode
+ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
+    let
+        ammoSwap =
+            context.memory.ammoSwap
+
+        gunWithMenuOpen =
+            case ammoSwap.menuOpenOnGunAtX of
+                Nothing ->
+                    Nothing
+
+                Just menuGunX ->
+                    fight.guns
+                        |> List.filter (\gun -> gun.uiNode.totalDisplayRegion.x == menuGunX)
+                        |> List.head
+
+        openMenuEntryTexts =
+            if ammoSwap.menuOpenOnGunAtX == Nothing then
+                []
+
+            else
+                context.readingFromGameClient.contextMenus
+                    |> List.head
+                    |> Maybe.map (.entries >> List.map .text)
+                    |> Maybe.withDefault []
+
+        gunsStillToVisit =
+            fight.guns
+                |> List.filter
+                    (\gun ->
+                        ammoSwap.gunsCommandedThisVerdictAtX
+                            |> List.member gun.uiNode.totalDisplayRegion.x
+                            |> not
+                    )
+
+        threshold =
+            ammoSwapThreshold context.eventContext.botSettings ammoSwap
+
+        -- Reading the optimal range is a refinement now, not the mechanism, and
+        -- it is only worth the held mouse while it is the only thing that can
+        -- answer. With `ammo-swap-range` set it never is; with the loaded
+        -- charge's range already read there is nothing to add until the charge
+        -- changes; and once the client has shown it has no tooltip there is
+        -- nothing left to ask.
+        stillWorthReadingTheOptimalRange =
+            not ammoSwap.optimalRangeGivenUp
+                && (context.eventContext.botSettings.ammoSwapRangeMeters == Nothing)
+                && (ammoSwap.optimalRangeInMeters == Nothing)
+
+        describeRanges =
+            "target "
+                ++ String.fromInt fight.distance
+                ++ " m away, crossover "
+                ++ (case threshold of
+                        Just crossover ->
+                            String.fromInt crossover.crossoverInMeters
+                                ++ " m from "
+                                ++ crossover.source
+
+                        Nothing ->
+                            "unknown"
+                   )
+
+        pressEscape =
+            decideActionForCurrentStep
+                [ EffectOnWindow.KeyDown EffectOnWindow.vkey_ESCAPE
+                , EffectOnWindow.KeyUp EffectOnWindow.vkey_ESCAPE
+                ]
+
+        idle =
+            if stillWorthReadingTheOptimalRange then
+                hoverWeaponForOptimalRange context fight.referenceGun
+
+            else
+                nextStep
+    in
+    case ammoSwap.rangeVerdict of
+        Nothing ->
+            idle
+
+        Just verdict ->
+            let
+                wantedChargeName =
+                    case verdict of
+                        ShortRangeAmmo ->
+                            fight.shortRangeAmmoName
+
+                        LongRangeAmmo ->
+                            fight.longRangeAmmoName
+
+                loadTheWantedCharge gun =
+                    useContextMenuCascade
+                        ( "weapon module", gun.uiNode )
+                        (useMenuEntryWithTextContaining wantedChargeName menuCascadeCompleted)
+                        context
+            in
+            if ammoSwap.verdictSatisfied then
+                idle
+
+            else if ammoSwap.verdictAbandoned then
+                describeBranch
+                    ("Gave up on loading '"
+                        ++ wantedChargeName
+                        ++ "' for this target ("
+                        ++ describeRanges
+                        ++ ") -- back to shooting with what is loaded, rather than standing here with the guns off. The next change of range tries again."
+                    )
+                    nextStep
+
+            else if ammoSwap.rangeVerdictTicks < ammoSwapDistanceHoldTicks then
+                describeBranch
+                    ("The range wants '"
+                        ++ wantedChargeName
+                        ++ "' ("
+                        ++ describeRanges
+                        ++ "), but only for "
+                        ++ String.fromInt ammoSwap.rangeVerdictTicks
+                        ++ " reading(s) -- a target dying and being replaced looks exactly like this, so wait."
+                    )
+                    nextStep
+
+            else
+                case gunWithMenuOpen of
+                    Just gunWithMenu ->
+                        if not (weaponMenuOffersCharge wantedChargeName openMenuEntryTexts) then
+                            -- The menu lists what the gun can switch *to*, so a
+                            -- charge missing from it is the charge already in the
+                            -- gun. That is the confirmation the whole design
+                            -- turns on, and it needs no tooltip.
+                            describeBranch
+                                ("The menu does not offer '"
+                                    ++ wantedChargeName
+                                    ++ "', which is the client saying this weapon already has it -- close the menu."
+                                )
+                                pressEscape
+
+                        else if not (weaponWillAcceptACharge gunWithMenu) then
+                            -- Reading the menu is free at any time; acting on it
+                            -- is not. Close it, so the module button is not
+                            -- underneath it when the next branch goes to switch
+                            -- the gun off.
+                            describeBranch
+                                ("The menu offers '"
+                                    ++ wantedChargeName
+                                    ++ "', but this weapon is still running and the client refuses a load into a running weapon -- close the menu and stop the gun first."
+                                )
+                                pressEscape
+
+                        else
+                            describeBranch
+                                ("The menu offers '"
+                                    ++ wantedChargeName
+                                    ++ "', so this weapon is not carrying it, and it is quiet enough to accept it -- load it. "
+                                    ++ describeRanges
+                                    ++ "."
+                                )
+                                (loadTheWantedCharge gunWithMenu)
+
+                    Nothing ->
+                        case fight.guns |> List.filter weaponIsFiring |> List.head of
+                            Just gunStillFiring ->
+                                -- Switch it off, and mind that the button is a
+                                -- toggle: clicking again before the client has
+                                -- shown the result turns it straight back on,
+                                -- which is what moduleButtonClickSettlingSteps
+                                -- exists for. This is bounded by
+                                -- ammoSwapSilenceGunsGiveUpTicks, and the guns
+                                -- come back on by themselves the moment the swap
+                                -- stops holding the fight -- see
+                                -- ammoSwapIsActingOnAVerdict.
+                                describeBranch
+                                    ("Stop this weapon before loading '"
+                                        ++ wantedChargeName
+                                        ++ "' -- the client refuses to load a charge into a module that is running, and says so only in the game log, which the bot cannot read. Silencing for "
+                                        ++ String.fromInt ammoSwap.gunsSilencingTicks
+                                        ++ " of "
+                                        ++ String.fromInt ammoSwapSilenceGunsGiveUpTicks
+                                        ++ " readings."
+                                    )
+                                    (clickModuleButtonButWaitIfClickedInPreviousStep context gunStillFiring)
+
+                            Nothing ->
+                                case fight.guns |> List.filter (weaponWillAcceptACharge >> not) |> List.head of
+                                    Just _ ->
+                                        describeBranch
+                                            ("The guns are switched off but one is still finishing its cycle -- wait for the ramp to stop before loading '"
+                                                ++ wantedChargeName
+                                                ++ "'."
+                                            )
+                                            waitForProgressInGame
+
+                                    Nothing ->
+                                        case gunsStillToVisit |> List.head of
+                                            Just gunToVisit ->
+                                                describeBranch
+                                                    ("Open this weapon's menu to see whether it already carries '"
+                                                        ++ wantedChargeName
+                                                        ++ "'. "
+                                                        ++ String.fromInt (List.length gunsStillToVisit)
+                                                        ++ " of "
+                                                        ++ String.fromInt (List.length fight.guns)
+                                                        ++ " weapon(s) still to check."
+                                                    )
+                                                    (loadTheWantedCharge gunToVisit)
+
+                                            Nothing ->
+                                                -- Every gun has been visited and
+                                                -- the swap is still not
+                                                -- confirmed, so re-open the last
+                                                -- one: its menu is where the
+                                                -- answer is, and the charge
+                                                -- having vanished from it is the
+                                                -- only evidence a load landed.
+                                                describeBranch
+                                                    ("Every weapon has been told to load '"
+                                                        ++ wantedChargeName
+                                                        ++ "' -- re-open the last one's menu to see whether it took."
+                                                    )
+                                                    (loadTheWantedCharge fight.referenceGun)
 
 
 {-| Rest the mouse on a weapon module until the client shows its tooltip.
@@ -5595,11 +6242,12 @@ a tooltip that never appears. And while it waits it holds the whole decision
 here rather than handing the fight on, because the fight is what would move the
 mouse: a click on a target or an overview row ends the dwell just as surely.
 
-Holding costs less than it reads. Guns and drones already engaged keep cycling
+Only reached while the crossover distance is still unknown, which means only
+while `ammo-swap-range` is unset, and at most until
+`weaponTooltipUnansweredGiveUpTicks` readings have gone by without an answer.
+Holding costs less than it reads: guns and drones already engaged keep cycling
 with no further input, so a few readings of issuing nothing is a few readings of
-not *changing* anything, not a ceasefire -- and it is bounded by
-`weaponTooltipUnansweredGiveUpTicks`, after which the whole feature switches
-itself off for the session.
+not *changing* anything, not a ceasefire.
 
 Holding still could in principle age a pending lock attempt past
 `lockAttemptReadingsBeforeVerdict` and have a lock the bot never gave a chance
@@ -5612,7 +6260,7 @@ hoverWeaponForOptimalRange : BotDecisionContext -> ShipUIModuleButton -> Decisio
 hoverWeaponForOptimalRange context referenceGun =
     if context.memory.ammoSwap.hoverAwaitingTooltip then
         describeBranch
-            ("Holding still for the weapon's tooltip to appear ("
+            ("Holding still for the weapon's tooltip, which is the only way to work out a crossover distance without 'ammo-swap-range' ("
                 ++ (context.memory.ammoSwap.hoverUnansweredTicks |> String.fromInt)
                 ++ " of "
                 ++ String.fromInt weaponTooltipUnansweredGiveUpTicks
@@ -5622,154 +6270,14 @@ hoverWeaponForOptimalRange context referenceGun =
 
     else
         describeBranch
-            "Rest the mouse on a weapon to read its optimal range, which is what says which ammo is loaded."
+            "Rest the mouse on a weapon to read its optimal range, which is what a crossover distance can be derived from."
             (decideActionForCurrentStep
                 (EveOnline.BotFramework.mouseMoveToUIElement referenceGun.uiNode)
             )
 
 
-ensureAmmoSuitsTargetRangeKnowingOptimalRange :
-    BotDecisionContext
-    ->
-        { guns : List ShipUIModuleButton
-        , referenceGun : ShipUIModuleButton
-        , distance : Int
-        , optimalRange : Int
-        , shortRangeAmmoName : String
-        , longRangeAmmoName : String
-        }
-    -> DecisionPathNode
-    -> DecisionPathNode
-ensureAmmoSuitsTargetRangeKnowingOptimalRange context fight nextStep =
-    let
-        ammoSwap =
-            context.memory.ammoSwap
-
-        describeRanges =
-            "target "
-                ++ String.fromInt fight.distance
-                ++ " m away, optimal "
-                ++ String.fromInt fight.optimalRange
-                ++ " m, deadband "
-                ++ String.fromInt (ammoSwapDeadbandMeters ammoSwap)
-                ++ " m"
-
-        gunsStillToCommand =
-            fight.guns
-                |> List.filter
-                    (\gun ->
-                        ammoSwap.gunsCommandedThisVerdictAtX
-                            |> List.member gun.uiNode.totalDisplayRegion.x
-                            |> not
-                    )
-
-        -- The gun whose context menu is open right now, if one is. A gun counts
-        -- as commanded from the reading its menu was opened, which is several
-        -- readings before the charge in that menu has been clicked -- so without
-        -- this the walk would move on to the next gun and leave the cascade it
-        -- started hanging, every time.
-        gunWithCascadeInFlight =
-            if context.readingFromGameClient.contextMenus |> List.isEmpty then
-                Nothing
-
-            else
-                case ammoSwap.gunsCommandedThisVerdictAtX |> List.head of
-                    Nothing ->
-                        Nothing
-
-                    Just mostRecentlyCommandedX ->
-                        fight.guns
-                            |> List.filter (\gun -> gun.uiNode.totalDisplayRegion.x == mostRecentlyCommandedX)
-                            |> List.head
-
-        -- Whether the bot has asked for a reload recently enough that a turning
-        -- ramp might be that reload rather than an ordinary firing cycle. See
-        -- ammoReloadSettlingTicks for why the ramp alone is not the test.
-        aReloadMayBeInFlight =
-            context.previousStepsEffects
-                |> List.take ammoReloadSettlingTicks
-                |> List.any
-                    (\effects ->
-                        fight.guns |> List.any (\gun -> effectsRightClickElement effects gun.uiNode)
-                    )
-    in
-    case ammoSwap.rangeVerdict of
-        Nothing ->
-            nextStep
-
-        Just verdict ->
-            let
-                ammoName =
-                    case verdict of
-                        ShortRangeAmmo ->
-                            fight.shortRangeAmmoName
-
-                        LongRangeAmmo ->
-                            fight.longRangeAmmoName
-            in
-            if ammoSwap.rangeVerdictTicks < ammoSwapDistanceHoldTicks then
-                describeBranch
-                    ("The range wants '"
-                        ++ ammoName
-                        ++ "' ("
-                        ++ describeRanges
-                        ++ "), but only for "
-                        ++ String.fromInt ammoSwap.rangeVerdictTicks
-                        ++ " reading(s) -- a target dying and being replaced looks exactly like this, so wait."
-                    )
-                    nextStep
-
-            else
-                case gunWithCascadeInFlight of
-                    Just gunMidCascade ->
-                        describeBranch
-                            ("Finish loading '" ++ ammoName ++ "' on the weapon whose menu is already open.")
-                            (useContextMenuCascade
-                                ( "weapon module", gunMidCascade.uiNode )
-                                (useMenuEntryWithTextContaining ammoName menuCascadeCompleted)
-                                context
-                            )
-
-                    Nothing ->
-                        case gunsStillToCommand |> List.head of
-                            Nothing ->
-                                -- Every gun has been told to load. The optimal
-                                -- range has not caught up yet, so re-read it:
-                                -- that number moving is the only evidence the
-                                -- reload happened at all, and a decision log
-                                -- saying "loaded" is not evidence of anything.
-                                hoverWeaponForOptimalRange context fight.referenceGun
-
-                            Just gunToCommand ->
-                                if aReloadMayBeInFlight && ((gunToCommand.rampRotationMilli |> Maybe.withDefault 0) /= 0) then
-                                    describeBranch
-                                        ("Want to load '"
-                                            ++ ammoName
-                                            ++ "' but a reload was just commanded and this weapon's ramp is turning -- asking again now would start it over."
-                                        )
-                                        nextStep
-
-                                else
-                                    describeBranch
-                                        ("Load '"
-                                            ++ ammoName
-                                            ++ "' -- "
-                                            ++ describeRanges
-                                            ++ ". "
-                                            ++ String.fromInt (List.length gunsStillToCommand)
-                                            ++ " of "
-                                            ++ String.fromInt (List.length fight.guns)
-                                            ++ " weapon(s) still to load."
-                                        )
-                                        (useContextMenuCascade
-                                            ( "weapon module", gunToCommand.uiNode )
-                                            (useMenuEntryWithTextContaining ammoName menuCascadeCompleted)
-                                            context
-                                        )
-
-
-{-| The ammo swap's whole state on one line, so an operator can watch the optimal
-range actually move rather than trust the decision log's claim that it swapped.
+{-| The ammo swap's whole state on one line, so an operator can watch the charge
+the client reports rather than trust the decision log's claim that it swapped.
 -}
 describeAmmoSwapState : BotDecisionContext -> String
 describeAmmoSwapState context =
@@ -5779,6 +6287,17 @@ describeAmmoSwapState context =
 
         describeOptional label value =
             label ++ ": " ++ (value |> Maybe.map String.fromInt |> Maybe.withDefault "unknown")
+
+        describeAmmoRange ammoRange =
+            case ammoRange of
+                Nothing ->
+                    "unknown"
+
+                Just ShortRangeAmmo ->
+                    "short-range"
+
+                Just LongRangeAmmo ->
+                    "long-range"
     in
     case ( context.eventContext.botSettings.shortRangeAmmoName, context.eventContext.botSettings.longRangeAmmoName ) of
         ( Just _, Just _ ) ->
@@ -5787,29 +6306,58 @@ describeAmmoSwapState context =
                     "Ammo swap: given up -- " ++ reason ++ "."
 
                 Nothing ->
-                    "Ammo swap: "
-                        ++ describeOptional "weapon optimal range" ammoSwap.optimalRangeInMeters
+                    "Ammo swap: loaded charge reads "
+                        ++ describeAmmoRange ammoSwap.chargeLoaded
+                        ++ ", crossover "
+                        ++ (case ammoSwapThreshold context.eventContext.botSettings ammoSwap of
+                                Just crossover ->
+                                    String.fromInt crossover.crossoverInMeters
+                                        ++ " m (+/-"
+                                        ++ String.fromInt crossover.deadbandInMeters
+                                        ++ ", from "
+                                        ++ crossover.source
+                                        ++ ")"
+
+                                Nothing ->
+                                    "unknown"
+                           )
+                        ++ ", "
+                        ++ describeOptional "target distance" (activeTargetDistanceInMeters context.readingFromGameClient)
+                        ++ " m, wants "
+                        ++ describeAmmoRange ammoSwap.rangeVerdict
+                        ++ " for "
+                        ++ String.fromInt ammoSwap.rangeVerdictTicks
+                        ++ " reading(s)"
+                        ++ (if ammoSwap.verdictSatisfied then
+                                " (satisfied)"
+
+                            else if ammoSwap.verdictAbandoned then
+                                " (gave up on this one, will try again on the next change of range)"
+
+                            else if 0 < ammoSwap.gunsSilencingTicks then
+                                " (waiting "
+                                    ++ String.fromInt ammoSwap.gunsSilencingTicks
+                                    ++ " of "
+                                    ++ String.fromInt ammoSwapSilenceGunsGiveUpTicks
+                                    ++ " readings for the guns to stop)"
+
+                            else
+                                ""
+                           )
+                        ++ ". Optimal range "
+                        ++ describeOptional "now" ammoSwap.optimalRangeInMeters
                         ++ " m ("
                         ++ describeOptional "seen low" ammoSwap.optimalRangeSeenLow
                         ++ ", "
                         ++ describeOptional "seen high" ammoSwap.optimalRangeSeenHigh
-                        ++ "), "
-                        ++ describeOptional "target distance" (activeTargetDistanceInMeters context.readingFromGameClient)
-                        ++ " m, verdict "
-                        ++ (case ammoSwap.rangeVerdict of
-                                Nothing ->
-                                    "none"
-
-                                Just ShortRangeAmmo ->
-                                    "short-range"
-
-                                Just LongRangeAmmo ->
-                                    "long-range"
-                           )
-                        ++ " for "
-                        ++ String.fromInt ammoSwap.rangeVerdictTicks
-                        ++ " reading(s), tooltip unanswered "
+                        ++ "), tooltip unanswered "
                         ++ String.fromInt ammoSwap.hoverUnansweredTicks
+                        ++ (if ammoSwap.optimalRangeGivenUp then
+                                " (given up)"
+
+                            else
+                                ""
+                           )
                         ++ "."
 
         _ ->
@@ -6552,7 +7100,7 @@ the candidate selection in `decideActionInCombat` grows into.
 The bounds are not reset within a session: `BotMemory` starts fresh with each
 one, and the ship does not change mid-session in the way this bot flies.
 -}
-updateLockRangeLearning : UpdateMemoryContext -> BotMemory -> LockRangeLearning
+updateLockRangeLearning : UpdateMemoryContext BotSettings -> BotMemory -> LockRangeLearning
 updateLockRangeLearning context botMemoryBefore =
     let
         entries : List OverviewWindowEntry
@@ -8449,7 +8997,7 @@ lowWaterMark readingFromGameClient getPercent previous =
                         min previous current
 
 
-updateMemoryForNewReadingFromGame : UpdateMemoryContext -> BotMemory -> BotMemory
+updateMemoryForNewReadingFromGame : UpdateMemoryContext BotSettings -> BotMemory -> BotMemory
 updateMemoryForNewReadingFromGame context botMemoryBefore =
     let
         currentContextMenuDepth =
