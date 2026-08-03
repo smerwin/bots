@@ -18,8 +18,16 @@ on one fit, and the entry #34 hung on has no observations at all:
 while the sampler ran. #12 and #34 are both a decision built on a field's assumed
 meaning. So `isActive`, `isBusy` and `isHiliteVisible` keep the meanings they
 had, the new fields reach the status line and stop there, and
-`test_nothing_but_the_status_line_reads_them` is what keeps that true as the
-file changes around it.
+`test_only_the_status_line_and_the_two_named_predicates_read_them` is what keeps
+that true as the file changes around it.
+
+**Issue #50 admitted one of them, and only after the observation arrived.** Run
+11's ammo swap switched a gun off with the status line printing, so
+`isInActiveState` was finally recorded going `Just True` -> `Just False` across a
+real switch-off -- and `isDeactivating` going `True` beside it, the leg named
+above as having no observations at all. That one field now backs two named
+predicates the ammo swap consults; the other eleven are unchanged, and the test
+above is narrowed rather than deleted.
 
 The parser is vendored six times and the policy is all six identically, so the
 block is compared byte for byte the way `test_game_log_channel.py` compares the
@@ -192,8 +200,15 @@ class ExposedAndNotActedOnTest(unittest.TestCase):
     def setUp(self):
         self.source = bot_elm()
         # Prose about these fields is expected and encouraged; a *read* of one
-        # is what must not spread. `{- -}` blocks are this file's doc comments.
+        # is what must not spread. `{- -}` blocks are this file's doc comments,
+        # and a whole line beginning `--` is prose too -- #50's memory update
+        # explains at length which entry it consults and why, which is exactly
+        # the kind of writing this should not punish. Only whole comment lines
+        # are dropped, never a trailing `--`, so no string literal is touched.
         self.code = re.sub(r"\{-.*?-\}", "", self.source, flags=re.DOTALL)
+        self.code = "\n".join(
+            "" if line.lstrip().startswith("--") else line
+            for line in self.code.split("\n"))
 
     def function_body(self, signature_start, source=None):
         source = self.source if source is None else source
@@ -201,16 +216,59 @@ class ExposedAndNotActedOnTest(unittest.TestCase):
         end = source.index("\n\n\n", start)
         return source[start:end]
 
-    def test_nothing_but_the_status_line_reads_them(self):
+    def test_only_the_status_line_and_the_two_named_predicates_read_them(self):
+        """#39 said nothing may read these; #50 is the one field that may.
+
+        The original assertion was that `describeTopRowModuleDictState` is the
+        sole reader, because no sample had ever caught a module switching off
+        and the entry #34 hung on had no observations behind it. Run 11 supplied
+        that sample, and it is the one this relaxation rests on:
+        `isInActiveState` goes `Just True` -> `Just False` on the reading after
+        the ammo swap clicks the module button, on all four swaps in the run,
+        with `isDeactivating` going `True` at the same moment.
+
+        So exactly one more reader is admitted, and it is bounded three ways.
+        The field is `isInActiveState`, which is the one #39 measured as meaning
+        *switched on*. The reads go through `moduleReadsSwitchedOff` and
+        `moduleReadsSwitchedOn`, so the rule about what the flag means lives in
+        one named, executable place rather than being spelled out at each site.
+        And the direction is one-way -- see
+        `test_ammo_no_disarm_under_fire.TheModuleReadingCanOnlyShortenTheDisarmedPeriod`
+        for the property that it can only make the ammo swap release the guns
+        sooner, never hold them longer, which is what keeps #34's deadline
+        independent of a signal that could stall it.
+
+        The other eleven entries keep #39's original status exactly: parsed,
+        logged, and acted on by nothing.
+        """
         describe = self.function_body(
             "describeTopRowModuleDictState : ReadingFromGameClient", self.code)
+        predicates = "".join(
+            self.function_body(signature, self.code) for signature in [
+                "moduleReadsSwitchedOff : EveOnline.ParseUserInterface.ShipUIModuleButtonState",
+                "moduleReadsSwitchedOn : EveOnline.ParseUserInterface.ShipUIModuleButtonState",
+            ])
         self.assertEqual(
             self.code.count("stateFromDictEntries"),
-            describe.count("stateFromDictEntries"),
-            "something outside describeTopRowModuleDictState reads the module "
-            "button's dict entries -- #35 exposes them to be logged, and the "
-            "one leg #34 needed (isDeactivating going True) has still never "
-            "been observed")
+            describe.count("stateFromDictEntries")
+            # The ammo swap maps the accessor over the guns and hands the
+            # states to the predicates; it never names a field itself.
+            + self.code.count("guns |> List.map .stateFromDictEntries"),
+            "something outside describeTopRowModuleDictState and the ammo "
+            "swap's one mapping reads the module button's dict entries")
+        for field in KEYS_IN_THE_STATUS_LINE:
+            if field == "isInActiveState":
+                continue
+            self.assertNotIn(
+                field, predicates,
+                field + " is read by a decision; run 11 observed "
+                "isInActiveState and nothing else, and #34 is what acting on "
+                "an unobserved field costs")
+        self.assertEqual(
+            self.code.count("isInActiveState"),
+            describe.count("isInActiveState") + predicates.count("isInActiveState"),
+            "isInActiveState is read somewhere other than the status line and "
+            "the two predicates named for what it means")
 
     def test_the_meanings_of_the_old_fields_are_unchanged(self):
         # `isActive` still reads `ramp_active` through the parser, and the

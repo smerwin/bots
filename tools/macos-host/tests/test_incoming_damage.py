@@ -388,10 +388,19 @@ class MissionRunnerGuardTest(unittest.TestCase):
         against is the host-side one, where the two really do share a file
         offset; that is covered by `TailFanOutTest`. Here it is enough to assert
         both verdicts are still written, in the one place that can write memory.
+
+        The window is computed into `incomingDamageNow` rather than inline since
+        #50, because the ammo swap reads it too and has to read *this* reading's
+        value: the reading fire first arrives on is exactly the reading a swap
+        must not begin on. One binding, two readers, still one writer.
         """
         update = self.source.index("updateMemoryForNewReadingFromGame context botMemoryBefore =")
         body = self.source[update:]
-        self.assertIn("    , incomingDamage = updateIncomingDamageMemory context", body)
+        self.assertIn(
+            "        incomingDamageNow =\n"
+            "            updateIncomingDamageMemory context botMemoryBefore.incomingDamage",
+            body)
+        self.assertIn("    , incomingDamage = incomingDamageNow", body)
         self.assertIn("    , shipLoss =", body)
 
     def test_the_launcher_always_ships_at_least_one_armed_guard(self):
