@@ -184,8 +184,15 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # The object is the Amarr-Caldari Mediation Center, confirmed on run 115: 48
 # readings closing on it turned "You need Amarr Diplomat in your cargohold" into
 # "Bring Amarr Diplomat to Uraarala Kigiken", and the mission handed in. It is
-# listed last so it is tried first -- settings prepend, so file order is reverse
-# priority.
+# near the front of the list so it is tried early -- names on one line are tried
+# in the order they are written, left to right.
+#
+# approach-object and prefer-wreck take a comma-separated list, the same as
+# attack-object above, so each stays one line as it grows. Note the two forms
+# order differently: a repeated key prepends, so nine separate lines were tried
+# bottom-up, while one line is tried left to right. These two lines are written
+# in the order the bot tries them, which is the reverse of the nine lines they
+# replaced.
 #
 # Survey Ship is the same story on "Survey Rendezvous", which wants Survey Data
 # in the cargohold. The ship carrying it sits on the overview as a plain
@@ -215,15 +222,8 @@ SETTINGS="orbit-in-combat=no
 keep-at-range=yes
 targeting-range=66000
 attack-object=Kruul's Pleasure Hub, Drone Silo, Repair Station, Habitat, Infested Laboratory, Laboratory, Gallente Broadcast Tower, Athran Ammunitions Depot, Warehouse
-prefer-wreck=Personnel Transport
-prefer-wreck=Cargo Container
-approach-object=Abandoned Mining Station
-approach-object=Amarr Station
-approach-object=Circular Construction
-approach-object=Caldari Deadspace Tactical Outpost
-approach-object=Amarr Chapel
-approach-object=Amarr-Caldari Mediation Center
-approach-object=Survey Ship
+prefer-wreck=Cargo Container, Personnel Transport
+approach-object=Survey Ship, Amarr-Caldari Mediation Center, Amarr Chapel, Caldari Deadspace Tactical Outpost, Circular Construction, Amarr Station, Abandoned Mining Station
 decline-mission=Survey Rendezvous
 run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=70
