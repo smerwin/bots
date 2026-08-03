@@ -1093,13 +1093,50 @@ back on**. Three things hold it together:
   second click before the client shows the result turns the gun back on.
 
 **Failing to a firing gun with the wrong ammo is always better than failing to a
-silent gun.** That is the invariant, and it is why every bound here abandons the
-*attempt* rather than the feature: `ammoSwapSilenceGunsGiveUpTicks` if the guns
-will not go quiet, `ammoSwapVerdictGiveUpTicks` if the whole verdict drags on.
-Either way the guns resume and the next change of range tries again. Only two
-things latch the swap off for the session, because only they are permanent: the
-menu offering neither charge (the ship carries neither), and there being no
-crossover distance at all.
+silent gun.** That is the invariant, and run 8 is what happens when it is left to
+individual branches to honour: the ship sat in a hostile pocket with its guns
+switched off, repeating one decision 298 times, and would not have recovered on
+its own.
+
+It failed in two places at once, which is worth keeping in view because they are
+the same mistake at different scales. The wait that ran for 298 readings —
+*guns off, ramp still turning* — had no counter at all. And the counter in front
+of it, which bounded *getting the guns quiet*, reset whenever no gun **read** as
+firing, so a weapon flickering between cycles held it at 1 forever; the log shows
+`Silencing for 1 of 8` on all eight readings it appears. A counter that consults
+the thing it is waiting out can be stopped by it.
+
+So the bound is now **one deadline over the whole silent period**
+(`ammoSwapSilencedGiveUpTicks`), counted from the reading the swap first tells a
+gun to stop until it lets go. Two properties make it structural rather than
+another branch remembering:
+
+- **It consults nothing the module says about itself.** Its only inputs are
+  whether the swap is still holding a verdict and whether the bot has commanded a
+  switch-off — the latter read from the step's own effects, because what the bot
+  asked for is knowable where what the client did with it is not. This matters
+  more since #35: `ramp_active`, which `isActive` reads, was measured returning
+  `False` on a module that was switched **on**.
+- **Nothing in the acting path waits.** Every state either acts or hands the
+  fight back, so no state can sit still while the guns are off. The ramp
+  precondition is gone entirely — the load is attempted after a fixed settle
+  (`ammoSwapSilenceSettleTicks`, a count, which always ends) and the client's own
+  refusal (#31) says if the gun was still running. Being wrong costs one reading;
+  waiting to be certain cost run 8 nearly three hundred.
+
+Both are checked in `tools/macos-host/tests/test_ammo_silenced_bound.py` rather
+than left as intentions, and verified by mutation: reintroducing either the
+module reading in the counter or a `waitForProgressInGame` in the acting path
+fails there.
+
+Every other failure abandons the *attempt* and not the feature —
+`ammoSwapVerdictGiveUpTicks` if a verdict drags on, the client's refusal if a
+load is discarded — so the guns resume and the next change of range tries again.
+Three things latch the swap off for the session, because only they should not be
+retried: the menu offering neither charge, there being no crossover distance, and
+reaching the silence deadline. That last one is the newcomer and deliberately so.
+Having disarmed the ship once and been unable to finish, doing it again is not an
+optimisation worth the risk.
 
 ### Not oscillating
 

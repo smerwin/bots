@@ -620,11 +620,20 @@ load has been commanded and the menu still offers the charge, so this attempt is
 abandoned. It resets the moment the verdict is satisfied, so that a struggle
 cannot leave a count behind for the next verdict to inherit.
 
-`verdictAbandoned` and `gunsSilencingTicks` are the bounds around switching the
-guns off, which the client requires before it will accept a load at all. Both
-abandon the *attempt* and never the feature: the guns go back to firing whatever
-is in them, and the next change of range tries again. Failing to a firing gun
-with the wrong ammo is always better than failing to a silent gun.
+`gunsSilencedTicks` is the one bound over the whole period the ship's guns are
+switched off, counted from the reading the swap first told one to stop and
+advanced on every reading until it lets go. It answers a question every waiting
+state in this path has to answer -- *and what if this never comes?* -- once, for
+all of them, rather than each remembering to. Issue #34 is what it is for: the
+previous shape bounded one phase and left the next unbounded, and a ship sat
+disarmed in a hostile pocket for 298 readings.
+
+`verdictAbandoned` is the ordinary per-attempt give-up: the guns go back to
+firing whatever is in them and the next change of range tries again. Failing to a
+firing gun with the wrong ammo is always better than failing to a silent gun. The
+one exception is that same silence deadline, which switches the swap off for the
+session -- having disarmed the ship once and been unable to finish, doing it
+again is not worth the ammo it might save.
 
 `loadRefusedByClient` holds the client's own sentence when it says it discarded
 the load, and it is kept because the entries it came from are not: a reading's
@@ -659,7 +668,7 @@ type alias AmmoSwapMemory =
     , verdictSatisfied : Bool
     , verdictAbandoned : Bool
     , loadRefusedByClient : Maybe String
-    , gunsSilencingTicks : Int
+    , gunsSilencedTicks : Int
     , gunsCommandedThisVerdictAtX : List Int
     , menuOpenOnGunAtX : Maybe Int
     , hoverAwaitingTooltip : Bool
@@ -680,7 +689,7 @@ initAmmoSwapMemory =
     , verdictSatisfied = False
     , verdictAbandoned = False
     , loadRefusedByClient = Nothing
-    , gunsSilencingTicks = 0
+    , gunsSilencedTicks = 0
     , gunsCommandedThisVerdictAtX = []
     , menuOpenOnGunAtX = Nothing
     , hoverAwaitingTooltip = False
@@ -5757,23 +5766,61 @@ weaponTooltipUnansweredGiveUpTicks =
     5
 
 
-{-| How many readings the bot will spend getting the guns to stop firing before
-it abandons the swap and lets them carry on.
+{-| How long the swap may leave the ship's guns switched off, counted from the
+reading it first told one to stop.
 
-**A weapon that will not go quiet keeps shooting the wrong charge.** That is the
-invariant this number exists to hold, and it is worth stating plainly because the
-sequence here deliberately switches the ship's guns off: failing to a firing gun
-with the wrong ammo is always better than failing to a silent gun. Everything
-below is bounded so that the worst case is a few seconds of lost damage, never a
-ship standing still.
+**One deadline over the whole silent period, not one per phase.** That is the
+correction issue #34 forced, and the distinction is the whole point. The previous
+version bounded *getting the guns quiet* and left the phase after it -- waiting
+for the ramp to finish -- with no counter at all. Run 8 sat in that second phase
+for 298 readings with the guns off and eleven hostiles on the overview, because
+the branch that would have handed the fight back is downstream of the wedge: the
+guns come back when the swap stops, and that branch was what stopped the swap
+from ever stopping.
 
-Generous enough for a cycle to finish -- a beam cycle is a few seconds, roughly a
-reading -- plus the settling window a module-button click needs before the client
-shows the result.
+So this counts readings, unconditionally, from the first switch-off command until
+the swap lets go. It is advanced by nothing more specific than "the swap is still
+holding a verdict it has silenced the guns for", which is what makes it
+structural: a phase added inside that window cannot escape it by forgetting to
+count, and no reading of the module's own state can stall it, which matters
+because those readings are exactly what turned out to be untrustworthy (#35).
+
+**A weapon that will not go quiet keeps shooting the wrong charge.** Failing to a
+firing gun with the wrong ammo is always better than failing to a silent gun.
+Reaching this deadline means the ship was disarmed and the bot could not get it
+back on its own schedule, so it is the one failure here that switches the whole
+swap off for the session rather than just abandoning the attempt -- see
+`ammoSwapVerdictGiveUpTicks` for why every other failure does the opposite.
+Repeating a manoeuvre that disarms the ship, once it has demonstrably not worked,
+is not an optimisation worth retrying.
+
+Comfortably longer than the sequence needs -- a settle plus a cascade or two --
+and comfortably shorter than `ammoSwapVerdictGiveUpTicks`, so that the dangerous
+state is always the first one to time out.
 -}
-ammoSwapSilenceGunsGiveUpTicks : Int
-ammoSwapSilenceGunsGiveUpTicks =
-    8
+ammoSwapSilencedGiveUpTicks : Int
+ammoSwapSilencedGiveUpTicks =
+    20
+
+
+{-| How many readings to let a switch-off settle before loading anyway.
+
+A count, deliberately, and not a condition on the module. The condition this
+replaces was "wait until the ramp stops turning", which is the wait that hung:
+`rampRotationMilli` is derived from a widget the client creates and destroys
+around a cycle, `isActive` reads `ramp_active`, and #35 measured `ramp_active`
+reading `False` on a module that was switched **on**. A wait on a signal that may
+never say what it is being asked is a wait that may never end, however patient.
+
+A count always ends. And it can afford to be short, because the bot no longer has
+to be *sure* the gun is quiet before trying: since #31 the client's own refusal
+says when a load was thrown away, so an attempt made too early is answered in one
+reading rather than guessed at. Being wrong costs a reading; waiting to be
+certain cost run 8 nearly three hundred.
+-}
+ammoSwapSilenceSettleTicks : Int
+ammoSwapSilenceSettleTicks =
+    3
 
 
 {-| How many entries a weapon's context menu must have before the bot will
@@ -5952,26 +5999,21 @@ and the confirmation that follows finds nothing changed because nothing happened
 `isActive` is `Nothing` when the module has never run, which
 `inactiveModulesToActivateAlways` documents at length; treated as not firing
 here, for the same reason it is treated as off there.
+
+**Used to choose whether to press the switch-off, and for nothing else.** It was
+also once used to decide whether the gun was *ready* to be loaded, together with
+`rampRotationMilli`, and that is the pair of readings run 8 hung on: the counter
+in front reset every time this flickered between cycles, and the wait behind it
+never ended because the ramp never went quiet. #35 then measured `ramp_active` --
+which is what this reads -- returning `False` on a module that was switched on.
+
+So nothing here waits on either signal any more. Being wrong about this costs one
+reading: the load is attempted anyway, and the client's own refusal (#31) says if
+the gun was still running.
 -}
 weaponIsFiring : ShipUIModuleButton -> Bool
 weaponIsFiring moduleButton =
     moduleButton.isActive == Just True
-
-
-{-| Whether this weapon will accept a charge: switched off, and no longer
-turning.
-
-The ramp is read here as the client's own answer to a question the bot has
-actually asked -- has the cycle finished -- which it can be, now that the gun has
-been told to stop. That is a different use from testing the ramp on a gun nobody
-switched off, where a turning ramp means only that the weapon is doing its job.
-It also subsumes the reload guard the previous version needed: a reload in flight
-turns the ramp, so a gun mid-reload is not quiet and will not be asked twice.
--}
-weaponWillAcceptACharge : ShipUIModuleButton -> Bool
-weaponWillAcceptACharge moduleButton =
-    not (weaponIsFiring moduleButton)
-        && ((moduleButton.rampRotationMilli |> Maybe.withDefault 0) == 0)
 
 
 {-| The weapons, left to right.
@@ -6376,22 +6418,57 @@ updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
             else
                 memoryBefore.rangeVerdictTicks + 1
 
-        -- Readings spent waiting for the guns to stop firing, for this verdict.
-        -- Counted only while the bot is actually acting on one, so a weapon that
-        -- is firing because nothing has asked it to stop does not spend this
-        -- budget.
-        gunsSilencingTicks =
-            if not verdictIsTheSameOneAsBefore then
+        -- Whether the swap has told a gun to stop for this verdict. The step's
+        -- own effects, not the module's reported state: what the bot asked for
+        -- is knowable, where what the client did with it turned out not to be.
+        swapJustCommandedAGunOff =
+            case context.previousStepsEffects |> List.head of
+                Nothing ->
+                    False
+
+                Just effects ->
+                    guns |> List.any (\gun -> doEffectsClickModuleButton gun effects)
+
+        -- Readings since the guns were first told to stop, for this verdict.
+        --
+        -- **Nothing about the module can stall this.** That is the entire
+        -- correction from #34, and the shape it replaces is worth keeping in
+        -- view: the old counter reset whenever no gun *read* as firing, so a
+        -- weapon flickering between cycles reset it every other reading and it
+        -- never reached its bound at all. Run 8's log shows it stuck at "1 of 8"
+        -- for all eight readings it was printed, and then the next phase, which
+        -- had no counter, ran for 298. Two bugs wearing one coat: a counter that
+        -- could not advance, in front of a state that did not count.
+        --
+        -- So the only inputs here are whether the swap is still holding the
+        -- guns and whether the bot has asked. It advances on every reading in
+        -- between, whatever the guns say about themselves.
+        --
+        -- Note what is deliberately *not* a reset: the verdict changing. A
+        -- target drifting back across the deadband flips short to long with the
+        -- guns still switched off, and a counter that restarted there would let
+        -- a flickering distance hold the ship disarmed indefinitely -- the same
+        -- bug in a different coat. Only the swap letting go clears it.
+        gunsSilencedTicks =
+            if rangeVerdict == Nothing then
                 0
 
-            else if verdictSatisfied || memoryBefore.verdictAbandoned then
+            else if verdictSatisfied then
                 0
 
-            else if (rangeVerdictTicks < ammoSwapDistanceHoldTicks) || not (guns |> List.any weaponIsFiring) then
+            else if memoryBefore.verdictAbandoned then
+                -- The swap has let go, so the fight owns the guns again and this
+                -- is no longer measuring anything. Reset here and nowhere else.
                 0
+
+            else if memoryBefore.gunsSilencedTicks > 0 then
+                memoryBefore.gunsSilencedTicks + 1
+
+            else if swapJustCommandedAGunOff then
+                1
 
             else
-                memoryBefore.gunsSilencingTicks + 1
+                0
 
         -- The client's own account of having thrown the load away. Recorded
         -- rather than acted on where it is read, because the entries carrying it
@@ -6434,7 +6511,7 @@ updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
                 -- readings later.
                 True
 
-            else if ammoSwapSilenceGunsGiveUpTicks < gunsSilencingTicks then
+            else if ammoSwapSilencedGiveUpTicks < gunsSilencedTicks then
                 True
 
             else if ammoSwapVerdictGiveUpTicks < rangeVerdictTicks then
@@ -6497,6 +6574,13 @@ updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
                                 ++ "', so the ship is carrying neither and there is nothing to swap between"
                             )
 
+                    else if ammoSwapSilencedGiveUpTicks < gunsSilencedTicks then
+                        Just
+                            ("the guns were switched off to load and were still not back "
+                                ++ String.fromInt gunsSilencedTicks
+                                ++ " readings later -- a disarmed ship is worse than the wrong charge, so this will not be attempted again this session"
+                            )
+
                     else if optimalRangeGivenUp && (threshold == Nothing) then
                         Just
                             ("no crossover distance: 'ammo-swap-range' is not set and the weapon's tooltip never appeared, so there is no distance to swap at even though the menu says which charge is loaded"
@@ -6522,7 +6606,7 @@ updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
     , verdictSatisfied = verdictSatisfied
     , verdictAbandoned = verdictAbandoned
     , loadRefusedByClient = loadRefusedByClient
-    , gunsSilencingTicks = gunsSilencingTicks
+    , gunsSilencedTicks = gunsSilencedTicks
     , gunsCommandedThisVerdictAtX = gunsCommandedThisVerdictAtX
     , menuOpenOnGunAtX = menuOpenOnGunAtX
     , hoverAwaitingTooltip = hoverAwaitingTooltip
@@ -6788,89 +6872,136 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                                 )
                                 pressEscape
 
-                        else if not (weaponWillAcceptACharge gunWithMenu) then
-                            -- Reading the menu is free at any time; acting on it
-                            -- is not. Close it, so the module button is not
-                            -- underneath it when the next branch goes to switch
+                        else if ammoSwap.gunsSilencedTicks < 1 then
+                            -- Reading the menu is free while the guns fire;
+                            -- loading is not. Close it, so the module button is
+                            -- not underneath it when the next branch switches
                             -- the gun off.
                             describeBranch
                                 ("The menu offers '"
                                     ++ wantedChargeName
-                                    ++ "', but this weapon is still running and the client refuses a load into a running weapon -- close the menu and stop the gun first."
+                                    ++ "', but nothing has told this weapon to stop yet and the client refuses a load into a running weapon -- close the menu and stop the gun first."
                                 )
                                 pressEscape
 
+                        else if ammoSwap.gunsSilencedTicks <= ammoSwapSilenceSettleTicks then
+                            -- Settling, on a count rather than on the module's
+                            -- own account of itself. See ammoSwapSilenceSettleTicks:
+                            -- the ramp reading this used to wait on may never
+                            -- say what it is being asked, and run 8 waited 298
+                            -- readings for it.
+                            describeBranch
+                                ("Told this weapon to stop "
+                                    ++ String.fromInt ammoSwap.gunsSilencedTicks
+                                    ++ " of "
+                                    ++ String.fromInt ammoSwapSilenceSettleTicks
+                                    ++ " readings ago -- let the cycle end before loading '"
+                                    ++ wantedChargeName
+                                    ++ "'."
+                                )
+                                nextStep
+
                         else
+                            -- Loaded without checking whether the gun reads
+                            -- quiet, on purpose. The client answers that
+                            -- question itself: a load into a running module
+                            -- comes back as a refusal in the game log, which the
+                            -- bot has read since #31, and one wasted reading is
+                            -- a better price than a wait that cannot end.
                             describeBranch
                                 ("The menu offers '"
                                     ++ wantedChargeName
-                                    ++ "', so this weapon is not carrying it, and it is quiet enough to accept it -- load it. "
+                                    ++ "', so this weapon is not carrying it, and it has had "
+                                    ++ String.fromInt ammoSwap.gunsSilencedTicks
+                                    ++ " reading(s) to stop -- load it. "
                                     ++ describeRanges
                                     ++ "."
                                 )
                                 (loadTheWantedCharge gunWithMenu)
 
                     Nothing ->
-                        case fight.guns |> List.filter weaponIsFiring |> List.head of
-                            Just gunStillFiring ->
-                                -- Switch it off, and mind that the button is a
-                                -- toggle: clicking again before the client has
-                                -- shown the result turns it straight back on,
-                                -- which is what moduleButtonClickSettlingSteps
-                                -- exists for. This is bounded by
-                                -- ammoSwapSilenceGunsGiveUpTicks, and the guns
-                                -- come back on by themselves the moment the swap
-                                -- stops holding the fight -- see
-                                -- ammoSwapIsActingOnAVerdict.
-                                describeBranch
-                                    ("Stop this weapon before loading '"
-                                        ++ wantedChargeName
-                                        ++ "' -- the client refuses to load a charge into a module that is running, and says so only in the game log, which the bot cannot read. Silencing for "
-                                        ++ String.fromInt ammoSwap.gunsSilencingTicks
-                                        ++ " of "
-                                        ++ String.fromInt ammoSwapSilenceGunsGiveUpTicks
-                                        ++ " readings."
-                                    )
-                                    (clickModuleButtonButWaitIfClickedInPreviousStep context gunStillFiring)
+                        if ammoSwap.gunsSilencedTicks < 1 then
+                            case fight.guns |> List.filter weaponIsFiring |> List.head of
+                                Just gunStillFiring ->
+                                    -- Switch it off, once. The button is a
+                                    -- toggle, so the settling window in
+                                    -- clickModuleButtonButWaitIfClickedInPreviousStep
+                                    -- is what keeps a second press from turning
+                                    -- it straight back on -- and from here on
+                                    -- `gunsSilencedTicks` is non-zero, so this
+                                    -- branch is not revisited for this verdict
+                                    -- however the module reports itself.
+                                    --
+                                    -- Everything after this point is inside the
+                                    -- window `ammoSwapSilencedGiveUpTicks` bounds.
+                                    describeBranch
+                                        ("Stop this weapon before loading '"
+                                            ++ wantedChargeName
+                                            ++ "' -- the client refuses to load a charge into a module that is running, and says so only in its game log."
+                                        )
+                                        (clickModuleButtonButWaitIfClickedInPreviousStep context gunStillFiring)
 
-                            Nothing ->
-                                case fight.guns |> List.filter (weaponWillAcceptACharge >> not) |> List.head of
-                                    Just _ ->
-                                        describeBranch
-                                            ("The guns are switched off but one is still finishing its cycle -- wait for the ramp to stop before loading '"
-                                                ++ wantedChargeName
-                                                ++ "'."
-                                            )
-                                            waitForProgressInGame
+                                Nothing ->
+                                    -- Nothing reads as firing, so there is
+                                    -- nothing to switch off and the load can be
+                                    -- tried directly. If that reading was wrong
+                                    -- -- and #35 gives real reason to think it
+                                    -- can be -- the refusal says so.
+                                    describeBranch
+                                        ("No weapon reads as firing, so open one's menu to see whether it already carries '"
+                                            ++ wantedChargeName
+                                            ++ "'."
+                                        )
+                                        (loadTheWantedCharge
+                                            (gunsStillToVisit |> List.head |> Maybe.withDefault fight.referenceGun)
+                                        )
 
-                                    Nothing ->
-                                        case gunsStillToVisit |> List.head of
-                                            Just gunToVisit ->
-                                                describeBranch
-                                                    ("Open this weapon's menu to see whether it already carries '"
-                                                        ++ wantedChargeName
-                                                        ++ "'. "
-                                                        ++ String.fromInt (List.length gunsStillToVisit)
-                                                        ++ " of "
-                                                        ++ String.fromInt (List.length fight.guns)
-                                                        ++ " weapon(s) still to check."
-                                                    )
-                                                    (loadTheWantedCharge gunToVisit)
+                        else if ammoSwap.gunsSilencedTicks <= ammoSwapSilenceSettleTicks then
+                            describeBranch
+                                ("Told the guns to stop "
+                                    ++ String.fromInt ammoSwap.gunsSilencedTicks
+                                    ++ " of "
+                                    ++ String.fromInt ammoSwapSilenceSettleTicks
+                                    ++ " readings ago -- let the cycle end before loading '"
+                                    ++ wantedChargeName
+                                    ++ "'."
+                                )
+                                nextStep
 
-                                            Nothing ->
-                                                -- Every gun has been visited and
-                                                -- the swap is still not
-                                                -- confirmed, so re-open the last
-                                                -- one: its menu is where the
-                                                -- answer is, and the charge
-                                                -- having vanished from it is the
-                                                -- only evidence a load landed.
-                                                describeBranch
-                                                    ("Every weapon has been told to load '"
-                                                        ++ wantedChargeName
-                                                        ++ "' -- re-open the last one's menu to see whether it took."
-                                                    )
-                                                    (loadTheWantedCharge fight.referenceGun)
+                        else
+                            case gunsStillToVisit |> List.head of
+                                Just gunToVisit ->
+                                    describeBranch
+                                        ("Open this weapon's menu to see whether it already carries '"
+                                            ++ wantedChargeName
+                                            ++ "'. "
+                                            ++ String.fromInt (List.length gunsStillToVisit)
+                                            ++ " of "
+                                            ++ String.fromInt (List.length fight.guns)
+                                            ++ " weapon(s) still to check. Guns off for "
+                                            ++ String.fromInt ammoSwap.gunsSilencedTicks
+                                            ++ " of "
+                                            ++ String.fromInt ammoSwapSilencedGiveUpTicks
+                                            ++ " readings."
+                                        )
+                                        (loadTheWantedCharge gunToVisit)
+
+                                Nothing ->
+                                    -- Every gun has been visited and the swap is
+                                    -- still not confirmed, so re-open the last
+                                    -- one: its menu is where the answer is, and
+                                    -- the charge having vanished from it is the
+                                    -- only evidence a load landed.
+                                    describeBranch
+                                        ("Every weapon has been told to load '"
+                                            ++ wantedChargeName
+                                            ++ "' -- re-open the last one's menu to see whether it took. Guns off for "
+                                            ++ String.fromInt ammoSwap.gunsSilencedTicks
+                                            ++ " of "
+                                            ++ String.fromInt ammoSwapSilencedGiveUpTicks
+                                            ++ " readings."
+                                        )
+                                        (loadTheWantedCharge fight.referenceGun)
 
 
 {-| Rest the mouse on a weapon module until the client shows its tooltip.
@@ -7001,12 +7132,14 @@ describeAmmoSwapState context =
                                         " (gave up on this one, will try again on the next change of range)"
                                 )
 
-                            else if 0 < ammoSwap.gunsSilencingTicks then
-                                " (waiting "
-                                    ++ String.fromInt ammoSwap.gunsSilencingTicks
+                            else if 0 < ammoSwap.gunsSilencedTicks then
+                                -- The number an operator should be watching: how
+                                -- long this ship has had its guns switched off.
+                                " (GUNS OFF for "
+                                    ++ String.fromInt ammoSwap.gunsSilencedTicks
                                     ++ " of "
-                                    ++ String.fromInt ammoSwapSilenceGunsGiveUpTicks
-                                    ++ " readings for the guns to stop)"
+                                    ++ String.fromInt ammoSwapSilencedGiveUpTicks
+                                    ++ " readings)"
 
                             else
                                 ""
