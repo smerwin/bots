@@ -3387,7 +3387,9 @@ parseAgentMissionInfoPanelEntry entryNode =
                 |> List.filter (.uiNode >> getNameFromDictEntries >> (/=) (Just "label"))
                 |> textsOf
 
-        locationButton =
+        -- The layout this parser was written against: one button whose label is
+        -- whatever the next travel step happens to be, named for its purpose.
+        singleLocationButton =
             descendants
                 |> List.filter
                     (.uiNode
@@ -3396,6 +3398,50 @@ parseAgentMissionInfoPanelEntry entryNode =
                         >> Maybe.withDefault False
                     )
                 |> List.head
+
+        -- The other layout, and it renders no such button. An objective chain
+        -- (`ObjectiveChainEntry` -> `ObjectiveEntry` -> per-task widgets) gives
+        -- each task its own button and shows only the one that is currently
+        -- available, hiding the rest with `_display` False. Run 14 sat docked
+        -- for 750 readings on "Technological Secrets (3 of 3)" printing "the
+        -- tracker offers no travel step from here" while the panel held
+        --
+        --     TravelToLocationButtonTaskWidget  _name=objective_task_travel_to_agent
+        --       EveLabelMedium  _name=label  Set Destination      (displayed)
+        --     ButtonTaskWidget                _name=objective_task_talk_to_agent
+        --       EveLabelMedium  _name=label  Start Conversation   (_display False)
+        --
+        -- so the step was rendered, labelled and named -- just named something
+        -- no rule here had ever heard of. Matched on the *type* name rather
+        -- than `_name`, because `_name` carries the objective ("travel_to_agent",
+        -- "talk_to_agent") and would need a new literal per objective, while
+        -- the type says what the widget is. The suffix covers both, which is
+        -- deliberate: the single button above also changes label from travel to
+        -- "Start Conversation" at hand-in, so a rule that took only the travel
+        -- widget would cross the grid and then strand the ship at the agent.
+        --
+        -- **The display filter is the selection, not a safety net.** Both
+        -- buttons are always present; which one is shown is the client saying
+        -- which task is live. Picking the hidden one yields a button
+        -- `missionTravelStep` then discards, which is the same stall by another
+        -- route.
+        objectiveChainTaskButton =
+            descendants
+                |> List.filter
+                    (.uiNode
+                        >> .pythonObjectTypeName
+                        >> String.endsWith "ButtonTaskWidget"
+                    )
+                |> List.filter (.uiNode >> nodeIsDisplayedFromDictEntries)
+                |> List.head
+
+        locationButton =
+            case singleLocationButton of
+                Just button ->
+                    Just button
+
+                Nothing ->
+                    objectiveChainTaskButton
     in
     { uiNode = entryNode
     , agentCharacterID =
@@ -4173,6 +4219,24 @@ getElementIdFromDictEntries =
 getHintTextFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Maybe String
 getHintTextFromDictEntries =
     getStringPropertyFromDictEntries "_hint"
+
+
+{-| Whether the client is rendering this node, from `_display`.
+
+Absent means shown -- the client writes the key to hide something, not to
+reveal it, and the overview's own rows carry no `_display` at all while plainly
+on screen. `Bot.elm` has the identical function for the same reason; this copy
+exists because `parseAgentMissionInfoPanelEntry` has to pick between two task
+buttons where the hidden one is the wrong answer, and a parser cannot ask the
+bot.
+
+-}
+nodeIsDisplayedFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Bool
+nodeIsDisplayedFromDictEntries uiNode =
+    uiNode.dictEntriesOfInterest
+        |> Dict.get "_display"
+        |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.bool >> Result.toMaybe)
+        |> Maybe.withDefault True
 
 
 getTexturePathFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Maybe String
