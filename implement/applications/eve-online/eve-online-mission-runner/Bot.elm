@@ -505,6 +505,9 @@ type alias BotMemory =
     , dockedWithCargoWantedTicks : Int
     , nothingToDoTicks : Int
     , lastObjectiveText : String
+    , missionStalledReadings : Int
+    , missionToAbandon : Maybe MissionToAbandon
+    , missionNamesAbandoned : List String
     , gateWithinReachTicks : Int
     , gateLockedForWantOfAnItem : Maybe String
     , siteAdmitsThisShip : Maybe Bool
@@ -548,6 +551,37 @@ nothing in `UpdateMemoryContext` carries the session clock.
 -}
 type alias ShipLossVerdict =
     { reason : String
+    , readingsSince : Int
+    }
+
+
+{-| The bot's conclusion that a mission it has accepted cannot be progressed at
+all, and that the only way on is to hand it back to the agent.
+
+Latched, like `ShipLossVerdict` and for the same reason: the state that produces
+the verdict disappears the moment the response starts. The trip back to the
+agent sets a route, and a route set is what `decideActionInMissionPocket` reads
+as "travel"; docking then clears `nothingToDoTicks` outright, because a docked
+reading has no ship UI. Without the latch the bot would fly home, be talked into
+undocking again by the tracker's own travel button, and spend another
+`missionStalledReadingsBeforeAbandoning` readings rediscovering what it already
+knew. Run 13 is that shape at session scale: a fresh process reached the same
+dead end in 29 readings, because the mission was still accepted and still
+impossible.
+
+Unlatched by one thing only -- the mission no longer being in the info panel,
+which is what quitting it produces. So a successful quit ends the abandonment on
+the reading the client shows it worked, and the bot goes back to ordinary work
+with no second verdict to clear.
+
+`readingsSince` is what bounds the whole attempt, counted in readings for
+`ShipLossVerdict`'s reason: `bot-step-delay` moves the wall-clock length of a
+reading and nothing in `UpdateMemoryContext` carries the session clock.
+
+-}
+type alias MissionToAbandon =
+    { name : String
+    , stalledReadings : Int
     , readingsSince : Int
     }
 
@@ -799,7 +833,9 @@ missionBotDecisionRootBeforeApplyingSettings context =
         -- `recoverPodAfterShipLoss`. It is below `generalSetupInUserInterface`
         -- only because the pod still needs the location info panel expanded and
         -- stray menus cleared to travel at all.
-        [ generalSetupInUserInterface context.readingFromGameClient
+        [ generalSetupInUserInterface
+            { confirmQuitMission = quitMissionConfirmationIsExpected context }
+            context.readingFromGameClient
         , recoverPodAfterShipLoss context
         , windDownBeforeSessionEnd context
         ]
@@ -810,12 +846,23 @@ missionBotDecisionRootBeforeApplyingSettings context =
             decision
 
         Nothing ->
+            -- The abandonment (#54) sits inside the split rather than in the
+            -- list above so that `runAwayIfLowHealth` keeps outranking it: the
+            -- trip back to the agent is an errand, and a ship being taken apart
+            -- during it is still the more urgent fact. Everything that would
+            -- otherwise fly the stuck mission lives below it and is never
+            -- reached while a verdict is latched.
             branchDependingOnDockedOrInSpace
-                { ifDocked = decideActionWhenDocked context
+                { ifDocked =
+                    abandonMissionThatCannotProgress context
+                        |> Maybe.withDefault (decideActionWhenDocked context)
                 , ifSeeShipUI =
                     \shipUI ->
                         runAwayIfLowHealth context shipUI
-                            |> Maybe.withDefault (decideActionWhenInSpace context { shipUI = shipUI })
+                            |> Maybe.withDefault
+                                (abandonMissionThatCannotProgress context
+                                    |> Maybe.withDefault (decideActionWhenInSpace context { shipUI = shipUI })
+                                )
                 }
                 context.readingFromGameClient
 
@@ -4155,6 +4202,26 @@ expandMissionTrackerIfCollapsed context =
                         )
 
 
+{-| Whether to hand an offered mission straight back.
+
+Two sources, and the second is what stops an abandonment from being undone two
+minutes later. `decline-mission` is the operator's standing list, and
+`missionNamesAbandoned` is what this session has already given up on -- taking
+the same mission again is the one thing that would make quitting it pointless,
+and the agent offers it again immediately. That is exactly what the operator did
+by hand after run 13: quit the mission, then restarted with
+`decline-mission=Illegal Activity`.
+
+The settings are parsed once per session and are not writable from a decision,
+so this is memory rather than a setting the bot edits -- which is also the
+honest shape, since it should not outlive the session. An operator who sees the
+same mission abandoned twice promotes it to `decline-mission` themselves.
+
+Both lists are matched the same way, as substrings of the offered name, so a
+name recorded without its `(1 of 3)` suffix covers the rest of the chain -- see
+`missionNameForDeclining`.
+
+-}
 shouldDeclineMission : BotDecisionContext -> Maybe String -> Bool
 shouldDeclineMission context missionName =
     case missionName of
@@ -4162,8 +4229,433 @@ shouldDeclineMission context missionName =
             False
 
         Just name ->
-            context.eventContext.botSettings.missionNamesToDecline
+            (context.eventContext.botSettings.missionNamesToDecline
+                ++ context.memory.missionNamesAbandoned
+            )
                 |> List.any (\toDecline -> stringContainsIgnoringCase toDecline name)
+
+
+
+-- A mission that cannot be progressed: giving it back to the agent
+
+
+{-| How many readings of a mission going nowhere before the bot hands it back.
+
+**600, and the number is the give-up alarm's own threshold doubled.** Written
+that way rather than as a bare constant because the relation is the argument:
+`nothingToDoTicksBeforeCryingStuck` is when `askForHelpToGetUnstuck` starts
+firing, and `missionStalledReadings` is a strict subset of the readings
+`nothingToDoTicks` counts (every reading that advances this one advances that
+one, and every reading that resets that one resets this one). So this cannot be
+reached without the alarm having been raised for at least 300 readings first --
+which at the three to four seconds a reading the recorded runs average is around
+twenty minutes of an operator being told, before anything irreversible happens.
+
+Irreversible is the whole reason for the distance. Quitting costs standing with
+the agent and a mission cannot be un-quit, so this is a last resort and not a
+response to a transient stall. Run 12 is what the other side of the trade costs:
+817 identical alarms and a session that had to be stopped by hand, then run 13
+reaching the same state in 29 readings because the mission was still accepted.
+
+-}
+missionStalledReadingsBeforeAbandoning : Int
+missionStalledReadingsBeforeAbandoning =
+    nothingToDoTicksBeforeCryingStuck * 2
+
+
+{-| How many readings the whole abandonment may take before the session ends.
+
+The trip is the same route-set, travel, dock that `recoverPodAfterShipLoss`
+budgets `podRecoveryGiveUpReadings` (150) for, plus the station work: open the
+conversation, press Quit Mission, answer the confirmation. Fifty readings of
+headroom for a sequence that takes about five is deliberate, since each step
+waits a reading for the client to catch up.
+
+When it expires the session **ends**, naming the mission it could not give back.
+That is the bound the issue asks for: quitting can fail in more ways than can be
+enumerated -- the ship cannot dock, the agent is not in the station we returned
+to, the conversation offers no Quit Mission, the confirmation is not recognised
+-- and every one of them would otherwise be a second forever-loop replacing the
+first. Ending loudly is worth more than not ending, which is the same conclusion
+the wind-down and the pod recovery both reached.
+
+-}
+abandonMissionGiveUpReadings : Int
+abandonMissionGiveUpReadings =
+    200
+
+
+{-| One reading of a mission that is not moving, as narrowly as a reading alone
+can say it.
+
+This is the counted evidence behind the verdict, and it is deliberately
+**stricter** than the give-up alarm's own premise rather than a copy of it. The
+alarm fires from the bottom of the decision tree, which is knowledge the memory
+update does not have -- it never sees a decision. What it does have is the
+reading, and these five facts are each a necessary condition of that branch
+being reached, or an exclusion chosen to keep the dangerous cases out:
+
+  - **In space.** The alarm lives under `decideActionInMissionPocket`, and a
+    docked reading has no ship UI at all.
+  - **A mission tracked, with an objective.** The branch's own `Just _` case.
+  - **The tracker offering no travel step.** `missionTravelStep` answering
+    `Just` is checked above the alarm and wins.
+  - **No route set.** `routeIsSet` is also checked above it, and travelling a
+    route is the state this must never be confused with -- including the trip
+    this verdict itself starts.
+  - **The ship reporting no manoeuvre of any kind, and no effects dispatched on
+    the previous step.** Neither is a condition of the alarm; both are here so
+    that a bot which is merely _busy_ can never reach the verdict. An approach
+    reads `ManeuverApproach` for as long as it runs (68 to 94 readings per run
+    say so, in the recordings, as `Already on the way -- let it run.`), a warp
+    reads `ManeuverWarp`, and combat, looting, gate activation and every context
+    menu cascade dispatch mouse effects. What is left is a ship sitting still
+    doing nothing, which is what run 12 was.
+
+`Nothing` from the indication is the client not showing a manoeuvre, which is
+the same fact as showing none -- the same reading `shipIsAlreadyApproaching`
+already makes of it.
+
+Reachability, since a guard that cannot be true is this repo's signature bug:
+run 12 reached exactly this state and stayed in it for 953 decision blocks with
+the ship stationary among the wrecks it had finished with, no travel step, no
+route, and nothing being clicked. Run 13 reached it again in 29 readings.
+
+-}
+readingShowsAMissionGoingNowhere : ReadingFromGameClient -> Bool
+readingShowsAMissionGoingNowhere readingFromGameClient =
+    (readingFromGameClient.shipUI /= Nothing)
+        && (missionNameFromTracker readingFromGameClient /= Nothing)
+        && (missionObjectiveText readingFromGameClient /= "")
+        && (trackerTravelStepLabel readingFromGameClient == Nothing)
+        && not (routeIsSetInReading readingFromGameClient)
+        && ((readingFromGameClient.shipUI
+                |> Maybe.andThen .indication
+                |> Maybe.andThen .maneuverType
+            )
+                == Nothing
+           )
+
+
+{-| The tracker's travel-step label, from the reading alone.
+
+`missionTravelStep` answers the same question for the decision tree and also
+hands back the node to click; this is the half of it the memory update can ask,
+and it is written in terms of the same two rules -- a button the client has
+hidden offers nothing, and a label that undoes a step in progress or merely
+reports the route is set is not a step to take.
+
+-}
+trackerTravelStepLabel : ReadingFromGameClient -> Maybe String
+trackerTravelStepLabel readingFromGameClient =
+    readingFromGameClient.agentMissionInfoPanelEntries
+        |> List.head
+        |> Maybe.andThen .locationButton
+        |> Maybe.andThen
+            (\button ->
+                if not (nodeIsDisplayed button.uiNode.uiNode) then
+                    Nothing
+
+                else
+                    button.label
+                        |> Maybe.andThen
+                            (\label ->
+                                if labelUndoesStepInProgress label || labelReportsRouteAlreadySet label then
+                                    Nothing
+
+                                else
+                                    Just label
+                            )
+            )
+
+
+{-| `routeIsSet`, asked of a reading rather than of a decision context.
+
+Same node and same `_display` test -- see `routeIsSet` for why neither the icon
+nor the "No Destination" label can answer this.
+
+-}
+routeIsSetInReading : ReadingFromGameClient -> Bool
+routeIsSetInReading readingFromGameClient =
+    readingFromGameClient.infoPanelContainer
+        |> Maybe.andThen .infoPanelRoute
+        |> Maybe.map (.uiNode >> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion)
+        |> Maybe.withDefault []
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "NextWaypointPanel")
+        |> List.any (.uiNode >> nodeIsDisplayed)
+
+
+{-| The name of the mission the tracker is showing, blank names excluded.
+
+Excluded because the name is what goes into the session's decline list, and
+`shouldDeclineMission` matches it as a substring -- an empty entry there is a
+filter that declines every mission the agent ever offers. `splitSettingIntoNames`
+drops empties for exactly this reason.
+
+-}
+missionNameFromTracker : ReadingFromGameClient -> Maybe String
+missionNameFromTracker readingFromGameClient =
+    readingFromGameClient.agentMissionInfoPanelEntries
+        |> List.head
+        |> Maybe.andThen .missionName
+        |> Maybe.andThen (String.trim >> nonEmptySettingValue)
+
+
+{-| Whether the tracker still carries the mission that was given up on.
+
+This is what un-latches the verdict, so what it can see matters. A _collapsed_
+tracker keeps its header row, and the name lives in that row -- the objectives
+and the travel button are what a collapse removes -- so a collapse cannot be
+mistaken for a mission that is gone. Compared whole rather than as a substring:
+the next mission in a chain differs from this one only by `(2 of 3)`, and a
+substring test would read it as the same mission and never let go.
+
+-}
+trackerStillShowsMission : ReadingFromGameClient -> String -> Bool
+trackerStillShowsMission readingFromGameClient missionName =
+    readingFromGameClient.agentMissionInfoPanelEntries
+        |> List.filterMap .missionName
+        |> List.any (String.trim >> (==) missionName)
+
+
+{-| The part of a mission's name worth refusing for the rest of the session.
+
+The tracker names a chain mission `Illegal Activity (1 of 3)`, and quitting that
+one only helps if the agent's next offer -- `(2 of 3)`, immediately -- is refused
+too. `shouldDeclineMission` matches as a substring, so recording the name with
+the counter dropped covers the whole chain, which is precisely the recovery the
+operator performed by hand: `decline-mission=Illegal Activity`.
+
+Everything from the first parenthesis is dropped rather than a `(N of M)`
+pattern being matched, because the counter is the only parenthesised suffix
+these names carry and a rule that has to recognise its wording is a rule that
+fails silently when the wording changes. A name that is _entirely_
+parenthesised, or that trims to nothing, keeps its original text -- an empty
+entry in the decline list would refuse every mission there is.
+
+-}
+missionNameForDeclining : String -> String
+missionNameForDeclining fullName =
+    case fullName |> String.split "(" |> List.head |> Maybe.map String.trim of
+        Just beforeTheCounter ->
+            if String.isEmpty beforeTheCounter then
+                String.trim fullName
+
+            else
+                beforeTheCounter
+
+        Nothing ->
+            String.trim fullName
+
+
+{-| Whether the previous step put anything at all on the client.
+
+"The bot is idle", read from what it asked for rather than from what the client
+shows -- the same source `updateAmmoSwapMemory` uses, and the only one available
+to a memory update. Every branch above the give-up alarm that is _doing_
+something clicks, drags, scrolls or types; the ones that dispatch nothing are
+the waiting ones.
+
+Keys as well as mouse, unlike `previousStepsEffectsPressedMouse`: typing a
+station name into the search bar is the bot working, and it presses no button.
+
+-}
+previousStepDispatchedEffects : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+previousStepDispatchedEffects previousStepsEffects =
+    previousStepsEffects
+        |> List.take 1
+        |> List.any (List.isEmpty >> not)
+
+
+{-| Give the mission back to the agent, and carry on with other work.
+
+Issue #54. The verdict this responds to is not new and is not being retuned:
+`decideActionInMissionPocket`'s "this mission is not going to progress on its
+own" branch has been right every time it has fired, and it still fires exactly
+as it did. What was missing was any response other than raising the alarm again
+-- 817 times in run 12, until a person stopped it, and then 29 readings into run
+13 because a restart cannot help while the mission is still accepted.
+
+Four outcomes, and every one of them names the mission in the decision log,
+because "which mission did the bot throw away" is the one fact an operator has
+to be able to read back:
+
+  - **In space.** Travel to the agent's station through
+    `travelToStationByName`, the same route-set, fly, dock path the drone
+    restock (#16) and the pod recovery (#33) use. There is deliberately no
+    second travel path here, and no second drone recall -- `jumpToNextSystem`
+    already goes through `returnDronesToBay`.
+  - **Docked, no conversation open.** `openAgentConversation`, the same one the
+    docked flow uses to take and hand in missions.
+  - **Docked, conversation open.** Press `QuitMission_Button`. The confirmation
+    that follows is answered in `closeMessageBox`, which is where the standing
+    "always decline a confirmation" rule lives and therefore where its one
+    exception belongs.
+  - **Out of time.** `abandonMissionGiveUpReadings` readings, and the session
+    ends saying which mission is still accepted and still stuck, so the operator
+    knows what to quit by hand.
+
+**Placed below the retreats and above everything mission-shaped.** It sits
+inside the docked-or-in-space split rather than in the pre-split list, so
+`recoverPodAfterShipLoss`, `windDownBeforeSessionEnd` and `runAwayIfLowHealth`
+all still outrank it -- a lost ship, a session ending and a ship being taken
+apart are each more urgent than an errand -- while every branch that would fly
+the stuck mission instead lives below it and is simply never reached.
+
+-}
+abandonMissionThatCannotProgress : BotDecisionContext -> Maybe DecisionPathNode
+abandonMissionThatCannotProgress context =
+    context.memory.missionToAbandon
+        |> Maybe.map
+            (\verdict ->
+                -- No reading counts in this text, for the reason the give-up
+                -- alarm it responds to states: the line repeats for as long as
+                -- the abandonment lasts, and a counter in it makes every repeat
+                -- a distinct line, which defeats stall_watch's dedupe and any
+                -- log filter downstream. Run 126 emitted 151 unique variants of
+                -- one alarm that way. Both counts are in the status line
+                -- instead -- see `describeMissionAbandonment` -- where they
+                -- cost nothing, and the give-up below carries them because it
+                -- is printed on exactly one reading before the session ends.
+                describeBranch
+                    ("Abandoning the mission '"
+                        ++ verdict.name
+                        ++ "': it cannot be progressed, so I am giving it back to the agent rather than asking for help until the session ends."
+                    )
+                    (if abandonMissionGiveUpReadings <= verdict.readingsSince then
+                        describeBranch
+                            ("I have been trying to quit '"
+                                ++ verdict.name
+                                ++ "' for "
+                                ++ String.fromInt verdict.readingsSince
+                                ++ " readings, after it went nowhere for "
+                                ++ String.fromInt verdict.stalledReadings
+                                ++ ", and have not managed it. Ending the session rather than retrying forever -- the mission is still accepted and still stuck, and it needs quitting by hand at the agent."
+                            )
+                            (Common.DecisionPath.endDecisionPath FinishSession)
+
+                     else
+                        case context.readingFromGameClient.shipUI of
+                            Nothing ->
+                                case context.readingFromGameClient.agentConversationWindows |> List.head of
+                                    Just conversation ->
+                                        quitMissionInConversation context verdict conversation
+
+                                    Nothing ->
+                                        describeBranch
+                                            "Docked -- open the agent conversation, which is the only place 'Quit Mission' lives."
+                                            (openAgentConversation context)
+
+                            Just _ ->
+                                case stationToReturnToForAbandonment context of
+                                    Just stationName ->
+                                        travelToStationByName context
+                                            stationName
+                                            { whileSettingRoute =
+                                                "Set the route to '"
+                                                    ++ stationName
+                                                    ++ "' -- the mission can only be quit face to face with the agent."
+                                            , whileTravelling =
+                                                "Travelling to '"
+                                                    ++ stationName
+                                                    ++ "' to give the mission back."
+                                            }
+
+                                    Nothing ->
+                                        describeBranch
+                                            "I have not docked anywhere this session and no 'home-station' is configured, so there is no station I can name to return to."
+                                            askForHelpToGetUnstuck
+                    )
+            )
+
+
+{-| The station to fly back to in order to quit.
+
+The one we last undocked from, which is the agent's -- the mission was taken
+there, and the tracker's own travel steps have been leading back to it all
+along. `home-station` is the fallback rather than the first choice: it is where
+the _drones_ are, which is a different question and need not be the same
+station.
+
+-}
+stationToReturnToForAbandonment : BotDecisionContext -> Maybe String
+stationToReturnToForAbandonment context =
+    [ context.memory.lastDockedStationNameFromInfoPanel
+    , context.eventContext.botSettings.homeStationName
+    ]
+        |> List.filterMap identity
+        |> List.head
+
+
+{-| Press Quit Mission, once the conversation is open.
+
+The click is gated on `previousStepClickedMouse` for the reason that guard was
+written: pressing a button in this window re-lays out the whole row, and
+"Accept" in the offer state overlaps "Quit Mission" in the accepted state by
+three pixels. A second click at coordinates computed before the reading caught
+up is how that was discovered -- from the other direction, which is worth
+keeping in mind here, since this branch is the one that _means_ to press Quit.
+
+A conversation that offers no Quit Mission is not waited on indefinitely: this
+says so on every reading, and `abandonMissionGiveUpReadings` ends the session.
+
+-}
+quitMissionInConversation :
+    BotDecisionContext
+    -> MissionToAbandon
+    -> EveOnline.ParseUserInterface.AgentConversationWindow
+    -> DecisionPathNode
+quitMissionInConversation context verdict conversation =
+    case
+        conversation.buttons
+            |> List.filter (.name >> (==) "QuitMission_Button")
+            |> List.head
+    of
+        Nothing ->
+            describeBranch
+                ("The agent conversation is open but offers no 'Quit Mission' button for '"
+                    ++ verdict.name
+                    ++ "'."
+                )
+                waitForProgressInGame
+
+        Just quitButton ->
+            if previousStepClickedMouse context then
+                describeBranch
+                    "I clicked in the conversation on the previous step -- wait for the reading to catch up before clicking again."
+                    waitForProgressInGame
+
+            else
+                describeBranch
+                    ("Quit the mission '" ++ verdict.name ++ "' with the agent.")
+                    (clickUiElement quitButton.uiNode)
+
+
+{-| Whether the confirmation dialog now on screen is the one this bot asked for.
+
+`closeMessageBox`'s standing rule is that the bot's automatic answer to a
+confirmation is always the one that declines -- and it names the "Quit Mission?"
+dialog as the reason, having once cost a mission's standing. This is the only
+state in which that rule is wrong, so it is stated as narrowly as it can be:
+
+  - a verdict is latched, so the bot has concluded the mission is impossible;
+  - an agent conversation is open, which no travel or station step produces;
+  - the previous step clicked inside it, and the only click this branch makes
+    inside a conversation is Quit Mission -- `openAgentConversation` clicks the
+    Agents tab and the agent's own chat button, both of which happen while no
+    conversation window exists.
+
+Not a test of the dialog's own text, which is the client's language rather than
+a fact about the bot's intent, and not a test of the button's name either --
+that is `quitMissionConfirmationButton`'s job, and it declines anything that
+does not look like a yes/no pair.
+
+-}
+quitMissionConfirmationIsExpected : BotDecisionContext -> Bool
+quitMissionConfirmationIsExpected context =
+    (context.memory.missionToAbandon /= Nothing)
+        && (context.readingFromGameClient.agentConversationWindows /= [])
+        && previousStepClickedMouse context
 
 
 
@@ -4994,9 +5486,19 @@ labelReportsRouteAlreadySet label =
     stringContainsIgnoringCase "destination set" label
 
 
-generalSetupInUserInterface : ReadingFromGameClient -> Maybe DecisionPathNode
-generalSetupInUserInterface readingFromGameClient =
-    [ closeSystemSettingsMenu, closeMessageBox, ensureInfoPanelLocationInfoIsExpanded ]
+{-| The three things that have to be dealt with before any decision can be made
+about the game itself.
+
+`confirmQuitMission` is passed down to `closeMessageBox` rather than read there,
+because whether a confirmation dialog is one the bot asked for is a fact about
+the bot's own intent and not about the reading -- see
+`quitMissionConfirmationIsExpected`. Everything else here is answerable from the
+reading alone and stays that way.
+
+-}
+generalSetupInUserInterface : { confirmQuitMission : Bool } -> ReadingFromGameClient -> Maybe DecisionPathNode
+generalSetupInUserInterface { confirmQuitMission } readingFromGameClient =
+    [ closeSystemSettingsMenu, closeMessageBox { confirmQuitMission = confirmQuitMission }, ensureInfoPanelLocationInfoIsExpanded ]
         |> List.filterMap
             (\maybeSetupDecisionFromGameReading ->
                 maybeSetupDecisionFromGameReading readingFromGameClient
@@ -5068,77 +5570,151 @@ closeSystemSettingsMenu readingFromGameClient =
             )
 
 
-closeMessageBox : ReadingFromGameClient -> Maybe DecisionPathNode
-closeMessageBox readingFromGameClient =
+closeMessageBox : { confirmQuitMission : Bool } -> ReadingFromGameClient -> Maybe DecisionPathNode
+closeMessageBox { confirmQuitMission } readingFromGameClient =
     readingFromGameClient.messageBoxes
         |> List.head
         |> Maybe.map
             (\messageBox ->
-                describeBranch "I see a message box to close."
-                    (let
-                        buttonCanBeUsedToClose =
-                            .mainText
-                                >> Maybe.map (String.trim >> String.toLower >> (\buttonText -> [ "close", "ok" ] |> List.member buttonText))
-                                >> Maybe.withDefault False
+                case
+                    if confirmQuitMission then
+                        quitMissionConfirmationButton messageBox
 
-                        namedButton name =
-                            messageBox.buttons
-                                |> List.filter
-                                    (.uiNode
-                                        >> .uiNode
-                                        >> EveOnline.ParseUserInterface.getNameFromDictEntries
-                                        >> (==) (Just name)
-                                    )
-                                |> List.head
-
-                        labelled description button =
-                            ( description, button.uiNode )
-
-                        {- Dismissal options in descending order of confidence.
-                           They deliberately never include a positive answer:
-                           these dialogs guard destructive actions (the
-                           "Quit Mission?" one cost a mission's standing once
-                           already), so the bot's automatic reply must always
-                           be the one that declines.
-
-                           1. A plain "Close"/"OK" acknowledgement.
-                           2. "No" on a confirmation dialog -- which has no
-                              Close/OK button at all, so nothing above matches
-                              it. `no_dialog_button` is stable across client
-                              languages.
-                           3. The window's own close ('X') control, for a
-                              dialog whose buttons we do not recognise at all.
-                              Seen live sitting in front of one of these for
-                              several ticks with nothing to click.
-                        -}
-                        dismissOptions =
-                            [ messageBox.buttons
-                                |> List.filter buttonCanBeUsedToClose
-                                |> List.head
-                                |> Maybe.map
-                                    (\button ->
-                                        labelled (button.mainText |> Maybe.withDefault "close") button
-                                    )
-                            , namedButton "no_dialog_button"
-                                |> Maybe.map (labelled "No")
-                            , messageBox.uiNode
-                                |> closeControlOfWindow
-                                |> Maybe.map (\node -> ( "the window's close button", node ))
-                            ]
-                     in
-                     case dismissOptions |> List.filterMap identity |> List.head of
-                        Nothing ->
-                            describeBranch "I see no way to close this message box." askForHelpToGetUnstuck
-
-                        Just ( description, nodeToClick ) ->
-                            describeBranch ("Dismiss it using " ++ description ++ ".")
-                                (decideActionForCurrentStep
-                                    (mouseClickOnUIElement MouseButtonLeft nodeToClick
-                                        |> Result.withDefault []
-                                    )
+                    else
+                        Nothing
+                of
+                    Just confirmButton ->
+                        -- The one dialog this bot ever answers in the
+                        -- affirmative, and it says so, because a log that shows
+                        -- only "dismiss it" would hide the single click in this
+                        -- whole file that costs standing.
+                        describeBranch
+                            "This is the 'Quit Mission' confirmation I just asked for -- confirm it."
+                            (decideActionForCurrentStep
+                                (mouseClickOnUIElement MouseButtonLeft confirmButton
+                                    |> Result.withDefault []
                                 )
-                    )
+                            )
+
+                    Nothing ->
+                        closeMessageBoxByDeclining messageBox
             )
+
+
+{-| The affirmative button on a yes/no confirmation, and nothing else.
+
+Identified by the _shape_ of the dialog rather than by its wording: a button
+named `no_dialog_button` -- the one name this file already relies on being
+stable across client languages -- and exactly one other button beside it. The
+affirmative is then the other one, whatever it is called and whatever language
+it is written in. `yes_dialog_button` is preferred when the client names it,
+which is the expected counterpart but is not relied on, because it has never
+been read out of a live tree here.
+
+Anything else answers `Nothing` and falls through to the ordinary decline, so a
+notification with a single OK, or a dialog with three buttons, is untouched even
+while a mission is being abandoned.
+
+-}
+quitMissionConfirmationButton :
+    EveOnline.ParseUserInterface.MessageBox
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+quitMissionConfirmationButton messageBox =
+    let
+        buttonIsNamed name button =
+            (button.uiNode.uiNode |> EveOnline.ParseUserInterface.getNameFromDictEntries) == Just name
+
+        declineButtons =
+            messageBox.buttons |> List.filter (buttonIsNamed "no_dialog_button")
+
+        otherButtons =
+            messageBox.buttons |> List.filter (buttonIsNamed "no_dialog_button" >> not)
+    in
+    case ( declineButtons, otherButtons ) of
+        ( [ _ ], [ theOtherOne ] ) ->
+            case otherButtons |> List.filter (buttonIsNamed "yes_dialog_button") |> List.head of
+                Just named ->
+                    Just named.uiNode
+
+                Nothing ->
+                    Just theOtherOne.uiNode
+
+        _ ->
+            Nothing
+
+
+closeMessageBoxByDeclining : EveOnline.ParseUserInterface.MessageBox -> DecisionPathNode
+closeMessageBoxByDeclining messageBox =
+    describeBranch "I see a message box to close."
+        (let
+            buttonCanBeUsedToClose =
+                .mainText
+                    >> Maybe.map (String.trim >> String.toLower >> (\buttonText -> [ "close", "ok" ] |> List.member buttonText))
+                    >> Maybe.withDefault False
+
+            namedButton name =
+                messageBox.buttons
+                    |> List.filter
+                        (.uiNode
+                            >> .uiNode
+                            >> EveOnline.ParseUserInterface.getNameFromDictEntries
+                            >> (==) (Just name)
+                        )
+                    |> List.head
+
+            labelled description button =
+                ( description, button.uiNode )
+
+            {- Dismissal options in descending order of confidence.
+               They deliberately never include a positive answer:
+               these dialogs guard destructive actions (the
+               "Quit Mission?" one cost a mission's standing once
+               already), so the bot's automatic reply must always
+               be the one that declines.
+
+               The single exception is the "Quit Mission?" dialog
+               the abandonment (#54) asked for itself, and it is
+               answered in `closeMessageBox` above rather than
+               here -- so this function still has no affirmative
+               in it at all, and cannot acquire one by accident.
+
+               1. A plain "Close"/"OK" acknowledgement.
+               2. "No" on a confirmation dialog -- which has no
+                  Close/OK button at all, so nothing above matches
+                  it. `no_dialog_button` is stable across client
+                  languages.
+               3. The window's own close ('X') control, for a
+                  dialog whose buttons we do not recognise at all.
+                  Seen live sitting in front of one of these for
+                  several ticks with nothing to click.
+            -}
+            dismissOptions =
+                [ messageBox.buttons
+                    |> List.filter buttonCanBeUsedToClose
+                    |> List.head
+                    |> Maybe.map
+                        (\button ->
+                            labelled (button.mainText |> Maybe.withDefault "close") button
+                        )
+                , namedButton "no_dialog_button"
+                    |> Maybe.map (labelled "No")
+                , messageBox.uiNode
+                    |> closeControlOfWindow
+                    |> Maybe.map (\node -> ( "the window's close button", node ))
+                ]
+         in
+         case dismissOptions |> List.filterMap identity |> List.head of
+            Nothing ->
+                describeBranch "I see no way to close this message box." askForHelpToGetUnstuck
+
+            Just ( description, nodeToClick ) ->
+                describeBranch ("Dismiss it using " ++ description ++ ".")
+                    (decideActionForCurrentStep
+                        (mouseClickOnUIElement MouseButtonLeft nodeToClick
+                            |> Result.withDefault []
+                        )
+                    )
+        )
 
 
 jumpToNextSystem : BotDecisionContext -> DecisionPathNode
@@ -9155,6 +9731,9 @@ initBotMemory =
     , dockedWithCargoWantedTicks = 0
     , nothingToDoTicks = 0
     , lastObjectiveText = ""
+    , missionStalledReadings = 0
+    , missionToAbandon = Nothing
+    , missionNamesAbandoned = []
     , gateWithinReachTicks = 0
     , gateLockedForWantOfAnItem = Nothing
     , siteAdmitsThisShip = Nothing
@@ -9379,7 +9958,7 @@ statusTextFromState context =
     -- bookkeeping shares one line, and anything empty drops out entirely, so a
     -- quiet reading is short and a busy one is still complete.
     [ [ describePerformance ]
-    , [ [ describeShipLoss context, describeHomeStation context, describeMenuAndSettlingCounters ]
+    , [ [ describeShipLoss context, describeMissionAbandonment context, describeHomeStation context, describeMenuAndSettlingCounters ]
             |> List.filter (String.isEmpty >> not)
             |> String.join " | "
       ]
@@ -9493,6 +10072,52 @@ describeShipLoss context =
                         Just _ ->
                             ""
                    )
+
+
+{-| What this session has given up on, and how the current attempt is going.
+
+Silent while nothing is wrong, which is nearly every reading of nearly every
+run -- the stall counter is deliberately not printed at zero, since it would be
+a zero on every line of every log and bury the one time it moves.
+
+The abandoned names stay on the line for the rest of the session, after the
+mission is gone and the bot is working again. That is the point: it is the only
+place an operator can see that a mission was thrown away, which of them it was,
+and that the agent is now being refused it -- and it is the signal that a
+mission type should be promoted into `decline-mission` permanently.
+
+-}
+describeMissionAbandonment : BotDecisionContext -> String
+describeMissionAbandonment context =
+    [ case context.memory.missionToAbandon of
+        Just verdict ->
+            "ABANDONING '"
+                ++ verdict.name
+                ++ "': stuck for "
+                ++ String.fromInt verdict.stalledReadings
+                ++ " readings, quitting it for "
+                ++ String.fromInt verdict.readingsSince
+                ++ " of "
+                ++ String.fromInt abandonMissionGiveUpReadings
+
+        Nothing ->
+            if context.memory.missionStalledReadings == 0 then
+                ""
+
+            else
+                "mission not moving "
+                    ++ String.fromInt context.memory.missionStalledReadings
+                    ++ "/"
+                    ++ String.fromInt missionStalledReadingsBeforeAbandoning
+    , if List.isEmpty context.memory.missionNamesAbandoned then
+        ""
+
+      else
+        "abandoned and now declined this session: "
+            ++ String.join ", " context.memory.missionNamesAbandoned
+    ]
+        |> List.filter (String.isEmpty >> not)
+        |> String.join " | "
 
 
 {-| The home station and whether the bot currently means to go there.
@@ -11668,6 +12293,52 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             shipUIWithoutModuleButtonsReadingsAfter
                 context.readingFromGameClient
                 botMemoryBefore.shipUIWithoutModuleButtonsReadings
+
+        -- One reading of a mission that is not moving: the reading says so
+        -- (`readingShowsAMissionGoingNowhere`), the objective has not changed
+        -- since the previous reading, and the bot put nothing on the client on
+        -- the step before. Strictly a subset of what `nothingToDoTicks` counts,
+        -- which is what lets the abandonment threshold be stated as a multiple
+        -- of the give-up alarm's -- see `missionStalledReadingsBeforeAbandoning`.
+        missionIsGoingNowhere =
+            readingShowsAMissionGoingNowhere context.readingFromGameClient
+                && (missionObjectiveText context.readingFromGameClient == botMemoryBefore.lastObjectiveText)
+                && not (previousStepDispatchedEffects context.previousStepsEffects)
+
+        missionStalledReadings =
+            if missionIsGoingNowhere then
+                botMemoryBefore.missionStalledReadings + 1
+
+            else
+                0
+
+        -- The abandonment verdict for this reading: the one already latched, or
+        -- a new one if this is the reading it becomes clear. Latched here for
+        -- `ShipLossVerdict`'s reason -- the decision tree cannot write memory,
+        -- and the state behind the verdict disappears the moment the response
+        -- starts. See `MissionToAbandon`.
+        missionToAbandon =
+            case botMemoryBefore.missionToAbandon of
+                Just latched ->
+                    if trackerStillShowsMission context.readingFromGameClient latched.name then
+                        Just { latched | readingsSince = latched.readingsSince + 1 }
+
+                    else
+                        Nothing
+
+                Nothing ->
+                    if missionStalledReadingsBeforeAbandoning <= missionStalledReadings then
+                        missionNameFromTracker context.readingFromGameClient
+                            |> Maybe.map
+                                (\name ->
+                                    { name = name
+                                    , stalledReadings = missionStalledReadings
+                                    , readingsSince = 0
+                                    }
+                                )
+
+                    else
+                        Nothing
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -11966,6 +12637,17 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , missionStalledReadings = missionStalledReadings
+    , missionToAbandon = missionToAbandon
+    , missionNamesAbandoned =
+        -- Appended on the reading the verdict latches, and never removed. See
+        -- `shouldDeclineMission` for why this is memory rather than a setting.
+        case ( botMemoryBefore.missionToAbandon, missionToAbandon ) of
+            ( Nothing, Just justDecided ) ->
+                missionNameForDeclining justDecided.name :: botMemoryBefore.missionNamesAbandoned
+
+            _ ->
+                botMemoryBefore.missionNamesAbandoned
     , dockedWithCargoWantedTicks =
         if dockedWithCargoWanted context.readingFromGameClient then
             botMemoryBefore.dockedWithCargoWantedTicks + 1

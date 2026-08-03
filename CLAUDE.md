@@ -1053,6 +1053,151 @@ up, followed by the drone recall and a dock — rather than another ten minutes 
 holding the mission item is not optional the way ordinary salvage is, and this
 change does not answer it.
 
+## A mission that cannot be progressed is given back, not asked about forever
+
+The bot already knew it was stuck. `decideActionInMissionPocket`'s "over 300
+readings of it — this mission is not going to progress on its own" branch has
+been right every time it has fired; what it did next was raise
+`askForHelpToGetUnstuck` and raise it again. Run 12 did that **817 times** on
+`Illegal Activity (1 of 3) -- Retrieve Gallente Light Marines` and was stopped by
+hand. Run 13 restarted on the same mission and reached the same state in **29
+readings** — a fresh process cannot escape, because the mission is still
+accepted and still impossible. Recovery took a person: fly Irnin → Amarr, dock,
+open the agent conversation, `Quit Mission`, confirm, restart with
+`decline-mission=Illegal Activity`.
+
+**The verdict was right and the response was inert.** Issue #54 adds the
+response and does not retune the verdict — #41 and #53 both confirmed it firing
+on real stalls, and a test asserts the alarm's threshold and wording are
+unchanged. #53 went further: PR #57 found run 12's wrecks were genuinely all
+looted and the mission item was in a `Cargo Container` that left the grid
+sixteen readings later, so that session's mission really had become impossible.
+This is not an escape hatch around a bug — it is the only remaining response to
+a mission that has genuinely stopped being completable, and it fires on a
+verdict that has now been shown correct at least once.
+
+**Quitting is the last resort it is, and the threshold says so as a relation.**
+`missionStalledReadingsBeforeAbandoning` is `nothingToDoTicksBeforeCryingStuck *
+2` — 600 readings — written as a multiple rather than a number so the argument
+cannot drift away from it. `missionStalledReadings` counts a strict *subset* of
+the readings `nothingToDoTicks` counts (every reading that advances the first
+advances the second; every reading that resets the second resets the first), so
+the abandonment cannot be reached without the alarm having been raised for at
+least 300 readings first — roughly twenty minutes of an operator being told,
+before anything irreversible happens. Standing is the cost, and a mission cannot
+be un-quit.
+
+**A bot that is merely busy cannot reach it.** The counter is narrower than the
+alarm's premise on purpose, and two of its conditions are not the alarm's at
+all: any reading where the ship reports a manoeuvre of any kind is excluded (an
+approach reads `ManeuverApproach` for as long as it runs — the recordings show
+it 68 to 94 times per run as `Already on the way -- let it run.`), and so is any
+reading where the previous step put effects on the client, which covers combat,
+looting, gate activation and every context-menu cascade. What is left is a ship
+sitting still with a tracked mission, no travel step, no route and nothing being
+clicked, which is what run 12 was.
+
+**The verdict is latched in `BotMemory`**, like #33's ship loss and for the same
+reason: the decision tree cannot write memory, and the state behind the verdict
+disappears the moment the response starts — the trip back sets a route, which
+reads as travel, and docking clears `nothingToDoTicks` outright. One thing
+un-latches it: the mission leaving the info panel, which is what quitting
+produces. So a successful quit ends the abandonment on the reading the client
+shows it worked, and the bot goes back to ordinary work.
+
+**Nothing new drives the UI.** In space it is `travelToStationByName` — the one
+route-set, fly, dock path, already shared by #16's restock trip and #33's pod
+recovery, and already recalling drones through `jumpToNextSystem`. Docked it is
+`openAgentConversation`, the same helper the docked flow uses to take and hand
+in missions. The only new click is `QuitMission_Button`, gated on
+`previousStepClickedMouse` for that guard's original reason: the Accept and Quit
+Mission rows overlap by three pixels, which is how this very dialog was once
+opened by accident.
+
+**The confirmation is the one dialog this bot ever answers yes to.**
+`closeMessageBox`'s standing rule is that a confirmation is always declined, and
+it names "Quit Mission?" as the reason. The exception is stated as narrowly as
+it can be — a verdict latched, an agent conversation open, and a click issued
+into it on the previous step — and the dialog is recognised by *shape* rather
+than wording: a `no_dialog_button` with exactly one other button beside it, the
+other one being the affirmative whatever it is called.
+`closeMessageBoxByDeclining` still contains no affirmative at all, which a test
+pins.
+
+**Bounded, and the bound ends the session.**
+`abandonMissionGiveUpReadings` (200) from the reading the verdict latches —
+larger than the 150 `podRecoveryGiveUpReadings` budgets for the same trip, plus
+the station work. Every way quitting can fail (cannot dock, no agent in the
+station returned to, no Quit Mission button, an unrecognised confirmation) runs
+under that one clock, so none of them can become a second forever-loop. When it
+expires the session ends naming the mission, so an operator knows what to quit
+by hand.
+
+**The abandoned name feeds the session's own decline list.**
+`BotMemory.missionNamesAbandoned` is consulted by `shouldDeclineMission`
+alongside `decline-mission`, so the agent cannot hand the same mission straight
+back — which is exactly what the human recovery did. The name is recorded with
+its `(N of 3)` counter dropped (`missionNameForDeclining`), so quitting
+`Illegal Activity (1 of 3)` also refuses `(2 of 3)`. It is memory rather than a
+setting because settings are parsed once per session and are not writable from a
+decision — and because it *should not* outlive the session: an operator who sees
+the same mission abandoned twice promotes it to `decline-mission` themselves.
+
+**It is never silent.** The decision log carries
+`Abandoning the mission 'X': it cannot be progressed, so I am giving it back to
+the agent rather than asking for help until the session ends.` on every reading
+of the attempt — with **no reading count in it**, for the reason the give-up
+alarm it responds to already documents: a counter makes every repeat a distinct
+line and defeats `stall_watch.py`'s dedupe, as run 126's 151 variants of one
+alarm showed. The counts live in the status line, which also carries
+`abandoned and now declined this session: ...` for the rest of the run — the
+signal that a mission type is worth adding to `decline-mission` permanently.
+
+**Placed below the retreats.** It sits inside the docked-or-in-space split
+rather than in the pre-split list, so `recoverPodAfterShipLoss`,
+`windDownBeforeSessionEnd` and `runAwayIfLowHealth` all still outrank it: a lost
+ship, a session ending and a ship being taken apart are each more urgent than an
+errand. Everything that would otherwise fly the stuck mission is below it.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_abandon_stuck_mission.py` (33 cases). The two pure
+rules are executed through the real `Bot.elm` in `elm repl` rather than mirrored
+in Python: `missionNameForDeclining` against **every** mission name the twelve
+recorded runs contain, in both the tracker's spelling and the agent's own offer,
+with the whole cross product checked so that a stripped name can neither miss
+its own chain nor match an unrelated mission; and `previousStepDispatchedEffects`
+against real effect values, including a keypress, since typing a station name
+presses no mouse button. Everything else — the subset relation, the counter
+properties, the bound, the ordering, the reuse, the confirmation's three
+conditions — is read out of the source, through a whitespace-collapsing reader
+so that the next `elm-format` pass cannot break them the way #58's broke three
+others. Confirmed by mutation, **twenty-seven** of them, each failing a named
+case: pinning the counter at `1`, removing its reset, freezing the attempt
+clock, conjoining a second condition onto the un-latch, writing the threshold as
+a bare 600, retuning the alarm, dropping the manoeuvre, idle or route exclusion,
+shrinking or replacing the deadline, adding a second travel path, putting an
+affirmative into the declining path, dropping either condition from the
+confirmation, matching the dialog loosely, hoisting the branch above the retreat
+or into the pre-split list, dropping the mission's name from the give-up, adding
+a reading count to the repeating line, dropping the abandoned names from the
+status line, ignoring the session decline list, recording the name on every
+reading rather than once, keeping the `(N of 3)` counter, stripping at the first
+space instead, and counting only mouse effects — or the whole history — as
+acting.
+
+**Not verified: any of it running.** In particular `yes_dialog_button` has never
+been read out of a live UI tree here — which is why the affirmative is
+identified by the dialog's shape and not by that name — and the whole path needs
+a mission that genuinely cannot progress, which is not something to stage. What
+to watch on the first one: `ABANDONING '<mission>'` in the status line, then
+`Travelling to '<station>' to give the mission back.`, then
+`Quit the mission '<mission>' with the agent.`, then
+`This is the 'Quit Mission' confirmation I just asked for -- confirm it.`, and
+then the status line's `abandoned and now declined this session:` while the bot
+takes other work. A stall at the confirmation means the dialog is not a
+two-button `no_dialog_button` pair after all, and the tell is 200 readings of
+the abandonment line followed by the session ending.
+
 ## Context-menu cascade robustness
 
 `EveOnline.BotFrameworkSeparatingMemory.elm`'s shared cascade logic
@@ -2312,6 +2457,14 @@ exists.
   `Bot.elm` in `elm repl`. Watch for `The objective is complete and the mission
   tracker says 'Dock'` arriving within a reading or two of the label, rather than
   another stretch of `I see a locked target`.
+
+  And it now **gives back a mission it cannot progress** instead of asking for
+  help until the session ends — flies to the agent, quits the mission, refuses
+  it for the rest of the session and takes other work. Run 12 raised the same
+  alarm 817 times and had to be stopped by hand; run 13 reached the same state
+  in 29 readings. The threshold, the bound and what is unverified are in "A
+  mission that cannot be progressed is given back, not asked about forever"
+  above. **Untested against a live client.**
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
@@ -2563,6 +2716,19 @@ for why ESI cannot replace it from inside a bot yet.
   simply skipped along with it. That is right for ordinary salvage and wrong for
   a wreck holding the mission item, and the two are not distinguished today —
   `isNotableWreck` only asks whether a wreck is worth looting.
+- **Quitting a mission has never been driven by the bot**, only by hand. The
+  affirmative half of the confirmation dialog is the weakest link: no live UI
+  tree in this repo contains one, so the affirmative is identified as "the other
+  button of a two-button dialog that has a `no_dialog_button`" rather than by a
+  name anyone has read. If that shape is wrong the abandonment ends the session
+  at its bound instead of quitting, which is bounded and loud but is still a
+  session lost — see "A mission that cannot be progressed is given back".
+- **A mission can only be quit at the station the bot last undocked from.** The
+  abandonment routes there (falling back to `home-station`), and if the agent
+  turns out not to be in it, `openAgentConversation` says so and the attempt
+  runs out its bound. A bot that had been flying a mission taken from a
+  different station than it last docked at would hit that; nothing has, because
+  the tracker's own travel steps lead back to the agent.
 - The damage-rate retreat's latch clears when nothing has hit the ship for a
   whole window, so a bot driven out of a pocket will be brought back into it by
   the mission logic and driven out again. Survivable, and better than the

@@ -450,12 +450,20 @@ class TheOrderingIsThePoint(unittest.TestCase):
         # controller and runs before `decideActionWhenInSpace` is called at all,
         # so this change cannot get in front of it. Inverting that leaves
         # everything compiling, which is issue #12's failure.
+        #
+        # Asserted on the collapsed text rather than on exact indentation:
+        # #54's mission abandonment now sits between the two, as a second
+        # fallback of the same retreat, and the property being pinned here is
+        # the ordering rather than what happens to be nested in between.
         start = self.source.index("missionBotDecisionRootBeforeApplyingSettings context =")
         end = self.source.index("\nsecondsBeforeSessionEndToWindDown", start)
-        body = self.source[start:end]
-        self.assertIn("runAwayIfLowHealth context shipUI\n"
-                      "                            |> Maybe.withDefault "
-                      "(decideActionWhenInSpace context", body)
+        collapsed = " ".join(self.source[start:end].split())
+        self.assertIn("runAwayIfLowHealth context shipUI |> Maybe.withDefault",
+                      collapsed)
+        self.assertLess(collapsed.index("runAwayIfLowHealth context shipUI"),
+                        collapsed.index("decideActionWhenInSpace context"),
+                        "the retreat must be consulted before the in-space "
+                        "decision, not the other way round")
 
     def test_the_ship_loss_verdict_still_outranks_everything(self):
         # PR #37 pinned this and it is not this change's to move: the pre-split
