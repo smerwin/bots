@@ -37,6 +37,7 @@ type alias ParsedUserInterface =
     , probeScannerWindow : Maybe ProbeScannerWindow
     , directionalScannerWindow : Maybe DirectionalScannerWindow
     , stationWindow : Maybe StationWindow
+    , shipItemCards : List ShipItemCard
     , inventoryWindows : List InventoryWindow
     , chatWindowStacks : List ChatWindowStack
     , agentConversationWindows : List AgentConversationWindow
@@ -438,6 +439,18 @@ type alias StationAgentEntry =
     }
 
 
+{-| One ship in the station's Hangars/Ships panel, as a card.
+
+Worth having only because of what a right-click on it offers: "Open Drone Bay"
+there anchors the inventory to that ship, and that is the only context in which
+a drop into the bay is accepted. See `tools/macos-host/reload_drones.py`.
+-}
+type alias ShipItemCard =
+    { uiNode : UITreeNodeWithDisplayRegion
+    , mainText : Maybe String
+    }
+
+
 type alias InventoryWindow =
     { uiNode : UITreeNodeWithDisplayRegion
     , leftTreeEntries : List InventoryWindowLeftTreeEntry
@@ -706,6 +719,7 @@ parseUserInterfaceFromUITree uiTree =
     , probeScannerWindow = parseProbeScannerWindowFromUITreeRoot uiTree
     , directionalScannerWindow = parseDirectionalScannerWindowFromUITreeRoot uiTree
     , stationWindow = parseStationWindowFromUITreeRoot uiTree
+    , shipItemCards = parseShipItemCardsFromUITreeRoot uiTree
     , inventoryWindows = parseInventoryWindowsFromUITreeRoot uiTree
     , moduleButtonTooltip = parseModuleButtonTooltipFromUITreeRoot uiTree
     , heatStatusTooltip = parseHeatStatusTooltipFromUITreeRoot uiTree
@@ -2313,6 +2327,35 @@ parseStationAgentEntries windowNode =
                         |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "AgentConversationIcon")
                         |> List.head
                 , isAvailable = isUnderAvailableHeader entryNode.totalDisplayRegion.y
+                }
+            )
+
+
+{-| The ship cards in the station's Hangars/Ships panel.
+
+Found by node type anywhere under the root, rather than scoped to the panel
+that holds them, because no reading has been captured that says which container
+that panel is -- and a wrong container filter would not fail loudly here, it
+would report no cards at all and leave the bot blind to a card plainly on
+screen. `reload_drones.py` locates the card the same way and works.
+
+`mainText` is the widest text on the card, which is the ship's name; it is for
+the decision log rather than for choosing between cards.
+-}
+parseShipItemCardsFromUITreeRoot : UITreeNodeWithDisplayRegion -> List ShipItemCard
+parseShipItemCardsFromUITreeRoot uiTreeRoot =
+    uiTreeRoot
+        |> listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "ShipItemCard")
+        |> List.map
+            (\cardNode ->
+                { uiNode = cardNode
+                , mainText =
+                    cardNode
+                        |> getAllContainedDisplayTextsWithRegion
+                        |> List.sortBy (Tuple.second >> .totalDisplayRegion >> .width >> negate)
+                        |> List.head
+                        |> Maybe.map Tuple.first
                 }
             )
 

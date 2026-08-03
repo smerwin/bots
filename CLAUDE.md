@@ -338,7 +338,7 @@ procedure and its traps; this file carries the facts.
 | `eve_repl.py` | interactive handle on the client for one-offs -- `python3 -i eve_repl.py`, then `eve.dock(...)`, `eve.warp_to(...)`, `eve.menu_click(...)`. See `REPL.md` |
 | `compile_bot.sh` | compiles a bot the way the host does, without running it; verifies the scratch copy matches the source |
 | `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session |
-| `reload_drones.py` | standalone one-off: refill drone bay from station hangar |
+| `reload_drones.py` | standalone one-off: refill drone bay from station hangar. Still the way to restock *outside* a session; the mission runner now does the same thing for itself while winding down |
 | `route_setter/route_setter.py` | standalone one-off: set the autopilot route from a chat channel's MOTD |
 
 **Launcher `--help`** is answered *before* the one-bot-at-a-time guard runs, so
@@ -714,6 +714,27 @@ exists.
   out, clears each pocket through its acceleration gates, returns and hands in.
   Across 55 logged runs it completed 48 missions, median 58 ticks (~5.4 min).
   Combat features in 79% of them, gates 33%, looting 21%.
+
+  It now also **restocks the drone bay while docked**, as maintenance in the
+  wind-down window (`restockDroneBayWhileDocked`), so a run that ends with an
+  empty bay does not hand the next one an empty bay too. This is a port of
+  `reload_drones.py`'s sequence -- open the bay from the ship's own
+  `ShipItemCard` context menu, filter the item hangar, drag the stack in,
+  accept the quantity dialog -- driven by the bot's own input path instead of a
+  standalone tool that fights it for the mouse. The drone is named by the
+  `drone-type` setting, default `Acolyte I`.
+
+  **Untested against a live client.** It compiles and the parser now sees
+  `ShipItemCard`, but nothing here has been watched running: it needs a docked
+  ship with an empty bay and the drone in that station's root item hangar. The
+  failure to watch for is the one `reload_drones.py`'s header names -- an
+  inventory not anchored to the ship accepts the drag, shows the quantity
+  dialog, and moves nothing. The bot's only evidence that its "Open Drone Bay"
+  landed is the drone bay showing as the selected container
+  (`droneBayOpenedFromShipCard`), which it remembers until the ship undocks;
+  a client left with that container selected some other way would fool it.
+  Read the decision log for the `Maintenance:` lines and check the drones
+  window afterwards rather than trusting them.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
@@ -819,7 +840,10 @@ full-name match from the rendered list. Note also that `'-'` maps to
 - `MouseMoveRelative` and `CharacterDown`/`CharacterUp` (raw Unicode text input)
   aren't implemented in `botlab_host.py`.
 - No automated Elm-toolchain bootstrap if `elm` isn't on `PATH`.
-- `reload_drones.py` only searches the root Item hangar, no sub-folders.
+- `reload_drones.py` only searches the root Item hangar, no sub-folders. The
+  mission runner's port of it inherits that, and also takes the first
+  `ShipItemCard` in the tree as the active ship, which is what the tool does --
+  untested on a character with several ships in the same hangar.
 - Tested against a handful of bots and one display configuration (single
   display, specific Retina scale). Non-EVE bots using
   `OpenWindowRequest`/browser automation are stubbed to always fail.
