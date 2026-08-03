@@ -1,0 +1,111 @@
+name: build-and-test
+
+# What a reviewer would otherwise check by hand on every pull request: that
+# every EVE app still compiles the way `botlab_host.py` compiles it, and that
+# the host's own test suite passes.
+#
+# Deliberately separate from `test-and-publish.yml`, which validates Elm
+# formatting and does not trigger on `pull_request` at all.
+#
+# This does not replicate `tools/macos-host/compile_bot.sh`, which is macOS-only
+# in three ways a Linux runner trips over immediately -- `#!/bin/zsh` with zsh
+# globbing, BSD `sed -i ''`, and `rsync`. The *steps* are the same ones, and the
+# interface-to-wrapper mapping below is the third copy of a rule that already
+# exists in `botlab_host.py` (`host_interface_of_bot`) and in `compile_bot.sh`.
+# Keep all three in step, or this verifies a build the host would never produce.
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install zsh
+        # tests/test_cycle_run.py sources cycle_run.sh, which is a zsh script
+        # and uses zsh-only syntax (glob qualifiers, ZSH_EVAL_CONTEXT). Without
+        # zsh those tests error rather than skip.
+        run: sudo apt-get update -qq && sudo apt-get install -y zsh
+
+      - name: Install Pillow
+        # botlab_host.py imports PIL at module scope for the screenshot path, so
+        # every test module that imports it fails to load without this -- an
+        # ImportError that reads like a broken test rather than a missing
+        # dependency.
+        run: python3 -m pip install --upgrade pip && python3 -m pip install pillow
+
+      - name: Install Elm
+        # The checked-in elm.json files pin 0.19.1. Homebrew ships 0.19.2, which
+        # is why botlab_host.py patches elm-version into its scratch copy; the
+        # compile step below does the same, so this version does not have to
+        # match what any developer has locally.
+        run: |
+          curl -sSL -o elm.gz https://github.com/elm/compiler/releases/download/0.19.1/binary-for-linux-64-bit.gz
+          gunzip elm.gz
+          chmod +x elm
+          sudo mv elm /usr/local/bin/elm
+          elm --version
+
+      - name: Compile every EVE app the way botlab_host does
+        run: |
+          set -u
+          failed=0
+          for app in implement/applications/eve-online/*/; do
+            [ -f "${app}Bot.elm" ] || continue
+            name=$(basename "$app")
+
+            # The wrapper is fixed by the interface the bot's own Bot.elm
+            # imports -- not by which interface modules the app vendors, since
+            # the mining bot ships two.
+            iface=$(grep -m1 -o 'BotLab\.BotInterface_To_Host_[0-9_]*' "${app}Bot.elm" || true)
+            case "$iface" in
+              BotLab.BotInterface_To_Host_2024_10_19) wrapper=Main.elm ;;
+              BotLab.BotInterface_To_Host_2023_02_06) wrapper=Main_2023_02_06.elm ;;
+              *)
+                echo "::error::${name} imports an unknown host interface: ${iface:-none found}"
+                failed=1
+                continue
+                ;;
+            esac
+
+            build=$(mktemp -d)
+            cp -R "${app}." "$build/"
+            cp "tools/macos-host/botlab_host/${wrapper}" "$build/Main.elm"
+
+            # Patch elm-version in the copy, never in the source -- an
+            # application-type elm.json demands an exact match with the compiler.
+            python3 - "$build/elm.json" <<'PATCH'
+          import json, subprocess, sys
+          path = sys.argv[1]
+          version = subprocess.run(["elm", "--version"], capture_output=True, text=True).stdout.strip()
+          manifest = json.load(open(path))
+          if manifest.get("elm-version") != version:
+              manifest["elm-version"] = version
+              json.dump(manifest, open(path, "w"), indent=4)
+          PATCH
+
+            if (cd "$build" && elm make Main.elm --output=bot.js > compile.log 2>&1); then
+              echo "ok    ${name} (${wrapper})"
+            else
+              echo "::error::${name} failed to compile"
+              cat "$build/compile.log"
+              failed=1
+            fi
+          done
+          exit $failed
+
+      - name: Run the host's test suite
+        # Tests that read recorded runs from ~/eve-bot-logs skip here and pass
+        # on a machine that has them. A skip is the intended outcome, not a
+        # silent pass: each one asserts against real client output when the
+        # logs are present.
+        run: python3 -m unittest discover -s tools/macos-host/tests -v

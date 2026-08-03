@@ -786,6 +786,110 @@ consumer turned into a `999999` placeholder that reads as merely far rather than
 unreachable — one run logged "Failed to read the distance" 444 times. Exclude
 those objects from anything the ship might act on.
 
+## What the bot is willing to shoot
+
+For a long time this was two rules, and both required somebody to have predicted
+the object: the overview's icon colour (`iconSpriteHasColorOfRat`, a sprite
+palette test) and a list of names in the `attack-object` setting. Anything
+matching neither was invisible — **including things actively shooting the ship**,
+and the failure is silent in the worst available direction, since "nothing to
+fight" is what the bot prints either way. Issue #40's principle: whatever is
+shooting the ship is a valid target, whatever colour its icon is and whether or
+not anyone remembered to name it in a setting.
+
+**Issue #40's headline incident is not this, and the recordings say so.** It
+attributes run 10's long "Nothing to fight and no travel step offered" stretch to
+this blindness; the log has that stretch running 900 decision blocks on
+`Illegal Activity (3 of 3) -- You need to activate the Acceleration Gate`, with
+**zero** incoming damage in the window, zero rats and a full shield throughout.
+That is #41's gate-locked refusal, fixed in #42. The frigates the issue quotes
+were engaged normally in the same run —
+`Lock target from overview entry 'Federation Navy Delta II Support Frigate'`
+appears throughout the pocket they were in — so the icon rule matched them.
+
+What the recordings do support is the gap itself, quantified: across them there
+are **1,198 readings taken under fire and 299 of those where the icon rule
+counted zero rats**, a quarter. Most are in warp, retreating or travelling with
+nothing on grid, but 26 sit at an acceleration gate absorbing 320-370 hitpoints
+a window from something the client names `R.S. Officer` while the bot engages
+nothing. Whether that attacker had an overview row the colour rule missed, or
+simply had no row at all, **the recordings cannot say** — the bot prints the
+count, never the rows. That is the one thing a live run has to settle.
+
+**The third rule is the client's own statement of fact.** EVE's combat log names
+every attacker — `49 from Centior Monster - Penetrates` — and the host already
+aggregates that channel into `incomingDamageSinceLastReading`, whose
+`topAttacker` field *is* the attacker's name. So the widening cost no new
+plumbing: the raw `(combat)` lines stay withheld, and `isObjectShootingAtUs`
+matches an overview row against the names the window already holds.
+
+**The two names are the same string**, checked rather than assumed. Across all
+ten recorded runs the combat log names 37 distinct attackers and **33 appear
+byte for byte** as an overview entry's Name in the bot's own
+`Lock target from overview entry '…'` and `Current target: …` lines — same case,
+same spacing, apostrophes and full stops intact
+("Kruul's Henchman", "R.S. Officer"). Of the four that do not, three are rats the
+bot never locked, so no overview-side string was ever printed for them; the
+fourth is `Toxic Cloud Environment`, the pocket's own damage cloud, which has no
+overview row and therefore matches nothing. `test_shoot_back_at_attackers.py`
+pins that round-trip against the recorded lines, #31's pattern.
+
+**Matched exactly, never as a substring.** `attack-object` already learned this
+in both directions, and there is a worse case here: a wreck's Type is its
+owner's name with " Wreck" appended, so a substring rule would have the bot open
+fire on the corpse of the thing that stopped shooting it — forever, since a
+wreck cannot die. Name and Type are both accepted, which exactness makes safe;
+the recorded evidence is for the Name column specifically.
+
+**`topAttacker` is one name, and a pocket has several attackers.** Rather than
+widen the host's aggregation into a list, the name rides on each
+`IncomingDamageSample` and the *window* of them is the set. Measured over the
+recorded runs, accumulating the per-reading top attacker across 45 seconds
+recovers **1674 of 1717** name-in-window pairs (97.5%) that carrying every name
+would have — a reading is one to three seconds, so a second attacker takes the
+top slot within a few of them. Run 10's own pocket shows it directly: two
+consecutive readings, one topped by `Federation Navy Delta II Support Frigate`
+and the next by `Federation Navy Soldier`. Holding the names inside `samples`
+also means **no new counter and no new clearing rule**: they are trimmed by the
+same clock, capped by the same `incomingDamageSampleLimit`, and gone 45 s after
+the last hit — one condition covering the rat dying, the ship warping out and
+the pocket ending.
+
+**It widens the set; it does not reorder it.** An entry qualifying only because
+it shot us enters the same list at its own distance rank, and every existing
+guard still applies by placement: `overviewEntryDistanceIsOnGrid` (so an AU
+distance is still excluded), `overviewEntryIsDisplayed` at the lock site (so a
+virtualised row is still never clicked), and the scrambler-first sort — being
+unable to *leave* still outranks being shot. When the colour rule and this one
+agree they produce one entry, not two.
+
+**The one place it stops is a briefing saying clearing is optional.** Attackers
+are deliberately absent from `isObjectToAttackByName`, which is what survives
+that filter. A briefing that says the pirates need not be cleared is the client
+saying in writing that the fight is not the job, and ignoring that cost run 102
+over 400 combat decisions and run 106 a session on Recon. The cost is stated
+rather than hidden: on such a mission the bot travels to the objective while
+being shot and does not shoot back, and what covers that is the damage-rate
+retreat, not this.
+
+**Webbing is not damage, and that case is not covered.** A webifier can apply no
+damage at all, and then it writes no combat line, so a signal built on damage
+cannot see it — which is precisely run 10's two frigates, whose rows the issue
+reports rendering "Pilot is webifying me". They happened also to deal damage, so
+run 10 itself is covered; a pure webifier would not be. That string appears
+**nowhere in the ten recorded runs** — nothing had ever printed these hints — so
+matching it would be a guard resting on a premise no evidence supports. The
+hints are printed instead (`Overview indications:` in the status line, distinct
+strings from rendered rows only), which is what turns the next run into the
+evidence a follow-up can be built on. `commonIndications` still reads exactly
+the two literals it inherited, `is jamming me` and `is warp disrupting me`.
+
+Every engagement of this kind names itself in the decision log —
+`Shooting back at '…': the client's combat log names it as having hit this ship
+in the last 45 s, and nothing else here marks it as a target.` — and only when
+nothing else would have selected the row, so the line means "this is new" rather
+than appearing beside every rat in the pocket.
+
 ## Context-menu cascade robustness
 
 `EveOnline.BotFrameworkSeparatingMemory.elm`'s shared cascade logic
@@ -1295,6 +1399,148 @@ button at all. And the hover, which holds the mouse still for several readings,
 cannot age a pending lock attempt into a false refusal: a refusal needs the
 target bar empty at both ends, and the ammo path only runs with an active target.
 
+## Acceleration gates: a gate that will not open says why, on a channel nobody read
+
+Run 10 raised `askForHelpToGetUnstuck` — the first time in eleven runs — while
+the objective's own acceleration gate sat 32 m off the bow with the Selected
+Item panel offering `selectedItemActivateGate`. Everything the bot needed was on
+screen and it declined to act for 1,325 readings. The explanation had been in
+the reading the whole time:
+
+```
+[ 2026.08.03 12:56:41 ] (info) This gate is locked! To activate it, you need to have R.S. Officer's Passcard in your cargo hold. By all signs it will not be consumed upon use, so the only problem is to locate the thing!
+```
+
+**The mission was unwinnable and the bot could not tell that from being stuck.**
+Reconstructed from the log: the bot pressed Activate, the client refused with
+that line *and* a modal message box, `closeMessageBox` dismissed the box as
+generic noise, and the gate branch pressed again — nine times over two minutes,
+alternating `I see an acceleration gate -- D-click it to move to the next
+pocket.` with `I see a message box to close.` Then `gateWithinReachTicks` passed
+`gateRefusesThisShipTicks` (40) and `activateAccelerationGateIfPresent` began
+answering `Nothing`, which is what the log then showed for twenty minutes as
+`Nothing to fight and no travel step offered`. The give-up at the bottom of the
+tree eventually fired and was right to; it was working from a symptom twenty
+minutes downstream of the cause.
+
+**Three things were wrong, and only the third is the one that looks like a bug.**
+
+**The refusal was legible and unread.** The client states this on the `info`
+channel — every other consumer of the game log in this bot reads `notify`, so
+`gameLogEntryIsFromInfoChannel` had to exist before the sentence could be seen
+at all. `gateLockedForWantOfAnItemFromGameLog` matches it and
+`BotMemory.gateLockedForWantOfAnItem` carries the client's own sentence forward,
+because a reading's entries are gone by the next one. The gate branch then stops
+pressing and asks for help *quoting the client*, on the first refusal rather
+than the thousandth reading.
+
+**Two "This gate is locked!" sentences exist and they want opposite responses.**
+The recorded game logs also hold
+
+```
+This gate is locked! There are synchronized gate scramblers on all hostile entities in this area ... you must simply clear the vicinity of enemy ships. So grab your guns.
+```
+
+which opens by itself once the pocket is clear, and which the bot already
+answers correctly by fighting. So `in your cargo hold` is not a second substring
+guarding against a rewording the way #31's pair is — it carries the entire
+distinction between a standing requirement the bot cannot meet and a fight it is
+already winning. Matching `This gate is locked` alone would stop runs that were
+about to succeed. `tools/macos-host/tests/test_gate_locked_refusal.py` pins that
+against both real sentences and against every `This gate is locked` line in
+`~/Documents/EVE/logs/Gamelogs`.
+
+**The give-up counted the wrong thing, and then said nothing.**
+`gateWithinReachTicks` counted readings with a gate inside
+`interactionRangeInMeters`, which is not evidence that the gate refuses the
+ship — the same error `dronesInSpaceTicks` made about the drone recall. Note
+what that costs on the *scrambled* gate above: clearing that pocket is by
+definition a long fight next to the gate, far longer than 40 readings, so the
+budget would have been spent before the last rat died and the gate left
+permanently declined on a grid where it was about to work. It now increments
+only where `selectedItemOffersActivateGate` — the client actually offering to
+open it and the gate not opening — **holds** its count on a reading in reach
+without the offer (the message box between every attempt is one of those, and
+resetting there is the shape that pinned `gunsSilencedTicks` at 1 forever), and
+resets only when the ship leaves reach.
+
+And the decline itself was silent. Returning `Nothing` is deliberate — it is
+what lets the caller's own fallbacks run, and the comment there explains why —
+but a `Nothing` cannot carry a decision line, so the log said only that nothing
+was happening. `describeAccelerationGate` puts it in the status line every
+reading instead: which gates are on the overview and at what range, how much of
+the budget is spent, whether the branch has given up, and the client's sentence
+if there is one. That is also what makes a two-gate grid visible; the decision
+text was printed 135 times without ever revealing that the overview held two
+gates at very different ranges, which is what made this take a manual read of
+the Selected Item panel to spot. It now names the gate it chose.
+
+**What was investigated and is not the cause.** The issue's first hypothesis was
+a consumer taking `List.head` of `overviewWindows` and seeing one of two
+windows. All eighteen call sites iterate the full list;
+`scrollOverviewToReveal` filters *windows* deliberately, because it needs to
+know which one to scroll. Multiple overview windows are a supported
+configuration and nothing here depends on there being one. The second was that
+the gate was out of range and the approach path of `1fe6439` had failed — the
+log shows the ship closing 59 km → 9,565 m → 8,076 m → in reach, shutting the
+prop mod down on arrival, exactly as intended.
+
+**The client names the key, so the bot fetches it.** #41 stopped at reporting
+the refusal, on the grounds that the objective names no cargo and so
+`lootMissionItemFromContainerIfPresent` had nothing to look for. Half of that
+was wrong, and the operator's own resolution is what showed it: the passcard was
+looted from a nearby wreck and the mission continued. The *objective* names no
+cargo; the *client's sentence* names the item outright, and every piece of the
+retrieval path — `isLootableFor`, `lootableHoldingMissionItem`,
+`scrollOverviewToReveal`, the `prefer-wreck` setting — already takes the item
+name as an argument. The only missing piece was the source of that argument.
+
+`gateKeyItemNameFromRefusal` slices it out between `you need to have` and
+`in your cargo hold`, `itemToFetchFromTheGrid` offers the objective's cargo
+first and the gate key second, and `lootMissionItemFromContainerIfPresent` asks
+that instead of the objective directly. Nothing downstream is new.
+
+Three things hold it together, and each is a way it could have gone wrong.
+
+**The right-hand marker is the substring the matcher already pins.**
+`gateKeyClosingMarker` is one constant used by both, so an extraction can never
+succeed on a sentence the matcher would have rejected — in particular the
+scrambled gate, which wants a fight rather than an errand. The left marker is
+the whole clause `you need to have` rather than something shorter that happens
+to work on the one recorded sentence.
+
+**The name is matched the way every other item name is.** It goes to
+`isLootableFor` as a plain substring, punctuation and all —
+`R.S. Officer's Passcard` carries two periods and an apostrophe, and a second
+matching rule invented for them would rest on one observation. What that costs
+is worth knowing: the *named container* branch only fires when an overview row
+literally contains the name, and a wreck's row carries the dead ship's name, so
+a key inside a wreck is found by the blind wreck-opening branch — exactly as for
+every other mission item that comes out of something destroyed.
+
+**The verdict lets go when a container is emptied.** Otherwise one refusal
+decides the rest of the session: the key goes in the hold and the gate is never
+asked again. Emptying anything clears it, the gate is pressed again, and if it
+is still locked the client says so again and the verdict re-latches on *that*
+reading — never on the strength of a verdict formed before the loot. The loop
+terminates for the reason `lootableHoldingMissionItem` already documents: each
+container emptied drops out of the candidate list, so the search shrinks, and
+when it is exhausted the gate branch asks for help **naming the item it was
+looking for**. `containerEmptiedThisReading` is one definition read by both
+`lootedWreckIds` and the verdict, because two copies of "was this just emptied"
+would drift silently in both directions.
+
+**Unverified.** The loot-then-retry sequence has never run: it needs a live
+mission that locks its gate, and none has been flown since. What is checked
+off-line is the extraction against the real sentence and against the scrambled
+one, that the key reaches the picker, that the verdict is forgotten on a loot,
+and that the give-up names the item — but the *rule* is mirrored in Python
+rather than executed, since the function is not exposed from the `Bot` module
+and this suite reads Elm as text. Nor is a second gate on that grid confirmed
+from the log; the 25 km row in the issue is an operator's live read, and if it
+was a working gate then trying the next-nearest gate after one is refused is
+still the follow-up.
+
 ## Drones: how long they have been out says nothing about a recall
 
 Warping with drones in space loses them, so every warp, dock and retreat in
@@ -1657,6 +1903,20 @@ exists.
   is following is its own. The tell is `Home station: ... set the route to`
   repeating where `Home station: travelling to` should have taken over.
 
+  It now also **shoots back at whatever the client says is shooting it**, rather
+  than only at what the overview colours as a rat or an operator remembered to
+  name — see "What the bot is willing to shoot" for the evidence that the combat
+  log's attacker name and the overview's Name are the same string, for why the
+  set is accumulated per reading rather than carried as a list by the host, and
+  for the two cases deliberately left out (an optional-clearing briefing, and a
+  webifier that deals no damage). **Untested against a live client**: the
+  matching, the bounding and every existing guard it has to keep are unit-checked
+  against the recorded runs, but no run has yet engaged anything this way. What
+  to watch is the status line's `Attackers named in the window:` clause carrying
+  names that the overview also shows — a window naming attackers while no
+  `Shooting back at` line ever appears means the two strings are not matching
+  after all, which is the failure this whole change would fail silently as.
+
   It also **recognises that the ship has been destroyed and flies the pod out**
   rather than continuing the mission in a capsule, which is what run 7 did for
   86 readings. Detection, the two signals that work and the two that do not,
@@ -1766,15 +2026,23 @@ exists.
   the channel, and `getAllContainedDisplayTexts` empty even with the attacker
   named "No room for more".
 
-  **Three consumers now, and none has been proven live.** #31's ammo-load
-  refusal (`loadRefusedByClient`), #33's capsule refusal (`shipLossFromGameLog`)
-  and #32's damage-rate retreat, the last reading the summary rather than the
-  lines. All three take the same three parts a consumer needs: a
-  match on `channel == Just "notify"` and the client's own wording, a `BotMemory`
+  **Four consumers now, and none has been proven live.** #31's ammo-load
+  refusal (`loadRefusedByClient`), #33's capsule refusal (`shipLossFromGameLog`),
+  #41's locked acceleration gate (`gateLockedForWantOfAnItem`) and #32's
+  damage-rate retreat, the last reading the summary rather than the
+  lines. All four take the same three parts a consumer needs: a
+  match on the channel and the client's own wording, a `BotMemory`
   field to carry the verdict (a reading's entries are gone by the next one, so a
   branch that does not record what it saw sees it once), and a live run that
   provokes the line. A run in which the line does not occur proves only that
   nothing broke.
+
+  **The channel is not always `notify`.** #41's line arrives on `info`, and
+  three consumers reading `notify` had made that look like the channel this
+  bot's refusals come on. Check which one carries the sentence, against the
+  recordings, before copying an existing matcher — a filter on the wrong channel
+  is a guard that can never fire, and looks exactly like a client that never
+  complains.
 
   Worth knowing what the two consumers found the channel to be good and bad at.
   Good: it states things no HUD sprite does, and the timestamp/channel split
@@ -1874,7 +2142,25 @@ for why ESI cannot replace it from inside a bot yet.
   system: Unknown" for a name that isn't a plain string in memory.
 - `MouseMoveRelative` and `CharacterDown`/`CharacterUp` (raw Unicode text input)
   aren't implemented in `botlab_host.py`.
-- The ammo swap and the ship-loss guard are the only consumers of
+- **The acceleration-gate path does not filter on `_display`**, which
+  "Reading the overview" says every path that acts on a row must. A hidden row
+  keeps a plausible region belonging to whatever was recycled into its place, so
+  the nearest "gate" could in principle be a phantom and the click land on
+  something else. Left alone deliberately while fixing #41: it explains nothing
+  about run 10 (the rows there carried no `_display` key at all, which reads as
+  shown), and adding the filter on its own would make a gate scrolled out of
+  view invisible rather than mis-clicked — the loot path pairs the filter with
+  `scrollOverviewToReveal` and the gate path has no such pairing. Both halves
+  together, on a run that can be watched.
+- **The gate key is fetched but the fetch has never run.** #44 wired the item
+  the client names into the existing loot path, so a locked gate now sends the
+  bot looking for its key rather than straight to asking for help. Nothing has
+  watched it: it needs a live mission that locks its gate. The first run that
+  does should show `looking for '<item>'` in the status line, then the ordinary
+  `Open the container` / `Look inside` decisions, then the gate taken — and if
+  the key is not on the grid, one give-up naming what it could not find.
+- The ammo swap, the ship-loss guard and the locked-gate verdict are the only
+  consumers of
   `gameLogEntriesSinceLastReading`'s *lines*, so every other guard that infers a
   refusal indirectly still does. The candidates the recorded runs actually
   contain: `You cannot launch Acolyte I
@@ -1894,6 +2180,13 @@ for why ESI cannot replace it from inside a bot yet.
   whole window, so a bot driven out of a pocket will be brought back into it by
   the mission logic and driven out again. Survivable, and better than the
   alternative it replaced, but it is a loop and it has not been seen live.
+- **A webifier that deals no damage is still invisible to the bot.** #40's
+  attacker set is built from the combat log, and an EWAR module that applies no
+  damage writes no line there. The overview row carries the answer — the client
+  renders "Pilot is webifying me" on it — but that string occurs in none of the
+  recorded runs, so there is nothing to derive a matcher from without a live
+  reading. The status line now prints the rendered rows'
+  `rightAlignedIconsHints`, so the next run that meets one records the literal.
 - No automated Elm-toolchain bootstrap if `elm` isn't on `PATH`.
 - `reload_drones.py` only searches the root Item hangar, no sub-folders. The
   mission runner's port of it inherits that, and also takes the first

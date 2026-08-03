@@ -124,6 +124,13 @@
      that does not cover. Either way the object must be enabled in the
      overview's type filters (Large Collidable Objects are off by default) or
      the bot cannot see it at all. Repeatable.
+
+     **It is also not what covers a hostile the icon colour misses.** Anything
+     the client's combat log names as having hit this ship inside
+     `incomingDamageWindowSeconds` is a target for as long as that window holds
+     it, with no setting involved -- see `isObjectShootingAtUs`. Listing rats
+     here is unnecessary and, because this list never expires, worse than
+     leaving them out.
    + `home-station` : Full name of the station to go back to when the drone bay
      has run dry, exactly as the client writes it -- e.g.
      `home-station=Amarr VIII (Oris) - Emperor Family Academy`. Without it the
@@ -477,6 +484,7 @@ type alias BotMemory =
     , nothingToDoTicks : Int
     , lastObjectiveText : String
     , gateWithinReachTicks : Int
+    , gateLockedForWantOfAnItem : Maybe String
     , siteAdmitsThisShip : Maybe Bool
     , clearingNotRequired : Bool
     , agentConversationWithoutTrackerTicks : Int
@@ -536,6 +544,14 @@ on the same reading, because the two questions this memory answers are "how hard
 are we being hit" and "is the instrument that is supposed to notice moving at
 all", and the second is only answerable by looking at both together.
 
+Each sample also carries the reading's own `topAttacker`, and the set of those
+names across the window is what issue #40's target selection reads. Holding the
+names *inside* `samples` rather than in a list of their own is what bounds and
+clears them without a second rule: they are trimmed by the same clock, capped by
+the same `incomingDamageSampleLimit`, and gone `incomingDamageWindowSeconds`
+after the last hit -- which covers a rat dying, the ship warping out and a
+pocket ending, in one condition none of which has to be detected separately.
+
 `hostCarriesTheChannel` is the `Nothing`-versus-`Just` distinction from the
 parser, kept so the status line can say when this whole guard is unarmed. A
 host without the channel reports no damage, which reads exactly like a peaceful
@@ -561,6 +577,11 @@ type alias IncomingDamageSample =
     -- was none to believe -- no ship UI, or a value `plausibleHitpointsPercent`
     -- rejected. A `Nothing` is never counted as the gauge moving.
     , hitpoints : Maybe ( Int, Int )
+
+    -- Who the client said hit hardest on this reading, kept per sample rather
+    -- than only in `lastAttacker`, because the window of these names is what
+    -- `namesOfRecentAttackers` hands to the target selection. See issue #40.
+    , attacker : Maybe String
     }
 
 
@@ -3354,6 +3375,29 @@ approachConfiguredObjectIfPresent context =
             )
 
 
+{-| What the bot is currently trying to pick up off the grid, from either of the
+two things that can ask for one.
+
+The mission objective first, because it is the mission's own instruction, and
+because a courier pickup names cargo the gate refusal never would. The gate key
+second: it is only ever set while a gate has refused to open, and it is the
+answer for the missions whose objective says nothing about cargo at all -- run
+10's said only "You need to activate the Acceleration Gate".
+
+They cannot both be live and mean different things at once in any observed case,
+and if they ever are, the objective is the one the mission will actually clear on.
+
+-}
+itemToFetchFromTheGrid : BotDecisionContext -> Maybe String
+itemToFetchFromTheGrid context =
+    case courierCargoToLoad context of
+        Just objectiveCargo ->
+            Just objectiveCargo
+
+        Nothing ->
+            gateKeyWanted context
+
+
 {-| Some missions want an item that is sitting in a cargo container on grid
 rather than in the station hangar -- "Get the Relic" asks for an `Ancient
 Amarrian Relic` that is inside a `Cargo Container - Ancient Amarrian Relic`
@@ -3366,10 +3410,14 @@ cargo, then click its "Loot All". The menu-entry priority list includes
 "approach" for the same reason the acceleration gate's does -- from outside
 looting range the menu offers that instead, and a later tick's fresh right-click
 finds the loot entries once in range.
+
+Since #44 the wanted item can also be the key a locked acceleration gate named,
+which is why this asks `itemToFetchFromTheGrid` rather than the objective
+directly -- see `gateKeyItemNameFromRefusal`.
 -}
 lootMissionItemFromContainerIfPresent : BotDecisionContext -> Maybe DecisionPathNode
 lootMissionItemFromContainerIfPresent context =
-    case courierCargoToLoad context of
+    case itemToFetchFromTheGrid context of
         Nothing ->
             Nothing
 
@@ -5396,6 +5444,41 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                 scrollOverviewToReveal context
                     (shouldAttackOverviewEntry (objectNamesToAttack context))
 
+        -- Issue #40: name what is in the list *only* because the client said it
+        -- hit us. Without this an operator reading the decision log sees the bot
+        -- engage something the overview does not colour as a rat and nothing
+        -- names in the settings, with no way to tell learning from misfiring.
+        -- Recomputed here rather than carried on the entry because
+        -- `shouldAttackOverviewEntry` returns a Bool and widening it to report
+        -- which disjunct matched would change every call site for one log line.
+        entriesEngagedOnlyBecauseTheyShotUs =
+            overviewEntriesToAttack
+                |> List.filter
+                    (\entry ->
+                        isObjectShootingAtUs (objectNamesToAttack context).fromIncomingDamage entry
+                            && not (iconSpriteHasColorOfRat entry)
+                            && not (isObjectToAttackByName (objectNamesToAttack context) entry)
+                    )
+
+        describeShootingBack decision =
+            case
+                entriesEngagedOnlyBecauseTheyShotUs
+                    |> List.filterMap .objectName
+                    |> Common.Basics.listUnique
+            of
+                [] ->
+                    decision
+
+                names ->
+                    describeBranch
+                        ("Shooting back at "
+                            ++ (names |> List.map (\name -> "'" ++ name ++ "'") |> String.join ", ")
+                            ++ ": the client's combat log names it as having hit this ship in the last "
+                            ++ (incomingDamageWindowSeconds |> String.fromInt)
+                            ++ " s, and nothing else here marks it as a target."
+                        )
+                        decision
+
         targetsToUnlock =
             targetsToUnlockFromReadingFromGameClient context.readingFromGameClient
 
@@ -5619,13 +5702,13 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
             decisionIfNoEnemyToAttack
 
     else if context.eventContext.botSettings.orbitInCombat == AppSettings.Yes then
-        ensureShipIsOrbitingDecision |> Maybe.withDefault decisionToFight
+        describeShootingBack (ensureShipIsOrbitingDecision |> Maybe.withDefault decisionToFight)
 
     else if context.eventContext.botSettings.keepAtRange == AppSettings.Yes then
-        ensureShipIsKeepingRangeDecision |> Maybe.withDefault decisionToFight
+        describeShootingBack (ensureShipIsKeepingRangeDecision |> Maybe.withDefault decisionToFight)
 
     else
-        decisionToFight
+        describeShootingBack decisionToFight
 
 
 {-| How many readings to keep commanding a manoeuvre the client never confirms
@@ -5985,6 +6068,144 @@ gameLogEntryIsFromNotifyChannel entry =
 
         Just channel ->
             (channel |> String.trim |> String.toLower) == "notify"
+
+
+gameLogEntryIsFromInfoChannel : EveOnline.ParseUserInterface.GameLogEntry -> Bool
+gameLogEntryIsFromInfoChannel entry =
+    case entry.channel of
+        Nothing ->
+            True
+
+        Just channel ->
+            (channel |> String.trim |> String.toLower) == "info"
+
+
+{-| The client saying this acceleration gate wants an item the ship is not
+carrying, in its own words.
+
+Run 10 pressed the panel's Activate on a gate 32 m away, nine times over two
+minutes, and the client answered every one of them on the `info` channel:
+
+    This gate is locked! To activate it, you need to have R.S. Officer's
+    Passcard in your cargo hold. By all signs it will not be consumed upon use,
+    so the only problem is to locate the thing!
+
+The bot read none of it. The refusal also arrives as a message box, which
+`closeMessageBox` dismissed as generic noise, so the whole exchange was a press,
+a dismissal and another press -- until `gateWithinReachTicks` ran out and the
+gate branch fell silent. See `activateAccelerationGateIfPresent`.
+
+**Two substrings, and here the second one carries the whole distinction rather
+than merely guarding a rewording.** The recorded game logs hold two different
+sentences opening "This gate is locked!", and they want opposite responses:
+
+    ... There are synchronized gate scramblers on all hostile entities in this
+    area ... you must simply clear the vicinity of enemy ships.
+
+That one is transient and the bot already answers it correctly by fighting; a
+matcher on the exclamation alone would fire on it and stop a run that was about
+to succeed. `in your cargo hold` is what separates a standing requirement the
+bot cannot meet from a fight it is already winning, so it is not optional and
+`This gate is locked` must never be matched on its own.
+
+`Nothing` and `Just []` are collapsed, safely and in the same direction as
+#31's and #33's matchers: finding no such line is never read as the gate being
+open. What says the gate opened is the pocket changing.
+
+-}
+gateLockedForWantOfAnItemFromGameLog : ReadingFromGameClient -> Maybe String
+gateLockedForWantOfAnItemFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromInfoChannel
+        |> List.filter
+            (\entry ->
+                stringContainsIgnoringCase "gate is locked" entry.text
+                    && stringContainsIgnoringCase gateKeyClosingMarker entry.text
+            )
+        |> List.head
+        |> Maybe.map .text
+
+
+{-| The key the locked gate is asking for, taken out of the client's sentence.
+
+    ... you need to have R.S. Officer's Passcard in your cargo hold ...
+                         ^^^^^^^^^^^^^^^^^^^^^^^
+
+#41 stopped at reporting the refusal, on the grounds that the objective names no
+cargo so the loot path had nothing to look for. Half of that was wrong: the
+*client* names it, and the whole retrieval path -- `isLootableFor`,
+`lootableHoldingMissionItem`, `scrollOverviewToReveal`, the `prefer-wreck`
+setting -- already takes the item name as an argument. This is the missing
+source of that argument, and nothing downstream of it is new. The passcard was
+in a nearby wreck, and looting it by hand is what let run 10's mission continue.
+
+**Bounded by the same literal the matcher pins**, not by a wider one.
+`gateKeyClosingMarker` is the substring `gateLockedForWantOfAnItemFromGameLog`
+already requires, so the extraction cannot succeed on a sentence the matcher
+would not have accepted -- in particular the scrambled-gate refusal, which wants
+a fight rather than an errand. The opening marker is the narrower of the two and
+never appears alone in the corpus.
+
+The name is returned exactly as the client wrote it, punctuation and all, and
+handed to `isLootableFor` to match the same way every other item name is.
+"R.S. Officer's Passcard" carries two periods and an apostrophe, and inventing a
+second matching rule for them would be a rule with one observation behind it.
+What that costs is worth naming: a plain substring match means the *named
+container* branch only fires if an overview row literally contains the name, and
+a wreck's row carries the dead ship's name instead -- so a key inside a wreck is
+found by the blind wreck-opening branch, exactly as for every other mission item
+that comes out of something destroyed.
+
+-}
+gateKeyItemNameFromRefusal : String -> Maybe String
+gateKeyItemNameFromRefusal clientSentence =
+    let
+        lowercased =
+            String.toLower clientSentence
+
+        openingMarker =
+            "you need to have "
+    in
+    String.indexes openingMarker lowercased
+        |> List.head
+        |> Maybe.andThen
+            (\openingIndex ->
+                let
+                    nameStart =
+                        openingIndex + String.length openingMarker
+                in
+                String.indexes gateKeyClosingMarker lowercased
+                    |> List.filter ((<) nameStart)
+                    |> List.head
+                    |> Maybe.map (\nameEnd -> String.slice nameStart nameEnd clientSentence)
+            )
+        |> Maybe.map String.trim
+        |> Maybe.andThen
+            (\itemName ->
+                if String.isEmpty itemName then
+                    Nothing
+
+                else
+                    Just itemName
+            )
+
+
+{-| The right-hand edge of the item's name, and the substring that tells this
+refusal from the one that opens itself. One definition for both jobs so they
+cannot drift apart -- see `gateLockedForWantOfAnItemFromGameLog`.
+-}
+gateKeyClosingMarker : String
+gateKeyClosingMarker =
+    "in your cargo hold"
+
+
+{-| The key a latched locked-gate refusal is asking for, if it named one.
+-}
+gateKeyWanted : BotDecisionContext -> Maybe String
+gateKeyWanted context =
+    context.memory.gateLockedForWantOfAnItem
+        |> Maybe.andThen gateKeyItemNameFromRefusal
 
 
 {-| Whether this weapon is running, and so whether the client will refuse to
@@ -7248,7 +7469,26 @@ activate that instead.
 gateCanBeActivatedNow : BotDecisionContext -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 gateCanBeActivatedNow context entry =
     selectedItemIsOverviewEntry context entry
-        && (selectedItemButtonNamed context "selectedItemActivateGate" /= Nothing)
+        && selectedItemOffersActivateGate context.readingFromGameClient
+
+
+{-| Whether the panel is offering to open a gate, whoever it is showing.
+
+The half of `gateCanBeActivatedNow` that needs no decision context, so that
+`updateMemoryForNewReadingFromGame` -- which never sees a decision -- can count
+the readings on which the client made the offer and the gate did not open.
+
+-}
+selectedItemOffersActivateGate : ReadingFromGameClient -> Bool
+selectedItemOffersActivateGate readingFromGameClient =
+    readingFromGameClient.selectedItemWindow
+        |> Maybe.map (.uiNode >> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion)
+        |> Maybe.withDefault []
+        |> List.any
+            (\node ->
+                (node.uiNode |> EveOnline.ParseUserInterface.getNameFromDictEntries)
+                    == Just "selectedItemActivateGate"
+            )
 
 
 {-| Readings of drones sitting in space before the recall is treated as not
@@ -8197,6 +8437,7 @@ initBotMemory =
     , nothingToDoTicks = 0
     , lastObjectiveText = ""
     , gateWithinReachTicks = 0
+    , gateLockedForWantOfAnItem = Nothing
     , siteAdmitsThisShip = Nothing
     , clearingNotRequired = False
     , agentConversationWithoutTrackerTicks = 0
@@ -8396,12 +8637,19 @@ statusTextFromState context =
                                 Just name ->
                                     "target " ++ name
                     in
-                    -- Grouped onto two lines rather than five, and joined with
-                    -- " | " so each field is findable by eye in a column of
+                    -- Grouped onto fewer lines than there are facts, and joined
+                    -- with " | " so each field is findable by eye in a column of
                     -- readings. Empty parts are dropped, so a line carries only
                     -- what is true this reading.
+                    --
+                    -- The gate and overview-indication lines stay separate: both
+                    -- are absent on most readings and long when present, so
+                    -- folding them into a shared line would make that line jump
+                    -- between short and unwieldy.
                     [ [ describeShip, describeDrones ]
                     , [ describeRatsInOverview, describeCurrentTarget, describeOverview, describeLockRange context ]
+                    , describeAccelerationGate context
+                    , [ describeOverviewIndicationHints readingFromGameClient ]
                     , [ describeAmmoSwapState context ]
                     ]
                         |> List.map (List.filter (String.isEmpty >> not) >> String.join " | ")
@@ -8421,6 +8669,67 @@ statusTextFromState context =
         |> List.concat
         |> List.filter (String.isEmpty >> not)
         |> String.join "\n"
+
+
+{-| What the gate branch can see, and what it has decided about it.
+
+Empty on a reading with no acceleration gate on the overview, which is most of
+them; a gate branch with nothing to act on has nothing to report.
+
+This exists because `activateAccelerationGateIfPresent`'s "the gate refuses this
+ship" answer is a `Nothing` -- deliberately, so the caller's own fallbacks get
+their turn -- and a `Nothing` cannot carry a decision line. Run 10 is what that
+costs unreported: the branch gave up on a gate 32 m away and the log said only
+"nothing to fight and no travel step offered", 1,325 times. The counter and the
+verdict are named here every reading instead, so the give-up is visible while it
+is happening rather than reconstructable afterwards.
+
+The gate count is carried for its own reason. Two gates on one grid at very
+different ranges is a real configuration, and the decision log alone could not
+distinguish it from one gate.
+
+-}
+describeAccelerationGate : BotDecisionContext -> List String
+describeAccelerationGate context =
+    case accelerationGatesOnOverview context.readingFromGameClient of
+        [] ->
+            []
+
+        gates ->
+            [ "Acceleration gates on the overview: "
+                ++ (gates
+                        |> List.map
+                            (\gate ->
+                                (gate.objectName |> Maybe.withDefault "unnamed")
+                                    ++ " at "
+                                    ++ String.fromInt (overviewEntryDistanceOrFarInMeters gate)
+                                    ++ " m"
+                            )
+                        |> String.join ", "
+                   )
+                ++ ". Offered and not opened for "
+                ++ String.fromInt context.memory.gateWithinReachTicks
+                ++ " of "
+                ++ String.fromInt gateRefusesThisShipTicks
+                ++ " readings"
+                ++ (if gateRefusesThisShipTicks < context.memory.gateWithinReachTicks then
+                        " -- the gate branch has given up and is declining to act."
+
+                    else
+                        "."
+                   )
+                ++ (case context.memory.gateLockedForWantOfAnItem of
+                        Just clientSentence ->
+                            " The client says it is locked: \""
+                                ++ clientSentence
+                                ++ "\" -- looking for '"
+                                ++ (gateKeyWanted context |> Maybe.withDefault "nothing I could name")
+                                ++ "'."
+
+                        Nothing ->
+                            ""
+                   )
+            ]
 
 
 {-| Whether the bot thinks it still has a ship, on every reading rather than only
@@ -8537,6 +8846,45 @@ overviewEntryIsWarpDisruptingMe overviewEntry =
     overviewEntry.commonIndications.isWarpDisruptingMe
 
 
+{-| The hint text behind the little icons on the right of each overview row.
+
+Reported rather than acted on, and here for one specific reason: issue #40 says
+run 10's two frigates showed "Pilot is webifying me", and **a webifier that
+applies no damage produces no combat-log line at all**, so the attacker set in
+`namesOfRecentAttackers` cannot see it. That case is not covered by this change
+and this line is what would let it be.
+
+The parser has carried `rightAlignedIconsHints` all along and
+`commonIndications` reads exactly two literals out of it -- "is jamming me" and
+"is warp disrupting me" -- both inherited from upstream. The webifier's literal
+is not among them, and **it appears nowhere in the ten recorded runs**, because
+nothing has ever printed these hints. Guessing at the string and matching it
+would be a guard whose premise no evidence supports, which is how this repo
+gets guards that quietly never fire. Printing them instead costs one status
+line and turns the next run into the evidence a follow-up can be built on.
+
+Capped and deduplicated: distinct strings across rendered rows only, since an
+undisplayed row's contents belong to whatever was recycled into its place.
+-}
+describeOverviewIndicationHints : ReadingFromGameClient -> String
+describeOverviewIndicationHints readingFromGameClient =
+    case
+        readingFromGameClient.overviewWindows
+            |> List.concatMap .entries
+            |> List.filter overviewEntryIsDisplayed
+            |> List.concatMap .rightAlignedIconsHints
+            |> Common.Basics.listUnique
+            |> List.take 8
+    of
+        [] ->
+            "Overview indications: none on any rendered row."
+
+        hints ->
+            "Overview indications: "
+                ++ (hints |> List.map (\hint -> "'" ++ hint ++ "'") |> String.join ", ")
+                ++ "."
+
+
 {-| Whether to shoot this overview entry. Rats are recognised by their icon
 colour, but some missions require destroying a structure -- a "Drone Silo" and
 other Large Collidable Objects -- and those are neutral objects with no
@@ -8546,14 +8894,79 @@ be named explicitly via the `attack-object` setting.
 Note the structure must also be *visible*: Large Collidable Objects are off by
 default in the overview's type filters, and the bot can only act on what the
 overview shows it.
+
+The third disjunct is issue #40's: whatever the client says has been shooting
+this ship. The first two require someone to have predicted the object -- the
+sprite palette to cover it, or an operator to have named it -- and when both
+miss, the failure is silent in the worst available direction: the bot reports
+"nothing to fight" while its armour drains. This one is not a prediction. It is
+the client's own statement that the object hit us, and it needs no
+configuration. See `namesOfRecentAttackers`.
+
+**This widens the set; it does not reorder it.** An entry that qualifies only
+because it shot us enters the same list at its own distance rank and is subject
+to every guard the other two are: `overviewEntryDistanceIsOnGrid` below (so an
+AU distance is still excluded), `overviewEntryIsDisplayed` at the lock site (so
+a virtualised row is still never clicked), and the scrambler-first sort in
+`decideActionInCombat` (so being unable to *leave* still outranks being shot).
+When the colour rule and this one agree they produce one entry, not two, and
+nothing downstream can tell which disjunct matched. The one place that can, and
+must, is `isObjectToAttackByName` -- see the note there.
 -}
 shouldAttackOverviewEntry : ObjectNamesToAttack -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 shouldAttackOverviewEntry namesToAttack overviewEntry =
     (iconSpriteHasColorOfRat overviewEntry
         || isObjectToAttackFromObjective namesToAttack.fromObjective overviewEntry
         || isObjectToAttackFromSettings namesToAttack.fromSettings overviewEntry
+        || isObjectShootingAtUs namesToAttack.fromIncomingDamage overviewEntry
     )
         && overviewEntryDistanceIsOnGrid overviewEntry
+
+
+{-| Whether the client's combat log has named this overview row as having hit us.
+
+**The two strings are the same string.** Established against the recorded runs
+rather than assumed: across all ten sessions the combat log names 37 distinct
+attackers, and 33 of them appear byte for byte -- same case, same spacing, same
+punctuation -- as an overview entry's Name, in the bot's own
+`Lock target from overview entry '...'` and `Current target: ...` lines, which
+read `objectName` directly. "Federation Navy Delta II Support Frigate",
+"Tower Sentry Sansha I", "Kruul's Henchman", "R.S. Officer" and "Centii Savage"
+all round-trip unchanged. Of the four that do not appear, three are rats the bot
+never locked, so the log has no overview-side string for them at all; the fourth
+is "Toxic Cloud Environment", which is the pocket's own damage cloud and has no
+overview row to match -- the harmless case, since a name with no row engages
+nothing.
+
+**Matched exactly, not as a substring**, for `isObjectToAttackFromSettings`'s
+reason and one of its own. A substring match on the attacker "Kruul" would
+select "Kruul's Pleasure Hub" and "Kruul's Henchman", and a wreck's Type is its
+owner's name with " Wreck" appended -- so substring matching would have the bot
+open fire on the corpse of the thing that just stopped shooting it, forever,
+since a wreck never dies. Exactness is what makes accepting the Type column safe
+too. Comparison trims and lowercases, matching the setting's rule, so nothing
+here depends on the client's capitalisation being stable.
+
+Both columns are accepted for the same reason the other two matchers accept
+both: which one carries the identifying label varies. The recorded evidence
+above is for the Name column specifically -- no recorded line shows an
+attacker's name in the Type column -- so Type is the unverified half of this,
+and it is included because the failure it guards against (a row whose Name cell
+is empty) is the silent one.
+-}
+isObjectShootingAtUs : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+isObjectShootingAtUs attackerNames overviewEntry =
+    let
+        normalize =
+            String.trim >> String.toLower
+
+        labels =
+            [ overviewEntry.objectName, overviewEntry.objectType ]
+                |> List.filterMap identity
+                |> List.map normalize
+    in
+    attackerNames
+        |> List.any (\attackerName -> labels |> List.member (normalize attackerName))
 
 
 {-| Whether the entry's distance is one the bot can act on at all.
@@ -8655,17 +9068,21 @@ isObjectToAttackFromSettings namesToAttack overviewEntry =
 
 
 {-| Non-rat objects worth shooting: whatever the mission objective names as a
-destruction target, plus anything listed in the settings. The objective is the
-primary source -- it already says which structure the mission means -- and the
-`attack-object` setting stays as a manual override for cases it does not cover.
+destruction target, whatever the settings list, and whatever the client says has
+been shooting us. The objective is the primary source -- it already says which
+structure the mission means -- and the `attack-object` setting stays as a manual
+override for cases it does not cover.
 
-The two are kept apart rather than concatenated because they are matched
-differently -- see `isObjectToAttackFromObjective` and
-`isObjectToAttackFromSettings`.
+The three are kept apart rather than concatenated because they are matched
+differently and, more importantly, mean different things. See
+`isObjectToAttackFromObjective`, `isObjectToAttackFromSettings` and
+`isObjectShootingAtUs` for the matching, and `isObjectToAttackByName` for the
+one decision that has to tell the third apart from the other two.
 -}
 type alias ObjectNamesToAttack =
     { fromObjective : List String
     , fromSettings : List String
+    , fromIncomingDamage : List String
     }
 
 
@@ -8676,6 +9093,7 @@ objectNamesToAttack context =
             |> Maybe.map .objectNamesToDestroy
             |> Maybe.withDefault []
     , fromSettings = context.eventContext.botSettings.attackObjectNames
+    , fromIncomingDamage = namesOfRecentAttackers context.memory.incomingDamage
     }
 
 
@@ -8697,6 +9115,22 @@ overviewEntriesToAttackFromReadingFromGameClient namesToAttack readingFromGameCl
 happen to share the grid. Distinguished by *why* the entry matched: an
 objective- or settings-named structure still has to die when the briefing says
 clearing is optional, a wandering pirate does not.
+
+**Issue #40's attackers are deliberately not here**, which is the one place the
+widening in `shouldAttackOverviewEntry` stops. A briefing that says the pirates
+need not be cleared is the client telling us, in writing, that the fight is not
+the job -- and the bot has already lost two whole sessions to ignoring that:
+run 102 spent over 400 combat decisions on a mission whose brief said not to
+bother, and run 106 did the same on Recon while the objective asked for an
+acceleration gate. A rat shooting at the ship on such a mission is exactly the
+rat those briefings are about, so admitting it here would reinstate that failure
+with a better excuse for it.
+
+The cost is real and is not hidden: on an optional-clearing mission the bot will
+now travel to the objective while being shot and will not shoot back. What
+covers that is the damage-rate retreat -- see `runAwayIfLowHealth` -- not this,
+and if the fire is light enough that the retreat never trips, taking it while
+finishing the mission is the intended outcome rather than an oversight.
 -}
 isObjectToAttackByName : ObjectNamesToAttack -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isObjectToAttackByName namesToAttack overviewEntry =
@@ -9232,9 +9666,7 @@ to contribute.
 -}
 accelerationGateIsWithinReach : ReadingFromGameClient -> Bool
 accelerationGateIsWithinReach readingFromGameClient =
-    readingFromGameClient.overviewWindows
-        |> List.concatMap .entries
-        |> List.filter isAccelerationGate
+    accelerationGatesOnOverview readingFromGameClient
         |> List.any
             (\entry ->
                 (overviewEntryDistanceOrFarInMeters entry)
@@ -9262,10 +9694,7 @@ pocket.
 -}
 activateAccelerationGateIfPresent : BotDecisionContext -> Maybe DecisionPathNode
 activateAccelerationGateIfPresent context =
-    context.readingFromGameClient.overviewWindows
-        |> List.concatMap .entries
-        |> List.filter isAccelerationGate
-        |> List.sortBy overviewEntryDistanceOrFarInMeters
+    accelerationGatesOnOverview context.readingFromGameClient
         |> List.head
         |> Maybe.andThen
             (\accelerationGateEntry ->
@@ -9273,7 +9702,56 @@ activateAccelerationGateIfPresent context =
                     distanceInMeters =
                         overviewEntryDistanceOrFarInMeters accelerationGateEntry
                 in
-                if not (gateCanBeActivatedNow context accelerationGateEntry) then
+                if context.memory.gateLockedForWantOfAnItem /= Nothing then
+                    Just <|
+                    -- The client has said, in answer to this bot's own press,
+                    -- that it will not open this gate without an item in the
+                    -- hold. Pressing again is the press/refuse/dismiss loop run
+                    -- 10 spent two minutes in.
+                    --
+                    -- **Reaching this branch means the search is already over.**
+                    -- `lootMissionItemFromContainerIfPresent` is checked ahead
+                    -- of the whole gate path in `decideActionInMissionPocket`,
+                    -- and since #44 it is driven by the key the client named as
+                    -- well as by the objective's own cargo -- so if anything on
+                    -- the overview could still be holding it, that branch won
+                    -- this reading and this one was never called. Arriving here
+                    -- is the loot path answering "nothing left to open".
+                    --
+                    -- Checked before the range test rather than after it, so
+                    -- the ship does not fly at a gate it has been told is shut.
+                    -- Nothing is lost by that: only the nearest gate is ever
+                    -- considered, and the verdict is cleared the moment the ship
+                    -- leaves reach or empties a container.
+                    --
+                    -- Asking for help on one line from the client rather than
+                    -- waiting for the bottom of the tree to notice. That give-up
+                    -- did fire in run 10 and did its job -- but 20 minutes and
+                    -- 1,325 readings later, and saying only that nothing was
+                    -- happening. The client had said why on the first attempt.
+                    describeBranch
+                        ("This acceleration gate will not open for this ship, and the client said why: \""
+                            ++ (context.memory.gateLockedForWantOfAnItem |> Maybe.withDefault "")
+                            ++ "\" -- "
+                            ++ (case gateKeyWanted context of
+                                    Just itemName ->
+                                        "and nothing left on the overview looks like it might hold '"
+                                            ++ itemName
+                                            ++ "'."
+
+                                    Nothing ->
+                                        -- The sentence matched but named nothing
+                                        -- extractable, so there is no errand to
+                                        -- run. Said differently from the case
+                                        -- above, because "we looked and found
+                                        -- nothing" and "we never had anything to
+                                        -- look for" are different problems.
+                                        "and it named no item this bot could pick out of that sentence."
+                               )
+                        )
+                        askForHelpToGetUnstuck
+
+                else if not (gateCanBeActivatedNow context accelerationGateEntry) then
                     Just <|
                     -- Approach until the client says we can take the gate, and
                     -- let *it* decide when that is. The panel only carries
@@ -9313,16 +9791,71 @@ activateAccelerationGateIfPresent context =
                     -- fallbacks run -- travelling a set route, then
                     -- approachConfiguredObjectIfPresent -- which is the move that
                     -- mission actually needs.
+                    --
+                    -- Declining without a decision line is the one thing this
+                    -- may not do silently, and it did: run 10 landed here and
+                    -- the log went on saying "nothing to fight and no travel
+                    -- step" for 1,325 readings with no hint that a gate had been
+                    -- given up on. `describeAccelerationGate` carries it in the
+                    -- status line every reading instead, since saying it here
+                    -- would mean returning a step and losing the fallbacks.
                     Nothing
 
                 else
                     Just <|
                     ensureDronesRecalledBeforeWarping context
                         (activateGateOnOverviewEntry context
-                            "I see an acceleration gate -- D-click it to move to the next pocket."
+                            -- Says which gate. The bare version of this line was
+                            -- printed 135 times in run 10 without ever revealing
+                            -- that the overview held two acceleration gates at
+                            -- very different ranges, which is what made the
+                            -- diagnosis take a manual read of the client. The
+                            -- distance deliberately does not read "N m away":
+                            -- stall_watch treats that wording as an approach in
+                            -- progress and a falling number as progress, and
+                            -- nothing is approaching here.
+                            (describeAccelerationGateChosen context accelerationGateEntry
+                                ++ " -- D-click it to move to the next pocket."
+                            )
                             accelerationGateEntry
                         )
             )
+
+
+{-| Which gate the gate branch is acting on, for the decision log.
+-}
+describeAccelerationGateChosen :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> String
+describeAccelerationGateChosen context entry =
+    let
+        gatesOnOverview =
+            accelerationGatesOnOverview context.readingFromGameClient
+    in
+    "I see an acceleration gate ("
+        ++ (entry.objectName |> Maybe.withDefault "unnamed")
+        ++ ", "
+        ++ String.fromInt (overviewEntryDistanceOrFarInMeters entry)
+        ++ " m, nearest of "
+        ++ String.fromInt (List.length gatesOnOverview)
+        ++ " on the overview)"
+
+
+{-| Every acceleration gate the overview is showing, nearest first.
+
+Across all overview windows, because more than one is a supported setup and the
+gates of a pocket are not obliged to share one.
+
+-}
+accelerationGatesOnOverview :
+    ReadingFromGameClient
+    -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+accelerationGatesOnOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter isAccelerationGate
+        |> List.sortBy overviewEntryDistanceOrFarInMeters
 
 
 {-| The "Opportunities" panel (e.g. "Sansha's Command Relay Outpost") is a
@@ -9975,6 +10508,44 @@ incomingDamageInWindow memory =
     memory.samples |> List.map .damage |> List.sum
 
 
+{-| Everything the client has named as having hit this ship inside the window.
+
+**Issue #40.** The bot decided what to shoot from the overview's icon colour
+plus whatever an operator had remembered to list in `attack-object`, so anything
+matching neither was invisible to it -- including things actively shooting it,
+and "nothing to fight" is what it prints either way. What is shooting the ship
+is a valid target whether or not anyone predicted it, and the client says so on
+every damage line it writes.
+
+The gap is measured rather than assumed, and it is smaller than the issue
+claims: of 1198 recorded readings taken under fire, 299 found no rat by icon
+colour, and 26 of those sit at an acceleration gate absorbing 320-370 hitpoints
+a window from something named "R.S. Officer". Whether that attacker had an
+overview row is not knowable from a recording -- the bot prints the count, never
+the rows. Run 10's long "Nothing to fight" stretch, which the issue attributes
+here, took no damage at all and belongs to #41's locked gate.
+
+The list is the window's `topAttacker` values, deduplicated. It is one name per
+reading rather than every attacker in the reading, which is what the host
+already aggregates -- and measured over the recorded runs that is enough:
+accumulating the per-reading top attacker across a 45-second window recovers
+**1674 of the 1717** attacker-name-in-window pairs the full set would have,
+97.5%, because a reading is one to three seconds and a second attacker takes the
+top slot within a few of them. Widening the host's aggregation to carry every
+name would buy the remaining 2.5% at the cost of a list where a single string
+is, and the names it misses are ones the icon-colour rule already covers.
+
+Order is not meaningful and nothing reads it as a priority: see
+`shouldAttackOverviewEntry`, where this is one disjunct of three and the
+resulting list keeps its existing distance ordering.
+-}
+namesOfRecentAttackers : IncomingDamageMemory -> List String
+namesOfRecentAttackers memory =
+    memory.samples
+        |> List.filterMap .attacker
+        |> Common.Basics.listUnique
+
+
 {-| Did the HUD's hitpoints reading move at all across the window?
 
 Only a *believed* value counts as evidence of movement: two different `Just`
@@ -10062,6 +10633,21 @@ describeIncomingDamage context =
                         ". Hardest hitter seen: '" ++ attacker ++ "'"
                )
             ++ "."
+            -- Issue #40: the set the target selection is actually reading, not
+            -- just the single hardest hitter above. Printed every reading and
+            -- not only when it matches something, because the useful diagnosis
+            -- on a run that fails this way is "the client named an attacker and
+            -- no overview row carried that name", and a clause that appears only
+            -- on success cannot say that.
+            ++ (case namesOfRecentAttackers memory of
+                    [] ->
+                        " Attackers named in the window: none."
+
+                    names ->
+                        " Attackers named in the window: "
+                            ++ (names |> List.map (\name -> "'" ++ name ++ "'") |> String.join ", ")
+                            ++ " (any overview row with one of these names is a target)."
+               )
 
 
 {-| Where the retreat's hysteresis actually lives.
@@ -10129,6 +10715,10 @@ hit at all for `incomingDamageWindowSeconds`. Trip and release are different
 conditions on purpose: one threshold with the reading walking back and forth
 across it is the flicker `runAwayRearmPercent` exists to prevent, and here there
 is no "healthy" reading to re-arm against, only the fire having stopped.
+
+The reading's `topAttacker` rides along on the sample rather than being
+accumulated into a list of its own, so `namesOfRecentAttackers` inherits the
+trimming above and needs no clearing rule -- see `IncomingDamageMemory`.
 -}
 updateIncomingDamageMemory : UpdateMemoryContext BotSettings -> IncomingDamageMemory -> IncomingDamageMemory
 updateIncomingDamageMemory context memoryBefore =
@@ -10160,6 +10750,7 @@ updateIncomingDamageMemory context memoryBefore =
                     { atMilliseconds = context.timeInMilliseconds
                     , damage = reading.damage
                     , hitpoints = hitpointsNow
+                    , attacker = reading.topAttacker
                     }
                         :: keptSamples
 
@@ -10209,6 +10800,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         dronesInSpaceCountNow =
             dronesInSpaceCount context.readingFromGameClient
+
+        -- A container that has just been emptied, on this reading. Two fields
+        -- read it: `lootedWreckIds` records which one, and the locked-gate
+        -- verdict forgets itself, because the hold may now hold the key.
+        containerEmptiedThisReading =
+            case openWreckLootWindowAndId context.readingFromGameClient of
+                Just ( lootWindow, wreckId ) ->
+                    openContainerIsEmpty lootWindow
+                        && not (List.member wreckId botMemoryBefore.lootedWreckIds)
+
+                Nothing ->
+                    False
 
         -- The agent offering to complete a mission is the agent asserting one
         -- is in progress. Read here rather than in the decision tree so the
@@ -10521,8 +11124,8 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         --
         -- Capped so a long session cannot grow this without bound.
         case openWreckLootWindowAndId context.readingFromGameClient of
-            Just ( lootWindow, wreckId ) ->
-                if openContainerIsEmpty lootWindow && not (List.member wreckId botMemoryBefore.lootedWreckIds) then
+            Just ( _, wreckId ) ->
+                if containerEmptiedThisReading then
                     wreckId :: botMemoryBefore.lootedWreckIds |> List.take 200
 
                 else
@@ -10641,16 +11244,80 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             Nothing ->
                 botMemoryBefore.unlootableWreckIds
     , gateWithinReachTicks =
-        -- Readings in a row with an acceleration gate close enough to use. A
-        -- gate normally takes a handful; a gate that refuses the ship never
-        -- takes any, and there is no error dialog to notice -- see
-        -- `missionNeedsADifferentShip`. Counting them is what turns that into
-        -- something the bot can act on.
-        if accelerationGateIsWithinReach context.readingFromGameClient then
+        -- Readings in a row in which the client was offering to open the gate
+        -- and it did not open. A gate normally takes a handful; a gate that
+        -- refuses the ship never takes any, and there is no error dialog to
+        -- notice -- see `missionNeedsADifferentShip`. Counting them is what
+        -- turns that into something the bot can act on.
+        --
+        -- It counts the *offer*, not the proximity, and the difference is the
+        -- same one `droneRecallUnansweredTicks` had to make: time spent near a
+        -- gate is not evidence that the gate refuses the ship. This budget is
+        -- spent by declining it, so anything else that keeps the ship parked
+        -- there was spending it too -- a fight beside the gate lasts far longer
+        -- than 40 readings, and the pocket that ends with a scrambled gate
+        -- ("clear the vicinity of enemy ships") is precisely a long fight
+        -- within `interactionRangeInMeters` of one. That would have exhausted
+        -- the budget before the last rat died and left the gate permanently
+        -- declined on a grid where it was about to work.
+        --
+        -- So a reading with the gate in reach but no Activate on the panel
+        -- *holds* the count rather than resetting it: the message box run 10
+        -- had to dismiss between every attempt is one of those, and a reset
+        -- there is the shape that held `gunsSilencingTicks` at 1 forever.
+        -- Leaving reach is what resets, since that is the ship no longer
+        -- asking this gate for anything.
+        if selectedItemOffersActivateGate context.readingFromGameClient then
             botMemoryBefore.gateWithinReachTicks + 1
+
+        else if accelerationGateIsWithinReach context.readingFromGameClient then
+            botMemoryBefore.gateWithinReachTicks
 
         else
             0
+    , gateLockedForWantOfAnItem =
+        -- The client's own sentence, kept from the reading it arrived on --
+        -- a reading's game log entries are gone by the next one, and the
+        -- branch that acts on this is several readings away from the press
+        -- that provoked it.
+        --
+        -- Cleared when no gate is within reach, which is the same reset
+        -- `gateWithinReachTicks` uses and for the same reason: it is the ship
+        -- having left this gate. Latching it for the session instead would be
+        -- wrong here in a way it is not for `shipLoss` -- that verdict ends the
+        -- session, this one asks for help and the run continues, so a gate
+        -- unlocked by hand in the next pocket must not still read as locked.
+        --
+        -- Cleared again the moment a container is emptied, which is what makes
+        -- the retrieval a loop that ends rather than one verdict deciding the
+        -- rest of the session. The bot has just taken everything out of
+        -- something and the key may be aboard, so the gate is asked again --
+        -- and if it is still locked the client says so again and this re-latches
+        -- on *that* reading. Nothing is ever re-latched on the strength of a
+        -- verdict formed before the loot.
+        --
+        -- That loop terminates for the reason `lootableHoldingMissionItem`
+        -- documents: each container emptied drops out of the candidate list, so
+        -- the search shrinks, and when it is empty the gate branch asks for help
+        -- naming what it was looking for.
+        --
+        -- Reachable in both directions: it is set from a line the client writes
+        -- in answer to the Activate press below, which only happens with the
+        -- gate in reach, and cleared by the first reading after the ship leaves
+        -- or the first container it empties.
+        if
+            not (accelerationGateIsWithinReach context.readingFromGameClient)
+                || containerEmptiedThisReading
+        then
+            Nothing
+
+        else
+            case botMemoryBefore.gateLockedForWantOfAnItem of
+                Just latched ->
+                    Just latched
+
+                Nothing ->
+                    gateLockedForWantOfAnItemFromGameLog context.readingFromGameClient
     , shipApproachingTicks =
         if
             context.readingFromGameClient.shipUI
