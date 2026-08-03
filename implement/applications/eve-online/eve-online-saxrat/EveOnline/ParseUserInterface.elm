@@ -57,6 +57,7 @@ type alias ParsedUserInterface =
     , keyActivationWindow : Maybe KeyActivationWindow
     , compressionWindow : Maybe CompressionWindow
     , gameLogEntriesSinceLastReading : Maybe (List GameLogEntry)
+    , incomingDamageSinceLastReading : Maybe IncomingDamage
     }
 
 
@@ -644,6 +645,7 @@ parseUserInterfaceFromUITree uiTree =
     , keyActivationWindow = parseKeyActivationWindowFromUITreeRoot uiTree
     , compressionWindow = parseCompressionWindowFromUITreeRoot uiTree
     , gameLogEntriesSinceLastReading = parseGameLogEntriesSinceLastReadingFromUITreeRoot uiTree
+    , incomingDamageSinceLastReading = parseIncomingDamageSinceLastReadingFromUITreeRoot uiTree
     }
 
 
@@ -715,6 +717,72 @@ parseGameLogEntry entryNode =
                 , channel = getStringPropertyFromDictEntries "channel" entryNode
                 , text = text
                 }
+
+
+{-| How much damage the client's own combat log says arrived since the last
+reading, as carried by the macOS host in this fork.
+
+`damage` is the total in hitpoints, `hits` the number of shots that landed
+(misses cost nothing and are not counted), and `topAttacker` whichever name did
+the most of it -- enough for a decision to say what is shooting without carrying
+a list of shots.
+
+**This is the one instrument here that does not go through the ship's HUD.**
+`ShipUI.hitpointsPercent` is a float read out of a gauge widget in live memory,
+and it is not reliably true: across eight recorded runs it produced -1021821%,
+2132822% and 8362% among others, always for exactly one reading and always
+surrounded by sane values, which is what a read landing on a reallocated object
+looks like. A number the client states outright cannot fail that way.
+
+`Nothing` and `Just { damage = 0, ... }` are different answers and must stay so,
+for the same reason they are for `gameLogEntriesSinceLastReading`. `Nothing` is
+a host that does not carry this at all -- BotLab.exe, or this fork's host run
+with `--no-game-log` -- and reading it as "no damage taken" is how a bot
+concludes it is safe because nothing is listening.
+
+The node this reads is **not from the game client**: the macOS host appends it
+to the tree it emits, which is why its type name says so in full. It carries no
+display region, so no other parser in this module can reach it, and its values
+sit under plain keys rather than `_setText`/`_text` so `getDisplayText` cannot
+mistake them for something rendered on screen.
+
+Scoped to the reading by the host, which drains its queue as it builds the tree,
+so this is the fire taken since the previous read rather than a running total.
+
+-}
+type alias IncomingDamage =
+    { damage : Int
+    , hits : Int
+    , topAttacker : Maybe String
+    }
+
+
+parseIncomingDamageSinceLastReadingFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe IncomingDamage
+parseIncomingDamageSinceLastReadingFromUITreeRoot uiTreeRoot =
+    uiTreeRoot.uiNode.children
+        |> Maybe.withDefault []
+        |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
+        |> List.filter (.pythonObjectTypeName >> (==) syntheticIncomingDamageNodeTypeName)
+        |> List.head
+        |> Maybe.map
+            (\damageNode ->
+                { damage = damageNode |> getIntPropertyFromDictEntries "damage" |> Maybe.withDefault 0
+                , hits = damageNode |> getIntPropertyFromDictEntries "hits" |> Maybe.withDefault 0
+                , topAttacker = getStringPropertyFromDictEntries "topAttacker" damageNode
+                }
+            )
+
+
+syntheticIncomingDamageNodeTypeName : String
+syntheticIncomingDamageNodeTypeName =
+    "MacOsHostSyntheticIncomingDamage"
+
+
+getIntPropertyFromDictEntries : String -> EveOnline.MemoryReading.UITreeNode -> Maybe Int
+getIntPropertyFromDictEntries dictEntryKey node =
+    node.dictEntriesOfInterest
+        |> Dict.get dictEntryKey
+        |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.int >> Result.toMaybe)
 
 
 asUITreeNodeWithDisplayRegion :

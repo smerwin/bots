@@ -184,7 +184,19 @@
      way to what the client has actually granted. See `lockRangeThresholdInMeters`.
    + `run-away-shield-hitpoints-threshold-percent` /
      `run-away-armor-hitpoints-threshold-percent`: Dock up when the ship drops
-     below these. Disabled by default.
+     below these. Disabled by default. Both read the ship's HUD gauges, which
+     are not a reliable instrument -- see `plausibleHitpointsPercent` -- and on
+     a shield-tanked hull the armour gauge cannot move until the shield is
+     already gone, so armour alone is not a guard. Set the shield one.
+   + `run-away-incoming-damage-threshold`: Dock up when the client's own combat
+     log reports this much damage taken inside
+     `incomingDamageWindowSeconds` (45 s). Defaults to 3500 and `-1` disables
+     it. This is the retreat that needs no HUD gauge at all: the number comes
+     from EVE's own log rather than from a widget read out of live memory. The
+     default is calibrated for the hull flown on this account -- across sixteen
+     recorded client sessions the worst 45-second window the ship *survived*
+     was 3114, and the one it died in peaked at 4101 -- so re-derive it for a
+     different hull rather than carrying it over.
 
    When using more than one setting, start a new line for each setting in the
    text input field. Here is an example of a complete settings string:
@@ -194,6 +206,7 @@ agent-name=Nehrnah Gorouyar
 orbit-in-combat=yes
 run-away-shield-hitpoints-threshold-percent=50
 run-away-armor-hitpoints-threshold-percent=80
+run-away-incoming-damage-threshold=3500
    ```
 
 -}
@@ -267,6 +280,7 @@ defaultBotSettings =
     , missionNamesToDecline = []
     , runAwayShieldHitpointsThresholdPercent = -1
     , runAwayArmorHitpointsThresholdPercent = -1
+    , runAwayIncomingDamageThreshold = defaultRunAwayIncomingDamageThreshold
     , avoidRats = []
     , attackObjectNames = []
     , approachObjectNames = []
@@ -324,6 +338,9 @@ parseBotSettings =
            )
          , ( "run-away-armor-hitpoints-threshold-percent"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayArmorHitpointsThresholdPercent = threshold })
+           )
+         , ( "run-away-incoming-damage-threshold"
+           , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayIncomingDamageThreshold = threshold })
            )
          , ( "avoid-rat"
            , AppSettings.valueTypeString
@@ -399,6 +416,7 @@ type alias BotSettings =
     , missionNamesToDecline : List String
     , runAwayShieldHitpointsThresholdPercent : Int
     , runAwayArmorHitpointsThresholdPercent : Int
+    , runAwayIncomingDamageThreshold : Int
     , avoidRats : List String
     , attackObjectNames : List String
     , approachObjectNames : List String
@@ -467,6 +485,7 @@ type alias BotMemory =
     , readingsCount : Int
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
+    , incomingDamage : IncomingDamageMemory
     , droneBayOpenedFromShipCard : Bool
     , droneBayWillTakeNoMore : Bool
     , droneRestockLooksWithRoom : Int
@@ -500,6 +519,48 @@ nothing in `UpdateMemoryContext` carries the session clock.
 type alias ShipLossVerdict =
     { reason : String
     , readingsSince : Int
+    }
+
+
+{-| What the client's combat log has said about incoming fire lately, and what
+the HUD was reading while it said it.
+
+A reading's `incomingDamageSinceLastReading` is gone by the next reading, like
+every other part of the game-log channel, so a rolling window has to be written
+down here -- `updateMemoryForNewReadingFromGame` is the only place that can, and
+it is the one place that never sees a decision.
+
+`samples` is newest first and holds only what falls inside
+`incomingDamageWindowSeconds`. Each sample carries the hitpoints the HUD showed
+on the same reading, because the two questions this memory answers are "how hard
+are we being hit" and "is the instrument that is supposed to notice moving at
+all", and the second is only answerable by looking at both together.
+
+`hostCarriesTheChannel` is the `Nothing`-versus-`Just` distinction from the
+parser, kept so the status line can say when this whole guard is unarmed. A
+host without the channel reports no damage, which reads exactly like a peaceful
+grid, and that inference in the wrong direction is this repo's signature
+failure.
+
+`retreating` is the latch. See `runAwayIfLowHealth` for why the trip and the
+release are different conditions rather than one threshold.
+-}
+type alias IncomingDamageMemory =
+    { samples : List IncomingDamageSample
+    , hostCarriesTheChannel : Bool
+    , lastAttacker : Maybe String
+    , retreating : Bool
+    }
+
+
+type alias IncomingDamageSample =
+    { atMilliseconds : Int
+    , damage : Int
+
+    -- The plausible HUD reading on this same reading, or `Nothing` where there
+    -- was none to believe -- no ship UI, or a value `plausibleHitpointsPercent`
+    -- rejected. A `Nothing` is never counted as the gauge moving.
+    , hitpoints : Maybe ( Int, Int )
     }
 
 
@@ -4737,11 +4798,112 @@ jumpToNextSystem context =
                     )
                     context )
 
+{-| Every reason this bot has to stop fighting and leave.
+
+Three, and they are deliberately not variations on one instrument.
+
+**The two hitpoint thresholds** are the original guard and read the ship's HUD
+gauges. They are the weakest of the three: the value is a float scraped out of a
+widget in live memory (see `plausibleHitpointsPercent`), and on a shield-tanked
+hull the armour gauge cannot move at all until the shield is spent -- across the
+recorded runs the shield reached 9%, 12% and 44% while armour sat at exactly
+100% in every one of thousands of samples. An armour threshold on such a hull is
+not a conservative guard, it is a guard that fires after the tank is already
+gone.
+
+**The damage rate** needs no gauge at all. It is the client's own combat log,
+summed by the host, and it answers the question the HUD is only a proxy for:
+how fast is this ship being taken apart.
+
+**The frozen reading.** A gauge that does not move while the ship absorbs
+`damageThatMustMoveTheHitpointsReading` is not reporting the ship, and an
+instrument that cannot answer is a reason to leave rather than a licence to
+carry on. This is the guard for the shape issue #32 was filed about -- a reading
+pinned at one value while damage lands -- and it is the one that needs saying
+out loud, because "100%" and "no reading" look identical in a log and only one
+of them means the ship is fine.
+
+**A lost ship outranks all three of them**, and that is settled by placement
+rather than by a condition here. `recoverPodAfterShipLoss` sits in
+`missionBotDecisionRootBeforeApplyingSettings`'s pre-split list, and it answers
+`Just` on every reading the verdict exists -- it is a bare `Maybe.map` over
+`context.memory.shipLoss` -- so once #33's verdict latches, the whole
+docked-or-in-space split below it is unreachable and this function is never
+called again. That is the right order and not merely a convenient one: a retreat
+manoeuvre is something a *ship* does, and the correct response to no longer
+having one is #33's, which flies the pod home and ends the session saying why.
+Warping a capsule between celestials would keep it alive and never finish.
+
+The interaction that makes this worth stating rather than leaving to the layout:
+a capsule *does* get shot, and being shot is exactly what arms the damage guard.
+`updateIncomingDamageMemory` keeps running through a pod recovery, so the window
+fills and the latch can set -- harmlessly, because nothing reads it from up
+there, and usefully, because the status line still reports whether the pod is
+under fire. The one case where this function speaks for a capsule at all is the
+one where #33's verdict never arrives (both its signals missed), and there a
+retreat is a strictly better fallback than run 7's alternative of sitting still
+asking for locks. It is a fallback, not a second controller.
+
+Reachability, since a compiling guard that can never fire is what shipped in
+issue #12. All three are reached on every reading in space where the ship UI
+parses and no ship-loss verdict has latched -- the same gate the original two
+always had, plus the one above. The two damage-based ones additionally need
+`incomingDamageSinceLastReading`, so on a host without the game log they are
+unarmed -- which the status line says in as many words rather than leaving it to
+be inferred from their silence. Against the recorded data: the damage threshold
+would have fired in the session the ship was lost (peak 4101 in 45 s) and in
+none of the fifteen it survived (worst 3114); the frozen-reading guard would not
+have fired in any of the three runs whose gauge was live, where the most damage
+absorbed during an unchanged reading was 595.
+-}
 runAwayIfLowHealth : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> Maybe DecisionPathNode
-runAwayIfLowHealth context shipUI = 
-    let 
-        runAwayShieldThreshold = 
+runAwayIfLowHealth context shipUI =
+    let
+        runAwayShieldThreshold =
             context.eventContext.botSettings.runAwayShieldHitpointsThresholdPercent
+
+        incomingDamageThreshold =
+            context.eventContext.botSettings.runAwayIncomingDamageThreshold
+
+        damageInWindow =
+            incomingDamageInWindow context.memory.incomingDamage
+
+        describeAttacker =
+            case context.memory.incomingDamage.lastAttacker of
+                Nothing ->
+                    ""
+
+                Just attacker ->
+                    ", hardest from '" ++ attacker ++ "'"
+
+        describeWindow =
+            (damageInWindow |> String.fromInt)
+                ++ " hitpoints in the last "
+                ++ (incomingDamageWindowSeconds |> String.fromInt)
+                ++ " s"
+                ++ describeAttacker
+
+        runAwayFromIncomingDamage =
+            describeBranch
+                ("The client's combat log says we are taking "
+                    ++ describeWindow
+                    ++ " -- over the "
+                    ++ (incomingDamageThreshold |> String.fromInt)
+                    ++ " we are willing to sit through. Get out, whatever the HUD says."
+                )
+                (runAway context)
+
+        runAwayFromAnInstrumentThatIsNotMoving =
+            describeBranch
+                ("We have absorbed "
+                    ++ describeWindow
+                    ++ " and the hitpoints reading has not moved off "
+                    ++ (shipUI.hitpointsPercent.shield |> String.fromInt)
+                    ++ "% shield / "
+                    ++ (shipUI.hitpointsPercent.armor |> String.fromInt)
+                    ++ "% armour for the whole window. That is not a reading, so it is no reason to stay. Get out."
+                )
+                (runAway context)
 
         runAwayArmorThreshold = 
             context.eventContext.botSettings.runAwayArmorHitpointsThresholdPercent
@@ -4784,6 +4946,20 @@ runAwayIfLowHealth context shipUI =
 
     else if lowestArmor < runAwayArmorThreshold then
         Just runAwayWithArmorDescription
+
+    else if context.memory.incomingDamage.retreating then
+        -- The latch, not the live comparison. Set and released in
+        -- updateIncomingDamageMemory, which is the only place that can hold a
+        -- verdict across readings -- and holding it is the whole point: the
+        -- moment the ship warps clear the window starts draining, so a live
+        -- comparison would cancel its own retreat halfway through.
+        Just runAwayFromIncomingDamage
+
+    else if
+        (damageThatMustMoveTheHitpointsReading <= damageInWindow)
+            && (hitpointsReadingMovedInWindow context.memory.incomingDamage == Just False)
+    then
+        Just runAwayFromAnInstrumentThatIsNotMoving
 
     else
         Nothing
@@ -7896,6 +8072,12 @@ initBotMemory =
     , readingsCount = 0
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
+    , incomingDamage =
+        { samples = []
+        , hostCarriesTheChannel = False
+        , lastAttacker = Nothing
+        , retreating = False
+        }
     , droneBayOpenedFromShipCard = False
     , droneBayWillTakeNoMore = False
     , droneRestockLooksWithRoom = 0
@@ -7965,9 +8147,32 @@ statusTextFromState context =
 
                 Just shipUI ->
                     let
+                        -- The raw gauge value is reported alongside "(not a
+                        -- believable reading)" rather than instead of it,
+                        -- because the raw value is what an operator sees and
+                        -- reasons about. Issue #32 was filed partly on this
+                        -- line printing "Shield: 385%" -- which the retreat
+                        -- guard had already rejected and never acted on, while
+                        -- the log gave every appearance that it had.
+                        describeHitpoint name value =
+                            name
+                                ++ ": "
+                                ++ (value |> String.fromInt)
+                                ++ "%"
+                                ++ (case plausibleHitpointsPercent value of
+                                        Nothing ->
+                                            " (not a believable reading -- ignored by the retreat guard)"
+
+                                        Just _ ->
+                                            ""
+                                   )
+
                         describeShip =
-                            "Shield: " ++ (shipUI.hitpointsPercent.shield |> String.fromInt) ++ "% "
-                            ++ " Armor: " ++ (shipUI.hitpointsPercent.armor |> String.fromInt) ++ "%"
+                            describeHitpoint "Shield" shipUI.hitpointsPercent.shield
+                                ++ "  "
+                                ++ describeHitpoint "Armor" shipUI.hitpointsPercent.armor
+                                ++ ". "
+                                ++ describeIncomingDamage context
 
                         describeDrones =
                             case readingFromGameClient.dronesWindow of
@@ -9471,14 +9676,26 @@ iconSpriteHasColorOfRat =
 
 {-| A hitpoints reading, if it is one we can believe.
 
-The parser returns nonsense occasionally -- measured across four runs, roughly
-one reading in a few hundred, with values like 1862%, 2307%, 7711% and -213%.
-That used to cost a single wrong tick, because every check compared the live
-value and the next reading corrected it. Latching the low-water mark for the
-retreat changed the stakes: one bogus -213% is below even a disabled threshold
-of -1, and `min` then holds it until the ship is docked or fully healthy. Seen
-live within one run of the latch going in -- "Shield reached -213% (now 70%),
-get out get out" -- so the two changes have to land together.
+The parser returns nonsense occasionally -- measured now across all eight
+recorded runs, roughly one reading in a few hundred, with values like 1862%,
+2307%, 7711%, -213%, and at the extremes 8362%, 302023%, 2132822% and
+-1021821%. That used to cost a single wrong tick, because every check compared
+the live value and the next reading corrected it. Latching the low-water mark
+for the retreat changed the stakes: one bogus -213% is below even a disabled
+threshold of -1, and `min` then holds it until the ship is docked or fully
+healthy. Seen live within one run of the latch going in -- "Shield reached
+-213% (now 70%), get out get out" -- so the two changes have to land together.
+
+**Rejecting the impossible values is not the same as trusting the rest**, and
+the run-8 case is the one to keep in mind: 95, 95, 95, then 2132822 for exactly
+one reading, then 95 again. `ShipUI.hitpointsPercent` is
+`gauge._lastValue * 100` read out of a widget in the client's live memory while
+the client is mutating it, so a single garbage reading is a read landing on a
+reallocated object -- and the same accident that produced 21328.22 could as
+easily produce 0.42. A garbage value inside [0, 100] is indistinguishable from a
+real one and this function cannot help with it. That is the argument for
+`run-away-incoming-damage-threshold`, which reads a number the client states
+outright rather than a float scraped off a sprite.
 -}
 plausibleHitpointsPercent : Int -> Maybe Int
 plausibleHitpointsPercent value =
@@ -9487,6 +9704,183 @@ plausibleHitpointsPercent value =
 
     else
         Just value
+
+
+{-| Hitpoints per `incomingDamageWindowSeconds` the ship will sit through.
+
+On rather than disabled, unlike the two hitpoint thresholds, because a guard
+shipped off is what issue #32 was: the launcher disabled the shield one, leaving
+the armour gauge as the only instrument, and on this shield-tanked hull the
+armour gauge cannot move until the tank is already gone.
+
+3500 is measured, not chosen. Peak incoming damage in any 45-second window,
+taken from the client's own timestamps across sixteen recorded sessions: the
+worst any session the ship survived absorbed was 3114, and the session it was
+lost in peaked at 4101. The margin either side is about 12%, which is the best
+this data offers -- and it is a real separation rather than a comfortable one,
+so a run that trips this guard is worth reading rather than assuming spurious.
+
+**This number is about a hull, not about the game.** It is the tank of the ship
+on this account. Flying anything else means re-deriving it, and the failure mode
+of carrying it over is silent in the dangerous direction: on a bigger hull it
+retreats from fights it would win, and on a smaller one it never fires.
+-}
+defaultRunAwayIncomingDamageThreshold : Int
+defaultRunAwayIncomingDamageThreshold =
+    3500
+
+
+{-| How far back the incoming-damage retreat looks.
+
+45 seconds, chosen from the recorded client logs rather than picked: it is where
+the fatal engagement separates most cleanly from every engagement the ship
+survived. Across sixteen recorded sessions the worst 45-second window a
+surviving run absorbed was 3114 hitpoints; the session the ship died in peaked
+at 4101. Shorter windows separate slightly better still in relative terms and
+carry more noise; longer ones close the gap -- at four minutes it is 8689
+against 9286, which no threshold could tell apart.
+-}
+incomingDamageWindowSeconds : Int
+incomingDamageWindowSeconds =
+    45
+
+
+{-| Damage the HUD has to react to before its silence is treated as a fault.
+
+The rule this serves: a gauge that does not move while the ship is being taken
+apart is not a reading, and the correct response to an instrument that cannot
+answer is to leave, not to keep fighting on its silence.
+
+The number is what makes that rule safe rather than trigger-happy. A shield at
+100% genuinely does not change by a whole percent for a small hit, and shields
+regenerate, so brief stretches of an unchanged reading under light fire are
+normal. Measured on the three recorded runs whose shield reading was live, the
+most damage ever absorbed while the `(shield, armor)` pair stayed frozen was 595
+hitpoints, over 21 seconds. 1500 is two and a half times that.
+
+Deliberately below `run-away-incoming-damage-threshold`: a ship that can see
+what is happening to it is given more room than one that cannot.
+-}
+damageThatMustMoveTheHitpointsReading : Int
+damageThatMustMoveTheHitpointsReading =
+    1500
+
+
+{-| How many readings the window must hold before its silence means anything.
+
+Without this, the first reading of a session is a window of one, which trivially
+"has not changed", and a bot that undocked into a fight would retreat on its
+first look. Four readings is roughly ten seconds here.
+-}
+readingsBeforeAFrozenHitpointsReadingCounts : Int
+readingsBeforeAFrozenHitpointsReadingCounts =
+    4
+
+
+{-| A backstop on the window's length, not a policy.
+
+The window is bounded by time, and 200 samples is far more than
+`incomingDamageWindowSeconds` can hold at any tick rate this bot runs at. It
+exists so a clock that jumps backwards cannot grow the list without limit.
+-}
+incomingDamageSampleLimit : Int
+incomingDamageSampleLimit =
+    200
+
+
+{-| Total hitpoints taken in the window.
+-}
+incomingDamageInWindow : IncomingDamageMemory -> Int
+incomingDamageInWindow memory =
+    memory.samples |> List.map .damage |> List.sum
+
+
+{-| Did the HUD's hitpoints reading move at all across the window?
+
+Only a *believed* value counts as evidence of movement: two different `Just`
+readings. A window of nothing but `Nothing` -- no ship UI, or every value
+rejected as impossible -- has not moved, which is the conservative reading and
+the intended one. So is a window mixing `Just 100` with `Nothing`.
+
+`Nothing` here means the question cannot be asked yet, because the window is
+still shorter than `readingsBeforeAFrozenHitpointsReadingCounts`.
+-}
+hitpointsReadingMovedInWindow : IncomingDamageMemory -> Maybe Bool
+hitpointsReadingMovedInWindow memory =
+    if List.length memory.samples < readingsBeforeAFrozenHitpointsReadingCounts then
+        Nothing
+
+    else
+        Just
+            (memory.samples
+                |> List.filterMap .hitpoints
+                |> Common.Basics.listUnique
+                |> List.length
+                |> (<) 1
+            )
+
+
+{-| The damage-rate guard, in the status line, every reading.
+
+Whether the host carries the channel is reported first and unconditionally,
+because "0 hitpoints in the last 45 s" reads exactly the same whether the grid
+is quiet or nothing is watching -- and two guards below depend on the
+difference. This follows the ammo swap's line for the same reason: a safety net
+that is not armed has to say so, since its silence is otherwise indistinguishable
+from its working.
+-}
+describeIncomingDamage : BotDecisionContext -> String
+describeIncomingDamage context =
+    let
+        memory =
+            context.memory.incomingDamage
+
+        threshold =
+            context.eventContext.botSettings.runAwayIncomingDamageThreshold
+    in
+    if not memory.hostCarriesTheChannel then
+        "Incoming damage: this host is not carrying the client's combat log, so "
+            ++ "the damage-rate retreat and the frozen-reading check are both unarmed."
+
+    else
+        "Incoming damage: "
+            ++ (incomingDamageInWindow memory |> String.fromInt)
+            ++ " hitpoints over the last "
+            ++ (incomingDamageWindowSeconds |> String.fromInt)
+            ++ " s in "
+            ++ (List.length memory.samples |> String.fromInt)
+            ++ " reading(s), threshold "
+            ++ (if threshold < 0 then
+                    "disabled"
+
+                else
+                    String.fromInt threshold
+               )
+            ++ (if memory.retreating then
+                    ", RETREATING"
+
+                else
+                    ""
+               )
+            ++ ". Hitpoints reading moved in the window: "
+            ++ (case hitpointsReadingMovedInWindow memory of
+                    Nothing ->
+                        "too few readings to say"
+
+                    Just True ->
+                        "yes"
+
+                    Just False ->
+                        "no"
+               )
+            ++ (case memory.lastAttacker of
+                    Nothing ->
+                        ""
+
+                    Just attacker ->
+                        ". Hardest hitter seen: '" ++ attacker ++ "'"
+               )
+            ++ "."
 
 
 {-| Where the retreat's hysteresis actually lives.
@@ -9503,9 +9897,8 @@ they got chewed up.
 
 This is the memory half: keep the low-water mark, and forget it once the ship
 is healthy again or docked. `runAwayIfLowHealth` compares it against the
-threshold, because `UpdateMemoryContext` does not carry the bot settings --
-they are not visible from here, which is why the re-arm level is a constant and
-the trip level is not.
+threshold, so the re-arm level is a constant here while the trip level is a
+setting read at the decision.
 -}
 runAwayRearmPercent : Int
 runAwayRearmPercent =
@@ -9529,6 +9922,102 @@ lowWaterMark readingFromGameClient getPercent previous =
 
                     else
                         min previous current
+
+
+{-| Fold this reading's incoming fire into the rolling window.
+
+Three things happen here and each has to happen here, because a reading's
+`incomingDamageSinceLastReading` does not survive to the next one.
+
+**The window is trimmed by the clock, not by a count.** Readings take between
+one and three seconds depending on what the client is doing, so a window
+measured in readings would be a window of wildly varying length, and the
+threshold behind it was calibrated in seconds against the client's own
+timestamps.
+
+**`Nothing` from the parser is recorded as "no channel", never as "no damage".**
+It leaves `samples` alone rather than appending a zero, so a host that does not
+carry the channel accumulates an empty window and every guard below reads
+"nothing is happening" -- which is the correct behaviour only because
+`hostCarriesTheChannel` is what the status line reports, loudly, so an operator
+can see the guard is unarmed instead of inferring safety from its silence.
+
+**The latch is released by absence, not by recovery.** It trips when the window
+is over the threshold and clears only when the window is completely empty -- no
+hit at all for `incomingDamageWindowSeconds`. Trip and release are different
+conditions on purpose: one threshold with the reading walking back and forth
+across it is the flicker `runAwayRearmPercent` exists to prevent, and here there
+is no "healthy" reading to re-arm against, only the fire having stopped.
+-}
+updateIncomingDamageMemory : UpdateMemoryContext BotSettings -> IncomingDamageMemory -> IncomingDamageMemory
+updateIncomingDamageMemory context memoryBefore =
+    let
+        hitpointsNow =
+            context.readingFromGameClient.shipUI
+                |> Maybe.andThen
+                    (\shipUI ->
+                        Maybe.map2 Tuple.pair
+                            (plausibleHitpointsPercent shipUI.hitpointsPercent.shield)
+                            (plausibleHitpointsPercent shipUI.hitpointsPercent.armor)
+                    )
+
+        keptSamples =
+            memoryBefore.samples
+                |> List.filter
+                    (\sample ->
+                        context.timeInMilliseconds - sample.atMilliseconds
+                            < incomingDamageWindowSeconds * 1000
+                    )
+                |> List.take incomingDamageSampleLimit
+
+        samples =
+            case context.readingFromGameClient.incomingDamageSinceLastReading of
+                Nothing ->
+                    keptSamples
+
+                Just reading ->
+                    { atMilliseconds = context.timeInMilliseconds
+                    , damage = reading.damage
+                    , hitpoints = hitpointsNow
+                    }
+                        :: keptSamples
+
+        updated =
+            { samples = samples
+            , hostCarriesTheChannel =
+                context.readingFromGameClient.incomingDamageSinceLastReading /= Nothing
+            , lastAttacker =
+                case context.readingFromGameClient.incomingDamageSinceLastReading of
+                    Just reading ->
+                        case reading.topAttacker of
+                            Just attacker ->
+                                Just attacker
+
+                            Nothing ->
+                                memoryBefore.lastAttacker
+
+                    Nothing ->
+                        memoryBefore.lastAttacker
+            , retreating = memoryBefore.retreating
+            }
+
+        damageInWindow =
+            incomingDamageInWindow updated
+
+        threshold =
+            context.botSettings.runAwayIncomingDamageThreshold
+    in
+    { updated
+        | retreating =
+            if damageInWindow <= 0 then
+                False
+
+            else if 0 <= threshold && threshold <= damageInWindow then
+                True
+
+            else
+                memoryBefore.retreating
+    }
 
 
 updateMemoryForNewReadingFromGame : UpdateMemoryContext BotSettings -> BotMemory -> BotMemory
@@ -9633,6 +10122,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         lowWaterMark context.readingFromGameClient
             (.armor)
             botMemoryBefore.lowestArmorPercentSinceHealthy
+    , incomingDamage = updateIncomingDamageMemory context botMemoryBefore.incomingDamage
     , readingsCount = botMemoryBefore.readingsCount + 1
     , droneBayOpenedFromShipCard =
         -- Whether our own "Open Drone Bay" on the ship's card has landed since
