@@ -36,12 +36,20 @@ jobs:
         # zsh those tests error rather than skip.
         run: sudo apt-get update -qq && sudo apt-get install -y zsh
 
-      - name: Install Pillow
-        # botlab_host.py imports PIL at module scope for the screenshot path, so
-        # every test module that imports it fails to load without this -- an
-        # ImportError that reads like a broken test rather than a missing
+      - name: Install Python dependencies
+        # pillow: botlab_host.py imports PIL at module scope for the screenshot
+        # path, so every test module that imports it fails to load without this
+        # -- an ImportError that reads like a broken test rather than a missing
         # dependency.
-        run: python3 -m pip install --upgrade pip && python3 -m pip install pillow
+        #
+        # pytest + pytest-xdist: the runner only. The tests are plain unittest
+        # and stay that way -- `python3 -m unittest discover -s
+        # tools/macos-host/tests` still runs the whole suite locally with no
+        # dependencies at all. pytest is here because unittest cannot run
+        # modules concurrently and this suite is dominated by `elm repl`.
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pillow pytest pytest-xdist
 
       - name: Install Elm
         # The checked-in elm.json files pin 0.19.1. Homebrew ships 0.19.2, which
@@ -108,4 +116,13 @@ jobs:
         # on a machine that has them. A skip is the intended outcome, not a
         # silent pass: each one asserts against real client output when the
         # logs are present.
-        run: python3 -m unittest discover -s tools/macos-host/tests -v
+        #
+        # `--dist loadfile` is load-bearing, not a default worth changing. Ten
+        # of the twenty-five modules build their own scratch copy of the mission
+        # runner and drive `elm repl` in it, and those ten are 99% of the
+        # runtime. Keeping a whole file on one worker means that scratch is
+        # built once; splitting a file across workers would build it per worker
+        # and give most of the gain straight back.
+        #
+        # Measured on a 4-core runner: 1266s sequential, 395s this way.
+        run: python3 -m pytest tools/macos-host/tests -n auto --dist loadfile -p no:cacheprovider
