@@ -93,6 +93,102 @@ Recovery Mode and running `csrutil enable --without debug`. Current state:
 everything else enabled. **This is a standing, system-wide reduction**, not
 scoped to this project — revert with Recovery Mode and plain `csrutil enable`.
 
+## Host permissions, and what actually blocks a launch
+
+The full macOS permission set the tools need. All four are granted on this
+machine; a failure in any one looks like a different bug, which is why they are
+listed together:
+
+| permission | granted to | what breaks without it |
+|---|---|---|
+| SIP Debugging Restrictions **disabled** | system-wide | `task_for_pid failed: (os/kern) failure (kr=5)` — no memory reads at all |
+| Screen Recording | the terminal app you run from | window titles do not resolve; `screencapture` returns blank |
+| Accessibility | the same terminal app | `cg_input` posts events that go nowhere |
+| Developer Tools (TCC) | the same terminal app | contributes to `task_for_pid` failures |
+
+These are **per-app**, so a run from iTerm2 can fail where the identical command
+from Terminal.app succeeds — that exact mismatch cost a debugging session once.
+
+**What is more often the blocker in practice is none of the above:**
+
+- **The Mac must be unlocked.** Synthetic `CGEventPost` input cannot reach a
+  locked session. The tell is that window captures still succeed but come back
+  *stale* — two `screencapture -l <id>` grabs a minute apart are byte-identical
+  and the launcher's own clock lags wall time. Combined with a WindowServer
+  "Display Shield" window and full-screen `loginwindow` windows in
+  `window_probe --all`, that is a locked screen, not a hung app. Restarting the
+  launcher does not help and costs a re-authentication.
+- **The target window must be frontmost before it will accept a click.** The
+  first press-and-hold on the launcher did nothing but activate it. Run
+  `osascript -e 'tell application "eve-online" to activate'` first, and confirm
+  the gesture is on target by capturing the window and looking for the tooltip
+  ("Click and hold to launch Gal Bistot") before committing to the hold.
+- **`eve_read.py` needs a bot run first.** It reuses `botlab_host`'s UI-root
+  cache and fails with "no usable UI-root cache" until one run has populated it,
+  so it cannot be used to check the client *before* starting a bot.
+
+Launching the client itself: press and hold the character's avatar for ~5s (see
+MACOS.md — PLAY NOW ignores synthetic clicks). On this machine Gal Bistot's
+avatar sits at screen point ~(489, 536) with the launcher window at
+`x=0 y=39 w=1400 h=800`; re-derive it from a capture rather than trusting those
+numbers, since they are per-layout.
+
+This section covers technical prerequisites only. Whether to start a run is the
+operator's call, as it always was.
+
+## Driving a run from a Claude Code session
+
+Claude Code is the wrapper around `cycle_run.sh` in practice: it starts the run,
+watches for stalls, triages them and cycles to the next run. That works well,
+but the harness imposes a few things that are not obvious and each cost real
+time to discover.
+
+**`cycle_run.sh` drives a `screen` session by stuffing keystrokes, so the target
+session matters more than it looks.** `BOT_SCREEN` must never name the session
+hosting the Claude Code terminal — stuffing there types the launcher into
+Claude's own prompt, and `--stop` sends it Ctrl-C. `screen` reports success
+either way. The default is now `evebot`, its own session, and
+`refuse_if_target_is_our_own_terminal` walks this process's ancestry and refuses
+if the target is in it. Note the ancestry check is the reliable test: a session
+can host Claude in one window and an idle shell in another, so inspecting the
+session's direct children finds the shell and misses the problem entirely.
+
+**Start it in the background.** `start()` polls for up to five minutes waiting
+for the first real decision, which overruns the default foreground tool timeout.
+Use `run_in_background`, then wait on a condition rather than a fixed sleep:
+
+```
+until grep -qE '^\+ ' ~/eve-bot-logs/mission_run<N>.log; do sleep 5; done
+```
+
+**Arm two monitors, not one.** `stall_watch.py --keep-going` covers stalls, but
+it says nothing when the bot or the client simply exits — and silence there
+reads exactly like a healthy run:
+
+```
+python3 -u stall_watch.py <log> --pid <client pid> --out <dir> --keep-going
+while true; do pgrep -f 'botlab_host\.py' >/dev/null || { echo "BOT GONE"; break; }; sleep 30; done
+```
+
+**Triage a stall alarm before acting on it.** Most are benign; see issue #3.
+The fast check is whether the game is still moving, which takes one command:
+
+```
+NEWEST=$(ls -t ~/Documents/EVE/logs/Gamelogs/*.txt | head -1)
+stat -f '%Sm' "$NEWEST"; grep -c "(combat)" "$NEWEST"; tail -2 "$NEWEST"
+```
+
+Fresh `(combat)` lines with real damage numbers mean the guns are landing and
+the alarm is noise. Then apply the distance test from `/diagnose-stuck-run`:
+monotonically falling is progress, flat or oscillating is not. Do not retune the
+threshold to quiet the noise — it is calibrated against 55 runs.
+
+**Reading the log by hand is free; typing is not.** The host checks system-wide
+HID idle time before every input sequence, so keystrokes anywhere — including
+in the attached `screen` window — trip the five-second stand-down and the bot
+skips that tick's input. It resumes on its own, but continuous typing holds it
+still. Scrolling costs nothing.
+
 ## CPython struct layouts (this build, arm64, Python 2 semantics)
 
 All addresses are per-process-launch (ASLR): re-derive each session, never
