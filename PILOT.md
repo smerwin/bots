@@ -62,6 +62,59 @@ Run it with `run_in_background`: `start()` polls up to five minutes for the
 first decision. An exit code of **144 is SIGPIPE from `tail`**, not a failure --
 check `cycle_run.sh --status` before believing a run did not start.
 
+**Fast-forward the shared checkout first if the run is meant to carry a fix.**
+`run_mission.sh` compiles from `/Users/smerwin/code/bots`, not from your
+worktree, so a run started while main is behind silently tests the old code.
+This happened once: the run looked like a test of two merged PRs and contained
+neither, and the tell was subtle -- a status-line clause that the merged source
+emits unconditionally was simply absent.
+
+**Check ESI before a run that depends on it.** The route path (#73) fails on its
+first use if the Keychain refresh token has gone stale, and that failure looks
+exactly like the search-bar bug it replaced. Two seconds, no side effects worth
+worrying about -- setting the destination to the station you are already docked
+at is a no-op in game terms:
+
+```zsh
+python3 esi_waypoint.py set --name "Amarr VIII (Oris) - Emperor Family Academy"
+```
+
+## Repositioning between sessions
+
+**Which missions the bot gets is decided by the station it is docked in, and
+nothing in the settings controls that.** `home-station` is about where the
+*drones* are: the wind-down flies there, docks, and the next session therefore
+starts there and takes whatever that agent chain offers.
+
+Measured across two runs with identical settings: **1,531,629** bounty ISK
+working from Amarr VI (Zorast) against **81,750** working the Mabnen agent,
+roughly 9x. The rewards tell the same story at a glance -- 126k + 103k bonus
+against 58k-83k.
+
+So repositioning is a manual step between sessions, and it is quick:
+
+1. **Stop the run in a docked window, never mid-pocket.** See "Handing back".
+2. Set the route through ESI, which can name a station the search bar cannot
+   type -- parentheses and hyphens included:
+   ```zsh
+   python3 esi_waypoint.py set --name "Amarr VI (Zorast) - Moon 2 - Theology Council Tribunal"
+   ```
+3. Read `InfoPanelRoute` for the jump count and the systems it names, then fly it
+   one gate at a time with `eve_repl`, polling `InfoPanelLocationInfo` for the
+   system name between hops rather than sleeping a fixed time:
+   ```python
+   eve.undock()                      # if docked
+   eve.jump("Hedion"); eve.jump("Amarr")
+   eve.dock("Theology Council Tribunal")
+   ```
+4. Confirm with the location panel -- the station name is the **second to last**
+   entry, with the empire name after it, so taking the last entry gives you
+   "Amarr Empire" and looks like a failure.
+
+Leaving `home-station` pointing at the drone station is deliberate: it keeps the
+restock able to restock. The cost is that every session ends parked there, so
+this repositioning is owed again next time.
+
 ## The client
 
 Relaunching after a quit, or from cold:
@@ -146,6 +199,24 @@ console`. This is the cheapest way to test a settings guess, and it saved run 10
 mid-session when a threshold was firing on the ship's resting state. It dies
 with the run: anything worth keeping goes into `run_mission.sh`.
 
+**Check the literal against the live client before you send it.** Every name
+setting is matched against what the client renders, so a name that is *almost*
+right matches nothing and fails in the silent direction -- the setting present,
+the branch never firing, and nothing in the log complaining. Asked to add
+`Wreck of Geeral Tash-Murkon` to `prefer-wreck`, the overview turned out to
+render it `Wreck of: Geeral Tash-Murkon`, with a colon. One read settles it:
+
+```zsh
+python3 eve_read.py overview | grep -i "<the name>"
+```
+
+Verify against the *client*, not the run log -- a name the bot has not acted on
+yet does not appear in the log at all, so a zero there proves nothing.
+
+**Then confirm it landed**, rather than trusting the `{"queued": true}`: look for
+`applying settings change from the console` in the log and read the setting back
+from `/api/state`.
+
 ## Intervening by hand
 
 Reading the client during a run is free. Driving it is not, but it is safe: the
@@ -190,6 +261,23 @@ right-clicks at a node's own centre from the tree, never at a guessed point.
 
 Leave the ship docked if you can -- `cycle_run.sh --stop` mid-mission strands it
 in space. Wait for `assume we are docked` in the log, then cycle.
+
+**Mid-pocket is the case that has actually cost a ship**, and it is worth being
+patient about: the next run takes minutes to compile, and that gap is when run
+7's ship died with 9,286 hitpoints of incoming fire landing between one run's
+last log line and the next run's first reading. Stopping is safe while docked and
+merely risky while travelling; it is not safe with rats on the grid.
+
+The docked window can be short -- the bot takes a new mission and undocks again
+-- so poll for it rather than checking by hand, and act as soon as it fires:
+
+```zsh
+until tail -40 ~/eve-bot-logs/mission_runN.log | grep -qa "assume we are docked"; do sleep 5; done
+```
+
+Waiting also lets the mission in progress pay out instead of being thrown away;
+run 21 banked 13 kills and 115k ISK in the minutes between "we should move" and
+a safe stop.
 
 Say plainly in the handover: what is running, which log, what is open on GitHub,
 and anything corrected live through the console that is not yet in a file.
