@@ -142,14 +142,24 @@
         station chosen by the agent and usually holds no drones at all. With it,
         the wind-down sets a route there, flies it, docks and restocks; if the ship
         is already there it just restocks. Give the whole name including the
-        parentheses and hyphens: the bot never types this string, it types the part
-        after the last " - " into the search bar and then matches this full name
-        against the rows that come back. See `routeToStationByName`.
+        parentheses and hyphens: the bot never types this string. With
+        `route-by-esi` it hands the whole name to the host, which sets the
+        destination through ESI; without it, it types the part after the last
+        " - " into the search bar and then matches this full name against the rows
+        that come back. See `routeToStation`.
 
         It is also where the pod goes if the ship is destroyed -- see "When the
         ship is lost" below. Without it the pod docks at whatever station this
         system offers instead, which is worse but is still not sitting still among
         the rats that just killed the ship.
+      + `route-by-esi` : Whether to ask the host to set the route through ESI --
+        the official API -- instead of driving the "Search for anything" bar.
+        Defaults to `yes`. A host that does not understand the directive (or has
+        no ESI credentials in its Keychain) simply does nothing with it, and the
+        bot falls back to the search bar after `esiRouteReadingsBeforeSearchBar`
+        readings, so the setting exists to turn the ask off outright rather than
+        to make the bot safe. `route-by-esi=no` restores the search bar as the
+        only mechanism. See `routeToStation`.
       + `drone-type` : Name of the drone to refill the drone bay with while the
         session winds down, as it appears in the station's item hangar -- e.g.
         `drone-type=Hobgoblin I`. Defaults to `Acolyte I`. Fit-specific, which is
@@ -303,6 +313,7 @@ defaultBotSettings =
     , targetingRangeMeters = 66000
     , droneTypeName = "Acolyte I"
     , homeStationName = Nothing
+    , routeByEsi = AppSettings.Yes
     , shortRangeAmmoName = Nothing
     , longRangeAmmoName = Nothing
     , ammoSwapRangeMeters = Nothing
@@ -421,6 +432,10 @@ parseBotSettings =
            , AppSettings.valueTypeString
                 (\stationName settings -> { settings | homeStationName = nonEmptySettingValue stationName })
            )
+         , ( "route-by-esi"
+           , AppSettings.valueTypeYesOrNo
+                (\routeByEsi settings -> { settings | routeByEsi = routeByEsi })
+           )
          , ( "short-range-ammo"
            , AppSettings.valueTypeString
                 (\ammoName settings -> { settings | shortRangeAmmoName = nonEmptySettingValue ammoName })
@@ -456,6 +471,7 @@ type alias BotSettings =
     , targetingRangeMeters : Int
     , droneTypeName : String
     , homeStationName : Maybe String
+    , routeByEsi : AppSettings.YesOrNo
     , shortRangeAmmoName : Maybe String
     , longRangeAmmoName : Maybe String
     , ammoSwapRangeMeters : Maybe Int
@@ -492,6 +508,8 @@ type alias BotMemory =
     , lootWindowOpenTicks : Int
     , routeFirstMarkerRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , routeFirstMarkerUnchangedTicks : Int
+    , routeWasSetInLastReading : Bool
+    , routeAppearedWithoutInput : Bool
     , targetToUnlockRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , targetToUnlockUnchangedTicks : Int
     , shipApproachingTicks : Int
@@ -1417,7 +1435,7 @@ goToHomeStationWhileDocked context =
                                         ++ stationName
                                         ++ "' -- set the route there before undocking."
                                     )
-                                    (routeToStationByName context stationName)
+                                    (routeToStation context stationName)
                             )
             )
 
@@ -1475,10 +1493,41 @@ travelToStationByName context stationName describe =
                 closeResults
 
             Nothing ->
-                describeBranch describe.whileTravelling (jumpToNextSystem context)
+                describeBranch describe.whileTravelling
+                    (keepAskingTheHostForThisRoute context stationName (jumpToNextSystem context))
 
     else
-        describeBranch describe.whileSettingRoute (routeToStationByName context stationName)
+        describeBranch describe.whileSettingRoute (routeToStation context stationName)
+
+
+{-| Keep the standing ESI ask naming the station the bot is currently flying to.
+
+`routeAppearedWithoutInput` records that _a_ route was set by the host, not
+which one, because the reading it is derived from cannot name a destination. So
+a bot that changes its mind mid-trip -- the drone restock's home station and the
+abandonment's agent station need not be the same place -- could otherwise read a
+standing route as the route to wherever it now wants to go.
+
+Re-asserting the destination on every travelling reading closes that without a
+second memory field: the host acts only when the name changes, so the line costs
+one string comparison per tick, and the destination the client is holding is
+always the last one this branch named. At worst the ship takes one gate towards
+the previous station before the correction lands.
+
+Silent unless the route came from the host in the first place. A route the
+search bar set is evidenced by its own window and needs no reassertion.
+
+-}
+keepAskingTheHostForThisRoute : BotDecisionContext -> String -> DecisionPathNode -> DecisionPathNode
+keepAskingTheHostForThisRoute context stationName continueWith =
+    if
+        (context.eventContext.botSettings.routeByEsi == AppSettings.Yes)
+            && context.memory.routeAppearedWithoutInput
+    then
+        describeBranch (hostDirectiveSetDestination stationName) continueWith
+
+    else
+        continueWith
 
 
 {-| Whether the route currently set is _our_ route home, rather than a leftover
@@ -1489,27 +1538,42 @@ nothing in a reading names it. Following the wrong route is not a visible
 failure either -- the ship travels, docks, and the session ends in the wrong
 station with every log line reading like success.
 
-So the evidence is the window that set it: the `Station: Information` window for
-the home station, which is what `routeToStationByName` clicks "Set Destination"
-in and which nothing afterwards closes. Route panel plus that window is the
-conjunction that only our own sequence produces.
+So each mechanism brings its own evidence, and either will do.
 
-**This is the seam an ESI backend replaces.** The travel-and-dock path below
-asks route-setting exactly two questions -- "is the route mine" (here) and
-"make it so" (`routeToStationByName`) -- and knows nothing else about how a
-destination is originated. A backend that sets the destination by id answers the
-first from its own result instead of from a window, and the undock, the jumps
-and the dock are unchanged. That is not a swap anyone can make today, though:
-`botlab_host` answers a `SetAutopilotDestinationRequest` (PR #23) but no bot can
-issue one, because `OperateBotConfiguration` gives a decision no channel to the
-volatile process at all -- only mouse, keys and scroll. Until that framework gap
-is closed, the search bar is not an interim, it is the mechanism.
+**The search bar's evidence is the window that set it**: the `Station:
+Information` window for the home station, which is what `routeToStationByName`
+clicks "Set Destination" in and which nothing afterwards closes. Route panel
+plus that window is the conjunction that only our own sequence produces.
+
+**The host's evidence is that nothing was clicked.** ESI leaves no window
+behind, so `routeAppearedWithoutInput` stands in its place: a route that
+appeared across a step which dispatched no input at all was not set by this
+bot's hands, and the host acting on `hostDirectiveSetDestination` is the only
+other thing here that can set one. See that field for the latch, and
+`keepAskingTheHostForThisRoute` for why "a route the host set" is enough without
+the reading also naming which station it goes to.
+
+**A route already standing when the trip is decided costs the ask.** The host
+replaces the destination either way, but the bot cannot see it happen -- the
+panel read "route" before and after -- so the transition never fires, the ask
+goes unanswered by its own test, and the search bar takes over and produces the
+window. That is the conservative direction: a leftover mission route followed
+home is the failure this whole function exists to prevent, and no reading can
+tell it from ours.
+
+**This is the seam #69 was left at.** The travel-and-dock path below asks
+route-setting exactly two questions -- "is the route mine" (here) and "make it
+so" (`routeToStation`) -- and knows nothing else about how a destination is
+originated, which is why adding the second mechanism touched these two functions
+and nothing downstream of them.
 
 -}
 homeStationRouteIsSet : BotDecisionContext -> String -> Bool
 homeStationRouteIsSet context stationName =
     routeIsSet context
-        && (stationInfoWindowForStation context stationName /= Nothing)
+        && (context.memory.routeAppearedWithoutInput
+                || (stationInfoWindowForStation context stationName /= Nothing)
+           )
 
 
 
@@ -4976,6 +5040,26 @@ previousStepsEffectsPressedMouse previousStepsEffects =
             )
 
 
+{-| Whether the step just dispatched sent the client nothing at all.
+
+The one thing a bot can do that leaves the client untouched, and so the one
+thing that can be told apart from every click, drag and keystroke by the
+effects alone. `routeAppearedWithoutInput` reads it to decide that a route
+which appeared cannot have been set by this bot's own hands.
+
+An empty step is not rare -- every `waitForProgressInGame` is one -- so this is
+never evidence on its own. It is only ever asked about the step _across which
+something changed in the client_.
+
+-}
+previousStepsEffectsDispatchedNothing : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+previousStepsEffectsDispatchedNothing previousStepsEffects =
+    previousStepsEffects
+        |> List.head
+        |> Maybe.map List.isEmpty
+        |> Maybe.withDefault False
+
+
 {-| Whether the step just dispatched was a drag rather than a click.
 
 The distinction is the pointer moving while a button is held, and it is exact
@@ -5414,7 +5498,7 @@ decideActionInMissionPocket context seeUndockingComplete =
                                                                         -- in the menu.
                                                                         case context.memory.lastDockedStationNameFromInfoPanel of
                                                                             Just stationName ->
-                                                                                routeToStationByName context stationName
+                                                                                routeToStation context stationName
 
                                                                             Nothing ->
                                                                                 -- Only before the first dock of a session, so
@@ -10085,6 +10169,8 @@ initBotMemory =
     , lootWindowOpenTicks = 0
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
+    , routeWasSetInLastReading = False
+    , routeAppearedWithoutInput = False
     , targetToUnlockRegion = Nothing
     , targetToUnlockUnchangedTicks = 0
     , shipApproachingTicks = 0
@@ -11813,6 +11899,138 @@ anyNotableWreckInOverview readingFromGameClient =
         |> List.any isNotableWreck
 
 
+{-| Set a route to a named station, by whichever mechanism can express the name.
+
+Two mechanisms, in order of preference, and the whole point of the order is that
+only one of them can name every station:
+
+  - **Ask the host, which sets it through ESI.** The bot writes
+    `hostDirectiveSetDestination` into its status text and waits. This is the
+    only way the bot can originate a destination containing a character it
+    cannot type: `getKeyboardKeyToEnterChar` has no parenthesis at all, and `-`
+    maps to `vkey_SUBTRACT`, which is absent from the host's `_VK_TO_CGKEYCODE`
+    and so presses nothing. `Amarr VIII (Oris) - Emperor Family Academy` carries
+    both. ESI takes the whole string and resolves it by id.
+  - **The search bar**, unchanged, in `routeToStationByName` below. It needs no
+    credentials, works from a cold start, and is what runs when the ask is
+    turned off or does not deliver.
+
+**Choosing between them costs no memory of having asked**, which matters
+because a decision here cannot write any. The ask is preferred while all three
+of these hold, and each of them is read out of the reading in front of it:
+
+1.  `route-by-esi` is on.
+2.  The search-bar sequence has not started -- no results window, and no
+    `Station: Information` window for this station. Once it has, it owns the
+    episode, so the two mechanisms cannot take turns fighting each other.
+3.  The last `esiRouteReadingsBeforeSearchBar` steps did not all dispatch an
+    empty effect list. Waiting is what the ask does and nothing else here does
+    it repeatedly, so a run of empty steps is how long the bot has been standing
+    still with no route -- which is the ask having been made and not answered.
+
+Point 3 is a proxy and it is wrong in both directions, cheaply. It over-counts
+when some other branch happened to wait just before the trip was decided, and
+the cost of that is the search bar, which is today's behaviour. It under-counts
+when a click intervenes, and the cost of that is one more silent reading before
+the fallback. Neither can set a destination that was not asked for, because the
+ask is the directive and the directive is only written here.
+
+-}
+routeToStation : BotDecisionContext -> String -> DecisionPathNode
+routeToStation context stationName =
+    if esiRouteIsPreferred context stationName then
+        describeBranch
+            ("Ask the host to set the route to '"
+                ++ stationName
+                ++ "' through ESI, which can name a station this bot cannot type."
+            )
+            (describeBranch (hostDirectiveSetDestination stationName) waitForProgressInGame)
+
+    else
+        routeToStationByName context stationName
+
+
+{-| Whether to ask the host for this route rather than drive the search bar.
+
+See `routeToStation` for what each of the three conditions is doing and why
+none of them needs the bot to remember that it asked.
+
+-}
+esiRouteIsPreferred : BotDecisionContext -> String -> Bool
+esiRouteIsPreferred context stationName =
+    (context.eventContext.botSettings.routeByEsi == AppSettings.Yes)
+        && (searchResultsWindow context == Nothing)
+        && (stationInfoWindowForStation context stationName == Nothing)
+        && not (esiRouteAskHasGoneUnanswered context.previousStepsEffects)
+
+
+{-| Whether the ask has been standing long enough to be treated as unanswered.
+
+Split from the decision context, like `previousStepsEffectsPressedMouse`, so the
+rule can be run on its own rather than only reasoned about.
+
+A session's first few readings have fewer steps than the window, and those are
+not a run of silence -- an empty history answers `False`, so the ask still gets
+its chance on a bot that has only just started.
+
+-}
+esiRouteAskHasGoneUnanswered : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+esiRouteAskHasGoneUnanswered previousStepsEffects =
+    let
+        recentSteps =
+            previousStepsEffects |> List.take esiRouteReadingsBeforeSearchBar
+    in
+    (List.length recentSteps == esiRouteReadingsBeforeSearchBar)
+        && List.all List.isEmpty recentSteps
+
+
+{-| How many readings the bot waits for the route panel before using the search
+bar instead.
+
+Three, which is deliberately short. The host acts on the directive _between_
+ticks and blocks while it does, so by the time the bot is read again the ESI
+call has already finished or timed out -- one reading would very nearly do, and
+the extra two are for the open question in #69: nobody has yet watched whether
+the client's route panel catches up within a single 3-second reading of the
+call, only that it flips "immediately" to a human (#17).
+
+Bounded at all because the alternative is the bot standing still forever waiting
+for a route that no host is going to set -- a session with no ESI credentials,
+or on BotLab.exe, where the directive is just a line of prose nothing reads.
+
+-}
+esiRouteReadingsBeforeSearchBar : Int
+esiRouteReadingsBeforeSearchBar =
+    3
+
+
+{-| The bot asking its host to set the client's autopilot destination.
+
+The second directive on the channel #68 opened, in the same shape and read by
+the same kind of one-line regex: `hostDirectivePrefix`, a verb, and an argument
+that runs to the end of the line. The argument is a station name, which is safe
+to put in a field that gets printed on every reading -- the point worth stating
+plainly is what may _not_ go here. The refresh token that authorises the call
+lives in the macOS Keychain and never leaves the host; nothing token-shaped ever
+travels this way, because everything written here is echoed into the log by
+`log_decision` the moment it is written.
+
+Written as its own decision line, rather than folded into
+`statusTextFromState` beside `hostDirectiveExtendSession`. The status text is
+assembled from the decision context, which cannot say _which_ branch was
+reached; the route is set from five different places for five different reasons,
+and re-deriving "is one of those running" outside the decision tree would be a
+second copy of the condition, drifting. A decision line is written only when the
+decision is taken, and `BotFrameworkSeparatingMemory` appends the decision path
+to the status text -- so the host sees it either way, and the mission still
+occupies the first line.
+
+-}
+hostDirectiveSetDestination : String -> String
+hostDirectiveSetDestination stationName =
+    hostDirectivePrefix ++ "set-destination " ++ stationName
+
+
 {-| Route to a station by name, through the "Search for anything" bar.
 
 This is the only way the bot can originate a destination. Every other route it
@@ -12857,6 +13075,12 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 |> infoPanelRouteFirstMarkerFromReadingFromGameClient
                 |> Maybe.map (.uiNode >> .totalDisplayRegion)
 
+        routeIsSetNow =
+            routeIsSetInReading context.readingFromGameClient
+
+        previousStepDispatchedNoInput =
+            previousStepsEffectsDispatchedNothing context.previousStepsEffects
+
         currentTargetToUnlockRegion =
             context.readingFromGameClient
                 |> targetsToUnlockFromReadingFromGameClient
@@ -13196,6 +13420,35 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , routeWasSetInLastReading = routeIsSetNow
+    , routeAppearedWithoutInput =
+        -- Whether the route the panel is showing was set by the host on this
+        -- bot's behalf, rather than by anything the bot clicked. See
+        -- `homeStationRouteIsSet`, which is the only reader: it is the ESI
+        -- half of "is this route *ours*", and the search bar's half is the
+        -- `Station: Information` window the click sequence leaves open.
+        --
+        -- The discriminator is the step that preceded the route appearing.
+        -- Setting a destination in the client takes a click -- a search
+        -- result's "Set Destination", the tracker's own travel button, a
+        -- route marker's menu -- and the ESI ask takes none: it is a line of
+        -- status text and `waitForProgressInGame`. So a route that appears out
+        -- of a step which dispatched no input at all was set by something
+        -- outside the client, and the only such thing here is the host acting
+        -- on `hostDirectiveSetDestination`.
+        --
+        -- Latched while the route stands, because the transition is visible on
+        -- exactly one reading and the trip that follows lasts hundreds. Cleared
+        -- the moment the panel is empty, so it can never outlive the route it
+        -- describes -- an arrival, or a destination cleared by hand, ends it.
+        if not routeIsSetNow then
+            False
+
+        else if botMemoryBefore.routeAppearedWithoutInput then
+            True
+
+        else
+            not botMemoryBefore.routeWasSetInLastReading && previousStepDispatchedNoInput
     , lootedWreckIds =
         -- An emptied wreck is supposed to drop off the overview, and the setup
         -- instructions ask for that filter -- but it does not always hold:

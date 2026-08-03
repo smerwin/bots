@@ -85,6 +85,38 @@ def bot_requested_overrun_seconds(status_text):
     return max(0.0, min(requested, MAX_BOT_REQUESTED_OVERRUN_SECONDS))
 
 
+# What the bot writes in its status text to ask for a route. Same channel and
+# same prefix as the extension above -- see Bot.elm's `hostDirectiveSetDestination`,
+# which must match. The argument runs to the end of the line because a station
+# name contains spaces, parentheses and hyphens: `Amarr VIII (Oris) - Emperor
+# Family Academy`. That is exactly the name the bot cannot type, which is what
+# this directive exists for.
+BOT_DIRECTIVE_SET_DESTINATION = re.compile(r"@host set-destination (.+)")
+
+
+def bot_requested_destination(status_text):
+    """The station the bot is asking to have set as its autopilot destination.
+
+    `None` when it is not asking, which is every ordinary reading. Read fresh
+    from every tick's status text like the extension above, so it is what the
+    bot wants *now* rather than something latched -- a bot that stops asking is
+    a bot the host stops acting for.
+
+    Only a name comes back out of here. The refresh token that authorises the
+    call lives in the Keychain and never enters this string; nothing read from
+    a status text is ever treated as a credential, and nothing token-shaped is
+    ever written into one -- the whole field is echoed to the log on every
+    reading by `log_decision`.
+    """
+    if not status_text:
+        return None
+    match = BOT_DIRECTIVE_SET_DESTINATION.search(status_text)
+    if match is None:
+        return None
+    name = match.group(1).strip()
+    return name or None
+
+
 MAIN_ELM_TEMPLATE = os.path.join(HERE, "Main.elm")
 # A bot's own source fixes which host interface it imports, and the wrappers are
 # not interchangeable -- see Main_2023_02_06.elm's header.
@@ -1708,6 +1740,10 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
     # Only so the granted-overrun notice is printed when the figure changes
     # rather than on every tick past the end.
     last_granted_overrun = None
+    # The destination the bot last asked for and this host acted on, so a
+    # standing ask is not a route set on every tick. `None` while it is not
+    # asking, which is what lets the same station be asked for again later.
+    last_requested_destination = None
 
     def log_decision(cont, decision_seq):
         # Every ContinueSession response carries its own freshly computed
@@ -1877,6 +1913,36 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
                       f"{granted_seconds:.0f}s to finish winding down -- continuing",
                       file=sys.stderr)
                 last_granted_overrun = granted_seconds
+
+        # The route, on the same channel and for the same reason: the bot has no
+        # way to spell a station name in `buildTaskFromEffectSequence`, and the
+        # search bar cannot type one either -- a parenthesis has no key at all.
+        #
+        # Acted on only when the name *changes*, because the bot re-derives its
+        # decision every reading and so asks on every reading it wants the
+        # route. Setting the same destination twenty times is twenty
+        # authenticated calls to CCP for one outcome. A directive that goes away
+        # clears this, so the same station asked for again later is acted on
+        # again rather than suppressed forever -- the lease shape #68 uses, not
+        # a high-water mark.
+        #
+        # Between ticks, like the deadline check above, and synchronously: the
+        # ESI call blocks this loop for up to its budget, so the reading the bot
+        # takes next is one where the call has already finished or given up.
+        # That is what makes the bot's own confirmation -- the route panel --
+        # meaningful one reading later.
+        #
+        # Deliberately the same code as the volatile-process request answers, so
+        # the two ways in cannot report a failure differently. It prints its own
+        # outcome, token-free, on both paths.
+        requested_destination = bot_requested_destination(cont.get("statusText"))
+        if requested_destination != last_requested_destination:
+            last_requested_destination = requested_destination
+            if requested_destination is not None:
+                print(f"# the bot asked for the route to {requested_destination!r}"
+                      " -- setting it through ESI", file=sys.stderr)
+                dispatcher.volatile._set_autopilot_destination(
+                    {"name": requested_destination})
 
         notify = cont.get("notifyWhenArrivedAtTime")
         if notify:
