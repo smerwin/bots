@@ -47,6 +47,44 @@ import esi_waypoint  # noqa: E402
 # repeat" (~250ms) so the key never starts auto-repeating.
 KEY_HOLD_SECONDS = 0.03
 
+# The most a bot may push its own session end back, however much it asks for.
+#
+# The deadline stays the host's to enforce -- see the loop's own comment -- and
+# the point of this cap is that handing a bound to the thing being bounded is
+# only safe if the handing-over is itself bounded. 600s is above every allowance
+# the mission runner can currently ask for (the largest is a home-station trip
+# plus its restock grace, 480s) and far below anything that would let a looping
+# bot run on unnoticed.
+MAX_BOT_REQUESTED_OVERRUN_SECONDS = 600.0
+
+# What the bot writes in its status text to ask for the extension. Chosen so it
+# cannot occur by accident in a field that otherwise carries free prose and
+# mission names -- see Bot.elm's `hostDirectivePrefix`, which must match.
+BOT_DIRECTIVE_EXTEND_SESSION = re.compile(r"@host extend-session (\d+)")
+
+
+def bot_requested_overrun_seconds(status_text):
+    """How far past the planned end this bot says it still needs, in seconds.
+
+    Read fresh from every tick's status text, so it is a lease the bot renews
+    rather than a setting it latches: a bot that stops asking is stopped on the
+    next tick, and one that has crashed or hung asks for nothing at all.
+
+    Capped here rather than trusted, and clamped at zero so a negative or absurd
+    number cannot extend anything.
+    """
+    if not status_text:
+        return 0.0
+    match = BOT_DIRECTIVE_EXTEND_SESSION.search(status_text)
+    if match is None:
+        return 0.0
+    try:
+        requested = float(match.group(1))
+    except ValueError:
+        return 0.0
+    return max(0.0, min(requested, MAX_BOT_REQUESTED_OVERRUN_SECONDS))
+
+
 MAIN_ELM_TEMPLATE = os.path.join(HERE, "Main.elm")
 # A bot's own source fixes which host interface it imports, and the wrappers are
 # not interchangeable -- see Main_2023_02_06.elm's header.
@@ -1667,6 +1705,9 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
 
     tick = 0
     tick_start = time.monotonic()
+    # Only so the granted-overrun notice is printed when the figure changes
+    # rather than on every tick past the end.
+    last_granted_overrun = None
 
     def log_decision(cont, decision_seq):
         # Every ContinueSession response carries its own freshly computed
@@ -1806,12 +1847,36 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         #
         # Checked between ticks rather than mid-tick so a dispatched input
         # sequence finishes rather than being cut in half.
+        # A bot winding down may need time the planned end does not contain --
+        # a trip to its home station is a route, a warp, a jump and a dock, and
+        # the mission runner budgets 420s for it. Every one of those allowances
+        # was measured past the planned end and so could never be spent, because
+        # this check fired first: run 17 was killed mid-trip with its own clock
+        # reading 420s of headroom. So the bot may now ask, in its status text,
+        # and the host grants what it asks up to a cap.
+        #
+        # Three properties keep this from being a bot that runs forever. It is a
+        # lease renewed every tick, so a bot that stops asking -- or that hangs,
+        # or crashes -- is stopped on the next one. It is capped here rather
+        # than trusted. And the grant is announced, because a session quietly
+        # running past its end is exactly what an operator would not think to
+        # look for.
         if session_end_at_milliseconds is not None:
             overrun_seconds = (time.time() * 1000 - session_end_at_milliseconds) / 1000.0
-            if overrun_seconds > 0:
-                print(f"# session duration elapsed {overrun_seconds:.0f}s ago and the bot has not "
-                      f"finished the session -- stopping", file=sys.stderr)
+            granted_seconds = bot_requested_overrun_seconds(cont.get("statusText"))
+            if overrun_seconds > granted_seconds:
+                if granted_seconds > 0:
+                    print(f"# session duration elapsed {overrun_seconds:.0f}s ago, past the "
+                          f"{granted_seconds:.0f}s the bot asked for -- stopping", file=sys.stderr)
+                else:
+                    print(f"# session duration elapsed {overrun_seconds:.0f}s ago and the bot has not "
+                          f"finished the session -- stopping", file=sys.stderr)
                 break
+            if overrun_seconds > 0 and granted_seconds > 0 and granted_seconds != last_granted_overrun:
+                print(f"# session end passed {overrun_seconds:.0f}s ago; the bot asked for "
+                      f"{granted_seconds:.0f}s to finish winding down -- continuing",
+                      file=sys.stderr)
+                last_granted_overrun = granted_seconds
 
         notify = cont.get("notifyWhenArrivedAtTime")
         if notify:
