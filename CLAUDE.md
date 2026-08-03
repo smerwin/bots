@@ -798,8 +798,14 @@ exists.
   /ui/autopilot/waypoint/` is the correct way to set a route, and
   `tools/macos-host/esi_waypoint.py` implements it (PKCE, so no client secret
   exists; the refresh token lives in the macOS Keychain and is never printed).
-  Name resolution is verified both ways; the authenticated half is untested
-  pending a browser login. Note `/universe/ids/` does not index every NPC
+  Name resolution is verified both ways, and the authenticated half is **proven
+  live**: `esi_waypoint.py set --name "Amarr VI (Zorast) - Moon 2 - Theology
+  Council Tribunal"` resolved it to 60008950 and the client's route panel
+  changed to match, with the credentials taken from the Keychain
+  (`eve-esi-client-id`, `eve-esi-refresh`) and no browser step needed. That name
+  contains both parentheses and hyphens, neither of which can be typed into the
+  search bar — so this is the only way the bot can originate a destination
+  carrying either. Note `/universe/ids/` does not index every NPC
   station — the agent's own "Amarr VI (Zorast) - Moon 2 - Theology Council
   Tribunal" comes back empty from it — so the tool falls back to resolving the
   system from the name's first token and enumerating its stations.
