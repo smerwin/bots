@@ -103,6 +103,22 @@ TRAVEL_LABELS_SEEN = [
     "Undock",
     "Warp to Location",
     "Warping",
+    # The next four appear only from run 17 onward, and only because #62 taught
+    # the parser to read the *objective-chain* mission panel -- a layout whose
+    # travel steps are per-task widgets rather than one relabelled button. The
+    # vocabulary was always being written; nothing could see it. That is what
+    # this assertion is for, and it fired the first time the client wrote
+    # something new, exactly as intended.
+    #
+    # Two of them are the argument for the exact match in one line: "Docking"
+    # and "Undocking" both contain "dock", and a substring rule would read
+    # either as the end of the mission -- one of them while the ship is still
+    # leaving the station.
+    "Docking",
+    "Jump",
+    # Trailing space is the client's, not a typo here.
+    "Jumping ",
+    "Undocking",
 ]
 
 # The eleventh, from run 11: a travel step the client rendered as a glyph with
