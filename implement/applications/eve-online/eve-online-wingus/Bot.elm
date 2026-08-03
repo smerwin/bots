@@ -2,7 +2,7 @@
 
     Adapted from anomaly bot; all bugs introduced are my own damn fault
 
-   This bot follows fleet warps and shoots rats. 
+   This bot follows fleet warps and shoots rats.
 
    ## Features
 
@@ -64,8 +64,6 @@ import Common.Basics exposing (listElementAtWrappedIndex, stringContainsIgnoring
 import Common.DecisionPath exposing (describeBranch)
 import Common.EffectOnWindow as EffectOnWindow exposing (MouseButton(..))
 import Dict
-import EveOnline.MemoryReading
-import Json.Decode
 import EveOnline.BotFramework
     exposing
         ( ModuleButtonTooltipMemory
@@ -96,12 +94,14 @@ import EveOnline.BotFrameworkSeparatingMemory
         , useContextMenuCascadeOnOverviewEntry
         , waitForProgressInGame
         )
+import EveOnline.MemoryReading
 import EveOnline.ParseUserInterface
     exposing
         ( OverviewWindowEntry
         , ShipUI
         , ShipUIModuleButton
         )
+import Json.Decode
 import Set
 
 
@@ -122,10 +122,10 @@ defaultBotSettings =
 parseBotSettings : String -> Result String BotSettings
 parseBotSettings =
     AppSettings.parseSimpleListOfAssignmentsSeparatedByNewlines
-        ([( "run-away-shield-hitpoints-threshold-percent"
+        ([ ( "run-away-shield-hitpoints-threshold-percent"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayShieldHitpointsThresholdPercent = threshold })
            )
-        , ( "hide-when-neutral-in-local"
+         , ( "hide-when-neutral-in-local"
            , AppSettings.valueTypeYesOrNo
                 (\hide settings -> { settings | hideWhenNeutralInLocal = hide })
            )
@@ -433,10 +433,10 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                 in
                                 describeBranch ("We are in anomaly '" ++ anomalyID ++ "' since " ++ String.fromInt arrivalInAnomalyAgeSeconds ++ " seconds.")
                                     (decideActionInAnomaly
-                                                { arrivalInAnomalyAgeSeconds = arrivalInAnomalyAgeSeconds }
-                                                context
-                                                seeUndockingComplete
-                                                returnDronesAndEnterAnomalyOrWait
+                                        { arrivalInAnomalyAgeSeconds = arrivalInAnomalyAgeSeconds }
+                                        context
+                                        seeUndockingComplete
+                                        returnDronesAndEnterAnomalyOrWait
                                     )
 
 
@@ -579,22 +579,26 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
 
 ensureShipIsOrbiting : ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
 ensureShipIsOrbiting shipUI overviewEntryToOrbit =
-        Nothing
-  {-  -- if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
-    --     Nothing
+    Nothing
 
-    -- else
-    --     Just
-    --         (describeBranch "Press the 'W' key and click on the overview entry."
-    --             (decideActionForCurrentStep
-    --                 ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_W ]
-    --                  , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft
-    --                  , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_W ]
-    --                  ]
-    --                     |> List.concat
-    --                 )
-    --             )
-    --         ) -}
+
+
+{- -- if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
+   --     Nothing
+
+   -- else
+   --     Just
+   --         (describeBranch "Press the 'W' key and click on the overview entry."
+   --             (decideActionForCurrentStep
+   --                 ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_W ]
+   --                  , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft
+   --                  , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_W ]
+   --                  ]
+   --                     |> List.concat
+   --                 )
+   --             )
+   --         )
+-}
 
 
 launchAndEngageDrones : BotDecisionContext -> Maybe DecisionPathNode
@@ -816,7 +820,6 @@ distinguishes them; the region does not.
 overviewEntryIsDisplayed : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 overviewEntryIsDisplayed entry =
     nodeIsDisplayed entry.uiNode.uiNode
-
 
 
 moduleIsActiveOrReloading : EveOnline.ParseUserInterface.ShipUIModuleButton -> Bool

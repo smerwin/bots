@@ -429,10 +429,14 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
 
         describeDisplayRegion : EveOnline.ParseUserInterface.DisplayRegion -> String
         describeDisplayRegion region =
-            "x=" ++ String.fromInt region.x
-                ++ " y=" ++ String.fromInt region.y
-                ++ " w=" ++ String.fromInt region.width
-                ++ " h=" ++ String.fromInt region.height
+            "x="
+                ++ String.fromInt region.x
+                ++ " y="
+                ++ String.fromInt region.y
+                ++ " w="
+                ++ String.fromInt region.width
+                ++ " h="
+                ++ String.fromInt region.height
 
         beginCascade : Common.DecisionPath.DecisionPathNode EndDecisionPathStructure
         beginCascade =
@@ -478,7 +482,8 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                        (see clearStrayContextMenu in Bot.elm).
                     -}
                     Common.DecisionPath.describeBranch
-                        ("All of " ++ target.targetUIElementName
+                        ("All of "
+                            ++ target.targetUIElementName
                             ++ " ("
                             ++ describeDisplayRegion target.targetUIElement.totalDisplayRegion
                             ++ ") is occluded by "
@@ -496,7 +501,8 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
 
                 Just preferredRegion ->
                     Common.DecisionPath.describeBranch
-                        ("Open context menu on " ++ target.targetUIElementName
+                        ("Open context menu on "
+                            ++ target.targetUIElementName
                             ++ " (cascade level "
                             ++ String.fromInt context.contextMenuCascadeLevel
                             ++ ", "
@@ -648,7 +654,9 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                                             == (previousReadingFromGameClient.contextMenus |> List.map identifyingInfoFromContextMenu)
                                     then
                                         discardExistingContextMenu
-                                            ("failed to continue (" ++ err ++ "), no progress across the last "
+                                            ("failed to continue ("
+                                                ++ err
+                                                ++ "), no progress across the last "
                                                 ++ String.fromInt (min 8 (List.length context.previousReadingsFromGameClient))
                                                 ++ " reading(s) -- still "
                                                 ++ String.fromInt (List.length context.readingFromGameClient.contextMenus)
@@ -959,13 +967,14 @@ flipping. Every step inside that gap reads exactly like "still inactive".
 
 The window used to be two steps -- and the framework only stored two, so it was
 really "as long as we can see", with no margin at all. Any module slower than
-that got a second click, which turned it *off*, and a third, which turned it on
+that got a second click, which turned it _off_, and a third, which turned it on
 again. That on/off/on flicker is what this number exists to prevent.
 
 Bounded rather than "wait for confirmation forever" because a click genuinely
 can fail to land (a lost input focus, a click that arrives while the client is
 busy), and a module that is still inactive well after the fact is one that never
 got the click at all.
+
 -}
 moduleButtonClickSettlingSteps : Int
 moduleButtonClickSettlingSteps =

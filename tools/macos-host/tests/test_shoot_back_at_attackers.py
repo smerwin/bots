@@ -237,7 +237,12 @@ class OneNameSeveralAttackersTest(unittest.TestCase):
 
         update = function_body(source, "updateIncomingDamageMemory")
         self.assertIn("attacker = reading.topAttacker", update)
-        self.assertIn("incomingDamageWindowSeconds * 1000", update)
+        # Matched as tokens rather than as a line, because elm-format decides
+        # where this expression wraps -- it currently splits the operands of
+        # `<` across three lines, which a literal "a * 1000" never survives.
+        # What the assertion is about is the window bounding the samples, not
+        # the layout the formatter chose for it.
+        self.assertRegex(update, r"incomingDamageWindowSeconds\s*\*\s*1000")
         self.assertIn("List.take incomingDamageSampleLimit", update)
 
 

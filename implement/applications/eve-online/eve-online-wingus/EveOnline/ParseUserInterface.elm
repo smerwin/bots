@@ -631,6 +631,7 @@ reach it and mistake a logged line for something rendered on screen.
 Scoped to the reading by the host, which drains its queue as it builds the tree:
 these are the lines written since the previous read, not a growing buffer that
 would have a bot answering a refusal from four minutes ago.
+
 -}
 parseGameLogEntriesSinceLastReadingFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe (List GameLogEntry)
 parseGameLogEntriesSinceLastReadingFromUITreeRoot uiTreeRoot =
