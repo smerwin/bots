@@ -1,112 +1,112 @@
 {- EVE Online combat anomaly bot version 2023-02-22
 
-   This bot uses the probe scanner to find combat anomalies and kills rats using drones and weapon modules.
+      This bot uses the probe scanner to find combat anomalies and kills rats using drones and weapon modules.
 
-   ## Features
+      ## Features
 
-   + Automatically detects if another pilot is in an anomaly on arrival and switches to another anomaly if necessary.
-   + Filtering for specific anomalies using bot settings.
-   + Avoiding dangerous or too-powerful rats using bot settings.
-   + Remembers observed properties of anomalies, like other pilots or dangerous rats, to inform the selection of anomalies in the future.
+      + Automatically detects if another pilot is in an anomaly on arrival and switches to another anomaly if necessary.
+      + Filtering for specific anomalies using bot settings.
+      + Avoiding dangerous or too-powerful rats using bot settings.
+      + Remembers observed properties of anomalies, like other pilots or dangerous rats, to inform the selection of anomalies in the future.
 
-   ## Setting up the Game Client
+      ## Setting up the Game Client
 
-   Despite being quite robust, this bot is less intelligent than a human. For example, its perception is more limited than ours, so we need to set up the game to ensure that the bot can see everything it needs. Following is the list of setup instructions for the EVE Online client:
+      Despite being quite robust, this bot is less intelligent than a human. For example, its perception is more limited than ours, so we need to set up the game to ensure that the bot can see everything it needs. Following is the list of setup instructions for the EVE Online client:
 
-   + Set the UI language to English.
-   + Undock, open probe scanner, overview window and drones window.
-   + Set the Overview window to sort objects in space by distance with the nearest entry at the top.
-   + In the ship UI, arrange the modules:
-     + Place the modules to use in combat (to activate on targets) in the top row.
-     + Place the propulsion module first in the middle row. The bot drives this
-       slot on its own rule -- running while the ship crosses distance, off at a
-       gate -- so it has to know which slot it is.
-     + Place the modules to keep running (hardeners and the like) in the rest of
-       the middle row.
-     + Hide passive modules by disabling the check-box `Display Passive Modules`.
-   + Configure the keyboard key 'W' to make the ship orbit.
+      + Set the UI language to English.
+      + Undock, open probe scanner, overview window and drones window.
+      + Set the Overview window to sort objects in space by distance with the nearest entry at the top.
+      + In the ship UI, arrange the modules:
+        + Place the modules to use in combat (to activate on targets) in the top row.
+        + Place the propulsion module first in the middle row. The bot drives this
+          slot on its own rule -- running while the ship crosses distance, off at a
+          gate -- so it has to know which slot it is.
+        + Place the modules to keep running (hardeners and the like) in the rest of
+          the middle row.
+        + Hide passive modules by disabling the check-box `Display Passive Modules`.
+      + Configure the keyboard key 'W' to make the ship orbit.
 
-   ## Configuration Settings
+      ## Configuration Settings
 
-   All settings are optional; you only need them in case the defaults don't fit your use-case.
+      All settings are optional; you only need them in case the defaults don't fit your use-case.
 
-   There is no setting for which modules to keep running: the bot takes that
-   from where the modules sit in the ship UI. The middle row after its first
-   slot is kept active whenever there is something to fight. The first slot is
-   the propulsion module, which runs on a different rule -- on whenever the ship
-   is actually covering distance, off once an acceleration gate is in reach or a
-   warp is being set up. (An `activate-module-always` setting used to be listed
-   here. It
-   named modules by their tooltip text, which this bot never reads, so it did
-   nothing at all -- removed rather than left as a setting that looks like it
-   works.)
+      There is no setting for which modules to keep running: the bot takes that
+      from where the modules sit in the ship UI. The middle row after its first
+      slot is kept active whenever there is something to fight. The first slot is
+      the propulsion module, which runs on a different rule -- on whenever the ship
+      is actually covering distance, off once an acceleration gate is in reach or a
+      warp is being set up. (An `activate-module-always` setting used to be listed
+      here. It
+      named modules by their tooltip text, which this bot never reads, so it did
+      nothing at all -- removed rather than left as a setting that looks like it
+      works.)
 
-   + `anomaly-name` : Choose the name of anomalies to take. You can use this setting multiple times to select multiple names.
-   + `hide-when-neutral-in-local` : Set this to 'yes' to make the bot dock in a station or structure when a neutral or hostile appears in the 'local' chat.
-   + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. You can use this setting multiple times to select multiple names.
-   + `anomaly-wait-time`: Minimum time to wait after arriving in an anomaly before considering it finished. Use this if you see anomalies in which rats arrive later than you arrive on grid.
-   + `warp-at`: Distance in km to warp to when warping to an anomaly, e.g. `warp-at=30`. Must match one of the game client's own preset "Warp to Within" distances offered in that menu (typically 0, 5, 10, 15, 20, 30, 50, 70, 100) -- an arbitrary value will not match any menu entry and will leave the bot stuck. Defaults to 100.
-   + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping range or aligning.
-   + `keep-at-range`: Set this to 'yes' to keep range from the target instead of orbiting or aligning.
-   + `targeting-range`: Maximum distance in meters to lock a target from the overview, e.g. `targeting-range=50000`. Beyond this, the bot approaches instead of locking. Defaults to 66000.
+      + `anomaly-name` : Choose the name of anomalies to take. You can use this setting multiple times to select multiple names.
+      + `hide-when-neutral-in-local` : Set this to 'yes' to make the bot dock in a station or structure when a neutral or hostile appears in the 'local' chat.
+      + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. You can use this setting multiple times to select multiple names.
+      + `anomaly-wait-time`: Minimum time to wait after arriving in an anomaly before considering it finished. Use this if you see anomalies in which rats arrive later than you arrive on grid.
+      + `warp-at`: Distance in km to warp to when warping to an anomaly, e.g. `warp-at=30`. Must match one of the game client's own preset "Warp to Within" distances offered in that menu (typically 0, 5, 10, 15, 20, 30, 50, 70, 100) -- an arbitrary value will not match any menu entry and will leave the bot stuck. Defaults to 100.
+      + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping range or aligning.
+      + `keep-at-range`: Set this to 'yes' to keep range from the target instead of orbiting or aligning.
+      + `targeting-range`: Maximum distance in meters to lock a target from the overview, e.g. `targeting-range=50000`. Beyond this, the bot approaches instead of locking. Defaults to 66000.
 
-   When using more than one setting, start a new line for each setting in the text input field.
-   Here is an example of a complete settings string:
+      When using more than one setting, start a new line for each setting in the text input field.
+      Here is an example of a complete settings string:
 
-   ```
-anomaly-name=blood hideaway
-anomaly-name=blood refuge
-anomaly-name=blood burrow
-anomaly-name=blood raider forsaken hideaway
-anomaly-name=blood raider hidden hideaway
-anomaly-name=blood raider forlorn hideaway
-anomaly-name=sansha hideaway
-anomaly-name=sansha refuge
-anomaly-name=sansha burrow
-anomaly-name=sansha forsaken hideaway
-anomaly-name=sansha hidden hideaway
-anomaly-name=sansha forlorn hideaway
-anomaly-name=drone assembly
-anomaly-name=drone cluster
-hide-when-neutral-in-local = no
-orbit-in-combat=yes
-run-away-shield-hitpoints-threshold-percent=69
-run-away-armor-hitpoints-threshold-percent=80
-   ```
+      ```
+   anomaly-name=blood hideaway
+   anomaly-name=blood refuge
+   anomaly-name=blood burrow
+   anomaly-name=blood raider forsaken hideaway
+   anomaly-name=blood raider hidden hideaway
+   anomaly-name=blood raider forlorn hideaway
+   anomaly-name=sansha hideaway
+   anomaly-name=sansha refuge
+   anomaly-name=sansha burrow
+   anomaly-name=sansha forsaken hideaway
+   anomaly-name=sansha hidden hideaway
+   anomaly-name=sansha forlorn hideaway
+   anomaly-name=drone assembly
+   anomaly-name=drone cluster
+   hide-when-neutral-in-local = no
+   orbit-in-combat=yes
+   run-away-shield-hitpoints-threshold-percent=69
+   run-away-armor-hitpoints-threshold-percent=80
+      ```
 
-   To learn more about the anomaly bot, see <https://to.botlab.org/guide/app/eve-online-combat-anomaly-bot>
+      To learn more about the anomaly bot, see <https://to.botlab.org/guide/app/eve-online-combat-anomaly-bot>
 
 -}
 {-
    catalog-tags:eve-online,anomaly,ratting
    authors-forum-usernames:viir
 -}
-
 {-
-anomaly-name=blood hideaway
-anomaly-name=blood refuge
-anomaly-name=blood burrow
-anomaly-name=blood raider forsaken hideaway
-anomaly-name=blood raider hidden hideaway
-anomaly-name=blood raider forlorn hideaway
-anomaly-name=sansha hideaway
-anomaly-name=sansha refuge
-anomaly-name=sansha burrow
-anomaly-name=sansha forsaken hideaway
-anomaly-name=sansha hidden hideaway
-anomaly-name=sansha forlorn hideaway
-anomaly-name=drone assembly
-anomaly-name=drone cluster
-hide-when-neutral-in-local = no
-orbit-in-combat=yes
-run-away-shield-hitpoints-threshold-percent=69
-run-away-armor-hitpoints-threshold-percent=80
+   anomaly-name=blood hideaway
+   anomaly-name=blood refuge
+   anomaly-name=blood burrow
+   anomaly-name=blood raider forsaken hideaway
+   anomaly-name=blood raider hidden hideaway
+   anomaly-name=blood raider forlorn hideaway
+   anomaly-name=sansha hideaway
+   anomaly-name=sansha refuge
+   anomaly-name=sansha burrow
+   anomaly-name=sansha forsaken hideaway
+   anomaly-name=sansha hidden hideaway
+   anomaly-name=sansha forlorn hideaway
+   anomaly-name=drone assembly
+   anomaly-name=drone cluster
+   hide-when-neutral-in-local = no
+   orbit-in-combat=yes
+   run-away-shield-hitpoints-threshold-percent=69
+   run-away-armor-hitpoints-threshold-percent=80
 
-anomaly-name=angel rally point
-hide-when-neutral-in-local = no
-orbit-in-combat=yes
-run-away-shield-hitpoints-threshold-percent=69
+   anomaly-name=angel rally point
+   hide-when-neutral-in-local = no
+   orbit-in-combat=yes
+   run-away-shield-hitpoints-threshold-percent=69
 -}
+
 
 module Bot exposing
     ( State
@@ -119,8 +119,6 @@ import Common.Basics exposing (listElementAtWrappedIndex, stringContainsIgnoring
 import Common.DecisionPath exposing (describeBranch)
 import Common.EffectOnWindow as EffectOnWindow exposing (MouseButton(..))
 import Dict
-import EveOnline.MemoryReading
-import Json.Decode
 import EveOnline.BotFramework
     exposing
         ( ReadingFromGameClient
@@ -128,9 +126,9 @@ import EveOnline.BotFramework
         , ShipModulesMemory
         , UseContextMenuCascadeNode(..)
         , doEffectsClickModuleButton
+        , infoPanelRouteFirstMarkerFromReadingFromGameClient
         , localChatWindowFromUserInterface
         , menuCascadeCompleted
-        , infoPanelRouteFirstMarkerFromReadingFromGameClient
         , mouseClickOnUIElement
         , pickEntryFromLastContextMenuInCascade
         , shipUIIndicatesShipIsWarpingOrJumping
@@ -146,22 +144,24 @@ import EveOnline.BotFrameworkSeparatingMemory
         , branchDependingOnDockedOrInSpace
         , clickModuleButtonButWaitIfClickedInPreviousStep
         , decideActionForCurrentStep
-        , ensureInfoPanelLocationInfoIsExpanded
         , discardContextMenuIfTooDistantFromTargetElement
+        , ensureInfoPanelLocationInfoIsExpanded
         , useContextMenuCascade
         , useContextMenuCascadeOnListSurroundingsButton
         , useContextMenuCascadeOnOverviewEntry
         , useContextMenuCascadeWithCustomConfig
         , waitForProgressInGame
         )
+import EveOnline.MemoryReading
 import EveOnline.ParseUserInterface
     exposing
-        ( OverviewWindowEntry
+        ( FleetWindow
+        , OverviewWindowEntry
         , ShipUI
         , ShipUIModuleButton
         )
+import Json.Decode
 import Set
-import EveOnline.ParseUserInterface exposing (FleetWindow)
 
 
 defaultBotSettings : BotSettings
@@ -169,7 +169,7 @@ defaultBotSettings =
     { hideWhenNeutralInLocal = AppSettings.Yes
     , runAwayShieldHitpointsThresholdPercent = -1
     , runAwayArmorHitpointsThresholdPercent = -1
-    , anomalyNames = ["sansha rally point", "angel rally point"]
+    , anomalyNames = [ "sansha rally point", "angel rally point" ]
     , avoidRats = []
     , maxTargetCount = 4
     , botStepDelayMilliseconds = 499
@@ -298,6 +298,7 @@ type alias MemoryOfAnomaly =
     , ratsSeen : Set.Set String
     }
 
+
 type alias BotDecisionContext =
     EveOnline.BotFrameworkSeparatingMemory.StepDecisionContext BotSettings BotMemory
 
@@ -334,13 +335,15 @@ describeReasonToAvoidAnomaly reason =
             "Found a rat to avoid: " ++ rat
 
 
+
 -- getFleetMembers: BotDecisionContext -> EveOnline.ParseUserInterface.FleetWindow -> Maybe FleetWindow
--- getFleetMembers context fleetWindow = 
---     case fleetWindow.fleetMembers 
+-- getFleetMembers context fleetWindow =
+--     case fleetWindow.fleetMembers
+
 
 findReasonToIgnoreProbeScanResult : BotDecisionContext -> EveOnline.ParseUserInterface.ProbeScanResult -> Maybe ReasonToIgnoreProbeScanResult
 findReasonToIgnoreProbeScanResult context probeScanResult =
-    case probeScanResult.cellsTexts |> Dict.get "ID" of 
+    case probeScanResult.cellsTexts |> Dict.get "ID" of
         Nothing ->
             Just ScanResultHasNoID
 
@@ -371,7 +374,7 @@ findReasonToIgnoreProbeScanResult context probeScanResult =
                 isDistantAnomaly =
                     probeScanResult.cellsTexts
                         |> Dict.get "Distance"
-                        |> Maybe.map (\text -> (text |> String.contains " AU"))
+                        |> Maybe.map (\text -> text |> String.contains " AU")
                         |> Maybe.withDefault False
 
                 matchesAnomalyNameFromSettings =
@@ -529,7 +532,6 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                 context.readingFromGameClient
             )
 
-             
 
 generalSetupInUserInterface : ReadingFromGameClient -> Maybe DecisionPathNode
 generalSetupInUserInterface readingFromGameClient =
@@ -568,10 +570,11 @@ from this by hand: a mouse move straight to the button's coordinates (no
 intermediate points) did nothing at all, not even register a hover
 tooltip -- only worked once the cursor got there via a real multi-step
 glide. That was diagnosed against `cg_input` directly, bypassing
-botlab_host.py's own input path entirely; a normal bot-driven click here
+botlab\_host.py's own input path entirely; a normal bot-driven click here
 goes through `_windows_input`'s `_move_mouse_eased`, which already glides
 every `MouseMoveAbsolute` by default, so plain `mouseClickOnUIElement` is
 sufficient -- nothing extra needed on the Elm side for this.
+
 -}
 closeSystemSettingsMenu : ReadingFromGameClient -> Maybe DecisionPathNode
 closeSystemSettingsMenu readingFromGameClient =
@@ -675,6 +678,7 @@ closeMessageBox readingFromGameClient =
                     )
             )
 
+
 {-| Shared by `tetherAtStructure`, `alignToStructure` and
 `dockAtRandomStationOrStructure`: the first menu entry whose text matches
 `textToSearch` exactly, ignoring case.
@@ -699,7 +703,7 @@ jumpToNextSystem : BotDecisionContext -> DecisionPathNode
 jumpToNextSystem context =
     case context.readingFromGameClient |> infoPanelRouteFirstMarkerFromReadingFromGameClient of
         Nothing ->
-         tetherAtStructure context
+            tetherAtStructure context
 
         Just infoPanelRouteFirstMarker ->
             -- Feedback: right after the route is reset and a new
@@ -730,58 +734,64 @@ jumpToNextSystem context =
 
             else
                 returnDronesToBay context
-                 |> Maybe.withDefault
-                    ( useContextMenuCascadeWithCustomConfig
-                    -- Feedback: "Jump Through Stargate" took 3-4 menu
-                    -- opens before being recognized. The route icon is
-                    -- small and sits in a strip that can shift as the
-                    -- route updates, so the default distance tolerance
-                    -- (70, already once widened from 40 for this same
-                    -- kind of drift on other elements) was plausibly
-                    -- discarding a menu that had, in fact, opened
-                    -- correctly. Widened just for this one cascade
-                    -- rather than the shared default, since other
-                    -- cascades' tolerance is already tuned from past
-                    -- observations and this is a different UI element.
-                    (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
-                    { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
-                    (useMenuEntryWithTextContainingFirstOf
-                        [ "dock"
-                        , "jump"
-                        ]
-                        menuCascadeCompleted
-                    )
-                    context )
+                    |> Maybe.withDefault
+                        (useContextMenuCascadeWithCustomConfig
+                            -- Feedback: "Jump Through Stargate" took 3-4 menu
+                            -- opens before being recognized. The route icon is
+                            -- small and sits in a strip that can shift as the
+                            -- route updates, so the default distance tolerance
+                            -- (70, already once widened from 40 for this same
+                            -- kind of drift on other elements) was plausibly
+                            -- discarding a menu that had, in fact, opened
+                            -- correctly. Widened just for this one cascade
+                            -- rather than the shared default, since other
+                            -- cascades' tolerance is already tuned from past
+                            -- observations and this is a different UI element.
+                            (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
+                            { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
+                            (useMenuEntryWithTextContainingFirstOf
+                                [ "dock"
+                                , "jump"
+                                ]
+                                menuCascadeCompleted
+                            )
+                            context
+                        )
+
 
 runAwayIfLowHealth : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> Maybe DecisionPathNode
-runAwayIfLowHealth context shipUI = 
-    let 
-        runAwayShieldThreshold = 
+runAwayIfLowHealth context shipUI =
+    let
+        runAwayShieldThreshold =
             context.eventContext.botSettings.runAwayShieldHitpointsThresholdPercent
 
-        runAwayArmorThreshold = 
+        runAwayArmorThreshold =
             context.eventContext.botSettings.runAwayArmorHitpointsThresholdPercent
 
-        runAwayWithShieldDescription = 
-            describeBranch 
-            ("Shield HP " ++ (shipUI.hitpointsPercent.shield |> String.fromInt) ++ "%, get out get out")
-            (runAway context)
+        runAwayWithShieldDescription =
+            describeBranch
+                ("Shield HP " ++ (shipUI.hitpointsPercent.shield |> String.fromInt) ++ "%, get out get out")
+                (runAway context)
 
-        runAwayWithArmorDescription = 
-            describeBranch 
-            ("Armor at " ++ (shipUI.hitpointsPercent.armor |> String.fromInt) ++ "%, get out get out get out")
-            (runAway context)
+        runAwayWithArmorDescription =
+            describeBranch
+                ("Armor at " ++ (shipUI.hitpointsPercent.armor |> String.fromInt) ++ "%, get out get out get out")
+                (runAway context)
     in
     if shipUI.hitpointsPercent.shield < runAwayShieldThreshold then
         Just runAwayWithShieldDescription
+
     else if shipUI.hitpointsPercent.armor < runAwayArmorThreshold then
         Just runAwayWithArmorDescription
+
     else
-      Nothing
+        Nothing
+
 
 runAway : BotDecisionContext -> DecisionPathNode
-runAway = 
+runAway =
     tetherAtStructure
+
 
 continueIfShouldHide : { ifShouldHide : DecisionPathNode } -> BotDecisionContext -> Maybe DecisionPathNode
 continueIfShouldHide config context =
@@ -865,7 +875,7 @@ tetherAtStructure context =
                         , withTextContainingIgnoringCase "Warp Squad"
                         , withTextContainingIgnoringCase "Warp"
                         , withTextContainingIgnoringCase "Approach"
-                        , Common.Basics.listElementAtWrappedIndex (0)
+                        , Common.Basics.listElementAtWrappedIndex 0
                         ]
                             |> List.filterMap (\priority -> suitableMenuEntries |> priority)
                             |> List.head
@@ -882,6 +892,7 @@ tetherAtStructure context =
             context
         )
 
+
 alignToStructure : ShipUI -> BotDecisionContext -> Maybe DecisionPathNode
 alignToStructure shipUI context =
     let
@@ -895,8 +906,8 @@ alignToStructure shipUI context =
                                 List.filter menuEntryIsSuitable currentMenu.entries
                         in
                         [ withTextContainingIgnoringCase "Align to"
-                         , Common.Basics.listElementAtWrappedIndex (0)
-                         , withTextContainingIgnoringCase "Track"
+                        , Common.Basics.listElementAtWrappedIndex 0
+                        , withTextContainingIgnoringCase "Track"
                         ]
                             |> List.filterMap (\priority -> suitableMenuEntries |> priority)
                             |> List.head
@@ -905,14 +916,18 @@ alignToStructure shipUI context =
     in
     -- this is what case statements are for, dude
     if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverAlign then
-            Nothing
+        Nothing
+
     else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverRange then
-            Nothing
+        Nothing
+
     else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
-            Nothing
+        Nothing
+
     else if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverWarp then
-            Nothing
-    else 
+        Nothing
+
+    else
         Just
             (useContextMenuCascadeOnListSurroundingsButton
                 (useMenuEntryWithTextContainingFirstOf [ "structures" ]
@@ -920,7 +935,9 @@ alignToStructure shipUI context =
                         (chooseNextMenuEntry MenuCascadeCompleted)
                     )
                 )
-                context)
+                context
+            )
+
 
 {-| The combat messages currently faded onto the screen, oldest first.
 
@@ -937,6 +954,7 @@ needing history should read the gamelog file instead.
 
 The markup is EVE's own colour and font tagging, stripped here because the
 status text is read by a human in a terminal.
+
 -}
 visibleCombatMessages : ReadingFromGameClient -> List String
 visibleCombatMessages readingFromGameClient =
@@ -988,7 +1006,6 @@ describeVisibleCombatMessages readingFromGameClient =
 The entries for structures in the menu from the SurroundingsButton can be nested one level deeper than the ones for stations.
 In other words, not all structures appear directly under the "structures" entry.
 -}
-
 dockAtRandomStationOrStructure : BotDecisionContext -> DecisionPathNode
 dockAtRandomStationOrStructure context =
     let
@@ -1003,8 +1020,8 @@ dockAtRandomStationOrStructure context =
                         in
                         [ withTextContainingIgnoringCase "Dock"
                         , List.filter (.text >> stringContainsIgnoringCase "station")
-                            >> Common.Basics.listElementAtWrappedIndex (0)
-                        , Common.Basics.listElementAtWrappedIndex (0)
+                            >> Common.Basics.listElementAtWrappedIndex 0
+                        , Common.Basics.listElementAtWrappedIndex 0
                         ]
                             |> List.filterMap (\priority -> suitableMenuEntries |> priority)
                             |> List.head
@@ -1012,178 +1029,180 @@ dockAtRandomStationOrStructure context =
                 }
     in
     returnDronesToBay context
-    |> Maybe.withDefault
-        (describeBranch "g'wan, git"
-            (
-                useContextMenuCascadeOnListSurroundingsButton
+        |> Maybe.withDefault
+            (describeBranch "g'wan, git"
+                (useContextMenuCascadeOnListSurroundingsButton
                     (useMenuEntryWithTextContainingFirstOf [ "structures", "station" ]
                         (chooseNextMenuEntry
                             (chooseNextMenuEntry MenuCascadeCompleted)
                         )
                     )
                     context
+                )
             )
-        )
 
 
 decideNextActionWhenInSpace : BotDecisionContext -> SeeUndockingComplete -> DecisionPathNode
 decideNextActionWhenInSpace context seeUndockingComplete =
-    clearStrayContextMenu context |> Maybe.withDefault
-    (if seeUndockingComplete.shipUI |> shipUIIndicatesShipIsWarpingOrJumping then
-        describeBranch "HOOOOONK in warp"
-            ([ returnDronesToBay context
-             ]
-                |> List.filterMap identity
-                |> List.head
-                |> Maybe.withDefault waitForProgressInGame
-            )
+    clearStrayContextMenu context
+        |> Maybe.withDefault
+            (if seeUndockingComplete.shipUI |> shipUIIndicatesShipIsWarpingOrJumping then
+                describeBranch "HOOOOONK in warp"
+                    ([ returnDronesToBay context
+                     ]
+                        |> List.filterMap identity
+                        |> List.head
+                        |> Maybe.withDefault waitForProgressInGame
+                    )
 
-    else
-    case context.readingFromGameClient.probeScannerWindow of
-        Nothing ->
-            describeBranch "No probe window" (
-                case manageMiddleRowModules context seeUndockingComplete of
-                        Just moduleAction ->
-                            moduleAction
+             else
+                case context.readingFromGameClient.probeScannerWindow of
+                    Nothing ->
+                        describeBranch "No probe window"
+                            (case manageMiddleRowModules context seeUndockingComplete of
+                                Just moduleAction ->
+                                    moduleAction
 
-                        Nothing ->
-                            decideActionInAnomaly
-                                { arrivalInAnomalyAgeSeconds = 600 }
-                                context
-                                seeUndockingComplete
-                                (jumpToNextSystem context)
-            )
-
-        Just probeScannerWindow ->
-            case context.readingFromGameClient |> getCurrentAnomalyIDAsSeenInProbeScanner of
-                Nothing ->
-                    let
-                        pickAnotherAnomalyOrLeaveViaScanResults =
-                            let
-                                scanResultsWithReasonToIgnore =
-                                    probeScannerWindow.scanResults
-                                        |> List.map
-                                            (\scanResult ->
-                                                ( scanResult
-                                                , findReasonToIgnoreProbeScanResult context scanResult
-                                                )
-                                            )
-                            in
-                            case
-                                scanResultsWithReasonToIgnore
-                                    |> List.filter (Tuple.second >> (==) Nothing)
-                                    |> List.map Tuple.first
-                                    |> listElementAtWrappedIndex (context.randomIntegers |> List.head |> Maybe.withDefault 0)
-                            of
                                 Nothing ->
-                                    describeBranch
-                                        ("I see "
-                                            ++ (probeScannerWindow.scanResults |> List.length |> String.fromInt)
-                                            ++ " scan results, and no matching anomaly. Git!"
-                                        )
+                                    decideActionInAnomaly
+                                        { arrivalInAnomalyAgeSeconds = 600 }
+                                        context
+                                        seeUndockingComplete
                                         (jumpToNextSystem context)
-                                Just _ ->
-                                    describeBranch "Found matching anomaly." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
-
-                        -- "Warp to Site" opportunities (e.g. "Sansha's
-                        -- Command Relay Outpost") and following acceleration
-                        -- gates through a multi-pocket site both take
-                        -- priority over the normal probe-scan hunt loop --
-                        -- but only once there's nothing left to fight or
-                        -- loot right now (checked by the caller before
-                        -- falling through to this), so an opportunity
-                        -- appearing mid-combat doesn't pull the ship away
-                        -- from a fight already in progress.
-                        pickAnotherAnomalyOrLeave =
-                            warpToOpportunitySiteIfAvailable context.readingFromGameClient
-                                |> Maybe.withDefault
-                                    (activateAccelerationGateIfPresent context
-                                        |> Maybe.withDefault pickAnotherAnomalyOrLeaveViaScanResults
-                                    )
-                    in
-                    -- The anomaly's own signature can drop off the probe
-                    -- scanner (site "resolved"/expired) while rats are
-                    -- still alive or wrecks are still sitting on the
-                    -- overview -- don't abandon those just because the
-                    -- site itself stopped showing up here; keep fighting
-                    -- and looting until the grid is actually clear. Same
-                    -- for a stray locked target (e.g. a cargo container):
-                    -- warping away drops the lock as a side effect without
-                    -- ever running the unlock cascade, so check for one
-                    -- here too rather than only inside decideActionInAnomaly.
-                    if anyAttackableInOverview context.readingFromGameClient
-                        || anyNotableWreckInOverview context.readingFromGameClient
-                        || (targetsToUnlockFromReadingFromGameClient context.readingFromGameClient |> List.isEmpty |> not)
-                    then
-                        describeBranch "The anomaly no longer shows on the scanner, but there is still something to attack or loot here."
-                            (decideActionInAnomaly
-                                { arrivalInAnomalyAgeSeconds = arrivalInAnomalyAgeSecondsFromMemory context }
-                                context
-                                seeUndockingComplete
-                                pickAnotherAnomalyOrLeave
                             )
 
-                    else
-                        pickAnotherAnomalyOrLeave
-
-                Just _ ->
-                    case manageMiddleRowModules context seeUndockingComplete of
-                        Just moduleAction ->
-                            moduleAction
-
-                        Nothing ->
-                            let
-                                returnDronesAndEnterAnomaly { ifNoAcceptableAnomalyAvailable } =
-                                    returnDronesToBay context
-                                        |> Maybe.withDefault
-                                            (describeBranch "No drones to return."
-                                                (enterAnomaly { ifNoAcceptableAnomalyAvailable = ifNoAcceptableAnomalyAvailable } context)
-                                            )
-
-                                returnDronesAndEnterAnomalyOrWait =
-                                    returnDronesAndEnterAnomaly
-                                        { ifNoAcceptableAnomalyAvailable =
-                                            describeBranch "Try autopilot?" (jumpToNextSystem context)
-                                        }
-                            in
-                            case context.readingFromGameClient |> getCurrentAnomalyIDAsSeenInProbeScanner of
-                                Nothing ->
-                                    describeBranch "Looks like we are not in an anomaly." returnDronesAndEnterAnomalyOrWait
-
-                                Just anomalyID ->
-                                    case memoryOfAnomalyWithID anomalyID context.memory of
-                                        Nothing ->
-                                            describeBranch
-                                                ("Program error: Did not find memory of anomaly " ++ anomalyID)
-                                                waitForProgressInGame
-
-                                        Just memoryOfAnomaly ->
-                                            let
-                                                arrivalInAnomalyAgeSeconds =
-                                                    (context.eventContext.timeInMilliseconds - memoryOfAnomaly.arrivalTime.milliseconds) // 1000
-                                            in
-                                            describeBranch ("We are in anomaly '" ++ anomalyID ++ "' since " ++ String.fromInt arrivalInAnomalyAgeSeconds ++ " seconds.")
-                                                (case findReasonToAvoidAnomalyFromMemory context { anomalyID = anomalyID } of
-                                                    Just reasonToAvoidAnomaly ->
-                                                        describeBranch
-                                                            ("Found a reason to avoid this anomaly: "
-                                                                ++ describeReasonToAvoidAnomaly reasonToAvoidAnomaly
+                    Just probeScannerWindow ->
+                        case context.readingFromGameClient |> getCurrentAnomalyIDAsSeenInProbeScanner of
+                            Nothing ->
+                                let
+                                    pickAnotherAnomalyOrLeaveViaScanResults =
+                                        let
+                                            scanResultsWithReasonToIgnore =
+                                                probeScannerWindow.scanResults
+                                                    |> List.map
+                                                        (\scanResult ->
+                                                            ( scanResult
+                                                            , findReasonToIgnoreProbeScanResult context scanResult
                                                             )
-                                                            (returnDronesAndEnterAnomaly
-                                                                { ifNoAcceptableAnomalyAvailable =
-                                                                    describeBranch "Get out of this anomaly."
-                                                                        (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
-                                                                }
-                                                            )
+                                                        )
+                                        in
+                                        case
+                                            scanResultsWithReasonToIgnore
+                                                |> List.filter (Tuple.second >> (==) Nothing)
+                                                |> List.map Tuple.first
+                                                |> listElementAtWrappedIndex (context.randomIntegers |> List.head |> Maybe.withDefault 0)
+                                        of
+                                            Nothing ->
+                                                describeBranch
+                                                    ("I see "
+                                                        ++ (probeScannerWindow.scanResults |> List.length |> String.fromInt)
+                                                        ++ " scan results, and no matching anomaly. Git!"
+                                                    )
+                                                    (jumpToNextSystem context)
 
-                                                    Nothing ->
-                                                        decideActionInAnomaly
-                                                            { arrivalInAnomalyAgeSeconds = arrivalInAnomalyAgeSeconds }
-                                                            context
-                                                            seeUndockingComplete
-                                                            returnDronesAndEnterAnomalyOrWait
+                                            Just _ ->
+                                                describeBranch "Found matching anomaly." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
+
+                                    -- "Warp to Site" opportunities (e.g. "Sansha's
+                                    -- Command Relay Outpost") and following acceleration
+                                    -- gates through a multi-pocket site both take
+                                    -- priority over the normal probe-scan hunt loop --
+                                    -- but only once there's nothing left to fight or
+                                    -- loot right now (checked by the caller before
+                                    -- falling through to this), so an opportunity
+                                    -- appearing mid-combat doesn't pull the ship away
+                                    -- from a fight already in progress.
+                                    pickAnotherAnomalyOrLeave =
+                                        warpToOpportunitySiteIfAvailable context.readingFromGameClient
+                                            |> Maybe.withDefault
+                                                (activateAccelerationGateIfPresent context
+                                                    |> Maybe.withDefault pickAnotherAnomalyOrLeaveViaScanResults
                                                 )
-    )
+                                in
+                                -- The anomaly's own signature can drop off the probe
+                                -- scanner (site "resolved"/expired) while rats are
+                                -- still alive or wrecks are still sitting on the
+                                -- overview -- don't abandon those just because the
+                                -- site itself stopped showing up here; keep fighting
+                                -- and looting until the grid is actually clear. Same
+                                -- for a stray locked target (e.g. a cargo container):
+                                -- warping away drops the lock as a side effect without
+                                -- ever running the unlock cascade, so check for one
+                                -- here too rather than only inside decideActionInAnomaly.
+                                if
+                                    anyAttackableInOverview context.readingFromGameClient
+                                        || anyNotableWreckInOverview context.readingFromGameClient
+                                        || (targetsToUnlockFromReadingFromGameClient context.readingFromGameClient |> List.isEmpty |> not)
+                                then
+                                    describeBranch "The anomaly no longer shows on the scanner, but there is still something to attack or loot here."
+                                        (decideActionInAnomaly
+                                            { arrivalInAnomalyAgeSeconds = arrivalInAnomalyAgeSecondsFromMemory context }
+                                            context
+                                            seeUndockingComplete
+                                            pickAnotherAnomalyOrLeave
+                                        )
+
+                                else
+                                    pickAnotherAnomalyOrLeave
+
+                            Just _ ->
+                                case manageMiddleRowModules context seeUndockingComplete of
+                                    Just moduleAction ->
+                                        moduleAction
+
+                                    Nothing ->
+                                        let
+                                            returnDronesAndEnterAnomaly { ifNoAcceptableAnomalyAvailable } =
+                                                returnDronesToBay context
+                                                    |> Maybe.withDefault
+                                                        (describeBranch "No drones to return."
+                                                            (enterAnomaly { ifNoAcceptableAnomalyAvailable = ifNoAcceptableAnomalyAvailable } context)
+                                                        )
+
+                                            returnDronesAndEnterAnomalyOrWait =
+                                                returnDronesAndEnterAnomaly
+                                                    { ifNoAcceptableAnomalyAvailable =
+                                                        describeBranch "Try autopilot?" (jumpToNextSystem context)
+                                                    }
+                                        in
+                                        case context.readingFromGameClient |> getCurrentAnomalyIDAsSeenInProbeScanner of
+                                            Nothing ->
+                                                describeBranch "Looks like we are not in an anomaly." returnDronesAndEnterAnomalyOrWait
+
+                                            Just anomalyID ->
+                                                case memoryOfAnomalyWithID anomalyID context.memory of
+                                                    Nothing ->
+                                                        describeBranch
+                                                            ("Program error: Did not find memory of anomaly " ++ anomalyID)
+                                                            waitForProgressInGame
+
+                                                    Just memoryOfAnomaly ->
+                                                        let
+                                                            arrivalInAnomalyAgeSeconds =
+                                                                (context.eventContext.timeInMilliseconds - memoryOfAnomaly.arrivalTime.milliseconds) // 1000
+                                                        in
+                                                        describeBranch ("We are in anomaly '" ++ anomalyID ++ "' since " ++ String.fromInt arrivalInAnomalyAgeSeconds ++ " seconds.")
+                                                            (case findReasonToAvoidAnomalyFromMemory context { anomalyID = anomalyID } of
+                                                                Just reasonToAvoidAnomaly ->
+                                                                    describeBranch
+                                                                        ("Found a reason to avoid this anomaly: "
+                                                                            ++ describeReasonToAvoidAnomaly reasonToAvoidAnomaly
+                                                                        )
+                                                                        (returnDronesAndEnterAnomaly
+                                                                            { ifNoAcceptableAnomalyAvailable =
+                                                                                describeBranch "Get out of this anomaly."
+                                                                                    (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
+                                                                            }
+                                                                        )
+
+                                                                Nothing ->
+                                                                    decideActionInAnomaly
+                                                                        { arrivalInAnomalyAgeSeconds = arrivalInAnomalyAgeSeconds }
+                                                                        context
+                                                                        seeUndockingComplete
+                                                                        returnDronesAndEnterAnomalyOrWait
+                                                            )
+            )
 
 
 undockUsingStationWindow : BotDecisionContext -> DecisionPathNode
@@ -1214,7 +1233,6 @@ undockUsingStationWindow context =
 
                         Just _ ->
                             describeBranch "I see we are already undocking." waitForProgressInGame
-                    
 
 
 decideActionInAnomaly :
@@ -1227,8 +1245,9 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
     let
         overviewEntriesToAttack =
             overviewEntriesToAttackFromReadingFromGameClient context.readingFromGameClient
+
         overviewEntriesToAttackFirst =
-            overviewEntriesToAttack 
+            overviewEntriesToAttack
                 |> List.filter shouldAttackOverviewEntryFirst
 
         -- Locking clicks the row, so only rows actually rendered can be used --
@@ -1243,7 +1262,8 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                     |> List.filter overviewEntryIsDisplayed
                     |> List.take 2
                     |> List.filter (overviewEntryIsTargetedOrTargeting >> not)
-                else
+
+            else
                 overviewEntriesToAttack
                     |> List.filter overviewEntryIsDisplayed
                     |> List.take 4
@@ -1267,13 +1287,14 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                 |> List.filter overviewEntryIsActiveTarget
                 |> List.head
                 |> Maybe.andThen (\overviewEntryToAttack -> ensureShipIsOrbiting seeUndockingComplete.shipUI overviewEntryToAttack)
+
         ensureShipIsKeepingRangeDecision =
             overviewEntriesToAttack
                 |> List.filter overviewEntryIsActiveTarget
                 |> List.head
                 |> Maybe.andThen (\overviewEntryToAttack -> ensureShipIsKeepingRange seeUndockingComplete.shipUI overviewEntryToAttack)
 
-        ensureShipIsAlignedDecision = 
+        ensureShipIsAlignedDecision =
             overviewEntriesToAttack
                 |> List.filter overviewEntryIsActiveTarget
                 |> List.head
@@ -1422,8 +1443,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                         case seeUndockingComplete |> shipUIModulesToActivateOnTarget |> List.indexedMap Tuple.pair |> List.filter (Tuple.second >> .isActive >> Maybe.withDefault False >> not) |> List.head of
                             Nothing ->
                                 describeBranch "Scoot!"
-                                    (waitForProgressInGame)
-
+                                    waitForProgressInGame
 
                             Just ( inactiveModuleIndex, inactiveModule ) ->
                                 describeBranch "Shoot!"
@@ -1475,9 +1495,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                                     nextOverviewEntryToLock :: _ ->
                                         describeBranch "I see an overview entry to lock."
                                             (lockTargetFromOverviewEntry context nextOverviewEntryToLock)
-
                                 )
-                                
 
                         Just _ ->
                             describeBranch "I see a locked target."
@@ -1507,15 +1525,15 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                                                     |> Maybe.withDefault
                                                         (describeBranch "No idling drones."
                                                             (if context.eventContext.botSettings.maxTargetCount <= (context.readingFromGameClient.targets |> List.length) then
-                                                            -- TODO branch if bouncing or brawling
-                                                            -- describeBranch "Enough locked targets." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
+                                                                -- TODO branch if bouncing or brawling
+                                                                -- describeBranch "Enough locked targets." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
                                                                 describeBranch "Enough locked targets." waitForProgressInGame
 
                                                              else
                                                                 case overviewEntriesToLock of
                                                                     [] ->
-                                                                    -- Ditto above
-                                                                    -- describeBranch "All locked up; bounce?" (tetherAtStructure context)
+                                                                        -- Ditto above
+                                                                        -- describeBranch "All locked up; bounce?" (tetherAtStructure context)
                                                                         revealEntryToLock
                                                                             |> Maybe.withDefault
                                                                                 (describeBranch "All locked up; bounce?" waitForProgressInGame)
@@ -1526,13 +1544,12 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                                                             )
                                                         )
                                                 )
-                                            --   (overviewEntriesToAttack
-                                            --     |> List.filter (overviewEntryIsTargetedOrTargeting)
-                                            --     |> List.head
-                                            --     |> Maybe.andThen (\overviewEntryToAttack -> ensureShipIsOrbiting seeUndockingComplete.shipUI overviewEntryToAttack)
-                                            --         |> Maybe.withDefault waitForProgressInGame)
 
-
+                                        --   (overviewEntriesToAttack
+                                        --     |> List.filter (overviewEntryIsTargetedOrTargeting)
+                                        --     |> List.head
+                                        --     |> Maybe.andThen (\overviewEntryToAttack -> ensureShipIsOrbiting seeUndockingComplete.shipUI overviewEntryToAttack)
+                                        --         |> Maybe.withDefault waitForProgressInGame)
                                         Just ( inactiveModuleIndex, inactiveModule ) ->
                                             clickTargetBeforeShooting context overviewEntriesToAttack
                                                 |> Maybe.withDefault
@@ -1567,15 +1584,16 @@ enterAnomaly { ifNoAcceptableAnomalyAvailable } context =
                                 , findReasonToIgnoreProbeScanResult context scanResult
                                 )
                             )
-                warp = 
-                 ("Within " ++ (context.eventContext.botSettings.warpAt |> String.fromInt) ++ " km")
+
+                warp =
+                    "Within " ++ (context.eventContext.botSettings.warpAt |> String.fromInt) ++ " km"
             in
             case
                 scanResultsWithReasonToIgnore
                     |> List.filter (Tuple.second >> (==) Nothing)
                     |> List.map Tuple.first
                     -- |> listElementAtWrappedIndex (context.randomIntegers |> List.head |> Maybe.withDefault 0)
-                    |> listElementAtWrappedIndex (0)
+                    |> listElementAtWrappedIndex 0
             of
                 Nothing ->
                     describeBranch
@@ -1592,16 +1610,14 @@ enterAnomaly { ifNoAcceptableAnomalyAvailable } context =
                                 ( "Scan result", anomalyScanResult.uiNode )
                                 (useMenuEntryWithTextContaining "to within"
                                     (useMenuEntryWithTextContaining warp menuCascadeCompleted)
-                                   -- (useMenuEntryWithTextContaining "Within 100 km" menuCascadeCompleted)
-                                   -- (useMenuEntryWithTextContaining "Within 30 km" menuCascadeCompleted)
-                                   -- TODO THIS PROBABLY OUGHTa be configurable
-                                   -- (useMenuEntryWithTextContaining "Within 70 km" menuCascadeCompleted)
+                                 -- (useMenuEntryWithTextContaining "Within 100 km" menuCascadeCompleted)
+                                 -- (useMenuEntryWithTextContaining "Within 30 km" menuCascadeCompleted)
+                                 -- TODO THIS PROBABLY OUGHTa be configurable
+                                 -- (useMenuEntryWithTextContaining "Within 70 km" menuCascadeCompleted)
                                 )
                                 context
                             )
                         )
-
-
 
 
 ensureShipIsKeepingRange : ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
@@ -1622,37 +1638,41 @@ ensureShipIsKeepingRange shipUI overviewEntryToKAR =
                     ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_E ]
                      , overviewEntryToKAR.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
                      , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_E ]
-                    --  , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_C ]
-                    --  , overviewEntryToKAR.uiNode |> mouseClickOnUIElement MouseButtonLeft
-                    --  , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_C ]
-                    --  , overviewEntryToKAR.uiNode |> mouseClickOnUIElement MouseButtonLeft
+
+                     --  , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_C ]
+                     --  , overviewEntryToKAR.uiNode |> mouseClickOnUIElement MouseButtonLeft
+                     --  , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_C ]
+                     --  , overviewEntryToKAR.uiNode |> mouseClickOnUIElement MouseButtonLeft
                      ]
                         |> List.concat
                     )
                 )
             )
 
+
 ensureShipIsOrbiting : ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
 ensureShipIsOrbiting shipUI overviewEntryToOrbit =
-        if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
-            Nothing
+    if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
+        Nothing
 
-        else
-            Just
-                (describeBranch "Press the 'W' key and click on the overview entry."
-                    (decideActionForCurrentStep
-                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_W ]
-                        , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_W ]
-                        -- , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_C ]
-                        -- , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft
-                        -- , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_C ]
-                        -- , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft
-                        ]
-                            |> List.concat
-                        )
+    else
+        Just
+            (describeBranch "Press the 'W' key and click on the overview entry."
+                (decideActionForCurrentStep
+                    ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_W ]
+                     , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
+                     , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_W ]
+
+                     -- , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_C ]
+                     -- , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft
+                     -- , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_C ]
+                     -- , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement MouseButtonLeft
+                     ]
+                        |> List.concat
                     )
                 )
+            )
+
 
 launchAndEngageDrones : BotDecisionContext -> Maybe DecisionPathNode
 launchAndEngageDrones context =
@@ -1723,18 +1743,18 @@ launchAndEngageDrones context =
                                 (describeBranch "Launch drones"
                                     (decideActionForCurrentStep
                                         ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT ]
-                                        , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_F ]
-                                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_F ]
-                                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_SHIFT ]
-                                        ]
+                                         , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_F ]
+                                         , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_F ]
+                                         , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_SHIFT ]
+                                         ]
                                             |> List.concat
                                         )
                                     )
-                                    -- (useContextMenuCascade
-                                    --     ( "drones group", droneGroupInBay.header.uiNode )
-                                    --     (useMenuEntryWithTextContaining "Launch drone" menuCascadeCompleted)
-                                    --     context
-                                    -- )
+                                 -- (useContextMenuCascade
+                                 --     ( "drones group", droneGroupInBay.header.uiNode )
+                                 --     (useMenuEntryWithTextContaining "Launch drone" menuCascadeCompleted)
+                                 --     context
+                                 -- )
                                 )
 
                         else
@@ -1743,6 +1763,7 @@ launchAndEngageDrones context =
                     _ ->
                         Nothing
             )
+
 
 returnDronesToBay : BotDecisionContext -> Maybe DecisionPathNode
 returnDronesToBay context =
@@ -1763,19 +1784,19 @@ returnDronesToBay context =
                     Just
                         (describeBranch "I see there are drones in space. Return those to bay."
                             (decideActionForCurrentStep
-                                    ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT ]
-                                    , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_R ]
-                                    , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_R ]
-                                    , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_SHIFT ]
-                                    ]
-                                        |> List.concat
-                                    )
+                                ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT ]
+                                 , [ EffectOnWindow.KeyDown EffectOnWindow.vkey_R ]
+                                 , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_R ]
+                                 , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_SHIFT ]
+                                 ]
+                                    |> List.concat
+                                )
                             )
-                            -- (useContextMenuCascade
-                            --     ( "drones group", droneGroupInLocalSpace.header.uiNode )
-                            --     (useMenuEntryWithTextContaining "Assist" menuCascadeCompleted)
-                            --     context
-                            -- )
+                         -- (useContextMenuCascade
+                         --     ( "drones group", droneGroupInLocalSpace.header.uiNode )
+                         --     (useMenuEntryWithTextContaining "Assist" menuCascadeCompleted)
+                         --     context
+                         -- )
                         )
             )
 
@@ -1791,33 +1812,32 @@ lockTargetFromOverviewEntry context overviewEntry =
         Ok distanceInMeters ->
             if distanceInMeters <= targetingRange then
                 if overviewEntry.commonIndications.targetedByMe || overviewEntry.commonIndications.targeting then
-                        describeBranch "Locking target is in progress, wait for completion." waitForProgressInGame
+                    describeBranch "Locking target is in progress, wait for completion." waitForProgressInGame
 
-                    else        
-                        describeBranch ("Lock target from overview entry '" ++ (overviewEntry.objectName |> Maybe.withDefault "") ++ "'")
-                                        (decideActionForCurrentStep
-                                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL ]
-                                        , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-                                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]
-                                        ]
-                                            |> List.concat
-                                        )
-                                    )
+                else
+                    describeBranch ("Lock target from overview entry '" ++ (overviewEntry.objectName |> Maybe.withDefault "") ++ "'")
+                        (decideActionForCurrentStep
+                            ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL ]
+                             , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
+                             , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]
+                             ]
+                                |> List.concat
+                            )
+                        )
+
             else
                 describeBranch ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Approach.")
-                                    (decideActionForCurrentStep
-                                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_E ]
-                                        , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-                                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_E ]
-                                        ]
-                                            |> List.concat
-                                        )
-                                    )
+                    (decideActionForCurrentStep
+                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_E ]
+                         , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
+                         , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_E ]
+                         ]
+                            |> List.concat
+                        )
+                    )
+
         Err error ->
             describeBranch ("Failed to read the distance: " ++ error) askForHelpToGetUnstuck
-                                
-
-
 
 
 botMain : InterfaceToHost.BotConfig State
@@ -1909,8 +1929,12 @@ statusTextFromState context =
                 Just shipUI ->
                     let
                         describeShip =
-                            "Shield: " ++ (shipUI.hitpointsPercent.shield |> String.fromInt) ++ "% "
-                            ++ " Armor: " ++ (shipUI.hitpointsPercent.armor |> String.fromInt) ++ "%"
+                            "Shield: "
+                                ++ (shipUI.hitpointsPercent.shield |> String.fromInt)
+                                ++ "% "
+                                ++ " Armor: "
+                                ++ (shipUI.hitpointsPercent.armor |> String.fromInt)
+                                ++ "%"
 
                         describeDrones =
                             case readingFromGameClient.dronesWindow of
@@ -2016,6 +2040,7 @@ Nothing measured in AU is reachable in combat -- the longest targeting range in
 the game is a few hundred km -- so these are dropped here, at the one point that
 decides what counts as something to shoot, rather than at each of the places
 that would otherwise try to lock, approach or wait for it.
+
 -}
 overviewEntryDistanceIsOnGrid : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 overviewEntryDistanceIsOnGrid overviewEntry =
@@ -2048,7 +2073,7 @@ loot showing, as opposed to just sitting on the ship's own hangar view.
 `EveOnline.ParseUserInterface.InventoryWindow` has no dedicated field for
 this (same gap noted at the "Loot All" text-search call site), and
 `readingFromGameClient.inventoryWindows |> List.head` used to just grab
-the window unconditionally -- since it's *always* present, that meant the
+the window unconditionally -- since it's _always_ present, that meant the
 looting logic thought a wreck was open even when nothing had ever been
 opened at all, forcing it to Ctrl+W-close a window the player never
 wanted closed (stuck 650+ seconds live with zero rats and zero commander
@@ -2057,8 +2082,8 @@ wrecks anywhere in the overview).
 First fix attempt here checked `leftTreeEntries |> List.isEmpty`, on the
 assumption that opening a wreck's cargo shows a separate flat popup with
 no hangar tree. Wrong, confirmed live immediately after shipping it: a
-wreck opened via "Open Cargo" shows up as one more row *in the same
-sidebar tree* as the ship's own hangar (Drone Bay, PLEX Vault, etc.), not
+wreck opened via "Open Cargo" shows up as one more row _in the same
+sidebar tree_ as the ship's own hangar (Drone Bay, PLEX Vault, etc.), not
 a separate window -- so `leftTreeEntries` is non-empty either way, and
 that check excluded the real, already-open loot view every single tick,
 which made the bot think "Open Cargo" had never been clicked and re-click
@@ -2067,7 +2092,7 @@ button) were sitting right there on screen.
 
 Checking for a findable "Loot All" button instead: not a structural
 property of the window, but the actual thing this code needs to already
-be true before it can act -- present only once a wreck is both open *and*
+be true before it can act -- present only once a wreck is both open _and_
 selected in the tree (confirmed live: "Open Cargo" both adds and selects
 the row in one step, so this becomes findable immediately, no separate
 select-click needed). Doesn't cover the fully-looted-and-emptied case (no
@@ -2076,6 +2101,7 @@ button left to find) as elegantly -- that degrades to the existing
 same already-empty wreck, bounded by `lootWreckTimeRemainingSeconds`
 elsewhere in this file, rather than a clean close -- but that's a correct,
 bounded, wasted-tick nuisance, not a real stall like the two bugs above.
+
 -}
 wreckLootWindowsFromReadingFromGameClient : ReadingFromGameClient -> List EveOnline.ParseUserInterface.InventoryWindow
 wreckLootWindowsFromReadingFromGameClient readingFromGameClient =
@@ -2111,7 +2137,8 @@ the bot locks from anyway.
 
 Returns Nothing once the click has gone out, so the guns follow on the next
 step rather than the row being re-clicked every tick -- a click is also how you
-*change* the active target, so repeating it is not free.
+_change_ the active target, so repeating it is not free.
+
 -}
 clickTargetBeforeShooting :
     BotDecisionContext
@@ -2159,7 +2186,7 @@ clickTargetBeforeShooting context entriesToAttack =
 
 {-| Promote one of the locked targets to being the active one, if none is.
 
-Locking a target and *aiming* at it are separate things in EVE, and they can
+Locking a target and _aiming_ at it are separate things in EVE, and they can
 come apart: seen live with a full set of locks and no active target at all,
 which quietly makes every weapon hotkey a no-op -- F1 fires whatever is fitted
 at whatever is active, and nothing was. The bot went on pressing it and hitting
@@ -2173,6 +2200,7 @@ target's portrait in the target bar promotes it to active.
 
 Nearest first, so the ship shoots what is closest rather than whichever target
 happens to sit leftmost in the bar.
+
 -}
 activateOneOfTheLockedTargets : BotDecisionContext -> Maybe DecisionPathNode
 activateOneOfTheLockedTargets context =
@@ -2261,10 +2289,13 @@ anyAttackableInOverview readingFromGameClient =
 
 
 shouldAttackOverviewEntryFirst : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
-shouldAttackOverviewEntryFirst overviewEntry = case overviewEntry.objectName of
-    Nothing -> False
-    Just objectName ->
-        objectName |> String.contains "Tower"
+shouldAttackOverviewEntryFirst overviewEntry =
+    case overviewEntry.objectName of
+        Nothing ->
+            False
+
+        Just objectName ->
+            objectName |> String.contains "Tower"
 
 
 {-| The widget's own `_display` flag, defaulting to shown when absent (most
@@ -2289,6 +2320,7 @@ mission bot: it approached an Asteroid Factory 18 times while trying to reach a
 Cargo Warehouse that was scrolled out of sight, and parked at the factory.
 
 `_display` is what distinguishes them; the region does not.
+
 -}
 overviewEntryIsDisplayed : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 overviewEntryIsDisplayed entry =
@@ -2304,6 +2336,7 @@ by someone else.
 
 The id memory in `notAlreadyEmptied` is kept as a backstop, since this test
 depends on the icon updating promptly.
+
 -}
 overviewEntryLooksLooted : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 overviewEntryLooksLooted entry =
@@ -2347,11 +2380,12 @@ shipIsApproaching readingFromGameClient =
 {-| How long to believe the ship's own "approaching" indication before issuing
 a fresh Approach anyway.
 
-`ManeuverApproach` stays set while the ship approaches *something*, which need
+`ManeuverApproach` stays set while the ship approaches _something_, which need
 not be the thing we asked for. The mission bot was seen live sitting 29 km from
 its target, moving at 304 m/s with the distance unchanged over 12 seconds --
 approaching, but not that. With no bound the guard suppressed every re-issue
 and the bot never redirected.
+
 -}
 approachIndicationTrustedForTicks : Int
 approachIndicationTrustedForTicks =
@@ -2364,8 +2398,9 @@ acts on an object the ship has not reached yet.
 The command puts the ship into an approach, and re-issuing it while that
 approach is running restarts the manoeuvre and burns a step every tick for
 nothing. `ManeuverApproach` is believed for a bounded run of readings only,
-since it stays set while the ship approaches *something*, which need not be this
+since it stays set while the ship approaches _something_, which need not be this
 object.
+
 -}
 unlessAlreadyClosingIn : BotDecisionContext -> String -> DecisionPathNode -> DecisionPathNode
 unlessAlreadyClosingIn context description action =
@@ -2385,6 +2420,7 @@ unlessAlreadyClosingIn context description action =
 A double click is EVE's own "Open Cargo", and from outside looting range the
 client answers it by flying there and opening on arrival -- so this is the whole
 interaction at any distance, with no separate approach to arrange.
+
 -}
 openCargoOnOverviewEntry :
     BotDecisionContext
@@ -2407,7 +2443,7 @@ The approach guard stays either way. The command puts the ship into an approach,
 and re-issuing it while that approach is running restarts the manoeuvre and
 burns a context-menu cascade every tick for nothing. `ManeuverApproach` is only
 believed for a bounded run of readings, since it stays set while the ship
-approaches *something*, which need not be this object.
+approaches _something_, which need not be this object.
 
 `menuEntries` is a priority list, so ending it with "approach" leaves the ship
 closing the distance even on an object whose own command is missing from the
@@ -2439,7 +2475,7 @@ moved. Two reasons, either fatal on its own.
 
 The arithmetic collapsed. `(rank - rowsOnScreen / 2) / scrollableRows` is
 negative for anything in the first half-page, so it clamped to 0 -- and with the
-handle already at the top of its track, the computed destination *was* where the
+handle already at the top of its track, the computed destination _was_ where the
 handle already sat. The drag was zero-length, and a zero-length drag emits no
 movement at all, so nothing was ever sent.
 
@@ -2452,6 +2488,7 @@ only which way to look, and it re-reads after every notch. Direction comes from
 where the handle sits in its track: room below means scroll down, otherwise turn
 around and sweep back up, so a list gets swept rather than pinned against one
 end.
+
 -}
 scrollOverviewToReveal :
     BotDecisionContext
@@ -2470,8 +2507,10 @@ scrollOverviewToReveal context entryIsWanted =
                                )
                     )
     in
-    if shipIsApproaching context.readingFromGameClient
-            && (context.memory.shipApproachingTicks < approachIndicationTrustedForTicks) then
+    if
+        shipIsApproaching context.readingFromGameClient
+            && (context.memory.shipApproachingTicks < approachIndicationTrustedForTicks)
+    then
         -- Do not chase the row while closing on it: an object being approached
         -- climbs a distance-sorted list on its own and arrives in view without
         -- help, and scrolling meanwhile only fights the sort.
@@ -2542,7 +2581,7 @@ overviewScrollNotchesPerStep =
     3
 
 
-{-| Matches the "Ancient Acceleration Gate" (and any other "* Acceleration
+{-| Matches the "Ancient Acceleration Gate" (and any other "\* Acceleration
 Gate") objects that link the separate rooms ("pockets") inside a multi-room
 site like the "Sansha's Command Relay Outpost" opportunity: checks both
 `objectName` and `objectType` the same defensive way `isNotableWreck`
@@ -2562,6 +2601,7 @@ Shared by the memory counter that notices a gate refusing the ship and by the
 propulsion-module rule, which switches the module off on arrival -- a gate is
 taken from a standstill, so once the ship is here the module has nothing left
 to contribute.
+
 -}
 accelerationGateIsWithinReach : ReadingFromGameClient -> Bool
 accelerationGateIsWithinReach readingFromGameClient =
@@ -2592,6 +2632,7 @@ gate is often tens of km away. Leaving it running costs a slower align into the
 gate's own warp; that is the cheaper end of the trade and the one deliberately
 chosen here. Drones get no such choice -- ones left in space stay in the old
 pocket.
+
 -}
 activateAccelerationGateIfPresent : BotDecisionContext -> Maybe DecisionPathNode
 activateAccelerationGateIfPresent context =
@@ -2870,6 +2911,7 @@ before.
 
 Acceleration gates are the exception and use `ensureDronesRecalledBeforeWarping`
 instead -- see `activateAccelerationGateIfPresent` for why.
+
 -}
 ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping :
     BotDecisionContext
@@ -2886,6 +2928,7 @@ The half of the preparation above that is never optional: drones still in space
 when the ship leaves are simply lost, whereas an active propulsion module only
 costs a slower align. Acceleration gates use this on its own -- see
 `activateAccelerationGateIfPresent`.
+
 -}
 ensureDronesRecalledBeforeWarping :
     BotDecisionContext
@@ -2952,7 +2995,7 @@ deactivatePropulsionModuleBeforeWarping context ifReadyToWarp =
             )
 
 
-{-| Number of consecutive ticks *any* context menu has been open before we
+{-| Number of consecutive ticks _any_ context menu has been open before we
 treat it as stray rather than as a cascade we (or the framework's own
 `useContextMenuCascade`) are actively progressing through.
 
@@ -2970,27 +3013,28 @@ rendered position while animating open, which would defeat an
 exact-`==` comparison indefinitely without ever looking different in a
 screenshot.
 
-First replacement: count consecutive ticks where *some* menu -- any
+First replacement: count consecutive ticks where _some_ menu -- any
 menu, open regardless of whether it's literally the same instance --
 has been open at all, resetting to 0 whenever `contextMenus` is empty.
 That also turned out wrong, the opposite way: a genuine multi-level
-cascade (e.g. a 3-deep menu select) keeps *some* menu open continuously
+cascade (e.g. a 3-deep menu select) keeps _some_ menu open continuously
 across every level, by design, until the final entry is clicked -- if
 that takes more ticks than the threshold (real render/network latency
 per level adds up over 3 levels), this fired mid-cascade and cancelled
 real progress.
 
-The actual fix: track cascade *depth*, not just presence. Context menus
+The actual fix: track cascade _depth_, not just presence. Context menus
 nest -- descending a level adds one more entry to
 `readingFromGameClient.contextMenus` rather than replacing it (this is
 also how the framework's own `contextMenuCascadeLevel` works). So
 `BotMemory.contextMenuStuckTicks` only increments when the menu count
 has stayed the same (or dropped without reaching zero) since the last
-reading; any tick that goes *deeper* than before resets it to 0,
+reading; any tick that goes _deeper_ than before resets it to 0,
 regardless of how many ticks the cascade has taken in total. A
 genuinely stuck cascade -- sitting at the same depth, unable to find its
 next entry -- still trips this after a few ticks; a cascade that keeps
 advancing, no matter how many levels or how slowly, never does.
+
 -}
 strayContextMenuStuckTicksThreshold : Int
 strayContextMenuStuckTicksThreshold =
@@ -3099,7 +3143,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                                         Set.union anomalyMemoryBefore.ratsSeen (Set.fromList namesOfRatsInOverview)
                                 }
                         in
-                       botMemoryBefore.visitedAnomalies |> Dict.insert currentAnomalyID anomalyMemory
+                        botMemoryBefore.visitedAnomalies |> Dict.insert currentAnomalyID anomalyMemory
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -3251,7 +3295,6 @@ scanResultLooksLikeItIsOnGrid =
         >> Maybe.map (\text -> (text |> String.contains " m") || (text |> String.contains " km"))
 
 
-
 getNamesOfRatsInOverview : ReadingFromGameClient -> List String
 getNamesOfRatsInOverview readingFromGameClient =
     let
@@ -3303,10 +3346,12 @@ and rejoin without moving on screen. This row's list index feeds directly
 into `weaponHotkeyFromIndex` (F1-F4), so an unsorted list here means the
 hotkey pressed does not reliably correspond to the same physical weapon
 twice -- the same failure mode caught live for the middle row.
+
 -}
 shipUIModulesToActivateOnTarget : SeeUndockingComplete -> List ShipUIModuleButton
 shipUIModulesToActivateOnTarget =
     .shipUI >> .moduleButtonsRows >> .top >> List.sortBy (.uiNode >> .totalDisplayRegion >> .x)
+
 
 {-| Put the middle row into the state the moment calls for, if it is not already.
 
@@ -3318,6 +3363,7 @@ while covering distance, off once a gate is in reach. Both directions are
 handled, because "should be off and is on" is a real state here: the module gets
 switched on out in the middle of a pocket and has to come off again at the far
 end.
+
 -}
 manageMiddleRowModules : BotDecisionContext -> SeeUndockingComplete -> Maybe DecisionPathNode
 manageMiddleRowModules context seeUndockingComplete =
@@ -3390,6 +3436,7 @@ waste of capacitor otherwise, which is the `anyAttackableInOverview` gate at the
 call site. The propulsion module is the reverse -- it earns its capacitor while
 the ship is crossing distance, which is usually when there is nothing to shoot
 at all. See `propulsionModuleShouldBeRunning`.
+
 -}
 shipUIModulesToActivateAlways : SeeUndockingComplete -> List ShipUIModuleButton
 shipUIModulesToActivateAlways =
@@ -3406,10 +3453,11 @@ index therefore does not reliably mean the same module twice.
 
 Caught live: with both tank modules already running, the bot decided three times
 in a row to switch on what it called the propulsion module, the propulsion module
-never came on, and a *tank* module went off instead -- an odd number of toggles
+never came on, and a _tank_ module went off instead -- an odd number of toggles
 landing on a neighbour. Sorting by x is what makes "first in the middle row" mean
 the thing the setup instructions point at, and it cannot be shifted by a slot
 dropping out of the list.
+
 -}
 middleRowLeftToRight : SeeUndockingComplete -> List ShipUIModuleButton
 middleRowLeftToRight =
@@ -3438,6 +3486,7 @@ module was never switched on in the one place it matters most.
 
 Align, Warp and Jump are deliberately absent: those are the ship leaving, and
 `shipIsEnteringWarp` exists to switch the module off for them.
+
 -}
 shipIsUnderway : ReadingFromGameClient -> Bool
 shipIsUnderway readingFromGameClient =
@@ -3467,6 +3516,7 @@ short-circuit on `shipUIIndicatesShipIsWarpingOrJumping` before the module logic
 is reached, so by the time the indication reads Warp this step no longer runs at
 all -- Warp and Jump are listed anyway, so the rule says what it means instead of
 depending on that ordering holding.
+
 -}
 shipIsEnteringWarp : ReadingFromGameClient -> Bool
 shipIsEnteringWarp readingFromGameClient =
@@ -3506,6 +3556,7 @@ which switches the module off ahead of an ordinary warp. Without it, a ship stil
 showing `ManeuverApproach` in the moment after that deliberate shutdown would
 have this rule turn it straight back on -- the same two-controllers flicker that
 splitting the row was meant to end.
+
 -}
 propulsionModuleShouldBeRunning : BotDecisionContext -> Bool -> Bool
 propulsionModuleShouldBeRunning context somethingToFight =
@@ -3545,6 +3596,7 @@ bot clicked a second time and switched the module back off.
 in the slot, and this client's slots only ever carry "mainshape", "overloadBtn"
 and (on an active slot) "underlay". Same for `isHiliteVisible` and its "hilite"
 sprite. Both are permanently False rather than informative.
+
 -}
 inactiveModulesToActivateAlways : SeeUndockingComplete -> List ShipUIModuleButton
 inactiveModulesToActivateAlways seeUndockingComplete =

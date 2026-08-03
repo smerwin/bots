@@ -447,6 +447,7 @@ type alias StationAgentEntry =
 Worth having only because of what a right-click on it offers: "Open Drone Bay"
 there anchors the inventory to that ship, and that is the only context in which
 a drop into the bay is accepted. See `tools/macos-host/reload_drones.py`.
+
 -}
 type alias ShipItemCard =
     { uiNode : UITreeNodeWithDisplayRegion
@@ -782,6 +783,7 @@ reach it and mistake a logged line for something rendered on screen.
 Scoped to the reading by the host, which drains its queue as it builds the tree:
 these are the lines written since the previous read, not a growing buffer that
 would have a bot answering a refusal from four minutes ago.
+
 -}
 parseGameLogEntriesSinceLastReadingFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe (List GameLogEntry)
 parseGameLogEntriesSinceLastReadingFromUITreeRoot uiTreeRoot =
@@ -2546,7 +2548,7 @@ parseStationWindowAgentsTab windowNode =
 
 
 {-| The Agents panel groups its entries under "Available to you" /
-"Not available to you" headers by *ordering* only -- the entries are
+"Not available to you" headers by _ordering_ only -- the entries are
 siblings of the headers, not children of them -- so which group an entry
 belongs to has to be recovered by comparing vertical positions against the
 headers above it.
@@ -2611,6 +2613,7 @@ screen. `reload_drones.py` locates the card the same way and works.
 
 `mainText` is the widest text on the card, which is the ship's name; it is for
 the decision log rather than for choosing between cards.
+
 -}
 parseShipItemCardsFromUITreeRoot : UITreeNodeWithDisplayRegion -> List ShipItemCard
 parseShipItemCardsFromUITreeRoot uiTreeRoot =
@@ -3303,7 +3306,7 @@ parseAgentConversationWindow windowUINode =
 
 
 {-| The mission's own name, as the first `<span id=subheader>` in the agent's
-briefing. This is the only place it can be read *before* the mission is
+briefing. This is the only place it can be read _before_ the mission is
 accepted -- the info panel's mission tracker does not exist until then -- so
 it is what any "should I take this mission?" decision has to work from.
 -}
@@ -3480,8 +3483,8 @@ parseAgentMissionInfoPanelEntry entryNode =
 
 
 {-| Pulls the numeric id out of the composite element names the mission UI
-uses to tie a node to an agent, e.g. "AgentConversation_3008771" or
-"agent_missions:3008771".
+uses to tie a node to an agent, e.g. "AgentConversation\_3008771" or
+"agent\_missions:3008771".
 -}
 idSuffixAfterSeparator : String -> String -> Maybe Int
 idSuffixAfterSeparator separator name =

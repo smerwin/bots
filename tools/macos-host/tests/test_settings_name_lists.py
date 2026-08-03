@@ -425,7 +425,20 @@ class TheHelpTextSaysSo(unittest.TestCase):
 
     def section(self, key):
         start = self.source.index("+ `%s` :" % key)
-        return self.source[start:self.source.index("\n   + `", start)]
+        # The next entry, found by shape rather than by a fixed indent. These
+        # bullets live inside the module's doc comment, and elm-format owns the
+        # indentation of that block -- it currently sets them six spaces deep
+        # where this used to assume three. Anchoring on the exact indent made
+        # the whole settings documentation unreadable to this test the first
+        # time the formatter ran over the file.
+        #
+        # Bounded by the end of the doc comment when there is no next bullet,
+        # never by the end of the file: a section running to EOF would find
+        # "comma-separated list" somewhere further down and report a setting as
+        # documented when its own entry says nothing.
+        following = re.compile(r"\n\s*\+ `").search(self.source, start + 1)
+        end = following.start() if following else self.source.index("\n-}", start)
+        return self.source[start:end]
 
     def test_each_name_list_setting_documents_the_comma_separated_form(self):
         for key in NAME_LIST_SETTINGS:

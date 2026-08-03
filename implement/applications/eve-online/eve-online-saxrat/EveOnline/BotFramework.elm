@@ -2055,6 +2055,7 @@ the cause: `findMouseButtonClickLocationsInListOfEffects` was returning an empty
 list for every click, so no region would have matched. It is kept because it is
 cheap and strictly more forgiving, not because the regions were ever seen to
 disagree.
+
 -}
 doEffectsClickModuleButton :
     EveOnline.ParseUserInterface.ShipUIModuleButton

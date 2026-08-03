@@ -113,7 +113,7 @@ defaultBotSettings =
     , botStepDelayMilliseconds = 1800
     , selectInstancePilotName = Nothing
     , includeAsteroidPatterns = []
-    , anomaliesToMine = ["cluster","deposit"]
+    , anomaliesToMine = [ "cluster", "deposit" ]
     }
 
 
@@ -164,7 +164,7 @@ parseBotSettings =
                     { settings | includeAsteroidPatterns = pattern :: settings.includeAsteroidPatterns }
                 )
            )
-        , ( "anomalies-to-mine"
+         , ( "anomalies-to-mine"
            , AppSettings.valueTypeString
                 (\anomalyToMine settings ->
                     { settings | anomaliesToMine = String.trim anomalyToMine :: settings.anomaliesToMine }
@@ -306,8 +306,8 @@ continueIfShouldHide config context =
                         in
                         if 1 < (subsetOfUsersWithNoGoodStanding |> List.length) then
                             Just (describeBranch "There is an enemy or neutral in local chat." config.ifShouldHide)
-                        
-                        else if 2 < ( getNamesOfRatsInOverview context.readingFromGameClient |> List.length ) then
+
+                        else if 2 < (getNamesOfRatsInOverview context.readingFromGameClient |> List.length) then
                             Just (describeBranch "Too many rats!" config.ifShouldHide)
 
                         else
@@ -323,6 +323,7 @@ iconSpriteHasColorOfRat =
             )
         >> Maybe.withDefault False
 
+
 getNamesOfRatsInOverview : ReadingFromGameClient -> List String
 getNamesOfRatsInOverview readingFromGameClient =
     let
@@ -336,7 +337,8 @@ getNamesOfRatsInOverview readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.filter overviewEntryRepresentsRatOnGrid
-        |> List.map (.objectName >> Maybe.withDefault "do not see name of overview entry")        
+        |> List.map (.objectName >> Maybe.withDefault "do not see name of overview entry")
+
 
 shouldHideWhenNeutralInLocal : BotDecisionContext -> Bool
 shouldHideWhenNeutralInLocal context =
@@ -677,6 +679,7 @@ unlockTargetsNotForMining context =
                     )
             )
 
+
 warpToMiningBeaconBeforeDocking : BotDecisionContext -> DecisionPathNode
 warpToMiningBeaconBeforeDocking context =
     case context.readingFromGameClient |> overviewWindowEntriesRepresentingMiningBeacon |> List.head of
@@ -722,10 +725,11 @@ travelToMiningSiteAndLaunchDronesAndTargetAsteroid context =
                         continueWithWarpToMiningSite
 
                 Just asteroidInOverview ->
-                        case context |> knownModulesToActivateAlways |> List.filter (Tuple.second >> .isActive >> Maybe.withDefault False >> not) |> List.head of
+                    case context |> knownModulesToActivateAlways |> List.filter (Tuple.second >> .isActive >> Maybe.withDefault False >> not) |> List.head of
                         Just ( inactiveModuleMatchingText, inactiveModule ) ->
                             describeBranch ("I see inactive module '" ++ inactiveModuleMatchingText ++ "' to activate always. Honk it.")
                                 (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
+
                         Nothing ->
                             describeBranch ("Choosing asteroid '" ++ (asteroidInOverview.objectName |> Maybe.withDefault "Nothing") ++ "'")
                                 (warpToOverviewEntryIfFarEnough context asteroidInOverview
@@ -766,7 +770,8 @@ warpToOverviewEntryIfFarEnough context destinationOverviewEntry =
                     )
 
         Err error ->
-            Just (describeBranch ("Failed to read the distance: " ++ error) 
+            Just
+                (describeBranch ("Failed to read the distance: " ++ error)
                     (describeBranch "Assuming far enough to warp..."
                         (returnDronesToBay context
                             |> Maybe.withDefault
@@ -778,7 +783,8 @@ warpToOverviewEntryIfFarEnough context destinationOverviewEntry =
                                     context
                                 )
                         )
-                    ))
+                    )
+                )
 
 
 ensureMiningHoldIsSelectedInInventoryWindow : ReadingFromGameClient -> (EveOnline.ParseUserInterface.InventoryWindow -> DecisionPathNode) -> DecisionPathNode
@@ -846,7 +852,8 @@ lockTargetFromOverviewEntryAndEnsureIsInRange context rangeInMeters overviewEntr
                         case context |> knownModulesToActivateAlways |> List.filter (Tuple.second >> .isActive >> Maybe.withDefault False >> not) |> List.head of
                             Just ( inactiveModuleMatchingText, inactiveModule ) ->
                                 describeBranch ("I see inactive module '" ++ inactiveModuleMatchingText ++ "' to activate always. Activate it.")
-                                (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
+                                    (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
+
                             Nothing ->
                                 describeBranch "Honk, already orbit." waitForProgressInGame
 
@@ -1002,12 +1009,12 @@ dockToStationOrStructureUsingSurroundingsButtonMenu { prioritizeStructures, desc
             )
         )
 
+
 warpToMiningSite : BotDecisionContext -> DecisionPathNode
 warpToMiningSite context =
     useContextMenuCascadeOnListSurroundingsButton
         (useMenuEntryWithTextContaining "anomalies"
-            (useMenuEntryWithTextContainingFirstOf context.eventContext.botSettings.anomaliesToMine menuCascadeCompleted
-            )
+            (useMenuEntryWithTextContainingFirstOf context.eventContext.botSettings.anomaliesToMine menuCascadeCompleted)
         )
         context
 
@@ -1215,13 +1222,12 @@ statusTextFromDecisionContext context =
             context.readingFromGameClient
 
         mypilotName : Maybe String
-        mypilotName = 
+        mypilotName =
             context.eventContext.botSettings.selectInstancePilotName
 
         pilotName : String
-        pilotName = 
+        pilotName =
             Maybe.withDefault "Pilot" mypilotName
-            
 
         describeSessionPerformance =
             [ ( "times unloaded", context.memory.timesUnloaded )
@@ -1427,6 +1433,7 @@ asteroidOverviewEntryMatchesSettings settings overviewEntry =
         |> Dict.values
         |> List.any textMatchesPattern
 
+
 overviewWindowEntriesRepresentingMiningBeacon : ReadingFromGameClient -> List OverviewWindowEntry
 overviewWindowEntriesRepresentingMiningBeacon =
     .overviewWindows
@@ -1435,12 +1442,10 @@ overviewWindowEntriesRepresentingMiningBeacon =
 
 
 overviewWindowEntryRepresentsAnMiningBeacon : OverviewWindowEntry -> Bool
-overviewWindowEntryRepresentsAnMiningBeacon entry = 
-    (entry.textsLeftToRight 
-        |> List.any (stringContainsIgnoringCase "Jove Observatory")    
-    ) 
+overviewWindowEntryRepresentsAnMiningBeacon entry =
+    entry.textsLeftToRight
+        |> List.any (stringContainsIgnoringCase "Jove Observatory")
 
-                
 
 overviewWindowEntriesRepresentingAsteroids : ReadingFromGameClient -> List OverviewWindowEntry
 overviewWindowEntriesRepresentingAsteroids =
@@ -1454,7 +1459,7 @@ overviewWindowEntryRepresentsAnAsteroid entry =
     (entry.textsLeftToRight |> List.any (stringContainsIgnoringCase "Asteroid"))
         && (entry.textsLeftToRight |> List.any (stringContainsIgnoringCase "belt") |> not)
 
- 
+
 capacityGaugeUsedPercent : EveOnline.ParseUserInterface.InventoryWindow -> Maybe Int
 capacityGaugeUsedPercent =
     .selectedContainerCapacityGauge
@@ -1542,6 +1547,7 @@ shipManeuverIsApproaching =
         -- If the ship is just floating in space, there might be no indication displayed.
         >> Maybe.withDefault False
 
+
 shipManeuverIsOrbiting : ReadingFromGameClient -> Bool
 shipManeuverIsOrbiting =
     .shipUI
@@ -1550,6 +1556,7 @@ shipManeuverIsOrbiting =
         >> Maybe.map ((==) EveOnline.ParseUserInterface.ManeuverOrbit)
         -- If the ship is just floating in space, there might be no indication displayed.
         >> Maybe.withDefault False
+
 
 uiNodeIsLargeEnoughForClicking : UITreeNodeWithDisplayRegion -> Bool
 uiNodeIsLargeEnoughForClicking node =
