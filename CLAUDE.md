@@ -102,6 +102,81 @@ ReadFromWindowMethod` (screenshot-based, returning `windowRect`/`clientRect`/
 `clientRectLeftUpperToScreen`/`imageData`). The latter supplies the rect that
 translates memory-read UI positions into screen coordinates, so both are needed.
 
+**A reading carries one node the client never wrote.** EVE explains every
+refusal in its own game log — `You cannot load or unload
+<weapon> while it is active`, `You are already managing 6 targets, as many as
+you have skill to`, `You cannot launch Acolyte I because you are already
+controlling 5 drones` — and until issue #28 the bot could not read a word of it,
+while `stall_watch.py` read the same file as ground truth. The watchdog watching
+the bot had better information than the bot. The host now appends a
+`MacOsHostSyntheticGameLog` node to the tree it emits, one
+`MacOsHostSyntheticGameLogEntry` child per line carrying `timestamp`, `channel`
+and `text`, and `ParseUserInterface.elm` lifts it into
+`ParsedUserInterface.gameLogEntriesSinceLastReading : Maybe (List GameLogEntry)`.
+
+**It rides the UI tree rather than extending the protocol**, for the same reason
+#17 could not extend it either. `ReadFromWindowResult` is decoded by the closed
+`deserializeResponseFromVolatileHost` `oneOf`, so a new field or a new response
+shape needs the vendored decoder changed *and* `BotFramework.elm` changed to
+carry it as far as a decision. Riding the tree needs neither: every bot already
+calls the parser on every reading.
+
+Four properties are what make injecting a fiction into a structure that
+otherwise mirrors real memory safe rather than merely untested:
+
+- **The type name says it is a fiction**, in full, because nothing else in the
+  tree is one.
+- **It has no display region.** `asUITreeNodeWithInheritedOffset` files a node
+  with no `_displayX`/`_displayY`/`_displayWidth`/`_displayHeight` as a
+  `ChildWithoutRegion`, and every existing parser here navigates by display
+  region, so none of them can reach it.
+- **The text sits under `text`, never `_setText` or `_text`.** Those two are
+  what `getDisplayText` reads, and `getAllContainedDisplayTexts` runs over the
+  raw tree with no region filtering — the mission runner asks it whether the
+  whole reading contains "No room for more". A game log line landing in that
+  answer would be a refusal dialog the client never showed.
+- **`Nothing` and `Just []` are different answers.** The node is emitted even
+  with nothing to report, so its absence means "this host provides no game log"
+  (BotLab.exe, or `--no-game-log`) rather than "the client said nothing".
+  Collapsing those two is how a bot concludes a command was accepted because no
+  refusal arrived.
+
+`(combat)` and `(bounty)` are withheld from the bot. Combat is per-shot and
+4,484 of the 4,852 lines across five recorded runs, so carrying it would put the
+whole cost of this channel in noise no decision uses; bounty is already the
+host's own source for kills and ISK, and a second reader of those lines would be
+a second source of truth for the same statistic. Everything else is carried,
+including channels never seen here — the list is a deny-list, because a channel
+silently dropped for being unfamiliar is this repo's signature failure.
+
+**Scoped to the reading by construction.** `GameLogTail` drains its queue while
+the tree is being built, so the node holds what the client said between the
+previous read and this one, not a growing buffer that would have the bot
+answering a refusal from four minutes ago. The tail fans one file offset out to
+two queues, because the stderr echo consuming the lines is exactly what kept
+them from the bot in the first place — a second caller of a single-cursor tail
+would have given whichever ran first that cycle's lines and the other nothing,
+intermittently and without a word.
+
+**`ParseUserInterface.elm` is vendored six times, and the policy is all six,
+identically.** Nothing in this parser is app-specific, and a change that lands
+in one copy while the others silently lack it is its own bug. The one deliberate
+divergence in this repo — `BotFrameworkSeparatingMemory.elm`'s
+`previousStepsEffects`, mission-runner only — is documented as such below. The
+consistency is *checked* rather than remembered: `test_game_log_channel.py`
+compares the block byte for byte across the six copies and pins the type-name
+string the host and the parser have to agree on across languages.
+
+**Why a fork-local Elm change is acceptable here when #17 rejected one.** The
+GitHub-URL source mode fetches a whole app directory, so the vendored parser and
+the bot's decision logic travel together: a bot fetched from upstream has
+neither the field nor anything reading it, and one fetched from this fork has
+both. #17's case was the asymmetric one — the host would have answered a request
+only fork-local Elm could build, so under the other source mode the host-side
+machinery would exist complete and nothing would ever issue the request. There
+is no such asymmetry here, and the node costs an upstream-sourced bot nothing:
+having no display region, upstream's parser cannot see it either.
+
 The native Apple Silicon client (`~/Library/Application Support/EVE
 Online/SharedCache/tq/EVE.app/.../bin64/exefile`, launched from the separate
 Electron launcher) is a real Metal build, not Wine — but still embeds a **Python
@@ -486,7 +561,9 @@ re-read its whole settings string.
 Stats come from EVE's game log, which the host already tails: a `(bounty) N ISK
 added to next bounty payout` line is emitted once per rat killed and carries
 what it paid, so kills and ISK are a count and a sum of those. The `(combat)`
-lines are per shot, not per kill, and are no use for a kill count.
+lines are per shot, not per kill, and are no use for a kill count. Those two
+channels are the ones deliberately withheld from the bot's own view of this log
+(see the Architecture section), so this stays the only reader of them.
 
 **Applying settings live** is the console's most useful trick and needs no
 restart. `GET /api/state` returns the current settings string; `POST
@@ -1189,6 +1266,34 @@ exists.
   see the Architecture section for why the bot has no channel that can carry a
   station name, and what would have to change to give it one. Until then this is
   reachable only from Python, and no bot has set a destination through it.
+- **EVE's own game log reaches the bot**, as
+  `ParsedUserInterface.gameLogEntriesSinceLastReading` — the refusals behind
+  issues #14, #19 and #27, which those features each had to infer indirectly
+  from something failing to change. The shape, the safety properties and the
+  vendoring policy are in the Architecture section.
+
+  **Verified without a live client, and that is most of what a live client
+  would have added.** 30 unit tests in
+  `tools/macos-host/tests/test_game_log_channel.py` cover the tail, the
+  filtering, the node and `_read_from_window`, replaying the real lines the
+  host echoed during five recorded runs — including a check that every one of
+  those ~4,850 recorded lines parses. The Elm half was driven end to end
+  off-line: a host-built reading, double-encoded exactly as the real one is,
+  through `decodeMemoryReadingFromString` and the real vendored
+  `parseUserInterfaceFromUITree` (mission-runner's copy and saxrat's), giving
+  the three lines back with their timestamps and channels intact, `Just []`
+  for a reading with nothing to report, `Nothing` for a host with no game log,
+  and `getAllContainedDisplayTexts` over the whole tree unchanged by the
+  node's presence.
+
+  **What is unproven is that any of it changes what the bot does**, because
+  nothing reads the field yet. A first consumer needs three things: a decision
+  that matches on `channel == Just "notify"` and the refusal's own wording, a
+  `BotMemory` field to carry the verdict (a reading's entries are gone by the
+  next one, so a branch that does not record what it saw sees it once), and a
+  live run that provokes the refusal — for #27's ammo load, guns firing and a
+  swap attempted. A run in which no refusal occurs proves only that nothing
+  broke.
 
 ## `route_setter.py` internals worth knowing before touching it again
 
@@ -1281,6 +1386,10 @@ for why ESI cannot replace it from inside a bot yet.
   system: Unknown" for a name that isn't a plain string in memory.
 - `MouseMoveRelative` and `CharacterDown`/`CharacterUp` (raw Unicode text input)
   aren't implemented in `botlab_host.py`.
+- Nothing reads `gameLogEntriesSinceLastReading` yet, so every guard that infers
+  a refusal indirectly still does — #27's ammo load retries for 50 readings on a
+  swap the client refused outright, and the learned lock range can still only be
+  taught by the first lock of an engagement.
 - No automated Elm-toolchain bootstrap if `elm` isn't on `PATH`.
 - `reload_drones.py` only searches the root Item hangar, no sub-folders. The
   mission runner's port of it inherits that, and also takes the first

@@ -53,6 +53,7 @@ type alias ParsedUserInterface =
     , messageBoxes : List MessageBox
     , layerAbovemain : Maybe UITreeNodeWithDisplayRegion
     , keyActivationWindow : Maybe KeyActivationWindow
+    , gameLogEntriesSinceLastReading : Maybe (List GameLogEntry)
     }
 
 
@@ -589,7 +590,78 @@ parseUserInterfaceFromUITree uiTree =
     , messageBoxes = parseMessageBoxesFromUITreeRoot uiTree
     , layerAbovemain = parseLayerAbovemainFromUITreeRoot uiTree
     , keyActivationWindow = parseKeyActivationWindowFromUITreeRoot uiTree
+    , gameLogEntriesSinceLastReading = parseGameLogEntriesSinceLastReadingFromUITreeRoot uiTree
     }
+
+
+{-| One line EVE's own client wrote to its game log, as carried into a reading
+by the macOS host in this fork. `channel` is the client's own bracketed
+category -- `notify` for a refusal, `None` for travel -- and is a `Maybe`
+because a node missing it is a host that did not say, not a line without one.
+-}
+type alias GameLogEntry =
+    { timestamp : Maybe String
+    , channel : Maybe String
+    , text : String
+    }
+
+
+{-| What the client said in its own game log since the previous reading.
+
+The client explains every refusal there and nowhere else -- "You cannot load or
+unload <weapon> while it is active", "You are already managing 6 targets, as
+many as you have skill to", "You cannot launch Acolyte I because you are already
+controlling 5 drones" -- while a bot that sees only the UI tree has to infer each
+of them from something else failing to change.
+
+`Nothing` and `Just []` are different answers and must stay so. `Nothing` is a
+host that provides no game log at all -- BotLab.exe, or this fork's host run
+with `--no-game-log` -- and reading that as "the client said nothing" is how a
+bot concludes a command was accepted because no refusal arrived.
+
+The node this reads is **not from the game client**: the macOS host appends it
+to the tree it emits, which is why its type name says so in full. It carries no
+display region, so it is invisible to every other parser in this module, and its
+text sits under `text` rather than `_setText`/`_text` so `getDisplayText` cannot
+reach it and mistake a logged line for something rendered on screen.
+
+Scoped to the reading by the host, which drains its queue as it builds the tree:
+these are the lines written since the previous read, not a growing buffer that
+would have a bot answering a refusal from four minutes ago.
+-}
+parseGameLogEntriesSinceLastReadingFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe (List GameLogEntry)
+parseGameLogEntriesSinceLastReadingFromUITreeRoot uiTreeRoot =
+    uiTreeRoot.uiNode.children
+        |> Maybe.withDefault []
+        |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
+        |> List.filter (.pythonObjectTypeName >> (==) syntheticGameLogNodeTypeName)
+        |> List.head
+        |> Maybe.map
+            (\gameLogNode ->
+                gameLogNode.children
+                    |> Maybe.withDefault []
+                    |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
+                    |> List.filterMap parseGameLogEntry
+            )
+
+
+syntheticGameLogNodeTypeName : String
+syntheticGameLogNodeTypeName =
+    "MacOsHostSyntheticGameLog"
+
+
+parseGameLogEntry : EveOnline.MemoryReading.UITreeNode -> Maybe GameLogEntry
+parseGameLogEntry entryNode =
+    case getStringPropertyFromDictEntries "text" entryNode of
+        Nothing ->
+            Nothing
+
+        Just text ->
+            Just
+                { timestamp = getStringPropertyFromDictEntries "timestamp" entryNode
+                , channel = getStringPropertyFromDictEntries "channel" entryNode
+                , text = text
+                }
 
 
 asUITreeNodeWithDisplayRegion :
