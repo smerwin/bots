@@ -881,6 +881,144 @@ in the last 45 s, and nothing else here marks it as a target.` — and only when
 nothing else would have selected the row, so the line means "this is new" rather
 than appearing beside every rat in the pocket.
 
+## When the tracker says Dock, the fight is over
+
+The mission runner's on-grid priority is the fight, then the looting, and only
+then travel — `decideActionInMissionPocket` wraps the whole travel branch in
+`decideActionInCombat`, so travel is the fallback reached once combat has
+nothing left to offer. That is the right default while a mission is in progress
+and the wrong one the moment it ends, because combat has something to offer for
+as long as anything on the grid is alive.
+
+Run 11 measured the cost. The tracker read `Illegal Activity (3 of 3) -- no
+instruction (next step: Dock)` on **77 consecutive in-space readings**; 386 of
+the 453 decision blocks inside them went to locking and shooting; and the first
+in-space click on that Dock button came **603 seconds** — just over ten minutes
+— after the label appeared, on the first reading where the overview finally read
+`Rats in overview: 0`. The objective was carrying no instruction the whole time:
+nothing left to destroy, retrieve or approach, and the only thing the tracker
+wanted was the trip back.
+
+**`dockOutranksTheFight` is the whole exception**, and it is placed rather than
+conditioned: it wraps the combat call inside `decideActionInMissionPocket`, so
+the fight becomes the fallback exactly where travel used to be. It fires only
+when the tracker's travel button reads `Dock` **and** the objective's
+`instructionTexts` is empty or blank.
+
+**Both halves are load-bearing, and the recordings say so.** Of the 1,738 `Dock`
+readings across the eleven recorded runs, 326 carry a live courier instruction
+(`Bring <a …>The Damsel</a> to …`) — a mission still asking for something — so
+the label alone would have disengaged on an unfinished objective.
+
+**The label is matched whole, never as a substring, because "Undock" contains
+"dock".** That is the label the tracker shows at the start of every mission, so
+a substring rule would read the ship's own departure as "the objective is
+complete" and try to leave from inside the station. The recordings carry ten
+distinct *text* travel labels — `Warp to Location`, `Destination Set`,
+`Warping`, `Dock`, `Set Destination`, `Preparing`, `Start Conversation`,
+`Undock`, `Abort Undock`, `Read Details` — and exactly one of them ends a
+mission.
+
+**The client can render a travel step as a glyph with no text at all, so any
+matcher on this field must fail closed.** Run 11 produced an eleventh "label"
+three times:
+
+```
+U+0002 U+0000 U+AD1D8 U+0001 U+0001 U+0000 U+0001
+```
+
+— six C0 control characters around one codepoint that is **unassigned**
+(category `Cn`, plane 10), *not* private-use. That distinction is the trap: a
+rule that recognised "not text" by private-use membership would classify this as
+text. It arrived on `Recon (3 of 3) -- You need to warp to the mission location`
+and the bot pressed the button carrying it, which is the ordinary travel
+behaviour and not something the Dock change touches.
+
+Both halves of the condition decline it independently, checked by running them
+rather than by reading them: `missionTravelStepIsDock` answers `False` for that
+string, and `missionHasNoOutstandingInstruction` answers `False` for the
+objective beside it. An exact comparison is what makes that automatic — a
+substring or "starts with" rule on a field that can hold arbitrary bytes has no
+such guarantee.
+
+It also has a lesson for the *tests*. Asserting "the set of travel labels is
+exactly these ten" fails the moment the client emits one of these, on a machine
+whose logs happen to contain it — which is what happened, on a run still being
+written. The assertion is over the **printable** labels, with the non-text case
+tested separately as the property that actually matters.
+
+**What still keeps the guns firing after `Dock` appears**, since the point of
+the branch is to stop:
+
+- **Anything warp disrupting the ship.** Docking is a warp, so a scrambler makes
+  leaving impossible and killing it is the only thing that restores the option —
+  the same reason `overviewEntryIsWarpDisruptingMe` sorts to the front of the
+  combat candidates. The branch hands the fight back **and says so every reading
+  it declines**, for `returnDronesToBay`'s reason. This is the one case where
+  being shot outranks leaving.
+- **Any other travel label**, and **an objective still carrying an
+  instruction** — both keep the old order untouched.
+- **A lost ship and the two retreats.** `recoverPodAfterShipLoss` still
+  short-circuits the docked-or-in-space split above all of this, and
+  `runAwayIfLowHealth` still runs before `decideActionWhenInSpace` is called at
+  all, so #32's damage-rate retreat outranks this branch. That is the right way
+  round: the retreat is the controller for "leave now, this is going badly" and
+  this one is for "the job is done, go home". There is no second one — this
+  branch presses the tracker's own button and owns no clock, no counter and no
+  memory.
+
+**Being shot, otherwise, does not keep the guns on**, and that is a decision.
+#40's rule stands while there is a fight to be in; once the tracker says Dock the
+answer to being shot is to leave. The recordings say the trade is cheap: over
+those 77 readings the client's combat log reported any incoming damage at all on
+**4** of them, at most **7 hitpoints** in a 45-second window against a threshold
+of 3,500. Were the damage real, the retreat above would have taken the reading
+before this branch saw it.
+
+**Drones leave through the recall that already exists.** The click is handed to
+`ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping`, exactly as the
+travel branch it hoists always did, so #7's lost drones and the give-up that
+followed apply unchanged and are not duplicated.
+
+**It clears itself, so it needs no bound.** Every condition is re-derived from
+the live reading: the moment the button stops reading `Dock` — the ship docked,
+the mission moved on, the tracker collapsed and took the button out of the tree —
+the fight is the bot's job again on that same reading. Nothing latches.
+
+Two decision-log lines carry it, and an operator should be able to see which:
+
+```
++ The objective is complete and the mission tracker says 'Dock' -- stop fighting and leave the rest of the field alone.
++ The mission tracker says 'Dock' and the objective asks for nothing more, but 'X' is warp disrupting this ship -- nothing leaves until that is dead, so keep fighting.
+```
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_dock_outranks_the_fight.py`: the two pure rules are
+run through the real `Bot.elm` in `elm repl` rather than mirrored in Python (copy
+the app to scratch, open `module Bot exposing (..)`, patch `elm-version`, drive
+it — twelve seconds), against every travel label and objective string the
+recordings contain, including the non-text one, which is rebuilt inside Elm with
+`Char.fromCode` since a NUL cannot go in a string literal; the *text*
+travel-label vocabulary is re-checked against `~/eve-bot-logs` so a client that
+starts writing a different readable label fails loudly; and the ordering, the
+scrambler decline, the drone recall and the absence of a counter are read out of
+the source. Reading a log a run is still appending to is safe — lines are taken
+one at a time and a trailing partial line is skipped.
+
+Confirmed by mutation, on the code and on the tests' own premises: a substring
+label match, re-wrapping the dock step in combat, dropping the scrambler
+decline, skipping the drone recall and ignoring the objective's instruction each
+fail it — and so do removing a known label from the list (so the drift check is
+live) and making every category count as text (so the glyph is covered by
+classification rather than by luck).
+
+**Not verified: any of this running.** What to watch on the first live run is the
+first line above arriving within a reading or two of `(next step: Dock)` showing
+up, followed by the drone recall and a dock — rather than another ten minutes of
+`I see a locked target`. The looting question is deliberately still open: a wreck
+holding the mission item is not optional the way ordinary salvage is, and this
+change does not answer it.
+
 ## Context-menu cascade robustness
 
 `EveOnline.BotFrameworkSeparatingMemory.elm`'s shared cascade logic
@@ -1922,6 +2060,16 @@ exists.
   check is whether `shipUI.moduleButtons` is genuinely empty on a capsule — the
   recordings show the *middle* row empty on every capsule reading, and every row
   being empty is the stronger form of that, inferred rather than observed.
+
+  And it now **stops fighting once the tracker says `Dock`** with the objective
+  carrying no instruction, instead of clearing the field first — run 11 spent ten
+  minutes and 386 combat decisions doing that after the mission was over. The
+  conditions that still keep it fighting, and why leaving beats shooting back,
+  are in "When the tracker says Dock, the fight is over" above. **Untested
+  against a live client**; the two pure rules behind it are run through the real
+  `Bot.elm` in `elm repl`. Watch for `The objective is complete and the mission
+  tracker says 'Dock'` arriving within a reading or two of the label, rather than
+  another stretch of `I see a locked target`.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
@@ -2167,6 +2315,12 @@ for why ESI cannot replace it from inside a bot yet.
   ship died, with 9,286 hitpoints of incoming fire landing between the old run's
   last log line and the new run's first reading. Nothing inside the bot can see
   that window. Dock or clear the grid before cycling.
+- **Looting has not been asked the question `Dock` was asked.** Once the tracker
+  says `Dock`, combat stops (see "When the tracker says Dock, the fight is
+  over"), but the looting branch keeps its old place under the fight and is
+  simply skipped along with it. That is right for ordinary salvage and wrong for
+  a wreck holding the mission item, and the two are not distinguished today —
+  `isNotableWreck` only asks whether a wreck is worth looting.
 - The damage-rate retreat's latch clears when nothing has hit the ship for a
   whole window, so a bot driven out of a pocket will be brought back into it by
   the mission logic and driven out again. Survivable, and better than the
