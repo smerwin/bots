@@ -3375,6 +3375,29 @@ approachConfiguredObjectIfPresent context =
             )
 
 
+{-| What the bot is currently trying to pick up off the grid, from either of the
+two things that can ask for one.
+
+The mission objective first, because it is the mission's own instruction, and
+because a courier pickup names cargo the gate refusal never would. The gate key
+second: it is only ever set while a gate has refused to open, and it is the
+answer for the missions whose objective says nothing about cargo at all -- run
+10's said only "You need to activate the Acceleration Gate".
+
+They cannot both be live and mean different things at once in any observed case,
+and if they ever are, the objective is the one the mission will actually clear on.
+
+-}
+itemToFetchFromTheGrid : BotDecisionContext -> Maybe String
+itemToFetchFromTheGrid context =
+    case courierCargoToLoad context of
+        Just objectiveCargo ->
+            Just objectiveCargo
+
+        Nothing ->
+            gateKeyWanted context
+
+
 {-| Some missions want an item that is sitting in a cargo container on grid
 rather than in the station hangar -- "Get the Relic" asks for an `Ancient
 Amarrian Relic` that is inside a `Cargo Container - Ancient Amarrian Relic`
@@ -3387,10 +3410,14 @@ cargo, then click its "Loot All". The menu-entry priority list includes
 "approach" for the same reason the acceleration gate's does -- from outside
 looting range the menu offers that instead, and a later tick's fresh right-click
 finds the loot entries once in range.
+
+Since #44 the wanted item can also be the key a locked acceleration gate named,
+which is why this asks `itemToFetchFromTheGrid` rather than the objective
+directly -- see `gateKeyItemNameFromRefusal`.
 -}
 lootMissionItemFromContainerIfPresent : BotDecisionContext -> Maybe DecisionPathNode
 lootMissionItemFromContainerIfPresent context =
-    case courierCargoToLoad context of
+    case itemToFetchFromTheGrid context of
         Nothing ->
             Nothing
 
@@ -6094,10 +6121,91 @@ gateLockedForWantOfAnItemFromGameLog readingFromGameClient =
         |> List.filter
             (\entry ->
                 stringContainsIgnoringCase "gate is locked" entry.text
-                    && stringContainsIgnoringCase "in your cargo hold" entry.text
+                    && stringContainsIgnoringCase gateKeyClosingMarker entry.text
             )
         |> List.head
         |> Maybe.map .text
+
+
+{-| The key the locked gate is asking for, taken out of the client's sentence.
+
+    ... you need to have R.S. Officer's Passcard in your cargo hold ...
+                         ^^^^^^^^^^^^^^^^^^^^^^^
+
+#41 stopped at reporting the refusal, on the grounds that the objective names no
+cargo so the loot path had nothing to look for. Half of that was wrong: the
+*client* names it, and the whole retrieval path -- `isLootableFor`,
+`lootableHoldingMissionItem`, `scrollOverviewToReveal`, the `prefer-wreck`
+setting -- already takes the item name as an argument. This is the missing
+source of that argument, and nothing downstream of it is new. The passcard was
+in a nearby wreck, and looting it by hand is what let run 10's mission continue.
+
+**Bounded by the same literal the matcher pins**, not by a wider one.
+`gateKeyClosingMarker` is the substring `gateLockedForWantOfAnItemFromGameLog`
+already requires, so the extraction cannot succeed on a sentence the matcher
+would not have accepted -- in particular the scrambled-gate refusal, which wants
+a fight rather than an errand. The opening marker is the narrower of the two and
+never appears alone in the corpus.
+
+The name is returned exactly as the client wrote it, punctuation and all, and
+handed to `isLootableFor` to match the same way every other item name is.
+"R.S. Officer's Passcard" carries two periods and an apostrophe, and inventing a
+second matching rule for them would be a rule with one observation behind it.
+What that costs is worth naming: a plain substring match means the *named
+container* branch only fires if an overview row literally contains the name, and
+a wreck's row carries the dead ship's name instead -- so a key inside a wreck is
+found by the blind wreck-opening branch, exactly as for every other mission item
+that comes out of something destroyed.
+
+-}
+gateKeyItemNameFromRefusal : String -> Maybe String
+gateKeyItemNameFromRefusal clientSentence =
+    let
+        lowercased =
+            String.toLower clientSentence
+
+        openingMarker =
+            "you need to have "
+    in
+    String.indexes openingMarker lowercased
+        |> List.head
+        |> Maybe.andThen
+            (\openingIndex ->
+                let
+                    nameStart =
+                        openingIndex + String.length openingMarker
+                in
+                String.indexes gateKeyClosingMarker lowercased
+                    |> List.filter ((<) nameStart)
+                    |> List.head
+                    |> Maybe.map (\nameEnd -> String.slice nameStart nameEnd clientSentence)
+            )
+        |> Maybe.map String.trim
+        |> Maybe.andThen
+            (\itemName ->
+                if String.isEmpty itemName then
+                    Nothing
+
+                else
+                    Just itemName
+            )
+
+
+{-| The right-hand edge of the item's name, and the substring that tells this
+refusal from the one that opens itself. One definition for both jobs so they
+cannot drift apart -- see `gateLockedForWantOfAnItemFromGameLog`.
+-}
+gateKeyClosingMarker : String
+gateKeyClosingMarker =
+    "in your cargo hold"
+
+
+{-| The key a latched locked-gate refusal is asking for, if it named one.
+-}
+gateKeyWanted : BotDecisionContext -> Maybe String
+gateKeyWanted context =
+    context.memory.gateLockedForWantOfAnItem
+        |> Maybe.andThen gateKeyItemNameFromRefusal
 
 
 {-| Whether this weapon is running, and so whether the client will refuse to
@@ -8567,7 +8675,11 @@ describeAccelerationGate context =
                    )
                 ++ (case context.memory.gateLockedForWantOfAnItem of
                         Just clientSentence ->
-                            " The client says it is locked: \"" ++ clientSentence ++ "\""
+                            " The client says it is locked: \""
+                                ++ clientSentence
+                                ++ "\" -- looking for '"
+                                ++ (gateKeyWanted context |> Maybe.withDefault "nothing I could name")
+                                ++ "'."
 
                         Nothing ->
                             ""
@@ -9542,30 +9654,50 @@ activateAccelerationGateIfPresent context =
                 in
                 if context.memory.gateLockedForWantOfAnItem /= Nothing then
                     Just <|
-                    -- The client has already said, in answer to this bot's own
-                    -- press, that it will not open this gate without an item in
-                    -- the hold. Nothing below can produce that item: the
-                    -- objective names no cargo, so `lootMissionItemFromContainer-
-                    -- IfPresent` has nothing to look for, and it is checked
-                    -- ahead of this branch anyway. Pressing again is the
-                    -- press/refuse/dismiss loop run 10 spent two minutes in.
+                    -- The client has said, in answer to this bot's own press,
+                    -- that it will not open this gate without an item in the
+                    -- hold. Pressing again is the press/refuse/dismiss loop run
+                    -- 10 spent two minutes in.
+                    --
+                    -- **Reaching this branch means the search is already over.**
+                    -- `lootMissionItemFromContainerIfPresent` is checked ahead
+                    -- of the whole gate path in `decideActionInMissionPocket`,
+                    -- and since #44 it is driven by the key the client named as
+                    -- well as by the objective's own cargo -- so if anything on
+                    -- the overview could still be holding it, that branch won
+                    -- this reading and this one was never called. Arriving here
+                    -- is the loot path answering "nothing left to open".
                     --
                     -- Checked before the range test rather than after it, so
                     -- the ship does not fly at a gate it has been told is shut.
                     -- Nothing is lost by that: only the nearest gate is ever
                     -- considered, and the verdict is cleared the moment the ship
-                    -- is no longer within reach of one.
+                    -- leaves reach or empties a container.
                     --
-                    -- Asking for help immediately, on one line from the client,
-                    -- rather than waiting for the bottom of the tree to notice.
-                    -- That give-up did fire in run 10 and did its job -- but 20
-                    -- minutes and 1,325 readings later, and saying only that
-                    -- nothing was happening. The client had said why on the
-                    -- first attempt.
+                    -- Asking for help on one line from the client rather than
+                    -- waiting for the bottom of the tree to notice. That give-up
+                    -- did fire in run 10 and did its job -- but 20 minutes and
+                    -- 1,325 readings later, and saying only that nothing was
+                    -- happening. The client had said why on the first attempt.
                     describeBranch
                         ("This acceleration gate will not open for this ship, and the client said why: \""
                             ++ (context.memory.gateLockedForWantOfAnItem |> Maybe.withDefault "")
-                            ++ "\" -- there is nothing on this grid the bot knows how to do about that."
+                            ++ "\" -- "
+                            ++ (case gateKeyWanted context of
+                                    Just itemName ->
+                                        "and nothing left on the overview looks like it might hold '"
+                                            ++ itemName
+                                            ++ "'."
+
+                                    Nothing ->
+                                        -- The sentence matched but named nothing
+                                        -- extractable, so there is no errand to
+                                        -- run. Said differently from the case
+                                        -- above, because "we looked and found
+                                        -- nothing" and "we never had anything to
+                                        -- look for" are different problems.
+                                        "and it named no item this bot could pick out of that sentence."
+                               )
                         )
                         askForHelpToGetUnstuck
 
@@ -10618,6 +10750,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         dronesInSpaceCountNow =
             dronesInSpaceCount context.readingFromGameClient
 
+        -- A container that has just been emptied, on this reading. Two fields
+        -- read it: `lootedWreckIds` records which one, and the locked-gate
+        -- verdict forgets itself, because the hold may now hold the key.
+        containerEmptiedThisReading =
+            case openWreckLootWindowAndId context.readingFromGameClient of
+                Just ( lootWindow, wreckId ) ->
+                    openContainerIsEmpty lootWindow
+                        && not (List.member wreckId botMemoryBefore.lootedWreckIds)
+
+                Nothing ->
+                    False
+
         -- The agent offering to complete a mission is the agent asserting one
         -- is in progress. Read here rather than in the decision tree so the
         -- assertion can be counted across readings, including the ones where
@@ -10929,8 +11073,8 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         --
         -- Capped so a long session cannot grow this without bound.
         case openWreckLootWindowAndId context.readingFromGameClient of
-            Just ( lootWindow, wreckId ) ->
-                if openContainerIsEmpty lootWindow && not (List.member wreckId botMemoryBefore.lootedWreckIds) then
+            Just ( _, wreckId ) ->
+                if containerEmptiedThisReading then
                     wreckId :: botMemoryBefore.lootedWreckIds |> List.take 200
 
                 else
@@ -11093,10 +11237,27 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- session, this one asks for help and the run continues, so a gate
         -- unlocked by hand in the next pocket must not still read as locked.
         --
+        -- Cleared again the moment a container is emptied, which is what makes
+        -- the retrieval a loop that ends rather than one verdict deciding the
+        -- rest of the session. The bot has just taken everything out of
+        -- something and the key may be aboard, so the gate is asked again --
+        -- and if it is still locked the client says so again and this re-latches
+        -- on *that* reading. Nothing is ever re-latched on the strength of a
+        -- verdict formed before the loot.
+        --
+        -- That loop terminates for the reason `lootableHoldingMissionItem`
+        -- documents: each container emptied drops out of the candidate list, so
+        -- the search shrinks, and when it is empty the gate branch asks for help
+        -- naming what it was looking for.
+        --
         -- Reachable in both directions: it is set from a line the client writes
         -- in answer to the Activate press below, which only happens with the
-        -- gate in reach, and cleared by the first reading after the ship leaves.
-        if not (accelerationGateIsWithinReach context.readingFromGameClient) then
+        -- gate in reach, and cleared by the first reading after the ship leaves
+        -- or the first container it empties.
+        if
+            not (accelerationGateIsWithinReach context.readingFromGameClient)
+                || containerEmptiedThisReading
+        then
             Nothing
 
         else

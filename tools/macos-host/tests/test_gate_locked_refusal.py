@@ -85,8 +85,63 @@ def matcher_body(source):
     return source[start:end]
 
 
+def string_constant(source, name):
+    """A top-level `name : String` / `name = "..."` definition's value."""
+    match = re.search(
+        r'^' + name + r' : String\n' + name + r' =\n\s+"([^"]*)"',
+        source, re.MULTILINE)
+    if match is None:
+        raise AssertionError("no String constant named " + name)
+    return match.group(1)
+
+
 def matcher_substrings(source):
-    return re.findall(r'stringContainsIgnoringCase "([^"]+)"', matcher_body(source))
+    """The substrings the matcher requires, with named constants resolved.
+
+    One of the two is `gateKeyClosingMarker` rather than a literal, because the
+    extraction below uses the same string as the item name's right-hand edge --
+    see `gate_key_markers`. Resolving it here keeps these cases checking the
+    real value rather than the name.
+    """
+    found = []
+    for literal, identifier in re.findall(
+            r'stringContainsIgnoringCase (?:"([^"]+)"|([a-zA-Z][a-zA-Z0-9_]*))',
+            matcher_body(source)):
+        found.append(literal if literal else string_constant(source, identifier))
+    return found
+
+
+def gate_key_markers(source):
+    """The two markers `gateKeyItemNameFromRefusal` slices the item out between."""
+    start = source.index("gateKeyItemNameFromRefusal : String -> Maybe String")
+    end = source.index("\n\n\n", start)
+    body = source[start:end]
+    opening = re.search(r'openingMarker =\n\s+"([^"]*)"', body)
+    if opening is None:
+        raise AssertionError("gateKeyItemNameFromRefusal names no openingMarker")
+    return opening.group(1), string_constant(source, "gateKeyClosingMarker")
+
+
+def extracted_item_name(text, markers):
+    """What `gateKeyItemNameFromRefusal` does, on one sentence.
+
+    Mirrored rather than executed: the function is not exposed from the `Bot`
+    module and this suite reads Elm as text, the same way
+    `test_ammo_load_refusal.py` does. So this pins the markers and the rule
+    against real sentences; that the Elm evaluates the rule the same way is
+    checked by `compile_bot.sh` and by reading it, not here.
+    """
+    opening, closing = markers
+    lowered = text.lower()
+    opening_at = lowered.find(opening.lower())
+    if opening_at < 0:
+        return None
+    name_start = opening_at + len(opening)
+    closing_at = lowered.find(closing.lower(), name_start)
+    if closing_at < 0:
+        return None
+    name = text[name_start:closing_at].strip()
+    return name or None
 
 
 def matches(text, substrings):
@@ -290,6 +345,117 @@ class TheGateBudgetIsSpentByTheOffer(unittest.TestCase):
         self.assertIn("0", branch_results(self.body),
                       "gateWithinReachTicks never resets, so it would carry "
                       "one grid's refusals onto the next")
+
+
+class TheKeyIsTakenOutOfTheClientsSentence(unittest.TestCase):
+    """#44: the client names the item, so the loot path has something to seek.
+
+    #41 stopped at reporting the refusal because "the objective names no cargo".
+    The objective does not; the sentence does, and everything downstream --
+    `isLootableFor`, `lootableHoldingMissionItem`, `prefer-wreck` -- already
+    takes the name as an argument.
+    """
+
+    def setUp(self):
+        self.markers = gate_key_markers(bot_elm())
+
+    def test_extracts_the_item_from_run_10s_sentence(self):
+        self.assertEqual(
+            extracted_item_name(LOCKED_FOR_WANT_OF_AN_ITEM, self.markers),
+            "R.S. Officer's Passcard")
+
+    def test_keeps_the_punctuation_the_client_wrote(self):
+        # Two periods and an apostrophe. `isLootableFor` matches the name as a
+        # plain substring, so anything stripped here is a row that never
+        # matches -- and inventing a second matching rule for punctuation would
+        # rest on this one observation.
+        name = extracted_item_name(LOCKED_FOR_WANT_OF_AN_ITEM, self.markers)
+        self.assertIn("'", name)
+        self.assertIn("R.S.", name)
+
+    def test_extracts_another_mission_s_item(self):
+        self.assertEqual(
+            extracted_item_name(
+                "This gate is locked! To activate it, you need to have "
+                "Zbikoki's Hacker Card in your cargo hold.",
+                self.markers),
+            "Zbikoki's Hacker Card")
+
+    def test_extracts_nothing_from_the_scrambled_gate(self):
+        self.assertIsNone(
+            extracted_item_name(LOCKED_UNTIL_THE_POCKET_IS_CLEAR, self.markers))
+
+    def test_extracts_nothing_when_the_name_is_empty(self):
+        self.assertIsNone(extracted_item_name(
+            "This gate is locked! you need to have  in your cargo hold.",
+            self.markers))
+
+    def test_the_opening_marker_is_the_whole_clause(self):
+        # Shortening it to "have " still extracts the right name from run 10's
+        # sentence, which is why this is asserted rather than left to the cases
+        # above: the clause is what makes the left edge unambiguous in a
+        # sentence that has not been seen yet.
+        opening, _ = self.markers
+        self.assertEqual(opening.strip().lower(), "you need to have")
+
+    def test_the_closing_marker_is_the_substring_the_matcher_pins(self):
+        # One string doing both jobs, so the extraction can never succeed on a
+        # sentence the matcher would have rejected. The Elm shares the constant
+        # outright; this checks the shared value is the right one.
+        _, closing = self.markers
+        self.assertIn(closing.lower(),
+                      [sub.lower() for sub in matcher_substrings(bot_elm())])
+
+    def test_the_matcher_refers_to_the_shared_constant(self):
+        self.assertIn("gateKeyClosingMarker", matcher_body(bot_elm()))
+
+
+class TheKeyReachesTheLootPath(unittest.TestCase):
+    """The extraction is worth nothing unless something acts on it.
+
+    Issue #12 shipped a guard that was written and never read. These check the
+    whole chain exists: the refusal names an item, the item reaches the picker,
+    and the verdict lets go once something has been looted.
+    """
+
+    def setUp(self):
+        self.source = bot_elm()
+
+    def test_the_loot_path_asks_for_both_sources(self):
+        start = self.source.index(
+            "lootMissionItemFromContainerIfPresent : BotDecisionContext")
+        body = self.source[start:self.source.index("\n\n\n", start)]
+        self.assertIn("itemToFetchFromTheGrid", body,
+                      "the loot path still reads the objective's cargo only, "
+                      "so a gate key would never be looked for")
+
+    def test_the_two_sources_are_the_objective_then_the_gate_key(self):
+        start = self.source.index("itemToFetchFromTheGrid : BotDecisionContext")
+        body = self.source[start:self.source.index("\n\n\n", start)]
+        self.assertIn("courierCargoToLoad", body)
+        self.assertIn("gateKeyWanted", body)
+        self.assertLess(body.index("courierCargoToLoad"), body.index("gateKeyWanted"),
+                        "the mission's own objective must win over the gate key")
+
+    def test_emptying_a_container_forgets_the_verdict(self):
+        # Otherwise one refusal decides the rest of the session: the key goes
+        # in the hold and the gate is never asked again.
+        body = record_field_body(self.source, "gateLockedForWantOfAnItem")
+        self.assertIn("containerEmptiedThisReading", body)
+
+    def test_the_looted_list_and_the_verdict_share_one_definition(self):
+        # Two copies of "was this container just emptied" would drift, and the
+        # drift is silent in both directions.
+        self.assertIn("containerEmptiedThisReading",
+                      record_field_body(self.source, "lootedWreckIds"))
+
+    def test_the_give_up_says_what_it_was_looking_for(self):
+        start = self.source.index(
+            "activateAccelerationGateIfPresent : BotDecisionContext")
+        body = self.source[start:self.source.index("\n\n\n", start)]
+        self.assertIn("gateKeyWanted", body,
+                      "the give-up must name the item, or an operator reading "
+                      "it learns nothing the previous version did not say")
 
 
 class AgainstTheRecordedGameLogs(unittest.TestCase):
