@@ -12582,18 +12582,28 @@ Same shape of evidence as `ammoSwapMenuEntriesBeforeTrusted`, and the same trap:
 "the row is not there" is an inference from absence, and a window caught before
 it has finished building says that about every row at once.
 
-Three, from the only live capture of a populated one this repo has -- CLAUDE.md's
-step 2, where the window carried its caption and two collapsed group headers,
-`Corporations (1)` and `Stations (26)`. So three is at the floor of a real window
-and above one that has only just appeared, which carries its caption alone. It is
-a floor rather than a fit: nothing has ever counted the texts of this window in a
-log, because nothing ever printed them. `describeSearchResults` prints the count
-every reading now, so the first run that opens one either confirms this number or
-moves it.
+Three, and the number is measured rather than guessed. Run 19's results window
+was still on screen afterwards and was read with `eve_read.py`: **four** rendered
+texts, and they decompose exactly. Two are the window's own furniture, present
+whatever the search did -- the `Search Results` caption and the `Close` label at
+the foot. The other two are one text per collapsed result group, here
+`Characters (9)` and `Corporations (1)`. CLAUDE.md's earlier live capture has the
+same shape with a different pair of groups.
+
+So the furniture is two and a group is one, and three is "the furniture plus at
+least one group" -- the smallest window that has said anything at all. Below it
+the window has produced nothing to read, and reading _absence_ out of it is the
+`ammoSwapMenuEntriesBeforeTrusted` mistake.
 
 It gates the negative conclusion only. A window offering `Stations (` is acted on
 however few texts it has, so a search matching nothing but stations is not made
 to wait for a threshold it would never reach.
+
+**On its own it would not have saved run 17 or run 19.** Both windows were above
+this line -- four rendered texts, two real groups, and no `Stations (` among
+them. That is the point of separating the two halves: the threshold stops the bot
+believing a window that has not spoken, and the diagnostics below are what
+explain a window that has.
 
 -}
 searchResultsTextsBeforeTrusted : Int
@@ -12653,10 +12663,18 @@ unverified: a `ListWindow` may virtualise the way the overview does, and
 in `inTree` and not in `rendered` _is_ that case, decided from a single reading --
 which is why both are carried rather than only the one the click needs.
 
+`clientHint` is the window's own `noContentHint`, and it is the most direct
+evidence in the whole reading: the client writes the query it actually ran into
+it. Read live off the window run 19 left behind, it says
+`No results returned for "eueu"` -- for a search the decision log records as
+`Search for 'Emperor Family Bureau'`. Whatever mangles that is upstream of
+everything here, and nothing was reading the one field that says so.
+
 -}
 type alias SearchResultsContents =
     { rendered : List String
     , inTree : List String
+    , clientHint : Maybe String
     }
 
 
@@ -12670,6 +12688,19 @@ searchResultsContents window =
         EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode
             |> List.map String.trim
             |> List.filter (String.isEmpty >> not)
+    , clientHint =
+        window.uiNode.dictEntriesOfInterest
+            |> Dict.get "noContentHint"
+            |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.string >> Result.toMaybe)
+            |> Maybe.map String.trim
+            |> Maybe.andThen
+                (\hint ->
+                    if String.isEmpty hint then
+                        Nothing
+
+                    else
+                        Just hint
+                )
     }
 
 
@@ -12702,6 +12733,13 @@ describeSearchResultsContents contents =
                                 ""
                            )
            )
+        ++ (case contents.clientHint of
+                Just hint ->
+                    ". The client's own note on the window: \"" ++ hint ++ "\""
+
+                Nothing ->
+                    ""
+           )
 
 
 {-| Which of the four things run 17 could have been, said in the log line rather
@@ -12720,6 +12758,14 @@ is decidable from the reading in front of the branch:
     matched nothing or results that never arrived;
   - rows, but no `Stations (` group -- the search matched other kinds of thing
     and no station, so the query or the group's label is wrong.
+
+The last of those is what run 17 and run 19 both were, established by reading run
+19's leftover window off the live client: `Characters (9)`, `Corporations (1)`,
+and no stations at all. Two different stations, two different derived queries,
+the same window -- so it is not the parentheses in one name and not one bad
+substring. The window's own `noContentHint` names a query that is not the one the
+bot logged typing, which is the thread to pull and is not this branch's to fix.
+What this branch owes is saying so on the reading it happens.
 
 -}
 diagnoseSearchResults :

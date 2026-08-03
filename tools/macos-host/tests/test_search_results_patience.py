@@ -1,4 +1,4 @@
-"""The search-results branch, and the two things run 17 proved it was missing.
+"""The search-results branch, and what runs 17 and 19 proved it was missing.
 
 Run 17 was the first live execution of the home-station trip. The bay was empty,
 the trip began, `searchQueryForStation` derived the typable tail correctly and
@@ -8,9 +8,18 @@ the search ran 25 times. Then a Search Results window appeared and
     ++++ I am stuck here and need help to continue.
 
 repeated for **192 consecutive readings** -- the whole of the last 119 seconds of
-the session. The wind-down never got past it, the ship never went home, and the
-recording cannot say why, because that line names what was not found and never
-what was.
+the session. Run 19 then did the same thing on a *different* station,
+`Mabnen IV - Moon 1 - Emperor Family Bureau`, for **1,346 readings**, a quarter
+of that entire run. Neither recording can say why, because that line names what
+was not found and never what was.
+
+Run 19's window was still on screen afterwards and was read with `eve_read.py`.
+It holds four rendered texts -- the `Search Results` caption, the `Close` label,
+`Characters (9)` and `Corporations (1)` -- and no `Stations (` group at all. Its
+own `noContentHint` reads `No results returned for "eueu"`, for a search the
+decision log records as `Search for 'Emperor Family Bureau'`. Those numbers are
+what the constants below are calibrated against, and they are quoted here rather
+than paraphrased.
 
 Two properties are asserted here, and they are different properties.
 
@@ -21,6 +30,9 @@ window. `searchResultsTextsBeforeTrusted` gates the *negative* conclusion only -
 a window offering `Stations (` is acted on however few rows it has -- and the
 cases below fail if that ordering is inverted, because a threshold in front of
 the positive action would stall a search that matched nothing but stations.
+Note it would not by itself have saved either run: both windows were above the
+line. It stops the bot believing a window that has not spoken; the diagnostics
+are what explain a window that has.
 
 **The patience is bounded, and the counter can reach the bound.** A wait nothing
 ends is #34, #41 and #53, and a bound whose counter cannot advance is #34
@@ -61,6 +73,13 @@ RENDERED_ROW = ("<color=0xFF7BB2FF>0.9</color> Amarr VIII (Oris) - "
 
 # The collapsed group header the branch clicks to expand. CLAUDE.md's step 3.
 STATIONS_GROUP_LABEL = "Stations ("
+
+# Run 19's leftover results window, read off the live client. Two of these four
+# are the window's own furniture and two are one-per-result-group, which is the
+# whole calibration of `searchResultsTextsBeforeTrusted`.
+RUN_19_WINDOW_ROWS = ["Search Results", "Close", "Characters (9)",
+                      "Corporations (1)"]
+RUN_19_CLIENT_HINT = 'No results returned for "eueu"'
 
 # The line run 17 printed 192 times. Kept whole so a rewording that breaks a
 # log grep an operator already has is visible here.
@@ -240,14 +259,19 @@ class TheThresholdGatesOnlyTheNegative(unittest.TestCase):
             "only appear once the group is expanded")
 
     def test_the_threshold_is_above_an_empty_window_and_at_the_floor_of_a_real_one(self):
+        # Measured, not guessed. Run 19's window renders four texts: two are
+        # furniture present whatever the search did (the caption and the Close
+        # label) and two are one per collapsed result group. So the smallest
+        # window that has said anything is furniture plus one group.
         trusted = int_constant(self.source, "searchResultsTextsBeforeTrusted")
+        furniture = 2
         self.assertGreater(
-            trusted, 1,
-            "a window carrying only its caption would be believed")
-        # CLAUDE.md's live capture: the caption and two collapsed group headers.
+            trusted, furniture,
+            "a window carrying nothing but its own furniture would be believed")
         self.assertLessEqual(
-            trusted, 3,
-            "above the only populated window this repo has ever recorded")
+            trusted, len(RUN_19_WINDOW_ROWS),
+            "above the window run 19 was actually looking at, so a real one "
+            "would be distrusted and wait out the whole bound")
 
     def test_the_group_header_matches_what_the_client_writes(self):
         with open(CLAUDE_MD, encoding="utf-8") as handle:
@@ -300,6 +324,13 @@ class TheBranchSaysWhatItSaw(unittest.TestCase):
         contents = function_body(self.source, "searchResultsContents")
         self.assertIn("getAllContainedDisplayTextsWithRegion", contents)
         self.assertIn("getAllContainedDisplayTexts ", contents)
+
+    def test_the_clients_own_note_on_the_window_is_read(self):
+        # `noContentHint` is where the client writes the query it actually ran,
+        # and it is the one field that disagrees with the decision log. The key
+        # is read off the live window rather than remembered.
+        contents = function_body(self.source, "searchResultsContents")
+        self.assertIn('Dict.get "noContentHint"', squeezed(contents))
 
 
 class ElmRepl:
@@ -372,9 +403,10 @@ def elm_list(texts):
                             for text in texts) + " ]"
 
 
-def elm_contents(rendered, in_tree=None):
-    return "{ rendered = %s, inTree = %s }" % (
-        elm_list(rendered), elm_list(in_tree if in_tree is not None else rendered))
+def elm_contents(rendered, in_tree=None, client_hint=None):
+    return "{ rendered = %s, inTree = %s, clientHint = %s }" % (
+        elm_list(rendered), elm_list(in_tree if in_tree is not None else rendered),
+        'Just "%s"' % client_hint.replace('"', '\\"') if client_hint else "Nothing")
 
 
 def elm_diagnosis(rendered, in_tree, group_offered):
@@ -489,6 +521,29 @@ class TheContentsPrintAsSomethingReadable(unittest.TestCase):
             '\'Search Results\', \'Stations (26)\'"'
             % elm_contents(["Search Results", "Stations (26)"])])
         self.assertEqual([True], answers)
+
+    def test_run_19_s_own_window_prints_as_the_four_rows_it_holds(self):
+        # The line the give-up would have carried, against the window run 19 was
+        # looking at while it said the results did not offer the station.
+        answers = self.repl.evaluate([
+            'describeSearchResultsContents %s == "4 rendered of 4 in the tree: '
+            "'Search Results', 'Close', 'Characters (9)', 'Corporations (1)'\""
+            % elm_contents(RUN_19_WINDOW_ROWS)])
+        self.assertEqual([True], answers)
+
+    def test_the_clients_own_note_is_quoted_when_there_is_one(self):
+        # The field that disagrees with the decision log. Run 19 logged
+        # `Search for 'Emperor Family Bureau'` and the window says it searched
+        # for "eueu"; a line that drops this is a line that cannot say so.
+        with_hint = elm_contents(RUN_19_WINDOW_ROWS,
+                                 client_hint=RUN_19_CLIENT_HINT)
+        without_hint = elm_contents(RUN_19_WINDOW_ROWS)
+        answers = self.repl.evaluate([
+            'describeSearchResultsContents %s |> String.contains "eueu"' % with_hint,
+            'describeSearchResultsContents %s |> String.contains "own note"' % with_hint,
+            'describeSearchResultsContents %s |> String.contains "own note"' % without_hint,
+        ])
+        self.assertEqual([True, True, False], answers)
 
     def test_the_two_counts_differ_when_rows_are_unrendered(self):
         # An expanded group of 26 stations with two rows rendered is what
