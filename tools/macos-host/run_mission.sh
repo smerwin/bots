@@ -70,14 +70,36 @@ SESSION_DURATION_MINUTES=180 ./run_mission.sh        # same, via the environment
 # 32000 was for a Coercer's 33 km and does not carry over. Weapon range is a
 # separate limit: locking something does not mean the guns reach it.
 #
-# The run-away thresholds dock the ship up when it drops below them. Shield
-# is disabled (-1) because shields recharge and dipping into them is normal
-# in a mission; armor damage is not, so this is a real warning sign.
+# The run-away thresholds pull the ship out when it drops below them.
 #
-# This is only the trip level. The bot stays committed to leaving until armor
-# climbs back over runAwayRearmPercent (90) in Bot.elm -- one threshold on its
-# own flip-flops, since a repairer running under fire walks the value back and
-# forth across the line and the decision follows it.
+# The shield one used to be disabled (-1), on the reasoning that shields
+# recharge and dipping into them is normal while armor damage is not. That
+# reasoning is right about a mission and wrong about this hull, and issue #32
+# is what it cost: the ship is shield-tanked, so armor cannot take a point of
+# damage until the shield is at zero. Across the recorded runs the shield
+# reached 9%, 12% and 44% while the armor gauge sat at exactly 100% in every
+# one of thousands of samples. Disabling shield therefore did not leave one
+# guard, it left none -- the guard that remained was on a value that cannot
+# move until the tank is already gone.
+#
+# 25 is set from those same runs: the two sessions that went below it went to
+# 9% and 12%, which is most of the tank spent, and the worst any other run
+# reached was 44%. Both of those two completed their missions, so this will
+# cost an aborted mission on a run like them. That is the trade, taken
+# deliberately.
+#
+# run-away-incoming-damage-threshold is the guard that needs no gauge at all:
+# EVE's own combat log, summed by the host, over a rolling 45-second window.
+# 3500 separates the session the ship was lost in (peak 4101) from all fifteen
+# it survived (worst 3114). It is also the bot's own default, so it applies to
+# a run started without this launcher. See the Bot.elm header -- the number is
+# calibrated for this hull and does not carry to another.
+#
+# All three are only the trip level. The bot stays committed to leaving until
+# hitpoints climb back over runAwayRearmPercent (90) in Bot.elm, or -- for the
+# damage guard -- until nothing has hit the ship for a whole window. One
+# threshold on its own flip-flops, since a repairer running under fire walks
+# the value back and forth across the line and the decision follows it.
 #
 # No attack-object entries are needed for the ordinary case: when a mission
 # objective names a structure to kill ("You need to destroy the <a ...>Drone
@@ -198,8 +220,9 @@ approach-object=Amarr Chapel
 approach-object=Amarr-Caldari Mediation Center
 approach-object=Survey Ship
 decline-mission=Survey Rendezvous
-run-away-shield-hitpoints-threshold-percent=-1
-run-away-armor-hitpoints-threshold-percent=70"
+run-away-shield-hitpoints-threshold-percent=25
+run-away-armor-hitpoints-threshold-percent=70
+run-away-incoming-damage-threshold=3500"
 
 # How long this session should run. The bot stops taking new work and docks
 # once ~200 seconds remain, so it finishes parked in a station rather than

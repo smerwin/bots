@@ -149,6 +149,36 @@ a second source of truth for the same statistic. Everything else is carried,
 including channels never seen here — the list is a deny-list, because a channel
 silently dropped for being unfamiliar is this repo's signature failure.
 
+**The combat lines are withheld; their total is not.** Issue #32 wanted a
+retreat that does not depend on the ship's HUD, and the only instrument that can
+give it is the one channel the bot could not see. Both halves of that turn out
+to be right at once: the *lines* are noise a decision has no use for — 134,641
+of them across the recorded sessions, peaking at 54 inside a single three-second
+reading — while the *total* is exactly what the decision wants and is one
+number. So the host sums it and appends a second synthetic node,
+`MacOsHostSyntheticIncomingDamage`, carrying `damage`, `hits` and `topAttacker`,
+lifted into `ParsedUserInterface.incomingDamageSinceLastReading : Maybe
+IncomingDamage`. Same four safety properties as the game-log node, same
+`Nothing`-versus-present distinction — a summary of zero is "the client reported
+no incoming fire" and an absent node is "this host does not carry the channel",
+and only the second may ever be read as "we do not know".
+
+Summing it host-side rather than in Elm also puts the one dangerous distinction
+in one tested place. `N from X` is damage taken and `N to X` is damage dealt,
+they are the same shape, and there are more than twice as many of the second —
+a retreat armed by the bot's own guns would fire hardest when the fight was
+going well. `tests/test_incoming_damage.py` checks the matcher against real
+recorded lines in both directions, plus the four `(combat)` lines in the whole
+corpus that carry "from" and are not damage (`Warp scramble attempt from …`),
+which is why the pattern is anchored on the leading number rather than the word.
+
+**A reading's entries are gone by the next reading, and that shapes every
+consumer.** A branch that reads them and writes nothing down sees a refusal once
+and then behaves exactly as it did before — so the verdict has to be recorded in
+`BotMemory`, in `updateMemoryForNewReadingFromGame`, which is the only place that
+can write memory and the one place that never sees the decision. The ammo swap's
+`loadRefusedByClient` is the worked example.
+
 **Scoped to the reading by construction.** `GameLogTail` drains its queue while
 the tree is being built, so the node holds what the client said between the
 previous read and this one, not a growing buffer that would have the bot
@@ -784,13 +814,87 @@ the parser drops any node whose display region it cannot read, so a slot can
 leave and rejoin while nothing moves on screen. Identify a module by position —
 sort the row by `x` — not by index. Indexing clicked a neighbouring module live.
 
-`isActive` reads `ramp_active` off the button, and on this client that entry does
-not exist until the module has run: the `ShipModuleButtonRamps` widget holding it
-is created when the module starts cycling and destroyed when it stops. So a
-module reads `Nothing` when off-and-never-run, `Just True` when running, and
-`Just False` only when off after having run. Treat `Nothing` as off. `isBusy` and
-`isHiliteVisible` are permanently `False` here — their sprites don't exist in
-this build — so they are no use as a second opinion.
+`isActive` reads `ramp_active` off the button. **That entry is the module's duty
+cycle, not whether it is switched on**, and the previous version of this
+paragraph — "`Just True` while running" — was wrong in the specific way that
+cost #34.
+
+Measured, read-only, 92 samples over 240s of run 9 (#35): on the weapon,
+`ramp_active` flipped **fourteen times** in those 240 seconds, 5–20s apart,
+while `isInActiveState` stayed `True` across every one of them. The gun never
+switched off. So `ramp_active = False` means *between cycles*, and a module that
+is firing reads `False` for a good part of every cycle. Middle and low slots
+behaved differently and consistently — they went `True` at 60–70s and never came
+back down, which is what a repairer or prop mod cycling continuously looks like.
+
+That is the whole of run 8. `gunsSilencingTicks` reset whenever no gun *read* as
+firing, so it reset inside every cycle and never reached 2; and a wait for "the
+ramp to stop" is satisfied by the gap between cycles rather than by the guns
+going quiet. Both halves of #34 were reading this field. Nothing in the ammo path
+depends on it any more — #38's deadline was deliberately built to hold with this
+reading worthless — but anything new that treats `isActive` as "this module is
+doing its job" is repeating the mistake. `isInActiveState` is the entry that
+means that, and it is not wired to anything yet; see below.
+
+**`Nothing` and `Just False` are still different facts.** The entry is absent
+until the module has cycled at all — for the first ~60s of that sample no module
+carried `ramp_active`, and it then appeared per module as each first cycled
+(low slot 60.3s, mediums 65.5s and 70.7s, the weapon 88.8s). This confirms the
+`ShipModuleButtonRamps` widget being created when cycling starts. Treating
+`Nothing` as off is still the right default, but it conflates "off" with "has
+never run", so never store it as a defaulted `Bool`.
+
+### The sprites really are missing; the state is somewhere else
+
+`isBusy` and `isHiliteVisible` are permanently `False` here, and that much is
+confirmed: a walk of a top-row button's whole subtree finds exactly one sprite,
+`underlay`. There is no `hilite` and no `busy` in this build, so those two
+lookups cannot return anything else however the module behaves.
+
+**The conclusion this file used to draw from that — that the client does not
+expose the state — was wrong.** The button's own `dictEntriesOfInterest` carries
+twelve entries that nothing had ever read: `ramp_active`, `isInActiveState`,
+`isDeactivating`, `effect_activating`, `online`, `blinking`, `grey`, `quantity`,
+`autoreload`, `autorepeat`, `isMaster`, `waitingForActiveTarget`. Same shape as
+#26's tooltip dead end, where the workaround also turned out to be a different
+reading rather than an absent one. Assume the state is present somewhere before
+concluding the client withholds it.
+
+All twelve are now parsed onto `ShipUIModuleButton.stateFromDictEntries`, under
+the client's own key names, and cost twelve dictionary lookups on a node the
+parser already holds — no extra traversal, unlike the two sprite lookups above.
+Every field is a `Maybe`; an entry that does not decode is `Nothing`, never a
+guessed `False`.
+
+What the same 240s sample says about the rest:
+
+| entry | observed | reading |
+|---|---|---|
+| `isInActiveState` | `True` on all four modules, all 92 samples | **switched on** — the flag `isActive` should have been |
+| `isDeactivating` | `False` throughout, never once `True` | **unobserved** — nothing switched a module off in the window |
+| `effect_activating` | `0`, except a single `1` at 175.3s, 2.6s before a cycle began | a brief pulse at **activation** |
+| `waitingForActiveTarget` | absent until 141.3s, then `0` on all four at once | `0` = not waiting; appears late, needs more observation |
+| `online` | `True` throughout | |
+| `blinking` / `grey` / `quantity` | `0` throughout | |
+| `autoreload` / `autorepeat` | `1` / `1000` throughout | settings, not state |
+| `isMaster` | `1` on the high slot only | identifies the weapon group's master |
+
+**Nothing decides anything from them, and that is deliberate.** This is one 240s
+window on one fit, and the leg #34 actually needed has zero observations:
+`isDeactivating` is named for exactly the state that wait cared about and was
+never once `True`, because the bot performed no ammo swap while the sampler ran
+and nothing else switched a module off.
+
+**Capturing that leg is what the status line is for.** The mission runner prints
+five entries every reading —
+`Top-row modules (ramp_active/isInActiveState/isDeactivating/effect_activating/waitingForActiveTarget)`
+— with `T`/`F` for a boolean, the number for a numeric entry, and `-` for an
+entry **absent from the tree**, which is a distinct output from `F` and `0` on
+purpose. So the next run that performs an ammo swap records the switch-off
+without anyone watching: read those columns across idle → activated → firing →
+commanded off → settled. The other seven entries are parsed and available but not
+printed, since this line goes out thousands of times a run and all seven were
+constant across the whole sample.
 
 A module button is a **toggle**, so a click repeated before the client has shown
 its result switches the module back off. `moduleButtonClickSettlingSteps` gives a
@@ -814,6 +918,128 @@ the previous step's effects moved the mouse onto. **Whether hovering raises a
 ever hovered a module here before. Nothing depends on the answer any more: the
 ammo swap reads the module's own context menu instead, and uses the tooltip only
 to derive a crossover distance when `ammo-swap-range` is unset.
+
+## Retreating: the HUD hitpoint gauge is the weakest instrument here
+
+Issue #32 was filed on run 7 losing the ship while the bot's health reading sat
+at 100% shield / 100% armour for all 724 samples. The reading was telling the
+truth. Reconstructing run 7's wall clock from its `(Ns)` gaps and lining it up
+against the client's own log puts the ship's death at 04:26:59 and the bot's
+first reading at roughly 04:27:29 — and from 04:27:33 the client is answering
+every lock attempt with `The ship you are piloting does not have targeting
+systems installed`, 173 times. **Run 7 flew a capsule from its first reading to
+its last**, and a capsule genuinely reads 100/100.
+
+That matters for three reasons.
+
+**The fatal engagement happened while nothing was watching.** All 9,286 hitpoints
+of it landed between 04:23 and 04:27 — after run 6's log stops at 04:23:05 and
+before run 7's first reading. Run 7's log shows the slow `elm make` path
+("Verifying dependencies (0/17)" through 17/17) filling that gap. So the ship sat
+in a hostile pocket, unattended, for four minutes of a run's own startup. No
+guard inside the bot can cover that, and none of the ones below would have.
+Cycling a run inside a mission pocket is the risk; dock, or clear the grid,
+before stopping one.
+
+**Nothing in #32's list would have saved run 7 either**, because by the bot's
+first reading the ship was already gone. What run 7 needed is #33's ship-loss
+detection. The guards below are for the next engagement the bot is actually
+present for.
+
+**The gauge is still not trustworthy, independently of any of that.** Across all
+eight recorded runs `ShipUI.hitpointsPercent` produced -1021821%, 2132822%,
+302023%, 8362%, 7711% and others, always for exactly one reading and always
+surrounded by sane values — run 8 reads 95, 95, 95, 2132822, 95. It is
+`gauge._lastValue * 100` read out of a widget in the client's live memory while
+the client is mutating it, so a single garbage reading is a read landing on a
+reallocated object. `plausibleHitpointsPercent` rejects the impossible ones and
+always has; what it cannot do is anything about a garbage value that happens to
+land inside [0, 100], and 0.42 is as reachable as 21328.22. That is the argument
+for a signal that does not come from a sprite at all.
+
+**Armour on this hull is not a second opinion, it is a later one.** The ship is
+shield-tanked, so armour takes no damage until the shield is at zero: across
+runs 2-8 the armour gauge read exactly 100% in every one of thousands of samples
+while the shield reached 9%, 12% and 44%. The launcher shipped
+`run-away-shield-hitpoints-threshold-percent=-1`, which therefore did not leave
+one guard, it left none. It now ships 25 — chosen because the two recorded
+sessions that went below it went to 9% and 12%, and the worst any other reached
+was 44%. Both of those two completed their missions, so this costs an aborted
+mission on a run like them.
+
+**`run-away-incoming-damage-threshold` is the guard that needs no gauge.** EVE's
+own combat log, summed by the host per reading, over a rolling 45-second window
+held in `BotMemory.incomingDamage` — a reading's entries are gone by the next
+one, so the window has to be written in `updateMemoryForNewReadingFromGame` like
+every other verdict from this channel. Calibrated from peak 45-second incoming
+damage across sixteen recorded client sessions: the worst any session the ship
+survived absorbed was 3114, and the session it was lost in peaked at 4101. The
+default is 3500, about 12% clear either way, which is the best this data offers
+and is a real separation rather than a comfortable one. **It is a number about a
+hull, not about the game** — carrying it to another ship fails silently in
+whichever direction that ship is different.
+
+45 seconds is where the separation is widest: at four minutes the same
+comparison is 8689 against 9286, which no threshold could tell apart.
+
+**A reading that cannot move is not a reading.** The third guard fires when the
+ship has absorbed `damageThatMustMoveTheHitpointsReading` (1500) inside the
+window and the `(shield, armor)` pair has not changed across it. A `Nothing` —
+no ship UI, or a value rejected as impossible — never counts as movement, so a
+window of nothing but unreadable values reads as frozen, which is the
+conservative direction and the intended one. Calibrated the same way: measured
+across the three runs whose gauge was live, the most damage ever absorbed while
+the pair stayed frozen was 595 hitpoints over 21 seconds. It sits below the
+damage threshold on purpose — a ship that cannot see what is happening to it
+gets less rope than one that can.
+
+**Trip and release are different conditions**, for the reason
+`runAwayRearmPercent` exists. The damage latch trips when the window crosses the
+threshold and clears only when the window is completely empty — nothing has hit
+the ship for a whole 45 seconds. A live comparison would cancel its own retreat:
+the moment the ship warps clear the window starts draining. The cost of that
+choice is a loop — the bot flies off, the window empties, the mission logic
+brings it back into the same pocket, and it leaves again — which is survivable
+where the old behaviour was to stay and die, but is the first thing to watch on
+a live run.
+
+**A lost ship outranks every one of these**, and the order is settled by
+placement rather than by a condition. `recoverPodAfterShipLoss` (see "Losing the
+ship") sits in the pre-split list and answers `Just` on every reading its verdict
+exists, so once that verdict latches the docked-or-in-space split is unreachable
+and `runAwayIfLowHealth` is never called again. That is the right order and not
+merely a convenient one: a retreat manoeuvre is something a *ship* does, and the
+answer to no longer having one is to fly the pod home and end the session, not to
+warp a capsule between celestials indefinitely.
+
+The two really can want to act on the same reading, which is why it is worth
+stating: a capsule gets shot, and being shot is exactly what arms the damage
+guard. `updateIncomingDamageMemory` keeps running through a pod recovery — its
+latch can set, harmlessly, since nothing reads it from up there, and its status
+line still reports whether the pod is under fire, which is worth having. The one
+case where the retreat speaks for a capsule at all is where the ship-loss verdict
+never arrives, and there it is a better fallback than run 7's alternative of
+sitting still asking for locks. A fallback, not a second controller.
+
+That ordering is pinned by a test rather than remembered, because inverting it
+leaves everything compiling — which is issue #12's failure exactly.
+
+**The two changes read different fields of the same reading**, so neither can
+consume the other's: #33 reads `gameLogEntriesSinceLastReading` and #32 reads
+`incomingDamageSinceLastReading`, both pure fields of a parsed record, and both
+write their verdict into a separate `BotMemory` field in the same
+`updateMemoryForNewReadingFromGame`. The place where they genuinely do share
+state is the host, where one file offset now feeds three queues — see the
+Architecture section, and `TailFanOutTest` for the assertion that each sees every
+line exactly once in either drain order.
+
+The status line reports the window, the threshold, whether the reading moved,
+and **whether the host is carrying the channel at all**, because "0 hitpoints in
+the last 45 s" reads identically whether the grid is quiet or nothing is
+listening. It also now annotates an implausible gauge value in place: #32 was
+filed partly on the status line printing `Shield: 385%`, which the retreat guard
+had already rejected and never acted on while the log gave every appearance that
+it had.
 
 ## Lock range is learned from the client, not set
 
@@ -950,13 +1176,50 @@ back on**. Three things hold it together:
   second click before the client shows the result turns the gun back on.
 
 **Failing to a firing gun with the wrong ammo is always better than failing to a
-silent gun.** That is the invariant, and it is why every bound here abandons the
-*attempt* rather than the feature: `ammoSwapSilenceGunsGiveUpTicks` if the guns
-will not go quiet, `ammoSwapVerdictGiveUpTicks` if the whole verdict drags on.
-Either way the guns resume and the next change of range tries again. Only two
-things latch the swap off for the session, because only they are permanent: the
-menu offering neither charge (the ship carries neither), and there being no
-crossover distance at all.
+silent gun.** That is the invariant, and run 8 is what happens when it is left to
+individual branches to honour: the ship sat in a hostile pocket with its guns
+switched off, repeating one decision 298 times, and would not have recovered on
+its own.
+
+It failed in two places at once, which is worth keeping in view because they are
+the same mistake at different scales. The wait that ran for 298 readings —
+*guns off, ramp still turning* — had no counter at all. And the counter in front
+of it, which bounded *getting the guns quiet*, reset whenever no gun **read** as
+firing, so a weapon flickering between cycles held it at 1 forever; the log shows
+`Silencing for 1 of 8` on all eight readings it appears. A counter that consults
+the thing it is waiting out can be stopped by it.
+
+So the bound is now **one deadline over the whole silent period**
+(`ammoSwapSilencedGiveUpTicks`), counted from the reading the swap first tells a
+gun to stop until it lets go. Two properties make it structural rather than
+another branch remembering:
+
+- **It consults nothing the module says about itself.** Its only inputs are
+  whether the swap is still holding a verdict and whether the bot has commanded a
+  switch-off — the latter read from the step's own effects, because what the bot
+  asked for is knowable where what the client did with it is not. This matters
+  more since #35: `ramp_active`, which `isActive` reads, was measured returning
+  `False` on a module that was switched **on**.
+- **Nothing in the acting path waits.** Every state either acts or hands the
+  fight back, so no state can sit still while the guns are off. The ramp
+  precondition is gone entirely — the load is attempted after a fixed settle
+  (`ammoSwapSilenceSettleTicks`, a count, which always ends) and the client's own
+  refusal (#31) says if the gun was still running. Being wrong costs one reading;
+  waiting to be certain cost run 8 nearly three hundred.
+
+Both are checked in `tools/macos-host/tests/test_ammo_silenced_bound.py` rather
+than left as intentions, and verified by mutation: reintroducing either the
+module reading in the counter or a `waitForProgressInGame` in the acting path
+fails there.
+
+Every other failure abandons the *attempt* and not the feature —
+`ammoSwapVerdictGiveUpTicks` if a verdict drags on, the client's refusal if a
+load is discarded — so the guns resume and the next change of range tries again.
+Three things latch the swap off for the session, because only they should not be
+retried: the menu offering neither charge, there being no crossover distance, and
+reaching the silence deadline. That last one is the newcomer and deliberately so.
+Having disarmed the ship once and been unable to finish, doing it again is not an
+optimisation worth the risk.
 
 ### Not oscillating
 
@@ -982,6 +1245,36 @@ crossover distance at all.
   a menu caught mid-populate would say every charge was loaded at once.
   `ammoSwapMenuEntriesBeforeTrusted` is below any real weapon menu (the five
   commands are always there) and above an empty one.
+
+### The client's refusal, read rather than inferred
+
+Since #28 the bot can read EVE's game log, and the ammo swap is its first
+consumer: a `notify` line matching `cannot load or unload` … `while it is active`
+sets `loadRefusedByClient`, which abandons the attempt on the spot and quotes the
+client's own sentence in the decision log.
+
+**This is not the fix for the refusal — stopping the gun first is, and that
+already landed.** It is two other things. It is a *safety net*, for the case
+where the deactivation does not take: a click swallowed, the toggle pressed
+twice, a module reporting inactive while the client disagrees. And it is
+*legibility* — the difference between "the swap did not confirm" twenty-five
+readings later and "the client refused the load. It said: …" on the reading it
+happened. Only the second is something an operator can act on.
+
+Two things about the matching are deliberate. It tests two substrings rather than
+the whole line, because the weapon's own name sits in the middle of the sentence
+and a whole-line match would be per-fitting; and two rather than one, because
+`cannot` alone catches every other refusal the client makes — across five
+recorded runs those were 17 drone-control refusals, 4 "while warping", 2 "while
+docking" and 1 module-activation, none of which should touch the guns.
+`tools/macos-host/tests/test_ammo_load_refusal.py` reads the substrings out of
+`Bot.elm` and checks them against those real lines, so a matcher that drifts from
+what the client writes fails there rather than in a run.
+
+The one inference never to make from this channel is the reverse one. No refusal
+arriving does **not** mean the load was accepted — that is what the menu says.
+An absent game log and a silent client are different answers, and treating them
+alike is how a bot concludes a command worked because nothing complained.
 
 ### What is verified and what is not
 
@@ -1155,6 +1448,81 @@ narrow on purpose — the travel path asks route-setting exactly two questions,
 `homeStationRouteIsSet` and `routeToStationByName`, and knows nothing else about
 where a destination comes from.
 
+The travel half of it is now shared. `travelToStationByName` is the route-set,
+fly, dock sequence, and both the restock trip and the pod recovery below call
+it — the callers differ only in the two log lines they hand it, because the
+*reason* is what an operator reads and the mechanism is not something this bot
+should have two of.
+
+## Losing the ship: the client never says so, and a capsule reads 100%
+
+Run 7's ship was destroyed mid-mission and the bot carried on for the whole of
+the next 86 readings flying **the capsule**, at 0.0 m/s, among the Sansha pack
+that had just killed it — reporting `Shield: 100%  Armor: 100%` the whole time,
+because that is what a capsule reads. It was stopped by hand and the pod flown
+out manually. A stationary pod in a hostile pocket is a podding, which costs the
+clone and its implants, usually more than the ship.
+
+**EVE does not announce the loss.** Issue #33 assumed it did, and #30 having
+just landed the game log made that look like the clean signal. It is not there.
+Across every recorded game log in `~/Documents/EVE/logs/Gamelogs` there is no
+"destroyed", no "podded", nothing about the hull at all — run 7 reads as the
+last `(combat)` line at 04:26:59 and then silence until:
+
+```
+[ 2026.08.03 04:27:33 ] (notify) The ship you are piloting does not have targeting systems installed.
+```
+
+repeated 173 times to the end of the run. So the client states the
+*consequence*, not the event, and only when something asks the capsule to lock.
+Do not go looking for an announcement; a matcher for one would never fire, and a
+guard that never fires is indistinguishable from a bot that is fine.
+
+**Two signals, and the two that were expected to work do not.**
+
+| signal | verdict |
+|---|---|
+| the `(notify)` capsule refusal | **used.** Arrives on a carried channel — the withheld ones are `(combat)` and `(bounty)`, and a destruction line would almost certainly have been on `(combat)` |
+| ship UI with no module buttons at all | **used**, after 3 consecutive readings |
+| the drones window disappearing | **rejected.** Run 1 printed `No drones` on 8,076 in-space status prints while flying a perfectly good ship |
+| hitpoints | **rejected.** A capsule reads 100/100, and #32 shows the reading is untrustworthy anyway |
+
+The module signal's discrimination is measured rather than assumed:
+`Middle-row modules: none.` appears on all 724 of run 7's in-space status prints
+and on **zero** across runs 1, 3, 5 and 8 — 4,419 readings, 15,836 in-space
+status prints, every one naming a propulsion module. Mind the unit: those are
+prints, not readings, and the counter that decides the verdict is stepped once
+per *reading*, in the memory update. Three readings rather than one because the
+parser drops any slot whose display region it cannot read (see "Ship modules"),
+so one reading finding none may be a parse that missed.
+
+One step in that is inferred rather than observed. The status line prints the
+middle row only; a non-empty middle row proves `moduleButtons` was non-empty,
+which is the direction that governs false positives. A capsule having no module
+buttons in *any* row follows from a capsule having no slots — plausible, and
+consistent with run 7's `ShipUI` text, but not directly measured. If it is wrong
+this signal simply never fires and the capsule refusal carries the guard alone.
+
+**The verdict latches, and it is written in
+`updateMemoryForNewReadingFromGame`.** Both are forced. A reading's game log
+entries are gone by the next reading, so a branch that recognised the refusal
+where it acts on it would see the loss once and go back to flying the mission —
+the failure #30's own follow-up names. And the latch never clears, because the
+cost is asymmetric in one direction only: docking early costs the rest of the
+session, un-concluding a loss on a reading that happens to look normal costs the
+clone.
+
+**The response is placed rather than enumerated.** `recoverPodAfterShipLoss`
+sits above the wind-down and above the docked-or-in-space split in
+`missionBotDecisionRootBeforeApplyingSettings`, so "stop fighting" is structural:
+locking, module activation, approach and looting all live below that split and
+are simply never reached. Then it flies to `home-station` if one is set, docks at
+whatever the surroundings menu offers if not, and **ends the session** — the
+remaining hours are worth nothing without a ship, and the operator has to find
+out. `podRecoveryGiveUpReadings` (150, about twenty minutes at the eight seconds
+a reading the recorded runs average) bounds it and ends the session saying the
+pod is still in space, for the same reason every other bound here exists.
+
 ## Elm toolchain
 
 `brew install elm` (arm64-native bottle) — **not** `npm install -g elm`, which
@@ -1288,6 +1656,21 @@ exists.
   "Set Destination" click, since that window is what tells the bot the route it
   is following is its own. The tell is `Home station: ... set the route to`
   repeating where `Home station: travelling to` should have taken over.
+
+  It also **recognises that the ship has been destroyed and flies the pod out**
+  rather than continuing the mission in a capsule, which is what run 7 did for
+  86 readings. Detection, the two signals that work and the two that do not,
+  and where the guard sits are in "Losing the ship" above. **Untested against a
+  live client**, and deliberately so — staging a real loss is not worth it. What
+  is checked without one: the matcher is read out of `Bot.elm` and asserted
+  against run 7's real line and against fourteen other `(notify)` lines the
+  client wrote, and the module-row discrimination is recounted from the recorded
+  runs. What to watch on the first real loss is the status line's `SHIP LOST:`
+  turning up within a reading or two of the last `(combat)` line, and then
+  `Pod recovery:` reaching a dock. If the verdict never arrives, the thing to
+  check is whether `shipUI.moduleButtons` is genuinely empty on a capsule — the
+  recordings show the *middle* row empty on every capsule reading, and every row
+  being empty is the stronger form of that, inferred rather than observed.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
@@ -1361,14 +1744,44 @@ exists.
   and `getAllContainedDisplayTexts` over the whole tree unchanged by the
   node's presence.
 
-  **What is unproven is that any of it changes what the bot does**, because
-  nothing reads the field yet. A first consumer needs three things: a decision
-  that matches on `channel == Just "notify"` and the refusal's own wording, a
-  `BotMemory` field to carry the verdict (a reading's entries are gone by the
-  next one, so a branch that does not record what it saw sees it once), and a
-  live run that provokes the refusal — for #27's ammo load, guns firing and a
-  swap attempted. A run in which no refusal occurs proves only that nothing
-  broke.
+  It also carries **how much damage the client says arrived since the last
+  reading**, as `incomingDamageSinceLastReading`, summed host-side from the
+  `(combat)` lines the channel proper withholds. That is the mission runner's
+  retreat that depends on no HUD gauge — see "Retreating: the HUD hitpoint gauge
+  is the weakest instrument here" for the calibration and for what run 7
+  actually was.
+
+  Verified without a live client: 24 unit tests in
+  `tools/macos-host/tests/test_incoming_damage.py` covering the
+  incoming/outgoing split against real recorded lines, the tail's third fan-out
+  in either drain order, present-with-zero against absent, the node's safety
+  properties, the six vendored parser copies, and the calibrated constants read
+  back out of `Bot.elm` and `run_mission.sh`. Confirmed by mutation: collapsing
+  `from` and `to` fails two, renaming the type name in one parser copy fails
+  two, and moving either threshold off its measured value fails one each. The
+  Elm half was driven end to end off-line through the real vendored parser — a
+  host-built reading double-encoded as the real one is gave back
+  `Just { damage = 4101, hits = 63, topAttacker = Just "Centum Fiend" }`,
+  `Just { damage = 0, ... }` for a quiet reading, `Nothing` for a host without
+  the channel, and `getAllContainedDisplayTexts` empty even with the attacker
+  named "No room for more".
+
+  **Three consumers now, and none has been proven live.** #31's ammo-load
+  refusal (`loadRefusedByClient`), #33's capsule refusal (`shipLossFromGameLog`)
+  and #32's damage-rate retreat, the last reading the summary rather than the
+  lines. All three take the same three parts a consumer needs: a
+  match on `channel == Just "notify"` and the client's own wording, a `BotMemory`
+  field to carry the verdict (a reading's entries are gone by the next one, so a
+  branch that does not record what it saw sees it once), and a live run that
+  provokes the line. A run in which the line does not occur proves only that
+  nothing broke.
+
+  Worth knowing what the two consumers found the channel to be good and bad at.
+  Good: it states things no HUD sprite does, and the timestamp/channel split
+  means neither matcher had to parse a line. Bad: it says far less than expected.
+  #33 went looking for a ship-destruction announcement and there is none — see
+  "Losing the ship" — so a consumer's first job is checking that the client
+  actually writes the sentence, against the recordings, before building on it.
 
 ## `route_setter.py` internals worth knowing before touching it again
 
@@ -1461,10 +1874,26 @@ for why ESI cannot replace it from inside a bot yet.
   system: Unknown" for a name that isn't a plain string in memory.
 - `MouseMoveRelative` and `CharacterDown`/`CharacterUp` (raw Unicode text input)
   aren't implemented in `botlab_host.py`.
-- Nothing reads `gameLogEntriesSinceLastReading` yet, so every guard that infers
-  a refusal indirectly still does — #27's ammo load retries for 50 readings on a
-  swap the client refused outright, and the learned lock range can still only be
-  taught by the first lock of an engagement.
+- The ammo swap and the ship-loss guard are the only consumers of
+  `gameLogEntriesSinceLastReading`'s *lines*, so every other guard that infers a
+  refusal indirectly still does. The candidates the recorded runs actually
+  contain: `You cannot launch Acolyte I
+  because you are already controlling 5 drones` (17 occurrences — the drone
+  launch retries blind), `You cannot do that while warping` and `while docking`
+  (6 between them), and `You cannot activate that module as the target is no
+  longer present`. The learned lock range is a fourth: `You are already managing
+  N targets` would separate "no free slot" from "too far" outright, where today
+  it is inferred from the target bar being empty at both ends of an attempt.
+- **A run cycled inside a mission pocket leaves the ship unattended for
+  minutes.** `run_mission.sh` kills the previous bot before the new one compiles,
+  and the slow `elm make` path takes several minutes; that gap is when run 7's
+  ship died, with 9,286 hitpoints of incoming fire landing between the old run's
+  last log line and the new run's first reading. Nothing inside the bot can see
+  that window. Dock or clear the grid before cycling.
+- The damage-rate retreat's latch clears when nothing has hit the ship for a
+  whole window, so a bot driven out of a pocket will be brought back into it by
+  the mission logic and driven out again. Survivable, and better than the
+  alternative it replaced, but it is a loop and it has not been seen live.
 - No automated Elm-toolchain bootstrap if `elm` isn't on `PATH`.
 - `reload_drones.py` only searches the root Item hangar, no sub-folders. The
   mission runner's port of it inherits that, and also takes the first

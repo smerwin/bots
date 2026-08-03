@@ -23,6 +23,24 @@
    answers that a mission is already in progress, it closes the conversation,
    and it starts over. Run 103 did that 87 times without undocking.
 
+   ## When the ship is lost
+
+   A destroyed ship leaves the character in a capsule, still flying, on the
+   same grid as whatever killed it -- and a capsule reads 100% shield and 100%
+   armour, so nothing about the health line says anything is wrong. Run 7 kept
+   running missions in one for its whole 86 readings, at 0.0 m/s among the pack
+   that had just killed it, and a stationary pod in a hostile pocket is a
+   podding, which costs the clone and its implants.
+
+   The bot now recognises it from two signals and stops. Either the client's own
+   `(notify)` line -- "The ship you are piloting does not have targeting systems
+   installed", which only a capsule ever hears -- or the ship UI carrying no
+   module buttons at all for several consecutive readings. Then it stops trying
+   to fight, flies the pod to `home-station` (or to whatever station this system
+   offers, if none is configured), docks, and **ends the session**, saying why.
+   The run's remaining hours are worthless without a ship, and a ship loss is
+   something the operator has to know about.
+
    ## Setting up the Game Client
 
    Despite being quite robust, this bot is less intelligent than a human. For
@@ -116,6 +134,11 @@
      parentheses and hyphens: the bot never types this string, it types the part
      after the last " - " into the search bar and then matches this full name
      against the rows that come back. See `routeToStationByName`.
+
+     It is also where the pod goes if the ship is destroyed -- see "When the
+     ship is lost" below. Without it the pod docks at whatever station this
+     system offers instead, which is worse but is still not sitting still among
+     the rats that just killed the ship.
    + `drone-type` : Name of the drone to refill the drone bay with while the
      session winds down, as it appears in the station's item hangar -- e.g.
      `drone-type=Hobgoblin I`. Defaults to `Acolyte I`. Fit-specific, which is
@@ -161,7 +184,19 @@
      way to what the client has actually granted. See `lockRangeThresholdInMeters`.
    + `run-away-shield-hitpoints-threshold-percent` /
      `run-away-armor-hitpoints-threshold-percent`: Dock up when the ship drops
-     below these. Disabled by default.
+     below these. Disabled by default. Both read the ship's HUD gauges, which
+     are not a reliable instrument -- see `plausibleHitpointsPercent` -- and on
+     a shield-tanked hull the armour gauge cannot move until the shield is
+     already gone, so armour alone is not a guard. Set the shield one.
+   + `run-away-incoming-damage-threshold`: Dock up when the client's own combat
+     log reports this much damage taken inside
+     `incomingDamageWindowSeconds` (45 s). Defaults to 3500 and `-1` disables
+     it. This is the retreat that needs no HUD gauge at all: the number comes
+     from EVE's own log rather than from a widget read out of live memory. The
+     default is calibrated for the hull flown on this account -- across sixteen
+     recorded client sessions the worst 45-second window the ship *survived*
+     was 3114, and the one it died in peaked at 4101 -- so re-derive it for a
+     different hull rather than carrying it over.
 
    When using more than one setting, start a new line for each setting in the
    text input field. Here is an example of a complete settings string:
@@ -171,6 +206,7 @@ agent-name=Nehrnah Gorouyar
 orbit-in-combat=yes
 run-away-shield-hitpoints-threshold-percent=50
 run-away-armor-hitpoints-threshold-percent=80
+run-away-incoming-damage-threshold=3500
    ```
 
 -}
@@ -244,6 +280,7 @@ defaultBotSettings =
     , missionNamesToDecline = []
     , runAwayShieldHitpointsThresholdPercent = -1
     , runAwayArmorHitpointsThresholdPercent = -1
+    , runAwayIncomingDamageThreshold = defaultRunAwayIncomingDamageThreshold
     , avoidRats = []
     , attackObjectNames = []
     , approachObjectNames = []
@@ -301,6 +338,9 @@ parseBotSettings =
            )
          , ( "run-away-armor-hitpoints-threshold-percent"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayArmorHitpointsThresholdPercent = threshold })
+           )
+         , ( "run-away-incoming-damage-threshold"
+           , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayIncomingDamageThreshold = threshold })
            )
          , ( "avoid-rat"
            , AppSettings.valueTypeString
@@ -376,6 +416,7 @@ type alias BotSettings =
     , missionNamesToDecline : List String
     , runAwayShieldHitpointsThresholdPercent : Int
     , runAwayArmorHitpointsThresholdPercent : Int
+    , runAwayIncomingDamageThreshold : Int
     , avoidRats : List String
     , attackObjectNames : List String
     , approachObjectNames : List String
@@ -444,16 +485,82 @@ type alias BotMemory =
     , readingsCount : Int
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
+    , incomingDamage : IncomingDamageMemory
     , droneBayOpenedFromShipCard : Bool
     , droneBayWillTakeNoMore : Bool
     , droneRestockLooksWithRoom : Int
     , droneRestockDragsDispatched : Int
     , droneBayEmptyLastSeen : Maybe Bool
+    , shipLoss : Maybe ShipLossVerdict
+    , shipUIWithoutModuleButtonsReadings : Int
     , lockAttempt : Maybe LockAttempt
     , lockProvenAtMeters : Maybe Int
     , lockRefusedAtMeters : Maybe Int
     , lockRangeLastChange : Maybe String
     , ammoSwap : AmmoSwapMemory
+    }
+
+
+{-| The bot's conclusion that the ship it is flying no longer exists, and how
+many readings ago it reached it.
+
+Latched, and never cleared inside a session. That is the cost asymmetry of #33
+written into the type: a false positive parks the pod and ends the run early,
+which costs the rest of the session; a false negative leaves a capsule sitting
+among the rats that just killed the ship, which costs the clone and every
+implant in it. Nothing here may un-conclude a loss on a later reading that
+happens to look normal.
+
+`readingsSince` is what bounds the recovery. It counts readings rather than
+seconds because `bot-step-delay` moves the wall-clock length of a reading and
+nothing in `UpdateMemoryContext` carries the session clock.
+
+-}
+type alias ShipLossVerdict =
+    { reason : String
+    , readingsSince : Int
+    }
+
+
+{-| What the client's combat log has said about incoming fire lately, and what
+the HUD was reading while it said it.
+
+A reading's `incomingDamageSinceLastReading` is gone by the next reading, like
+every other part of the game-log channel, so a rolling window has to be written
+down here -- `updateMemoryForNewReadingFromGame` is the only place that can, and
+it is the one place that never sees a decision.
+
+`samples` is newest first and holds only what falls inside
+`incomingDamageWindowSeconds`. Each sample carries the hitpoints the HUD showed
+on the same reading, because the two questions this memory answers are "how hard
+are we being hit" and "is the instrument that is supposed to notice moving at
+all", and the second is only answerable by looking at both together.
+
+`hostCarriesTheChannel` is the `Nothing`-versus-`Just` distinction from the
+parser, kept so the status line can say when this whole guard is unarmed. A
+host without the channel reports no damage, which reads exactly like a peaceful
+grid, and that inference in the wrong direction is this repo's signature
+failure.
+
+`retreating` is the latch. See `runAwayIfLowHealth` for why the trip and the
+release are different conditions rather than one threshold.
+-}
+type alias IncomingDamageMemory =
+    { samples : List IncomingDamageSample
+    , hostCarriesTheChannel : Bool
+    , lastAttacker : Maybe String
+    , retreating : Bool
+    }
+
+
+type alias IncomingDamageSample =
+    { atMilliseconds : Int
+    , damage : Int
+
+    -- The plausible HUD reading on this same reading, or `Nothing` where there
+    -- was none to believe -- no ship UI, or a value `plausibleHitpointsPercent`
+    -- rejected. A `Nothing` is never counted as the gauge moving.
+    , hitpoints : Maybe ( Int, Int )
     }
 
 
@@ -513,11 +620,28 @@ load has been commanded and the menu still offers the charge, so this attempt is
 abandoned. It resets the moment the verdict is satisfied, so that a struggle
 cannot leave a count behind for the next verdict to inherit.
 
-`verdictAbandoned` and `gunsSilencingTicks` are the bounds around switching the
-guns off, which the client requires before it will accept a load at all. Both
-abandon the *attempt* and never the feature: the guns go back to firing whatever
-is in them, and the next change of range tries again. Failing to a firing gun
-with the wrong ammo is always better than failing to a silent gun.
+`gunsSilencedTicks` is the one bound over the whole period the ship's guns are
+switched off, counted from the reading the swap first told one to stop and
+advanced on every reading until it lets go. It answers a question every waiting
+state in this path has to answer -- *and what if this never comes?* -- once, for
+all of them, rather than each remembering to. Issue #34 is what it is for: the
+previous shape bounded one phase and left the next unbounded, and a ship sat
+disarmed in a hostile pocket for 298 readings.
+
+`verdictAbandoned` is the ordinary per-attempt give-up: the guns go back to
+firing whatever is in them and the next change of range tries again. Failing to a
+firing gun with the wrong ammo is always better than failing to a silent gun. The
+one exception is that same silence deadline, which switches the swap off for the
+session -- having disarmed the ship once and been unable to finish, doing it
+again is not worth the ammo it might save.
+
+`loadRefusedByClient` holds the client's own sentence when it says it discarded
+the load, and it is kept because the entries it came from are not: a reading's
+game log lines are gone by the next reading, so a branch that reads them and
+records nothing sees a refusal once and then behaves exactly as it did before.
+It is a shortcut to the same abandonment those bounds reach, not a new outcome --
+what it changes is that the answer arrives on the reading the client gave it
+rather than twenty-five readings later, and that the log can quote why.
 
 `gunsCommandedThisVerdictAtX` is how the walk across a multi-gun row remembers
 where it got to, keyed on each gun's `x` because the row is not a stable index
@@ -543,7 +667,8 @@ type alias AmmoSwapMemory =
     , rangeVerdictTicks : Int
     , verdictSatisfied : Bool
     , verdictAbandoned : Bool
-    , gunsSilencingTicks : Int
+    , loadRefusedByClient : Maybe String
+    , gunsSilencedTicks : Int
     , gunsCommandedThisVerdictAtX : List Int
     , menuOpenOnGunAtX : Maybe Int
     , hoverAwaitingTooltip : Bool
@@ -563,7 +688,8 @@ initAmmoSwapMemory =
     , rangeVerdictTicks = 0
     , verdictSatisfied = False
     , verdictAbandoned = False
-    , gunsSilencingTicks = 0
+    , loadRefusedByClient = Nothing
+    , gunsSilencedTicks = 0
     , gunsCommandedThisVerdictAtX = []
     , menuOpenOnGunAtX = Nothing
     , hoverAwaitingTooltip = False
@@ -599,7 +725,15 @@ missionBotDecisionRoot context =
 missionBotDecisionRootBeforeApplyingSettings : BotDecisionContext -> DecisionPathNode
 missionBotDecisionRootBeforeApplyingSettings context =
     case
+        -- The pod recovery sits above the wind-down, and above the
+        -- docked-or-in-space split below, because a lost ship outranks both:
+        -- there is no mission left to wind down from, and every branch that
+        -- locks, shoots, approaches or loots lives under the split. See
+        -- `recoverPodAfterShipLoss`. It is below `generalSetupInUserInterface`
+        -- only because the pod still needs the location info panel expanded and
+        -- stray menus cleared to travel at all.
         [ generalSetupInUserInterface context.readingFromGameClient
+        , recoverPodAfterShipLoss context
         , windDownBeforeSessionEnd context
         ]
             |> List.filterMap identity
@@ -1022,27 +1156,50 @@ goToHomeStationWhileInSpace context =
     homeStationToGoTo context
         |> Maybe.map
             (\stationName ->
-                if homeStationRouteIsSet context stationName then
-                    case closeSearchResultsWhenRouteIsSet context of
-                        Just closeResults ->
-                            closeResults
-
-                        Nothing ->
-                            describeBranch
-                                ("Home station: travelling to '"
-                                    ++ stationName
-                                    ++ "' to restock the drone bay."
-                                )
-                                (jumpToNextSystem context)
-
-                else
-                    describeBranch
-                        ("Home station: the drone bay is empty -- set the route to '"
+                travelToStationByName context
+                    stationName
+                    { whileSettingRoute =
+                        "Home station: the drone bay is empty -- set the route to '"
                             ++ stationName
                             ++ "'."
-                        )
-                        (routeToStationByName context stationName)
+                    , whileTravelling =
+                        "Home station: travelling to '"
+                            ++ stationName
+                            ++ "' to restock the drone bay."
+                    }
             )
+
+
+{-| Set a route to a named station and fly it, gate by gate, until the route
+marker's own menu offers "Dock" at the far end.
+
+Split out of `goToHomeStationWhileInSpace` when #33's pod recovery needed the
+same three steps for a different reason, so that there is one travel-and-dock
+path in this bot rather than two that can drift apart. The caller supplies both
+log lines because the *reason* differs and the decision log is where an operator
+reads it -- "the drone bay is empty" and "the ship is gone" want completely
+different words in front of the same mechanism.
+
+`jumpToNextSystem` is what docks at the far end too, which is why nothing here
+has to know the difference between another jump and arrival.
+
+-}
+travelToStationByName :
+    BotDecisionContext
+    -> String
+    -> { whileSettingRoute : String, whileTravelling : String }
+    -> DecisionPathNode
+travelToStationByName context stationName describe =
+    if homeStationRouteIsSet context stationName then
+        case closeSearchResultsWhenRouteIsSet context of
+            Just closeResults ->
+                closeResults
+
+            Nothing ->
+                describeBranch describe.whileTravelling (jumpToNextSystem context)
+
+    else
+        describeBranch describe.whileSettingRoute (routeToStationByName context stationName)
 
 
 {-| Whether the route currently set is *our* route home, rather than a leftover
@@ -1073,6 +1230,293 @@ homeStationRouteIsSet : BotDecisionContext -> String -> Bool
 homeStationRouteIsSet context stationName =
     routeIsSet context
         && (stationInfoWindowForStation context stationName /= Nothing)
+
+
+
+-- The ship is gone: recognising it, and getting the pod out
+
+
+{-| How many consecutive in-space readings a ship UI with no module buttons at
+all has to persist before it counts as a lost ship on its own.
+
+Low, because of the asymmetry #33 is about: docking early costs the rest of the
+session, and being wrong the other way costs the clone. Not one, because the
+module row is not a stable index space -- `ParseUserInterface` drops any slot
+whose display region it cannot read (see CLAUDE.md, "Ship modules"), so a single
+reading finding none is a parse that may simply have missed, where three in a
+row is the ship's shape having changed.
+
+Three *readings*, not three decision lines -- the unit CLAUDE.md keeps a section
+on, and the one `stall_watch.py` got wrong twice. This counter is stepped from
+`updateMemoryForNewReadingFromGame`, which runs once per reading, so three of
+them is roughly twenty-five seconds at the tick rate the recorded runs show
+(run 57: 376 ticks in 3,025s).
+
+-}
+shipLossReadingsWithoutModulesBeforeVerdict : Int
+shipLossReadingsWithoutModulesBeforeVerdict =
+    3
+
+
+{-| How many readings the pod recovery may run before the session ends anyway.
+
+A pod that has been trying to reach a station for this long is not going to, and
+an unbounded retry loop reads in the log exactly like a bot working -- issues #7
+and #14 twice over. When it expires the session *ends*, naming the station the
+pod never reached, so an operator finds out rather than discovering it later.
+
+Calibrated in readings, at the eight seconds a reading the recorded runs
+average -- so this is about twenty minutes of trying, against the roughly fifty
+readings `homeStationTripSecondsPastSessionEnd` (420s) already budgets for the
+same route, jumps and dock. Three times the headroom the trip that works needs.
+
+-}
+podRecoveryGiveUpReadings : Int
+podRecoveryGiveUpReadings =
+    150
+
+
+{-| The client saying, in its own words, that the ship being flown cannot lock
+anything -- which for this bot means the ship is gone and a capsule is in its
+place.
+
+**This is not a destruction announcement, and there is no such thing in this
+client's log.** The whole of run 7's loss reads, in
+`~/Documents/EVE/logs/Gamelogs`, as the last `(combat)` line at 04:26:59 and then
+nothing until:
+
+    [ 2026.08.03 04:27:33 ] (notify) The ship you are piloting does not have targeting systems installed.
+
+repeated 173 times to the end of the run. Issue #33 expected EVE to state the
+loss outright; it does not. What it states is the *consequence*, and only when
+something asks the capsule to lock -- which this bot does on every reading it
+sees a rat, so in the case that matters (a hostile pocket) the answer arrives
+within a reading or two. It is silent for a pod drifting somewhere empty, which
+is why it is not the only signal.
+
+Two things make it usable anyway. It arrives on `(notify)`, which is carried:
+the withheld channels are `(combat)` and `(bounty)`, and a destruction line, if
+one existed, would almost certainly have been on `(combat)` and therefore
+invisible to the bot. And it is the client asserting a fact about the hull rather
+than the bot inferring one from a HUD sprite, which is what the hitpoint reading
+of #32 turned out to be.
+
+Matched on two substrings for #31's reason: the sentence has no variable part
+today, but `targeting systems` alone would also match a rewording about a
+*module*, and the pair pins the subject ("the ship you are piloting") to the
+symptom.
+
+`Nothing` and `Just []` are collapsed here, and that is safe only because of the
+direction of the inference. Finding no such line is never read as the ship being
+intact -- `shipUIHasNoModuleButtons` is the signal that works on a host carrying
+no game log at all. Nothing anywhere may conclude "no loss was reported, so the
+ship is fine", which is exactly the reading of an absent game log #30 built the
+`Maybe` to prevent.
+
+-}
+shipLossFromGameLog : ReadingFromGameClient -> Maybe String
+shipLossFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.filter
+            (\entry ->
+                stringContainsIgnoringCase "ship you are piloting" entry.text
+                    && stringContainsIgnoringCase "does not have targeting systems" entry.text
+            )
+        |> List.head
+        |> Maybe.map .text
+
+
+{-| A ship UI that is showing, and carries no module buttons in any row.
+
+The second signal, and the one that needs no game log. A capsule has no module
+slots at all; every ship this bot is set up to fly has weapons in the top row and
+hardeners in the middle, because its own setup instructions require them.
+
+Run 7 logged `Middle-row modules: none.` on every one of its 724 in-space status
+prints, across all 86 of its readings. Runs 1, 3, 5 and 8, all flying real ships,
+logged it **zero** times between them -- 4,419 readings and 15,836 in-space
+status prints, every one of which named a propulsion module. That is the
+discrimination this rests on, and it is measured rather than assumed.
+
+What is *inferred* rather than observed is the step from that row to this one.
+The status line prints the middle row only, and the middle row is a subset of
+`moduleButtons`, so a non-empty middle row proves `moduleButtons` was non-empty
+on all 15,836 -- the direction that matters for false positives. The other
+direction, a capsule having no module buttons in *any* row, follows from a
+capsule having no slots to fit them in, and from run 7's own `ShipUI` text
+carrying nothing behind its slots. If that turns out to be wrong on some client
+the symptom is this signal never firing, and the game log's capsule refusal
+carrying the whole load.
+
+Note what is *not* used. The drones window disappearing was #33's third suggested
+signal and it does not survive contact with the recordings: run 1 reported "No
+drones" on 8,076 in-space readings while flying a perfectly good ship, so an
+absent drones window says nothing about the hull. Nor are hitpoints used --
+a capsule reads 100% shield and 100% armour, which is the reassuring-and-
+meaningless line that made this failure invisible in the first place.
+
+-}
+shipUIHasNoModuleButtons : ReadingFromGameClient -> Bool
+shipUIHasNoModuleButtons readingFromGameClient =
+    case readingFromGameClient.shipUI of
+        Nothing ->
+            False
+
+        Just shipUI ->
+            List.isEmpty shipUI.moduleButtons
+
+
+{-| The count of consecutive in-space readings whose ship UI carried no modules.
+
+Reset by a reading that shows any module, and by docking -- a docked reading has
+no ship UI at all and so is no evidence either way, and letting it count would
+have every dock accumulate towards a verdict.
+
+-}
+shipUIWithoutModuleButtonsReadingsAfter : ReadingFromGameClient -> Int -> Int
+shipUIWithoutModuleButtonsReadingsAfter readingFromGameClient countBefore =
+    if shipUIHasNoModuleButtons readingFromGameClient then
+        countBefore + 1
+
+    else
+        0
+
+
+{-| The loss verdict for this reading: the one already latched, or a new one if
+this reading is where it becomes clear.
+
+Written from `updateMemoryForNewReadingFromGame` because it has to be. The game
+log entries behind the first signal are gone by the next reading, so a branch
+that read them and recorded nothing would see the loss once and then go back to
+flying the mission -- which is precisely what #30's follow-up section warns
+about, and the shape #31 already had to work around.
+
+Latched: once set it is returned unchanged forever. See `ShipLossVerdict`.
+
+-}
+shipLossVerdictAfter :
+    ReadingFromGameClient
+    -> { withoutModulesReadings : Int, verdictBefore : Maybe ShipLossVerdict }
+    -> Maybe ShipLossVerdict
+shipLossVerdictAfter readingFromGameClient { withoutModulesReadings, verdictBefore } =
+    case verdictBefore of
+        Just latched ->
+            Just { latched | readingsSince = latched.readingsSince + 1 }
+
+        Nothing ->
+            case shipLossFromGameLog readingFromGameClient of
+                Just clientSentence ->
+                    Just
+                        { reason =
+                            "the client said \""
+                                ++ clientSentence
+                                ++ "\", which only a capsule hears"
+                        , readingsSince = 0
+                        }
+
+                Nothing ->
+                    if shipLossReadingsWithoutModulesBeforeVerdict <= withoutModulesReadings then
+                        Just
+                            { reason =
+                                "the ship UI has carried no modules at all for "
+                                    ++ String.fromInt withoutModulesReadings
+                                    ++ " readings, which is the shape of a capsule and not of any ship this bot flies"
+                            , readingsSince = 0
+                            }
+
+                    else
+                        Nothing
+
+
+{-| Stop flying the mission and get the pod to a station, once the ship is gone.
+
+Placed above the wind-down and above everything docked-or-in-space in
+`missionBotDecisionRootBeforeApplyingSettings`, which is what makes "stop
+fighting" structural rather than a list of things not to do: locking, module
+activation, approach and looting all live below this branch and are simply never
+reached. There is nothing aboard a capsule to fight with.
+
+Four outcomes, and every one of them says in the decision log that the ship was
+lost, because that is the one fact an operator has to be able to read back:
+
+  - **Docked.** The pod is safe and the run is over. A ship loss is something the
+    operator has to act on, and the session's remaining hours are worth nothing
+    without a ship, so this ends the session rather than parking.
+  - **In space with a `home-station`.** The same route-travel-dock path #16 built
+    for the drone restock, via `travelToStationByName`.
+  - **In space with no `home-station`.** `dockAtStation` off the surroundings
+    menu, preferring the station last docked at. Weaker -- it can only reach a
+    station in this system, and it says so -- but a pod docked anywhere beats a
+    pod stationary in the pocket that just killed the ship.
+  - **Out of time.** `podRecoveryGiveUpReadings` readings of trying, and the
+    session ends saying so.
+
+-}
+recoverPodAfterShipLoss : BotDecisionContext -> Maybe DecisionPathNode
+recoverPodAfterShipLoss context =
+    context.memory.shipLoss
+        |> Maybe.map
+            (\shipLoss ->
+                describeBranch
+                    ("The ship is gone -- "
+                        ++ shipLoss.reason
+                        ++ ". Stop flying the mission and get the pod out ("
+                        ++ String.fromInt shipLoss.readingsSince
+                        ++ " readings since)."
+                    )
+                    (case context.readingFromGameClient.shipUI of
+                        Nothing ->
+                            describeBranch
+                                ("The pod is docked at "
+                                    ++ (dockedStationNameFromInfoPanel context
+                                            |> Maybe.map (\name -> "'" ++ name ++ "'")
+                                            |> Maybe.withDefault "a station"
+                                       )
+                                    ++ " and safe. Ending the session: there is no ship left to fly the mission with, and that is for the operator to fix."
+                                )
+                                (Common.DecisionPath.endDecisionPath FinishSession)
+
+                        Just _ ->
+                            if podRecoveryGiveUpReadings <= shipLoss.readingsSince then
+                                describeBranch
+                                    ("The pod has been trying to reach a station for "
+                                        ++ String.fromInt shipLoss.readingsSince
+                                        ++ " readings and has not got there. Ending the session in space rather than retrying forever -- the pod needs recovering by hand."
+                                    )
+                                    (Common.DecisionPath.endDecisionPath FinishSession)
+
+                            else
+                                case context.eventContext.botSettings.homeStationName of
+                                    Just stationName ->
+                                        travelToStationByName context
+                                            stationName
+                                            { whileSettingRoute =
+                                                "Pod recovery: set the route to '"
+                                                    ++ stationName
+                                                    ++ "' before anything else."
+                                            , whileTravelling =
+                                                "Pod recovery: travelling to '"
+                                                    ++ stationName
+                                                    ++ "' to get the pod docked."
+                                            }
+
+                                    Nothing ->
+                                        describeBranch
+                                            ("Pod recovery: no 'home-station' is configured, so there is no station this pod can be routed to by name. Docking at whatever this system offers"
+                                                ++ (context.memory.lastDockedStationNameFromInfoPanel
+                                                        |> Maybe.map (\name -> ", preferring '" ++ name ++ "'")
+                                                        |> Maybe.withDefault ""
+                                                   )
+                                                ++ " instead."
+                                            )
+                                            (dockAtStation
+                                                context.memory.lastDockedStationNameFromInfoPanel
+                                                context
+                                            )
+                    )
+            )
 
 
 
@@ -4363,11 +4807,112 @@ jumpToNextSystem context =
                     )
                     context )
 
+{-| Every reason this bot has to stop fighting and leave.
+
+Three, and they are deliberately not variations on one instrument.
+
+**The two hitpoint thresholds** are the original guard and read the ship's HUD
+gauges. They are the weakest of the three: the value is a float scraped out of a
+widget in live memory (see `plausibleHitpointsPercent`), and on a shield-tanked
+hull the armour gauge cannot move at all until the shield is spent -- across the
+recorded runs the shield reached 9%, 12% and 44% while armour sat at exactly
+100% in every one of thousands of samples. An armour threshold on such a hull is
+not a conservative guard, it is a guard that fires after the tank is already
+gone.
+
+**The damage rate** needs no gauge at all. It is the client's own combat log,
+summed by the host, and it answers the question the HUD is only a proxy for:
+how fast is this ship being taken apart.
+
+**The frozen reading.** A gauge that does not move while the ship absorbs
+`damageThatMustMoveTheHitpointsReading` is not reporting the ship, and an
+instrument that cannot answer is a reason to leave rather than a licence to
+carry on. This is the guard for the shape issue #32 was filed about -- a reading
+pinned at one value while damage lands -- and it is the one that needs saying
+out loud, because "100%" and "no reading" look identical in a log and only one
+of them means the ship is fine.
+
+**A lost ship outranks all three of them**, and that is settled by placement
+rather than by a condition here. `recoverPodAfterShipLoss` sits in
+`missionBotDecisionRootBeforeApplyingSettings`'s pre-split list, and it answers
+`Just` on every reading the verdict exists -- it is a bare `Maybe.map` over
+`context.memory.shipLoss` -- so once #33's verdict latches, the whole
+docked-or-in-space split below it is unreachable and this function is never
+called again. That is the right order and not merely a convenient one: a retreat
+manoeuvre is something a *ship* does, and the correct response to no longer
+having one is #33's, which flies the pod home and ends the session saying why.
+Warping a capsule between celestials would keep it alive and never finish.
+
+The interaction that makes this worth stating rather than leaving to the layout:
+a capsule *does* get shot, and being shot is exactly what arms the damage guard.
+`updateIncomingDamageMemory` keeps running through a pod recovery, so the window
+fills and the latch can set -- harmlessly, because nothing reads it from up
+there, and usefully, because the status line still reports whether the pod is
+under fire. The one case where this function speaks for a capsule at all is the
+one where #33's verdict never arrives (both its signals missed), and there a
+retreat is a strictly better fallback than run 7's alternative of sitting still
+asking for locks. It is a fallback, not a second controller.
+
+Reachability, since a compiling guard that can never fire is what shipped in
+issue #12. All three are reached on every reading in space where the ship UI
+parses and no ship-loss verdict has latched -- the same gate the original two
+always had, plus the one above. The two damage-based ones additionally need
+`incomingDamageSinceLastReading`, so on a host without the game log they are
+unarmed -- which the status line says in as many words rather than leaving it to
+be inferred from their silence. Against the recorded data: the damage threshold
+would have fired in the session the ship was lost (peak 4101 in 45 s) and in
+none of the fifteen it survived (worst 3114); the frozen-reading guard would not
+have fired in any of the three runs whose gauge was live, where the most damage
+absorbed during an unchanged reading was 595.
+-}
 runAwayIfLowHealth : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> Maybe DecisionPathNode
-runAwayIfLowHealth context shipUI = 
-    let 
-        runAwayShieldThreshold = 
+runAwayIfLowHealth context shipUI =
+    let
+        runAwayShieldThreshold =
             context.eventContext.botSettings.runAwayShieldHitpointsThresholdPercent
+
+        incomingDamageThreshold =
+            context.eventContext.botSettings.runAwayIncomingDamageThreshold
+
+        damageInWindow =
+            incomingDamageInWindow context.memory.incomingDamage
+
+        describeAttacker =
+            case context.memory.incomingDamage.lastAttacker of
+                Nothing ->
+                    ""
+
+                Just attacker ->
+                    ", hardest from '" ++ attacker ++ "'"
+
+        describeWindow =
+            (damageInWindow |> String.fromInt)
+                ++ " hitpoints in the last "
+                ++ (incomingDamageWindowSeconds |> String.fromInt)
+                ++ " s"
+                ++ describeAttacker
+
+        runAwayFromIncomingDamage =
+            describeBranch
+                ("The client's combat log says we are taking "
+                    ++ describeWindow
+                    ++ " -- over the "
+                    ++ (incomingDamageThreshold |> String.fromInt)
+                    ++ " we are willing to sit through. Get out, whatever the HUD says."
+                )
+                (runAway context)
+
+        runAwayFromAnInstrumentThatIsNotMoving =
+            describeBranch
+                ("We have absorbed "
+                    ++ describeWindow
+                    ++ " and the hitpoints reading has not moved off "
+                    ++ (shipUI.hitpointsPercent.shield |> String.fromInt)
+                    ++ "% shield / "
+                    ++ (shipUI.hitpointsPercent.armor |> String.fromInt)
+                    ++ "% armour for the whole window. That is not a reading, so it is no reason to stay. Get out."
+                )
+                (runAway context)
 
         runAwayArmorThreshold = 
             context.eventContext.botSettings.runAwayArmorHitpointsThresholdPercent
@@ -4410,6 +4955,20 @@ runAwayIfLowHealth context shipUI =
 
     else if lowestArmor < runAwayArmorThreshold then
         Just runAwayWithArmorDescription
+
+    else if context.memory.incomingDamage.retreating then
+        -- The latch, not the live comparison. Set and released in
+        -- updateIncomingDamageMemory, which is the only place that can hold a
+        -- verdict across readings -- and holding it is the whole point: the
+        -- moment the ship warps clear the window starts draining, so a live
+        -- comparison would cancel its own retreat halfway through.
+        Just runAwayFromIncomingDamage
+
+    else if
+        (damageThatMustMoveTheHitpointsReading <= damageInWindow)
+            && (hitpointsReadingMovedInWindow context.memory.incomingDamage == Just False)
+    then
+        Just runAwayFromAnInstrumentThatIsNotMoving
 
     else
         Nothing
@@ -5207,23 +5766,61 @@ weaponTooltipUnansweredGiveUpTicks =
     5
 
 
-{-| How many readings the bot will spend getting the guns to stop firing before
-it abandons the swap and lets them carry on.
+{-| How long the swap may leave the ship's guns switched off, counted from the
+reading it first told one to stop.
 
-**A weapon that will not go quiet keeps shooting the wrong charge.** That is the
-invariant this number exists to hold, and it is worth stating plainly because the
-sequence here deliberately switches the ship's guns off: failing to a firing gun
-with the wrong ammo is always better than failing to a silent gun. Everything
-below is bounded so that the worst case is a few seconds of lost damage, never a
-ship standing still.
+**One deadline over the whole silent period, not one per phase.** That is the
+correction issue #34 forced, and the distinction is the whole point. The previous
+version bounded *getting the guns quiet* and left the phase after it -- waiting
+for the ramp to finish -- with no counter at all. Run 8 sat in that second phase
+for 298 readings with the guns off and eleven hostiles on the overview, because
+the branch that would have handed the fight back is downstream of the wedge: the
+guns come back when the swap stops, and that branch was what stopped the swap
+from ever stopping.
 
-Generous enough for a cycle to finish -- a beam cycle is a few seconds, roughly a
-reading -- plus the settling window a module-button click needs before the client
-shows the result.
+So this counts readings, unconditionally, from the first switch-off command until
+the swap lets go. It is advanced by nothing more specific than "the swap is still
+holding a verdict it has silenced the guns for", which is what makes it
+structural: a phase added inside that window cannot escape it by forgetting to
+count, and no reading of the module's own state can stall it, which matters
+because those readings are exactly what turned out to be untrustworthy (#35).
+
+**A weapon that will not go quiet keeps shooting the wrong charge.** Failing to a
+firing gun with the wrong ammo is always better than failing to a silent gun.
+Reaching this deadline means the ship was disarmed and the bot could not get it
+back on its own schedule, so it is the one failure here that switches the whole
+swap off for the session rather than just abandoning the attempt -- see
+`ammoSwapVerdictGiveUpTicks` for why every other failure does the opposite.
+Repeating a manoeuvre that disarms the ship, once it has demonstrably not worked,
+is not an optimisation worth retrying.
+
+Comfortably longer than the sequence needs -- a settle plus a cascade or two --
+and comfortably shorter than `ammoSwapVerdictGiveUpTicks`, so that the dangerous
+state is always the first one to time out.
 -}
-ammoSwapSilenceGunsGiveUpTicks : Int
-ammoSwapSilenceGunsGiveUpTicks =
-    8
+ammoSwapSilencedGiveUpTicks : Int
+ammoSwapSilencedGiveUpTicks =
+    20
+
+
+{-| How many readings to let a switch-off settle before loading anyway.
+
+A count, deliberately, and not a condition on the module. The condition this
+replaces was "wait until the ramp stops turning", which is the wait that hung:
+`rampRotationMilli` is derived from a widget the client creates and destroys
+around a cycle, `isActive` reads `ramp_active`, and #35 measured `ramp_active`
+reading `False` on a module that was switched **on**. A wait on a signal that may
+never say what it is being asked is a wait that may never end, however patient.
+
+A count always ends. And it can afford to be short, because the bot no longer has
+to be *sure* the gun is quiet before trying: since #31 the client's own refusal
+says when a load was thrown away, so an attempt made too early is answered in one
+reading rather than guessed at. Being wrong costs a reading; waiting to be
+certain cost run 8 nearly three hundred.
+-}
+ammoSwapSilenceSettleTicks : Int
+ammoSwapSilenceSettleTicks =
+    3
 
 
 {-| How many entries a weapon's context menu must have before the bot will
@@ -5347,6 +5944,49 @@ ammoSwapBootstrapThreshold ammoSwap =
             )
 
 
+{-| The client's own words for having discarded a load, if it said them since
+the last reading.
+
+Matched on the two parts of the sentence that do not vary. The weapon's name sits
+between them -- `You cannot load or unload Focused Modulated Medium Energy Beam I
+while it is active.` -- so a whole-line match would be per-fitting, and matching
+`cannot` alone would catch every other refusal the client makes.
+
+The channel is checked where the host gave one. A `Nothing` channel is a host
+that did not say which, not a line without one, so it is judged on its text alone
+rather than dropped.
+
+Note what this does *not* do. `Nothing` from the game log and `Just []` are
+collapsed here, and that is safe only because of the direction of the inference:
+finding no refusal is never read as the load having been accepted. The menu is
+what says that. Nothing anywhere may conclude "no refusal arrived, so it worked",
+which is the reading of an absent game log that would put this repo's signature
+bug back.
+-}
+loadRefusalFromGameLog : ReadingFromGameClient -> Maybe String
+loadRefusalFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.filter
+            (\entry ->
+                stringContainsIgnoringCase "cannot load or unload" entry.text
+                    && stringContainsIgnoringCase "while it is active" entry.text
+            )
+        |> List.head
+        |> Maybe.map .text
+
+
+gameLogEntryIsFromNotifyChannel : EveOnline.ParseUserInterface.GameLogEntry -> Bool
+gameLogEntryIsFromNotifyChannel entry =
+    case entry.channel of
+        Nothing ->
+            True
+
+        Just channel ->
+            (channel |> String.trim |> String.toLower) == "notify"
+
+
 {-| Whether this weapon is running, and so whether the client will refuse to
 load a charge into it.
 
@@ -5359,26 +5999,21 @@ and the confirmation that follows finds nothing changed because nothing happened
 `isActive` is `Nothing` when the module has never run, which
 `inactiveModulesToActivateAlways` documents at length; treated as not firing
 here, for the same reason it is treated as off there.
+
+**Used to choose whether to press the switch-off, and for nothing else.** It was
+also once used to decide whether the gun was *ready* to be loaded, together with
+`rampRotationMilli`, and that is the pair of readings run 8 hung on: the counter
+in front reset every time this flickered between cycles, and the wait behind it
+never ended because the ramp never went quiet. #35 then measured `ramp_active` --
+which is what this reads -- returning `False` on a module that was switched on.
+
+So nothing here waits on either signal any more. Being wrong about this costs one
+reading: the load is attempted anyway, and the client's own refusal (#31) says if
+the gun was still running.
 -}
 weaponIsFiring : ShipUIModuleButton -> Bool
 weaponIsFiring moduleButton =
     moduleButton.isActive == Just True
-
-
-{-| Whether this weapon will accept a charge: switched off, and no longer
-turning.
-
-The ramp is read here as the client's own answer to a question the bot has
-actually asked -- has the cycle finished -- which it can be, now that the gun has
-been told to stop. That is a different use from testing the ramp on a gun nobody
-switched off, where a turning ramp means only that the weapon is doing its job.
-It also subsumes the reload guard the previous version needed: a reload in flight
-turns the ramp, so a gun mid-reload is not quiet and will not be asked twice.
--}
-weaponWillAcceptACharge : ShipUIModuleButton -> Bool
-weaponWillAcceptACharge moduleButton =
-    not (weaponIsFiring moduleButton)
-        && ((moduleButton.rampRotationMilli |> Maybe.withDefault 0) == 0)
 
 
 {-| The weapons, left to right.
@@ -5783,22 +6418,80 @@ updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
             else
                 memoryBefore.rangeVerdictTicks + 1
 
-        -- Readings spent waiting for the guns to stop firing, for this verdict.
-        -- Counted only while the bot is actually acting on one, so a weapon that
-        -- is firing because nothing has asked it to stop does not spend this
-        -- budget.
-        gunsSilencingTicks =
-            if not verdictIsTheSameOneAsBefore then
+        -- Whether the swap has told a gun to stop for this verdict. The step's
+        -- own effects, not the module's reported state: what the bot asked for
+        -- is knowable, where what the client did with it turned out not to be.
+        swapJustCommandedAGunOff =
+            case context.previousStepsEffects |> List.head of
+                Nothing ->
+                    False
+
+                Just effects ->
+                    guns |> List.any (\gun -> doEffectsClickModuleButton gun effects)
+
+        -- Readings since the guns were first told to stop, for this verdict.
+        --
+        -- **Nothing about the module can stall this.** That is the entire
+        -- correction from #34, and the shape it replaces is worth keeping in
+        -- view: the old counter reset whenever no gun *read* as firing, so a
+        -- weapon flickering between cycles reset it every other reading and it
+        -- never reached its bound at all. Run 8's log shows it stuck at "1 of 8"
+        -- for all eight readings it was printed, and then the next phase, which
+        -- had no counter, ran for 298. Two bugs wearing one coat: a counter that
+        -- could not advance, in front of a state that did not count.
+        --
+        -- So the only inputs here are whether the swap is still holding the
+        -- guns and whether the bot has asked. It advances on every reading in
+        -- between, whatever the guns say about themselves.
+        --
+        -- Note what is deliberately *not* a reset: the verdict changing. A
+        -- target drifting back across the deadband flips short to long with the
+        -- guns still switched off, and a counter that restarted there would let
+        -- a flickering distance hold the ship disarmed indefinitely -- the same
+        -- bug in a different coat. Only the swap letting go clears it.
+        gunsSilencedTicks =
+            if rangeVerdict == Nothing then
                 0
 
-            else if verdictSatisfied || memoryBefore.verdictAbandoned then
+            else if verdictSatisfied then
                 0
 
-            else if (rangeVerdictTicks < ammoSwapDistanceHoldTicks) || not (guns |> List.any weaponIsFiring) then
+            else if memoryBefore.verdictAbandoned then
+                -- The swap has let go, so the fight owns the guns again and this
+                -- is no longer measuring anything. Reset here and nowhere else.
                 0
+
+            else if memoryBefore.gunsSilencedTicks > 0 then
+                memoryBefore.gunsSilencedTicks + 1
+
+            else if swapJustCommandedAGunOff then
+                1
 
             else
-                memoryBefore.gunsSilencingTicks + 1
+                0
+
+        -- The client's own account of having thrown the load away. Recorded
+        -- rather than acted on where it is read, because the entries carrying it
+        -- are gone by the next reading and this is the only place that can write
+        -- memory.
+        --
+        -- Only while a verdict is live: this wording can only be answering a
+        -- load, and the ammo swap is the only thing here that loads, but a
+        -- refusal with nothing outstanding belongs to whoever provoked it.
+        loadRefusedByClient =
+            if rangeVerdict == Nothing then
+                Nothing
+
+            else if not verdictIsTheSameOneAsBefore then
+                loadRefusalFromGameLog context.readingFromGameClient
+
+            else
+                case loadRefusalFromGameLog context.readingFromGameClient of
+                    Just refusal ->
+                        Just refusal
+
+                    Nothing ->
+                        memoryBefore.loadRefusedByClient
 
         -- Abandoning is per verdict and says nothing about the next one -- see
         -- ammoSwapVerdictGiveUpTicks. The guns go back to firing the moment this
@@ -5810,7 +6503,15 @@ updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
             else if verdictSatisfied then
                 False
 
-            else if ammoSwapSilenceGunsGiveUpTicks < gunsSilencingTicks then
+            else if loadRefusedByClient /= Nothing then
+                -- The client has said the load was discarded, so waiting for the
+                -- menu to confirm it is waiting for something that cannot
+                -- happen. The same outcome the bounds below reach, arrived at on
+                -- the reading the client answered instead of twenty-five
+                -- readings later.
+                True
+
+            else if ammoSwapSilencedGiveUpTicks < gunsSilencedTicks then
                 True
 
             else if ammoSwapVerdictGiveUpTicks < rangeVerdictTicks then
@@ -5873,6 +6574,13 @@ updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
                                 ++ "', so the ship is carrying neither and there is nothing to swap between"
                             )
 
+                    else if ammoSwapSilencedGiveUpTicks < gunsSilencedTicks then
+                        Just
+                            ("the guns were switched off to load and were still not back "
+                                ++ String.fromInt gunsSilencedTicks
+                                ++ " readings later -- a disarmed ship is worse than the wrong charge, so this will not be attempted again this session"
+                            )
+
                     else if optimalRangeGivenUp && (threshold == Nothing) then
                         Just
                             ("no crossover distance: 'ammo-swap-range' is not set and the weapon's tooltip never appeared, so there is no distance to swap at even though the menu says which charge is loaded"
@@ -5897,7 +6605,8 @@ updateAmmoSwapMemoryWithChargeNames context chargeNames memoryBefore =
     , rangeVerdictTicks = rangeVerdictTicks
     , verdictSatisfied = verdictSatisfied
     , verdictAbandoned = verdictAbandoned
-    , gunsSilencingTicks = gunsSilencingTicks
+    , loadRefusedByClient = loadRefusedByClient
+    , gunsSilencedTicks = gunsSilencedTicks
     , gunsCommandedThisVerdictAtX = gunsCommandedThisVerdictAtX
     , menuOpenOnGunAtX = menuOpenOnGunAtX
     , hoverAwaitingTooltip = hoverAwaitingTooltip
@@ -6111,14 +6820,30 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                 idle
 
             else if ammoSwap.verdictAbandoned then
-                describeBranch
-                    ("Gave up on loading '"
-                        ++ wantedChargeName
-                        ++ "' for this target ("
-                        ++ describeRanges
-                        ++ ") -- back to shooting with what is loaded, rather than standing here with the guns off. The next change of range tries again."
-                    )
-                    nextStep
+                case ammoSwap.loadRefusedByClient of
+                    Just refusal ->
+                        -- The client's own sentence, quoted rather than
+                        -- paraphrased. The whole value of reading its log is
+                        -- that an operator sees what EVE said, not what the bot
+                        -- made of it.
+                        describeBranch
+                            ("The client refused the load. It said: \""
+                                ++ refusal
+                                ++ "\" -- so '"
+                                ++ wantedChargeName
+                                ++ "' is not going in this time. Back to shooting with what is loaded; the next change of range tries again."
+                            )
+                            nextStep
+
+                    Nothing ->
+                        describeBranch
+                            ("Gave up on loading '"
+                                ++ wantedChargeName
+                                ++ "' for this target ("
+                                ++ describeRanges
+                                ++ ") -- back to shooting with what is loaded, rather than standing here with the guns off. The next change of range tries again."
+                            )
+                            nextStep
 
             else if ammoSwap.rangeVerdictTicks < ammoSwapDistanceHoldTicks then
                 describeBranch
@@ -6147,89 +6872,136 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                                 )
                                 pressEscape
 
-                        else if not (weaponWillAcceptACharge gunWithMenu) then
-                            -- Reading the menu is free at any time; acting on it
-                            -- is not. Close it, so the module button is not
-                            -- underneath it when the next branch goes to switch
+                        else if ammoSwap.gunsSilencedTicks < 1 then
+                            -- Reading the menu is free while the guns fire;
+                            -- loading is not. Close it, so the module button is
+                            -- not underneath it when the next branch switches
                             -- the gun off.
                             describeBranch
                                 ("The menu offers '"
                                     ++ wantedChargeName
-                                    ++ "', but this weapon is still running and the client refuses a load into a running weapon -- close the menu and stop the gun first."
+                                    ++ "', but nothing has told this weapon to stop yet and the client refuses a load into a running weapon -- close the menu and stop the gun first."
                                 )
                                 pressEscape
 
+                        else if ammoSwap.gunsSilencedTicks <= ammoSwapSilenceSettleTicks then
+                            -- Settling, on a count rather than on the module's
+                            -- own account of itself. See ammoSwapSilenceSettleTicks:
+                            -- the ramp reading this used to wait on may never
+                            -- say what it is being asked, and run 8 waited 298
+                            -- readings for it.
+                            describeBranch
+                                ("Told this weapon to stop "
+                                    ++ String.fromInt ammoSwap.gunsSilencedTicks
+                                    ++ " of "
+                                    ++ String.fromInt ammoSwapSilenceSettleTicks
+                                    ++ " readings ago -- let the cycle end before loading '"
+                                    ++ wantedChargeName
+                                    ++ "'."
+                                )
+                                nextStep
+
                         else
+                            -- Loaded without checking whether the gun reads
+                            -- quiet, on purpose. The client answers that
+                            -- question itself: a load into a running module
+                            -- comes back as a refusal in the game log, which the
+                            -- bot has read since #31, and one wasted reading is
+                            -- a better price than a wait that cannot end.
                             describeBranch
                                 ("The menu offers '"
                                     ++ wantedChargeName
-                                    ++ "', so this weapon is not carrying it, and it is quiet enough to accept it -- load it. "
+                                    ++ "', so this weapon is not carrying it, and it has had "
+                                    ++ String.fromInt ammoSwap.gunsSilencedTicks
+                                    ++ " reading(s) to stop -- load it. "
                                     ++ describeRanges
                                     ++ "."
                                 )
                                 (loadTheWantedCharge gunWithMenu)
 
                     Nothing ->
-                        case fight.guns |> List.filter weaponIsFiring |> List.head of
-                            Just gunStillFiring ->
-                                -- Switch it off, and mind that the button is a
-                                -- toggle: clicking again before the client has
-                                -- shown the result turns it straight back on,
-                                -- which is what moduleButtonClickSettlingSteps
-                                -- exists for. This is bounded by
-                                -- ammoSwapSilenceGunsGiveUpTicks, and the guns
-                                -- come back on by themselves the moment the swap
-                                -- stops holding the fight -- see
-                                -- ammoSwapIsActingOnAVerdict.
-                                describeBranch
-                                    ("Stop this weapon before loading '"
-                                        ++ wantedChargeName
-                                        ++ "' -- the client refuses to load a charge into a module that is running, and says so only in the game log, which the bot cannot read. Silencing for "
-                                        ++ String.fromInt ammoSwap.gunsSilencingTicks
-                                        ++ " of "
-                                        ++ String.fromInt ammoSwapSilenceGunsGiveUpTicks
-                                        ++ " readings."
-                                    )
-                                    (clickModuleButtonButWaitIfClickedInPreviousStep context gunStillFiring)
+                        if ammoSwap.gunsSilencedTicks < 1 then
+                            case fight.guns |> List.filter weaponIsFiring |> List.head of
+                                Just gunStillFiring ->
+                                    -- Switch it off, once. The button is a
+                                    -- toggle, so the settling window in
+                                    -- clickModuleButtonButWaitIfClickedInPreviousStep
+                                    -- is what keeps a second press from turning
+                                    -- it straight back on -- and from here on
+                                    -- `gunsSilencedTicks` is non-zero, so this
+                                    -- branch is not revisited for this verdict
+                                    -- however the module reports itself.
+                                    --
+                                    -- Everything after this point is inside the
+                                    -- window `ammoSwapSilencedGiveUpTicks` bounds.
+                                    describeBranch
+                                        ("Stop this weapon before loading '"
+                                            ++ wantedChargeName
+                                            ++ "' -- the client refuses to load a charge into a module that is running, and says so only in its game log."
+                                        )
+                                        (clickModuleButtonButWaitIfClickedInPreviousStep context gunStillFiring)
 
-                            Nothing ->
-                                case fight.guns |> List.filter (weaponWillAcceptACharge >> not) |> List.head of
-                                    Just _ ->
-                                        describeBranch
-                                            ("The guns are switched off but one is still finishing its cycle -- wait for the ramp to stop before loading '"
-                                                ++ wantedChargeName
-                                                ++ "'."
-                                            )
-                                            waitForProgressInGame
+                                Nothing ->
+                                    -- Nothing reads as firing, so there is
+                                    -- nothing to switch off and the load can be
+                                    -- tried directly. If that reading was wrong
+                                    -- -- and #35 gives real reason to think it
+                                    -- can be -- the refusal says so.
+                                    describeBranch
+                                        ("No weapon reads as firing, so open one's menu to see whether it already carries '"
+                                            ++ wantedChargeName
+                                            ++ "'."
+                                        )
+                                        (loadTheWantedCharge
+                                            (gunsStillToVisit |> List.head |> Maybe.withDefault fight.referenceGun)
+                                        )
 
-                                    Nothing ->
-                                        case gunsStillToVisit |> List.head of
-                                            Just gunToVisit ->
-                                                describeBranch
-                                                    ("Open this weapon's menu to see whether it already carries '"
-                                                        ++ wantedChargeName
-                                                        ++ "'. "
-                                                        ++ String.fromInt (List.length gunsStillToVisit)
-                                                        ++ " of "
-                                                        ++ String.fromInt (List.length fight.guns)
-                                                        ++ " weapon(s) still to check."
-                                                    )
-                                                    (loadTheWantedCharge gunToVisit)
+                        else if ammoSwap.gunsSilencedTicks <= ammoSwapSilenceSettleTicks then
+                            describeBranch
+                                ("Told the guns to stop "
+                                    ++ String.fromInt ammoSwap.gunsSilencedTicks
+                                    ++ " of "
+                                    ++ String.fromInt ammoSwapSilenceSettleTicks
+                                    ++ " readings ago -- let the cycle end before loading '"
+                                    ++ wantedChargeName
+                                    ++ "'."
+                                )
+                                nextStep
 
-                                            Nothing ->
-                                                -- Every gun has been visited and
-                                                -- the swap is still not
-                                                -- confirmed, so re-open the last
-                                                -- one: its menu is where the
-                                                -- answer is, and the charge
-                                                -- having vanished from it is the
-                                                -- only evidence a load landed.
-                                                describeBranch
-                                                    ("Every weapon has been told to load '"
-                                                        ++ wantedChargeName
-                                                        ++ "' -- re-open the last one's menu to see whether it took."
-                                                    )
-                                                    (loadTheWantedCharge fight.referenceGun)
+                        else
+                            case gunsStillToVisit |> List.head of
+                                Just gunToVisit ->
+                                    describeBranch
+                                        ("Open this weapon's menu to see whether it already carries '"
+                                            ++ wantedChargeName
+                                            ++ "'. "
+                                            ++ String.fromInt (List.length gunsStillToVisit)
+                                            ++ " of "
+                                            ++ String.fromInt (List.length fight.guns)
+                                            ++ " weapon(s) still to check. Guns off for "
+                                            ++ String.fromInt ammoSwap.gunsSilencedTicks
+                                            ++ " of "
+                                            ++ String.fromInt ammoSwapSilencedGiveUpTicks
+                                            ++ " readings."
+                                        )
+                                        (loadTheWantedCharge gunToVisit)
+
+                                Nothing ->
+                                    -- Every gun has been visited and the swap is
+                                    -- still not confirmed, so re-open the last
+                                    -- one: its menu is where the answer is, and
+                                    -- the charge having vanished from it is the
+                                    -- only evidence a load landed.
+                                    describeBranch
+                                        ("Every weapon has been told to load '"
+                                            ++ wantedChargeName
+                                            ++ "' -- re-open the last one's menu to see whether it took. Guns off for "
+                                            ++ String.fromInt ammoSwap.gunsSilencedTicks
+                                            ++ " of "
+                                            ++ String.fromInt ammoSwapSilencedGiveUpTicks
+                                            ++ " readings."
+                                        )
+                                        (loadTheWantedCharge fight.referenceGun)
 
 
 {-| Rest the mouse on a weapon module until the client shows its tooltip.
@@ -6274,6 +7046,26 @@ hoverWeaponForOptimalRange context referenceGun =
             (decideActionForCurrentStep
                 (EveOnline.BotFramework.mouseMoveToUIElement referenceGun.uiNode)
             )
+
+
+{-| Whether this host is carrying the client's game log at all.
+
+Worth a place on the status line because "no refusal was reported" reads exactly
+the same whether the client said nothing or nothing was listening -- and those
+are the two answers `gameLogEntriesSinceLastReading` keeps apart on purpose. An
+operator wondering why a refusal never appeared should not have to guess which
+of the two they are looking at.
+-}
+describeGameLogAvailability : ReadingFromGameClient -> String
+describeGameLogAvailability readingFromGameClient =
+    case readingFromGameClient.gameLogEntriesSinceLastReading of
+        Nothing ->
+            "This host is not carrying the client's game log, so a refusal cannot be seen -- only inferred from the swap not confirming."
+
+        Just entries ->
+            "Game log carried, "
+                ++ String.fromInt (List.length entries)
+                ++ " line(s) this reading."
 
 
 {-| The ammo swap's whole state on one line, so an operator can watch the charge
@@ -6332,14 +7124,22 @@ describeAmmoSwapState context =
                                 " (satisfied)"
 
                             else if ammoSwap.verdictAbandoned then
-                                " (gave up on this one, will try again on the next change of range)"
+                                (case ammoSwap.loadRefusedByClient of
+                                    Just refusal ->
+                                        " (the client refused it: \"" ++ refusal ++ "\")"
 
-                            else if 0 < ammoSwap.gunsSilencingTicks then
-                                " (waiting "
-                                    ++ String.fromInt ammoSwap.gunsSilencingTicks
+                                    Nothing ->
+                                        " (gave up on this one, will try again on the next change of range)"
+                                )
+
+                            else if 0 < ammoSwap.gunsSilencedTicks then
+                                -- The number an operator should be watching: how
+                                -- long this ship has had its guns switched off.
+                                " (GUNS OFF for "
+                                    ++ String.fromInt ammoSwap.gunsSilencedTicks
                                     ++ " of "
-                                    ++ String.fromInt ammoSwapSilenceGunsGiveUpTicks
-                                    ++ " readings for the guns to stop)"
+                                    ++ String.fromInt ammoSwapSilencedGiveUpTicks
+                                    ++ " readings)"
 
                             else
                                 ""
@@ -6358,7 +7158,8 @@ describeAmmoSwapState context =
                             else
                                 ""
                            )
-                        ++ "."
+                        ++ ". "
+                        ++ describeGameLogAvailability context.readingFromGameClient
 
         _ ->
             "Ammo swap: off (needs both short-range-ammo and long-range-ammo)."
@@ -7404,11 +8205,19 @@ initBotMemory =
     , readingsCount = 0
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
+    , incomingDamage =
+        { samples = []
+        , hostCarriesTheChannel = False
+        , lastAttacker = Nothing
+        , retreating = False
+        }
     , droneBayOpenedFromShipCard = False
     , droneBayWillTakeNoMore = False
     , droneRestockLooksWithRoom = 0
     , droneRestockDragsDispatched = 0
     , droneBayEmptyLastSeen = Nothing
+    , shipLoss = Nothing
+    , shipUIWithoutModuleButtonsReadings = 0
     , lockAttempt = Nothing
     , lockProvenAtMeters = Nothing
     , lockRefusedAtMeters = Nothing
@@ -7463,6 +8272,8 @@ statusTextFromState context =
                 ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
                 ++ ". "
                 ++ describeModulesToActivateAlways readingFromGameClient
+                ++ " "
+                ++ describeTopRowModuleDictState readingFromGameClient
 
         describeCurrentReading =
             case readingFromGameClient.shipUI of
@@ -7471,9 +8282,32 @@ statusTextFromState context =
 
                 Just shipUI ->
                     let
+                        -- The raw gauge value is reported alongside "(not a
+                        -- believable reading)" rather than instead of it,
+                        -- because the raw value is what an operator sees and
+                        -- reasons about. Issue #32 was filed partly on this
+                        -- line printing "Shield: 385%" -- which the retreat
+                        -- guard had already rejected and never acted on, while
+                        -- the log gave every appearance that it had.
+                        describeHitpoint name value =
+                            name
+                                ++ ": "
+                                ++ (value |> String.fromInt)
+                                ++ "%"
+                                ++ (case plausibleHitpointsPercent value of
+                                        Nothing ->
+                                            " (not a believable reading -- ignored by the retreat guard)"
+
+                                        Just _ ->
+                                            ""
+                                   )
+
                         describeShip =
-                            "Shield: " ++ (shipUI.hitpointsPercent.shield |> String.fromInt) ++ "% "
-                            ++ " Armor: " ++ (shipUI.hitpointsPercent.armor |> String.fromInt) ++ "%"
+                            describeHitpoint "Shield" shipUI.hitpointsPercent.shield
+                                ++ "  "
+                                ++ describeHitpoint "Armor" shipUI.hitpointsPercent.armor
+                                ++ ". "
+                                ++ describeIncomingDamage context
 
                         describeDrones =
                             case readingFromGameClient.dronesWindow of
@@ -7542,10 +8376,50 @@ statusTextFromState context =
     [ [ describePerformance ]
     , [ describeMenuAndSettlingCounters ]
     , [ describeHomeStation context ]
+    , [ describeShipLoss context ]
     , describeCurrentReading
     ]
         |> List.concat
         |> String.join "\n"
+
+
+{-| Whether the bot thinks it still has a ship, on every reading rather than only
+once it does not.
+
+Carried continuously for the same reason `describeHomeStation` is: both inputs
+are otherwise invisible. Whether the host is carrying the game log at all decides
+whether the first of the two signals can ever fire, and "no capsule refusal was
+seen" reads identically whether the client was silent or nothing was listening --
+the distinction #30's `Maybe` exists to keep. The module counter shows the second
+signal counting up, so a verdict that is about to arrive is visible before it
+does rather than only in hindsight.
+
+-}
+describeShipLoss : BotDecisionContext -> String
+describeShipLoss context =
+    case context.memory.shipLoss of
+        Just shipLoss ->
+            "SHIP LOST: "
+                ++ shipLoss.reason
+                ++ " -- recovering the pod, "
+                ++ String.fromInt shipLoss.readingsSince
+                ++ " of "
+                ++ String.fromInt podRecoveryGiveUpReadings
+                ++ " readings spent."
+
+        Nothing ->
+            "Ship: intact as far as this reading can tell (no-module readings "
+                ++ String.fromInt context.memory.shipUIWithoutModuleButtonsReadings
+                ++ " of "
+                ++ String.fromInt shipLossReadingsWithoutModulesBeforeVerdict
+                ++ "). "
+                ++ (case context.readingFromGameClient.gameLogEntriesSinceLastReading of
+                        Nothing ->
+                            "This host is not carrying the client's game log, so the capsule refusal cannot be seen at all and the module count is the only signal left."
+
+                        Just _ ->
+                            "The game log is carried, so the capsule refusal would be seen."
+                   )
 
 
 {-| The home station and whether the bot currently means to go there.
@@ -8937,14 +9811,26 @@ iconSpriteHasColorOfRat =
 
 {-| A hitpoints reading, if it is one we can believe.
 
-The parser returns nonsense occasionally -- measured across four runs, roughly
-one reading in a few hundred, with values like 1862%, 2307%, 7711% and -213%.
-That used to cost a single wrong tick, because every check compared the live
-value and the next reading corrected it. Latching the low-water mark for the
-retreat changed the stakes: one bogus -213% is below even a disabled threshold
-of -1, and `min` then holds it until the ship is docked or fully healthy. Seen
-live within one run of the latch going in -- "Shield reached -213% (now 70%),
-get out get out" -- so the two changes have to land together.
+The parser returns nonsense occasionally -- measured now across all eight
+recorded runs, roughly one reading in a few hundred, with values like 1862%,
+2307%, 7711%, -213%, and at the extremes 8362%, 302023%, 2132822% and
+-1021821%. That used to cost a single wrong tick, because every check compared
+the live value and the next reading corrected it. Latching the low-water mark
+for the retreat changed the stakes: one bogus -213% is below even a disabled
+threshold of -1, and `min` then holds it until the ship is docked or fully
+healthy. Seen live within one run of the latch going in -- "Shield reached
+-213% (now 70%), get out get out" -- so the two changes have to land together.
+
+**Rejecting the impossible values is not the same as trusting the rest**, and
+the run-8 case is the one to keep in mind: 95, 95, 95, then 2132822 for exactly
+one reading, then 95 again. `ShipUI.hitpointsPercent` is
+`gauge._lastValue * 100` read out of a widget in the client's live memory while
+the client is mutating it, so a single garbage reading is a read landing on a
+reallocated object -- and the same accident that produced 21328.22 could as
+easily produce 0.42. A garbage value inside [0, 100] is indistinguishable from a
+real one and this function cannot help with it. That is the argument for
+`run-away-incoming-damage-threshold`, which reads a number the client states
+outright rather than a float scraped off a sprite.
 -}
 plausibleHitpointsPercent : Int -> Maybe Int
 plausibleHitpointsPercent value =
@@ -8953,6 +9839,183 @@ plausibleHitpointsPercent value =
 
     else
         Just value
+
+
+{-| Hitpoints per `incomingDamageWindowSeconds` the ship will sit through.
+
+On rather than disabled, unlike the two hitpoint thresholds, because a guard
+shipped off is what issue #32 was: the launcher disabled the shield one, leaving
+the armour gauge as the only instrument, and on this shield-tanked hull the
+armour gauge cannot move until the tank is already gone.
+
+3500 is measured, not chosen. Peak incoming damage in any 45-second window,
+taken from the client's own timestamps across sixteen recorded sessions: the
+worst any session the ship survived absorbed was 3114, and the session it was
+lost in peaked at 4101. The margin either side is about 12%, which is the best
+this data offers -- and it is a real separation rather than a comfortable one,
+so a run that trips this guard is worth reading rather than assuming spurious.
+
+**This number is about a hull, not about the game.** It is the tank of the ship
+on this account. Flying anything else means re-deriving it, and the failure mode
+of carrying it over is silent in the dangerous direction: on a bigger hull it
+retreats from fights it would win, and on a smaller one it never fires.
+-}
+defaultRunAwayIncomingDamageThreshold : Int
+defaultRunAwayIncomingDamageThreshold =
+    3500
+
+
+{-| How far back the incoming-damage retreat looks.
+
+45 seconds, chosen from the recorded client logs rather than picked: it is where
+the fatal engagement separates most cleanly from every engagement the ship
+survived. Across sixteen recorded sessions the worst 45-second window a
+surviving run absorbed was 3114 hitpoints; the session the ship died in peaked
+at 4101. Shorter windows separate slightly better still in relative terms and
+carry more noise; longer ones close the gap -- at four minutes it is 8689
+against 9286, which no threshold could tell apart.
+-}
+incomingDamageWindowSeconds : Int
+incomingDamageWindowSeconds =
+    45
+
+
+{-| Damage the HUD has to react to before its silence is treated as a fault.
+
+The rule this serves: a gauge that does not move while the ship is being taken
+apart is not a reading, and the correct response to an instrument that cannot
+answer is to leave, not to keep fighting on its silence.
+
+The number is what makes that rule safe rather than trigger-happy. A shield at
+100% genuinely does not change by a whole percent for a small hit, and shields
+regenerate, so brief stretches of an unchanged reading under light fire are
+normal. Measured on the three recorded runs whose shield reading was live, the
+most damage ever absorbed while the `(shield, armor)` pair stayed frozen was 595
+hitpoints, over 21 seconds. 1500 is two and a half times that.
+
+Deliberately below `run-away-incoming-damage-threshold`: a ship that can see
+what is happening to it is given more room than one that cannot.
+-}
+damageThatMustMoveTheHitpointsReading : Int
+damageThatMustMoveTheHitpointsReading =
+    1500
+
+
+{-| How many readings the window must hold before its silence means anything.
+
+Without this, the first reading of a session is a window of one, which trivially
+"has not changed", and a bot that undocked into a fight would retreat on its
+first look. Four readings is roughly ten seconds here.
+-}
+readingsBeforeAFrozenHitpointsReadingCounts : Int
+readingsBeforeAFrozenHitpointsReadingCounts =
+    4
+
+
+{-| A backstop on the window's length, not a policy.
+
+The window is bounded by time, and 200 samples is far more than
+`incomingDamageWindowSeconds` can hold at any tick rate this bot runs at. It
+exists so a clock that jumps backwards cannot grow the list without limit.
+-}
+incomingDamageSampleLimit : Int
+incomingDamageSampleLimit =
+    200
+
+
+{-| Total hitpoints taken in the window.
+-}
+incomingDamageInWindow : IncomingDamageMemory -> Int
+incomingDamageInWindow memory =
+    memory.samples |> List.map .damage |> List.sum
+
+
+{-| Did the HUD's hitpoints reading move at all across the window?
+
+Only a *believed* value counts as evidence of movement: two different `Just`
+readings. A window of nothing but `Nothing` -- no ship UI, or every value
+rejected as impossible -- has not moved, which is the conservative reading and
+the intended one. So is a window mixing `Just 100` with `Nothing`.
+
+`Nothing` here means the question cannot be asked yet, because the window is
+still shorter than `readingsBeforeAFrozenHitpointsReadingCounts`.
+-}
+hitpointsReadingMovedInWindow : IncomingDamageMemory -> Maybe Bool
+hitpointsReadingMovedInWindow memory =
+    if List.length memory.samples < readingsBeforeAFrozenHitpointsReadingCounts then
+        Nothing
+
+    else
+        Just
+            (memory.samples
+                |> List.filterMap .hitpoints
+                |> Common.Basics.listUnique
+                |> List.length
+                |> (<) 1
+            )
+
+
+{-| The damage-rate guard, in the status line, every reading.
+
+Whether the host carries the channel is reported first and unconditionally,
+because "0 hitpoints in the last 45 s" reads exactly the same whether the grid
+is quiet or nothing is watching -- and two guards below depend on the
+difference. This follows the ammo swap's line for the same reason: a safety net
+that is not armed has to say so, since its silence is otherwise indistinguishable
+from its working.
+-}
+describeIncomingDamage : BotDecisionContext -> String
+describeIncomingDamage context =
+    let
+        memory =
+            context.memory.incomingDamage
+
+        threshold =
+            context.eventContext.botSettings.runAwayIncomingDamageThreshold
+    in
+    if not memory.hostCarriesTheChannel then
+        "Incoming damage: this host is not carrying the client's combat log, so "
+            ++ "the damage-rate retreat and the frozen-reading check are both unarmed."
+
+    else
+        "Incoming damage: "
+            ++ (incomingDamageInWindow memory |> String.fromInt)
+            ++ " hitpoints over the last "
+            ++ (incomingDamageWindowSeconds |> String.fromInt)
+            ++ " s in "
+            ++ (List.length memory.samples |> String.fromInt)
+            ++ " reading(s), threshold "
+            ++ (if threshold < 0 then
+                    "disabled"
+
+                else
+                    String.fromInt threshold
+               )
+            ++ (if memory.retreating then
+                    ", RETREATING"
+
+                else
+                    ""
+               )
+            ++ ". Hitpoints reading moved in the window: "
+            ++ (case hitpointsReadingMovedInWindow memory of
+                    Nothing ->
+                        "too few readings to say"
+
+                    Just True ->
+                        "yes"
+
+                    Just False ->
+                        "no"
+               )
+            ++ (case memory.lastAttacker of
+                    Nothing ->
+                        ""
+
+                    Just attacker ->
+                        ". Hardest hitter seen: '" ++ attacker ++ "'"
+               )
+            ++ "."
 
 
 {-| Where the retreat's hysteresis actually lives.
@@ -8969,9 +10032,8 @@ they got chewed up.
 
 This is the memory half: keep the low-water mark, and forget it once the ship
 is healthy again or docked. `runAwayIfLowHealth` compares it against the
-threshold, because `UpdateMemoryContext` does not carry the bot settings --
-they are not visible from here, which is why the re-arm level is a constant and
-the trip level is not.
+threshold, so the re-arm level is a constant here while the trip level is a
+setting read at the decision.
 -}
 runAwayRearmPercent : Int
 runAwayRearmPercent =
@@ -8995,6 +10057,102 @@ lowWaterMark readingFromGameClient getPercent previous =
 
                     else
                         min previous current
+
+
+{-| Fold this reading's incoming fire into the rolling window.
+
+Three things happen here and each has to happen here, because a reading's
+`incomingDamageSinceLastReading` does not survive to the next one.
+
+**The window is trimmed by the clock, not by a count.** Readings take between
+one and three seconds depending on what the client is doing, so a window
+measured in readings would be a window of wildly varying length, and the
+threshold behind it was calibrated in seconds against the client's own
+timestamps.
+
+**`Nothing` from the parser is recorded as "no channel", never as "no damage".**
+It leaves `samples` alone rather than appending a zero, so a host that does not
+carry the channel accumulates an empty window and every guard below reads
+"nothing is happening" -- which is the correct behaviour only because
+`hostCarriesTheChannel` is what the status line reports, loudly, so an operator
+can see the guard is unarmed instead of inferring safety from its silence.
+
+**The latch is released by absence, not by recovery.** It trips when the window
+is over the threshold and clears only when the window is completely empty -- no
+hit at all for `incomingDamageWindowSeconds`. Trip and release are different
+conditions on purpose: one threshold with the reading walking back and forth
+across it is the flicker `runAwayRearmPercent` exists to prevent, and here there
+is no "healthy" reading to re-arm against, only the fire having stopped.
+-}
+updateIncomingDamageMemory : UpdateMemoryContext BotSettings -> IncomingDamageMemory -> IncomingDamageMemory
+updateIncomingDamageMemory context memoryBefore =
+    let
+        hitpointsNow =
+            context.readingFromGameClient.shipUI
+                |> Maybe.andThen
+                    (\shipUI ->
+                        Maybe.map2 Tuple.pair
+                            (plausibleHitpointsPercent shipUI.hitpointsPercent.shield)
+                            (plausibleHitpointsPercent shipUI.hitpointsPercent.armor)
+                    )
+
+        keptSamples =
+            memoryBefore.samples
+                |> List.filter
+                    (\sample ->
+                        context.timeInMilliseconds - sample.atMilliseconds
+                            < incomingDamageWindowSeconds * 1000
+                    )
+                |> List.take incomingDamageSampleLimit
+
+        samples =
+            case context.readingFromGameClient.incomingDamageSinceLastReading of
+                Nothing ->
+                    keptSamples
+
+                Just reading ->
+                    { atMilliseconds = context.timeInMilliseconds
+                    , damage = reading.damage
+                    , hitpoints = hitpointsNow
+                    }
+                        :: keptSamples
+
+        updated =
+            { samples = samples
+            , hostCarriesTheChannel =
+                context.readingFromGameClient.incomingDamageSinceLastReading /= Nothing
+            , lastAttacker =
+                case context.readingFromGameClient.incomingDamageSinceLastReading of
+                    Just reading ->
+                        case reading.topAttacker of
+                            Just attacker ->
+                                Just attacker
+
+                            Nothing ->
+                                memoryBefore.lastAttacker
+
+                    Nothing ->
+                        memoryBefore.lastAttacker
+            , retreating = memoryBefore.retreating
+            }
+
+        damageInWindow =
+            incomingDamageInWindow updated
+
+        threshold =
+            context.botSettings.runAwayIncomingDamageThreshold
+    in
+    { updated
+        | retreating =
+            if damageInWindow <= 0 then
+                False
+
+            else if 0 <= threshold && threshold <= damageInWindow then
+                True
+
+            else
+                memoryBefore.retreating
+    }
 
 
 updateMemoryForNewReadingFromGame : UpdateMemoryContext BotSettings -> BotMemory -> BotMemory
@@ -9061,6 +10219,11 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
             else
                 droneBayFillWhileSelected context.readingFromGameClient
+
+        shipUIWithoutModuleButtonsReadings =
+            shipUIWithoutModuleButtonsReadingsAfter
+                context.readingFromGameClient
+                botMemoryBefore.shipUIWithoutModuleButtonsReadings
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -9094,6 +10257,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         lowWaterMark context.readingFromGameClient
             (.armor)
             botMemoryBefore.lowestArmorPercentSinceHealthy
+    , incomingDamage = updateIncomingDamageMemory context botMemoryBefore.incomingDamage
     , readingsCount = botMemoryBefore.readingsCount + 1
     , droneBayOpenedFromShipCard =
         -- Whether our own "Open Drone Bay" on the ship's card has landed since
@@ -9127,6 +10291,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
             Just isEmpty ->
                 Just isEmpty
+    , shipUIWithoutModuleButtonsReadings = shipUIWithoutModuleButtonsReadings
+    , shipLoss =
+        -- Written here and nowhere else. The game log entries the first signal
+        -- reads are gone by the next reading, and this is the only place that
+        -- can write memory -- a branch that recognised the loss in the decision
+        -- tree instead would see it once and forget it.
+        shipLossVerdictAfter context.readingFromGameClient
+            { withoutModulesReadings = shipUIWithoutModuleButtonsReadings
+            , verdictBefore = botMemoryBefore.shipLoss
+            }
     , ammoSwap = updateAmmoSwapMemory context botMemoryBefore.ammoSwap
     , droneBayWillTakeNoMore =
         -- The restock's "already done", in the two forms a docked reading can
@@ -9744,6 +10918,16 @@ bot clicked a second time and switched the module back off.
 in the slot, and this client's slots only ever carry "mainshape", "overloadBtn"
 and (on an active slot) "underlay". Same for `isHiliteVisible` and its "hilite"
 sprite. Both are permanently False rather than informative.
+
+What #35 found is that the state is not missing, only elsewhere: twelve entries
+on the button's own `dictEntriesOfInterest`, now parsed onto
+`stateFromDictEntries`. `isInActiveState` is the one that means what this filter
+wants -- it read `True` on all four modules across all 92 samples of a 240s
+live sample, tracking switched-on, while `ramp_active` oscillated fourteen times
+underneath it. It is **not** wired in here, because that sample is one window on
+one fit and it never saw a module switch off, which is the state this filter
+exists to detect. `describeTopRowModuleDictState` logs it every reading so the
+next run settles that leg.
 -}
 inactiveModulesToActivateAlways : SeeUndockingComplete -> List ShipUIModuleButton
 inactiveModulesToActivateAlways seeUndockingComplete =
@@ -9787,6 +10971,88 @@ describeModulesToActivateAlways readingFromGameClient =
                         ++ ", keep-active ["
                         ++ (rest |> List.map describeOne |> String.join ", ")
                         ++ "]."
+
+
+{-| What the guns say about themselves in their own dict entries, verbatim.
+
+#35 found the module state the sprites do not carry sitting unread on every
+module button. A 240s read-only sample of run 9 then measured most of what those
+entries mean -- `ramp_active` is the gun's duty cycle and oscillates all through
+a fight, `isInActiveState` is the switched-on flag -- and left one leg with no
+observations at all: `isDeactivating` was never `True`, because nothing switched
+a module off while the sampler ran. **This line exists to catch that leg**, on
+the next run that performs an ammo swap, without anybody having to be watching.
+The status line is what survives a run to be read back afterwards, which is how
+`Middle-row modules: none.` turned out to be measurable across nine logs (#33).
+
+**Nothing acts on any of it.** One 240s window on one fit is not a licence to
+rewire a decision, and the field #34 hung on is the one still unobserved.
+
+The top row is where the guns are (`shipUIModulesToActivateOnTarget`), and the
+guns are what #34 hung waiting on, so it is the row worth the characters. The
+other seven entries the parser reads are not printed: this line goes out
+thousands of times a run, and `online`, `blinking`, `grey`, `quantity`,
+`autoreload`, `autorepeat` and `isMaster` were each constant across all 92
+samples.
+
+`isInActiveState` is printed beside `ramp_active` rather than left out because
+it is what makes `ramp_active` readable at all: a `False` there means "between
+cycles" while the gun is on and "not running" once it is off, and only the
+switched-on flag separates those two. The switch-off leg is exactly where they
+disagree.
+
+`-` is an entry that is **absent from the tree**, printed differently from `0`
+and `F` on purpose. Absent and `False` are different facts here and both were
+seen: no module carried `ramp_active` for the first ~60s of the sample, and
+`waitingForActiveTarget` appeared on all four modules at once at 141s. A format
+that collapsed them would drop the very transition worth recording. (An entry
+present but undecodable also prints `-`; on this build every key seen decodes.)
+
+-}
+describeTopRowModuleDictState : ReadingFromGameClient -> String
+describeTopRowModuleDictState readingFromGameClient =
+    let
+        describeFlag maybeFlag =
+            case maybeFlag of
+                Just True ->
+                    "T"
+
+                Just False ->
+                    "F"
+
+                Nothing ->
+                    "-"
+
+        describeNumber maybeNumber =
+            case maybeNumber of
+                Just number ->
+                    String.fromInt number
+
+                Nothing ->
+                    "-"
+
+        describeOne moduleButton =
+            [ describeFlag moduleButton.stateFromDictEntries.ramp_active
+            , describeFlag moduleButton.stateFromDictEntries.isInActiveState
+            , describeFlag moduleButton.stateFromDictEntries.isDeactivating
+            , describeNumber moduleButton.stateFromDictEntries.effect_activating
+            , describeNumber moduleButton.stateFromDictEntries.waitingForActiveTarget
+            ]
+                |> String.join "/"
+    in
+    case readingFromGameClient.shipUI of
+        Nothing ->
+            "Top-row modules: no ship UI."
+
+        Just shipUI ->
+            case shipUI.moduleButtonsRows.top |> List.sortBy (.uiNode >> .totalDisplayRegion >> .x) of
+                [] ->
+                    "Top-row modules: none."
+
+                topRowModules ->
+                    "Top-row modules (ramp_active/isInActiveState/isDeactivating/effect_activating/waitingForActiveTarget): "
+                        ++ (topRowModules |> List.map describeOne |> String.join ", ")
+                        ++ "."
 
 
 nothingFromIntIfGreaterThan : Int -> Int -> Maybe Int

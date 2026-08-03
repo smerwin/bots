@@ -607,6 +607,7 @@ def bring_window_to_foreground(pid, window_number, retries=4, delay=0.35):
 # to tell -- see CLAUDE.md's architecture section.
 SYNTHETIC_GAME_LOG_TYPE_NAME = "MacOsHostSyntheticGameLog"
 SYNTHETIC_GAME_LOG_ENTRY_TYPE_NAME = "MacOsHostSyntheticGameLogEntry"
+SYNTHETIC_INCOMING_DAMAGE_TYPE_NAME = "MacOsHostSyntheticIncomingDamage"
 
 
 def synthetic_game_log_node(entries):
@@ -649,6 +650,47 @@ def synthetic_game_log_node(entries):
             }
             for index, entry in enumerate(entries)
         ],
+    }
+
+
+def synthetic_incoming_damage_node(summary):
+    """A UI-tree node carrying how hard the client says we are being hit.
+
+    The same fiction as `synthetic_game_log_node`, with the same three
+    properties -- no display region, nothing under `_setText`/`_text`, and a
+    type name that says in full that the client never wrote this -- and it
+    exists for one reason the game-log node cannot cover.
+
+    `(combat)` is withheld from `gameLogEntriesSinceLastReading` and stays
+    withheld: 134,641 of the recorded lines are combat, the peak measured is 54
+    of them inside a single three-second reading, and none of them is a sentence
+    a decision wants to read. What a decision wants is the *total*, and the
+    total is one number. Summing it here rather than in Elm also puts the
+    incoming/outgoing split in one place, next to the markup stripping that
+    produced the line and covered by tests that run against the real recorded
+    lines -- `N from X` is damage taken, `N to X` is damage dealt, and confusing
+    the two would arm a retreat on the bot's own guns.
+
+    **Present-with-zero and absent are different answers**, exactly as they are
+    for the game log. The node is emitted on every reading a game log exists
+    for, so `damage = 0` is "the client reported no incoming fire" and the
+    node's absence is "this host does not carry the channel". A bot that read
+    the second as the first would conclude it was safe because nothing was
+    listening, which is this repo's signature failure.
+    """
+    entries = {
+        "damage": summary["damage"],
+        "hits": summary["hits"],
+    }
+    # Only when there was one: an attacker key on a reading with no incoming
+    # fire would be a name the client did not say this reading.
+    if summary["topAttacker"] is not None:
+        entries["topAttacker"] = summary["topAttacker"]
+    return {
+        "pythonObjectAddress": "macos-host-synthetic-incoming-damage",
+        "pythonObjectTypeName": SYNTHETIC_INCOMING_DAMAGE_TYPE_NAME,
+        "dictEntriesOfInterest": entries,
+        "children": [],
     }
 
 
@@ -912,6 +954,14 @@ class VolatileHost:
             # would have the bot answering a refusal from four minutes ago.
             tree.setdefault("children", []).append(
                 synthetic_game_log_node(self.game_log.entries_for_reading())
+            )
+            # A sibling rather than a child of the node above, because the two
+            # answer different questions and must be able to be absent
+            # independently later. Both are drained here and nowhere else, and
+            # the queues are independent, so the order of these two calls does
+            # not matter -- which is asserted rather than assumed.
+            tree["children"].append(
+                synthetic_incoming_damage_node(self.game_log.incoming_damage_for_reading())
             )
         return {
             "Completed": {
@@ -1794,6 +1844,18 @@ _GAME_LOG_LINE = re.compile(r"^\[ (?P<timestamp>[^\]]+?) \] \((?P<channel>[^)]*)
 # repo's signature failure, so the list is a deny-list rather than an allow-list.
 GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT = frozenset({"combat", "bounty"})
 
+# Incoming damage, after the markup above has been stripped:
+#   "49 from Centior Monster - Penetrates"
+#   "74 from Centum Fiend - Mjolnir Heavy Missile - Hits"
+# Outgoing damage is the same shape with "to", and it must never be counted --
+# a retreat armed by the bot's own guns would fire hardest when the fight is
+# going well. Anchored on the leading number for the same reason: the only
+# other `(combat)` lines carrying "from" are warp-disruption notices
+# ("Warp scramble attempt from Chief Republic Isak to you!"), which name no
+# damage. Across 134,641 recorded combat lines there are exactly four of those
+# and none begins with a digit.
+_INCOMING_DAMAGE_LINE = re.compile(r"^(?P<amount>\d+) from (?P<attacker>.+)$")
+
 # A backstop on each queue, not a policy. Both are drained once per reading, so
 # reaching either means nothing drained for a long time (a paused session, or a
 # run still searching for the UI root) rather than a busy client.
@@ -1817,6 +1879,24 @@ def parse_game_log_line(line):
     }
 
 
+def parse_incoming_damage(entry):
+    """`(amount, attacker)` for a combat line that is damage *taken*, else None.
+
+    The attacker is the name up to the first " - ", because the rest of the line
+    is the weapon and the quality of the hit ("- Mjolnir Heavy Missile - Hits")
+    and both differ per shot. A miss ("Centior Monster misses you completely")
+    is deliberately not damage: it costs nothing and counting it as a hit of
+    zero would only inflate the hit count.
+    """
+    if entry is None or entry["channel"] != "combat":
+        return None
+    match = _INCOMING_DAMAGE_LINE.match(entry["text"])
+    if match is None:
+        return None
+    attacker = match.group("attacker").split(" - ")[0].strip()
+    return int(match.group("amount")), (attacker or None)
+
+
 class GameLogTail:
     """Follow EVE's own game log, the only timestamped record in this system.
 
@@ -1835,14 +1915,19 @@ class GameLogTail:
     we start at its end: the point is what happened since the last decision, not
     a replay of the session so far.
 
-    **Two readers, one file offset.** This used to serve the stderr echo alone,
-    and that echo consuming the lines is precisely what kept them from the bot
-    (issue #28). `_poll` is now the only thing that moves the offset, and it
-    fans each line out to two independent queues -- so `lines_for_echo` and
-    `entries_for_reading` each see every line exactly once and neither can eat
-    the other's. Adding a second caller of a single-cursor tail would have given
-    whichever ran first that cycle's lines and the other nothing, intermittently
-    and without a word.
+    **Three readers, one file offset.** This used to serve the stderr echo
+    alone, and that echo consuming the lines is precisely what kept them from
+    the bot (issue #28). `_poll` is now the only thing that moves the offset,
+    and it fans each line out to three independent queues -- so
+    `lines_for_echo`, `entries_for_reading` and `incoming_damage_for_reading`
+    each see every line exactly once and none can eat another's. Adding a second
+    caller of a single-cursor tail would have given whichever ran first that
+    cycle's lines and the others nothing, intermittently and without a word.
+
+    The damage queue is fed from the `(combat)` lines that the reading queue
+    deliberately drops (issue #32): withholding the channel from the bot was
+    right about the *lines* and wrong about the *total*, which is a number no
+    other instrument in this system reports.
     """
 
     def __init__(self, directory):
@@ -1851,6 +1936,7 @@ class GameLogTail:
         self.offset = 0
         self._echo_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
         self._reading_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
+        self._damage_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
 
     def _newest_file(self):
         try:
@@ -1893,8 +1979,13 @@ class GameLogTail:
                 continue
             self._echo_queue.append(line)
             entry = parse_game_log_line(line)
-            if entry is not None and entry["channel"] not in GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT:
+            if entry is None:
+                continue
+            if entry["channel"] not in GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT:
                 self._reading_queue.append(entry)
+            damage = parse_incoming_damage(entry)
+            if damage is not None:
+                self._damage_queue.append(damage)
 
     def lines_for_echo(self, limit=25):
         """The stderr/web-console echo: whole lines, capped for readability."""
@@ -1918,6 +2009,32 @@ class GameLogTail:
         entries = list(self._reading_queue)
         self._reading_queue.clear()
         return entries
+
+    def incoming_damage_for_reading(self):
+        """How hard the client says we were hit since the last reading.
+
+        `{"damage": total, "hits": count, "topAttacker": name or None}` --
+        the attacker being whichever name did the most damage in this reading,
+        so a decision log can name what is shooting without carrying a list.
+
+        Zero is an answer, not an absence: a reading with no incoming fire
+        returns `{"damage": 0, "hits": 0, "topAttacker": None}`, and the caller
+        turns *that* into a node. The distinction the bot needs -- "the client
+        reported nothing" against "nothing is reporting" -- lives in whether
+        the node exists at all, which is the same rule the game log follows.
+        """
+        self._poll()
+        events = list(self._damage_queue)
+        self._damage_queue.clear()
+        by_attacker = collections.Counter()
+        for amount, attacker in events:
+            if attacker is not None:
+                by_attacker[attacker] += amount
+        return {
+            "damage": sum(amount for amount, _ in events),
+            "hits": len(events),
+            "topAttacker": by_attacker.most_common(1)[0][0] if by_attacker else None,
+        }
 
 
 def main():
