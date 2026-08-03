@@ -962,17 +962,55 @@ exists.
   standalone tool that fights it for the mouse. The drone is named by the
   `drone-type` setting, default `Acolyte I`.
 
-  **Untested against a live client.** It compiles and the parser now sees
-  `ShipItemCard`, but nothing here has been watched running: it needs a docked
-  ship with an empty bay and the drone in that station's root item hangar. The
-  failure to watch for is the one `reload_drones.py`'s header names -- an
-  inventory not anchored to the ship accepts the drag, shows the quantity
-  dialog, and moves nothing. The bot's only evidence that its "Open Drone Bay"
-  landed is the drone bay showing as the selected container
-  (`droneBayOpenedFromShipCard`), which it remembers until the ship undocks;
-  a client left with that container selected some other way would fool it.
-  Read the decision log for the `Maintenance:` lines and check the drones
-  window afterwards rather than trusting them.
+  Note the dialog is *accepted* only once the reading has been checked for the
+  refusal dialog first. Both are windows with an OK button and nothing else
+  separates them, so clicking whichever OK is on screen and calling it "accept
+  the quantity dialog" reports a success for a drop that moved nothing -- the
+  same defect issue #19 found in the tool, inherited by the port.
+
+  **What ends the task is the bay's own capacity gauge, read while the bay is
+  the selected container.** The first version asked the *drones window* whether
+  the bay was empty, and that window does not exist while docked -- the only
+  state this task runs in. It answered "not empty" for every reading it would
+  ever see, so the guard bailed every time and the whole feature was dead code
+  that compiled and never once ran (issue #15). Nothing in a docked reading can
+  answer the question before the bay is opened, so the first look now happens
+  *after* opening it and costs the readings that takes.
+
+  The gauge is also why the condition is **full**, not non-empty: a bay holding
+  one drone of ten is not restocked, and only `used / maximum` can tell the
+  difference. Its limit is that a drone's own volume is not readable, so a bay
+  with less free space than one drone still reads as having room. That case
+  ends in the client's refusal dialog, which is now recognised on its text and
+  treated as the stronger answer -- it is the client saying directly that no
+  more will fit.
+
+  **Untested against a live client.** It compiles, the pure parts of the guard
+  are unit-checked, and the parser sees `ShipItemCard`, but nothing here has
+  been watched running: it needs a docked ship with a part-empty bay and the
+  drone in that station's root item hangar. Two things to watch, both of which
+  look like success from the log alone:
+
+  - **An inventory not anchored to the ship** accepts the drag, shows the
+    quantity dialog, and moves nothing. The bot's only evidence that its "Open
+    Drone Bay" landed is the drone bay showing as the selected container
+    (`droneBayOpenedFromShipCard`), remembered until the ship undocks; a client
+    left with that container selected some other way would fool it.
+  - **The gauge parsing.** `reload_drones.py` reads `50.0/50.0 m³` off
+    `InvContCapacityGauge` on this build, so the text exists and has the shape
+    the parser wants; what is unverified is the Elm parser picking that node
+    out of an inventory window (it takes the first descendant whose type name
+    contains `CapacityGauge`) and the bay reading `ShipDroneBay` as the
+    selected container. If either misses, every look reads "a capacity gauge
+    that does not say", the bot drags twice on the assumption there is room,
+    and then gives up -- deliberately, because a condition that cannot see the
+    bay must not be allowed to conclude the work is done. That is the failure
+    #15 was.
+
+  Read the decision log for the `Maintenance:` lines: one drag followed by one
+  `look ... of 3` and then silence is a restock that landed. Silence right
+  after the last look is the give-up. The drones window after the session is
+  still the last word on what is actually in the bay.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and

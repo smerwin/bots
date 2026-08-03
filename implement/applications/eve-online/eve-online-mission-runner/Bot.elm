@@ -407,6 +407,9 @@ type alias BotMemory =
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
     , droneBayOpenedFromShipCard : Bool
+    , droneBayWillTakeNoMore : Bool
+    , droneRestockLooksWithRoom : Int
+    , droneRestockDragsDispatched : Int
     , lockAttempt : Maybe LockAttempt
     , lockProvenAtMeters : Maybe Int
     , lockRefusedAtMeters : Maybe Int
@@ -910,13 +913,25 @@ Ordered by what a reading can *see*, the way `loadCourierCargo` is: which
 container the inventory has selected decides the next step, so the sequence
 converges without the bot having to remember where in it we are.
 
-**Telling from the log whether it worked**, which matters because the failure
-this is most exposed to is a drop that is refused without saying so: a restock
-that succeeded logs its drag once and then goes quiet, because the bay stops
-being empty and the whole task retires. One that was refused keeps logging the
-same drag every other reading until the window closes. Two `Maintenance: drag`
-lines in a session is the shape to be suspicious of, and the drones window
-after the session is the answer.
+**What ends it is a look into the bay, and nothing else.** Docked, the drones
+window does not exist, so the bay's contents are only readable as the selected
+container of an inventory window -- which means they are only readable at the
+two moments the sequence deliberately puts the bay there, before the first drag
+and after each one. That is the whole of the fix for issue #15: the check that
+used to sit here read the drones window, which is `Nothing` for every reading
+this task ever sees, and so the task never ran once.
+
+Looking after the drag rather than before it is what distinguishes a restock
+from a refusal, and the refusal is real: the client answers a drop it will not
+take with a "No room for more in destination container" window that carries an
+OK button of its own (issue #19). Nothing else in the reading separates the two.
+
+**Telling from the log whether it worked**: `Maintenance: drag ... (attempt 1)`
+followed by one `select the ship's drone bay ... (look 2 of 3)` and then
+silence is a restock that landed -- the bay was seen holding drones and the
+task retired. A second attempt means the first look found nothing. The log
+falling silent right after `look 3 of 3` is the give-up, and the drones window
+after the session is still the last word on what is actually in there.
 
 Every branch here also names what it saw rather than only what it wanted,
 because the node type names it steers by (`ShipDroneBay`, `StationItems`) are
@@ -928,10 +943,35 @@ restockDroneBayWhileDocked context =
     if not (withinDroneRestockWindow context) then
         Nothing
 
-    else if not (droneBayIsEmpty context.readingFromGameClient) then
-        -- The "already done" condition. Anything in the bay means either this
-        -- ran or there was nothing to do, and both end the task -- the drop
-        -- accepts the dialog's default, which fills the bay in one go.
+    else if
+        (0 < context.memory.droneRestockDragsDispatched)
+            && dropIntoDroneBayWasRefused context.readingFromGameClient
+    then
+        -- Ahead of the "already done" check below, which the same reading has
+        -- just latched: the dialog is ours and is dismissed rather than left
+        -- sitting over the client for the rest of the session.
+        Just (dismissRefusedDropIntoDroneBay context)
+
+    else if context.memory.droneBayWillTakeNoMore then
+        -- The "already done" condition, in the only two forms a docked reading
+        -- can supply: the bay's own capacity gauge reading full, or the client
+        -- having refused a drop into it.
+        --
+        -- Read from the bay, not from the drones window. That window does not
+        -- exist while docked, which is the only state this task runs in, so
+        -- the check that used to live here answered "not empty" on every
+        -- reading and made the whole task unreachable -- issue #15. Nothing in
+        -- a docked reading can be consulted before the bay is opened, so the
+        -- first look happens after opening it and costs the readings that
+        -- takes.
+        Nothing
+
+    else if droneRestockLooksBeforeGivingUp <= context.memory.droneRestockLooksWithRoom then
+        -- Out of attempts, and deliberately silent from here. The alternative
+        -- is a give-up line repeating for the rest of the window, and
+        -- `stall_watch` counts readings rather than distinct lines, so that
+        -- reads as a stall. Where this stopped is the last
+        -- "look ... of N" line in the log.
         Nothing
 
     else if not context.memory.droneBayOpenedFromShipCard then
@@ -948,7 +988,8 @@ restockDroneBayWhileDocked context =
                 Just
                     (restockDroneBayFromInventoryWindow
                         context
-                        inventoryWindow
+                        inventoryWindow.window
+                        inventoryWindow.droneBayTreeEntry
                         context.eventContext.botSettings.droneTypeName
                     )
 
@@ -961,24 +1002,39 @@ reading that shows anything else selected only ever clicks the item hangar --
 otherwise a filter typed against the ship's own cargo would come back empty and
 be reported as "the station has no drones", which is a wrong answer rather than
 a missing one.
+
+The bay is looked at before and after every drag, and that is the only thing
+that ever ends this task. The two counters say which of those the current
+reading is for, because the station hangar stays selected across a drag and so
+a reading cannot tell "about to drag" from "just dragged": one look precedes
+each drag, so `dragsDispatched == looksWithRoom` means the drag for this round
+has gone out and the bay is due another look, while one fewer means the drag
+has not happened yet.
+
+Looking after the drag is the point. A drop can be refused -- the client puts
+up "No room for more in destination container", which carries an OK button of
+its own (issue #19) -- and a refusal is indistinguishable from success in
+everything except the bay's own gauge.
+
+The look budget only bounds the paths that reach a drag. The dead ends below --
+this station's hangar holding none of the drone, no item hangar in the
+inventory at all -- still repeat their line until the clock closes the window,
+because no drag ever happens to advance the count and nothing in a reading
+distinguishes "filtered and found nothing" from "the container has not
+rendered yet" well enough to latch on. They dispatch no input, and wind-down
+repeats a line either way -- "Already docked. Stay put." is what fills that
+window otherwise -- so this costs a differently-worded log and nothing else.
 -}
 restockDroneBayFromInventoryWindow :
     BotDecisionContext
     -> EveOnline.ParseUserInterface.InventoryWindow
+    -> EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
     -> String
     -> DecisionPathNode
-restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
+restockDroneBayFromInventoryWindow context inventoryWindow droneBayTreeEntry droneTypeName =
     let
         itemsInView =
-            case inventoryWindow.selectedContainerInventory |> Maybe.andThen .itemsView of
-                Just (EveOnline.ParseUserInterface.InventoryItemsListView listView) ->
-                    listView.items |> List.map .uiNode
-
-                Just (EveOnline.ParseUserInterface.InventoryItemsNotListView notListView) ->
-                    notListView.items
-
-                Nothing ->
-                    []
+            inventoryItemsInView inventoryWindow
 
         -- The first word, not the whole name: the same match
         -- `reload_drones.py` makes. An item cell renders the name with its
@@ -998,24 +1054,50 @@ restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
                     )
                 |> List.head
 
-        droneBayTreeEntry =
-            inventoryWindow |> inventoryTreeEntryWithText "drone bay"
-
         itemHangarTreeEntry =
             inventoryWindow |> inventoryTreeEntryWithText "item hangar"
 
         selectedContainerTypeName =
-            inventoryWindow.selectedContainerInventory
-                |> Maybe.map (.uiNode >> .uiNode >> .pythonObjectTypeName)
+            selectedContainerTypeNameOfWindow inventoryWindow
+
+        looksWithRoom =
+            context.memory.droneRestockLooksWithRoom
+
+        dragsDispatched =
+            context.memory.droneRestockDragsDispatched
     in
-    case quantityDialogAcceptButton context.readingFromGameClient of
+    case okButtonInReading context.readingFromGameClient of
+        -- Only reached once `restockDroneBayWhileDocked` has ruled out the
+        -- refusal dialog, which carries an OK of its own that this cannot
+        -- tell apart -- see `okButtonInReading`.
         Just acceptButton ->
             describeBranch
                 "Maintenance: accept the quantity dialog, whose default already fills the drone bay."
                 (clickUiElement acceptButton)
 
         Nothing ->
-            if selectedContainerTypeName /= Just "StationItems" then
+            if selectedContainerTypeName /= Just "ShipDroneBay" && looksWithRoom <= dragsDispatched then
+                -- The drag for this round has gone out and the bay has not
+                -- been looked at since. Nothing else in the reading says
+                -- whether it landed, so go and look before dragging again.
+                if previousStepClickedMouse context then
+                    describeBranch
+                        "Maintenance: I just clicked -- wait for the reading to catch up before deciding on the inventory again."
+                        waitForProgressInGame
+
+                else
+                    describeBranch
+                        ("Maintenance: dragged "
+                            ++ String.fromInt dragsDispatched
+                            ++ " time(s) -- select the ship's drone bay to read its capacity gauge (look "
+                            ++ String.fromInt (looksWithRoom + 1)
+                            ++ " of "
+                            ++ String.fromInt droneRestockLooksBeforeGivingUp
+                            ++ "; the log goes quiet here if it is the last one and the bay still has room)."
+                        )
+                        (clickUiElement (droneBayTreeEntry.selectRegion |> Maybe.withDefault droneBayTreeEntry.uiNode))
+
+            else if selectedContainerTypeName /= Just "StationItems" then
                 case itemHangarTreeEntry of
                     Nothing ->
                         describeBranch
@@ -1032,6 +1114,18 @@ restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
                             describeBranch
                                 ("Maintenance: select the station's item hangar (the inventory shows "
                                     ++ (selectedContainerTypeName |> Maybe.withDefault "nothing")
+                                    ++ (case droneBayFillWhileSelected context.readingFromGameClient of
+                                            -- The outcome of a look, printed
+                                            -- where the look happens: the bay
+                                            -- being selected here is the bot
+                                            -- having just read its gauge and
+                                            -- decided to go and fetch drones.
+                                            Just fill ->
+                                                ", with " ++ describeDroneBayFill fill
+
+                                            Nothing ->
+                                                ""
+                                       )
                                     ++ ")."
                                 )
                                 (clickUiElement (itemHangar.selectRegion |> Maybe.withDefault itemHangar.uiNode))
@@ -1042,8 +1136,8 @@ restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
                         filterStep
 
                     Nothing ->
-                        case ( matchingItem, droneBayTreeEntry ) of
-                            ( Just itemNode, Just droneBay ) ->
+                        case matchingItem of
+                            Just itemNode ->
                                 if previousStepClickedMouse context then
                                     -- A repeat drag is not harmless: it can
                                     -- move part of a stack somewhere
@@ -1058,21 +1152,17 @@ restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
                                     describeBranch
                                         ("Maintenance: drag '"
                                             ++ droneTypeName
-                                            ++ "' from the item hangar into the ship's drone bay."
+                                            ++ "' from the item hangar into the ship's drone bay (attempt "
+                                            ++ String.fromInt (dragsDispatched + 1)
+                                            ++ ")."
                                         )
                                         (dragFromItemIconOntoUiElement itemNode
-                                            (droneBay.selectRegion |> Maybe.withDefault droneBay.uiNode)
+                                            (droneBayTreeEntry.selectRegion
+                                                |> Maybe.withDefault droneBayTreeEntry.uiNode
+                                            )
                                         )
 
-                            ( Just _, Nothing ) ->
-                                describeBranch
-                                    ("Maintenance: the item hangar holds '"
-                                        ++ droneTypeName
-                                        ++ "' but the inventory shows no drone bay to drop it into -- give up on restocking."
-                                    )
-                                    waitForProgressInGame
-
-                            ( Nothing, _ ) ->
+                            Nothing ->
                                 -- With the count in it, "the hangar has none"
                                 -- can be told from "nothing is being read out
                                 -- of this container at all", which look the
@@ -1088,6 +1178,42 @@ restockDroneBayFromInventoryWindow context inventoryWindow droneTypeName =
                                     waitForProgressInGame
 
 
+{-| Clear the dialog the client puts up when it will not take a drop, and say
+so in the log.
+
+The restock is already over by the time this runs -- the same reading latches
+`droneBayWillTakeNoMore`, because a refusal is the client's own answer to
+"will more fit", and a better one than the gauge. This exists so the dialog
+does not sit over the client until it times out, and so the log carries the
+refusal in its own words rather than as an accepted quantity dialog, which is
+what it used to be reported as.
+-}
+dismissRefusedDropIntoDroneBay : BotDecisionContext -> DecisionPathNode
+dismissRefusedDropIntoDroneBay context =
+    if previousStepClickedMouse context then
+        describeBranch
+            "Maintenance: I just clicked -- wait for the reading to catch up before deciding on the dialog again."
+            waitForProgressInGame
+
+    else
+        case okButtonInReading context.readingFromGameClient of
+            Just okButton ->
+                describeBranch
+                    ("Maintenance: the client refused the drop -- '"
+                        ++ dropRefusedDialogText
+                        ++ " in destination container'. The drone bay will take no more, so dismiss this and stop restocking."
+                    )
+                    (clickUiElement okButton)
+
+            Nothing ->
+                describeBranch
+                    ("Maintenance: the client refused the drop -- '"
+                        ++ dropRefusedDialogText
+                        ++ " in destination container' -- and shows no OK to dismiss it with. It closes itself; stop restocking either way."
+                    )
+                    waitForProgressInGame
+
+
 {-| Right-click the ship's card and choose "Open Drone Bay".
 
 The cards only exist while the station panel is showing them, so a reading
@@ -1095,6 +1221,11 @@ without one is answered by opening the tab that has them rather than by giving
 up. `reload_drones.py` clicks "Hangars" and then "Ships" for the same reason;
 here each click is one reading, and the next reading decides again from what it
 sees.
+
+The entry is matched on its whole text, and that is not a detail to relax: the
+same menu carries "Open Cargohold" directly above it (all 14 entries were read
+off a live client, issue #19), and a looser match lands on a container that
+looks the same in the tree and silently takes the drop nowhere useful.
 
 The first card is taken, which is what the tool does. The active ship is the
 one card the panel shows under "Active", and nothing read so far distinguishes
@@ -1168,13 +1299,43 @@ The window is the wind-down branch itself -- docked, roughly 200 seconds on the
 clock -- which at ~5.7s a reading is around 30 readings for a handful of steps.
 This is the far end of it: enough left for the agent survey, and a bound that
 needs no stored state, the same reason `withinAgentSurveyWindow` is written
-against the clock. Every failure here repeats one decision until the window
-closes, which is the shape `stall_watch` reports, so the bound is what keeps
-that under its threshold instead of running for the rest of the session.
+against the clock.
+
+It is the backstop, not the bound that matters. ~30 readings is *over*
+`stall_watch`'s `CIRCLING_THRESHOLD` of 20, so a failure that repeats one
+decision for the whole window does alarm -- what this originally claimed it
+prevented. `droneRestockLooksBeforeGivingUp` is the bound that
+actually stops the task, and it stops it by falling silent rather than by
+repeating a give-up line.
 -}
 droneRestockGiveUpSecondsBeforeSessionEnd : Int
 droneRestockGiveUpSecondsBeforeSessionEnd =
     30
+
+
+{-| How many times the bot reads a drone bay that still has room before it
+stops trying to fill it.
+
+Counted in looks rather than in drags because a look is the only observation
+that ends this task either way, and every drag is bracketed by two of them: the
+sequence is look, drag, look, drag, look. Three therefore allows two drags and
+still spends its last look confirming the second one, so a drop that was
+refused -- which is indistinguishable from success everywhere except in the
+bay's gauge (issue #19) -- costs two attempts rather than the whole window.
+
+A look that cannot read the gauge counts too. It has to: the alternative is
+looking forever at a bay whose capacity text this build renders differently,
+and that is the shape of the bug this whole change exists to fix.
+
+Bound in stored state, not on the clock, because the thing being bounded is a
+drag: it moves items, and a repeat can split a stack while the first drag is
+still catching up. The memory-counter trap `surveyAgentsInStation` documents
+does not apply -- this counter only starts once our own "Open Drone Bay" has
+landed, and nothing else in the bot ever selects that container.
+-}
+droneRestockLooksBeforeGivingUp : Int
+droneRestockLooksBeforeGivingUp =
+    3
 
 
 withinDroneRestockWindow : BotDecisionContext -> Bool
@@ -1187,40 +1348,108 @@ withinDroneRestockWindow context =
             droneRestockGiveUpSecondsBeforeSessionEnd < secondsRemaining
 
 
-{-| Whether the ship's drone bay has nothing in it.
-
-Deliberately "nothing", not "not full": the drones window titles its groups
-with a count, and the bay's own capacity is not readable from it, so "full" is
-not a question this reading can answer. It does not need to be -- the quantity
-dialog's default fills the bay in one drop, so any drone in the bay means the
-work is done, and an empty bay is the case that costs a run its drones.
-
-A bay with nothing in it may render no group at all, which is why a missing
-group counts as empty -- as does a group whose title does not parse into a
-number. Reading either as "cannot tell" would leave this maintenance dead in
-exactly the state it exists for, and the cost of being wrong the other way is
-one refused drag inside a bounded window. The drones window being absent
-altogether is the genuinely unanswerable case, and is left alone: the bot's own
-setup instructions ask for that window, so its absence is a client that is not
-set up rather than a bay that is empty.
+{-| What a look into the ship's drone bay says about whether more will fit.
 -}
-droneBayIsEmpty : ReadingFromGameClient -> Bool
-droneBayIsEmpty readingFromGameClient =
-    case readingFromGameClient.dronesWindow of
+type DroneBayFill
+    = DroneBayFull
+    | DroneBayHasRoom
+    | DroneBayFillUnreadable
+
+
+{-| Read the bay's fill state off its capacity gauge.
+
+**Fullness, not emptiness.** The condition this answers is the restock's
+"already done", and "holds something" is too weak for that -- a bay holding one
+drone of ten reads as stocked and never gets topped up. The gauge is the only
+thing in a reading that can tell the difference, and it is the same ground
+truth `reload_drones.py` settled on.
+
+The gauge itself is not a guess: `reload_drones.py` reads `50.0/50.0 m³` off
+`InvContCapacityGauge` on this client build with the bay selected, and an
+unlimited container such as the station hangar is exactly the case that reports
+no maximum. This bot has the stronger handle of the two, since the parser names
+the selected container (`ShipDroneBay`) where the tool had to infer it.
+
+The two ways it declines to answer are both `Unreadable`: the gauge node
+missing or unparsable, and `maximum` absent, which
+`parseInventoryCapacityGaugeText` leaves `Nothing` unless the text carries a
+`used / maximum` slash. Unreadable is treated as "act anyway" by the caller,
+not as "already done" -- reading it the other way is precisely the mistake
+issue #15 was: a condition that cannot see the bay must not conclude the work
+is finished, or the task is dead in the state it exists for.
+
+`maximum <= used` is the honest limit of this test, not a full one. The gauge
+is in cubic metres truncated to an integer, and a drone's own volume is not
+readable, so a bay with 1 m³ free reads as having room while a 5 m³ drone will
+not fit. That case is what the refusal dialog and the bounded attempt count are
+for.
+-}
+droneBayFillFromCapacityGauge : Maybe EveOnline.ParseUserInterface.InventoryWindowCapacityGauge -> DroneBayFill
+droneBayFillFromCapacityGauge capacityGauge =
+    case capacityGauge |> Maybe.andThen (\gauge -> gauge.maximum |> Maybe.map (Tuple.pair gauge.used)) of
         Nothing ->
-            False
+            DroneBayFillUnreadable
 
-        Just dronesWindow ->
-            case dronesWindow.droneGroupInBay of
-                Nothing ->
-                    True
+        Just ( used, maximum ) ->
+            if maximum <= used then
+                DroneBayFull
 
-                Just droneGroupInBay ->
-                    (droneGroupInBay.header.quantityFromTitle
-                        |> Maybe.map .current
-                        |> Maybe.withDefault 0
-                    )
-                        < 1
+            else
+                DroneBayHasRoom
+
+
+{-| The bay's fill state as an inventory window is showing it, or Nothing if no
+window has the ship's drone bay selected -- which is not the same as the gauge
+declining to answer.
+
+Readable only while the bay *is* the selected container: the capacity gauge
+belongs to whatever is selected, and the restock has to select the station
+hangar to reach the drones. So the bay is looked at deliberately, at the
+moments the sequence puts it there, and the verdict is latched into memory
+rather than re-read when the drag comes around.
+-}
+droneBayFillWhileSelected : ReadingFromGameClient -> Maybe DroneBayFill
+droneBayFillWhileSelected readingFromGameClient =
+    readingFromGameClient.inventoryWindows
+        |> List.filter (selectedContainerTypeNameOfWindow >> (==) (Just "ShipDroneBay"))
+        |> List.head
+        |> Maybe.map
+            (.selectedContainerCapacityGauge
+                >> Maybe.andThen Result.toMaybe
+                >> droneBayFillFromCapacityGauge
+            )
+
+
+describeDroneBayFill : DroneBayFill -> String
+describeDroneBayFill fill =
+    case fill of
+        DroneBayFull ->
+            "full"
+
+        DroneBayHasRoom ->
+            "room for more"
+
+        DroneBayFillUnreadable ->
+            "a capacity gauge that does not say"
+
+
+{-| The items an inventory window is currently rendering, whichever of the two
+views it is in. Only the rendered ones: the list is virtualised at roughly 40
+rows, so a count from here is a signal and never a total.
+-}
+inventoryItemsInView :
+    EveOnline.ParseUserInterface.InventoryWindow
+    -> List EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+inventoryItemsInView inventoryWindow =
+    case inventoryWindow.selectedContainerInventory |> Maybe.andThen .itemsView of
+        Just (EveOnline.ParseUserInterface.InventoryItemsListView listView) ->
+            listView.items |> List.map .uiNode
+
+        Just (EveOnline.ParseUserInterface.InventoryItemsNotListView notListView) ->
+            notListView.items
+
+        Nothing ->
+            []
 
 
 {-| Whether the ship's own drone bay is the container an inventory window is
@@ -1233,13 +1462,16 @@ droneBayIsSelectedContainer readingFromGameClient =
         |> List.member "ShipDroneBay"
 
 
+selectedContainerTypeNameOfWindow : EveOnline.ParseUserInterface.InventoryWindow -> Maybe String
+selectedContainerTypeNameOfWindow inventoryWindow =
+    inventoryWindow.selectedContainerInventory
+        |> Maybe.map (.uiNode >> .uiNode >> .pythonObjectTypeName)
+
+
 selectedContainerTypeNames : ReadingFromGameClient -> List String
 selectedContainerTypeNames readingFromGameClient =
     readingFromGameClient.inventoryWindows
-        |> List.filterMap
-            (.selectedContainerInventory
-                >> Maybe.map (.uiNode >> .uiNode >> .pythonObjectTypeName)
-            )
+        |> List.filterMap selectedContainerTypeNameOfWindow
 
 
 {-| What every open inventory window currently has selected, for the decision
@@ -1262,16 +1494,35 @@ all, preferring a window anchored to the active ship if the client opened a
 separate one. Which of those happens is not known from a reading yet -- the
 same client reuses the one window when a wreck is opened -- so this covers
 both rather than assuming.
+
+The drone bay's own sidebar row comes back with the window rather than being
+looked up again inside the sequence. It is the drop target and the row the bot
+clicks to look into the bay, and finding it here is what makes it present by
+construction -- the version this replaces re-derived it and carried a
+"no drone bay to drop it into" branch that this same filter had already made
+unreachable.
 -}
-inventoryWindowShowingDroneBay : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.InventoryWindow
+inventoryWindowShowingDroneBay :
+    ReadingFromGameClient
+    ->
+        Maybe
+            { window : EveOnline.ParseUserInterface.InventoryWindow
+            , droneBayTreeEntry : EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
+            }
 inventoryWindowShowingDroneBay readingFromGameClient =
     let
         windowsShowingDroneBay =
             readingFromGameClient.inventoryWindows
-                |> List.filter (inventoryTreeEntryWithText "drone bay" >> (/=) Nothing)
+                |> List.filterMap
+                    (\window ->
+                        window
+                            |> inventoryTreeEntryWithText "drone bay"
+                            |> Maybe.map
+                                (\treeEntry -> { window = window, droneBayTreeEntry = treeEntry })
+                    )
     in
     [ windowsShowingDroneBay
-        |> List.filter (.uiNode >> .uiNode >> .pythonObjectTypeName >> (==) "ActiveShipCargo")
+        |> List.filter (.window >> .uiNode >> .uiNode >> .pythonObjectTypeName >> (==) "ActiveShipCargo")
     , windowsShowingDroneBay
     ]
         |> List.concat
@@ -1304,15 +1555,24 @@ flattenInventoryTreeEntry entry =
            )
 
 
-{-| The button that confirms how much of a stack to move.
+{-| The one OK button on screen, whichever dialog it belongs to.
 
 Not a `MessageBox`, so `closeMessageBox` does not reach it -- and it carries no
 name of its own either, which leaves its label. `reload_drones.py` finds it the
-same way and accepts the default rather than typing a number, because the
-default is already as much as the bay will take.
+same way.
+
+**It cannot tell one dialog from another, and that mattered.** This used to be
+called `quantityDialogAcceptButton` and was the first thing the restock checked
+on every reading, so a refused drop -- which puts up its own dialog carrying
+its own OK -- was clicked and logged as "accept the quantity dialog, whose
+default already fills the drone bay". The action reported success and moved
+nothing, which is the failure class this whole task was written to avoid
+(issue #19). What separates the two dialogs is their text, so
+`dropIntoDroneBayWasRefused` is asked first and this is only the button; the
+name now says only what it can back up.
 -}
-quantityDialogAcceptButton : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
-quantityDialogAcceptButton readingFromGameClient =
+okButtonInReading : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+okButtonInReading readingFromGameClient =
     [ "OK", "Ok" ]
         |> List.filterMap
             (\label ->
@@ -1320,6 +1580,36 @@ quantityDialogAcceptButton readingFromGameClient =
                     |> widestNodeLabelledExactly { label = label, pythonObjectTypeName = Nothing }
             )
         |> List.head
+
+
+{-| Whether the client is showing its refusal of a drop into the drone bay.
+
+Matched on the dialog's text, because that is the only thing separating it from
+the quantity dialog that a successful drop raises -- both are windows with an
+OK button, and `okButtonInReading` finds either. The wording was read off a live
+client during a manual reload (issue #19): a `FormWnd` captioned "No room for
+more in destination container", up for about four seconds before closing itself.
+
+Only the stable half of that caption is matched, and against every text in the
+reading rather than a scoped subtree. Scoping it would need a container this
+dialog has been observed in, and one wrong guess there would answer "no refusal"
+for a refusal plainly on screen -- the same reason `shipItemCards` is not scoped
+to the panel that holds it.
+
+A single live observation is all the evidence behind the wording. If the client
+ever phrases it differently this reads as "not refused", which puts the restock
+back on the bounded-attempts path rather than into a loop.
+-}
+dropIntoDroneBayWasRefused : ReadingFromGameClient -> Bool
+dropIntoDroneBayWasRefused readingFromGameClient =
+    readingFromGameClient.uiTree.uiNode
+        |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+        |> List.any (stringContainsIgnoringCase dropRefusedDialogText)
+
+
+dropRefusedDialogText : String
+dropRefusedDialogText =
+    "No room for more"
 
 
 {-| The widest node whose first visible text is exactly this label.
@@ -2926,7 +3216,16 @@ the reading is one step behind the UI.
 -}
 previousStepClickedMouse : BotDecisionContext -> Bool
 previousStepClickedMouse context =
-    context.previousStepsEffects
+    previousStepsEffectsPressedMouse context.previousStepsEffects
+
+
+{-| Split out from `previousStepClickedMouse` so that
+`updateMemoryForNewReadingFromGame`, which gets the same effects but not a
+decision context, can ask the same question.
+-}
+previousStepsEffectsPressedMouse : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+previousStepsEffectsPressedMouse previousStepsEffects =
+    previousStepsEffects
         |> List.take 1
         |> List.any
             (List.any
@@ -2939,6 +3238,43 @@ previousStepClickedMouse context =
                             False
                 )
             )
+
+
+{-| Whether the step just dispatched was a drag rather than a click.
+
+The distinction is the pointer moving while a button is held, and it is exact
+rather than a heuristic: `effectsMouseClickAtLocation` emits move, down, up and
+never moves in between, while `effectsForDragAndDrop` always does -- that
+prompt move is the whole reason a drag registers as one. So this separates the
+restock's drag from every click it also issues into the same window, which
+matters because the drag is the step that has to be counted and bounded.
+-}
+previousStepsEffectsDragged : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+previousStepsEffectsDragged previousStepsEffects =
+    previousStepsEffects
+        |> List.take 1
+        |> List.any effectsMovePointerWhileButtonHeld
+
+
+effectsMovePointerWhileButtonHeld : List EffectOnWindow.EffectOnWindowStruct -> Bool
+effectsMovePointerWhileButtonHeld =
+    List.foldl
+        (\effect ( buttonIsHeld, hasMovedWhileHeld ) ->
+            case effect of
+                EffectOnWindow.ButtonDown _ ->
+                    ( True, hasMovedWhileHeld )
+
+                EffectOnWindow.ButtonUp _ ->
+                    ( False, hasMovedWhileHeld )
+
+                EffectOnWindow.MouseMoveTo _ ->
+                    ( buttonIsHeld, hasMovedWhileHeld || buttonIsHeld )
+
+                _ ->
+                    ( buttonIsHeld, hasMovedWhileHeld )
+        )
+        ( False, False )
+        >> Tuple.second
 
 
 decideActionInAgentConversation :
@@ -6104,6 +6440,9 @@ initBotMemory =
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
     , droneBayOpenedFromShipCard = False
+    , droneBayWillTakeNoMore = False
+    , droneRestockLooksWithRoom = 0
+    , droneRestockDragsDispatched = 0
     , lockAttempt = Nothing
     , lockProvenAtMeters = Nothing
     , lockRefusedAtMeters = Nothing
@@ -7690,6 +8029,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         lockRangeLearning =
             updateLockRangeLearning context botMemoryBefore
 
+        -- Only settled readings count as a look. The selected container
+        -- renders empty for one reading while it is being switched (40 -> 0 ->
+        -- 40 rendered rows, watched live), so a gauge read on the reading after
+        -- a click can describe a container that is still arriving.
+        settledDroneBayFill =
+            if previousStepsEffectsPressedMouse context.previousStepsEffects then
+                Nothing
+
+            else
+                droneBayFillWhileSelected context.readingFromGameClient
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -7740,6 +8089,56 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             droneBayIsSelectedContainer context.readingFromGameClient
                 || botMemoryBefore.droneBayOpenedFromShipCard
     , ammoSwap = updateAmmoSwapMemory context botMemoryBefore.ammoSwap
+    , droneBayWillTakeNoMore =
+        -- The restock's "already done", in the two forms a docked reading can
+        -- supply it: the bay's own capacity gauge reading full at a moment the
+        -- bay was the selected container, or the client refusing a drop. The
+        -- refusal is the stronger of the two -- it is the client answering the
+        -- question directly, and it catches the case the gauge cannot, a bay
+        -- with less free volume than one drone.
+        --
+        -- Latched because the restock has to select the station hangar to
+        -- reach the drones, after which the bay is not readable at all.
+        if context.readingFromGameClient.shipUI /= Nothing then
+            False
+
+        else
+            (settledDroneBayFill == Just DroneBayFull)
+                || ((0 < botMemoryBefore.droneRestockDragsDispatched)
+                        && dropIntoDroneBayWasRefused context.readingFromGameClient
+                   )
+                || botMemoryBefore.droneBayWillTakeNoMore
+    , droneRestockLooksWithRoom =
+        -- Counts the readings that read the bay's gauge and did not find it
+        -- full, which is what bounds the restock. A gauge that does not answer
+        -- counts as a look for the same reason the caller acts on it: a
+        -- condition that cannot see the bay must not be allowed to run the
+        -- task forever any more than it may retire it.
+        if context.readingFromGameClient.shipUI /= Nothing then
+            0
+
+        else if (settledDroneBayFill /= Nothing) && (settledDroneBayFill /= Just DroneBayFull) then
+            botMemoryBefore.droneRestockLooksWithRoom + 1
+
+        else
+            botMemoryBefore.droneRestockLooksWithRoom
+    , droneRestockDragsDispatched =
+        -- Scoped to the restock by `droneBayOpenedFromShipCard`: the courier
+        -- load drags too, but it runs during a mission leg, and this flag is
+        -- only ever set by the restock's own "Open Drone Bay" during
+        -- wind-down. A miscount could only end the restock early, never let it
+        -- run longer.
+        if context.readingFromGameClient.shipUI /= Nothing then
+            0
+
+        else if
+            botMemoryBefore.droneBayOpenedFromShipCard
+                && previousStepsEffectsDragged context.previousStepsEffects
+        then
+            botMemoryBefore.droneRestockDragsDispatched + 1
+
+        else
+            botMemoryBefore.droneRestockDragsDispatched
     , orbitUnconfirmedTicks =
         -- The orbit twin of keepAtRangeUnconfirmedTicks below; same indicator,
         -- same way of never arriving.
