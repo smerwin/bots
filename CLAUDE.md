@@ -1286,6 +1286,103 @@ button at all. And the hover, which holds the mouse still for several readings,
 cannot age a pending lock attempt into a false refusal: a refusal needs the
 target bar empty at both ends, and the ammo path only runs with an active target.
 
+## Acceleration gates: a gate that will not open says why, on a channel nobody read
+
+Run 10 raised `askForHelpToGetUnstuck` — the first time in eleven runs — while
+the objective's own acceleration gate sat 32 m off the bow with the Selected
+Item panel offering `selectedItemActivateGate`. Everything the bot needed was on
+screen and it declined to act for 1,325 readings. The explanation had been in
+the reading the whole time:
+
+```
+[ 2026.08.03 12:56:41 ] (info) This gate is locked! To activate it, you need to have R.S. Officer's Passcard in your cargo hold. By all signs it will not be consumed upon use, so the only problem is to locate the thing!
+```
+
+**The mission was unwinnable and the bot could not tell that from being stuck.**
+Reconstructed from the log: the bot pressed Activate, the client refused with
+that line *and* a modal message box, `closeMessageBox` dismissed the box as
+generic noise, and the gate branch pressed again — nine times over two minutes,
+alternating `I see an acceleration gate -- D-click it to move to the next
+pocket.` with `I see a message box to close.` Then `gateWithinReachTicks` passed
+`gateRefusesThisShipTicks` (40) and `activateAccelerationGateIfPresent` began
+answering `Nothing`, which is what the log then showed for twenty minutes as
+`Nothing to fight and no travel step offered`. The give-up at the bottom of the
+tree eventually fired and was right to; it was working from a symptom twenty
+minutes downstream of the cause.
+
+**Three things were wrong, and only the third is the one that looks like a bug.**
+
+**The refusal was legible and unread.** The client states this on the `info`
+channel — every other consumer of the game log in this bot reads `notify`, so
+`gameLogEntryIsFromInfoChannel` had to exist before the sentence could be seen
+at all. `gateLockedForWantOfAnItemFromGameLog` matches it and
+`BotMemory.gateLockedForWantOfAnItem` carries the client's own sentence forward,
+because a reading's entries are gone by the next one. The gate branch then stops
+pressing and asks for help *quoting the client*, on the first refusal rather
+than the thousandth reading.
+
+**Two "This gate is locked!" sentences exist and they want opposite responses.**
+The recorded game logs also hold
+
+```
+This gate is locked! There are synchronized gate scramblers on all hostile entities in this area ... you must simply clear the vicinity of enemy ships. So grab your guns.
+```
+
+which opens by itself once the pocket is clear, and which the bot already
+answers correctly by fighting. So `in your cargo hold` is not a second substring
+guarding against a rewording the way #31's pair is — it carries the entire
+distinction between a standing requirement the bot cannot meet and a fight it is
+already winning. Matching `This gate is locked` alone would stop runs that were
+about to succeed. `tools/macos-host/tests/test_gate_locked_refusal.py` pins that
+against both real sentences and against every `This gate is locked` line in
+`~/Documents/EVE/logs/Gamelogs`.
+
+**The give-up counted the wrong thing, and then said nothing.**
+`gateWithinReachTicks` counted readings with a gate inside
+`interactionRangeInMeters`, which is not evidence that the gate refuses the
+ship — the same error `dronesInSpaceTicks` made about the drone recall. Note
+what that costs on the *scrambled* gate above: clearing that pocket is by
+definition a long fight next to the gate, far longer than 40 readings, so the
+budget would have been spent before the last rat died and the gate left
+permanently declined on a grid where it was about to work. It now increments
+only where `selectedItemOffersActivateGate` — the client actually offering to
+open it and the gate not opening — **holds** its count on a reading in reach
+without the offer (the message box between every attempt is one of those, and
+resetting there is the shape that pinned `gunsSilencedTicks` at 1 forever), and
+resets only when the ship leaves reach.
+
+And the decline itself was silent. Returning `Nothing` is deliberate — it is
+what lets the caller's own fallbacks run, and the comment there explains why —
+but a `Nothing` cannot carry a decision line, so the log said only that nothing
+was happening. `describeAccelerationGate` puts it in the status line every
+reading instead: which gates are on the overview and at what range, how much of
+the budget is spent, whether the branch has given up, and the client's sentence
+if there is one. That is also what makes a two-gate grid visible; the decision
+text was printed 135 times without ever revealing that the overview held two
+gates at very different ranges, which is what made this take a manual read of
+the Selected Item panel to spot. It now names the gate it chose.
+
+**What was investigated and is not the cause.** The issue's first hypothesis was
+a consumer taking `List.head` of `overviewWindows` and seeing one of two
+windows. All eighteen call sites iterate the full list;
+`scrollOverviewToReveal` filters *windows* deliberately, because it needs to
+know which one to scroll. Multiple overview windows are a supported
+configuration and nothing here depends on there being one. The second was that
+the gate was out of range and the approach path of `1fe6439` had failed — the
+log shows the ship closing 59 km → 9,565 m → 8,076 m → in reach, shutting the
+prop mod down on arrival, exactly as intended.
+
+**Unverified, and the reason the response is "ask for help" rather than "go get
+it".** The item is presumably in a wreck or container on the grid — the mission
+was *Illegal Activity (3 of 3)* and `R.S. Officer` was the hardest hitter of the
+fight — but the objective text names no cargo, so
+`lootMissionItemFromContainerIfPresent` has nothing to look for, and the bot
+reported nothing on the grid to approach for 2,816 readings. Getting the
+passcard is a feature this does not attempt. Nor is a second gate on that grid
+confirmed from the log; the 25 km row in the issue is an operator's live read,
+and if it was a working gate then trying the next-nearest gate after one is
+refused is the follow-up. None of this has been watched running.
+
 ## Drones: how long they have been out says nothing about a recall
 
 Warping with drones in space loses them, so every warp, dock and retreat in
@@ -1757,15 +1854,23 @@ exists.
   the channel, and `getAllContainedDisplayTexts` empty even with the attacker
   named "No room for more".
 
-  **Three consumers now, and none has been proven live.** #31's ammo-load
-  refusal (`loadRefusedByClient`), #33's capsule refusal (`shipLossFromGameLog`)
-  and #32's damage-rate retreat, the last reading the summary rather than the
-  lines. All three take the same three parts a consumer needs: a
-  match on `channel == Just "notify"` and the client's own wording, a `BotMemory`
+  **Four consumers now, and none has been proven live.** #31's ammo-load
+  refusal (`loadRefusedByClient`), #33's capsule refusal (`shipLossFromGameLog`),
+  #41's locked acceleration gate (`gateLockedForWantOfAnItem`) and #32's
+  damage-rate retreat, the last reading the summary rather than the
+  lines. All four take the same three parts a consumer needs: a
+  match on the channel and the client's own wording, a `BotMemory`
   field to carry the verdict (a reading's entries are gone by the next one, so a
   branch that does not record what it saw sees it once), and a live run that
   provokes the line. A run in which the line does not occur proves only that
   nothing broke.
+
+  **The channel is not always `notify`.** #41's line arrives on `info`, and
+  three consumers reading `notify` had made that look like the channel this
+  bot's refusals come on. Check which one carries the sentence, against the
+  recordings, before copying an existing matcher — a filter on the wrong channel
+  is a guard that can never fire, and looks exactly like a client that never
+  complains.
 
   Worth knowing what the two consumers found the channel to be good and bad at.
   Good: it states things no HUD sprite does, and the timestamp/channel split
@@ -1865,7 +1970,26 @@ for why ESI cannot replace it from inside a bot yet.
   system: Unknown" for a name that isn't a plain string in memory.
 - `MouseMoveRelative` and `CharacterDown`/`CharacterUp` (raw Unicode text input)
   aren't implemented in `botlab_host.py`.
-- The ammo swap and the ship-loss guard are the only consumers of
+- **The acceleration-gate path does not filter on `_display`**, which
+  "Reading the overview" says every path that acts on a row must. A hidden row
+  keeps a plausible region belonging to whatever was recycled into its place, so
+  the nearest "gate" could in principle be a phantom and the click land on
+  something else. Left alone deliberately while fixing #41: it explains nothing
+  about run 10 (the rows there carried no `_display` key at all, which reads as
+  shown), and adding the filter on its own would make a gate scrolled out of
+  view invisible rather than mis-clicked — the loot path pairs the filter with
+  `scrollOverviewToReveal` and the gate path has no such pairing. Both halves
+  together, on a run that can be watched.
+- **A mission item the bot cannot fetch stops the run.** #41's locked gate is
+  now recognised and reported, but the response is to ask for help: the client
+  names the item (`R.S. Officer's Passcard`) while the mission objective does
+  not, so `lootMissionItemFromContainerIfPresent` has nothing to look for and
+  nothing goes looking for the wreck or container holding it. Closing that means
+  taking the item name out of the client's sentence and feeding it to the loot
+  path — worth doing on a grid where the container is actually on the overview,
+  which run 10's was not.
+- The ammo swap, the ship-loss guard and the locked-gate verdict are the only
+  consumers of
   `gameLogEntriesSinceLastReading`'s *lines*, so every other guard that infers a
   refusal indirectly still does. The candidates the recorded runs actually
   contain: `You cannot launch Acolyte I
