@@ -277,6 +277,34 @@ class Session:
         self._cg_send(f"text {text}")
         time.sleep(0.25)
 
+    def type_field(self, cx, cy, text, delay=0.18):
+        """Type into a field at (cx, cy), re-taking focus before every character.
+
+        The recipe this client needs, learned the hard way on the search bar:
+
+          * Focus is dropped after a single keystroke, so one click at the start
+            gets you exactly one character and silently loses the rest.
+          * Clicking the field puts the caret at position 0, so without an End
+            press each character lands in *front* of the last and the text
+            arrives reversed -- "theology" came out "ygoloet".
+
+        Still not a guarantee. Characters drop unpredictably and 'a' (keycode 0)
+        never arrives at all, so the caller should pass text made of characters
+        that work and check the field afterwards rather than trusting this.
+        """
+        for ch in text.lower():
+            code = KEYCODE.get(ch)
+            if code is None:
+                continue
+            self.click(cx, cy, settle=0.3)
+            self._cg_send(f"keydown {KEY_END}")
+            self._cg_send(f"keyup {KEY_END}")
+            time.sleep(0.05)
+            self._cg_send(f"keydown {code}")
+            time.sleep(KEY_HOLD)
+            self._cg_send(f"keyup {code}")
+            time.sleep(delay)
+
     def caret_to_end(self):
         """Put the caret after any existing text.
 
