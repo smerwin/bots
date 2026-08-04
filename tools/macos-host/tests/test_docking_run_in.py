@@ -44,6 +44,7 @@ Nothing here reads a live game client or drives a bot.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
+import collections
 import glob
 import os
 import re
@@ -120,6 +121,20 @@ def int_constant(source, name):
     if match is None:
         raise AssertionError("no Int constant named " + name)
     return int(match.group(1))
+
+
+class Episode(collections.namedtuple(
+        "Episode", "start end commands accepted")):
+    """One stretch of run 27's log between two accepted course-settings.
+
+    `commands` and `accepted` are readings, not decision lines, for
+    `readings_with`'s reason. `span` counts both bounds, since the run-in was
+    under way on each of them.
+    """
+
+    @property
+    def span(self):
+        return self.end - self.start + 1
 
 
 def run_in(range_meters, since_closer, course_settings):
@@ -434,7 +449,36 @@ class TheMarkerIsWhatTheClientWrote(unittest.TestCase):
 
 
 class RunTwentySevenIsTheEvidence(unittest.TestCase):
-    """The measurement the fix is sized against, re-derived from the log."""
+    """The measurement the fix is sized against, re-derived from the log.
+
+    **Scoped to the incident rather than to the run, and #103 is why.** These
+    cases were written while run 27 was still being appended to, when what the
+    log held was the incident: two course-settings the client accepted 121
+    readings apart, with a Dock commanded on nearly every reading between them.
+    The run then went on for another 5,800 readings and eleven further
+    course-settings -- ordinary docking, arriving the first time it was asked --
+    and the same question put to the finished log answers 124 commands over
+    3,104 readings, 4%. That is a true statement about a whole session and no
+    statement at all about the incident, so the assertion went red on `main`
+    with nothing wrong with the bot.
+
+    The property belongs to the *episode*, so the episode is what is selected --
+    by its own shape, a course-setting followed by a dense run of commands,
+    rather than by where it sits in the log -- and what is asserted is that such
+    an episode exists and is overwhelmingly dense. That is
+    `test_travel_outranks_the_fight.py`'s lesson applied here: assert the
+    relation the change rests on, not the numbers one run happened to produce,
+    so a corpus that grows cannot make a true claim red. Later docking adds
+    episodes; it cannot take this one away.
+
+    What it still cannot pass without is the incident itself. An episode of a
+    hundred-odd readings that is 80% Dock commands is not something an ordinary
+    dock produces: of run 27's twelve other episodes the most commanded carries
+    five, and the whole rest of the run holds ten. So a corpus without #89's
+    evidence in it fails here, which is the whole point of these two cases --
+    checked by removing the episode's commands from a copy of the log, which
+    fails both.
+    """
 
     def readings_with(self, path, needle):
         """The set of reading numbers whose decisions include `needle`.
@@ -455,19 +499,54 @@ class RunTwentySevenIsTheEvidence(unittest.TestCase):
                     readings.add(current)
         return readings
 
+    def course_setting_episodes(self, path):
+        """Every stretch from one accepted course-setting to the next.
+
+        The bounds are the client's own sentence rather than anything the bot
+        said, so an episode is "a dock the client took on, up to the next dock
+        it took on" -- which is the unit the re-command hypothesis is about.
+        Both bounds are inside it: the first is the reading the run-in started
+        on and the second is the reading it was restarted on.
+        """
+        marker = string_constant(bot_elm(), "courseSetToDockingPerimeterMarker")
+        docking = self.readings_with(path, "Click on menu entry 'Dock'")
+        course_set = sorted(self.readings_with(path, marker))
+        return [
+            Episode(start, end,
+                    len([r for r in docking if start <= r <= end]),
+                    len([r for r in course_set if start <= r <= end]))
+            for start, end in zip(course_set, course_set[1:])]
+
+    def the_re_command_episode(self, name, path):
+        """The episode the bot spent re-commanding, taken by that property.
+
+        The most Dock commands of any of them, which is a way of asking the log
+        where the re-commanding happened rather than telling it. Run 27's own
+        answer is emphatic -- 114 against the runner-up's 5 -- and the
+        assertions the callers make are what pin that this is #89's episode
+        rather than merely the busiest one.
+        """
+        episodes = self.course_setting_episodes(path)
+        self.assertTrue(
+            episodes,
+            "run %s carries fewer than two accepted course-settings, so it "
+            "holds no dock the client both started and restarted" % name)
+        return max(episodes, key=lambda episode: episode.commands)
+
     def test_the_bot_commanded_the_dock_on_almost_every_reading(self):
         for name, path in recorded_runs("27"):
-            docking = self.readings_with(path, "Click on menu entry 'Dock'")
+            episode = self.the_re_command_episode(name, path)
             self.assertGreater(
-                len(docking), 100,
+                episode.commands, 100,
                 "run %s should show the dock commanded over a long stretch of "
                 "readings; that stretch is the bug" % name)
-            span = max(docking) - min(docking) + 1
             self.assertGreater(
-                len(docking) / float(span), 0.8,
-                "run %s commanded the dock on %d of %d consecutive readings -- "
-                "the density is what makes this a re-command rather than a "
-                "retry" % (name, len(docking), span))
+                episode.commands / float(episode.span), 0.8,
+                "run %s commanded the dock on %d of the %d readings between "
+                "the course-settings at %d and %d -- the density is what makes "
+                "this a re-command rather than a retry"
+                % (name, episode.commands, episode.span, episode.start,
+                   episode.end))
 
     def test_the_client_accepted_far_fewer_course_settings_than_commands(self):
         """And that gap is the client throwing re-commands away.
@@ -476,15 +555,23 @@ class RunTwentySevenIsTheEvidence(unittest.TestCase):
         are a property of one run and the relation is the finding: the bot asks
         far more often than the client acts, and the asking is what keeps the
         run-in from finishing.
+
+        Asked of the episode, where the run cannot answer it. The client
+        accepts a course-setting for every dock it takes on, so a session that
+        docks a dozen times ordinarily has a dozen of them and the ratio over
+        the whole log measures how much of the session was spent docking --
+        which is what #103 found it measuring. Inside the episode the accepted
+        ones are the two bounding it, counted from the log rather than assumed
+        from the construction, against every reading the bot asked again.
         """
-        marker = string_constant(bot_elm(), "courseSetToDockingPerimeterMarker")
         for name, path in recorded_runs("27"):
-            docking = self.readings_with(path, "Click on menu entry 'Dock'")
-            course_set = self.readings_with(path, marker)
+            episode = self.the_re_command_episode(name, path)
             self.assertGreater(
-                len(docking), 10 * len(course_set),
+                episode.commands, 10 * episode.accepted,
                 "run %s should show the dock commanded an order of magnitude "
-                "more often than the client set a course for one" % name)
+                "more often between the course-settings at %d and %d than the "
+                "client set a course for one"
+                % (name, episode.start, episode.end))
 
 
 class TheWiringIsInPlace(unittest.TestCase):
