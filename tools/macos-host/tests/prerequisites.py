@@ -195,10 +195,37 @@ class ElmRepl:
 
         The *last* list, because a `definitions` binding can itself print one
         and the expressions are always asked after them.
+
+        **The opening bracket is found by balancing, not by a non-greedy
+        match**, and that is the whole of this function's difficulty. A
+        `definitions` binding that prints a large record -- a whole parsed
+        `ReadingFromGameClient`, say -- puts hundreds of `[` and of the words
+        `True` and `False` between the prompt and the real answer. A
+        `\\[(.*?)\\]\\s*:\\s*List ` match then starts at some bracket *inside*
+        that record and runs to the answer's own closing bracket, so the
+        elements it yields are the record's fields followed by the answers.
+        Measured: three expressions came back as nineteen.
+
+        That is worse than an error, because `_require_one_answer_each` only
+        checks the *count*. Ask for sixteen expressions after such a binding and
+        the counts can agree while every answer read is a field of the record --
+        a case that passes having tested nothing, which is this repo's signature
+        bug wearing the test suite's clothes.
         """
-        listed = list(re.finditer(r"\[(.*?)\]\s*:\s*List ",
-                                  plain.replace("\n", " ")))
-        return re.findall(pattern, listed[-1].group(1)) if listed else []
+        flat = plain.replace("\n", " ")
+        closes = list(re.finditer(r"\]\s*:\s*List ", flat))
+        if not closes:
+            return []
+        end = closes[-1].start()
+        depth = 0
+        for index in range(end, -1, -1):
+            if flat[index] == "]":
+                depth += 1
+            elif flat[index] == "[":
+                depth -= 1
+                if depth == 0:
+                    return re.findall(pattern, flat[index + 1:end])
+        return []
 
     def run_script(self, lines):
         """One repl session over `lines`, with the colour codes stripped."""
