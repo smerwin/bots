@@ -2111,6 +2111,11 @@ reaching the silence deadline. That last one is the newcomer and deliberately so
 Having disarmed the ship once and been unable to finish, doing it again is not an
 optimisation worth the risk.
 
+The middle one is the weakest of the three and #106 is why: it is the only one
+that is not a permanent fact about the ship or the client, so it now rests on six
+hovers asked at six different moments rather than on five readings of one — see
+"The tooltip is asked where the mouse is free, and one hover is not evidence".
+
 ### The bound is a backstop; the policy is gain against risk
 
 Run 11 reached that deadline, latched the feature off, and it still cost most of
@@ -2490,6 +2495,117 @@ back)` beside it. A run where the charge tracks the verdict and no refusal
 appears is the whole claim. A refusal appearing means the load is going into a
 running gun again, which is #76's territory and not this.
 
+### The tooltip is asked where the mouse is free, and one hover is not evidence
+
+Run 32 turned the whole ammo swap off **at tick 61**, four minutes into a
+three-hour session:
+
+```
+Ammo swap: given up -- no crossover distance: 'ammo-swap-range' is not set and
+the weapon's tooltip never appeared, so there is no distance to swap at even
+though the menu says which charge is loaded.
+```
+
+The status line the reading before reads `tooltip unanswered 5`. That is the
+whole of the evidence: five readings of **one** hover, and one of only three
+verdicts that switch this feature off for a session — alongside the ship carrying
+neither charge and the silence deadline, both of which are permanent facts where
+this one is not. Nothing about five unanswered readings says the tooltip will
+never appear. Run 32 then spent the remaining 2,593 of its ammo status lines
+reporting the feature off.
+
+**The tooltip works on this client**, which is what makes five readings too small
+a sample rather than a conclusion. Run 17 answered on the reading straight after
+the hover; run 26 derived its 44000 m crossover from two observed optimal ranges;
+run 30 answered on the third reading of its own hover.
+
+**Combat is not what starved it, and this is where the issue that prompted the
+fix is wrong.** The obvious explanation is that run 32's hover landed mid-fight —
+`Recon (1 of 3) -- You need to activate the Acceleration Gate`, under fire from a
+`Centum Loyal Slaughterer` — where the mouse is wanted for locking rows and
+clicking the overview, so the sustained dwell a Photon flyout needs never
+accumulates. The log refutes it twice:
+
+- Across the **eleven steps** of that hover the bot dispatched **exactly one**
+  effect — `move: glided (1179.0, 155.5) -> (478.5, 978.5)` — and nothing else.
+  Twelve seconds of wall clock by the game log's own timestamps, the cursor
+  parked on the module, and no flyout.
+- **Run 30's hover was answered mid-fight**, with twelve rats on the overview,
+  726 hitpoints in the 45-second window and the shield at 62% — the same
+  conditions run 32 failed in, at the same screen point (478.5, 978.5).
+
+So whatever decides whether the flyout comes, incoming fire is not a proxy for
+it, and the fix carries **no damage clause** — `swapMayDisarmTheGuns`'s shape
+would have been the wrong shape here.
+
+**What changed is the sample and the moment.** The readings now bound one
+*hover*; the feature is given up only after `weaponTooltipAttemptsBeforeGivingUp`
+(6) separate hovers, each asked at a different moment. And the moments after the
+first are **warps**: `decideActionWhenInSpace` already answers `I am in warp` and
+issues nothing, so the mouse is free by construction and holding it still costs
+literally nothing — the branch the hover replaces there is
+`waitForProgressInGame`, after `returnDronesToBay` has had its say.
+
+**The first hover still happens in the pocket**, because that is where the three
+runs that got an answer asked. What the pocket no longer gets is a second one:
+`weaponTooltipIsWorthAsking` permits a hover out of warp only while none has been
+spent, so a fight can never burn the session's evidence on consecutive readings
+of a single moment.
+
+**One hover per warp**, which is the clause that stops the fix reproducing the
+bug at a larger scale. A warp holds enough readings to run six budgets back to
+back, and six hovers inside one warp are one moment sampled six times.
+`hoverAttemptSpentThisWarp` clears whenever the ship is not warping, so each
+warp is one sample.
+
+**Six is read off the runs' own warps**, counting warp episodes in the recorded
+logs: run 30 warped about 15 times over three hours, run 26 about 14, run 17 six
+in half an hour — and the median warp is 16 to 18 readings, comfortably more than
+the 5 a hover is allowed. So six moments are reachable in the shortest recorded
+session, and a client that genuinely never answers still says so early. The
+status line carries both numbers, `tooltip unanswered N, hovers spent M of 6`,
+because run 32's operator could watch the first climb to 5 with no way to see
+that it was about to end the feature.
+
+**`ammo-swap-range` removes the dependency, not this bug**, and the two changes
+are complementary rather than alternatives. With the setting the give-up cannot
+fire at all — but the tooltip is also the only way the *second* optimal range is
+ever learned, and a run whose hover is only ever attempted at one bad moment
+never refines its crossover whether the setting is present or not. The hover is
+still not attempted while the setting is set, which is deliberate and is the one
+thing here that is left as it was: that would be more mouse work for a
+refinement, and it wants its own evidence.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_ammo_tooltip_retry.py` (28 cases). The rule is
+*executed* through the real `Bot.elm` in `elm repl` rather than restated — which
+the version it replaces could not be, since it was reachable only through a whole
+`BotDecisionContext`, and that is exactly why the shipped version was checked by
+reading it. Run 32's episode is re-derived from its log as relations (one hover,
+one dispatched effect sequence, the counter reaching the budget, more readings
+spanned than the budget counts), run 30's answered hover is asserted to sit
+beside real damage and real rats, and the budget's sizing is asserted against the
+warp episodes and warp lengths the corpus carries rather than against numbers
+written down here. Confirmed by mutation, thirteen of them, each failing a named
+case: dropping the in-warp branch of the rule, letting the pocket ask on every
+reading, letting one warp spend every hover, moving either bound's comparison,
+setting the hover budget back to one, dropping the `ammo-swap-range` clause,
+never clearing the per-warp flag, reading the hover count from before this
+reading's increment, letting a spent hover keep holding the fight, reverting the
+warp branch to `waitForProgressInGame`, pinning the hover counter at a constant,
+and putting "never appeared" back into the give-up's sentence.
+
+**Unverified: any of it running.** No run has been flown since. What to watch on
+the first one is `hovers spent 0 of 6` on the ammo status line while a hover is
+in progress, then `Rest the mouse on a weapon` appearing again on a reading whose
+decision log reads `I am in warp` — that second hover is the whole change, and it
+has never happened. The failure to watch for is the opposite of run 32's: the
+counter climbing to `hovers spent 5 of 6` across several warps means the client
+really does not answer here and the give-up is doing its job, while a run that
+never prints a second hover at all means the warp branch is not reached — the
+tell for that would be `I am in warp` beside `hovers spent 1 of 6` and no
+`Holding still`.
+
 ### Not oscillating
 
 - **The crossover does not move, so the deadband is simple.** It is
@@ -2560,6 +2676,14 @@ lines, with `tooltip unanswered` reading `0` on every one of the run's 2,473 —
 so the tooltip came back on the reading straight after the hover and
 `optimalRangeGivenUp` never latched. `weaponOptimalRangeFromHover` works on this
 client, and the crossover in that run is derived rather than configured.
+
+**Runs 30 and 32 are the two halves of the follow-up.** Run 30 answered on the
+third reading of a hover asked in the middle of a fight — twelve rats, 726
+hitpoints in the window — and run 32 got nothing across twelve seconds of
+perfectly still cursor at the same screen point, then latched the feature off for
+three hours. So the hover works, it does not always work, and what separates the
+two is not incoming fire. That is #106, and the response is in "The tooltip is
+asked where the mouse is free, and one hover is not evidence".
 
 Not verified: **the disarm rule's own code running, in either version.** Run 17
 did reach #50's guard — 188 readings of `not disarming` are the evidence #63 was
