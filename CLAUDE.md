@@ -1445,6 +1445,144 @@ under that one clock, so none of them can become a second forever-loop. When it
 expires the session ends naming the mission, so an operator knows what to quit
 by hand.
 
+### A bound counted on every reading and tested on a few is not a bound
+
+That last paragraph was true of the arithmetic and false of the code, and issue
+#102 is the difference. `readingsSince` is advanced in
+`updateMemoryForNewReadingFromGame`, which runs on **every** reading
+unconditionally — that is the whole point of writing verdicts there. The
+comparison that reads it sat inside `abandonMissionThatCannotProgress`, below the
+docked-or-in-space split, and was therefore only asked on readings the decision
+tree got that far.
+
+Run 30 is the first live firing of the whole feature and it separates the two
+completely. The verdict latched on a genuinely unwinnable objective, the bot
+routed to the agent's station, travelled, docked, opened the conversation and
+clicked Quit Mission three times — every piece of machinery that had never run,
+ran. What failed is the bound:
+
+| | count |
+|---|---:|
+| `quitting it for N of 200` reached | **10,811** |
+| readings the status clause printed on | 32,813 |
+| readings the branch printed a decision line on | **211** |
+
+The counter had every reading and the comparison had 0.7% of them, because an
+undismissable window held `generalSetupInUserInterface` for three hours and
+forty-four minutes (#101). **And the comparison was never wrong**: on the last
+reading of the run the box was gone, the tree reached the branch for the first
+time since the onset, and the deadline fired *on that reading* at 10,811 and
+ended the session. A bound that is correct and fires immediately when it is
+finally asked, 54 times late, is a bound whose only defect is where it is asked.
+
+**This is #34's family with the halves swapped**, and worth naming as its own
+shape. There a counter could never reach its bound; here it reaches it easily and
+the comparison is never put. Both present identically from outside — a bound that
+is printed, looks armed and does not fire — and both survive review because the
+arithmetic reads correctly in isolation.
+
+**The fix is placement.** `abandonmentOutOfTime` is the comparison, extracted as
+a pure rule over a record, and `endSessionOnAnExpiredBound` asks it from the
+**head** of `missionBotDecisionRootBeforeApplyingSettings` — above
+`generalSetupInUserInterface`, above the pod recovery, above the wind-down, above
+the split. It is the one entry in that list with no work to do and no state to
+reach: it neither clicks nor waits, so it can be evaluated on any reading at all,
+and nothing has a reason to be placed over it. `abandonMissionThatCannotProgress`
+lost its "out of time" branch entirely, so there is one comparison rather than
+two places that could disagree about whether the attempt still has time.
+
+**Fixing #101 is not this fix**, and the temptation to close it that way is the
+thing to resist. PR #109 removed *one* way the tree can be held above this
+branch. The two retreats, the pod recovery and the wind-down all sit above it
+legitimately, and every future entry in that list is another one.
+
+**The counter still counts readings and not attempts, and that is a choice with
+a cost.** The other shape available — advance the counter only on readings the
+branch was actually evaluated, so 200 means 200 *attempts* — is cleaner
+semantically and wrong for this bound: a bot held elsewhere would then spend none
+of the budget, which is precisely the runaway. Run 30 reached the branch on 211
+readings in three and three-quarter hours, so an attempt counter would have stood
+at 211 and gone on standing there. #54's own promise is that "every way quitting
+can fail runs under that one clock", and a clock that stops while the bot is
+stuck elsewhere is not one. The cost is stated rather than hidden: a bot starved
+above this branch for an unrelated reason now ends its session at 200 readings
+with the quit never attempted, where before it ran until something else stopped
+it. The give-up line says so — the count is *readings since the verdict rather
+than attempts*, so an operator whose session ends here having never reached the
+agent is being pointed at the rest of the bot rather than at the quit.
+
+**`droneRecallUnansweredTicks` is the counter-example, and the two are not in
+conflict.** It deliberately advances only on readings the branch acted, reading
+the ask out of `previousStepsEffects`, and it is right to: its give-up *declines
+an action and hands the caller's own step back*, so a fight that legitimately
+kept the bot elsewhere must not spend a budget whose purpose is to bound a
+repeated ask. What decides the shape is what the give-up does. **A give-up that
+ends the session bounds elapsed time and belongs where nothing can decline to ask
+it; a give-up that declines an action bounds effort and belongs where the action
+is.**
+
+**Four other bounds in this file share the asymmetry, and none has cost anything
+yet.** Stated so the next one is recognised rather than rediscovered:
+
+- **`podRecoveryGiveUpReadings`** is the identical shape —
+  `shipLoss.readingsSince` advances every reading, `recoverPodAfterShipLoss` is
+  in the pre-split list *below* `generalSetupInUserInterface`, and run 30's box
+  starved it exactly as it starved this one — nothing below that list ran on any
+  reading of the incident. It has never been *seen* only because no verdict was
+  latched, so its counter was not running and its bound had nothing to be late
+  for. That is luck, not soundness. Left where it is deliberately: moving a bound
+  is a behaviour change and wants its own evidence.
+- **`messageBoxStandoffGiveUpReadings`** counts every reading with a box and is
+  tested in `closeMessageBox`, which sits below `closeSystemSettingsMenu` in the
+  same list. It over-counts if the pause menu holds it, which makes it give up
+  *sooner* and hand the tree back — the safe direction.
+- **`dockingRunInPatienceReadings`** and the loot window's
+  `lootWindowOutOfRangeTicks` / `lootAllRefusedTicks` both advance from the
+  reading and are tested deep under the split. Over-counting costs one
+  re-commanded dock and one abandoned wreck respectively, not a runaway.
+- **`gateWithinReachTicks`** counts the client's *offer* rather than the branch,
+  and its own comment argues the case: anything that keeps the ship parked
+  beside the gate was spending the budget too. Deliberate rather than
+  accidental, and the failure direction is a gate declined.
+
+`lockAttempt` is the clean one: its verdict is reached in the memory update
+itself, so the counter and the test are the same code on the same reading.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_abandonment_deadline_reachable.py` (22 cases). The
+two pure rules are executed through the real `Bot.elm` in `elm repl` rather than
+restated in Python — the deadline at both sides of its boundary, at zero, at run
+30's own 10,811, and against a verdict that never stalled and one with no name,
+so that nothing conjoined onto the comparison can hide; and the give-up line,
+which has to name the mission, carry both counts, say the count is readings and
+not attempts, and say the mission still needs a person. The placement, the
+absence of a second comparison, the branch doing nothing but ending the session,
+and the counter's own unconditional advance are read out of the source through a
+whitespace-collapsing reader. Run 30 is recounted as the relations rather than
+the numbers: the count ran past 50x the bound, the branch was reached on two
+orders of magnitude fewer readings than the verdict was latched for, and the
+give-up fired exactly once, at the highest count the run ever printed.
+
+Confirmed by mutation, ten of them, each failing a named case: the comparison
+moved by one in either direction; the deadline conditioned on the attempt having
+stalled as well; the deadline placed after `generalSetupInUserInterface` instead
+of before it; the branch left out of the list entirely; the comparison left in
+`abandonMissionThatCannotProgress` as well as in the rule; the clock advanced
+only on readings the branch acted (the attempt-counting shape, which run 30's own
+numbers refute); the give-up dropping the mission's name; the give-up dropping
+the readings-not-attempts clause; the expired-deadline branch waiting instead of
+ending the session; and the drone recall's counter changed to advance on every
+reading, which is the same mistake in the direction the other rule needs.
+
+**Unverified: any of it running.** No run has been flown since. The whole path
+needs a mission that genuinely cannot progress *and* a bot that cannot finish
+quitting it, which is not something to stage. What to watch on the first run that
+abandons anything: `quitting it for N of 200` in the status line climbing and
+then stopping — a run that ends the session at N=200 having never printed
+`Travelling to '<station>' to give the mission back.` is the new failure mode and
+means something above the branch is holding the tree, which is now what the
+give-up line says to go and look for.
+
 **The abandoned name feeds the session's own decline list.**
 `BotMemory.missionNamesAbandoned` is consulted by `shouldDeclineMission`
 alongside `decline-mission`, so the agent cannot hand the same mission straight
@@ -3969,7 +4107,15 @@ exists.
   alarm 817 times and had to be stopped by hand; run 13 reached the same state
   in 29 readings. The threshold, the bound and what is unverified are in "A
   mission that cannot be progressed is given back, not asked about forever"
-  above. **Untested against a live client.**
+  above. Run 30 flew the whole thing for the first time and every piece of it
+  worked except the bound: the trip, the dock, the conversation and three clicks
+  on Quit Mission are all confirmed live, and the 200-reading deadline ran to
+  **10,811** because the comparison sat in a branch the tree was not reaching.
+  Since #102 that deadline is asked from the head of the decision root, where
+  nothing can decline to ask it — see "A bound counted on every reading and
+  tested on a few is not a bound", and the four other bounds named there that
+  share the shape. **The abandonment itself is still untested against a live
+  client**; only the machinery under it has run.
 
   And it now **stops answering a message box that will not close**, after
   sixty readings of the ordinary declining answer and another sixty of Escape,
@@ -4542,6 +4688,18 @@ constant (#30), the parser block byte-identical across all six vendored copies
 *true* in the state the code runs in. "I traced the path forward from this state"
 does not establish that the state can be entered, which is precisely how #34's
 bound shipped unreachable.
+
+**And say what guarantees the branch holding it is evaluated on the reading it
+becomes true.** That is the second half of the same standard and #102 is what it
+costs to leave it off: `abandonMissionGiveUpReadings` was a correct comparison
+over a counter advanced on every reading, sitting in a branch the tree reached on
+0.7% of them, and it ran to 10,811 against 200 before anything asked it. A
+counter and the comparison that reads it are two different pieces of code on two
+different schedules unless something makes them one. Where the answer is "nothing
+does", either move the comparison to where nothing can decline to ask it, or
+count only the readings it is asked on — and which of those is right depends on
+what the give-up does, not on which is tidier. See "A bound counted on every
+reading and tested on a few is not a bound".
 
 **Distinguish absent from false.** `ramp_active` is missing until a module has
 cycled, and `Nothing` from the game log means "no game log on this host" while

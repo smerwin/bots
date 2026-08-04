@@ -117,6 +117,19 @@ def function_body(source, signature_start, next_top_level):
     return source[start:end]
 
 
+def without_comments(text):
+    """The same source with its `--` line comments dropped.
+
+    For the cases that assert what a list does *not* contain. `collapsed` puts
+    a comment on the same line as the code, so a comment naming the branch that
+    is deliberately absent reads as the branch being present -- which is a case
+    that fails for saying the right thing.
+    """
+    return "\n".join(
+        line for line in text.splitlines()
+        if not line.strip().startswith("--"))
+
+
 def update_memory_source(source):
     """`updateMemoryForNewReadingFromGame`'s whole definition.
 
@@ -492,13 +505,29 @@ class TheQuitAttemptIsBounded(unittest.TestCase):
             "\nstationToReturnToForAbandonment :"))
 
     def test_the_bound_ends_the_session(self):
-        self.assertIn("if abandonMissionGiveUpReadings <= verdict.readingsSince then",
-                      self.body)
-        deadline = self.body[self.body.index("abandonMissionGiveUpReadings <="):]
-        self.assertIn("Common.DecisionPath.endDecisionPath FinishSession",
-                      deadline.split("else")[0],
-                      "reaching the bound must end the session, not hand the "
-                      "problem back to the branch that could not solve it")
+        # Since #102 the comparison lives in `abandonmentOutOfTime` and is asked
+        # from above the whole tree rather than from this branch -- see
+        # `test_abandonment_deadline_reachable.py` for why,
+        # and for the placement. What this case has always meant is unchanged:
+        # reaching the bound ends the session rather than handing the problem
+        # back to the branch that could not solve it.
+        rule = collapsed(function_body(
+            self.source, "abandonmentOutOfTime :",
+            "\n{-| The one line an operator gets"))
+        self.assertIn(
+            "if abandonMissionGiveUpReadings <= verdict.readingsSince then",
+            rule)
+        self.assertIn(
+            "Common.DecisionPath.endDecisionPath FinishSession",
+            collapsed(function_body(
+                self.source, "endSessionOnAnExpiredBound :",
+                "\n{-| How long before the planned session end")))
+        self.assertNotIn(
+            "abandonMissionGiveUpReadings", self.body,
+            "the deadline must be asked in exactly one place -- two would be "
+            "two things that could disagree about whether the attempt has time "
+            "left, and the one inside this branch is the one run 30 never "
+            "reached")
 
     def test_the_bound_is_larger_than_the_trip_it_has_to_cover(self):
         # The same route-set, travel, dock the pod recovery budgets for, plus
@@ -623,9 +652,12 @@ class TheOperatorCanReadWhatHappened(unittest.TestCase):
         # Each `describeBranch` in the response either names the mission itself
         # or is nested inside the one that does, which is the outermost.
         first = body.index("describeBranch")
-        self.assertIn("verdict.name", body[first:body.index("(if abandon")])
-        deadline = body[body.index("abandonMissionGiveUpReadings <="):]
-        self.assertIn("verdict.name", deadline.split("else")[0],
+        self.assertIn("verdict.name", body[first:body.index("(case context")])
+        # The give-up moved out of this branch in #102 and still has to name it.
+        self.assertIn("verdict.name",
+                      collapsed(function_body(
+                          self.source, "describeAbandonmentOutOfTime :",
+                          "\n{-| One reading of a mission that is not moving")),
                       "the give-up must say which mission is still stuck, or "
                       "the operator has nothing to quit by hand")
 
@@ -643,11 +675,12 @@ class TheOperatorCanReadWhatHappened(unittest.TestCase):
             self.source,
             "abandonMissionThatCannotProgress : BotDecisionContext",
             "\nstationToReturnToForAbandonment :"))
-        repeating = body[body.index("describeBranch"):body.index("(if abandon")]
+        repeating = body[body.index("describeBranch"):body.index("(case context")]
         self.assertNotIn("String.fromInt", repeating)
-        deadline = body[body.index("abandonMissionGiveUpReadings <="):]
         self.assertIn("String.fromInt verdict.readingsSince",
-                      deadline.split("else")[0],
+                      collapsed(function_body(
+                          self.source, "describeAbandonmentOutOfTime :",
+                          "\n{-| One reading of a mission that is not moving")),
                       "the one line printed once may carry its numbers, and "
                       "should -- it is what says how long the attempt ran")
 
@@ -702,8 +735,8 @@ class TheOrderingIsThePoint(unittest.TestCase):
         self.source = bot_elm()
         start = self.source.index(
             "missionBotDecisionRootBeforeApplyingSettings context =")
-        end = self.source.index("\nsecondsBeforeSessionEndToWindDown", start)
-        self.collapsed = collapsed(self.source[start:end])
+        end = self.source.index("\nendSessionOnAnExpiredBound :", start)
+        self.collapsed = collapsed(without_comments(self.source[start:end]))
 
     def test_the_ship_loss_and_the_wind_down_outrank_it(self):
         # Both live in the pre-split list, and the abandonment does not: there

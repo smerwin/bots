@@ -253,10 +253,13 @@ class TheAffirmativeIsStillNarrow(unittest.TestCase):
     def test_the_gate_reaches_close_message_box_from_the_decision_root(self):
         # A gate computed and never passed down is #15's shape: it compiles,
         # it runs, and the branch behind it can never be true.
+        # Sliced from the root itself rather than from the setup call's own
+        # opening bracket: #102 put `endSessionOnAnExpiredBound` in front of it
+        # in that list, and the next entry added there would move it again.
         root = collapsed(function_body(
             self.source,
-            "[ generalSetupInUserInterface",
-            "context.readingFromGameClient"))
+            "missionBotDecisionRootBeforeApplyingSettings context =",
+            "\n            |> List.filterMap identity"))
         self.assertIn(
             "confirmDeclineMission = declineMissionConfirmationIsExpected context",
             root)
