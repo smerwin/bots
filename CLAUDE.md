@@ -1374,12 +1374,14 @@ together, with `ramp_active` still `True` because the gun is finishing its cycle
 and #39 both asked for and neither had.
 
 Two readings later the column becomes `F/T/F` and stays there. The guns are
-switched back **on** — by `decisionToKillRats`, which owns activation, because the
-swap's settle hands the fight on and the fight sees an inactive weapon on a
-locked target. That is the intended owner behaving correctly; what was wrong is
-that the swap kept going. Its `gunsSilencedTicks` counter consults nothing the
-module says (deliberately, #38) so it counted to its bound of 20 while the guns
-had been back on since reading 3.
+switched back **on**, and **not by anything in the bot** — see "The switch-off
+does not hold" below, where #72 read the dispatched effects across that window
+and found no press of the button in either recorded run. This file used to
+attribute it to `decisionToKillRats`; that was wrong, and it was wrong in the
+direction that made the swap's own failure look like correct behaviour by its
+intended owner. What is true either way is that the swap kept going: its
+`gunsSilencedTicks` counter consults nothing the module says (deliberately, #38)
+so it counted to its bound of 20 while the guns had been back on since reading 3.
 
 **`isInActiveState` is decisive about the switch-off and says nothing about the
 guns working.** In that same window the weapon fired *not once* — all 33 outgoing
@@ -1876,9 +1878,11 @@ exit from the bound rather than a replacement for it.
 is `isInActiveState` reading `Just False` on a gun the swap commanded off. It
 shortens the settle — measured landing on the first reading after the click every
 time — and, once it has been true and the gun reads switched on again,
-`switchOffHasBeenUndone` abandons the attempt, since a load into a running gun is
-refused anyway. Replayed against run 11's twenty status-line columns that fires
-at reading 3 rather than 21.
+`switchOffHasBeenUndone` says the switch-off did not hold. Replayed against run
+11's twenty status-line columns that fires at reading 3 rather than 21. **Since
+#72 that is a report and not a verdict**: the client re-arms the gun on every
+swap, so abandoning there guaranteed no attempt could reach its load. See "The
+switch-off does not hold".
 
 **The deadline itself is unchanged, and so is its independence.** `gunsSilencedTicks`
 still consults nothing the module says. Every use of the module reading can only
@@ -1903,22 +1907,77 @@ F/T/F   "gave up on this one"                           switched on again
 
 The gun is back on **the reading after the confirmation**, with the swap still
 holding the fight and its own decision line reading `Open this weapon's menu`.
-Nothing in the bot pressed the hotkey in between — `decisionToKillRats` is not
-reached while the ammo path holds the fight — so this is the *client* turning the
-weapon back on. Auto-repeat is the obvious candidate: `autorepeat` reads `1000`
-on these guns and has since #39 parsed it, and a weapon with auto-repeat on and a
-locked target is exactly what re-activates itself the moment a cycle ends. The
-weapon's own context menu offers `Set Auto-Repeat Off`, so the client can be told
-not to, and nothing has tried it.
 
-**`switchOffHasBeenUndone` then abandons the attempt on the reading the menu
+**The cheap hypothesis was that this is our own code, and it is not.** #72 was
+told to rule that out first, because `decisionToKillRats` presses an inactive
+top-row module on a locked target and #50 deliberately relies on that to bring
+the guns back — so two controllers fighting over one button would have made this
+an ordering fix needing no knowledge of the client at all. The decision log
+settles it, on all four swaps across the two runs that have one:
+
+- **The branch that presses is `Cycle combat mod`, and through the disarmed
+  window it prints `All guns cycling` instead.** `isActive` reads `ramp_active`,
+  which stays `True` while the gun finishes its cycle, so the fight sees nothing
+  inactive to press.
+- **The one reading it did reach `Cycle combat mod`** — run 11's second swap —
+  the gun was *already* back on, and the press was suppressed by
+  `activateWeaponModuleButWaitIfActivatedInPreviousStep`. Reached one reading
+  after the re-arm, so it could not have caused one.
+- **What was dispatched in between** was a drone launch (run 11's second swap), a
+  left click on an *overview entry* (run 11's first), and the swap's own
+  right-click on the module (both of run 18's). Run 11 is the control that
+  matters: there the host's own gesture log shows the mouse glided *away* from
+  the module button before the gun came back on, so a re-arm happens with
+  nothing touching it.
+
+So this is the *client* turning the weapon back on. Auto-repeat remains the
+candidate explanation and is **not** established: `autorepeat` reads `1000` on
+these guns and has since #39 parsed it, and the weapon's own context menu offers
+`Set Auto-Repeat Off`, which nothing has tried. What is established is only that
+the bot did not do it — which is all the fix rests on.
+
+**`switchOffHasBeenUndone` then abandoned the attempt on the reading the menu
 would have arrived on.** The right-click was issued on the confirmation reading;
-a context menu is in the tree on the *next* one; and that is the reading the
-verdict is abandoned, so the menu is never read. That matters more than losing
+a context menu is in the tree on the *next* one; and that was the reading the
+verdict was abandoned, so the menu was never read. That matters more than losing
 one swap, because menu membership is the swap's only answer to *which charge is
 loaded* — which is why runs 17 and 18 print `loaded charge reads unknown` on
 every ammo status line they have, while run 11, which predates the confirmation,
 resolved it on 358 of its 488.
+
+**#72's fix is that the re-arm reports and decides nothing.** Since the client
+does it on *every* swap, that clause was not a detector — it was a guarantee that
+no attempt could reach its load, which is what runs 11, 18 and 22 all did. Every
+episode across those runs where a gun read `isInActiveState` `F` ends with it
+reading `T` again, the longest running four readings; none held. Run 22 is the
+one that makes the count worth quoting: it reached `GUNS OFF` 29 times, two of
+those got a gun genuinely off, and both were abandoned on the reading after,
+exactly as run 18's two were, on a different mission and a different target.
+
+**The length varies and is not what the fix depends on.** Run 11's first swap
+read `T/F/T` then `F/F/T` — the ramp stopping with the gun still off — before
+coming back on. What holds across the corpus is only that the client always takes
+the guns back, which is the assertion made, after a stricter one was written and
+run 11 falsified it.
+
+And it
+fired precisely where the swap had stopped costing anything the bounds exist to
+protect: the predicate is true exactly when the guns are firing again, so
+*failing to a firing gun beats failing to a silent gun* has nothing left to
+choose between. What ends an attempt now is what always could —
+`ammoSwapSilencedGiveUpTicks` (20, untouched) and the client's own load refusal
+(#31) — and neither consults the module, which is why the clause could go without
+taking a bound with it. `switchOffUndoneByClient` survives as a latched report:
+the status line stops saying `GUNS OFF for N` once the guns are back and says so
+instead, because a counter that means "readings this attempt has held the fight"
+and a sentence that means "the guns are off" came apart at that moment and only
+one of them was ever true afterwards.
+
+The swap now goes on to its load on the reading the menu arrives, which is what
+run 11 did before #50 and which is where the next observation has to come from —
+see "What is verified and what is not" below for why the two recorded loads into
+a switched-on gun disagree with each other, and why that makes proceeding the
+experiment rather than the gamble.
 
 **So `loaded charge reads unknown` is a symptom with two different causes**, and
 neither is a fault in the menu read itself:
@@ -2077,16 +2136,48 @@ with `short-range-ammo` and `long-range-ammo` set:
    smaller share, which no recorded run shows.
 4. **That `Ammo swap: given up` appears once** and then as the short flag.
 
-**`loaded charge reads unknown` is not fixed here and is not one bug.** It
-printed on all 2,473 of run 17's ammo status lines and all of run 18's, and the
-two runs got there differently — run 17 never opened a menu because the gate
-never let it, run 18 opened one and abandoned the verdict before reading it. See
-"The switch-off does not hold" above. The gate change addresses only the first,
-so a run that now reaches `GUNS OFF` and still reads `unknown` is the second.
+**`loaded charge reads unknown` was not one bug.** It printed on all 2,473 of run
+17's ammo status lines and all of run 18's, and the two runs got there
+differently — run 17 never opened a menu because the gate never let it, run 18
+opened one and abandoned the verdict before reading it. #63 addressed the first
+and #72 the second, and **run 21 shows the menu read itself working**: it prints
+`loaded charge reads long-range` and derives a crossover from two optimal ranges,
+which is the strongest evidence yet that nothing is wrong downstream of the menu.
 
-Also watch the game log staying free of `cannot load or unload`: with the
-confirmation in front of the load, a refusal now means the gun read switched off
-and the client disagreed.
+**Nobody has yet watched a load land, in twenty-two runs.** `(satisfied)`
+appears **zero** times in run 22 — the run that reached `GUNS OFF` 29 times —
+and its `loaded charge reads` went `unknown` → `short-range` once, when the menu
+read finally resolved, and never changed again while the swap asked for `Radio M`
+on 277 prints. **A resolved charge is the menu read working, not a load
+landing**, and reading the first as the second is the mistake to avoid here.
+
+**What run 22 does settle is the arbiter.** `You cannot load or unload Focused
+Modulated Medium Energy Beam I while it is active.` appears **134 times** in its
+game log and the bot printed `The client refused the load. It said: …` **65**
+times. #31 had never fired in a recorded bot run before. So the client does
+refuse a load into a gun it considers active, it says so on a channel the bot
+reads, and the branch that quotes it works. Every part of the ammo path that
+says "if that was wrong, the refusal says so" now has one observation behind it
+instead of none.
+
+**Those refusals are the case where the switch-off never landed**, not the case
+#72 makes reachable. Run 22's longest episode pressed the button at `T/T/F` and
+still read `isInActiveState` `T` three readings later — `none has yet read
+switched off` — with an `effect_activating` pulse in the middle, a gun starting a
+cycle rather than ending one. The fixed settle then expired and the load went in
+regardless. So a click that does not take, and a switch-off the client undoes,
+are two different failures and only the second is #72.
+
+**What a load into a *re-armed* gun does is still unknown, and the two recorded
+attempts disagree.** Run 11 clicked `Radio M [5]` into a gun reading `F/T/F` and
+the client neither refused it (`cannot load or unload` appears nowhere in run 11)
+nor changed the charge. Run 22 shows the same client refusing loudly when the gun
+read `T/T/F`. `F/T/F` and `T/T/F` are both `isInActiveState = True`, so either
+the refusal depends on the cycle rather than the toggle, or run 11's menu click
+never reached the entry. **That is exactly the experiment #72 makes possible**,
+and it is why proceeding to the load beats abandoning: the client's own answer is
+the only thing that can settle it, the guns are firing while it is asked, and the
+bounds cap the asking.
 
 One cross-feature invariant, since this and the learned lock range both read the
 previous step's effects. They cannot be confused: the lock chord is Ctrl over a

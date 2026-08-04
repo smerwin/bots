@@ -23,16 +23,25 @@ all. The separation is measured against the two runs that produced the two
 issues, rather than asserted: run 11's fourth swap is declined, run 17's first
 attempt is permitted, and run 17's own shield collapse is declined too.
 
-**A switch-off the client confirmed and then contradicted ends the attempt.** #39
-parsed `isInActiveState` onto the module button and deliberately wired it to
-nothing, because no sample had ever caught a module switching off. Run 11 is that
-sample, and it settles the question #39 left open in a way nobody expected: the
-switch-off *lands*, on the reading straight after the click, on all four swaps.
-What then happens is that the guns come back on at the third reading -- the
-settle hands the fight on and `decisionToKillRats` presses the weapon hotkey --
-and the swap spends the remaining seventeen readings issuing loads into a running
-gun. `switchOffHasBeenUndone` is what notices, and the replay below runs the
+**A switch-off the client confirmed and then contradicted is reported, and ends
+nothing.** #39 parsed `isInActiveState` onto the module button and deliberately
+wired it to nothing, because no sample had ever caught a module switching off.
+Run 11 is that sample, and it settles the question #39 left open in a way nobody
+expected: the switch-off *lands*, on the reading straight after the click, on all
+four swaps. What then happens is that the guns come back on a reading or three
+later. `switchOffHasBeenUndone` is what notices, and the replay below runs the
 run's own twenty status-line columns through it.
+
+**#50 read that re-arm as the bot's own doing and #72 measured that it is not.**
+`decisionToKillRats` presses an inactive top-row module on a locked target, so
+"the settle hands the fight on and the fight presses the hotkey" was a plausible
+account of run 11 -- and it would have made this an ordering bug entirely inside
+our own code. The decision log says otherwise on all four swaps in the two runs
+that have one; `NothingInTheBotPressedTheButton` is that evidence and the reason
+the abandon-on-re-arm clause is gone. Since the client does it on every swap,
+that clause was not detecting a pathology, it was guaranteeing that no attempt
+could ever reach its load -- and it fired exactly where the guns were already
+firing again, so it released nothing that #34's or #50's bounds were protecting.
 
 **What is deliberately *not* here.** `gunsSilencedTicks` still consults nothing
 the module says about itself; `test_ammo_silenced_bound.py` owns that property
@@ -196,6 +205,31 @@ def recorded_runs(*names):
             "none of mission_run{%s}.log is on this machine, so the recorded "
             "runs cannot be consulted here" % ",".join(names))
     return found
+
+
+def without_comments(source):
+    """Elm source with its `--` line comments removed.
+
+    For assertions that a name is *absent* from a decision: the comment
+    explaining why it left names it, and a search that the comment satisfies
+    would pass on the code it was written to forbid.
+    """
+    return "\n".join(line for line in source.split("\n")
+                     if not line.strip().startswith("--"))
+
+
+def read_framework_source():
+    """`BotFrameworkSeparatingMemory.elm`, where the two gestures are built.
+
+    The swap's switch-off and its menu-open both land on the same module button
+    at the same coordinates, and only the mouse button separates them -- which
+    is what #72 had to tell apart. Both are written here rather than in
+    `Bot.elm`.
+    """
+    path = os.path.join(MISSION_RUNNER_DIR, "EveOnline",
+                        "BotFrameworkSeparatingMemory.elm")
+    with open(path, encoding="utf-8") as source:
+        return source.read()
 
 
 def let_binding(source, name, indent="        "):
@@ -660,19 +694,90 @@ class TheModuleReadingCanOnlyShortenTheDisarmedPeriod(unittest.TestCase):
     it is safe here is one-directional: every use makes the swap let go of the
     guns sooner, and none can make it hold on longer. That is not visible from
     behaviour on any one input, so it is asserted about the shape.
+
+    #72 narrows what "every use" is. The direction is unchanged and still
+    asserted -- the settle can only be shortened, and the deadline still reads
+    nothing the module says. What went away is the one use that was not on that
+    axis at all: abandoning the attempt because the client re-armed a gun, which
+    released nothing (the guns were already firing) and cost the whole feature.
     """
 
     def setUp(self):
         self.source = bot_source()
 
-    def test_the_undone_verdict_only_ever_abandons(self):
-        # `switchOffUndone` is a branch of `verdictAbandoned` evaluating to
-        # True. Abandoning resets `gunsSilencedTicks` and hands the fight back,
-        # which is what re-arms the guns; any other value here would be a module
-        # reading holding them rather than releasing them.
+    def test_the_undone_switch_off_is_reported_and_decides_nothing(self):
+        """Issue #72. The re-arm is the client's, so it may not end an attempt.
+
+        #50 had `switchOffUndone` abandon the verdict, reading run 11's re-armed
+        gun as `decisionToKillRats` pressing the hotkey. That run's own decision
+        lines say otherwise, and the client does this on every swap -- so the
+        clause was not a detector, it was a guarantee that no attempt could
+        reach its load. What is left is a latched report the status line reads.
+
+        Pinned as an absence in the one binding that matters rather than as a
+        text search over the file, since the field is *meant* to appear in the
+        status line and in the acting path's own description of the hold. The
+        comments go first, because this binding's own explain why the clause
+        left and would otherwise satisfy the search that proves it did.
+        """
+        body = without_comments(let_binding(self.source, "verdictAbandoned"))
+        self.assertNotIn("switchOffUndoneByClient", body)
+        self.assertNotIn("switchOffHasBeenUndone", body)
+
+    def test_the_two_bounds_that_do_end_an_attempt_are_still_there(self):
+        """...because the case above is only safe if something else ends it.
+
+        Removing a give-up clause is only not a regression while the bounds
+        behind it hold, and both of these end an attempt without consulting the
+        module at all -- which is why the module reading could be taken out of
+        this decision without taking a bound with it.
+        """
         body = let_binding(self.source, "verdictAbandoned")
         self.assertRegex(
-            body, r"else if switchOffUndone then\n(\s*--[^\n]*\n)*\s*True\n")
+            body,
+            r"else if ammoSwapSilencedGiveUpTicks < gunsSilencedTicks then"
+            r"\n(\s*--[^\n]*\n)*\s*True\n")
+        self.assertRegex(
+            body,
+            r"else if ammoSwapVerdictGiveUpTicks < rangeVerdictTicks then"
+            r"\n(\s*--[^\n]*\n)*\s*True\n")
+        self.assertRegex(
+            body,
+            r"else if loadRefusedByClient /= Nothing then"
+            r"\n(\s*--[^\n]*\n)*\s*True\n")
+
+    def test_the_report_is_cleared_wherever_the_confirmation_is(self):
+        """It belongs to one verdict and cannot be inherited by the next.
+
+        Same three clearing conditions as `gunsConfirmedOff`, which is what it
+        is derived from: a latch that outlived its verdict would have the status
+        line describing the previous attempt's guns.
+        """
+        latch = let_binding(self.source, "switchOffUndoneByClient")
+        confirmation = let_binding(self.source, "gunsConfirmedOff")
+        for clearing in ["if rangeVerdict == Nothing then",
+                         "else if verdictSatisfied then",
+                         "else if memoryBefore.verdictAbandoned then"]:
+            self.assertIn(collapse(clearing), collapse(confirmation))
+            self.assertIn(collapse(clearing), collapse(latch))
+
+    def test_the_report_is_read_by_something_that_prints(self):
+        """A latch nothing reads is a field, not a report.
+
+        This is the only thing `switchOffUndoneByClient` is for now, so if it
+        reaches no output it is dead weight and #72 is unobservable in the next
+        run's log -- which is the whole reason the field survived at all. Both
+        sites, because the status line answers on every reading and the decision
+        line is what says the counter has stopped meaning "guns off".
+        """
+        status = let_binding(self.source, "describeTheHold", indent="        ")
+        self.assertIn("ammoSwap.switchOffUndoneByClient", status)
+        self.assertIn("switched a gun back on by itself", self.source)
+        self.assertIn(
+            "else if ammoSwap.switchOffUndoneByClient then",
+            collapse(self.source),
+            "the status line no longer branches on the re-arm, so a run in "
+            "which the client takes the guns back reads as one holding them off")
 
     def test_fire_arriving_mid_swap_only_ever_abandons(self):
         body = let_binding(self.source, "verdictAbandoned")
@@ -1289,6 +1394,241 @@ class TheSwitchOffIsChosenByTheToggleAndNotTheCycle(unittest.TestCase):
             "run 21 no longer carries the decision line this issue is about "
             "-- it is the pre-fix wording and the log is a recording, so it "
             "cannot change unless the file was replaced")
+
+
+class NothingInTheBotPressedTheButton(unittest.TestCase):
+    """Issue #72's evidence, read out of the runs that produced it.
+
+    The cheap hypothesis was that two pieces of our own code were fighting over
+    one button: `decisionToKillRats` presses an inactive top-row module on a
+    locked target, and #50 deliberately relies on that to bring the guns back
+    after an abandoned attempt. If that path were also firing *while* the swap
+    held the fight, the fix would be an ordering question and would need no
+    knowledge of the client at all.
+
+    **It is not what happened, and these cases are how that was established.**
+    The decision log records the branch the bot took and the effects it
+    dispatched, which is the technique #18 used to identify the lock chord. On
+    all four swaps in the two runs that have one:
+
+    - the branch that presses a module button is `Cycle combat mod`, and through
+      every reading of a disarmed window it prints `All guns cycling` instead --
+      `isActive` reads `ramp_active`, which stays `True` while the gun finishes
+      its cycle, so the fight sees nothing inactive to press;
+    - the one reading it did reach `Cycle combat mod` (run 11's second swap), the
+      gun was *already* back on and the press was suppressed by
+      `activateWeaponModuleButWaitIfActivatedInPreviousStep`;
+    - and the effects actually dispatched between the confirmation and the
+      re-arm were a drone launch, an overview click, and the swap's own
+      right-click on the module -- not one a press of the button.
+
+    So the client re-arms the gun by itself. `autorepeat` reading `1000` on
+    these guns since #39 parsed it remains the candidate explanation and is
+    **not** established by any of this; what is established is that the bot did
+    not do it, which is what the fix rests on.
+    """
+
+    @staticmethod
+    def decision_lines(name):
+        path = os.path.join(
+            os.path.expanduser("~"), "eve-bot-logs", "mission_run%s.log" % name)
+        if not os.path.exists(path):
+            raise unittest.SkipTest("no recorded " + os.path.basename(path))
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return [line.rstrip("\n") for line in handle
+                    if line.startswith("+") or line.startswith("#     move:")]
+
+    # The decision text `decisionToKillRats` prints on the reading it presses a
+    # top-row module, and the one it prints instead when it declines to. Read
+    # out of `Bot.elm` by the case below so a reworded branch cannot quietly
+    # make the log evidence unfalsifiable.
+    PRESSES_A_MODULE = "Cycle combat mod"
+    SUPPRESSED = "Already pressed this weapon hotkey in a previous step."
+
+    def test_the_branch_that_presses_a_module_is_named_as_these_cases_assume(self):
+        source = bot_source()
+        self.assertIn('describeBranch "%s"' % self.PRESSES_A_MODULE, source)
+        self.assertIn(self.SUPPRESSED, source)
+
+    def test_the_fight_never_pressed_a_gun_while_a_swap_held_it_off(self):
+        """Between the confirmed switch-off and the re-arm, in every run.
+
+        The window is delimited by the swap's own decision lines rather than by
+        a reading count, because the settle and the confirmation give the runs
+        different lengths: run 11's guns were off for three readings, run 18's
+        and run 22's for one.
+        """
+        for name, opening, closing in (
+                ("11", "Told the guns to stop 1 of", "Open this weapon's menu"),
+                ("18", "Guns off for 1 of", "I see a locked target"),
+                ("22", "Guns off for 1 of", "I see a locked target")):
+            lines = self.decision_lines(name)
+            starts = [index for index, line in enumerate(lines)
+                      if opening in line]
+            self.assertTrue(
+                starts,
+                "run %s no longer carries a confirmed switch-off, so it is no "
+                "longer the run these cases were written from" % name)
+            ends = [index for index, line in enumerate(lines)
+                    if index > starts[0] and closing in line]
+            window = lines[starts[0]:(ends[0] if ends else len(lines))]
+            pressed = [line for line in window
+                       if self.PRESSES_A_MODULE in line
+                       and self.SUPPRESSED not in line]
+            self.assertEqual(
+                pressed, [],
+                "run %s pressed a module button while the swap held the guns "
+                "off, which would make #72 an ordering bug in our own code "
+                "rather than a client behaviour: %r" % (name, pressed[:3]))
+
+    def test_every_switch_off_in_the_corpus_is_taken_back_by_the_client(self):
+        """The claim the fix rests on, over every run that reached one.
+
+        `switchOffHasBeenUndone` was written as a detector for a pathology. If
+        it were one, some switch-off somewhere would have held. None has: every
+        episode in the corpus where a gun reads switched off (`isInActiveState`
+        `F`) ends with it reading `T` again, and the longest ran four readings.
+        So the clause fired on the client's *normal* behaviour, and abandoning
+        there guaranteed that no attempt could reach its load rather than
+        responding to something going wrong.
+
+        **The length is deliberately not asserted, only that it ends.** An
+        earlier version of this case claimed no switch-off survived a single
+        reading and run 11 falsified it -- its first swap read `T/F/T` then
+        `F/F/T`, the ramp stopping with the gun still off, before coming back on
+        the reading after. The fix does not depend on how long the client grants;
+        it depends on the client always taking the guns back, which is what is
+        asserted.
+
+        Run 22 is what makes this worth asserting over the corpus rather than
+        over run 18. It reached `GUNS OFF` 29 times where run 18 reached it
+        twice, and the two of those that got a gun genuinely off ended the same
+        way, on a different mission and a different target.
+
+        Gated on the corpus being *present*, never on the search finding
+        episodes — see `recorded_runs`. With no `~/eve-bot-logs` this would
+        otherwise find no episodes and report that the switch-offs had vanished,
+        which is a finding it has no evidence for.
+        """
+        episodes = []
+        for run, path in recorded_runs("11", "18", "21", "22"):
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                columns = re.findall(
+                    r"Top-row modules \([^)]*\): ([^.,]*)", handle.read())
+            # Prints, not readings -- the log repeats each reading about three
+            # times -- so collapse runs of identical columns first.
+            readings = [column for index, column in enumerate(columns)
+                        if index == 0 or column != columns[index - 1]]
+            switched_off = [column.split("/")[1] == "F" for column in readings]
+            length = 0
+            for index, off in enumerate(switched_off):
+                if off:
+                    length += 1
+                    continue
+                if length:
+                    episodes.append((run, length, True))
+                    length = 0
+            if length:
+                # Ran to the end of the log, so the client never took it back
+                # within the recording.
+                episodes.append((run, length, False))
+        self.assertGreaterEqual(
+            len(episodes), 4,
+            "the corpus no longer contains the switch-offs these cases are "
+            "about, so nothing here is evidence of anything")
+        self.assertEqual(
+            [episode for episode in episodes if not episode[2]], [],
+            "a gun stayed switched off to the end of a run, so the client does "
+            "not always take the guns back and abandoning on the re-arm may be "
+            "a detector after all")
+
+    def test_where_the_fight_did_reach_that_branch_the_press_was_suppressed(self):
+        """Run 11's second swap, and it is the one that could have been ours.
+
+        `Cycle combat mod` appears there, on the reading the gun read switched
+        on again -- so a case that only asked whether the branch was *reached*
+        would have concluded the bot did it. What follows it is the suppression,
+        so no press went out; and it is reached one reading *after* the re-arm,
+        so it could not have caused one.
+        """
+        lines = self.decision_lines("11")
+        reached = [index for index, line in enumerate(lines)
+                   if self.PRESSES_A_MODULE in line]
+        self.assertTrue(
+            reached, "run 11 never reaches the branch that presses a module")
+        followed = [lines[index + 1] for index in reached
+                    if index + 1 < len(lines)]
+        self.assertTrue(
+            [line for line in followed if self.SUPPRESSED in line],
+            "run 11's `Cycle combat mod` is no longer followed by the "
+            "suppression, so the press these cases rule out may have gone out")
+
+    def test_the_swap_s_own_step_across_the_re_arm_is_a_right_click(self):
+        """The one effect that did land on the module, and why it is not it.
+
+        On the re-arm reading of both of run 18's swaps the bot dispatched its
+        own `Open context menu on weapon module` step, which lands on the module
+        button's coordinates -- so "no effect touched the button" would be false
+        and the honest statement is narrower. That step is a **right** click,
+        where the switch-off is a **left** click, and the two are distinct
+        gestures in the framework.
+
+        Run 11 is what rules it out as the cause rather than this: there the gun
+        came back on with the mouse glided *away* from the module button, so a
+        re-arm happens with nothing touching it at all.
+        """
+        framework = collapse(read_framework_source())
+        self.assertIn(
+            "Common.EffectOnWindow.effectsMouseClickAtLocation "
+            "Common.EffectOnWindow.MouseButtonRight",
+            framework,
+            "the context-menu cascade no longer right-clicks, so the gesture "
+            "these cases distinguish is not the one the swap dispatches")
+        self.assertIn(
+            "mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft "
+            "moduleButton.uiNode",
+            framework,
+            "the module button is no longer clicked with the left button, so "
+            "the switch-off and the menu-open are no longer distinguishable")
+
+    def test_run_11_s_gun_came_back_with_the_mouse_moved_away_from_it(self):
+        """The control, and the case that makes the finding a measurement.
+
+        The host prints the gesture it executed. In run 11's first swap the last
+        move before the gun read switched on again is a glide *from* the module
+        button to the overview -- so nothing was on the button, nothing was
+        pressed, and the gun re-armed anyway.
+        """
+        lines = self.decision_lines("11")
+        moves = [line for line in lines if line.startswith("#     move:")]
+        self.assertTrue(moves, "run 11 records no mouse gestures at all")
+        self.assertTrue(
+            [line for line in moves
+             if re.search(r"glided \(917\.3, 1023\.7\) -> \((?!917\.3)", line)],
+            "run 11 never glides away from the module button, so the control "
+            "these cases rest on is not in this log")
+
+    def test_run_21_never_reached_the_state_this_issue_is_about(self):
+        """The run that followed, and why it is a different finding.
+
+        Run 21 resolves the loaded charge and forms verdicts, and its swap still
+        never disarms -- but not for #72's reason: `T/F/T` never appears, so no
+        switch-off ever landed for the client to undo. Recorded here so that a
+        later reader does not take it as this issue recurring.
+        """
+        path = os.path.join(os.path.expanduser("~"), "eve-bot-logs",
+                            "mission_run21.log")
+        if not os.path.exists(path):
+            raise unittest.SkipTest("no recorded mission_run21.log")
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            columns = re.findall(r"Top-row modules \([^)]*\): ([^.]*)\.",
+                                 handle.read())
+        self.assertTrue(columns, "run 21 carries no top-row module clause")
+        first = {column.split(",")[0].strip() for column in columns}
+        self.assertEqual(
+            [state for state in first if state.split("/")[1] == "F"], [],
+            "run 21 now shows a gun reading switched off, so it is evidence "
+            "about #72 after all and these cases should say so")
 
 
 if __name__ == "__main__":
