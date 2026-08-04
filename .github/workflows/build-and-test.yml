@@ -115,7 +115,13 @@ jobs:
         # Tests that read recorded runs from ~/eve-bot-logs skip here and pass
         # on a machine that has them. A skip is the intended outcome, not a
         # silent pass: each one asserts against real client output when the
-        # logs are present.
+        # logs are present. Which skips are acceptable is asserted by the step
+        # below rather than left to whoever reads the log.
+        #
+        # `ELM_HARNESS_MAY_SKIP` is deliberately *not* set: elm is installed
+        # above, so a case that cannot execute the bot's own rules here has a
+        # broken runner and must fail rather than skip. See
+        # tools/macos-host/tests/prerequisites.py.
         #
         # `--dist loadfile` is load-bearing, not a default worth changing. Ten
         # of the twenty-five modules build their own scratch copy of the mission
@@ -125,4 +131,18 @@ jobs:
         # and give most of the gain straight back.
         #
         # Measured on a 4-core runner: 1266s sequential, 395s this way.
-        run: python3 -m pytest tools/macos-host/tests -n auto --dist loadfile -p no:cacheprovider
+        run: |
+          python3 -m pytest tools/macos-host/tests -n auto --dist loadfile \
+            -p no:cacheprovider --junitxml=test-report.xml
+
+      - name: Every skip must be one somebody named
+        # Issue #71: `OK (skipped=43)` and `OK` print the same way to anyone not
+        # counting, so a suite that stopped executing a third of itself reads as
+        # a healthy one. This asserts the *reasons*, not the number -- zero is
+        # the wrong assertion, since this runner genuinely has no
+        # `~/eve-bot-logs` and every corpus-reading case skips here correctly.
+        #
+        # It runs even when the suite failed, because a failing run is also one
+        # whose skips are worth seeing.
+        if: always()
+        run: python3 tools/macos-host/check_expected_skips.py test-report.xml

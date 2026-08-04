@@ -52,17 +52,17 @@ structure and not its typography.
 
 Nothing here reads a live game client or drives a bot. The `elm repl` cases need
 `elm` on PATH with the app's dependencies fetched, which is what
-`compile_bot.sh` leaves behind; they skip if the repl cannot run at all.
+`compile_bot.sh` leaves behind; without it they **fail** rather than skipping,
+for the reason `prerequisites.py` gives.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
 import glob
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 import unittest
+
+from prerequisites import ElmRepl, open_repl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
@@ -193,95 +193,23 @@ def mission_names_from_logs():
     return tracker, offered
 
 
-class ElmRepl:
-    """The bot's own compiled code, answering for itself.
-
-    `botlab_host.py`'s recipe: copy the app to scratch, patch `elm-version`,
-    build there, never in the checked-in source. The one extra step is opening
-    `module Bot exposing (...)` to `(..)`, since the repl can only call what the
-    module exports and the bot exports `botMain` alone.
-    """
-
-    def __init__(self):
-        self.scratch = tempfile.mkdtemp(prefix="test-abandon-mission-")
-        self.app = os.path.join(self.scratch, "app")
-        shutil.copytree(MISSION_RUNNER_DIR, self.app)
-
-        version = subprocess.run(
-            ["elm", "--version"], capture_output=True, text=True,
-            check=True).stdout.strip()
-        elm_json = os.path.join(self.app, "elm.json")
-        with open(elm_json, encoding="utf-8") as source:
-            patched = source.read().replace(
-                '"elm-version": "0.19.1"', '"elm-version": "%s"' % version)
-        with open(elm_json, "w", encoding="utf-8") as target:
-            target.write(patched)
-
-        bot = os.path.join(self.app, "Bot.elm")
-        with open(bot, encoding="utf-8") as handle:
-            source = handle.read()
-        opened = re.sub(r"module Bot exposing\s*\([^)]*\)",
-                        "module Bot exposing (..)", source, count=1)
-        assert opened != source, "could not open Bot.elm's exports"
-        with open(bot, "w", encoding="utf-8") as handle:
-            handle.write(opened)
-
-    def ask(self, expressions):
-        script = ("import Bot exposing (..)\n"
-                  "import Common.EffectOnWindow as EffectOnWindow\n"
-                  "import Common.Basics exposing (stringContainsIgnoringCase)\n"
-                  + "".join(expression + "\n" for expression in expressions))
-        result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
-                                capture_output=True, text=True)
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-        return plain, result.stderr
-
-    def booleans(self, expressions):
-        plain, stderr = self.ask(expressions)
-        answers = [answer == "True"
-                   for answer in re.findall(r"(True|False) : Bool", plain)]
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return answers
-
-    def strings(self, expressions):
-        plain, stderr = self.ask(expressions)
-        answers = re.findall(r'^(?:> )*"((?:[^"\\]|\\.)*)" : String$', plain,
-                             re.MULTILINE)
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return [answer.replace('\\"', '"').replace("\\\\", "\\")
-                for answer in answers]
-
-    def works(self):
-        plain, stderr = self.ask(['missionNameForDeclining "x"'])
-        return '"x" : String' in plain, plain + "\n" + stderr
-
-    def close(self):
-        shutil.rmtree(self.scratch, ignore_errors=True)
+PREAMBLE = (
+    "import Bot exposing (..)",
+    "import Common.EffectOnWindow as EffectOnWindow",
+    "import Common.Basics exposing (stringContainsIgnoringCase)",
+)
 
 
-def elm_is_available():
-    return shutil.which("elm") is not None
+def repl():
+    return open_repl(ElmRepl, prefix="test-abandon-mission-", preamble=PREAMBLE)
 
 
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheDeclineNameIsExecutedRatherThanMirrored(unittest.TestCase):
     """`missionNameForDeclining`, run for real against the recorded names."""
 
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        usable, output = cls.repl.works()
-        if not usable:
-            cls.repl.close()
-            raise unittest.SkipTest(
-                "elm repl cannot evaluate here, so the rule is unchecked by "
-                "execution in this environment:\n" + output)
+        cls.repl = repl()
         cls.tracker_names, cls.offered_names = mission_names_from_logs()
 
     @classmethod
@@ -373,17 +301,12 @@ class TheDeclineNameIsExecutedRatherThanMirrored(unittest.TestCase):
             "to match its own chain")
 
 
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheIdleTestIsExecutedRatherThanMirrored(unittest.TestCase):
     """`previousStepDispatchedEffects`, the "is the bot acting" half."""
 
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        usable, output = cls.repl.works()
-        if not usable:
-            cls.repl.close()
-            raise unittest.SkipTest("elm repl cannot evaluate here:\n" + output)
+        cls.repl = repl()
 
     @classmethod
     def tearDownClass(cls):

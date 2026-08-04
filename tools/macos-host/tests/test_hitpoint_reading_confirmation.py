@@ -39,8 +39,10 @@ retreat by a reading; it can never suppress one.
 The rules are **executed** rather than mirrored, through `elm repl` against the
 bot's own compiled code -- the recipe `test_dock_outranks_the_fight.py`
 established. Those cases need `elm` on PATH and the app's dependencies already
-fetched, which is what `compile_bot.sh` leaves behind; they skip if the repl
-cannot run at all. The log-derived cases skip if `~/eve-bot-logs` is empty, and
+fetched, which is what `compile_bot.sh` leaves behind; without it they **fail**
+rather than skipping, for the reason `prerequisites.py` gives. The log-derived
+cases do skip if `~/eve-bot-logs` is empty -- absent evidence and absent
+machinery are different answers -- and
 read a run still being appended to safely, a line at a time with the trailing
 partial line dropped.
 
@@ -49,10 +51,9 @@ partial line dropped.
 import glob
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 import unittest
+
+from prerequisites import ElmRepl, open_repl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
@@ -143,20 +144,16 @@ def elm_maybe_ints(values):
         for value in values) + " ]"
 
 
-class ElmRepl:
-    """The bot's own compiled code, answering for itself.
+class ReplayingRepl(ElmRepl):
+    """The shared harness, plus the folds every case here replays a run through.
 
-    `botlab_host.py`'s recipe, and the same one `test_ammo_no_disarm_under_fire`
-    uses: copy the app to scratch, patch `elm-version` to whatever this
-    machine's elm reports, build there and never in the checked-in source, and
-    open `module Bot exposing (...)` to `(..)`.
-
-    The preamble folds a series of readings through the real
-    `updateHitpointsGaugeMemory` and hands back the believed value after each
-    one, which is how every case below replays a recorded run.
+    The bindings drive the real `updateHitpointsGaugeMemory` over a series of
+    readings and hand back the believed value after each one. They are a
+    preamble rather than a definition per case so that a case's assertions line
+    up with what it asked.
     """
 
-    PREAMBLE = [
+    BINDINGS = [
         "believedAfterEach th values = List.foldl (\\v acc ->"
         " updateHitpointsGaugeMemory th v (Tuple.first acc) |> (\\m ->"
         " ( m, Tuple.second acc ++ [ m.believed ] ))) ( initHitpointsGaugeMemory, [] )"
@@ -174,88 +171,20 @@ class ElmRepl:
         " values))",
     ]
 
-    def __init__(self):
-        self.scratch = tempfile.mkdtemp(prefix="test-hitpoint-confirmation-")
-        self.app = os.path.join(self.scratch, "app")
-        shutil.copytree(MISSION_RUNNER_DIR, self.app)
-
-        version = subprocess.run(
-            ["elm", "--version"], capture_output=True, text=True,
-            check=True).stdout.strip()
-        elm_json = os.path.join(self.app, "elm.json")
-        with open(elm_json, encoding="utf-8") as source:
-            patched = source.read().replace(
-                '"elm-version": "0.19.1"', '"elm-version": "%s"' % version)
-        with open(elm_json, "w", encoding="utf-8") as target:
-            target.write(patched)
-
-        bot = os.path.join(self.app, "Bot.elm")
-        with open(bot, encoding="utf-8") as handle:
-            source = handle.read()
-        opened = re.sub(r"module Bot exposing\s*\([^)]*\)",
-                        "module Bot exposing (..)", source, count=1)
-        assert opened != source, "could not open Bot.elm's exports"
-        with open(bot, "w", encoding="utf-8") as handle:
-            handle.write(opened)
-
-    def evaluate(self, expressions, definitions=()):
-        """Answer each expression, which must evaluate to a `Bool`.
-
-        `definitions` are bindings the expressions need -- a replayed series is
-        one of these -- and are not answers, so a case's assertions line up with
-        what it asked rather than with what it had to set up first.
-        """
-        answers, plain, stderr = self.ask(expressions, definitions)
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return answers
-
-    def ask(self, expressions, definitions=()):
-        script = "import Bot exposing (..)\n" + "".join(
-            line + "\n"
-            for line in self.PREAMBLE + list(definitions) + list(expressions))
-        result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
-                                capture_output=True, text=True)
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-        answers = [answer == "True"
-                   for answer in re.findall(r"(True|False) : Bool", plain)]
-        return answers, plain, result.stderr
-
-    def works(self):
-        # Deliberately asserts nothing about behaviour: it names a function so
-        # a Bot that did not compile leaves the repl with nothing to answer,
-        # and its value cannot make the whole class skip. A canary that tests a
-        # rule turns a broken rule into a silent skip, which is the failure
-        # this repo keeps finding.
-        answers, plain, stderr = self.ask(
-            ["(\\_ -> True) updateHitpointsGaugeMemory"])
-        return answers == [True], plain + "\n" + stderr
-
-    def close(self):
-        shutil.rmtree(self.scratch, ignore_errors=True)
-
-
-def elm_is_available():
-    return shutil.which("elm") is not None
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.preamble = self.preamble + self.BINDINGS
 
 
 def recorded_runs():
     return sorted(glob.glob(LOG_GLOB))
 
 
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        usable, output = cls.repl.works()
-        if not usable:
-            cls.repl.close()
-            raise unittest.SkipTest(
-                "elm repl cannot evaluate here, so the rule is unchecked "
-                "by execution in this environment:\n" + output)
+        cls.repl = open_repl(ReplayingRepl,
+                             prefix="test-hitpoint-confirmation-")
 
     @classmethod
     def tearDownClass(cls):

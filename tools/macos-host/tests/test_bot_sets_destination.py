@@ -49,12 +49,11 @@ import io
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
 import unittest
 import urllib.error
+
+from prerequisites import ElmRepl, open_repl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
@@ -469,98 +468,20 @@ class NothingTokenShapedTravelsThisWay(unittest.TestCase):
         self.assertIn("return name or None", body)
 
 
-def elm_is_available():
-    return shutil.which("elm") is not None
+PREAMBLE = (
+    "import Bot exposing (..)",
+    "import Common.EffectOnWindow as EffectOnWindow",
+)
 
 
-class ElmRepl:
-    """The bot's own compiled code, answering for itself.
-
-    `botlab_host.py`'s recipe: copy the app to scratch, patch `elm-version`,
-    build there, never in the checked-in source, and open the module's exports
-    so the repl can reach more than `botMain`.
-    """
-
-    def __init__(self):
-        self.scratch = tempfile.mkdtemp(prefix="test-set-destination-")
-        self.app = os.path.join(self.scratch, "app")
-        shutil.copytree(MISSION_RUNNER_DIR, self.app)
-
-        version = subprocess.run(
-            ["elm", "--version"], capture_output=True, text=True,
-            check=True).stdout.strip()
-        elm_json = os.path.join(self.app, "elm.json")
-        with open(elm_json, encoding="utf-8") as source:
-            patched_json = source.read().replace(
-                '"elm-version": "0.19.1"', '"elm-version": "%s"' % version)
-        with open(elm_json, "w", encoding="utf-8") as target:
-            target.write(patched_json)
-
-        bot = os.path.join(self.app, "Bot.elm")
-        with open(bot, encoding="utf-8") as handle:
-            source = handle.read()
-        opened = re.sub(r"module Bot exposing\s*\([^)]*\)",
-                        "module Bot exposing (..)", source, count=1)
-        assert opened != source, "could not open Bot.elm's exports"
-        with open(bot, "w", encoding="utf-8") as handle:
-            handle.write(opened)
-
-    def ask(self, expressions):
-        script = ("import Bot exposing (..)\n"
-                  "import Common.EffectOnWindow as EffectOnWindow\n"
-                  + "".join(expression + "\n" for expression in expressions))
-        result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
-                                capture_output=True, text=True)
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-        return plain, result.stderr
-
-    def booleans(self, expressions):
-        plain, stderr = self.ask(expressions)
-        answers = [answer == "True"
-                   for answer in re.findall(r"(True|False) : Bool", plain)]
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return answers
-
-    def strings(self, expressions):
-        plain, stderr = self.ask(expressions)
-        # A long answer is wrapped onto its own line before the ` : String`,
-        # so the type annotation is matched across whatever whitespace the repl
-        # chose rather than only at the end of the same line.
-        answers = re.findall(r'"((?:[^"\\]|\\.)*)"\s*: String', plain)
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return [answer.replace('\\"', '"').replace("\\\\", "\\")
-                for answer in answers]
-
-    def works(self):
-        """A probe on something this change does not touch, so a mutation to
-        what is under test fails a case rather than skipping the whole class."""
-        plain, stderr = self.ask(['missionNameForDeclining "x"'])
-        return '"x" : String' in plain, plain + "\n" + stderr
-
-    def close(self):
-        shutil.rmtree(self.scratch, ignore_errors=True)
-
-
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheRulesAreExecutedRatherThanMirrored(unittest.TestCase):
     """The suite is Python and reads `Bot.elm` as text, which is fine for
     structure and a trap for behaviour. These three run for real."""
 
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        usable, output = cls.repl.works()
-        if not usable:
-            cls.repl.close()
-            raise unittest.SkipTest(
-                "elm repl cannot evaluate here, so these rules are unchecked "
-                "by execution in this environment:\n" + output)
+        cls.repl = open_repl(ElmRepl, prefix="test-set-destination-",
+                             preamble=PREAMBLE)
 
     @classmethod
     def tearDownClass(cls):

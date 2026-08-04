@@ -51,19 +51,18 @@ while using the signal #34 lacked. That direction is asserted below as a propert
 of the source, because it is the whole safety argument.
 
 The rules are **executed** rather than mirrored, through `elm repl` against the
-bot's own compiled code -- the recipe `test_dock_outranks_the_fight.py`
-established. Those cases need `elm` on PATH and the app's dependencies already
-fetched, which is what `compile_bot.sh` leaves behind; they skip if the repl
-cannot run at all.
+bot's own compiled code -- the one harness in `prerequisites.py`. Those cases
+need `elm` on PATH and the app's dependencies already fetched, which is what
+`compile_bot.sh` leaves behind; without it they **fail** rather than skipping,
+because a rule that was never executed must not read as a rule that held.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 import unittest
+
+from prerequisites import ElmRepl, open_repl, recorded_runs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
@@ -177,36 +176,6 @@ def bot_source():
 EVE_BOT_LOGS = os.path.join(os.path.expanduser("~"), "eve-bot-logs")
 
 
-def recorded_runs(*names):
-    """The runs among `names` this machine has, or a skip if it has none.
-
-    Three situations, three different answers, and only the middle one is a
-    skip:
-
-    - the corpus is here and says something -> assert on it;
-    - **the corpus is absent**, as it is on CI -> skip, with the reason stated.
-      A case cannot report on evidence it cannot read, and a suite that goes red
-      for "no data" teaches people to ignore red;
-    - the corpus is here and does *not* say what a case asserts -> **fail**,
-      because that is the evidence for a change having disappeared.
-
-    This is a helper rather than three lines at each call site because the
-    natural shape gets it wrong. Skipping missing files *inside* the loop and
-    then asserting on whatever accumulated silently turns the third case into
-    the second when the loop finds nothing at all: the assertion fires on an
-    empty result and reports a finding where there is only an empty directory.
-    CI caught exactly that, on a case that passed here.
-    """
-    found = [(name, os.path.join(EVE_BOT_LOGS, "mission_run%s.log" % name))
-             for name in names]
-    found = [pair for pair in found if os.path.exists(pair[1])]
-    if not found:
-        raise unittest.SkipTest(
-            "none of mission_run{%s}.log is on this machine, so the recorded "
-            "runs cannot be consulted here" % ",".join(names))
-    return found
-
-
 def without_comments(source):
     """Elm source with its `--` line comments removed.
 
@@ -316,131 +285,14 @@ def elm_module_state(column):
         "%s = %s" % (name, values[name]) for name in MODULE_STATE_FIELDS) + " }"
 
 
-class ElmRepl:
-    """The bot's own compiled code, answering for itself.
-
-    `botlab_host.py`'s recipe: copy the app to scratch, patch `elm-version` to
-    whatever this machine's elm reports, build there and never in the checked-in
-    source, and open `module Bot exposing (...)` to `(..)` so the repl can reach
-    more than `botMain`.
-    """
-
-    def __init__(self):
-        self.scratch = tempfile.mkdtemp(prefix="test-ammo-under-fire-")
-        self.app = os.path.join(self.scratch, "app")
-        shutil.copytree(MISSION_RUNNER_DIR, self.app)
-
-        version = subprocess.run(
-            ["elm", "--version"], capture_output=True, text=True,
-            check=True).stdout.strip()
-        elm_json = os.path.join(self.app, "elm.json")
-        with open(elm_json, encoding="utf-8") as source:
-            patched = source.read().replace(
-                '"elm-version": "0.19.1"', '"elm-version": "%s"' % version)
-        with open(elm_json, "w", encoding="utf-8") as target:
-            target.write(patched)
-
-        bot = os.path.join(self.app, "Bot.elm")
-        with open(bot, encoding="utf-8") as handle:
-            source = handle.read()
-        opened = re.sub(r"module Bot exposing\s*\([^)]*\)",
-                        "module Bot exposing (..)", source, count=1)
-        assert opened != source, "could not open Bot.elm's exports"
-        with open(bot, "w", encoding="utf-8") as handle:
-            handle.write(opened)
-
-    def evaluate(self, expressions):
-        answers, plain, stderr = self.ask(expressions)
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return answers
-
-    def ask(self, expressions):
-        """The answers to `expressions`, asked as one `List Bool`.
-
-        Asked as a list rather than one expression per line because the repl
-        recompiles the module for every line it is given. Measured against this
-        app: twenty expressions cost 36.5s a line at a time and 5.8s as a
-        single list, which is the whole reason this suite took twenty-one
-        minutes. The answers come back in the order asked either way.
-
-        `evaluate_values` below deliberately still asks line by line -- it
-        parses the repl's printed form with a caller's own pattern, and inside
-        a list that form is the list's, not each answer's.
-        """
-        if not expressions:
-            return [], "", ""
-        plain, stderr = self.run_repl("[ %s ]" % ", ".join(expressions))
-        # The repl wraps, so `: List Bool` can land on the line after the list.
-        listed = re.search(r"\[([^\]]*)\]\s*:\s*List Bool", plain.replace("\n", " "))
-        answers = ([answer == "True"
-                    for answer in re.findall(r"True|False", listed.group(1))]
-                   if listed else [])
-        return answers, plain, stderr
-
-    def run_repl(self, *lines):
-        """One repl process, given `lines` verbatim after the import."""
-        script = "import Bot exposing (..)\n" + "".join(
-            line + "\n" for line in lines)
-        result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
-                                capture_output=True, text=True)
-        return re.sub(r"\x1b\[[0-9;]*m", "", result.stdout), result.stderr
-
-    def evaluate_values(self, expressions, pattern):
-        """The repl's own printed answers, for the ones that are not `Bool`.
-
-        Still asked one expression per line, unlike `ask` above: the caller
-        matches the repl's printed form with its own pattern, and inside a list
-        that form is the list's rather than each answer's. These calls are the
-        minority, so the line-at-a-time cost stays where it is understood.
-        """
-        plain, stderr = self.run_repl(*expressions)
-        answers = re.findall(pattern, plain)
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return answers
-
-    def works(self):
-        """Whether the repl can evaluate here at all -- not what it answered.
-
-        This decides whether the whole executed-behaviour class is skipped, so
-        it must not depend on the rule being right. It used to: it asserted the
-        smoke-test expression came back `True`, so a mutation that flipped that
-        one answer skipped every case in the class instead of failing one, and
-        the suite reported OK for a rule nothing had executed. Found by
-        mutating `<=` to `<`, which is exactly the boundary the cases exist to
-        pin.
-
-        So the question asked here is only "did Elm compile this and print a
-        `Bool`", and the answer it gave belongs to a case.
-        """
-        answers, plain, stderr = self.ask(
-            ["swapMayDisarmTheGuns " + elm_disarm_case(None, None)])
-        return len(answers) == 1, plain + "\n" + stderr
-
-    def close(self):
-        shutil.rmtree(self.scratch, ignore_errors=True)
+def repl():
+    return open_repl(ElmRepl, prefix="test-ammo-under-fire-")
 
 
-def elm_is_available():
-    return shutil.which("elm") is not None
-
-
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        usable, output = cls.repl.works()
-        if not usable:
-            cls.repl.close()
-            raise unittest.SkipTest(
-                "elm repl cannot evaluate here, so the rules are unchecked "
-                "by execution in this environment:\n" + output)
+        cls.repl = repl()
 
     @classmethod
     def tearDownClass(cls):
@@ -536,7 +388,7 @@ class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
         # The other end of the same boundary, where the budget is not zero.
         # `< budget` would decline here and permit one hitpoint less, which is
         # a rule nobody wrote down and a difference no other case would show.
-        budget = int(self.repl.evaluate_values(
+        budget = int(self.repl.values(
             ["ammoSwapDisarmDamageBudget " + elm_disarm_case(0, 90)],
             r"(-?\d+) : Int")[0])
         on_it, one_over = self.repl.evaluate([
@@ -569,7 +421,7 @@ class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
         # The number the whole risk half rests on, and it has to move with the
         # setting rather than being a constant somebody re-measures by hand:
         # 3500 is a fact about this hull.
-        budgets = self.repl.evaluate_values(
+        budgets = self.repl.values(
             ["ammoSwapDisarmDamageBudget " + elm_disarm_case(
                 0, 90, retreat_threshold=threshold)
              for threshold in (RETREAT_THRESHOLD, 7000, 1750)],
@@ -581,7 +433,7 @@ class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
     def test_the_budget_is_below_the_window_that_cost_run_11_its_tank(self):
         # Stated as the relation rather than as two numbers, because the whole
         # argument for the share is that it stays below that window on any hull.
-        budget = int(self.repl.evaluate_values(
+        budget = int(self.repl.values(
             ["ammoSwapDisarmDamageBudget " + elm_disarm_case(0, 90)],
             r"(-?\d+) : Int")[0])
         run_11_expensive_swap = RUN_11_SWAPS[3][1]
@@ -591,7 +443,7 @@ class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
         # And neither does one too small to matter, nor a disabled retreat
         # threshold to take a share of. Each collapses the rule back to #50's,
         # which is the honest answer to not being able to tell.
-        budgets = self.repl.evaluate_values(
+        budgets = self.repl.values(
             ["ammoSwapDisarmDamageBudget " + case for case in [
                 elm_disarm_case(0, None),
                 elm_disarm_case(0, 0),
@@ -613,7 +465,7 @@ class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
         # `-1 // 8` is already `0` and a missing `max` survives. The settings
         # parser takes any integer, so the case that bites is a threshold past
         # the divisor.
-        budgets = self.repl.evaluate_values(
+        budgets = self.repl.values(
             ["ammoSwapDisarmDamageBudget " + elm_disarm_case(
                 0, gain, retreat_threshold=threshold)
              for threshold in (-RETREAT_THRESHOLD, -8, -1, 0, 1, 7,
@@ -626,7 +478,7 @@ class TheRuleIsExecutedRatherThanMirrored(unittest.TestCase):
         # A target too close and a target too far are the same magnitude of
         # wrong, and the crossover is the scale -- so the same rule reads on a
         # 21 km fit and a 67 km one.
-        answers = self.repl.evaluate_values(
+        answers = self.repl.values(
             ["ammoSwapRangeErrorPercent (Just { crossoverInMeters = %d, "
              "deadbandInMeters = 3000, source = \"\" }) %s"
              % (crossover, elm_maybe_int(distance))
@@ -1214,7 +1066,6 @@ RUN_21_COLUMNS = [
 ]
 
 
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class WhatCountsAsAGunThatNeedsStopping(unittest.TestCase):
     """Issue #76. `weaponIsSwitchedOn` reads the toggle, not the duty cycle.
 
@@ -1235,13 +1086,7 @@ class WhatCountsAsAGunThatNeedsStopping(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        usable, output = cls.repl.works()
-        if not usable:
-            cls.repl.close()
-            raise unittest.SkipTest(
-                "elm repl cannot evaluate here, so these rules are unchecked "
-                "by execution in this environment:\n" + output)
+        cls.repl = repl()
 
     @classmethod
     def tearDownClass(cls):

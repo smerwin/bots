@@ -75,10 +75,9 @@ strings the client really wrote rather than restated in Python.
 import glob
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 import unittest
+
+from prerequisites import ElmRepl, open_repl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
@@ -191,92 +190,12 @@ def branch_results(body):
     return results
 
 
-class ElmRepl:
-    """The bot's own compiled code, answering for itself.
-
-    Same recipe as `test_dock_outranks_the_fight.py`: copy the app to scratch,
-    open `module Bot exposing (..)` so the repl can reach more than `botMain`,
-    patch `elm-version` to whatever this machine's elm reports, and drive it.
-    """
-
-    def __init__(self):
-        self.scratch = tempfile.mkdtemp(prefix="test-lootable-identity-")
-        self.app = os.path.join(self.scratch, "app")
-        shutil.copytree(MISSION_RUNNER_DIR, self.app)
-
-        version = subprocess.run(
-            ["elm", "--version"], capture_output=True, text=True,
-            check=True).stdout.strip()
-        elm_json = os.path.join(self.app, "elm.json")
-        with open(elm_json, encoding="utf-8") as source:
-            patched = source.read().replace(
-                '"elm-version": "0.19.1"', '"elm-version": "%s"' % version)
-        with open(elm_json, "w", encoding="utf-8") as target:
-            target.write(patched)
-
-        bot = os.path.join(self.app, "Bot.elm")
-        with open(bot, encoding="utf-8") as handle:
-            source = handle.read()
-        opened = re.sub(r"module Bot exposing\s*\([^)]*\)",
-                        "module Bot exposing (..)", source, count=1)
-        assert opened != source, "could not open Bot.elm's exports"
-        with open(bot, "w", encoding="utf-8") as handle:
-            handle.write(opened)
-
-    def ask(self, expressions):
-        # Asked as one `List Bool` rather than one expression per line,
-        # because the repl recompiles the module for every line it is given.
-        # Measured against this app: twenty expressions cost 36.5s a line at a
-        # time and 5.8s as a single list. The answers come back in the order
-        # asked either way, which is all any caller here relies on.
-        if not expressions:
-            return [], "", ""
-        script = "import Bot exposing (..)\n[ %s ]\n" % ", ".join(expressions)
-        result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
-                                capture_output=True, text=True)
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-        # The repl wraps, so `: List Bool` can land on the line after the list.
-        listed = re.search(r"\[([^\]]*)\]\s*:\s*List Bool",
-                           plain.replace("\n", " "))
-        answers = ([answer == "True"
-                    for answer in re.findall(r"True|False", listed.group(1))]
-                   if listed else [])
-        return answers, plain, result.stderr
-
-    def evaluate(self, expressions):
-        answers, plain, stderr = self.ask(expressions)
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return answers
-
-    def works(self):
-        answers, plain, stderr = self.ask(
-            ['textNamesALootableObject "Gallente Small Wreck"'])
-        return answers == [True], plain + "\n" + stderr
-
-    def close(self):
-        shutil.rmtree(self.scratch, ignore_errors=True)
-
-
-def elm_is_available():
-    return shutil.which("elm") is not None
-
-
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheRuleIsExecutedAgainstRunTwelvesOwnGrid(unittest.TestCase):
     """Every row the stuck client was holding, classified by the real rule."""
 
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        usable, output = cls.repl.works()
-        if not usable:
-            cls.repl.close()
-            raise unittest.SkipTest(
-                "elm repl cannot evaluate here, so the rule is unchecked by "
-                "execution in this environment:\n" + output)
+        cls.repl = open_repl(ElmRepl, prefix="test-lootable-identity-")
 
     @classmethod
     def tearDownClass(cls):
