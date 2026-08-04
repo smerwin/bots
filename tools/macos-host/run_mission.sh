@@ -227,7 +227,8 @@ approach-object=Survey Ship, Amarr-Caldari Mediation Center, Amarr Chapel, Calda
 decline-mission=Survey Rendezvous
 run-away-shield-hitpoints-threshold-percent=-1
 run-away-armor-hitpoints-threshold-percent=70
-run-away-incoming-damage-threshold=3500"
+run-away-incoming-damage-threshold=3500
+ammo-swap-range=29000"
 
 # How long this session should run. The bot stops taking new work and docks
 # once ~200 seconds remain, so it finishes parked in a station rather than
