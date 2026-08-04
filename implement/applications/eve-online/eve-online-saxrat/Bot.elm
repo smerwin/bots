@@ -49,6 +49,8 @@
       + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping range or aligning.
       + `keep-at-range`: Set this to 'yes' to keep range from the target instead of orbiting or aligning.
       + `targeting-range`: Maximum distance in meters to lock a target from the overview, e.g. `targeting-range=50000`. Beyond this, the bot approaches instead of locking. Defaults to 66000.
+      + `hunt-system`: Name of a solar system to hunt anomalies in, e.g. `hunt-system=Irnin`. Use it several times to give the bot a circuit. When a system has nothing left worth hunting and no route is set, the bot asks the host to set the autopilot destination to the next system on this list and flies there on its own. Without this setting the bot behaves as it always did: it parks and waits for a human to set a route.
+      + `home-system`: Name of the solar system to fall back to once every `hunt-system` has been tried, e.g. `home-system=Amarr`. Optional, and only consulted after the circuit is exhausted.
       + `run-away-incoming-damage-threshold`: Hitpoints of incoming damage, summed from the client's own combat log over a rolling 45-second window, past which the bot breaks off and runs. Unlike the two hitpoint settings above this needs no HUD gauge, which is the point of it: the gauge is scraped out of the client's live memory and produces values like 2132822% and a spurious 0%. Defaults to 3500, calibrated against sixteen recorded sessions of one hull -- the worst any session the ship survived absorbed was 3114, and the session it was lost in peaked at 4101. **That is a number about a hull, not about the game**, so re-derive it for a different ship. Set to -1 to disable.
 
       When using more than one setting, start a new line for each setting in the text input field.
@@ -188,6 +190,12 @@ defaultBotSettings =
     -- much, where `hitpointsPercent` is a float scraped out of a widget the
     -- client is concurrently mutating.
     , runAwayIncomingDamageThreshold = defaultRunAwayIncomingDamageThreshold
+
+    -- No circuit by default, which is what keeps this change free for an
+    -- existing settings string: with no `hunt-system` the bot never asks for a
+    -- destination and parks exactly as it did before.
+    , huntSystemNames = []
+    , homeSystemName = Nothing
     }
 
 
@@ -203,6 +211,16 @@ parseBotSettings =
            )
          , ( "run-away-armor-hitpoints-threshold-percent"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayArmorHitpointsThresholdPercent = threshold })
+           )
+         , ( "hunt-system"
+           , AppSettings.valueTypeString
+                (\systemName settings ->
+                    { settings | huntSystemNames = settings.huntSystemNames ++ [ String.trim systemName ] }
+                )
+           )
+         , ( "home-system"
+           , AppSettings.valueTypeString
+                (\systemName settings -> { settings | homeSystemName = Just (String.trim systemName) })
            )
          , ( "run-away-incoming-damage-threshold"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayIncomingDamageThreshold = threshold })
@@ -280,6 +298,8 @@ type alias BotSettings =
     , warpAt : Int
     , targetingRangeMeters : Int
     , runAwayIncomingDamageThreshold : Int
+    , huntSystemNames : List String
+    , homeSystemName : Maybe String
     }
 
 
@@ -329,6 +349,20 @@ type alias BotMemory =
     , droneRecallUnansweredTicks : Int
     , dronesInSpaceCountLastReading : Int
     , dronesInSpaceTicks : Int
+
+    -- Where the circuit has got to. Advanced when the ship is standing in the
+    -- system this points at, which is what makes the rotation move on rather
+    -- than ping-ponging between the first two names on the list.
+    , huntSystemIndex : Int
+
+    -- The destination last asked for, and how many readings have passed since
+    -- with no route to show for it. The ask is one line of status text and the
+    -- host acts on it only when it changes, so repeating it costs nothing --
+    -- but it has to be bounded, or a name that never resolves is a bot that
+    -- asks forever and never hunts again.
+    , destinationAskedFor : Maybe String
+    , destinationAskReadings : Int
+    , routeSettingGivenUp : Bool
     }
 
 
@@ -790,11 +824,153 @@ menuEntryIsSuitable menuEntry =
         |> not
 
 
+{-| The token both sides of the status-text channel agree on.
+
+Issuing a `RequestToVolatileProcess` from a decision is not possible -- every
+one of them is issued by `getNextSetupTask`'s closed setup state machine, which
+a decision cannot reach, and `OperateBotConfiguration` gives a running bot only
+`buildTaskFromEffectSequence`, whose vocabulary is mouse moves, buttons, keys
+and scroll. A solar system name cannot be spelled in it.
+
+So the ask rides a field that already crosses the boundary. `ContinueSession
+.statusText` is free prose the host reads every tick, and the host scans it for
+a token ordinary prose cannot produce.
+
+**One-way and unacknowledged, which is a property rather than a limitation.**
+The bot's confirmation that a route was set is the client's own route panel --
+stronger evidence than the host's report of what it asked for. The status text
+is also _printed_, on every reading, so a system name may travel this way and a
+credential may not.
+
+-}
+hostDirectivePrefix : String
+hostDirectivePrefix =
+    "@host "
+
+
+hostDirectiveSetDestination : String -> String
+hostDirectiveSetDestination systemName =
+    hostDirectivePrefix ++ "set-destination " ++ systemName
+
+
+{-| How long to keep asking before concluding nobody is listening.
+
+The ask costs one line of status text and the host acts on it only when the
+name changes, so repeating it is nearly free -- but "nearly free forever" is
+this repo's signature stall. A host with no ESI credentials, one running
+BotLab.exe, or a system name that does not resolve will never answer, and the
+bot has to go back to hunting rather than stand in space asking.
+
+-}
+routeAskGiveUpReadings : Int
+routeAskGiveUpReadings =
+    20
+
+
+huntSystemAtIndex : BotSettings -> Int -> Maybe String
+huntSystemAtIndex botSettings index =
+    if List.isEmpty botSettings.huntSystemNames then
+        Nothing
+
+    else
+        botSettings.huntSystemNames
+            |> List.drop (modBy (List.length botSettings.huntSystemNames) index)
+            |> List.head
+
+
+{-| Where to go next, or `Nothing` if there is nowhere configured.
+
+The circuit first, then `home-system` once every name on it has been visited.
+"Visited" needs no record of its own: `huntSystemIndex` is advanced by the
+memory update whenever the ship is standing in the system it points at, so a
+full lap has happened exactly when the index has passed the end of the list.
+
+-}
+nextHuntingGround : BotDecisionContext -> Maybe String
+nextHuntingGround context =
+    nextHuntingGroundFrom context.eventContext.botSettings context.memory.huntSystemIndex
+
+
+{-| The picker itself, over the two things it actually needs.
+
+Split out because `updateMemoryForNewReadingFromGame` has to name the same
+destination the decision will ask for, and it has the settings and the index
+but no `BotDecisionContext`. Two copies of this choice would drift, and the
+memory would then be counting readings against a system the bot was not asking
+for.
+
+-}
+nextHuntingGroundFrom : BotSettings -> Int -> Maybe String
+nextHuntingGroundFrom botSettings huntSystemIndex =
+    let
+        lapsCompleted =
+            if List.isEmpty botSettings.huntSystemNames then
+                0
+
+            else
+                huntSystemIndex // List.length botSettings.huntSystemNames
+    in
+    if 0 < lapsCompleted then
+        case botSettings.homeSystemName of
+            Just homeSystem ->
+                Just homeSystem
+
+            Nothing ->
+                huntSystemAtIndex botSettings huntSystemIndex
+
+    else
+        huntSystemAtIndex botSettings huntSystemIndex
+
+
+{-| Ask the host to set the autopilot destination, when there is nowhere to go.
+
+This is the one branch that lets the bot originate a route. Everything else it
+does with a route follows one that already exists -- set by a human, or by an
+earlier pass through here -- and with no `hunt-system` configured the answer is
+`tetherAtStructure`, exactly as before.
+
+The ask is repeated every reading until the route panel shows something,
+because the channel is unacknowledged: there is no reply to wait for, and the
+client's own route panel is the confirmation. `routeAskGiveUpReadings` bounds
+it, and the give-up latches for the session.
+
+-}
+setRouteToNextHuntingGround : BotDecisionContext -> DecisionPathNode
+setRouteToNextHuntingGround context =
+    if context.memory.routeSettingGivenUp then
+        describeBranch
+            ("Asked for a destination for more than "
+                ++ String.fromInt routeAskGiveUpReadings
+                ++ " readings and no route ever appeared -- this host does not set destinations, so stop asking and wait where it is safe."
+            )
+            (tetherAtStructure context)
+
+    else
+        case nextHuntingGround context of
+            Nothing ->
+                describeBranch
+                    "Nothing left to hunt here and no route set. No 'hunt-system' is configured, so there is nowhere to ask for."
+                    (tetherAtStructure context)
+
+            Just systemName ->
+                describeBranch
+                    ("Nothing left to hunt here and no route set. Asking the host to set the destination to '"
+                        ++ systemName
+                        ++ "' ("
+                        ++ String.fromInt context.memory.destinationAskReadings
+                        ++ "/"
+                        ++ String.fromInt routeAskGiveUpReadings
+                        ++ " readings). "
+                        ++ hostDirectiveSetDestination systemName
+                    )
+                    waitForProgressInGame
+
+
 jumpToNextSystem : BotDecisionContext -> DecisionPathNode
 jumpToNextSystem context =
     case context.readingFromGameClient |> infoPanelRouteFirstMarkerFromReadingFromGameClient of
         Nothing ->
-            tetherAtStructure context
+            setRouteToNextHuntingGround context
 
         Just infoPanelRouteFirstMarker ->
             -- Feedback: right after the route is reset and a new
@@ -2525,6 +2701,45 @@ previousStepClickedMouse context =
             )
 
 
+{-| The circuit, and whether the bot is currently asking to move along it.
+
+Printed every reading rather than only while asking, because the useful
+diagnosis on a run that fails this way is "the bot asked and no route ever
+appeared", and a clause that shows up only on success cannot say that.
+
+-}
+describeHuntCircuit : BotDecisionContext -> String
+describeHuntCircuit context =
+    if List.isEmpty context.eventContext.botSettings.huntSystemNames then
+        "Hunt circuit: none configured (no 'hunt-system'), so this bot waits for a route rather than setting one."
+
+    else
+        "Hunt circuit: "
+            ++ (context.eventContext.botSettings.huntSystemNames |> String.join " -> ")
+            ++ ", next "
+            ++ (nextHuntingGround context |> Maybe.withDefault "nowhere")
+            ++ (case context.memory.destinationAskedFor of
+                    Nothing ->
+                        ""
+
+                    Just asked ->
+                        ". Asked for '"
+                            ++ asked
+                            ++ "' "
+                            ++ String.fromInt context.memory.destinationAskReadings
+                            ++ "/"
+                            ++ String.fromInt routeAskGiveUpReadings
+                            ++ " readings ago with no route yet"
+               )
+            ++ (if context.memory.routeSettingGivenUp then
+                    ". ROUTE SETTING GIVEN UP -- this host does not set destinations"
+
+                else
+                    ""
+               )
+            ++ "."
+
+
 describeDroneRecall : BotDecisionContext -> String
 describeDroneRecall context =
     "Drones: "
@@ -2631,6 +2846,10 @@ initBotMemory =
     , droneRecallUnansweredTicks = 0
     , dronesInSpaceCountLastReading = 0
     , dronesInSpaceTicks = 0
+    , huntSystemIndex = 0
+    , destinationAskedFor = Nothing
+    , destinationAskReadings = 0
+    , routeSettingGivenUp = False
     }
 
 
@@ -2682,6 +2901,8 @@ statusTextFromState context =
                 ++ describeIncomingDamage context
                 ++ " "
                 ++ describeDroneRecall context
+                ++ " "
+                ++ describeHuntCircuit context
                 ++ (case context.memory.shipLoss of
                         Nothing ->
                             ""
@@ -3954,6 +4175,14 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     botMemoryBefore.hitpoints.armor
             }
 
+        standingInADeadEnd =
+            (context.readingFromGameClient.shipUI /= Nothing)
+                && (currentRouteFirstMarkerRegion == Nothing)
+                && (context.readingFromGameClient.probeScannerWindow
+                        |> Maybe.map (.scanResults >> List.isEmpty)
+                        |> Maybe.withDefault True
+                   )
+
         dronesInSpaceCountNow =
             context.readingFromGameClient.dronesWindow
                 |> Maybe.andThen .droneGroupInSpace
@@ -3971,6 +4200,12 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 |> targetsToUnlockFromReadingFromGameClient
                 |> List.head
                 |> Maybe.map (\target -> (target.barAndImageCont |> Maybe.withDefault target.uiNode).totalDisplayRegion)
+
+        currentSolarSystemName =
+            context.readingFromGameClient.infoPanelContainer
+                |> Maybe.andThen .infoPanelLocationInfo
+                |> Maybe.andThen .currentSolarSystemName
+                |> Maybe.map String.trim
 
         currentStationNameFromInfoPanel =
             context.readingFromGameClient.infoPanelContainer
@@ -4211,6 +4446,56 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.dronesInSpaceTicks + 1
+    , huntSystemIndex =
+        -- Advance when the ship is standing in the system the circuit
+        -- currently points at. That is the whole rotation, and it needs no
+        -- record of which systems were dry: arriving somewhere is what moves
+        -- the pointer past it, so the picker below can never name the system
+        -- the ship is already in. A simple "first name that is not here"
+        -- would ping-pong between the first two entries and never reach the
+        -- third.
+        case currentSolarSystemName of
+            Nothing ->
+                botMemoryBefore.huntSystemIndex
+
+            Just systemName ->
+                if huntSystemAtIndex context.botSettings botMemoryBefore.huntSystemIndex == Just systemName then
+                    botMemoryBefore.huntSystemIndex + 1
+
+                else
+                    botMemoryBefore.huntSystemIndex
+    , destinationAskedFor =
+        -- What the decision branch is asking for, named by the *same* picker it
+        -- uses. Forgotten the moment a route exists, so arriving and going dry
+        -- again asks afresh rather than reading as already asked.
+        --
+        -- Tracked only while the ship is in space with no route and nothing at
+        -- all on the probe scanner -- which is narrower than the condition the
+        -- ask itself fires on (that one is "no anomaly *matching the
+        -- settings*"). Narrower is the safe direction and the same one
+        -- `noProbeScanResultsAndNoRouteLastTimeInSpace` above argues for: the
+        -- counter advances only in a state where the branch is certainly
+        -- asking, so it can under-count and delay the give-up, and can never
+        -- run up while the bot is happily fighting in a system it has anomalies
+        -- in. Counting that would be issue #11's mistake again -- a counter
+        -- measuring something other than the thing it bounds.
+        if standingInADeadEnd then
+            nextHuntingGroundFrom context.botSettings botMemoryBefore.huntSystemIndex
+
+        else
+            Nothing
+    , destinationAskReadings =
+        if standingInADeadEnd then
+            botMemoryBefore.destinationAskReadings + 1
+
+        else
+            0
+    , routeSettingGivenUp =
+        -- Latched for the session. A host with no ESI credentials, or one that
+        -- does not read the directive at all, will never answer -- and a bot
+        -- that keeps asking is one that never goes back to hunting.
+        botMemoryBefore.routeSettingGivenUp
+            || (routeAskGiveUpReadings < botMemoryBefore.destinationAskReadings)
     }
 
 
