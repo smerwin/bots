@@ -4905,7 +4905,7 @@ The second state in which the standing rule is wrong, and it is the same shape
 as the first: a verdict, a conversation, and a click into it on the previous
 step.
 
-  - the agent is *offering* a mission `shouldDeclineMission` says to refuse, so
+  - the agent is _offering_ a mission `shouldDeclineMission` says to refuse, so
     the intent is the bot's own settings rather than an inference about the
     dialog;
   - an agent conversation is open, which no travel or station step produces;
@@ -4915,8 +4915,8 @@ step.
 unreachable for twenty-five runs. EVE only raises the confirmation inside the
 standing-penalty window; run 20 clicked `Decline` six times and got no dialog at
 all, so the feature looked like it worked. Run 25 clicked it 105 times against
-226 dismissals: `closeMessageBoxByDeclining` answered `No`, which *cancels the
-decline*, so the offer came back and the bot declined it again. A blanket "always
+226 dismissals: `closeMessageBoxByDeclining` answered `No`, which _cancels the
+decline_, so the offer came back and the bot declined it again. A blanket "always
 say no" defeats the one branch whose whole purpose is to say yes.
 
 The standing cost is not a new decision. `skipOfferedMissionButton` already
