@@ -36,19 +36,22 @@ under `~/eve-bot-logs` and are not in the repo, so those cases skip when absent.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
-import glob
 import os
 import re
-import sys
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
 REPO_DIR = os.path.dirname(os.path.dirname(MACOS_HOST_DIR))
 
-BOT_ELM = os.path.join(
+MISSION_RUNNER_DIR = os.path.join(
     REPO_DIR, "implement", "applications", "eve-online",
-    "eve-online-mission-runner", "Bot.elm")
+    "eve-online-mission-runner")
+
+BOT_ELM = os.path.join(MISSION_RUNNER_DIR, "Bot.elm")
 
 LOG_DIR = os.path.expanduser("~/eve-bot-logs")
 
@@ -297,6 +300,114 @@ class TheLoopThisAnswers(unittest.TestCase):
             0, dismissals,
             "run 20's declines raised no confirmation at all -- the same "
             "setting, the same code, and no dialog")
+
+
+class Repl:
+    """A scratch copy of the app with its exports opened, driven by `elm repl`.
+
+    The same shape `test_abandon_stuck_mission` uses. `elm.json`'s
+    `elm-version` is patched in the *scratch* copy, never in the checked-in
+    source, and `booleans` raises rather than returning short — an answer that
+    silently goes missing is #71, and it would make every case below vacuous.
+    """
+
+    def __init__(self):
+        self.scratch = tempfile.mkdtemp(prefix="test-decline-confirmation-")
+        self.app = os.path.join(self.scratch, "app")
+        shutil.copytree(MISSION_RUNNER_DIR, self.app)
+
+        version = subprocess.run(["elm", "--version"], capture_output=True,
+                                 text=True, check=True).stdout.strip()
+        elm_json = os.path.join(self.app, "elm.json")
+        with open(elm_json, encoding="utf-8") as source:
+            patched = source.read().replace(
+                '"elm-version": "0.19.1"', '"elm-version": "%s"' % version)
+        with open(elm_json, "w", encoding="utf-8") as target:
+            target.write(patched)
+
+        bot = os.path.join(self.app, "Bot.elm")
+        with open(bot, encoding="utf-8") as handle:
+            source = handle.read()
+        opened = re.sub(r"module Bot exposing\s*\([^)]*\)",
+                        "module Bot exposing (..)", source, count=1)
+        assert opened != source, "could not open Bot.elm's exports"
+        with open(bot, "w", encoding="utf-8") as handle:
+            handle.write(opened)
+
+    def booleans(self, expressions):
+        script = ("import Bot exposing (..)\n"
+                  "import Common.EffectOnWindow as EffectOnWindow\n"
+                  + "".join(e + "\n" for e in expressions))
+        result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
+                                capture_output=True, text=True)
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+        answers = [a == "True" for a in re.findall(r"(True|False) : Bool", plain)]
+        if len(answers) != len(expressions):
+            raise AssertionError(
+                "elm repl answered %d of %d.\nstdout:\n%s\nstderr:\n%s"
+                % (len(answers), len(expressions), plain, result.stderr))
+        return answers
+
+    def cleanup(self):
+        shutil.rmtree(self.scratch, ignore_errors=True)
+
+
+CLICK = "[ EffectOnWindow.ButtonDown EffectOnWindow.MouseButtonLeft ]"
+
+
+def steps_with_click_at(index, length):
+    """Effects for `length` steps, the click `index` steps back (0 = last)."""
+    return "[ " + ", ".join(
+        CLICK if i == index else "[]" for i in range(length)) + " ]"
+
+
+class TheWindowIsExecutedNotJustRead(unittest.TestCase):
+    """Run the predicate for real, because reading it cannot catch this.
+
+    Mutation testing found the hole: replacing `List.take lookbackSteps` with
+    `List.take 1` leaves every structural assertion passing while the lookback
+    is read and then ignored — a constant that cannot be reached, which is
+    #34's shape. Only executing it says otherwise.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("elm") is None:
+            raise unittest.SkipTest("elm is not on PATH")
+        cls.repl = Repl()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.cleanup()
+
+    def test_the_lookback_reaches_the_measured_six_step_gap(self):
+        """The case run 26 failed and this exists for."""
+        answers = self.repl.booleans([
+            # the click six steps back, which is what the client does
+            "recentStepsEffectsPressedMouse 8 " + steps_with_click_at(5, 8),
+            # and one step back, the easy case
+            "recentStepsEffectsPressedMouse 8 " + steps_with_click_at(0, 8),
+        ])
+        self.assertEqual([True, True], answers,
+                         "a lookback of 8 must see a click 6 steps back")
+
+    def test_it_does_not_see_past_the_window(self):
+        answers = self.repl.booleans([
+            "recentStepsEffectsPressedMouse 8 " + steps_with_click_at(8, 10),
+            "recentStepsEffectsPressedMouse 1 " + steps_with_click_at(1, 4),
+        ])
+        self.assertEqual([False, False], answers,
+                         "the window has to bound the answer in both "
+                         "directions or it is not a window")
+
+    def test_the_strict_predicate_still_means_the_previous_step(self):
+        answers = self.repl.booleans([
+            "previousStepsEffectsPressedMouse " + steps_with_click_at(0, 4),
+            "previousStepsEffectsPressedMouse " + steps_with_click_at(1, 4),
+        ])
+        self.assertEqual([True, False], answers,
+                         "#60's gate and the cascade's still ask about the "
+                         "previous step alone")
 
 
 if __name__ == "__main__":
