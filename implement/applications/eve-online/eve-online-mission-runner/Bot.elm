@@ -825,9 +825,19 @@ switching off; run 11 is that sample, and it says the flag goes `True` -> `False
 on the reading straight after the click, on all four swaps in the run. It is used
 in the two directions a confirmation is good for and in no other: to stop
 settling early, and -- once it has been `True` and the gun reads switched on
-again -- to conclude the switch-off has been undone and let go. It can only make
-the swap release the guns sooner, never hold them longer, which is what keeps
-#34's lesson intact while using the signal #34 lacked.
+again -- to record in `switchOffUndoneByClient` that the switch-off did not hold.
+It can only make the swap release the guns sooner, never hold them longer, which
+is what keeps #34's lesson intact while using the signal #34 lacked.
+
+`switchOffUndoneByClient` is that second reading, latched. It is a _report_ and
+drives no branch, which is the whole of #72: the client re-arms the gun by itself
+on every swap, so having it abandon the attempt -- as #50 did, on the mistaken
+reading that `decisionToKillRats` was pressing the button -- meant no attempt
+could reach its load, in run 11 or run 18. It is true exactly when the guns are
+firing again, so there is no disarmed period left for it to cut short, and the
+two bounds that end an attempt without it are untouched. What it is for is the
+status line: an operator has to be able to see the difference between a swap
+holding silent guns and a swap whose guns the client took back.
 
 `verdictAbandoned` is the ordinary per-attempt give-up: the guns go back to
 firing whatever is in them and the next change of range tries again. Failing to a
@@ -878,6 +888,7 @@ type alias AmmoSwapMemory =
     , loadRefusedByClient : Maybe String
     , gunsSilencedTicks : Int
     , gunsConfirmedOff : Bool
+    , switchOffUndoneByClient : Bool
     , gunsCommandedThisVerdictAtX : List Int
     , menuOpenOnGunAtX : Maybe Int
     , hoverAwaitingTooltip : Bool
@@ -901,6 +912,7 @@ initAmmoSwapMemory =
     , loadRefusedByClient = Nothing
     , gunsSilencedTicks = 0
     , gunsConfirmedOff = False
+    , switchOffUndoneByClient = False
     , gunsCommandedThisVerdictAtX = []
     , menuOpenOnGunAtX = Nothing
     , hoverAwaitingTooltip = False
@@ -7338,12 +7350,34 @@ The question only means anything once the client has said the guns went off, so
 the previous answer to that is the first argument -- with no confirmation there
 is no undoing to detect, whatever the modules read.
 
-Run 11 is what this is for. On every one of that run's four swaps the guns read
-switched off for two readings and switched _on_ from the third, because the
-settle hands the fight on and `decisionToKillRats` presses the weapon hotkey on
-the locked target. The swap went on for another seventeen readings re-opening
-menus and issuing loads the client had nothing to load into: the weapon fired not
-once in that window, every outgoing combat line in it belonging to a drone.
+**This is a report, not a verdict, and #72 is why.** #50 had it abandon the
+attempt, on the reading of run 11 that the guns came back because
+`decisionToKillRats` had pressed the hotkey. Run 11's own decision lines say it
+did not. Through every reading of that run's first swap the fight's activation
+branch printed `All guns cycling` -- `isActive` reads `ramp_active`, which stays
+`True` while the gun finishes its cycle, so the branch saw nothing inactive to
+press -- and the one reading it did reach `Cycle combat mod`, the gun was
+_already_ back on and the press was suppressed by
+`activateWeaponModuleButWaitIfActivatedInPreviousStep`. Across four swaps in two
+runs the only effects the bot dispatched between the confirmation and the re-arm
+were a drone launch, an overview click, and the swap's own right-click; not one
+was a press of the button. See CLAUDE.md's "The switch-off does not hold" for
+the columns and the dispatched effects beside them.
+
+So the client re-arms the gun by itself, on every swap, one to three readings
+after the switch-off lands. A rule that abandons on that is not detecting a
+pathology -- it is a guarantee that no swap can ever finish, which is what
+runs 11 and 18 both did.
+
+**What replaces abandoning is nothing**, and the invariant is what makes that
+safe rather than merely permissive. This predicate is true exactly when the guns
+are back on, which is the moment the swap stops costing anything #34 and #50
+exist to protect: _failing to a firing gun with the wrong ammo beats failing to a
+silent gun_, and there is no longer a silent gun to fail to. What the attempt
+spends from here is mouse work and readings, and both were already bounded --
+`ammoSwapSilencedGiveUpTicks` over the whole period and the client's own refusal
+(#31) on the reading it arrives. Abandoning here traded the entire feature away
+to save neither.
 
 **Both halves of the test are load-bearing.** Requiring that nothing reads
 switched off keeps a reading whose entries simply did not decode from being read
@@ -8305,16 +8339,28 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
             else
                 (gunsSilencedTicks > 0) && gunsReadSwitchedOff
 
-        -- The guns were confirmed off and now read switched on again, so
-        -- something has turned them back on and a load issued from here would be
-        -- refused (#27). Run 11's twenty-reading window is this: the settle
-        -- hands the fight on, `decisionToKillRats` presses the weapon hotkey on
-        -- the locked target, and from the third reading the module reads
-        -- switched on while the swap goes on re-opening its menu. The guns fired
-        -- not once in that window -- every outgoing combat line in it came from
-        -- a drone -- so continuing was neither shooting nor swapping.
-        switchOffUndone =
-            switchOffHasBeenUndone memoryBefore.gunsConfirmedOff gunStates
+        -- The guns were confirmed off and now read switched on again. Nothing in
+        -- the bot pressed the button -- see `switchOffHasBeenUndone` for the
+        -- dispatched effects that establish that -- so this is the client, and
+        -- it does it on every swap. Latched for the same reason
+        -- `gunsConfirmedOff` is: it is the fact #72 is about, the status line
+        -- has to be able to say it on the readings afterwards, and the reading
+        -- that observed it is gone by the next one.
+        switchOffUndoneByClient =
+            if rangeVerdict == Nothing then
+                False
+
+            else if verdictSatisfied then
+                False
+
+            else if memoryBefore.verdictAbandoned then
+                False
+
+            else if memoryBefore.switchOffUndoneByClient then
+                True
+
+            else
+                switchOffHasBeenUndone memoryBefore.gunsConfirmedOff gunStates
 
         -- The same trade the acting path weighs before it starts, re-asked on
         -- every reading the swap holds the guns, and read off this reading
@@ -8387,19 +8433,19 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
                 -- readings later.
                 True
 
-            else if switchOffUndone then
-                -- The guns are back on, so there is nothing to load into and the
-                -- deadline below would spend seventeen more readings finding
-                -- that out. The same outcome, reached on the reading the client
-                -- reported it.
-                True
-
             else if fireArrivedWhileHoldingTheGuns then
                 -- Issue #50. A swap begun in a lull is not worth finishing under
                 -- fire, and abandoning is what hands the guns back.
                 True
 
             else if ammoSwapSilencedGiveUpTicks < gunsSilencedTicks then
+                -- Issue #72 put this back in charge of the ordinary ending.
+                -- `switchOffUndoneByClient` used to sit above it and abandon the
+                -- moment the client re-armed a gun, which the client does on
+                -- every swap -- so this bound, and the refusal above it, were
+                -- unreachable and no attempt ever got as far as its load. Both
+                -- of them end an attempt without consulting the module, which is
+                -- why removing the clause that did costs no bound at all.
                 True
 
             else if ammoSwapVerdictGiveUpTicks < rangeVerdictTicks then
@@ -8509,6 +8555,7 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
     , loadRefusedByClient = loadRefusedByClient
     , gunsSilencedTicks = gunsSilencedTicks
     , gunsConfirmedOff = gunsConfirmedOff
+    , switchOffUndoneByClient = switchOffUndoneByClient
     , gunsCommandedThisVerdictAtX = gunsCommandedThisVerdictAtX
     , menuOpenOnGunAtX = menuOpenOnGunAtX
     , hoverAwaitingTooltip = hoverAwaitingTooltip
@@ -8696,6 +8743,27 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
         stillSettling =
             (ammoSwap.gunsSilencedTicks <= ammoSwapSilenceSettleTicks)
                 && not ammoSwap.gunsConfirmedOff
+
+        -- What the deadline is counting, said in whichever of its two states the
+        -- swap is actually in. Issue #72: it counts the readings this attempt
+        -- has held the fight, which is the guns being off only until the client
+        -- takes them back -- and it does, on every swap. Two branches printing
+        -- "Guns off for N" through a window where the guns are firing is the
+        -- reading that made run 11 look like a twenty-reading disarmament.
+        describeTheHold =
+            if ammoSwap.switchOffUndoneByClient then
+                " The client has switched a gun back on by itself, so the guns are firing; "
+                    ++ String.fromInt ammoSwap.gunsSilencedTicks
+                    ++ " of "
+                    ++ String.fromInt ammoSwapSilencedGiveUpTicks
+                    ++ " readings of this attempt spent."
+
+            else
+                " Guns off for "
+                    ++ String.fromInt ammoSwap.gunsSilencedTicks
+                    ++ " of "
+                    ++ String.fromInt ammoSwapSilencedGiveUpTicks
+                    ++ " readings."
 
         threshold =
             ammoSwapThreshold context.eventContext.botSettings ammoSwap
@@ -8973,11 +9041,8 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                                             ++ String.fromInt (List.length gunsStillToVisit)
                                             ++ " of "
                                             ++ String.fromInt (List.length fight.guns)
-                                            ++ " weapon(s) still to check. Guns off for "
-                                            ++ String.fromInt ammoSwap.gunsSilencedTicks
-                                            ++ " of "
-                                            ++ String.fromInt ammoSwapSilencedGiveUpTicks
-                                            ++ " readings."
+                                            ++ " weapon(s) still to check."
+                                            ++ describeTheHold
                                         )
                                         (loadTheWantedCharge gunToVisit)
 
@@ -8990,11 +9055,8 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                                     describeBranch
                                         ("Every weapon has been told to load '"
                                             ++ wantedChargeName
-                                            ++ "' -- re-open the last one's menu to see whether it took. Guns off for "
-                                            ++ String.fromInt ammoSwap.gunsSilencedTicks
-                                            ++ " of "
-                                            ++ String.fromInt ammoSwapSilencedGiveUpTicks
-                                            ++ " readings."
+                                            ++ "' -- re-open the last one's menu to see whether it took."
+                                            ++ describeTheHold
                                         )
                                         (loadTheWantedCharge fight.referenceGun)
 
@@ -9136,6 +9198,20 @@ describeAmmoSwapState context =
 
                                     Nothing ->
                                         " (gave up on this one, will try again on the next change of range)"
+
+                            else if ammoSwap.switchOffUndoneByClient then
+                                -- Issue #72. Saying `GUNS OFF` here would be a
+                                -- lie, and it was the lie run 11 told for
+                                -- eighteen readings: the counter is the bound on
+                                -- the attempt, not a statement about the guns,
+                                -- and once the client has re-armed them the two
+                                -- have come apart. The bound still shows,
+                                -- because it is still what ends this.
+                                " (the client switched a gun back on by itself "
+                                    ++ String.fromInt ammoSwap.gunsSilencedTicks
+                                    ++ " of "
+                                    ++ String.fromInt ammoSwapSilencedGiveUpTicks
+                                    ++ " readings in -- the guns are firing, and this attempt is going on to its load anyway)"
 
                             else if 0 < ammoSwap.gunsSilencedTicks then
                                 -- The number an operator should be watching: how
