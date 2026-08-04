@@ -218,6 +218,16 @@
         recorded client sessions the worst 45-second window the ship *survived*
         was 3114, and the one it died in peaked at 4101 -- so re-derive it for a
         different hull rather than carrying it over.
+      + `give-up-after-zero-damage-hits`: Stop shooting an object once this many
+        shots have *landed* on it for zero total damage, unlock it, and leave it
+        alone for the rest of the session. Defaults to 8 and `-1` disables it.
+        Misses do not count -- the client writes no damage number for one -- and
+        any damage at all resets the count, so a merely well-tanked target never
+        trips it. Calibrated from 77,316 recorded outgoing damage lines, in which
+        no target that ever took damage produced a single zero; see
+        `defaultZeroDamageHitsBeforeGivingUp`. Needs a host that carries the game
+        log: without one the guard is unarmed and the bot keeps shooting, which
+        is the safe direction.
 
       When using more than one setting, start a new line for each setting in the
       text input field. Here is an example of a complete settings string:
@@ -302,6 +312,7 @@ defaultBotSettings =
     , runAwayShieldHitpointsThresholdPercent = -1
     , runAwayArmorHitpointsThresholdPercent = -1
     , runAwayIncomingDamageThreshold = defaultRunAwayIncomingDamageThreshold
+    , zeroDamageHitsBeforeGivingUp = defaultZeroDamageHitsBeforeGivingUp
     , avoidRats = []
     , attackObjectNames = []
     , approachObjectNames = []
@@ -374,6 +385,9 @@ parseBotSettings =
            )
          , ( "run-away-incoming-damage-threshold"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayIncomingDamageThreshold = threshold })
+           )
+         , ( "give-up-after-zero-damage-hits"
+           , AppSettings.valueTypeInteger (\hits settings -> { settings | zeroDamageHitsBeforeGivingUp = hits })
            )
          , ( "avoid-rat"
            , AppSettings.valueTypeString
@@ -460,6 +474,7 @@ type alias BotSettings =
     , runAwayShieldHitpointsThresholdPercent : Int
     , runAwayArmorHitpointsThresholdPercent : Int
     , runAwayIncomingDamageThreshold : Int
+    , zeroDamageHitsBeforeGivingUp : Int
     , avoidRats : List String
     , attackObjectNames : List String
     , approachObjectNames : List String
@@ -545,6 +560,7 @@ type alias BotMemory =
     , lowestArmorPercentSinceHealthy : Int
     , hitpoints : HitpointsMemory
     , incomingDamage : IncomingDamageMemory
+    , zeroDamage : ZeroDamageMemory
     , droneBayOpenedFromShipCard : Bool
     , droneBayWillTakeNoMore : Bool
     , droneRestockLooksWithRoom : Int
@@ -750,6 +766,56 @@ type alias IncomingDamageSample =
     -- than only in `lastAttacker`, because the window of these names is what
     -- `namesOfRecentAttackers` hands to the target selection. See issue #40.
     , attacker : Maybe String
+    }
+
+
+{-| Which objects this ship's guns have been unable to hurt, and how far along
+the evidence against each one is.
+
+**Issue #90.** Run 27 locked an `Infested Asteroid` and shot it with every gun
+for roughly 290 consecutive readings. Every shot _landed_ and every one did zero
+damage, while nine real rats sat on the same overview untouched and the mission
+objective was already finished. Nothing could see it: the reading carried no
+field saying how much damage this ship was dealing, so no branch could ask.
+
+A reading's `outgoingDamageSinceLastReading` is gone by the next reading, like
+every other part of this channel, so the running count has to be written here --
+`updateMemoryForNewReadingFromGame` is the only place that can write memory and
+the one place that never sees a decision. A branch that read the zero and wrote
+nothing down would see it once and go straight back to shooting the same rock,
+which is the failure `loadRefusedByClient` documents.
+
+`landedHitsAtZero` is the evidence being gathered: per target name, how many
+shots have landed on it for a running total of zero. Any damage at all clears
+that name's tally outright, so a merely well-tanked target -- one taking small
+but real damage -- never accumulates. It is capped by
+`zeroDamageTalliesTracked`, oldest activity dropped first, because the names
+come from the client and nothing else bounds how many there can be.
+
+`namesGivenUpOn` is the verdict, latched for the session the way
+`missionNamesAbandoned` is, and for the same reason: unlocking without
+remembering is a loop, not a fix. Whatever put the object in the target bar will
+put it there again on the very next reading.
+
+`hostCarriesTheChannel` is the parser's `Nothing`-versus-`Just` distinction, and
+here it points the _opposite_ way from `IncomingDamageMemory`'s. A host that
+does not carry the channel reports no shots landing, which must never read as
+"everything is immune" -- absent means unknown, and unknown keeps shooting. So
+nothing is ever added to `namesGivenUpOn` from a reading with no node, and the
+status line says the guard is unarmed rather than leaving it to be inferred from
+an empty list.
+
+-}
+type alias ZeroDamageMemory =
+    { landedHitsAtZero : List ZeroDamageTally
+    , namesGivenUpOn : List String
+    , hostCarriesTheChannel : Bool
+    }
+
+
+type alias ZeroDamageTally =
+    { name : String
+    , hits : Int
     }
 
 
@@ -6809,6 +6875,24 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                 |> List.filter overviewEntryIsActiveTarget
                 |> List.head
 
+        -- The active target's own name, when this session has already given up
+        -- on hurting it. Read from the *whole* overview rather than from
+        -- `activeTargetEntry`, because giving up removes the row from
+        -- `overviewEntriesToAttack` -- so looking for it there would find
+        -- nothing and the guns would go on firing at it. Issue #90: run 27's
+        -- asteroid was never a row this bot chose, it arrived in the target bar
+        -- while a lock aimed at a rat, so the fix cannot live in the selection.
+        activeTargetGivenUpAsImmune =
+            context.readingFromGameClient.overviewWindows
+                |> List.concatMap .entries
+                |> List.filter overviewEntryIsActiveTarget
+                |> List.filter
+                    (overviewEntryWasGivenUpAsImmune
+                        (namesGivenUpAsImmune context.memory.zeroDamage)
+                    )
+                |> List.head
+                |> Maybe.andThen .objectName
+
         ensureShipIsOrbitingDecision =
             activeTargetEntry
                 |> Maybe.andThen (ensureShipIsOrbiting context seeUndockingComplete.shipUI)
@@ -6940,7 +7024,47 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
 
                         Just _ ->
                             describeBranch "I see a locked target."
-                                (if activeTargetOverviewEntryIsStray context.readingFromGameClient then
+                                (if activeTargetGivenUpAsImmune /= Nothing then
+                                    -- Unlock it rather than merely declining to
+                                    -- shoot it, for the wreck branch's reason
+                                    -- below and one of its own. The guns follow
+                                    -- whatever EVE calls the active target and
+                                    -- nothing here chooses which of several
+                                    -- locked targets that is, so an immune
+                                    -- object holding the active slot points
+                                    -- every weapon and every drone at itself
+                                    -- however many real rats are locked beside
+                                    -- it. Run 27 ended with the shield at 0%
+                                    -- while three named attackers hit the ship
+                                    -- and its own guns were still on the rock.
+                                    --
+                                    -- Freeing the slot is all this has to do:
+                                    -- `activateOneOfTheLockedTargets` clicks
+                                    -- another locked target on the next reading,
+                                    -- and the memory keeps the object out of
+                                    -- `overviewEntriesToLock` so nothing locks
+                                    -- it again on purpose.
+                                    case context.readingFromGameClient.targets |> List.filter .isActiveTarget |> List.head of
+                                        Just activeTarget ->
+                                            describeBranch
+                                                ("Every shot that has landed on '"
+                                                    ++ (activeTargetGivenUpAsImmune |> Maybe.withDefault "the active target")
+                                                    ++ "' did zero damage, "
+                                                    ++ (context.eventContext.botSettings.zeroDamageHitsBeforeGivingUp |> String.fromInt)
+                                                    ++ " of them by the client's own count -- these shots are achieving nothing. Unlock it (Ctrl+Shift+Click) and leave it alone for the rest of the session."
+                                                )
+                                                (ctrlShiftClickUiElement
+                                                    (activeTarget.barAndImageCont
+                                                        |> Maybe.withDefault activeTarget.uiNode
+                                                    )
+                                                )
+
+                                        Nothing ->
+                                            describeBranch
+                                                "The active target is one I have given up on hurting, but I cannot find it in the target bar to unlock -- hold fire."
+                                                waitForProgressInGame
+
+                                 else if activeTargetOverviewEntryIsStray context.readingFromGameClient then
                                     -- Unlock it, do not merely decline to shoot
                                     -- it. Holding fire leaves the wreck locked
                                     -- and active, so the next reading reaches
@@ -10682,6 +10806,14 @@ initBotMemory =
         , lastAttacker = Nothing
         , retreating = False
         }
+    , zeroDamage =
+        { landedHitsAtZero = []
+        , namesGivenUpOn = []
+
+        -- False until a reading proves otherwise, which is the safe start:
+        -- until the channel is seen, nothing can be given up on.
+        , hostCarriesTheChannel = False
+        }
     , droneBayOpenedFromShipCard = False
     , droneBayWillTakeNoMore = False
     , droneRestockLooksWithRoom = 0
@@ -10921,6 +11053,7 @@ statusTextFromState context =
                     -- between short and unwieldy.
                     [ [ describeShip, describeDrones ]
                     , [ describeRatsInOverview, describeCurrentTarget, describeOverview, describeLockRange context ]
+                    , [ describeZeroDamage context ]
                     , describeAccelerationGate context
                     , [ describeOverviewIndicationHints readingFromGameClient ]
                     , [ describeAmmoSwapState context ]
@@ -11364,6 +11497,16 @@ shouldAttackOverviewEntry namesToAttack overviewEntry =
         || isObjectShootingAtUs namesToAttack.fromIncomingDamage overviewEntry
     )
         && overviewEntryDistanceIsOnGrid overviewEntry
+        -- Issue #90's subtraction, and it outranks every disjunct above --
+        -- including a name the objective or the settings asked for. Whatever
+        -- put the object in the list, the client has now said several times
+        -- over that shooting it achieves nothing, and that is a stronger
+        -- statement than any prediction about what should be shootable. A
+        -- structure the mission really does need dead, given up on wrongly,
+        -- ends as a mission that cannot progress -- which is a state this bot
+        -- already recognises and gives back (see `missionToAbandon`) rather
+        -- than one it spends the session on.
+        && not (overviewEntryWasGivenUpAsImmune namesToAttack.givenUpAsImmune overviewEntry)
 
 
 {-| Whether the client's combat log has named this overview row as having hit us.
@@ -11400,17 +11543,42 @@ is empty) is the silent one.
 -}
 isObjectShootingAtUs : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isObjectShootingAtUs attackerNames overviewEntry =
+    anyNameMatchesOverviewLabel attackerNames overviewEntry
+
+
+{-| Exact, trimmed, case-insensitive match of a name from the client's combat
+log against an overview row's own labels.
+
+Shared by the two rules that take a name off that channel and look for its row --
+`isObjectShootingAtUs` (issue #40, which adds the row to the targets) and
+`overviewEntryWasGivenUpAsImmune` (issue #90, which takes it away). One
+definition rather than two copies of four lines, because the two are the same
+question asked in opposite directions and a difference between them would be a
+row that can be engaged for shooting us and never dropped for being unhurtable.
+
+-}
+anyNameMatchesOverviewLabel : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+anyNameMatchesOverviewLabel names overviewEntry =
+    namesMatchLabels names
+        ([ overviewEntry.objectName, overviewEntry.objectType ]
+            |> List.filterMap identity
+        )
+
+
+{-| The string comparison behind `anyNameMatchesOverviewLabel`, on its own so it
+can be executed rather than restated in a test.
+-}
+namesMatchLabels : List String -> List String -> Bool
+namesMatchLabels names labels =
     let
         normalize =
             String.trim >> String.toLower
 
-        labels =
-            [ overviewEntry.objectName, overviewEntry.objectType ]
-                |> List.filterMap identity
-                |> List.map normalize
+        normalisedLabels =
+            labels |> List.map normalize
     in
-    attackerNames
-        |> List.any (\attackerName -> labels |> List.member (normalize attackerName))
+    names
+        |> List.any (\name -> normalisedLabels |> List.member (normalize name))
 
 
 {-| Whether the entry's distance is one the bot can act on at all.
@@ -11531,6 +11699,17 @@ type alias ObjectNamesToAttack =
     { fromObjective : List String
     , fromSettings : List String
     , fromIncomingDamage : List String
+
+    -- The one subtractive member, and the only thing here that can take a row
+    -- *out* of the set: names this session has watched absorb
+    -- `zeroDamageHitsBeforeGivingUp` landed shots for no damage at all. It
+    -- rides on this record rather than being applied at one call site because
+    -- every consumer has to honour it -- `shouldAttackOverviewEntry` is asked
+    -- by the lock candidates, by the scroll-to-reveal, and by
+    -- `anyAttackableInOverview`, and a rule that removed the object from only
+    -- the first would have the bot scrolling the overview to find it again.
+    -- See issue #90 and `ZeroDamageMemory`.
+    , givenUpAsImmune : List String
     }
 
 
@@ -11542,6 +11721,7 @@ objectNamesToAttack context =
             |> Maybe.withDefault []
     , fromSettings = context.eventContext.botSettings.attackObjectNames
     , fromIncomingDamage = namesOfRecentAttackers context.memory.incomingDamage
+    , givenUpAsImmune = namesGivenUpAsImmune context.memory.zeroDamage
     }
 
 
@@ -13469,6 +13649,57 @@ incomingDamageSampleLimit =
     200
 
 
+{-| How many landed shots must achieve nothing before an object is given up on.
+
+**One zero is not evidence, and this is the number that says how much is.** The
+client's own combat log is the whole corpus behind it -- 77,316 outgoing damage
+lines across 139 recorded sessions, naming 294 distinct targets.
+
+What the corpus says is a cleaner separation than the issue expects. Of those
+294 targets, **eight ever produced a zero and none of those eight ever produced
+a nonzero**; the other 286 took damage on every one of their lines and never
+once read zero. So resists and glancing hits do _not_ round to zero here -- a
+glancing hit reads `15 to Mercenary Commander - Acolyte I - Glances Off` -- and
+the largest run of zeros anywhere that was later broken by a real hit on the
+same target is **zero**. Any threshold at all would have produced no false
+positive in that data, so the number is chosen for margin rather than to clear
+an observed overlap.
+
+Eight is the largest value that still catches every episode worth catching. The
+eight zero-only episodes ran 3, 3, 10, 28, 74, 86, 101 and 108 landed hits; the
+two three-hit ones ended on their own inside eight seconds and are nothing to
+fix, and eight sits below the ten of the smallest one that did not. Measured
+against the client's own timestamps, it fires 20 to 75 seconds into each of the
+six it catches, in place of the 41 to 414 seconds those episodes actually ran.
+
+**It is a number about this ship's guns, not about the game.** A fit whose shots
+are small enough to round to zero against a heavily resisted target would
+accumulate against a target it could eventually kill, and nothing in this corpus
+covers that -- so re-derive it rather than carrying it over, the same warning
+`defaultRunAwayIncomingDamageThreshold` carries. `give-up-after-zero-damage-hits`
+sets it and `-1` disables the whole guard.
+
+-}
+defaultZeroDamageHitsBeforeGivingUp : Int
+defaultZeroDamageHitsBeforeGivingUp =
+    8
+
+
+{-| A backstop on how many targets are tracked at once, not a policy.
+
+The names come from the client, so nothing about a pocket bounds how many can
+appear; a tally list growing with every rat engaged would be a leak. Sixteen is
+far more than any recorded reading names -- the busiest carries a handful, guns
+on one target and drones on another -- and the ones dropped are the ones with
+the least evidence against them, which is the harmless direction: a target that
+is genuinely immune keeps producing zeros and climbs back.
+
+-}
+zeroDamageTalliesTracked : Int
+zeroDamageTalliesTracked =
+    16
+
+
 {-| Total hitpoints taken in the window.
 -}
 incomingDamageInWindow : IncomingDamageMemory -> Int
@@ -13618,6 +13849,70 @@ describeIncomingDamage context =
                         " Attackers named in the window: "
                             ++ (names |> List.map (\name -> "'" ++ name ++ "'") |> String.join ", ")
                             ++ " (any overview row with one of these names is a target)."
+               )
+
+
+{-| Whether this ship's own shots are achieving anything, in the status line.
+
+**The instrument run 27 did not have.** That run shot an `Infested Asteroid` for
+roughly 290 consecutive readings, every shot landing for zero damage, and the
+status line said only `rats 10 | target Infested Asteroid` -- which reads
+identically to a fight going well. This clause is what turns the next such run
+into evidence rather than a puzzle.
+
+Whether the host carries the channel is reported first and unconditionally, for
+`describeIncomingDamage`'s reason and with the fail-safe pointing the other way:
+no channel means nothing can ever be given up on, so the guns keep firing and an
+operator has to be able to see that the guard is unarmed rather than infer it
+from a verdict that never arrives.
+
+-}
+describeZeroDamage : BotDecisionContext -> String
+describeZeroDamage context =
+    let
+        memory =
+            context.memory.zeroDamage
+
+        threshold =
+            context.eventContext.botSettings.zeroDamageHitsBeforeGivingUp
+    in
+    if not memory.hostCarriesTheChannel then
+        "zero-damage check: NO COMBAT LOG -- unarmed, so nothing is ever given up on"
+
+    else if threshold < 0 then
+        "zero-damage check: off"
+
+    else
+        -- The tallies are printed even at one hit, because a target climbing
+        -- towards the threshold and a target that never climbs are the two
+        -- things worth telling apart while watching a run, and only the first
+        -- ever reaches a decision line.
+        (case memory.landedHitsAtZero of
+            [] ->
+                "shots landing for zero: none"
+
+            tallies ->
+                "shots landing for zero: "
+                    ++ (tallies
+                            |> List.map
+                                (\tally ->
+                                    "'"
+                                        ++ tally.name
+                                        ++ "' "
+                                        ++ String.fromInt tally.hits
+                                        ++ "/"
+                                        ++ String.fromInt threshold
+                                )
+                            |> String.join ", "
+                       )
+        )
+            ++ (case memory.namesGivenUpOn of
+                    [] ->
+                        ""
+
+                    names ->
+                        ". GIVEN UP ON (not shot at again this session): "
+                            ++ (names |> List.map (\name -> "'" ++ name ++ "'") |> String.join ", ")
                )
 
 
@@ -13856,6 +14151,159 @@ updateIncomingDamageMemory context hitpoints memoryBefore =
     }
 
 
+{-| Everything this session has concluded it cannot hurt.
+
+Read by `shouldAttackOverviewEntry`, so an object given up on stops being a
+candidate, and by the branch that unlocks it when the client makes it the active
+target anyway. Both are needed: run 27 shows the object arriving in the target
+bar without the bot ever having chosen it.
+
+-}
+namesGivenUpAsImmune : ZeroDamageMemory -> List String
+namesGivenUpAsImmune memory =
+    memory.namesGivenUpOn
+
+
+{-| Whether an overview row is one this session has given up on hurting.
+
+Matched exactly and case-insensitively across both label columns, which is
+`isObjectShootingAtUs`'s rule and is here for its reasons. A substring rule on
+"Infested Asteroid" would also refuse to shoot an "Infested Asteroid Cluster"
+nobody has any evidence about, and a wreck's Type is its owner's name with
+" Wreck" appended -- so a target given up on would take its killer's corpse out
+of the loot path with it. The name comes from the client's combat log and is
+compared against the overview's own columns, which is the round trip
+`test_shoot_back_at_attackers` established holds byte for byte.
+
+-}
+overviewEntryWasGivenUpAsImmune : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryWasGivenUpAsImmune givenUpNames overviewEntry =
+    anyNameMatchesOverviewLabel givenUpNames overviewEntry
+
+
+{-| Accumulate what the client says this ship's shots achieved, per target.
+
+**The whole of issue #90 that survives the reading it arrived on.** A reading's
+outgoing summary is gone by the next one, so the count of landed-and-achieved-
+nothing shots lives here, and so does the verdict it eventually produces.
+
+Four properties, each of them the thing that would otherwise go wrong:
+
+**`Nothing` from the parser is "this host does not carry the channel", never
+"nothing landed".** It leaves both the tallies and the verdicts alone, so a host
+with no game log accumulates no evidence and gives up on nothing. That is the
+opposite direction from #32's retreat -- there an absent channel must not read
+as safety, here it must not read as immunity -- and it is the safe one for the
+same underlying reason: the inference that costs something is the one drawn from
+silence. The status line reports `hostCarriesTheChannel` so an operator sees the
+guard is unarmed instead of inferring it from an empty list.
+
+**Any damage at all clears the tally.** A target that is merely well tanked is
+taking _some_ damage, so its count never climbs, and a target that starts taking
+damage after a few unlucky readings goes back to zero evidence rather than
+carrying it. Only `hits > 0` with `damage == 0` adds.
+
+**A miss adds nothing**, because the host never counts one: the client writes no
+damage number for a miss, so it cannot reach `hits`. A gun that is out of range
+and missing everything therefore accumulates no evidence against its target,
+which is right -- missing is a range problem and the answer to it is not to give
+up on the object.
+
+**The verdict latches for the session.** Once a name is in `namesGivenUpOn` it
+stays, and its tally is dropped so nothing keeps counting. Unlatching on later
+damage would be the wrong way round: after giving up, the bot stops shooting the
+object, so no later evidence can arrive and any rule waiting for some would be
+waiting forever. An operator who disagrees restarts the session, exactly as with
+`missionNamesAbandoned`.
+
+-}
+updateZeroDamageMemory : UpdateMemoryContext BotSettings -> ZeroDamageMemory -> ZeroDamageMemory
+updateZeroDamageMemory context memoryBefore =
+    zeroDamageMemoryAfterReading
+        context.botSettings.zeroDamageHitsBeforeGivingUp
+        context.readingFromGameClient.outgoingDamageSinceLastReading
+        memoryBefore
+
+
+{-| The rule itself, taking only what it reads, so a test can run it.
+
+Separated from `updateZeroDamageMemory` for the reason CLAUDE.md's verification
+section gives: a Python restatement of a rule tests the restatement, and this
+one is arithmetic over a list where an off-by-one is invisible in review. Every
+property the doc comment above claims -- absent leaving the verdicts alone, any
+damage clearing a tally, a miss adding nothing, the latch holding -- is a call
+to this function with three arguments.
+
+-}
+zeroDamageMemoryAfterReading : Int -> Maybe (List EveOnline.ParseUserInterface.OutgoingDamageToTarget) -> ZeroDamageMemory -> ZeroDamageMemory
+zeroDamageMemoryAfterReading threshold outgoingDamage memoryBefore =
+    case outgoingDamage of
+        Nothing ->
+            { memoryBefore | hostCarriesTheChannel = False }
+
+        Just targets ->
+            let
+                landedThisReading =
+                    targets |> List.filter (\target -> 0 < target.hits)
+
+                hitsAtZeroFor name =
+                    landedThisReading
+                        |> List.filter (\target -> target.name == name && target.damage <= 0)
+                        |> List.map .hits
+                        |> List.sum
+
+                tookDamage name =
+                    landedThisReading
+                        |> List.any (\target -> target.name == name && 0 < target.damage)
+
+                namesSeen =
+                    (landedThisReading |> List.map .name)
+                        ++ (memoryBefore.landedHitsAtZero |> List.map .name)
+                        |> Common.Basics.listUnique
+                        |> List.filter
+                            (\name -> not (List.member name memoryBefore.namesGivenUpOn))
+
+                tallied =
+                    namesSeen
+                        |> List.filterMap
+                            (\name ->
+                                if tookDamage name then
+                                    Nothing
+
+                                else
+                                    let
+                                        before =
+                                            memoryBefore.landedHitsAtZero
+                                                |> List.filter (\tally -> tally.name == name)
+                                                |> List.map .hits
+                                                |> List.sum
+                                    in
+                                    case before + hitsAtZeroFor name of
+                                        0 ->
+                                            Nothing
+
+                                        hits ->
+                                            Just { name = name, hits = hits }
+                            )
+                        |> List.sortBy (.hits >> negate)
+                        |> List.take zeroDamageTalliesTracked
+
+                givingUpNow =
+                    if threshold < 0 then
+                        []
+
+                    else
+                        tallied
+                            |> List.filter (\tally -> threshold <= tally.hits)
+                            |> List.map .name
+            in
+            { landedHitsAtZero =
+                tallied |> List.filter (\tally -> not (List.member tally.name givingUpNow))
+            , namesGivenUpOn = givingUpNow ++ memoryBefore.namesGivenUpOn
+            , hostCarriesTheChannel = True
+            }
+
+
 updateMemoryForNewReadingFromGame : UpdateMemoryContext BotSettings -> BotMemory -> BotMemory
 updateMemoryForNewReadingFromGame context botMemoryBefore =
     let
@@ -14056,6 +14504,12 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             botMemoryBefore.lowestArmorPercentSinceHealthy
     , hitpoints = hitpointsNow
     , incomingDamage = incomingDamageNow
+
+    -- The other half of the same channel, and a separate field for the same
+    -- reason the host emits a separate node: the two read different fields of
+    -- one pure record, so neither can consume the other's, and each writes its
+    -- own verdict here. See issue #90.
+    , zeroDamage = updateZeroDamageMemory context botMemoryBefore.zeroDamage
     , readingsCount = botMemoryBefore.readingsCount + 1
     , droneBayOpenedFromShipCard =
         -- Whether our own "Open Drone Bay" on the ship's card has landed since

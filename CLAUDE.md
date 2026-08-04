@@ -211,6 +211,15 @@ recorded lines in both directions, plus the four `(combat)` lines in the whole
 corpus that carry "from" and are not damage (`Warp scramble attempt from …`),
 which is why the pattern is anchored on the leading number rather than the word.
 
+**And the other direction is a third node.** Issue #90 needed the half that was
+matched nowhere: `MacOsHostSyntheticOutgoingDamage`, one child per target
+carrying `name`, `hits` and `damage`, lifted into
+`ParsedUserInterface.outgoingDamageSinceLastReading`. It is per target rather
+than one total, unlike the incoming node, because the question it answers is
+about one object — see "What the bot gives up on: shots that land and achieve
+nothing". Its `Nothing` points the opposite way from the retreat's: a host that
+cannot answer must not read as "everything is immune".
+
 **A reading's entries are gone by the next reading, and that shapes every
 consumer.** A branch that reads them and writes nothing down sees a refusal once
 and then behaves exactly as it did before — so the verdict has to be recorded in
@@ -222,10 +231,11 @@ can write memory and the one place that never sees the decision. The ammo swap's
 the tree is being built, so the node holds what the client said between the
 previous read and this one, not a growing buffer that would have the bot
 answering a refusal from four minutes ago. The tail fans one file offset out to
-two queues, because the stderr echo consuming the lines is exactly what kept
-them from the bot in the first place — a second caller of a single-cursor tail
-would have given whichever ran first that cycle's lines and the other nothing,
-intermittently and without a word.
+four queues — the echo, the entries, and one per damage direction — because the
+stderr echo consuming the lines is exactly what kept them from the bot in the
+first place, and a second caller of a single-cursor tail would have given
+whichever ran first that cycle's lines and the others nothing, intermittently
+and without a word.
 
 **`ParseUserInterface.elm` is vendored six times, and the policy is all six,
 identically.** Nothing in this parser is app-specific, and a change that lands
@@ -938,6 +948,136 @@ in the last 45 s, and nothing else here marks it as a target.` — and only when
 nothing else would have selected the row, so the line means "this is new" rather
 than appearing beside every rat in the pocket.
 
+## What the bot gives up on: shots that land and achieve nothing
+
+Everything above adds rows to the target set. This is the one rule that takes
+one away, and it exists because run 27 locked an `Infested Asteroid` and shot it
+with every gun for roughly **290 consecutive readings** — every shot landing,
+every one doing **zero damage**, nine or ten real rats untouched on the same
+overview, and the mission tracker already reading `no instruction (next step:
+Set Destination)`. It ended with the shield at 0% and armour going while three
+named attackers hit the ship and its own guns were still on the rock.
+
+**The bot could not see any of it, and that was the whole issue.** The host
+matched `^(\d+) from (?P<attacker>.+)$` — the incoming half, summed for #32's
+retreat. Outgoing `N to <target>` lines were matched nowhere, so no field in any
+reading said how much damage this ship was *dealing* and no decision could ask.
+That gap had already been named once: `ammoSwapRangeErrorPercent` is documented
+as "the weak half" precisely because what decides whether the other charge is
+better is whether the guns are landing, "which the client states on its outgoing
+combat lines and which this does not read". Same missing instrument, second
+consumer, and the summary now serves both.
+
+**The client distinguishes the three cases in the line itself**, so none of this
+is inferred from a health bar that never moves: a miss carries no damage number
+(`Your Hobgoblin II misses Vigilant Sentry Tower completely`), a landed shot
+reads `104 to Mammon Apis - Hits`, and a landed shot that did nothing reads
+`0 to Infested Asteroid - Hits`.
+
+**Summarised host-side, per target.** `MacOsHostSyntheticOutgoingDamage` is the
+third synthetic node, one child per target carrying `name`, `hits` and `damage`,
+lifted into `ParsedUserInterface.outgoingDamageSinceLastReading : Maybe (List
+OutgoingDamageToTarget)`. Same four safety properties as the other two. The raw
+lines stay withheld — there are 158,850 `(combat)` lines across the recorded
+sessions and 77,316 of them are outgoing, more than twice the incoming count.
+
+**Per target rather than one total**, which is the one place this differs from
+the incoming node, and run 27 is why: its drones were landing real damage on a
+`Mercenary Commander` in the very readings its guns were achieving nothing on
+the asteroid, so a single sum would have read as healthy throughout the incident
+the whole change exists to catch.
+
+**Absent means unknown, and unknown keeps shooting.** `Nothing` from the parser
+is "this host does not carry the channel" and never adds to the evidence or to
+the verdict. The fail-safe direction is the *opposite* of #37's — there an
+absent channel must not read as "the grid is quiet", here it must not read as
+"everything is immune" — and the status line reports
+`zero-damage check: NO COMBAT LOG` rather than leaving it to be inferred from a
+verdict that never arrives.
+
+**Eight landed hits at zero, and the corpus is cleaner than the issue expects.**
+Across 77,316 outgoing lines naming 294 distinct targets, **eight targets ever
+produced a zero and none of those eight ever produced a nonzero**; the other 286
+never read zero once. Resists and glancing hits do not round to zero on this fit
+— a glancing hit reads `15 to Mercenary Commander - Acolyte I - Glances Off` —
+and the longest run of zeros anywhere later broken by a real hit is **zero**. So
+there is no observed overlap for a threshold to clear, and eight is margin
+rather than a separator: it is the largest value that still catches every
+episode worth catching, the eight zero-only episodes having run 3, 3, 10, 28,
+74, 86, 101 and 108 landed hits. It fires 20–75 s into each of the six it
+catches, in place of the 41–414 s those episodes actually ran.
+
+**It is a number about this ship's guns, not about the game.** A fit whose shots
+are small enough to round to zero against a heavily resisted target would
+accumulate against something it could eventually kill, and nothing in this
+corpus covers that — the same warning `defaultRunAwayIncomingDamageThreshold`
+carries. `give-up-after-zero-damage-hits` sets it; `-1` disables it.
+
+**A miss builds no case**, because the host never counts one. Missing is a range
+problem and giving up is not the answer to it — without that, a gun firing out
+of range would give up on everything it could not reach.
+
+**The verdict is latched in `BotMemory.zeroDamage` and kept for the session**,
+the way `missionNamesAbandoned` is. A reading's summary is gone by the next one,
+so a branch that read the zero and wrote nothing down would see it once and go
+straight back to shooting the same rock — `loadRefusedByClient`'s failure. It
+does not un-latch on later damage, deliberately: after giving up the bot stops
+shooting the object, so no further evidence can arrive and a rule waiting for
+some would wait forever.
+
+**Two consumers, and both are needed** — which is what run 27 settles about the
+selection question the issue left open. The bot **never chose that asteroid**:
+across 265 `Lock target from overview entry '…'` lines in that run, not one
+names it. The reading before it appeared shows the bot Ctrl+clicking the row for
+`Sunder Alvi`, and the next reading reads `target Infested Asteroid`. That is
+the distance-sorted overview re-sorting between the reading and the click, the
+same row shift already documented for the loot cascade — so the icon rule is
+exonerated, and **a `never-attack` name list would not have helped, because no
+name-based rule was ever consulted for this object.**
+
+So `shouldAttackOverviewEntry` gains the subtraction (one choke point, since the
+lock candidates, the scroll-to-reveal and `anyAttackableInOverview` all ask it),
+and the branch that matters unlocks it from the *target bar*:
+`activeTargetGivenUpAsImmune` reads the whole overview rather than
+`overviewEntriesToAttack`, because giving up has already removed the row from
+that list. Nothing here chooses which locked target EVE calls the active one, so
+declining to shoot would leave the object in the slot and reach the same branch
+again next reading — run 27 with a different decision line. Freeing the slot is
+all it has to do; `activateOneOfTheLockedTargets` clicks another locked target
+on the next reading. The unlock is the locked-target-bar icon that already
+exists, one of the two cascades needing a 200px tolerance.
+
+**It says so out loud**, which `askForHelpToGetUnstuck` never did for run 27:
+
+```
+Every shot that has landed on 'Infested Asteroid' did zero damage, 8 of them by
+the client's own count -- these shots are achieving nothing. Unlock it
+(Ctrl+Shift+Click) and leave it alone for the rest of the session.
+```
+
+and the status line carries `shots landing for zero: 'X' 3/8` every reading, so
+a target climbing towards the threshold and one that never climbs are
+distinguishable while watching a run.
+
+**No `never-attack` setting was added.** `attack-object` is a positive list and
+there is still no negative one — but a name list is exactly what failed here:
+nobody had predicted `Infested Asteroid`, and the object was never selected by
+name in the first place. What the operator gets instead is a threshold to tune
+and a run that learns the name itself. The lever an operator actually lacked
+mid-run is covered by the web console, which applies a settings change without a
+restart.
+
+**Untested against a live client.** The rule is executed through the real
+`Bot.elm` in `elm repl` and the threshold is checked against the client's own
+recorded lines, but no run has given up on anything. What to watch on the first
+one: the status line's `shots landing for zero:` clause appearing at all — if it
+never does on a run that fights, the outgoing summary is not reaching the bot —
+then the unlock line above, then `GIVEN UP ON` for the rest of the session with
+the object never locked again. The failure to watch for is a lock/unlock
+oscillation: the row shift that produced run 27's asteroid can produce it again,
+and the verdict then costs one reading each time instead of 290, which is a fix
+rather than a cure.
+
 ## When the tracker says Dock, the fight is over
 
 The mission runner's on-grid priority is the fight, then the looting, and only
@@ -1587,7 +1727,7 @@ consume the other's: #33 reads `gameLogEntriesSinceLastReading` and #32 reads
 `incomingDamageSinceLastReading`, both pure fields of a parsed record, and both
 write their verdict into a separate `BotMemory` field in the same
 `updateMemoryForNewReadingFromGame`. The place where they genuinely do share
-state is the host, where one file offset now feeds three queues — see the
+state is the host, where one file offset now feeds four queues — see the
 Architecture section, and `TailFanOutTest` for the assertion that each sees every
 line exactly once in either drain order.
 
@@ -2944,6 +3084,20 @@ exists.
   only appears when the thing it watches for happens, so a quiet run is not
   evidence the instrument works.
 
+  And it now **stops shooting an object whose every landed shot does zero
+  damage**, unlocks it and leaves it alone for the rest of the session. Run 27
+  shot an `Infested Asteroid` for roughly 290 consecutive readings with the
+  objective already finished, and no field in any reading could say so — the
+  host summed only the incoming half of the combat channel. The third synthetic
+  node, the threshold and its calibration, and why a `never-attack` setting
+  would not have helped are in "What the bot gives up on: shots that land and
+  achieve nothing" above. **Untested against a live client**, though the rule is
+  executed through the real `Bot.elm` and the threshold is checked against the
+  client's own recorded lines. What to watch first is the status line's `shots
+  landing for zero:` clause appearing at all on a run that fights; a run where it
+  never does means the outgoing summary is not reaching the bot, which is the
+  direction this whole change would fail silently in.
+
   And it now **acts on a hitpoint reading only once a second reading agrees**,
   rather than on whatever the gauge said this reading. Run 11 retreated forty
   printed decisions on `Armor reached 0%` with the armour at 82-96%, which is a
@@ -3087,11 +3241,20 @@ exists.
   the channel, and `getAllContainedDisplayTexts` empty even with the attacker
   named "No room for more".
 
-  **Four consumers now, and none has been proven live.** #31's ammo-load
+  And it carries **what this ship's own shots achieved, per target**, as
+  `outgoingDamageSinceLastReading` — the other half of the same channel, and the
+  instrument run 27 did not have. See "What the bot gives up on: shots that land
+  and achieve nothing". Verified without a live client: 46 unit tests in
+  `tools/macos-host/tests/test_zero_damage_target.py`, with the accumulation
+  rule executed through the real `Bot.elm` rather than restated in Python and
+  the threshold recounted from the client's own 77,316 outgoing damage lines.
+
+  **Five consumers now, and none has been proven live.** #31's ammo-load
   refusal (`loadRefusedByClient`), #33's capsule refusal (`shipLossFromGameLog`),
-  #41's locked acceleration gate (`gateLockedForWantOfAnItem`) and #32's
-  damage-rate retreat, the last reading the summary rather than the
-  lines. All four take the same three parts a consumer needs: a
+  #41's locked acceleration gate (`gateLockedForWantOfAnItem`), #32's
+  damage-rate retreat and #90's zero-damage verdict, the last two reading a
+  summary rather than the lines. All five take the same three parts a consumer
+  needs: a
   match on the channel and the client's own wording, a `BotMemory`
   field to carry the verdict (a reading's entries are gone by the next one, so a
   branch that does not record what it saw sees it once), and a live run that
@@ -3261,6 +3424,21 @@ load-bearing — see "The home station".
   whole window, so a bot driven out of a pocket will be brought back into it by
   the mission logic and driven out again. Survivable, and better than the
   alternative it replaced, but it is a loop and it has not been seen live.
+- **The lock click still lands on whatever row the overview re-sorted into
+  place.** Run 27's asteroid was never chosen: 265 lock commands in that run and
+  not one names it, the reading before it appeared shows a Ctrl+click aimed at
+  `Sunder Alvi`, and the next reading reads `target Infested Asteroid`. #90
+  unlocks the object once it has proved itself unhurtable, which turns 290
+  readings into one per recurrence — a fix, not a cure, and a lock/unlock
+  oscillation is what to watch for. The row shift itself is the same one
+  `openCargoOnOverviewEntry` documents for the loot cascade and is unaddressed;
+  nothing verifies that the row clicked is the row locked.
+- **Nothing reads the outgoing damage summary except #90.** The gap it was built
+  for is named twice in this file: `ammoSwapRangeErrorPercent` is "the weak
+  half" precisely because what decides whether the other charge is better is
+  whether the guns are landing, and the summary now says so per target and per
+  reading. Wiring it into the swap's gain term is the obvious follow-up and is
+  deliberately not part of #90 — that rule is being tuned separately.
 - **A webifier that deals no damage is still invisible to the bot.** #40's
   attacker set is built from the combat log, and an EWAR module that applies no
   damage writes no line there. The overview row carries the answer — the client
