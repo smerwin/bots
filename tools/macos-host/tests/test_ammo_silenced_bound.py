@@ -175,8 +175,13 @@ class EveryCounterCanActuallyAdvance(unittest.TestCase):
     # so the latched give-up is printed once rather than 763 times -- but the
     # property is about the shape a counter in this record has, and a counter
     # exempted from it because it looked harmless is how the next one drifts.
+    #
+    # `hoverAttemptsSpent` joins them from #106, and it is a bound: it is what
+    # ends the tooltip ask, where `hoverUnansweredTicks` now ends only one
+    # hover. Its reset branch is an answered tooltip, which voids the evidence
+    # the count is accumulating.
     COUNTERS = ["rangeVerdictTicks", "gunsSilencedTicks", "hoverUnansweredTicks",
-                "givenUpReadingsAgo"]
+                "hoverAttemptsSpent", "givenUpReadingsAgo"]
 
     def results_for(self, name):
         return branch_results(definition_body(bot_elm(), name))

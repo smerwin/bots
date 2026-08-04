@@ -1071,6 +1071,8 @@ type alias AmmoSwapMemory =
     , loadCascadeReachedTheMenu : Bool
     , hoverAwaitingTooltip : Bool
     , hoverUnansweredTicks : Int
+    , hoverAttemptsSpent : Int
+    , hoverAttemptSpentThisWarp : Bool
     , optimalRangeGivenUp : Bool
     , givenUp : Maybe String
     , givenUpReadingsAgo : Int
@@ -1097,6 +1099,8 @@ initAmmoSwapMemory =
     , loadCascadeReachedTheMenu = False
     , hoverAwaitingTooltip = False
     , hoverUnansweredTicks = 0
+    , hoverAttemptsSpent = 0
+    , hoverAttemptSpentThisWarp = False
     , optimalRangeGivenUp = False
     , givenUp = Nothing
     , givenUpReadingsAgo = 0
@@ -5757,7 +5761,7 @@ decideActionWhenInSpace context seeUndockingComplete =
         |> Maybe.withDefault
             (if seeUndockingComplete.shipUI |> shipUIIndicatesShipIsWarpingOrJumping then
                 describeBranch "I am in warp."
-                    (returnDronesToBay context waitForProgressInGame)
+                    (returnDronesToBay context (readWeaponOptimalRangeWhileWarping context))
 
              else
                 -- An agent conversation is not a docked-only state. EVE offers
@@ -8119,8 +8123,7 @@ ammoSwapVerdictGiveUpTicks =
     25
 
 
-{-| How many readings the bot keeps hovering a weapon waiting for its tooltip
-before deciding this client will not show one.
+{-| How many readings one hover waits for its tooltip before that hover is over.
 
 This used to disable the whole ammo swap, because the tooltip's `optimalRange`
 was the only thing that said which charge was loaded. It is not any more -- the
@@ -8129,15 +8132,163 @@ here now costs only the _refinement_: the crossover distance the swap would
 otherwise have derived from the two charges' optimal ranges. With
 `ammo-swap-range` set, nothing is lost at all.
 
-Small, because the bot holds the mouse still while it waits -- see
+**It bounds one hover and not the feature**, which is the correction issue #106
+forced -- the same correction #27 forced on `ammoSwapVerdictGiveUpTicks`, for the
+same reason. Run 32 spent this budget once, at tick 61 of a three-hour session,
+and turned the swap off for the rest of it. Five readings, asked at one moment,
+read as "this client will not show a tooltip".
+
+**It will.** Run 17 got one on the reading straight after the hover, with
+`tooltip unanswered` at 0 on all 2,473 of its ammo status lines; run 26 derived a
+44000 m crossover from two observed optimal ranges; run 30 got 21000 m on the
+third reading of its hover. What runs out here is a hover, and
+`weaponTooltipAttemptsBeforeGivingUp` is what runs out the ask.
+
+Small, because in a pocket the bot holds the mouse still while it waits -- see
 `hoverWeaponForOptimalRange` -- and holding still is holding off the rest of the
-fight. It is also attempted at most twice a session: once per charge, after which
-both optimal ranges are known and there is nothing left to learn.
+fight. Running out hands the fight back.
 
 -}
 weaponTooltipUnansweredGiveUpTicks : Int
 weaponTooltipUnansweredGiveUpTicks =
     5
+
+
+{-| How many separate hovers may go unanswered before the bot decides this client
+will not show a tooltip at all.
+
+**Each of these is a different moment, and that is the whole point.** Run 32's
+give-up rested on five readings of a _single_ hover -- one moment, sampled five
+times. Whether a Photon flyout appears is a property of the moment (CLAUDE.md's
+coordinates section, on dwell), so five readings of one hover are worth about as
+much as one.
+
+Sized against the runs' own warps, because every hover after the first is asked
+in one -- see `weaponTooltipIsWorthAsking`. Counting warp episodes in the
+recorded logs: run 30 warped about 15 times over three hours, run 26 about 14,
+run 17 six in half an hour. Six is therefore the early part of a session on all
+of them, so a client that genuinely never answers still says so long before the
+run ends, while one that answers late still gets asked.
+
+-}
+weaponTooltipAttemptsBeforeGivingUp : Int
+weaponTooltipAttemptsBeforeGivingUp =
+    6
+
+
+{-| Everything the decision to rest the mouse on a weapon turns on.
+
+A record rather than the `BotDecisionContext`, so a case can execute the rule
+below. The give-up this replaces was reachable only through a whole context, so
+the only way to check it was to restate it in Python -- and a restatement is what
+issue #106 found wrong.
+
+-}
+type alias WeaponTooltipAskCase =
+    { ammoNamesConfigured : Bool
+    , swapGivenUp : Bool
+    , crossoverIsConfigured : Bool
+    , optimalRangeIsKnown : Bool
+    , unansweredTicks : Int
+    , attemptsSpent : Int
+    , attemptSpentSinceWarpBegan : Bool
+    , shipIsWarping : Bool
+    }
+
+
+{-| Has this hover waited longer than one hover is allowed to?
+-}
+weaponTooltipAttemptIsSpent : WeaponTooltipAskCase -> Bool
+weaponTooltipAttemptIsSpent askCase =
+    weaponTooltipUnansweredGiveUpTicks < askCase.unansweredTicks
+
+
+{-| Has the bot asked at enough different moments to conclude the client will not
+answer? This is the verdict that turns the crossover off for the session.
+-}
+weaponTooltipAskIsGivenUp : WeaponTooltipAskCase -> Bool
+weaponTooltipAskIsGivenUp askCase =
+    weaponTooltipAttemptsBeforeGivingUp <= askCase.attemptsSpent
+
+
+{-| Whether to rest the mouse on a weapon on this reading.
+
+**The fight gets one hover; every hover after it is asked in warp.** That is
+issue #106's fix, and the asymmetry behind it is that retrying is cheap and
+latching is expensive: a hover is one mouse move, while the verdict it feeds is
+one of only three that switch the swap off for a whole session.
+
+A warp is the moment the bot can hold still for free. `decideActionWhenInSpace`
+answers `I am in warp` and issues nothing for the length of the manoeuvre, and
+the recorded warps run about sixteen readings -- more dwell than the budget above
+needs, several times a mission, with nothing else wanting the mouse.
+
+**The first hover stays in the pocket**, because that is where the three runs
+that got an answer asked. Runs 17, 26 and 30 all read their optimal range
+mid-fight, run 30 with twelve rats on the overview and 726 hitpoints in its
+damage window. So combat is not what starves a hover, and run 32 says the same
+thing from the other side: across the eleven steps of its failed hover the bot
+dispatched exactly **one** effect, the glide onto the module, and nothing else --
+twelve seconds of uninterrupted dwell that the flyout did not answer. That is why
+this carries no incoming-damage clause the way `swapMayDisarmTheGuns` does; the
+evidence does not support one.
+
+`attemptSpentSinceWarpBegan` is what keeps one warp from being six moments: a
+warp long enough to hold six budgets would otherwise spend the whole session's
+evidence at a single moment, which is the bug this exists to fix wearing a
+different hat.
+
+-}
+weaponTooltipIsWorthAsking : WeaponTooltipAskCase -> Bool
+weaponTooltipIsWorthAsking askCase =
+    askCase.ammoNamesConfigured
+        && not askCase.swapGivenUp
+        && not askCase.crossoverIsConfigured
+        && not askCase.optimalRangeIsKnown
+        && not (weaponTooltipAskIsGivenUp askCase)
+        && (if askCase.shipIsWarping then
+                not askCase.attemptSpentSinceWarpBegan
+
+            else
+                askCase.attemptsSpent < 1
+           )
+
+
+{-| The same case, built from a reading -- the only place the decision path and
+the memory update can disagree, so there is one of it.
+-}
+weaponTooltipAskCaseFromContext : BotDecisionContext -> WeaponTooltipAskCase
+weaponTooltipAskCaseFromContext context =
+    let
+        ammoSwap =
+            context.memory.ammoSwap
+    in
+    { ammoNamesConfigured =
+        (context.eventContext.botSettings.shortRangeAmmoName /= Nothing)
+            && (context.eventContext.botSettings.longRangeAmmoName /= Nothing)
+    , swapGivenUp = ammoSwap.givenUp /= Nothing
+    , crossoverIsConfigured = context.eventContext.botSettings.ammoSwapRangeMeters /= Nothing
+    , optimalRangeIsKnown = ammoSwap.optimalRangeInMeters /= Nothing
+    , unansweredTicks = ammoSwap.hoverUnansweredTicks
+    , attemptsSpent = ammoSwap.hoverAttemptsSpent
+    , attemptSpentSinceWarpBegan = ammoSwap.hoverAttemptSpentThisWarp
+    , shipIsWarping = shipIsWarpingInReading context.readingFromGameClient
+    }
+
+
+{-| Whether this reading has the ship in warp, for the branches that hold no
+`SeeUndockingComplete` of their own.
+
+The same predicate `decideActionWhenInSpace` short-circuits on, deliberately: the
+hover is asked in the moment that branch describes, so the two must not be able
+to disagree about what that moment is.
+
+-}
+shipIsWarpingInReading : ReadingFromGameClient -> Bool
+shipIsWarpingInReading readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.map shipUIIndicatesShipIsWarpingOrJumping
+        |> Maybe.withDefault False
 
 
 {-| How long the swap may leave the ship's guns switched off, counted from the
@@ -9761,7 +9912,7 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
         previousStepHoveredAWeapon =
             guns |> List.any (.uiNode >> previousStepHoveredElement context.previousStepsEffects)
 
-        hoverAwaitingTooltip =
+        hoverStillAwaitingTooltip =
             if previousStepHoveredAWeapon then
                 True
 
@@ -9779,8 +9930,40 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
             else
                 memoryBefore.hoverAwaitingTooltip
 
+        shipIsWarping =
+            shipIsWarpingInReading context.readingFromGameClient
+
+        -- What the rules below are asked, with the counters as they stood before
+        -- this reading. `unansweredTicks` therefore carries what this hover's
+        -- count is about to become, which is what makes the hover run out on the
+        -- reading past the budget rather than one after it.
+        hoverAskCase =
+            { ammoNamesConfigured = True
+            , swapGivenUp = memoryBefore.givenUp /= Nothing
+            , crossoverIsConfigured = context.botSettings.ammoSwapRangeMeters /= Nothing
+            , optimalRangeIsKnown = optimalRangeAfterTheLoad /= Nothing
+            , unansweredTicks = memoryBefore.hoverUnansweredTicks + 1
+            , attemptsSpent = memoryBefore.hoverAttemptsSpent
+            , attemptSpentSinceWarpBegan = memoryBefore.hoverAttemptSpentThisWarp
+            , shipIsWarping = shipIsWarping
+            }
+
+        -- This hover is over, and nothing else is. #106: what ends the ask is
+        -- `weaponTooltipAskIsGivenUp` below, counting hovers rather than the
+        -- readings of any one of them.
+        hoverAttemptRanOut =
+            hoverStillAwaitingTooltip
+                && (freshOptimalRange == Nothing)
+                && weaponTooltipAttemptIsSpent hoverAskCase
+
+        hoverAwaitingTooltip =
+            hoverStillAwaitingTooltip && not hoverAttemptRanOut
+
         hoverUnansweredTicks =
-            if freshOptimalRange /= Nothing then
+            if hoverAttemptRanOut then
+                0
+
+            else if freshOptimalRange /= Nothing then
                 0
 
             else if hoverAwaitingTooltip then
@@ -9793,9 +9976,34 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
                 -- not evidence that the client answered.
                 memoryBefore.hoverUnansweredTicks
 
+        hoverAttemptsSpent =
+            if freshOptimalRange /= Nothing then
+                -- An answer voids the evidence. This counts towards concluding
+                -- the client will not show a tooltip, and it just did.
+                0
+
+            else if hoverAttemptRanOut then
+                memoryBefore.hoverAttemptsSpent + 1
+
+            else
+                memoryBefore.hoverAttemptsSpent
+
+        -- One spent hover per warp, so that six of them are six moments. Cleared
+        -- whenever the ship is not warping, which is also every arrival: the
+        -- next warp is a fresh moment and is allowed to ask again.
+        hoverAttemptSpentThisWarp =
+            if not shipIsWarping then
+                False
+
+            else if hoverAttemptRanOut then
+                True
+
+            else
+                memoryBefore.hoverAttemptSpentThisWarp
+
         optimalRangeGivenUp =
             memoryBefore.optimalRangeGivenUp
-                || (weaponTooltipUnansweredGiveUpTicks < hoverUnansweredTicks)
+                || weaponTooltipAskIsGivenUp { hoverAskCase | attemptsSpent = hoverAttemptsSpent }
 
         -- Readings since the give-up latched, so it can be *said* once. `1` on
         -- the reading it happened and climbing after -- the ordinary counter
@@ -9835,7 +10043,10 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
 
                     else if optimalRangeGivenUp && (threshold == Nothing) then
                         Just
-                            "no crossover distance: 'ammo-swap-range' is not set and the weapon's tooltip never appeared, so there is no distance to swap at even though the menu says which charge is loaded"
+                            ("no crossover distance: 'ammo-swap-range' is not set and the weapon's tooltip did not appear across "
+                                ++ String.fromInt weaponTooltipAttemptsBeforeGivingUp
+                                ++ " separate hovers asked at different moments, so there is no distance to swap at even though the menu says which charge is loaded"
+                            )
 
                     else
                         -- A load that does not land is *not* here. It abandons
@@ -9866,6 +10077,8 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
     , loadCascadeReachedTheMenu = loadCascadeReachedTheMenu
     , hoverAwaitingTooltip = hoverAwaitingTooltip
     , hoverUnansweredTicks = hoverUnansweredTicks
+    , hoverAttemptsSpent = hoverAttemptsSpent
+    , hoverAttemptSpentThisWarp = hoverAttemptSpentThisWarp
     , optimalRangeGivenUp = optimalRangeGivenUp
     , givenUp = givenUp
     , givenUpReadingsAgo = givenUpReadingsAgo
@@ -10105,14 +10318,11 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
 
         -- Reading the optimal range is a refinement now, not the mechanism, and
         -- it is only worth the held mouse while it is the only thing that can
-        -- answer. With `ammo-swap-range` set it never is; with the loaded
-        -- charge's range already read there is nothing to add until the charge
-        -- changes; and once the client has shown it has no tooltip there is
-        -- nothing left to ask.
+        -- answer. `weaponTooltipIsWorthAsking` owns the whole of that question,
+        -- including #106's answer to how often a pocket may be asked -- once,
+        -- after which the ask moves to the warps, where the mouse is free.
         stillWorthReadingTheOptimalRange =
-            not ammoSwap.optimalRangeGivenUp
-                && (context.eventContext.botSettings.ammoSwapRangeMeters == Nothing)
-                && (ammoSwap.optimalRangeInMeters == Nothing)
+            weaponTooltipIsWorthAsking (weaponTooltipAskCaseFromContext context)
 
         describeRanges =
             "target "
@@ -10406,19 +10616,26 @@ a tooltip that never appears. And while it waits it holds the whole decision
 here rather than handing the fight on, because the fight is what would move the
 mouse: a click on a target or an overview row ends the dwell just as surely.
 
-Only reached while the crossover distance is still unknown, which means only
-while `ammo-swap-range` is unset, and at most until
-`weaponTooltipUnansweredGiveUpTicks` readings have gone by without an answer.
+**Two callers, and only one of them is in a fight.** The fight's own path reaches
+it while a target is locked, and `readWeaponOptimalRangeWhileWarping` reaches it
+in warp, which since #106 is where every hover after the first is asked.
+`weaponTooltipIsWorthAsking` decides which, and bounds both:
+`weaponTooltipUnansweredGiveUpTicks` readings for this hover, and
+`weaponTooltipAttemptsBeforeGivingUp` hovers for the ask.
+
 Holding costs less than it reads: guns and drones already engaged keep cycling
 with no further input, so a few readings of issuing nothing is a few readings of
-not _changing_ anything, not a ceasefire.
+not _changing_ anything, not a ceasefire. In warp it costs nothing at all, since
+the branch it replaces was `waitForProgressInGame`.
 
 Holding still could in principle age a pending lock attempt past
 `lockAttemptReadingsBeforeVerdict` and have a lock the bot never gave a chance
-recorded as a refusal. It cannot, and the reason is worth keeping if either side
-is changed: a refusal is only counted with the target bar empty at both ends of
-the attempt, and this branch is only reachable with an active target. Letting the
-ammo path run without one would connect them.
+recorded as a refusal, and the reason it cannot is worth keeping if either side
+is changed. A refusal is only counted with the target bar empty at both ends of
+the attempt and the clicked row still on the overview: the fight's caller runs
+only with an active target, so the bar is not empty there, and a ship in warp has
+left the grid the row was on. Letting the ammo path hold still on a grid with an
+empty target bar would connect them.
 
 -}
 hoverWeaponForOptimalRange : BotDecisionContext -> ShipUIModuleButton -> DecisionPathNode
@@ -10429,7 +10646,11 @@ hoverWeaponForOptimalRange context referenceGun =
                 ++ (context.memory.ammoSwap.hoverUnansweredTicks |> String.fromInt)
                 ++ " of "
                 ++ String.fromInt weaponTooltipUnansweredGiveUpTicks
-                ++ " readings) -- the mouse is already resting on it, and moving anything ends the hover."
+                ++ " readings of hover "
+                ++ String.fromInt (context.memory.ammoSwap.hoverAttemptsSpent + 1)
+                ++ " of "
+                ++ String.fromInt weaponTooltipAttemptsBeforeGivingUp
+                ++ ") -- the mouse is already resting on it, and moving anything ends the hover."
             )
             waitForProgressInGame
 
@@ -10439,6 +10660,40 @@ hoverWeaponForOptimalRange context referenceGun =
             (decideActionForCurrentStep
                 (EveOnline.BotFramework.mouseMoveToUIElement referenceGun.uiNode)
             )
+
+
+{-| Ask for the weapon's tooltip while the ship is in warp, where holding the
+mouse still costs nothing.
+
+Issue #106. The hover needs sustained, uninterrupted dwell, and until now the
+only branch that asked for it was inside the fight -- reachable only with an
+active target, which is to say only ever at a moment when the mouse is wanted for
+something else and the bot has to hold the whole fight to wait. A warp is the
+opposite of that moment and the bot is already sitting in one:
+`decideActionWhenInSpace` answers `I am in warp` and hands on to
+`waitForProgressInGame`, so this replaces _waiting_ with _waiting on the module_.
+
+Placed after `returnDronesToBay`, which is the caller's own ordering: getting the
+drones back before the warp finishes is worth more than a refinement, and run 11
+spent 21 readings of `I am in warp` doing exactly that. This only ever runs on
+the readings that would otherwise have issued nothing at all.
+
+Answers `waitForProgressInGame` where there is nothing to ask or no gun to ask
+it of, so a warp with the crossover already known is unchanged.
+
+-}
+readWeaponOptimalRangeWhileWarping : BotDecisionContext -> DecisionPathNode
+readWeaponOptimalRangeWhileWarping context =
+    if not (weaponTooltipIsWorthAsking (weaponTooltipAskCaseFromContext context)) then
+        waitForProgressInGame
+
+    else
+        case weaponModuleButtonsLeftToRight context.readingFromGameClient |> List.reverse |> List.head of
+            Nothing ->
+                waitForProgressInGame
+
+            Just referenceGun ->
+                hoverWeaponForOptimalRange context referenceGun
 
 
 {-| Whether this host is carrying the client's game log at all.
@@ -10601,6 +10856,15 @@ describeAmmoSwapState context =
                         ++ describeOptional "seen high" ammoSwap.optimalRangeSeenHigh
                         ++ "), tooltip unanswered "
                         ++ String.fromInt ammoSwap.hoverUnansweredTicks
+                        -- #106: the readings are this hover's and the hovers are
+                        -- the session's, and the give-up counts the second. An
+                        -- operator watching only the first would read run 32's
+                        -- `5` as the feature about to die, which it no longer
+                        -- is.
+                        ++ ", hovers spent "
+                        ++ String.fromInt ammoSwap.hoverAttemptsSpent
+                        ++ " of "
+                        ++ String.fromInt weaponTooltipAttemptsBeforeGivingUp
                         ++ (if ammoSwap.optimalRangeGivenUp then
                                 " (given up)"
 
