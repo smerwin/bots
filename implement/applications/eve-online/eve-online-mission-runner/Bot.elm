@@ -626,6 +626,7 @@ type alias BotMemory =
     , lowestArmorPercentSinceHealthy : Int
     , hitpoints : HitpointsMemory
     , incomingDamage : IncomingDamageMemory
+    , shipScale : ShipScaleMemory
     , zeroDamage : ZeroDamageMemory
     , droneBayOpenedFromShipCard : Bool
     , droneBayWillTakeNoMore : Bool
@@ -918,6 +919,52 @@ type alias IncomingDamageSample =
     -- than only in `lastAttacker`, because the window of these names is what
     -- `namesOfRecentAttackers` hands to the target selection. See issue #40.
     , attacker : Maybe String
+    }
+
+
+{-| What this session has worked out about how big the ship it is flying is.
+
+**Issue #119.** `run-away-incoming-damage-threshold` is the one number in the
+settings that is about a _hull_ rather than about the game -- 3500 sits between
+the worst 45-second window any surviving session absorbed (3114) and the window
+the session that lost the ship peaked at (4101) -- and nothing in the bot
+notices when it stops describing the ship. Moving to a battleship changes the
+tank by a large multiple in one step and the number does not move with it,
+silently, in whichever direction that ship differs.
+
+The client states both halves of the arithmetic on every reading it is being
+shot on. The combat log says how much damage arrived, already summed host-side
+into `incomingDamageSinceLastReading`; the gauge says how many percentage points
+it moved. Their ratio is the pool that moved, in hitpoints. This is the move
+`targeting-range` made when it stopped asserting a lock range and learned one
+from accepted and refused locks, and the move the host made when it stopped
+assuming a Retina backing scale and read `UIRoot`'s own canvas size.
+
+`shieldHitpointsObserved` is one such ratio per admissible reading, newest
+first, bounded by `shipScaleObservationsKept`. `damageOnTheLastReading` is what
+makes an observation _possible_, and it is here rather than inferred because the
+two halves do not arrive on the same reading -- see
+`shipScaleObservationFromReading`.
+
+**The shield gauge, not the armour one, and that is measured rather than
+chosen.** Over 27,710 readings in the 22 recorded runs that carry this channel,
+the shield ratio agrees with itself across runs and the armour ratio does not:
+twelve runs reach enough shield observations to derive anything and their
+answers span 1833 to 2095 hitpoints, a spread of 14%, while the seven that reach
+enough armour observations span 2262 to 6550, a factor of nearly three. The
+reason is the second noise source issue #119 names: this ship repairs its armour
+and does not boost its shield, so armour points recovered while damage lands
+break the ratio outright and shield points do not. **That is also the one way
+this fails dangerously**, and it is stated here rather than left to be found: a
+hull with a shield booster would corrupt the readable gauge the way the repairer
+corrupts the armour one here, in the direction that raises the threshold and
+keeps the ship in the pocket, and nothing in this corpus calibrates a detector
+for it.
+
+-}
+type alias ShipScaleMemory =
+    { shieldHitpointsObserved : List Int
+    , damageOnTheLastReading : Maybe Int
     }
 
 
@@ -7404,7 +7451,9 @@ runAwayIfLowHealth context shipUI =
             context.eventContext.botSettings.runAwayShieldHitpointsThresholdPercent
 
         incomingDamageThreshold =
-            context.eventContext.botSettings.runAwayIncomingDamageThreshold
+            incomingDamageThresholdForThisShip
+                context.eventContext.botSettings.runAwayIncomingDamageThreshold
+                context.memory.shipScale
 
         damageInWindow =
             incomingDamageInWindow context.memory.incomingDamage
@@ -8684,6 +8733,18 @@ just inside it.
 A share rather than a number for `defaultRunAwayIncomingDamageThreshold`'s own
 reason: 3500 is a fact about this hull, so anything derived from it has to move
 with it rather than being re-measured by hand on the next ship.
+
+**The share is of the _setting_, and since #119 that is a distinction with a
+consequence.** The retreat now scales its own threshold per session from the
+ship's derived shield pool, and letting this budget follow that scaling would
+have moved it too -- on this hull, over the twelve recorded runs that derive
+anything, to somewhere between 420 and 480. 480 is past the 445 above, so the
+upper end would license disarming on exactly the windows the recordings show
+escalating. The eighth was measured against this corpus and this corpus is one
+hull's worth of evidence, so it stays pinned to the number an operator set. What
+that costs is stated rather than hidden: on a hull whose setting nobody retunes,
+the retreat re-derives itself and this budget does not, so the swap defers more
+often than it needs to -- the direction that keeps the guns firing.
 
 -}
 ammoSwapDisarmDamageBudgetDivisor : Int
@@ -12528,6 +12589,10 @@ initBotMemory =
         , lastAttacker = Nothing
         , retreating = False
         }
+    , shipScale =
+        { shieldHitpointsObserved = []
+        , damageOnTheLastReading = Nothing
+        }
     , zeroDamage =
         { landedHitsAtZero = []
         , namesGivenUpOn = []
@@ -15592,10 +15657,154 @@ on this account. Flying anything else means re-deriving it, and the failure mode
 of carrying it over is silent in the dangerous direction: on a bigger hull it
 retreats from fights it would win, and on a smaller one it never fires.
 
+Since #119 the setting is a statement about _this_ hull that the session scales
+to whatever hull it turns out to be flying -- see
+`scaledRunAwayIncomingDamageThreshold`. It is still what an operator sets and
+still exactly what is used when nothing can be derived.
+
 -}
 defaultRunAwayIncomingDamageThreshold : Int
 defaultRunAwayIncomingDamageThreshold =
     3500
+
+
+{-| The shield pool of the hull `defaultRunAwayIncomingDamageThreshold` was
+measured on.
+
+**The scale factor is a ratio, so this is the denominator and it has to be
+measured the same way the numerator is.** It is
+`shieldHitpointsFromObservations` run over every admissible observation in the
+recorded corpus at once: 141 of them, across the 22 runs that carry the
+incoming-damage channel, lower quartile **1909**. The twelve runs that reach
+`shipScaleObservationsBeforeTrusted` on their own answer 1833, 1855, 1885, 1909,
+1921, 1922, 1924, 1942, 1944, 1958, 2028 and 2095 -- a 14% spread, which is what
+one session's worth of evidence is worth about a number this steady.
+
+**What that spread costs is bounded, and the bound is the point.** Scaling 3500
+by each of those twelve answers gives 3360 to 3841. Every one of those is still
+above the 3114 the worst surviving session absorbed and still below the 4101 the
+session that lost the ship peaked at -- so on the hull this was calibrated on
+the derivation moves the threshold only _inside_ the band the original
+calibration already established as correct. It cannot introduce a retreat on a
+session that survived, and it cannot miss the session that did not.
+
+-}
+shieldHitpointsWhereTheThresholdWasCalibrated : Int
+shieldHitpointsWhereTheThresholdWasCalibrated =
+    1909
+
+
+{-| How much damage has to arrive before dividing by a gauge movement is worth
+anything.
+
+The gauge is an `Int` percentage, so the movement it reports is the true
+movement truncated: an observed drop of `k` points was really somewhere in
+`(k - 1, k + 1)`. On a pool near 1900 hitpoints, 150 damage is about 8 points,
+where that is a 12% error; 20 damage is one point, where it is 100%.
+
+Measured over the corpus, the small observations are not merely noisier, they
+are _biased_: grouped by the size of the movement, readings carrying at least
+100 damage against a two-point drop imply a median of 7750 hitpoints, three
+points 5900, four points 5100, and five points and up settle at 1900 to 2100.
+Every mechanism behind that bias -- shield regeneration, quantisation of a small
+drop, damage the host summed a reading either side of the one the gauge answered
+on -- shrinks the movement without shrinking the damage, so all of them read as
+_more_ tank than there is. That is the direction that raises the threshold and
+keeps the ship in the pocket, which is why the floor is here and why the
+statistic below is a lower quartile.
+
+150 is where the corpus is both clean and still plentiful: it leaves 141
+observations across twelve runs, and the per-run answers agree to 14%. Dropping
+it to 50 buys four more runs and widens the agreement to 22%.
+
+-}
+smallestDamageWorthDividingByAGaugeMove : Int
+smallestDamageWorthDividingByAGaugeMove =
+    150
+
+
+{-| The smallest gauge movement an observation may be built on.
+
+One point is the truncation error itself, so an observation resting on one is
+mostly measuring the rounding. Thirteen of the corpus's 179 damage-bearing
+shield drops are one point wide and they are dropped.
+
+-}
+smallestGaugeMoveWorthDividing : Int
+smallestGaugeMoveWorthDividing =
+    2
+
+
+{-| The largest one-reading gauge movement this bot will believe.
+
+**`believed` does not catch every corruption, and this is the residue.** A
+single garbage reading never produces a movement at all, because `believed` is
+the healthier of the last two readings and a lone bad value is never the
+healthier one. A corruption that lasts _two_ readings does, and CLAUDE.md
+records two of them by name: run 10's shield went `84, 14, 17, 84` and run 11's
+`96, 7, 7, 96`.
+
+60 sits in a gap the corpus draws rather than at a number someone liked. Of the
+179 shield drops that carry at least `smallestDamageWorthDividingByAGaugeMove`
+damage, the largest credible one is **52 points against 1054 hitpoints**, which
+implies 2026 -- squarely with every other observation. The only two above 60 are
+70 points against 653 and 80 against 475, implying 932 and 593, which is half of
+everything else and is the shape of a gauge that fell further than the damage
+can explain. Eleven further movements over 60 points -- 62, 67, 71, 74, 74, 75,
+75, 87, 88, 89, 89 -- occur on readings carrying no real damage at all, so they
+are turned away by the floor before this bound is even asked.
+
+So this bound costs two observations in the whole corpus and rejects exactly the
+class it exists for. **Note which direction it guards.** A movement too large
+for the damage implies too _little_ tank, which lowers the threshold and leaves
+the pocket early. That is the cheap failure; the expensive one is the small
+movement, and the floor above is what answers it.
+
+-}
+largestCredibleGaugeMove : Int
+largestCredibleGaugeMove =
+    60
+
+
+{-| How many observations must agree before the ship's scale is used at all.
+
+**One division is not a measurement**, for the reason one gauge reading is not
+evidence: the noise on a single observation is larger than the difference this
+whole change exists to detect. Six is where a session has enough for the lower
+quartile below to mean something -- at six the quartile is the second smallest,
+so a single contaminated observation cannot be the answer.
+
+Twelve of the 22 recorded runs reach six; the other ten never take enough
+sustained fire, and they get the configured threshold unchanged, which is
+current behaviour exactly. Reaching it takes between 57 and 2,710 readings
+depending on how hard the run is fought.
+
+**A spread test was measured and is deliberately not here.** Refusing to derive
+when the observations disagree with each other is the obvious extra
+corroboration, and the corpus says it would not work: the twelve deriving runs
+carry inter-quartile ratios from 1.07 to 14.88 while answering 1833 to 2095, so
+a test tight enough to bite would have refused four runs that were right. It
+would not have caught the gauge it needs to catch either -- the armour gauge,
+which the repairer corrupts, spans 2.67 to 4.88 and sits inside the shield's
+range. Corroboration here is by count, and contamination is answered by the
+quartile rather than by refusing.
+
+-}
+shipScaleObservationsBeforeTrusted : Int
+shipScaleObservationsBeforeTrusted =
+    6
+
+
+{-| A backstop on the observation list's length, not a policy.
+
+Observations are rare -- the busiest recorded run produced 22 in 2,487 readings
+-- so this is far above anything a session reaches, and it exists so a very long
+session cannot grow the list without limit. Oldest are dropped first.
+
+-}
+shipScaleObservationsKept : Int
+shipScaleObservationsKept =
+    64
 
 
 {-| How far back the incoming-damage retreat looks.
@@ -15783,6 +15992,164 @@ hitpointsReadingMovedInWindow memory =
             )
 
 
+{-| One reading's worth of evidence about how big this ship's shield is.
+
+**The pairing is the trap in this rule, and it is the reason this is a function
+over a record rather than three lines inside the memory update.** `believed` is
+the healthier of the last two readings, so on a falling gauge it _is_ the
+previous reading's value -- which means the movement it shows between the last
+reading and this one is the movement the _last_ reading's damage caused, not
+this one's. Hence `damageOnTheLastReading`.
+
+That is measured, not reasoned about. Pairing this reading's gauge movement with
+this reading's damage yields 63 admissible observations across the corpus and
+three runs that can derive anything, spanning 1108 to 2675; pairing it with the
+previous reading's damage yields 202 and twelve runs, spanning 1625 to 2095. The
+naive pairing does not merely lose evidence, it disagrees with itself.
+
+Four things make an observation admissible, and each is a way the ratio lies:
+
+  - **Both gauges believable at both ends.** `Nothing` from either is a reading
+    with no confirmed value, and there is no movement to measure across one.
+  - **The other gauge did not move.** Damage spilling out of the shield and into
+    the armour inside one reading moves two gauges, and all of it would be
+    charged to the one being measured. 23 of the corpus's 179 damage-bearing
+    shield drops are spills and they are dropped rather than apportioned --
+    apportioning needs the very number this is deriving.
+  - **The movement is between `smallestGaugeMoveWorthDividing` and
+    `largestCredibleGaugeMove`.** Below, the truncation error dominates; above,
+    it is the two-reading gauge corruption `believed` cannot see.
+  - **The damage is at least `smallestDamageWorthDividingByAGaugeMove`.**
+
+What comes back is the whole pool in hitpoints, not hitpoints per point: a
+movement of `k` points for `d` damage means the pool is `d * 100 / k`.
+
+-}
+shipScaleObservationFromReading :
+    { damageOnTheLastReading : Maybe Int
+    , shieldBefore : Maybe Int
+    , shieldNow : Maybe Int
+    , armorBefore : Maybe Int
+    , armorNow : Maybe Int
+    }
+    -> Maybe Int
+shipScaleObservationFromReading observationCase =
+    case
+        ( observationCase.damageOnTheLastReading
+        , Maybe.map2 (-) observationCase.shieldBefore observationCase.shieldNow
+        , Maybe.map2 (-) observationCase.armorBefore observationCase.armorNow
+        )
+    of
+        ( Just damage, Just shieldMove, Just armorMove ) ->
+            if
+                (armorMove == 0)
+                    && (smallestGaugeMoveWorthDividing <= shieldMove)
+                    && (shieldMove <= largestCredibleGaugeMove)
+                    && (smallestDamageWorthDividingByAGaugeMove <= damage)
+            then
+                Just (damage * 100 // shieldMove)
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+
+{-| The session's answer for how big this ship's shield is, or no answer.
+
+**The lower quartile, and the asymmetry is what picks it.** Every contamination
+the corpus contains shrinks the gauge's movement without shrinking the damage --
+passive shield regeneration, a reading's damage summed either side of the one
+the gauge answered on, truncation of a small drop -- and every one of them
+therefore reads as _more_ tank than there is. Damage spilling into a second
+gauge, which would read as less, is excluded upstream rather than corrected. So
+the distribution has a long high tail and a short low one: pooled over the
+corpus the quartiles are 1909, 2083 and 2500, and individual runs reach 29,133.
+
+Discarding the tail that is biased in the direction that would raise the
+threshold is the whole point, and the corpus says it works where a median does
+not. Per-run lower quartiles span 1833 to 2095, a factor of 1.14; per-run
+medians span 1980 to 2700, a factor of 1.36. What it costs is sitting a little
+low, which retreats a little early -- the cheap direction.
+
+`Nothing` below `shipScaleObservationsBeforeTrusted` is the refusal that keeps
+this safe: no answer means the configured threshold is used unchanged, which is
+current behaviour exactly, and that is also what a host with no combat log gets.
+
+-}
+shieldHitpointsFromObservations : List Int -> Maybe Int
+shieldHitpointsFromObservations observations =
+    if List.length observations < shipScaleObservationsBeforeTrusted then
+        Nothing
+
+    else
+        observations
+            |> List.sort
+            |> List.drop (List.length observations // 4)
+            |> List.head
+
+
+{-| `run-away-incoming-damage-threshold`, scaled to the ship actually being
+flown.
+
+**The live decision is still a combat-log window against a constant**, and that
+is the property this whole change is built around rather than a detail of it.
+The retreat has three guards and this is the only one that does not read the HUD
+gauge -- deliberately, because the gauge is the weakest instrument here, so a
+corrupt gauge today costs two guards and leaves this one armed. The derivation
+feeds a number computed at _session_ scope from many readings; nothing in
+`runAwayIfLowHealth` or in the latch reads a gauge. A gauge that starts lying
+mid-session cannot disarm this guard, it can only fail to have scaled it.
+
+Two properties, and both are non-negotiable rather than convenient:
+
+  - **A disabled threshold stays disabled.** `-1` means the operator switched
+    this guard off and no derivation may switch it back on.
+  - **No usable derivation means the configured value, unchanged.** That is
+    current behaviour exactly, and it is what every quiet session gets: ten of
+    the 22 recorded runs never take enough sustained fire to observe anything.
+
+The ratio is against `shieldHitpointsWhereTheThresholdWasCalibrated`, so this
+hull answers 1.0 by construction and a hull with three times the shield answers
+3.0. **It is a proxy for the tank and not the tank**, because the armour half of
+the tank is not measurable on a ship that repairs it -- see `ShipScaleMemory`.
+What it buys is that the number moves with the hull at all, which is the failure
+issue #119 was filed on; what it does not buy is a fit-independent answer.
+
+-}
+scaledRunAwayIncomingDamageThreshold : { configured : Int, shieldHitpoints : Maybe Int } -> Int
+scaledRunAwayIncomingDamageThreshold thresholdCase =
+    case thresholdCase.shieldHitpoints of
+        Just shieldHitpoints ->
+            if thresholdCase.configured < 0 then
+                thresholdCase.configured
+
+            else
+                thresholdCase.configured
+                    * shieldHitpoints
+                    // shieldHitpointsWhereTheThresholdWasCalibrated
+
+        Nothing ->
+            thresholdCase.configured
+
+
+{-| The threshold this session's retreat is actually comparing against.
+
+One expression, called from the three places that need it -- the latch in
+`updateIncomingDamageMemory`, the branch that prints why it fired, and the
+status line -- so none of them can disagree about what the guard's own number
+is. `ammoSwapDisarmDamageBudget` deliberately does _not_ call it; see there.
+
+-}
+incomingDamageThresholdForThisShip : Int -> ShipScaleMemory -> Int
+incomingDamageThresholdForThisShip configured shipScale =
+    scaledRunAwayIncomingDamageThreshold
+        { configured = configured
+        , shieldHitpoints = shieldHitpointsFromObservations shipScale.shieldHitpointsObserved
+        }
+
+
 {-| The damage-rate guard, in the status line, every reading.
 
 Whether the host carries the channel is reported first and unconditionally,
@@ -15800,7 +16167,9 @@ describeIncomingDamage context =
             context.memory.incomingDamage
 
         threshold =
-            context.eventContext.botSettings.runAwayIncomingDamageThreshold
+            incomingDamageThresholdForThisShip
+                context.eventContext.botSettings.runAwayIncomingDamageThreshold
+                context.memory.shipScale
     in
     if not memory.hostCarriesTheChannel then
         "dmg: NO COMBAT LOG -- damage retreat and frozen-reading check unarmed"
@@ -15861,6 +16230,42 @@ describeIncomingDamage context =
                             ++ (names |> List.map (\name -> "'" ++ name ++ "'") |> String.join ", ")
                             ++ " (any overview row with one of these names is a target)."
                )
+            ++ describeShipScale context
+
+
+{-| What the session has worked out about the ship's size, in the status line.
+
+Printed on every reading rather than only once it has an answer, because "no
+answer yet" and "this hull is the size the setting assumes" produce the _same_
+threshold and would otherwise grep identically -- which is the shape of failure
+this file keeps a section on. The observation count is what an operator watches:
+a run that fights hard and never reaches
+`shipScaleObservationsBeforeTrusted` is one where the shield is not the gauge
+taking the damage, and the tell is the count sitting at 0 while `dmg` climbs.
+
+-}
+describeShipScale : BotDecisionContext -> String
+describeShipScale context =
+    let
+        observed =
+            context.memory.shipScale.shieldHitpointsObserved
+    in
+    case shieldHitpointsFromObservations observed of
+        Nothing ->
+            " Ship scale: "
+                ++ (List.length observed |> String.fromInt)
+                ++ "/"
+                ++ (shipScaleObservationsBeforeTrusted |> String.fromInt)
+                ++ " observations -- going by the threshold as configured."
+
+        Just shieldHitpoints ->
+            " Ship scale: shield reads "
+                ++ (shieldHitpoints |> String.fromInt)
+                ++ " hitpoints from "
+                ++ (List.length observed |> String.fromInt)
+                ++ " observations, against the "
+                ++ (shieldHitpointsWhereTheThresholdWasCalibrated |> String.fromInt)
+                ++ " the threshold was calibrated on."
 
 
 {-| Whether this ship's own shots are achieving anything, in the status line.
@@ -16094,8 +16499,8 @@ it must not be blocked by a trivial reading, where the retreat must not be
 tripped by a corrupt one -- and neither rule may quietly move the other's input.
 
 -}
-updateIncomingDamageMemory : UpdateMemoryContext BotSettings -> HitpointsMemory -> IncomingDamageMemory -> IncomingDamageMemory
-updateIncomingDamageMemory context hitpoints memoryBefore =
+updateIncomingDamageMemory : UpdateMemoryContext BotSettings -> HitpointsMemory -> ShipScaleMemory -> IncomingDamageMemory -> IncomingDamageMemory
+updateIncomingDamageMemory context hitpoints shipScale memoryBefore =
     let
         hitpointsNow =
             Maybe.map2 Tuple.pair hitpoints.shield.believed hitpoints.armor.believed
@@ -16146,8 +16551,16 @@ updateIncomingDamageMemory context hitpoints memoryBefore =
         damageInWindow =
             incomingDamageInWindow updated
 
+        -- Scaled to the ship this session turns out to be flying, and computed
+        -- from many readings at session scope rather than from this one -- see
+        -- `scaledRunAwayIncomingDamageThreshold`. The comparison below is still
+        -- a combat-log window against a number no gauge on this reading can
+        -- move, which is what keeps this the one retreat guard a corrupt gauge
+        -- cannot disarm.
         threshold =
-            context.botSettings.runAwayIncomingDamageThreshold
+            incomingDamageThresholdForThisShip
+                context.botSettings.runAwayIncomingDamageThreshold
+                shipScale
     in
     { updated
         | retreating =
@@ -16159,6 +16572,52 @@ updateIncomingDamageMemory context hitpoints memoryBefore =
 
             else
                 memoryBefore.retreating
+    }
+
+
+{-| Fold this reading into what the session knows about the ship's size.
+
+Here rather than anywhere else for the reason every verdict from this channel is
+here: a reading's `incomingDamageSinceLastReading` does not survive to the next
+reading, and this rule needs the _previous_ one's.
+
+**It runs before `updateIncomingDamageMemory` and that ordering is load-bearing
+in one direction only.** The latch reads the scaled threshold, so an observation
+made on this reading counts towards this reading's comparison rather than the
+next one's. Nothing flows the other way: this rule reads the two hitpoint
+memories and the parser's damage field, none of which the damage memory writes,
+so there is no cycle to get wrong.
+
+`damageOnTheLastReading` is written from the parser's field unconditionally,
+including the `Nothing` a host with no combat log gives, because that `Nothing`
+is what makes the next reading decline to observe anything -- which is the
+correct answer there and not a defaulted zero.
+
+-}
+updateShipScaleMemory : UpdateMemoryContext BotSettings -> HitpointsMemory -> HitpointsMemory -> ShipScaleMemory -> ShipScaleMemory
+updateShipScaleMemory context hitpointsBefore hitpointsNow memoryBefore =
+    let
+        observed =
+            shipScaleObservationFromReading
+                { damageOnTheLastReading = memoryBefore.damageOnTheLastReading
+                , shieldBefore = hitpointsBefore.shield.believed
+                , shieldNow = hitpointsNow.shield.believed
+                , armorBefore = hitpointsBefore.armor.believed
+                , armorNow = hitpointsNow.armor.believed
+                }
+    in
+    { shieldHitpointsObserved =
+        case observed of
+            Just shieldHitpoints ->
+                shieldHitpoints
+                    :: memoryBefore.shieldHitpointsObserved
+                    |> List.take shipScaleObservationsKept
+
+            Nothing ->
+                memoryBefore.shieldHitpointsObserved
+    , damageOnTheLastReading =
+        context.readingFromGameClient.incomingDamageSinceLastReading
+            |> Maybe.map .damage
     }
 
 
@@ -16331,8 +16790,14 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- the previous one: the reading fire first arrives on is exactly the
         -- reading a swap must not begin, and a one-reading-stale window would
         -- give it away.
+        -- Ahead of the damage memory, because the latch there compares the
+        -- window against a threshold scaled by what this answers. See
+        -- `updateShipScaleMemory` for why the ordering only matters one way.
+        shipScaleNow =
+            updateShipScaleMemory context botMemoryBefore.hitpoints hitpointsNow botMemoryBefore.shipScale
+
         incomingDamageNow =
-            updateIncomingDamageMemory context hitpointsNow botMemoryBefore.incomingDamage
+            updateIncomingDamageMemory context hitpointsNow shipScaleNow botMemoryBefore.incomingDamage
 
         dronesInSpaceCountNow =
             dronesInSpaceCount context.readingFromGameClient
@@ -16587,6 +17052,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             botMemoryBefore.lowestArmorPercentSinceHealthy
     , hitpoints = hitpointsNow
     , incomingDamage = incomingDamageNow
+    , shipScale = shipScaleNow
 
     -- The other half of the same channel, and a separate field for the same
     -- reason the host emits a separate node: the two read different fields of

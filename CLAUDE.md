@@ -2450,6 +2450,185 @@ whichever direction that ship is different.
 45 seconds is where the separation is widest: at four minutes the same
 comparison is 8689 against 9286, which no threshold could tell apart.
 
+### The threshold is a number about one hull, and the session works out which hull
+
+That last sentence — carrying it to another ship fails silently in whichever
+direction that ship is different — is issue #119, and the level 4 question is
+what made it urgent: moving to a battleship changes the tank by a large multiple
+in one step and the number does not move with it.
+
+**The client states both halves of the arithmetic on every reading it is being
+shot on.** The combat log says how much damage arrived, already summed
+host-side; the gauge says how many percentage points it moved; their ratio is
+the pool that moved, in hitpoints. This is the move `targeting-range` made when
+it stopped asserting a lock range and learned one, and the move the host made
+when it stopped assuming a Retina backing scale and read `UIRoot`'s own canvas
+size.
+
+**Why "make it a percentage of shield/armour HP" is not the fix**, since it is
+the obvious formulation and it fails three ways. `ParseUserInterface.Hitpoints`
+is three percentages of a maximum the client never states, so the bot cannot
+evaluate "20% of my shield". It would put a common-mode failure in the one place
+the design avoids one — this is the only one of the three guards that does not
+read the gauge, so a corrupt gauge today costs two guards and leaves this one
+armed, and a live comparison against the gauge would disarm all three at once in
+the direction that keeps the ship in the pocket. And share-of-maximum is the
+wrong control anyway: absorbing 20% of the tank in 45 seconds is routine at full
+health and fatal at 25%.
+
+**The measurement came before any bot code, and it is what chose the gauge.**
+Over the 27,710 readings in the 22 recorded runs that carry this channel, the
+shield ratio agrees with itself across runs and the armour ratio does not:
+twelve runs reach enough shield observations to derive anything and answer 1833,
+1855, 1885, 1909, 1921, 1922, 1924, 1942, 1944, 1958, 2028 and 2095 hitpoints —
+a 14% spread — while the seven that reach enough armour observations span 2262
+to 6550, a factor of nearly three. The reason is the second noise source the
+issue names: **this ship repairs its armour and does not boost its shield**, so
+armour points recovered while damage lands break the ratio outright and shield
+points do not.
+
+**The pairing is the trap, and it is not the obvious one.** `believed` is the
+healthier of the last two readings, so on a falling gauge it *is* the previous
+reading's value — which means the movement it shows at this reading is the
+movement the *previous* reading's damage caused.
+`shipScaleObservationFromReading` therefore takes `damageOnTheLastReading`.
+Measured: the naive pairing yields 63 admissible observations and three runs
+that derive anything, spanning 1108 to 2675; the lagged one yields 202 and
+twelve runs, spanning 1625 to 2095. It does not merely lose evidence, it
+disagrees with itself.
+
+**Four things make an observation admissible, and the corpus places each.** Both
+gauges believable at both ends; the other gauge unmoved (23 of the 179
+damage-bearing shield drops are spills, and apportioning one needs the number
+being derived); the movement between 2 and 60 points; and at least 150 damage.
+The two bounds guard opposite directions and only one of them is about safety:
+
+- **The floor is the dangerous direction.** Grouped by movement size, readings
+  carrying at least 100 damage against a two-point drop imply a median of 7750
+  hitpoints, three points 5900, four points 5100, and five points and up settle
+  at 1900 to 2100. Every mechanism behind that — shield regeneration,
+  quantisation of a small drop, damage summed a reading either side of the one
+  the gauge answered on — shrinks the movement without shrinking the damage, so
+  all of it reads as *more* tank than there is, which raises the threshold and
+  keeps the ship in the pocket.
+- **The ceiling is the cheap direction and exists for the corruption `believed`
+  cannot see.** A single garbage reading never produces a movement, because the
+  healthier of two readings is never the bad one; a *two*-reading corruption
+  does, and run 10's shield went `84, 14, 17, 84` and run 11's `96, 7, 7, 96`,
+  leaving believed movements of 67 and 89 points. 60 sits in a gap the corpus
+  draws: the largest credible movement anywhere is 52 points against 1054
+  hitpoints (implying 2026, squarely with everything else), the only two over 60
+  that carry real damage are 70 against 653 and 80 against 475 (implying 932 and
+  593, half of everything else), and eleven further movements of 62 to 89 points
+  occur on readings carrying no damage at all.
+
+**The statistic is the lower quartile, and the asymmetry above is what picks
+it.** Pooled over the corpus the quartiles are 1909, 2083 and 2500 — a long high
+tail and a short low one, individual runs reaching 29,133. Per-run lower
+quartiles span 1833 to 2095, a factor of 1.14; per-run medians span 1980 to
+2700, a factor of 1.36. What it costs is sitting a little low, which retreats a
+little early.
+
+**A spread test was measured and deliberately not built.** Refusing to derive
+when the observations disagree with each other is the obvious extra
+corroboration and the corpus says it would not work: the twelve deriving runs
+carry inter-quartile ratios from 1.07 to 14.88 while answering 1833 to 2095, so
+a test tight enough to bite would have refused four runs that were right — and
+it would not have caught the gauge it needs to catch, since the armour ratios
+(2.67 to 4.88) sit inside the shield's range. Corroboration is by count
+(`shipScaleObservationsBeforeTrusted`, 6) and contamination is answered by the
+quartile.
+
+**What it costs on the hull it was calibrated on is bounded, and that is the
+point.** `shieldHitpointsWhereTheThresholdWasCalibrated` is 1909, the corpus's
+own pooled lower quartile, so this hull answers 1.0 by construction. Scaling
+3500 by each of the twelve per-run answers gives **3360 to 3841** — every one
+above the 3114 the worst surviving session absorbed and below the 4101 the
+session that lost the ship peaked at. So the derivation moves the threshold only
+*inside* the band the original calibration already established: it cannot
+introduce a retreat on a session that survived, and cannot miss the one that did
+not.
+
+**Failure is today, exactly.** No usable derivation means the configured
+`run-away-incoming-damage-threshold` unchanged, which is what ten of the 22
+recorded runs would get and what a host with no combat log already gets, and
+`-1` stays `-1` — no derivation may switch a guard back on that an operator
+switched off. Reaching six observations takes between 57 and 2,710 readings
+depending on how hard a run is fought.
+
+**The per-reading comparison stays gauge-free**, which is the property the whole
+change is built around rather than a detail of it. The derivation feeds a number
+computed at session scope from many readings;
+`incomingDamageThresholdForThisShip` takes the setting and `ShipScaleMemory` and
+nothing else, and neither the latch nor `runAwayIfLowHealth` reads a gauge. A
+gauge that starts lying mid-session cannot disarm this guard, only fail to have
+scaled it.
+
+**`ammoSwapDisarmDamageBudget` deliberately does not inherit the scaling**, and
+that is the ripple the issue asked to be asserted rather than inherited. It is
+an eighth of the retreat threshold, and letting it follow the derived one would
+move it to between 420 and 480 over the runs that derive anything — 480 is past
+the 445 at which the recordings stop saying the fire does not escalate. The
+eighth was measured against this corpus and this corpus is one hull's worth of
+evidence, so the budget stays pinned to the number an operator set. The cost is
+stated rather than hidden: on a hull whose setting nobody retunes, the retreat
+re-derives itself and this budget does not, so the swap defers more often than
+it needs to — the direction that keeps the guns firing.
+
+**The one way this fails dangerously is the gauge being repaired.** A hull with
+a shield booster would corrupt the readable gauge the way the repairer corrupts
+the armour one here, in the direction that raises the threshold, and nothing in
+this corpus calibrates a detector for it. Stated here rather than left to be
+found.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_ship_scale_from_the_gauge.py` (37 cases). The three
+pure rules are executed through the real `Bot.elm` in `elm repl` rather than
+restated in Python — the admissibility rule against each of the four clauses and
+against run 10's and run 11's own recorded corruptions, the estimate at both
+sides of its evidence bound and against a set whose median and quartile differ,
+and the scaling against a disabled guard, an absent derivation, the calibration
+hull and a hull three times its size. The corpus is recomputed from
+`~/eve-bot-logs` as *relations* rather than as the numbers above — the shield
+agrees with itself and the armour does not, the lagged pairing yields more than
+twice the evidence of the naive one, the reference is the corpus's own answer to
+within 5%, every deriving run lands inside the calibrated band, and most runs
+derive nothing at all — so a growing corpus cannot turn a true claim red. The
+placement, the ordering against the latch, the gauge-free comparison and the
+ammo budget's deliberate unchangedness are read out of the source through a
+whitespace-collapsing reader.
+
+Confirmed by mutation, **fourteen** of them, each failing a named case: the
+ceiling raised past run 10's corruption and past run 11's, the floor on the
+damage or on the movement dropped, the spill clause dropped, the ratio read as
+hitpoints per point rather than as the whole pool, the observation reading the
+live gauge instead of `believed`, the pairing taking this reading's damage
+instead of the previous one's, the quartile replaced by the median or by the
+minimum, the evidence bound cut to one observation, a disabled threshold scaled
+anyway, the scale folded in after the latch instead of before it, and the ammo
+budget pointed at the scaled threshold.
+
+**Four mutations survived the first time and three were real holes**, all of one
+shape: a case that reads a threshold out of `Bot.elm` and then asks only about
+`constant - 1` and `constant` passes for *any* constant, including one that
+admits everything. Dropping the damage floor to 0, the movement floor to 1 and
+the evidence bound to 1 each did exactly that. Every one of those cases now
+carries a fixed value beside the boundary pair — 20 hitpoints, a one-point move,
+three observations — and asserts the constant is above it. The fourth was a
+substring: `"shield.believed" in body` is satisfied by any one of the rule's four
+gauge ends, so a version reading `believed` at three of them and the live value
+at the fourth passed; all four are now named exactly.
+
+**Unverified: any of it running.** No run has been flown since. What to watch on
+the first one is the status line's `Ship scale:` clause — it should read
+`0/6 observations` on a quiet run and climb on one that is fought, then
+`shield reads N hitpoints from M observations` with N near 1900 on this hull. A
+run that fights hard and never leaves `0/6` means the shield is not the gauge
+taking the damage, which on this hull would itself be news. The failure to watch
+for is N drifting far from 1900 on the ship the number came from, which would
+mean the gauge is being repaired or the pairing has come apart, and the tell is
+`dmg N/T` carrying a `T` that is not 3500.
+
 **A reading that cannot move is not a reading.** The third guard fires when the
 ship has absorbed `damageThatMustMoveTheHitpointsReading` (1500) inside the
 window and the `(shield, armor)` pair has not changed across it. A `Nothing` —
@@ -4309,6 +4488,25 @@ exists.
   that the status line now carries `clearing '<mission>':` on every reading a
   mission is tracked, saying which of the four cases the bot is in. A run that
   never prints that clause is the one to look into.
+
+  And it now **works out how big the ship it is flying is, and scales the
+  damage-rate retreat to it**, instead of comparing every hull against a number
+  measured on one. `run-away-incoming-damage-threshold` is 3500 because that is
+  where a battlecruiser's recorded sessions separate, and moving to a battleship
+  changes the tank by a large multiple in one step. The client states both
+  halves of the arithmetic — the combat log says how much damage arrived and the
+  gauge says how many percentage points it moved — so the session divides them,
+  many times, and takes the lower quartile. Why the shield gauge and not the
+  armour one, why the observation is paired with the *previous* reading's
+  damage, what makes one admissible, and why the ammo swap's disarm budget
+  deliberately does not inherit the scaling are in "The threshold is a number
+  about one hull, and the session works out which hull" above. **Untested
+  against a live client**, though the whole derivation is replayed through the
+  real `Bot.elm` and every number in it is recomputed from `~/eve-bot-logs`.
+  Watch the status line's `Ship scale:` clause: `0/6 observations` on a quiet
+  run, then `shield reads N hitpoints` with N near 1900 on this hull. A run that
+  fights hard and stays at `0/6` means the shield is not the gauge taking the
+  damage.
 - **`eve-online-saxrat`** now carries the general guards the mission runner
   learned — the confirmed hitpoint readings behind a low-water mark, the
   damage-rate retreat, ship-loss detection and pod recovery, a bounded drone
