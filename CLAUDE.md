@@ -1414,6 +1414,138 @@ takes other work. A stall at the confirmation means the dialog is not a
 two-button `no_dialog_button` pair after all, and the tell is 200 readings of
 the abandonment line followed by the session ending.
 
+## A message box the answer does not close is bounded, and the bot stops answering it
+
+Dismissing message boxes is the first thing `generalSetupInUserInterface` does
+after the pause menu, and that list is evaluated **above the docked-or-in-space
+split** — above the two retreats, the pod recovery, the wind-down and the
+abandonment. `closeMessageBoxByDeclining` had no counter, no bound and no
+give-up, so it answered a dialog the same way on the first reading and on the
+thirty-thousandth.
+
+Run 30 found the window that does not care. Something the client draws on the
+`MessageBox` widget — an emoji picker, by every sign — carried a
+`no_dialog_button`, so `Dismiss it using No.` was the right-looking answer and
+the box was still there afterwards:
+
+```
+++ Dismiss it using No.        32,585 readings, 3h44m
+```
+
+**Nothing else in the bot ran for any of them.** The section above is the other
+end of the same incident: `abandonMissionThatCannotProgress` held a live verdict
+on `Technological Secrets (1 of 3)` throughout and its own 200-reading bound
+never fired, because the branch holding it was unreachable. The status line
+counted `quitting it for 10811 of 200` while the tree never reached the branch
+that reads the number. This is the fifth time this repo has paid for an
+unbounded wait — the drone recall before #11, the ammo swap's ramp wait before
+#38, the loot window before #53, the locked-target wait alongside the learned
+lock range — and it is worse only in position.
+
+**What is bounded is the box, not message boxes.** #54's standing lesson holds:
+the automatic reply to a dialog stays the declining one, because these guard
+destructive actions and the "Quit Mission?" one has cost a mission's standing
+already. `closeMessageBoxByDeclining` still contains no affirmative at all.
+What #101 adds is a ladder over one box: the ordinary answer for
+`messageBoxAnswersBeforeEscape` (60) readings, then **Escape** at it for another
+60, then `closeMessageBox` answers `Nothing` and the rest of the tree runs.
+
+**`Nothing` rather than an alarm is the point.** The box stays on the screen and
+every branch below now works around it, which is worse than a closed box and
+incomparably better than nothing running at all — run 30's abandonment would
+have reached its own bound and ended the session naming the mission, which is
+what an operator can act on.
+
+**The count is per box, and the identity is what the box says and offers.** A
+global tally of dismissals accumulates across a run that legitimately closes
+many dialogs: runs 10, 22, 25, 26 and 27 answer 175 separate stretches of
+message box between them. `clearStrayContextMenu` compares its menu across
+readings for exactly this reason. The identity is the box's own display texts
+plus its buttons' `_name`s and labels, and deliberately **not** its display
+region — `strayContextMenuStuckTicksThreshold` records what a coordinate-based
+identity costs, which is a widget re-rendered each tick differing sub-pixel
+while looking identical, and a count that therefore never accumulates at all.
+The side effect is that a dialog whose wording changes starts a fresh count,
+which is the wanted direction.
+
+**60 is placed in a gap rather than cut through a distribution.** Counting
+consecutive readings with a message box on the screen, the 175 stretches in the
+runs that recovered are 6, 10, 11, 18, 20 and 44 readings long and nothing else
+— 44 is run 26's worst, the median is 6, 1,267 readings in all — while run 30's
+one box ran to 32,585. Nothing recorded lies between 44 and the incident. A
+stretch is an upper bound on any single box, since one can hold several dialogs
+in succession, so the real separation is wider still.
+
+**Escape rather than Ctrl+W**, though the issue offers both and Ctrl+W is
+confirmed live as the client's own "close the active window". Escape is what
+this codebase already escalates with — `beginCascade` presses it rather than
+right-clicking a computed empty point, `clearStrayContextMenu` presses it at a
+menu that has not advanced in three ticks — and it needs no focus. Ctrl+W does:
+`lootWindowRefusesToCloseTicks` records a version that pressed it at an
+unfocused window 650 times in one run and closed nothing, and the live recovery
+needed the title bar clicked first. Clicking an unidentified modal to focus it
+is a click into a dialog nobody has read. A naked Escape can open the client's
+own pause menu — `closeSystemSettingsMenu` records that happening live from
+exactly this key — and that is covered rather than risked, since that branch is
+the entry *before* this one in the same list.
+
+**It says so, once, and then keeps saying so in the status line.** 32,585
+identical lines is what an operator got, and `stall_watch.py` deduped them into
+a single alarm so nothing escalated. The give-up names the box and both rungs it
+tried, at the root, on the reading it is reached —
+`dronesLeftBehindLastChange`'s mechanism, for its reason: the verdict is settled
+in the memory update, and the branch that would otherwise say so is precisely
+the branch that has just stopped running. The status line then carries
+`message box N/120` continuously, with `(pressing Escape at it)` and
+`(GIVEN UP ON, still open)`, which is the only thing on a reading that says a
+box is still there once the decision line has gone.
+
+**Narrowing `parseMessageBoxesFromUITreeRoot` is explicitly not the fix**, and a
+test asserts it is unchanged. It matches `pythonObjectTypeName == "MessageBox"`
+and nothing else, so anything the client implements on that widget is a message
+box as far as the bot is concerned — but treating the emoji picker leaves the
+shape, and any window on that widget the declining answer does not close
+reproduces run 30 exactly.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_message_box_standoff.py` (35 cases). The four pure
+rules are executed through the real `Bot.elm` in `elm repl` rather than restated
+in Python — the standoff folded over the states a run passes through, the ladder
+at both of its boundaries and either side of each, the identity over boxes built
+out of real UI-tree nodes, and the give-up line — and the corpus is recounted as
+the *relations* the threshold rests on: every stretch in a run that recovered is
+below the escalation, run 30's is more than ten times the give-up, and nothing
+but the box ran in run 30 after the onset. The wiring, the placement and the
+parser's deliberate unchangedness are read out of the source through a
+whitespace-collapsing reader. Confirmed by mutation, **fifteen** of them, each
+failing a named case: the escalation cut to 44 so it slices the recorded
+distribution, either boundary comparison moved by one, the give-up written as a
+bare number instead of a multiple, the give-up retuned, the give-up applied only
+in a band so the ladder wraps back to answering, the identity dropping the box's
+text or its buttons, the count not resetting on a different box, the count
+surviving a reading with no box at all, the give-up raising
+`askForHelpToGetUnstuck` instead of handing the tree back, the escalation
+clicking the box instead of pressing Escape, the give-up line dropping the box's
+name or its truncation, the status line dropping the clause, and the branch not
+consulting the verdict at all.
+
+**Unverified: any of it running.** No run has been flown since, and the box that
+caused this had been closed by hand long before it was investigated — so which
+node an emoji picker presents as, and whether it carried a `no_dialog_button` at
+all, is still inferred from `Dismiss it using No.` being printed on the path
+that requires one. Whether **Escape** closes such a window is the open question
+this fix cannot answer off-line; if it does not, the ladder costs 60 extra
+readings and ends in the same place, which is why the give-up rather than the
+escalation is the half that matters. What to watch on the first run that meets
+one: `message box N/120` in the status line climbing at all — on a healthy run
+it should appear briefly and vanish, since the recorded dialogs close in 6
+readings — then the Escape line, then the give-up naming the box, and then
+ordinary decisions resuming while `(GIVEN UP ON, still open)` stays in the
+status line. A give-up on a run where boxes are being answered normally means
+the identity is churning less than it should; a `message box` clause that never
+appears at all on a run that dismisses one means the standoff is not being
+written.
+
 ## Context-menu cascade robustness
 
 `EveOnline.BotFrameworkSeparatingMemory.elm`'s shared cascade logic
@@ -3481,6 +3613,20 @@ exists.
   in 29 readings. The threshold, the bound and what is unverified are in "A
   mission that cannot be progressed is given back, not asked about forever"
   above. **Untested against a live client.**
+
+  And it now **stops answering a message box that will not close**, after
+  sixty readings of the ordinary declining answer and another sixty of Escape,
+  and lets the rest of the decision tree run with the box still on the screen.
+  Run 30 dismissed one window 32,585 times over three hours and forty-four
+  minutes and nothing else in the bot ran for any of them, because
+  `closeMessageBox` is reached above the docked-or-in-space split — the
+  abandonment that was supposed to end that session held a live verdict
+  throughout and could not be reached. The ladder, why the count is per box, why
+  Escape rather than Ctrl+W, and why narrowing the message-box parser is not the
+  fix are in "A message box the answer does not close is bounded" above.
+  **Untested against a live client**, and whether Escape closes such a window is
+  the open question — watch the status line's `message box N/120`, which should
+  appear briefly and vanish on a healthy run.
 
   And it now **says when it leaves drones behind** — how many and where, once in
   the decision log and then in the status line for the rest of the session. This
