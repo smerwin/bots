@@ -553,7 +553,7 @@ type alias BotMemory =
     , gateWithinReachTicks : Int
     , gateLockedForWantOfAnItem : Maybe String
     , siteAdmitsThisShip : Maybe Bool
-    , clearingNotRequired : Bool
+    , briefingsRead : List ClearingVerdict
     , agentConversationWithoutTrackerTicks : Int
     , keepAtRangeUnconfirmedTicks : Int
     , orbitUnconfirmedTicks : Int
@@ -7337,13 +7337,20 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                             1
                     )
 
+        clearing =
+            clearingCaseForContext context
+
         -- When the briefing says the rooms need not be cleared, drop everything
         -- that only qualified by looking like a rat. What the objective or the
         -- settings named by name still stands: those missions ask for a
         -- structure dead, and "clearing is optional" is about the pirates
         -- guarding it, not about the target itself.
+        --
+        -- Only a briefing read for *this* mission gets here. A mission whose
+        -- briefing this session never saw clears the field, which is #108's
+        -- chosen direction rather than its old accident -- see `clearingCase`.
         overviewEntriesToAttack =
-            if context.memory.clearingNotRequired then
+            if clearingIsOptional clearing then
                 everythingWorthAttacking
                     |> List.filter (isObjectToAttackByName (objectNamesToAttack context))
 
@@ -7678,9 +7685,9 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                                 )
     in
     if overviewEntriesToAttack |> List.isEmpty then
-        if context.memory.clearingNotRequired && not (List.isEmpty everythingWorthAttacking) then
+        if clearingIsOptional clearing && not (List.isEmpty everythingWorthAttacking) then
             describeBranch
-                ("The briefing says clearing is not required -- leaving "
+                ("The briefing for this mission says clearing is not required -- leaving "
                     ++ (everythingWorthAttacking |> List.length |> String.fromInt)
                     ++ " hostile(s) alone and getting on with the objective."
                 )
@@ -11668,7 +11675,7 @@ initBotMemory =
     , gateWithinReachTicks = 0
     , gateLockedForWantOfAnItem = Nothing
     , siteAdmitsThisShip = Nothing
-    , clearingNotRequired = False
+    , briefingsRead = []
     , agentConversationWithoutTrackerTicks = 0
     , keepAtRangeUnconfirmedTicks = 0
     , orbitUnconfirmedTicks = 0
@@ -11956,6 +11963,7 @@ statusTextFromState context =
                     [ [ describeShip, describeDrones ]
                     , [ describeRatsInOverview, describeCurrentTarget, describeOverview, describeLockRange context ]
                     , [ describeZeroDamage context ]
+                    , [ describeClearing context ]
                     , describeAccelerationGate context
                     , [ describeOverviewIndicationHints readingFromGameClient ]
                     , [ describeAmmoSwapState context ]
@@ -12701,20 +12709,261 @@ briefingSaysClearingIsOptional briefing =
            )
 
 
-{-| The answer from any briefing on screen right now, or `Nothing` when no
-briefing is readable and the remembered answer should stand.
--}
-clearingNotRequiredFromReading : ReadingFromGameClient -> Maybe Bool
-clearingNotRequiredFromReading readingFromGameClient =
-    case
-        readingFromGameClient.agentConversationWindows
-            |> List.filter (.objectiveHtml >> (/=) Nothing)
-    of
-        [] ->
-            Nothing
+{-| A briefing this session has actually read, and what it said about clearing
+the pocket.
 
-        conversations ->
-            Just (conversations |> List.any (missionFinePrint >> briefingSaysClearingIsOptional))
+One entry per mission, the way `missionNamesAbandoned` keeps one name per
+mission given up on, because a single session-wide answer cannot say _which_
+mission it is about -- and both directions of that conflation cost something.
+
+**Run 32 is the expensive direction.** This was a `Bool` initialised to `False`,
+so a session that had never seen a briefing was indistinguishable from one whose
+briefing said "clear them". `Recon (1 of 3)` was accepted in run **31**; run 32
+was cycled onto it mid-flight, clicked `Accept the mission` **zero** times
+across its 784 readings and never opened an agent conversation at all, and spent
+all 2,861 of its decision blocks trying to kill eleven cruisers on the one
+mission whose briefing says in writing that it need not be done. The operator
+stopped it and flew the ship out by hand. `briefingSaysClearingIsOptional` names
+that exact mission and is right; it never ran, because a briefing is readable
+only while the conversation is open and this session never had one open.
+
+**Flying a mission whose briefing was never read is the ordinary case.** Of the
+34 recorded runs, **13 never had a briefing on screen at any point** -- 3,688
+readings with no evidence of any kind to answer this from -- and 27 of the 33
+that ever tracked a mission began on one this session did not accept.
+
+**The other direction is why an entry carries a name.** One `Bool` kept the last
+briefing's answer until another briefing overwrote it, so a "clearing is
+optional" read from mission A stood over mission B for as long as B's briefing
+went unread -- and by the counts above, B is frequently a mission whose briefing
+this session will never see. That is the same conflation pointing the other way:
+rats left alive in a pocket that has to be cleared before its gate will open. An
+entry here answers for the mission it was read for and for no other.
+
+**The name is the briefing's own, not the tracker's**, because the tracker has
+no entry for a mission still being offered -- `subheaderTextFromHtml` exists for
+that reason. The two agree wherever both exist: across the recorded runs, **331
+of 361** accepted missions later appear in the tracker under exactly the name
+the briefing gave, 324 of them on the very next reading carrying a tracker. The
+30 that never do are accepts the tracker never showed at all, which is the
+untracked-mission state `agentConversationWithoutTrackerTicks` already exists
+for.
+
+-}
+type alias ClearingVerdict =
+    { missionName : String
+    , clearingIsOptional : Bool
+    }
+
+
+{-| What one briefing on screen says, and which mission it says it about.
+
+Two ways an open conversation answers nothing, and both are the attribution
+question rather than the matching one -- which is why this is its own rule with
+a record for an argument.
+
+**Terms that are not on screen are not a briefing.** `objectiveHtml` is where
+the terms live and it is gone the moment the window closes, so a conversation
+without it has nothing to read.
+
+**A briefing that names no mission is dropped rather than attributed to whatever
+the tracker happens to be showing.** That attribution is what would put #108 back
+in the dangerous direction: the conversation on screen is as often an offer the
+bot is about to skip as it is the mission being flown, and pinning its verdict on
+the tracked mission could switch the fight off on a pocket that has to be
+cleared. It costs almost nothing -- `unnamed` is printed 3 times across the 875
+accept-or-skip decisions in the recorded runs -- and it fails safe, since a
+mission left unanswered is a mission the bot clears.
+
+-}
+clearingVerdictFromBriefing :
+    { missionName : Maybe String
+    , termsAreOnScreen : Bool
+    , finePrint : String
+    }
+    -> Maybe ClearingVerdict
+clearingVerdictFromBriefing briefing =
+    if not briefing.termsAreOnScreen then
+        Nothing
+
+    else
+        briefing.missionName
+            |> Maybe.andThen nonEmptySettingValue
+            |> Maybe.map
+                (\missionName ->
+                    { missionName = missionName
+                    , clearingIsOptional = briefingSaysClearingIsOptional briefing.finePrint
+                    }
+                )
+
+
+{-| Every briefing readable in this reading, each tied to the mission it names.
+-}
+clearingVerdictsFromReading : ReadingFromGameClient -> List ClearingVerdict
+clearingVerdictsFromReading readingFromGameClient =
+    readingFromGameClient.agentConversationWindows
+        |> List.filterMap
+            (\conversation ->
+                clearingVerdictFromBriefing
+                    { missionName = conversation.offeredMissionName
+                    , termsAreOnScreen = conversation.objectiveHtml /= Nothing
+                    , finePrint = missionFinePrint conversation
+                    }
+            )
+
+
+{-| The session's briefings with `verdict` folded in, replacing any earlier
+answer about the same mission.
+
+Replacing rather than appending, because the conversation stays open for several
+readings and a list that grew per reading would hold one mission's answer dozens
+of times over. The newest read wins for `loadRefusedByClient`'s reason -- the
+client speaking now outranks the client having spoken earlier.
+
+-}
+rememberClearingVerdict : ClearingVerdict -> List ClearingVerdict -> List ClearingVerdict
+rememberClearingVerdict verdict briefingsRead =
+    verdict
+        :: (briefingsRead |> List.filter (.missionName >> (/=) verdict.missionName))
+
+
+{-| Which of four things this session knows about clearing the pocket it is in.
+
+Four rather than a `Bool`, because the whole of #108 is two of them having been
+the same value, and because `describeClearing` has to be able to say which one
+the bot is in on the readings where it matters.
+
+-}
+type ClearingCase
+    = ThisBriefingSaysClearingIsOptional String
+    | ThisBriefingSaysNothingAboutClearing String
+    | NoBriefingReadForThisMission { missionName : String, briefingsRead : Int }
+    | NoMissionTracked { briefingsRead : Int }
+
+
+{-| What this session can say about clearing the mission it is flying.
+
+Taking a record rather than a `BotDecisionContext` so the two cases that cost a
+session can be executed by a case rather than reasoned about -- see
+`tools/macos-host/tests/test_clearing_needs_a_briefing.py`.
+
+**Not knowing clears the field, and that direction is chosen rather than
+inherited.** Both answers cost something real and they are not symmetric.
+Reading "no briefing seen" as "clearing is optional" would leave the rats alive
+on any mission whose briefing this session has not read, which by the counts on
+`ClearingVerdict` is most missions on most runs -- and on the mission shape this
+is about, the client's other locked-gate sentence is
+`There are synchronized gate scramblers on all hostile entities in this area ...
+you must simply clear the vicinity of enemy ships`, so the bot would be sitting
+at a gate that will not open with the pocket alive behind it. Reading it as
+"clearing is required" costs run 32: a session spent fighting a pocket the
+client said to skip, which an operator watching the log can see and stop. A ship
+stranded at a gate is worse than a session spent shooting, so the unknown falls
+on the side of fighting -- and the status line says, every reading, that it is an
+assumption rather than a reading. Nothing here narrows the gap between the two;
+what it does is stop them being the same value.
+
+A mission the tracker does not name cannot be matched against anything and gets
+the same answer. A _collapsed_ tracker is not that case: the name lives in the
+header row a collapse keeps, which is the distinction `trackerStillShowsMission`
+already documents.
+
+-}
+clearingCase :
+    { briefingsRead : List ClearingVerdict
+    , missionNameNow : Maybe String
+    }
+    -> ClearingCase
+clearingCase evidence =
+    case evidence.missionNameNow of
+        Nothing ->
+            NoMissionTracked { briefingsRead = List.length evidence.briefingsRead }
+
+        Just missionName ->
+            case
+                evidence.briefingsRead
+                    |> List.filter (.missionName >> (==) missionName)
+                    |> List.head
+            of
+                Just verdict ->
+                    if verdict.clearingIsOptional then
+                        ThisBriefingSaysClearingIsOptional missionName
+
+                    else
+                        ThisBriefingSaysNothingAboutClearing missionName
+
+                Nothing ->
+                    NoBriefingReadForThisMission
+                        { missionName = missionName
+                        , briefingsRead = List.length evidence.briefingsRead
+                        }
+
+
+{-| Whether the pirates on this grid may be left alone.
+
+True for exactly one of the four cases: a briefing read _for this mission_
+saying so. Both kinds of not knowing clear the field, for the reason
+`clearingCase` states. Written out rather than defaulted with a wildcard so a
+fifth case cannot inherit an answer nobody chose for it.
+
+-}
+clearingIsOptional : ClearingCase -> Bool
+clearingIsOptional clearing =
+    case clearing of
+        ThisBriefingSaysClearingIsOptional _ ->
+            True
+
+        ThisBriefingSaysNothingAboutClearing _ ->
+            False
+
+        NoBriefingReadForThisMission _ ->
+            False
+
+        NoMissionTracked _ ->
+            False
+
+
+clearingCaseForContext : BotDecisionContext -> ClearingCase
+clearingCaseForContext context =
+    clearingCase
+        { briefingsRead = context.memory.briefingsRead
+        , missionNameNow = missionNameFromTracker context.readingFromGameClient
+        }
+
+
+{-| The clearing verdict in the status line, on every reading a mission is
+tracked.
+
+Printed on the ordinary case too, not only when the bot is guessing, because the
+failure this exists to end is one where nothing was printed at all: run 32 flew
+784 readings on an assumption and no line in its log records that an assumption
+was made. A clause that appeared only while guessing would still
+leave "the briefing said clear them" and "I never saw a briefing" reading the
+same way to anyone grepping for the first.
+
+-}
+describeClearing : BotDecisionContext -> String
+describeClearing context =
+    case clearingCaseForContext context of
+        ThisBriefingSaysClearingIsOptional missionName ->
+            "clearing '"
+                ++ missionName
+                ++ "': its briefing says the pirates need not be cleared -- attacking only what the objective or the settings name."
+
+        ThisBriefingSaysNothingAboutClearing missionName ->
+            "clearing '"
+                ++ missionName
+                ++ "': its briefing was read this session and says nothing about clearing -- clearing the field."
+
+        NoBriefingReadForThisMission notRead ->
+            "clearing '"
+                ++ notRead.missionName
+                ++ "': NO BRIEFING READ this session ("
+                ++ String.fromInt notRead.briefingsRead
+                ++ " read, none of them this mission's) -- clearing the field, which is an assumption rather than a reading."
+
+        NoMissionTracked _ ->
+            ""
 
 
 {-| Whether the ship's own persistent cargo-hold "Inventory" window (open
@@ -15616,14 +15865,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.agentConversationWithoutTrackerTicks
-    , clearingNotRequired =
+    , briefingsRead =
         -- Kept far longer than siteAdmitsThisShip below, and deliberately: the
         -- briefing is only readable while the conversation is open, but the
-        -- rooms it describes are fought long after it closes. Every briefing
-        -- that appears overwrites the answer, so the next mission replaces this
-        -- one rather than inheriting it.
-        clearingNotRequiredFromReading context.readingFromGameClient
-            |> Maybe.withDefault botMemoryBefore.clearingNotRequired
+        -- rooms it describes are fought long after it closes.
+        --
+        -- Nothing is ever dropped, which is what changed in #108. The old field
+        -- was one answer overwritten by the next briefing, so it kept the last
+        -- briefing rather than this mission's, and an empty session read as
+        -- "clear them". Accumulating by name means the answer that applies is
+        -- looked up rather than defaulted, and a mission with no entry is a
+        -- mission with no evidence -- see `clearingCase`.
+        clearingVerdictsFromReading context.readingFromGameClient
+            |> List.foldl rememberClearingVerdict botMemoryBefore.briefingsRead
     , siteAdmitsThisShip =
         -- Read while the restrictions window is up, then kept so the answer
         -- outlives closing it. Forgotten once the conversation ends, since the

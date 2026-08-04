@@ -933,6 +933,102 @@ rather than hidden: on such a mission the bot travels to the objective while
 being shot and does not shoot back, and what covers that is the damage-rate
 retreat, not this.
 
+### A briefing nobody read is not a briefing that said "clear them"
+
+Run 32 lost a whole session to the mission the matcher above names by name.
+`Recon (1 of 3)` was accepted in run **31**; run 32 was cycled onto it
+mid-flight, clicked `Accept the mission` zero times across its 784 readings, and
+spent all 2,861 of its decision blocks trying to kill eleven cruisers on a
+pocket whose briefing says in writing that destroying them is not a requirement.
+The operator stopped it and flew the ship out by hand.
+
+**The matcher is not the bug.** `briefingSaysClearingIsOptional` matches both of
+the client's wordings and, run against every mission briefing the recordings
+hold, reads exactly one of them as optional — this one. It never ran, because a
+briefing is readable only while the agent conversation is open, and run 32 never
+opened one.
+
+**The bug was the remembered answer.** `clearingNotRequired : Bool` initialised
+to `False`, so *the briefing said clear them* and *I have never seen a briefing*
+were the same value — CLAUDE.md's own "distinguish absent from false", in
+`BotMemory` rather than in a parser, and collapsed in the expensive direction.
+It was also **one answer for the whole session**, overwritten by whatever
+briefing appeared next, so a "clearing is optional" verdict read for mission A
+stood over mission B until B's briefing happened to be read.
+
+**Flying a mission whose briefing this session never read is the ordinary
+case**, which is what makes the second value worth having. Of the 34 recorded
+runs, **13 never had a briefing on screen at any point** — 3,688 readings — and
+27 of the 33 that ever tracked a mission began on one they did not accept.
+
+So the verdict is now one entry per mission (`BotMemory.briefingsRead`, the way
+`missionNamesAbandoned` is a list), filed under the name the *briefing* gives
+and looked up under the name the tracker gives. Those are the same string where
+both exist: across the recordings **331 of 361** accepted missions later appear
+in the tracker under exactly the briefing's name, 324 of them on the very next
+reading carrying a tracker, and the 30 that never do are accepts the tracker
+never showed at all — the untracked-mission state
+`agentConversationWithoutTrackerTicks` already exists for. Compared whole rather
+than chain-wide, unlike `missionNameForDeclining`: the rooms of a chain differ
+only by `(N of 3)` and they do not share an answer.
+
+**Which direction the unknown fails in is chosen, and it is the same direction
+as before.** `clearingCase` answers four things, and only one of them —
+a briefing read *for this mission* saying so — leaves the rats alive. Both kinds
+of not knowing clear the field. That is not free and the cost is run 32 again:
+a session spent fighting a pocket the client said to skip. It is chosen against
+the other cost, which is worse and less visible — reading "no briefing seen" as
+"clearing is optional" would leave rats alive on most missions on most runs, and
+the client's *other* locked-gate sentence is `There are synchronized gate
+scramblers on all hostile entities in this area … you must simply clear the
+vicinity of enemy ships`, so the bot would sit at a gate that will not open with
+the pocket alive behind it. A stranded ship is worse than a wasted session.
+
+**What actually changes for a run like 32 is that it says so.**
+`describeClearing` is in the status line on every reading a mission is tracked,
+naming which of the four cases the bot is in —
+
+```
+clearing 'Recon (1 of 3)': NO BRIEFING READ this session (0 read, none of them
+this mission's) -- clearing the field, which is an assumption rather than a
+reading.
+```
+
+— printed on the ordinary case too, not only while guessing, because run 32's
+log carries no line at all recording that an assumption was being made and a
+clause that appeared only under the assumption would still leave the two states
+grepping the same. **Nothing here narrows the gap between the two answers**;
+what it does is stop them being one value, and give a later rule something to
+act on. The obvious follow-up — going and reading the briefing rather than
+assuming — is not in this change and is in "Open gaps".
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_clearing_needs_a_briefing.py` (30 cases). The three
+pure rules are executed through the real `Bot.elm` in `elm repl` rather than
+mirrored in Python: run 32's own state, the per-mission lookup against a session
+holding several verdicts, the chain's two rooms not sharing an answer, a
+nameless briefing being dropped rather than attributed, and a verdict outliving
+the conversation that produced it. Every mission briefing the recordings hold
+goes through `clearingVerdictFromBriefing`, and exactly the Recon one comes back
+optional while each carries the name the log quoted. The corpus counts above are
+recounted as *relations* — a large share of runs saw no briefing, the two names
+agree for the large majority of accepts — so a growing corpus cannot make a true
+claim red. Confirmed by mutation, eleven of them, each failing a named case: the
+unknown answering "optional" (the flip this change refuses), the unread case
+collapsed back into "said nothing", the name matched chain-wide, the lookup
+ignoring the mission the way the old `Bool` did, a nameless briefing attributed
+anyway, terms that are not on screen reading as a briefing, remembering
+appending instead of replacing, the matcher losing one of the client's two
+wordings, the status line no longer naming the case, the fight reading the
+memory instead of the rule, and the memory update defaulting the answer again.
+
+**Unverified: any of it running.** No run has been flown since. What to watch on
+the first one is the `clearing '<mission>':` clause appearing on every reading a
+mission is tracked, and saying `NO BRIEFING READ this session` on a run cycled
+onto an inherited mission and something else on a run that took its own. A run
+that never prints the clause at all is a tracker the status line cannot read,
+which is the direction this would fail silently in.
+
 **Webbing is not damage, and that case is not covered.** A webifier can apply no
 damage at all, and then it writes no combat line, so a signal built on damage
 cannot see it — which is precisely run 10's two frigates, whose rows the issue
@@ -3550,6 +3646,20 @@ exists.
   as its own. Three readings of the ask followed by `Search for '<tail>'` is the
   fallback firing, which means the host did not set the route and its own log
   says why.
+
+  And it now **knows whether it has read a briefing at all**, rather than
+  treating a session that has never seen one as a session whose briefing said
+  "clear the pocket". Run 32 spent 784 readings fighting the one mission whose
+  briefing says in writing that the pirates need not be cleared, because it was
+  cycled onto that mission mid-flight and never opened an agent conversation.
+  The verdict is now one entry per mission rather than one `Bool` per session,
+  filed under the briefing's own mission name; which direction the unknown fails
+  in, and why it is still "clear the field", are in "A briefing nobody read is
+  not a briefing that said clear them" above. **Untested against a live client**,
+  and the behaviour on the unknown is deliberately unchanged — what changes is
+  that the status line now carries `clearing '<mission>':` on every reading a
+  mission is tracked, saying which of the four cases the bot is in. A run that
+  never prints that clause is the one to look into.
 - **`eve-online-saxrat`** now carries the general guards the mission runner
   learned — the confirmed hitpoint readings behind a low-water mark, the
   damage-rate retreat, ship-loss detection and pod recovery, a bounded drone
@@ -3837,6 +3947,28 @@ load-bearing — see "The home station".
   ship died, with 9,286 hitpoints of incoming fire landing between the old run's
   last log line and the new run's first reading. Nothing inside the bot can see
   that window. Dock or clear the grid before cycling.
+
+  **It also costs the new run everything the old one had read.** A mission
+  inherited across a restart is a mission whose briefing the bot has not read,
+  and run 32 is what that cost once: 784 readings fighting a Recon pocket the
+  client had said in writing to skip. The verdict is per session by
+  construction — `BotMemory` does not outlive a process — so cycling mid-mission
+  hands the next run a mission it can only guess about. Since #108 the guess is
+  at least visible: the status line's `clearing '<mission>':` clause says
+  `NO BRIEFING READ this session` for the whole of such a run.
+- **A mission whose briefing was never read is guessed about rather than
+  looked up.** #108 made "no briefing read for this mission" its own value and
+  chose the direction it fails in — the bot clears the field — but it did not
+  make the bot go and *get* the answer, so run 32's behaviour is unchanged and
+  only its log is different. Two routes were considered and neither is built.
+  The tracker's own `Read Details` step would be the cheap one and the corpus
+  says it is not there when it is wanted: 53 occurrences across every recorded
+  run, all of them on Recon missions, and **none in run 32**. Opening the agent
+  conversation on an in-progress mission is the other, and rests on a premise
+  no recording settles — whether such a conversation carries `objectiveHtml` and
+  a briefing subheader at all. The bot reaches that state (14 occurrences of
+  `The mission is still in progress -- go fly it.`) and never prints what the
+  window held, so the first thing a follow-up needs is a live read of one.
 - **Looting has not been asked the question the travel step was asked.** Once
   the objective is done and the tracker offers a trip, combat stops (see "When
   the objective is done and the tracker offers a trip, the fight is over"), but
