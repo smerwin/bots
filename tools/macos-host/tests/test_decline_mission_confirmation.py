@@ -45,7 +45,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prerequisites import ElmRepl, open_repl
+from prerequisites import ElmRepl, open_repl, recorded_runs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
@@ -185,10 +185,7 @@ class TheLookbackIsMeasured(unittest.TestCase):
         Decline to the reading carrying the confirmation.
         """
         gaps = []
-        for run in (25, 26):
-            path = os.path.join(LOG_DIR, "mission_run%d.log" % run)
-            if not os.path.exists(path):
-                continue
+        for _name, path in recorded_runs("25", "26"):
             steps = 0
             last_dispatch = None
             declined = False
@@ -204,8 +201,9 @@ class TheLookbackIsMeasured(unittest.TestCase):
                       and last_dispatch is not None and not counted):
                     gaps.append(steps - last_dispatch)
                     counted, declined = True, False
-        if not gaps:
-            self.skipTest("neither run 25 nor run 26 is on this machine")
+        # No skip here on purpose: `recorded_runs` already skipped if the
+        # corpus is absent, so reaching this with no gaps means the runs
+        # are present and no longer carry the evidence -- a failure.
         self.assertGreater(len(gaps), 100, "the measurement rests on 158 cases")
         self.assertEqual(
             {6}, set(gaps),
@@ -273,9 +271,7 @@ class TheLoopThisAnswers(unittest.TestCase):
     """The recorded evidence, and the contrast that explains the blind spot."""
 
     def _counts(self, run):
-        path = os.path.join(LOG_DIR, "mission_run%d.log" % run)
-        if not os.path.exists(path):
-            self.skipTest("%s is not on this machine" % path)
+        (_name, path), = recorded_runs(str(run))
         declines = dismissals = 0
         for line in log_lines(path):
             if "using 'Decline'" in line:
