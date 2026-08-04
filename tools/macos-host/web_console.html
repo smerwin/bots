@@ -53,13 +53,17 @@
   textarea:focus{outline:1px solid var(--accent);outline-offset:-1px}
   .apply{display:flex;align-items:center;gap:10px;padding:10px 14px;border-top:1px solid var(--line)}
   .note{color:var(--dim);font-size:12px}
+  .note.mono{font-family:var(--mono)}
+  .note.path{max-width:38ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .ok{color:var(--accent)}
 </style>
 </head>
 <body>
 <header>
   <span class="dot" id="dot"></span>
-  <h1>Host Console</h1>
+  <h1 id="app">Host Console</h1>
+  <span class="note mono" id="version">—</span>
+  <span class="note path" id="source" title=""></span>
   <span class="note" id="conn">connecting…</span>
   <span class="spacer"></span>
   <button id="pause">Pause</button>
@@ -163,11 +167,29 @@ $("applySettings").onclick = async () => {
   setTimeout(() => $("settingsNote").textContent = "one key=value per line", 4000);
 };
 
+// Which bot, from where, at what version. The tab title carries the app name
+// because two consoles open at once are otherwise the same tab twice, and an
+// absent value says so rather than showing an empty space that reads like a
+// console that simply has nothing to report.
+let identified = false;
+function identify(s){
+  if (identified) return;
+  identified = true;
+  const app = s.appName || "Host Console";
+  $("app").textContent = app;
+  document.title = s.appName ? `${app} — Host Console` : "Host Console";
+  $("version").textContent = s.version || "version unknown";
+  $("source").textContent = s.botSource || "source unknown";
+  $("source").title = s.botSource || "";
+}
+
 async function poll(){
   try {
     const res = await fetch(`/api/state?since=${since}`);
     const s = await res.json();
     since = s.latestSeq;
+
+    identify(s);
 
     $("conn").textContent = s.finished ? ("finished — " + (s.finishReason || ""))
                                        : (s.paused ? "paused" : "running");

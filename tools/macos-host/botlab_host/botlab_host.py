@@ -386,6 +386,104 @@ def fetch_bot_source(url_or_path, workdir):
 
 
 # ---------------------------------------------------------------------------
+# What the bot was built from
+# ---------------------------------------------------------------------------
+
+# A version stamp runs once, at launch, in front of everything else. A git that
+# hangs -- an index lock held by another process, a filesystem that has gone
+# away -- would hold the launch with it, so every call is bounded.
+BOT_VERSION_GIT_TIMEOUT_SECONDS = 5.0
+
+# git could not answer at all: not installed, could not be started, or it ran
+# past its timeout. Distinct from `None`, which is git running and saying no --
+# the difference between "there is no answer to be had here" and "the answer is
+# that this is not a checkout", and only the second is a fact about the source.
+GIT_UNAVAILABLE = object()
+
+
+def _git(cwd, *args):
+    """Run git in `cwd` and return its stdout, or `None`/`GIT_UNAVAILABLE`.
+
+    Never raises. Nothing about identifying the source is worth failing a
+    launch for, and a stamp that cannot be computed is a stamp that says
+    "unknown" -- see `bot_source_version`.
+    """
+    try:
+        done = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True,
+                              timeout=BOT_VERSION_GIT_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return GIT_UNAVAILABLE
+    if done.returncode != 0:
+        return None
+    return done.stdout
+
+
+def bot_source_version(bot_dir):
+    """What this bot was built from, as far as this machine can actually prove.
+
+    A bare `git rev-parse HEAD` is the wrong answer here, and it is the wrong
+    answer in the direction that looks authoritative, so the stamp carries two
+    qualifications beside the commit:
+
+      - **The tree, not the commit, is what gets compiled.** `prepare_build_dir`
+        copies `bot_dir` as it stands and `elm make` builds that copy, so a
+        short SHA printed beside modified sources describes something that was
+        never run. Judged over `bot_dir` itself rather than the whole repository
+        -- that directory is what is copied, so an edit to the host or to a test
+        elsewhere in the same checkout changes nothing about what this bot
+        compiled -- and untracked files count, because the copy takes them too.
+
+      - **The commit may exist nowhere but here.** Run 29 flew `776a202`, a
+        local revert that was never pushed, and a reader handed that SHA cannot
+        resolve it against anything. Reachability is asked of the remote-tracking
+        refs this machine holds (`git branch --remotes --contains`), which is a
+        local question with no network in it; a fetch that has not happened can
+        make a pushed commit read as LOCAL-ONLY, which is the direction that
+        understates rather than overstates what a reader can go and look at.
+
+    Anything that cannot be established says so. A source that is not a git
+    checkout at all is a supported case -- `fetch_bot_source` takes a plain
+    directory -- and it degrades to a stated "unknown" rather than to a blank, a
+    crash, or a commit-shaped string nobody can resolve.
+    """
+    try:
+        return _bot_source_version(bot_dir)
+    except Exception as exc:  # noqa: BLE001 -- a version must not fail a launch
+        return f"unknown (version could not be computed: {exc})"
+
+
+def _bot_source_version(bot_dir):
+    head = _git(bot_dir, "rev-parse", "--short", "HEAD")
+    if head is GIT_UNAVAILABLE:
+        return "unknown (git could not be run)"
+    if head is None or not head.strip():
+        return "unknown (not a git checkout)"
+    commit = head.strip()
+
+    # `.` rather than the absolute path: git resolves its work tree through
+    # symlinks (`/var` is `/private/var` on macOS) and an absolute pathspec that
+    # does not match the resolved form is rejected as outside the repository,
+    # which would read as "dirtiness unknown" for every run.
+    status = _git(bot_dir, "status", "--porcelain", "--", ".")
+    if status is GIT_UNAVAILABLE or status is None:
+        tree = "dirtiness unknown"
+    elif status.strip():
+        tree = "DIRTY"
+    else:
+        tree = "clean"
+
+    on_remote = _git(bot_dir, "branch", "--remotes", "--contains", commit)
+    if on_remote is GIT_UNAVAILABLE or on_remote is None:
+        where = "remote reachability unknown"
+    elif on_remote.strip():
+        where = "on a remote-tracking branch"
+    else:
+        where = "LOCAL-ONLY"
+
+    return f"{commit} ({tree}, {where})"
+
+
+# ---------------------------------------------------------------------------
 # Build: patch elm.json, add Main.elm, compile
 # ---------------------------------------------------------------------------
 
@@ -2503,7 +2601,13 @@ def main():
     workdir = tempfile.mkdtemp(prefix="botlab-host-")
     try:
         bot_dir = fetch_bot_source(args.bot_source, workdir)
+        bot_app_name = os.path.basename(os.path.normpath(bot_dir))
+        bot_version = bot_source_version(bot_dir)
         print(f"# bot source: {bot_dir}", file=sys.stderr)
+        # Beside the path rather than only in the console: the path never
+        # changes and the log is where "which code did this run fly" gets asked
+        # afterwards, long after any console has been closed.
+        print(f"# bot version: {bot_version}", file=sys.stderr)
         build_dir = prepare_build_dir(bot_dir, workdir)
         bot_js = compile_bot(build_dir)
         print(f"# compiled: {bot_js}", file=sys.stderr)
@@ -2513,7 +2617,10 @@ def main():
             if args.session_duration_minutes is not None:
                 session_end_at_ms = int(time.time() * 1000) + int(args.session_duration_minutes * 60 * 1000)
             console = web_console.ConsoleState(settings_text=args.settings,
-                                               session_end_at_ms=session_end_at_ms)
+                                               session_end_at_ms=session_end_at_ms,
+                                               app_name=bot_app_name,
+                                               bot_source=bot_dir,
+                                               version=bot_version)
             try:
                 _httpd, url = web_console.start(console, port=args.web_console)
                 print(f"# web console: {url}", file=sys.stderr)
