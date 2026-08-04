@@ -36,16 +36,17 @@ nine lines produced.
 
 Nothing here reads a live game client or drives a bot. The `elm repl` cases need
 `elm` on PATH and the app's dependencies already fetched, which is what
-`compile_bot.sh` leaves behind; they skip if the repl cannot be run at all.
+`compile_bot.sh` leaves behind; without it they **fail** rather than skipping,
+for the reason `prerequisites.py` gives.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
 import os
 import re
-import shutil
 import subprocess
-import tempfile
 import unittest
+
+from prerequisites import ElmRepl, open_repl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
@@ -102,58 +103,14 @@ def elm_string(value):
         .replace("\n", "\\n") + '"'
 
 
-class ElmRepl:
-    """The bot's own parser, answering for itself.
+PREAMBLE = (
+    "import Bot exposing (..)",
+    "import Common.Basics exposing (stringContainsIgnoringCase)",
+)
 
-    The recipe is `botlab_host.py`'s and `test_dock_outranks_the_fight.py`'s:
-    copy the app to scratch, patch `elm-version` to whatever this machine's elm
-    reports, and build there -- never in the checked-in source. The one extra
-    step is opening `module Bot exposing (...)` to `(..)`, since the repl can
-    only call what the module exports and the bot exports `botMain` alone.
-    """
 
-    def __init__(self):
-        self.scratch = tempfile.mkdtemp(prefix="test-settings-name-lists-")
-        self.app = os.path.join(self.scratch, "app")
-        shutil.copytree(MISSION_RUNNER_DIR, self.app)
-
-        version = subprocess.run(
-            ["elm", "--version"], capture_output=True, text=True,
-            check=True).stdout.strip()
-        elm_json = os.path.join(self.app, "elm.json")
-        with open(elm_json, encoding="utf-8") as source:
-            patched = source.read().replace(
-                '"elm-version": "0.19.1"', '"elm-version": "%s"' % version)
-        with open(elm_json, "w", encoding="utf-8") as target:
-            target.write(patched)
-
-        bot = os.path.join(self.app, "Bot.elm")
-        with open(bot, encoding="utf-8") as handle:
-            source = handle.read()
-        opened = re.sub(r"module Bot exposing\s*\([^)]*\)",
-                        "module Bot exposing (..)", source, count=1)
-        assert opened != source, "could not open Bot.elm's exports"
-        with open(bot, "w", encoding="utf-8") as handle:
-            handle.write(opened)
-
-    def ask(self, expressions):
-        script = ("import Bot exposing (..)\n"
-                  "import Common.Basics exposing (stringContainsIgnoringCase)\n"
-                  + "".join(expression + "\n" for expression in expressions))
-        result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
-                                capture_output=True, text=True)
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-        return plain, result.stderr
-
-    def evaluate(self, expressions, answer_pattern, read_answer):
-        plain, stderr = self.ask(expressions)
-        answers = [read_answer(found)
-                   for found in re.findall(answer_pattern, plain)]
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return answers
+class SettingsRepl(ElmRepl):
+    """The shared harness, plus the two questions this file asks of it."""
 
     def names(self, field, settings_strings):
         """The list each settings string parses to, one per string.
@@ -163,14 +120,11 @@ class ElmRepl:
         A settings string the parser rejects answers `<rejected>`, which is a
         distinct result from the empty list rather than an exception here.
         """
-        expressions = [
+        answers = self.strings([
             'parseBotSettings %s |> Result.map (.%s >> String.join "|") '
             '|> Result.withDefault "<rejected>"'
             % (elm_string(settings), field)
-            for settings in settings_strings]
-        # The repl wraps a long answer onto the line after its value, so the
-        # type annotation is matched across an optional line break.
-        answers = self.evaluate(expressions, r'"(.*)"\s*: String', lambda x: x)
+            for settings in settings_strings])
         return [[] if answer == "" else answer.split("|") for answer in answers]
 
     def parses(self, settings_strings):
@@ -180,42 +134,18 @@ class ElmRepl:
             "|> Result.withDefault False" % elm_string(settings)
             for settings in settings_strings])
 
-    def booleans(self, expressions):
-        return self.evaluate(expressions, r"(True|False)\s*: Bool",
-                             lambda found: found == "True")
 
-    def works(self):
-        """Whether the repl can evaluate anything at all here.
-
-        Distinguishes an environment where `elm repl` cannot run -- no cached
-        dependencies, no writable ELM_HOME -- from the bot answering wrongly.
-        Only the first is a reason to skip: a suite that skipped on any failure
-        would be a check that never fires, which is this repo's own failure mode.
-        """
-        plain, stderr = self.ask(['splitSettingIntoNames "a,b"'])
-        return '["a","b"]' in plain.replace(" ", ""), plain + "\n" + stderr
-
-    def close(self):
-        shutil.rmtree(self.scratch, ignore_errors=True)
+def repl():
+    return open_repl(SettingsRepl, prefix="test-settings-name-lists-",
+                     preamble=PREAMBLE)
 
 
-def elm_is_available():
-    return shutil.which("elm") is not None
-
-
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheParserIsExecutedRatherThanMirrored(unittest.TestCase):
     """All three settings, run for real."""
 
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        usable, output = cls.repl.works()
-        if not usable:
-            cls.repl.close()
-            raise unittest.SkipTest(
-                "elm repl cannot evaluate here, so the parser is unchecked "
-                "by execution in this environment:\n" + output)
+        cls.repl = repl()
 
     @classmethod
     def tearDownClass(cls):
@@ -327,7 +257,6 @@ class TheParserIsExecutedRatherThanMirrored(unittest.TestCase):
             [["Centii Butcher, Centum Fiend"]])
 
 
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheLauncherDefaultsStillMeanWhatTheyMeant(unittest.TestCase):
     """`run_mission.sh` is the only settings string anyone runs unedited.
 
@@ -340,12 +269,7 @@ class TheLauncherDefaultsStillMeanWhatTheyMeant(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        usable, output = cls.repl.works()
-        if not usable:
-            cls.repl.close()
-            raise unittest.SkipTest(
-                "elm repl cannot evaluate here:\n" + output)
+        cls.repl = repl()
         cls.settings = launcher_default_settings()
 
     @classmethod

@@ -3316,6 +3316,47 @@ Used to confirm gate-key extraction (#45), the `Dock` conditions (#49), and that
 a non-text travel label is declined (#49). A NUL cannot appear in an Elm string
 literal — rebuild such input with `Char.fromCode`.
 
+In the suite that recipe is `tools/macos-host/tests/prerequisites.py` and there
+is exactly one of it. `open_repl` copies the app to scratch, patches
+`elm-version`, opens `Bot.elm`'s exports and returns a repl that has been shown
+to evaluate; expressions go in as one `[ a, b, c ]` rather than a line each,
+because the repl recompiles the module per line (#84: twenty expressions, 36.5s
+against 5.8s). Ask for `Bool`s with `evaluate`, `String`s with `strings`, and
+anything else with `values`, which is the one caller still asking line by line —
+inside a list the printed form is the list's rather than each answer's.
+
+**A missing prerequisite is not one kind of thing.** #71 is the failure that
+makes this worth stating. Eleven files each carried their own copy of the
+harness, each decided for itself whether the toolchain worked by probing a real
+function's current behaviour, and each answered "no" by *skipping*. Mutating
+`<=` to `<` in the ammo swap's disarm budget flipped one file's probe, seventeen
+cases were skipped, and the run reported `OK` for a rule nothing had executed —
+which is exactly what the convention above reads as "the test is real".
+
+So the two prerequisites get opposite answers, and the reason is what the
+absence means:
+
+| absent | answer |
+|---|---|
+| the recorded corpus (`~/eve-bot-logs`), the client's game logs | **skip**, reason stated — the case cannot report on evidence it does not have, and a suite that goes red for "no data" teaches people to ignore red |
+| the `elm` toolchain | **fail** — the rule still exists and simply was not checked, and `OK` must not mean that |
+
+`recorded_runs(*names)` is the first (evidence present and disagreeing is a
+*failure*, which is the third answer people forget); `open_repl` is the second,
+raising `ElmToolchainMissing` rather than skipping. `ELM_HARNESS_MAY_SKIP=1`
+downgrades it for a machine with no Elm, and the skip it leaves is one CI
+refuses. The probe is a declaration the harness appends to the *scratch* copy of
+`Bot.elm`, so nothing under test can change its answer while it still cannot be
+reached unless the app compiles.
+
+**CI asserts the skip reasons, not the skip count.** Zero is the wrong
+assertion — the runner has no `~/eve-bot-logs`, so 43 corpus cases skip there
+correctly, and that number moves as corpus-reading cases are added.
+`tools/macos-host/check_expected_skips.py` reads the JUnit report and fails on
+any reason not named in its `EXPECTED` list, so a new kind of skip has to be
+added by somebody who has thought about whether the runner should have had that
+prerequisite.
+
 **Assert client text against recorded logs, not against memory.** Where the bot
 matches something the client wrote, read the literal out of the source and check
 it against real lines in `~/eve-bot-logs`. A matcher that drifts from what the

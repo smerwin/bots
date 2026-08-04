@@ -49,10 +49,9 @@ Nothing here reads a live game client, a bot, or the game log directory.
 """
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 import unittest
+
+from prerequisites import ElmRepl, open_repl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
@@ -394,69 +393,14 @@ class TheBranchSaysWhatItSaw(unittest.TestCase):
         self.assertIn('Dict.get "noContentHint"', squeezed(contents))
 
 
-class ElmRepl:
-    """The bot's own compiled code, answering for itself.
-
-    `botlab_host.py`'s recipe: copy the app to scratch, patch `elm-version` to
-    whatever this machine's elm reports, and open `module Bot exposing (...)` to
-    `(..)` so the repl can reach more than `botMain`.
-    """
-
-    def __init__(self):
-        self.scratch = tempfile.mkdtemp(prefix="test-search-results-")
-        self.app = os.path.join(self.scratch, "app")
-        shutil.copytree(MISSION_RUNNER_DIR, self.app)
-
-        version = subprocess.run(
-            ["elm", "--version"], capture_output=True, text=True,
-            check=True).stdout.strip()
-        elm_json = os.path.join(self.app, "elm.json")
-        with open(elm_json, encoding="utf-8") as source:
-            patched = source.read().replace(
-                '"elm-version": "0.19.1"', '"elm-version": "%s"' % version)
-        with open(elm_json, "w", encoding="utf-8") as target:
-            target.write(patched)
-
-        bot = os.path.join(self.app, "Bot.elm")
-        with open(bot, encoding="utf-8") as handle:
-            source = handle.read()
-        opened = re.sub(r"module Bot exposing\s*\([^)]*\)",
-                        "module Bot exposing (..)", source, count=1)
-        assert opened != source, "could not open Bot.elm's exports"
-        with open(bot, "w", encoding="utf-8") as handle:
-            handle.write(opened)
-
-    def ask(self, expressions):
-        script = ("import Bot exposing (..)\n"
-                  "import Common.Basics exposing (..)\n") + "".join(
-            expression + "\n" for expression in expressions)
-        result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
-                                capture_output=True, text=True)
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-        answers = [answer == "True"
-                   for answer in re.findall(r"(True|False) : Bool", plain)]
-        return answers, plain, result.stderr
-
-    def evaluate(self, expressions):
-        answers, plain, stderr = self.ask(expressions)
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return answers
-
-    def works(self):
-        answers, plain, stderr = self.ask(
-            ['searchQueryForStation "Amarr VIII (Oris) - Emperor Family Academy"'
-             ' == "Emperor Family Academy"'])
-        return answers == [True], plain + "\n" + stderr
-
-    def close(self):
-        shutil.rmtree(self.scratch, ignore_errors=True)
+PREAMBLE = (
+    "import Bot exposing (..)",
+    "import Common.Basics exposing (..)",
+)
 
 
-def elm_is_available():
-    return shutil.which("elm") is not None
+def repl():
+    return open_repl(ElmRepl, prefix="test-search-results-", preamble=PREAMBLE)
 
 
 def elm_list(texts):
@@ -476,7 +420,6 @@ def elm_diagnosis(rendered, in_tree, group_offered):
         "True" if group_offered else "False")
 
 
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheDiagnosesAreExecutedRatherThanMirrored(unittest.TestCase):
     """Four causes, four different sentences, decided from one reading.
 
@@ -490,13 +433,7 @@ class TheDiagnosesAreExecutedRatherThanMirrored(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        usable, output = cls.repl.works()
-        if not usable:
-            cls.repl.close()
-            raise unittest.SkipTest(
-                "elm repl cannot evaluate here, so these rules are unchecked "
-                "by execution in this environment:\n" + output)
+        cls.repl = repl()
 
     @classmethod
     def tearDownClass(cls):
@@ -555,16 +492,10 @@ class TheDiagnosesAreExecutedRatherThanMirrored(unittest.TestCase):
         self.assertEqual([True], answers)
 
 
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheContentsPrintAsSomethingReadable(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        usable, output = cls.repl.works()
-        if not usable:
-            cls.repl.close()
-            raise unittest.SkipTest(
-                "elm repl cannot evaluate here:\n" + output)
+        cls.repl = repl()
 
     @classmethod
     def tearDownClass(cls):

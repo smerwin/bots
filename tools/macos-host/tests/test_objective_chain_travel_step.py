@@ -61,10 +61,9 @@ reached by a longer road.
 import json
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 import unittest
+
+from prerequisites import ElmRepl, open_repl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
@@ -144,46 +143,21 @@ def single_button_entry(text):
     ])
 
 
-class ElmRepl:
+PREAMBLE = (
+    "import EveOnline.MemoryReading",
+    "import EveOnline.ParseUserInterface",
+)
+
+
+class ParserRepl(ElmRepl):
     """The real parser, answering for itself.
 
     Unlike the other suites here this drives `EveOnline.ParseUserInterface`
-    directly rather than `Bot`, so no source needs opening -- both that module
-    and `EveOnline.MemoryReading` already expose everything.
+    directly rather than `Bot` -- both that module and `EveOnline.MemoryReading`
+    already expose everything. The harness's probe still goes through `Bot`,
+    which imports the parser, so it is the stronger question rather than a
+    different one.
     """
-
-    def __init__(self):
-        self.scratch = tempfile.mkdtemp(prefix="test-objective-chain-")
-        self.app = os.path.join(self.scratch, "app")
-        shutil.copytree(MISSION_RUNNER_DIR, self.app)
-
-        version = subprocess.run(
-            ["elm", "--version"], capture_output=True, text=True,
-            check=True).stdout.strip()
-        elm_json = os.path.join(self.app, "elm.json")
-        with open(elm_json, encoding="utf-8") as source:
-            patched = source.read().replace(
-                '"elm-version": "0.19.1"', '"elm-version": "%s"' % version)
-        with open(elm_json, "w", encoding="utf-8") as target:
-            target.write(patched)
-
-    def ask(self, expressions):
-        script = ("import EveOnline.MemoryReading\n"
-                  "import EveOnline.ParseUserInterface\n"
-                  + "".join(e + "\n" for e in expressions))
-        result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
-                                capture_output=True, text=True)
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-        answers = [a == "True" for a in re.findall(r"(True|False) : Bool", plain)]
-        return answers, plain, result.stderr
-
-    def evaluate(self, expressions):
-        answers, plain, stderr = self.ask(expressions)
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return answers
 
     def travel_label_of(self, tree):
         """What the parser makes of this tree's travel step, as an assertion."""
@@ -197,30 +171,13 @@ class ElmRepl:
             ' |> Maybe.andThen .label)'
         ) % json.dumps(tree)
 
-    def works(self):
-        answers, plain, stderr = self.ask([
-            "%s == Just \"Set Destination\""
-            % self.travel_label_of(tree_with(single_button_entry("Set Destination")))])
-        return answers == [True], plain + "\n" + stderr
 
-    def close(self):
-        shutil.rmtree(self.scratch, ignore_errors=True)
-
-
-def elm_is_available():
-    return shutil.which("elm") is not None
-
-
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheRealParserReadsBothLayouts(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        works, output = cls.repl.works()
-        if not works:
-            cls.repl.close()
-            raise unittest.SkipTest("elm repl cannot run here:\n%s" % output)
+        cls.repl = open_repl(ParserRepl, prefix="test-objective-chain-",
+                             preamble=PREAMBLE)
 
     @classmethod
     def tearDownClass(cls):

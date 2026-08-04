@@ -60,10 +60,9 @@ Nothing here reads a live game client or drives a bot. The `elm repl` cases need
 """
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 import unittest
+
+from prerequisites import ElmRepl, open_repl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
@@ -92,97 +91,16 @@ def function_body(source, name):
     return match.group(0)
 
 
-class ElmRepl:
-    """The bot's own compiled code, answering for itself.
-
-    `botlab_host.py`'s recipe: copy the app to scratch, patch `elm-version` to
-    whatever this machine's elm reports, and build there -- never in the
-    checked-in source. The one extra step is opening `module Bot exposing (...)`
-    to `(..)`, since the repl can only call what the module exports.
-    """
-
-    def __init__(self):
-        self.scratch = tempfile.mkdtemp(prefix="test-wind-down-")
-        self.app = os.path.join(self.scratch, "app")
-        shutil.copytree(MISSION_RUNNER_DIR, self.app)
-
-        version = subprocess.run(
-            ["elm", "--version"], capture_output=True, text=True,
-            check=True).stdout.strip()
-        elm_json = os.path.join(self.app, "elm.json")
-        with open(elm_json, encoding="utf-8") as source:
-            patched = source.read().replace(
-                '"elm-version": "0.19.1"', '"elm-version": "%s"' % version)
-        with open(elm_json, "w", encoding="utf-8") as target:
-            target.write(patched)
-
-        bot = os.path.join(self.app, "Bot.elm")
-        with open(bot, encoding="utf-8") as handle:
-            source = handle.read()
-        opened = re.sub(r"module Bot exposing\s*\([^)]*\)",
-                        "module Bot exposing (..)", source, count=1)
-        assert opened != source, "could not open Bot.elm's exports"
-        with open(bot, "w", encoding="utf-8") as handle:
-            handle.write(opened)
-
-    def evaluate(self, expressions):
-        answers, plain, stderr = self.ask(expressions)
-        if len(answers) != len(expressions):
-            raise AssertionError(
-                "elm repl answered %d of %d expressions.\nstdout:\n%s\nstderr:\n%s"
-                % (len(answers), len(expressions), plain, stderr))
-        return answers
-
-    def ask(self, expressions):
-        # Asked as one `List Bool` rather than one expression per line,
-        # because the repl recompiles the module for every line it is given.
-        # Measured against this app: twenty expressions cost 36.5s a line at a
-        # time and 5.8s as a single list. The answers come back in the order
-        # asked either way, which is all any caller here relies on.
-        if not expressions:
-            return [], "", ""
-        script = "import Bot exposing (..)\n[ %s ]\n" % ", ".join(expressions)
-        result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
-                                capture_output=True, text=True)
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-        # The repl wraps, so `: List Bool` can land on the line after the list.
-        listed = re.search(r"\[([^\]]*)\]\s*:\s*List Bool",
-                           plain.replace("\n", " "))
-        answers = ([answer == "True"
-                    for answer in re.findall(r"True|False", listed.group(1))]
-                   if listed else [])
-        return answers, plain, result.stderr
-
-    def works(self):
-        """Whether the repl can evaluate anything at all here.
-
-        Distinguishes an environment where `elm repl` cannot run from the bot
-        answering wrongly. Only the first is a reason to skip: a suite that
-        skipped on any failure would be a check that never fires.
-        """
-        answers, plain, stderr = self.ask(
-            ["homeStationTripSecondsPastSessionEnd > 0"])
-        return answers == [True], plain + "\n" + stderr
-
-    def close(self):
-        shutil.rmtree(self.scratch, ignore_errors=True)
+def repl():
+    return open_repl(ElmRepl, prefix="test-wind-down-")
 
 
-def elm_is_available():
-    return shutil.which("elm") is not None
-
-
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheBudgetIsExecutedRatherThanMirrored(unittest.TestCase):
     """The constants answer for themselves, so a retune fails here."""
 
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        works, output = cls.repl.works()
-        if not works:
-            cls.repl.close()
-            raise unittest.SkipTest("elm repl cannot run here:\n%s" % output)
+        cls.repl = repl()
 
     @classmethod
     def tearDownClass(cls):
@@ -298,7 +216,6 @@ class TheRestockWindowCannotDriftFromTheWindDown(unittest.TestCase):
         self.assertIn("droneRestockGiveUpSecondsBeforeSessionEnd", self.body)
 
 
-@unittest.skipUnless(elm_is_available(), "elm is not on PATH")
 class TheOutcomesThatUsedToBeWrong(unittest.TestCase):
     """The caller's comparison is `secondsRemaining <= deadline -> finish`,
     asserted textually above. These replay it against the real constants for the
@@ -306,11 +223,7 @@ class TheOutcomesThatUsedToBeWrong(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.repl = ElmRepl()
-        works, output = cls.repl.works()
-        if not works:
-            cls.repl.close()
-            raise unittest.SkipTest("elm repl cannot run here:\n%s" % output)
+        cls.repl = repl()
 
     @classmethod
     def tearDownClass(cls):
