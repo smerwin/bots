@@ -649,7 +649,7 @@ class TheConfirmationIsTheOnlyAffirmativeAnswer(unittest.TestCase):
             "\njumpToNextSystem :"))
         self.assertIn('namedButton "no_dialog_button"', declining)
         for affirmative in ["yes_dialog_button", "quitMissionConfirmationButton",
-                            "confirmQuitMission"]:
+                            "confirmQuitMission", "confirmDeclineMission"]:
             self.assertNotIn(
                 affirmative, declining,
                 "the default answer to a confirmation must stay the one that "
@@ -657,10 +657,14 @@ class TheConfirmationIsTheOnlyAffirmativeAnswer(unittest.TestCase):
                 "standing once already")
 
     def test_the_exception_needs_all_three_conditions(self):
+        # Ends at the *next* function rather than at the section break: the
+        # decline confirmation now sits between them and repeats two of these
+        # three conditions, so a looser slice would let its copies satisfy this
+        # test while this one had lost them.
         expected = collapsed(function_body(
             self.source,
             "quitMissionConfirmationIsExpected : BotDecisionContext",
-            "\n\n\n-- Docked"))
+            '\n{-| Whether the dialog now on screen is the "Decline Mission?"'))
         self.assertIn("context.memory.missionToAbandon /= Nothing", expected)
         self.assertIn("context.readingFromGameClient.agentConversationWindows /= []",
                       expected)
