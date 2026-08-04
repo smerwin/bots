@@ -247,8 +247,21 @@ class OneNameSeveralAttackersTest(unittest.TestCase):
 
 
 class TheMatchIsExactTest(unittest.TestCase):
+    """The comparison itself, wherever `isObjectShootingAtUs` keeps it.
+
+    Since #90 it keeps it in `namesMatchLabels`, shared with the rule that takes
+    a row *out* of the target set for having absorbed every shot fired at it.
+    The two are the same question asked in opposite directions and a difference
+    between them would be a row that can be engaged for shooting us and never
+    dropped for being unhurtable -- so one definition, and these assertions
+    follow it rather than pinning the caller's shape.
+    """
+
     def setUp(self):
-        self.body = function_body(bot_elm(), "isObjectShootingAtUs")
+        source = bot_elm()
+        self.body = (function_body(source, "isObjectShootingAtUs")
+                     + function_body(source, "anyNameMatchesOverviewLabel")
+                     + function_body(source, "namesMatchLabels"))
 
     def test_it_compares_whole_labels_rather_than_substrings(self):
         # `List.member` over the row's labels, not `String.contains`. See
@@ -260,6 +273,13 @@ class TheMatchIsExactTest(unittest.TestCase):
 
     def test_it_normalises_case_and_surrounding_space(self):
         self.assertIn("String.trim >> String.toLower", self.body)
+
+    def test_it_still_reads_both_of_the_rows_own_labels(self):
+        # Name and Type, which exactness is what makes safe: a wreck's Type is
+        # its owner's name with " Wreck" appended. Asserted here because the
+        # extraction moved these two lines out of the caller.
+        self.assertIn("overviewEntry.objectName", self.body)
+        self.assertIn("overviewEntry.objectType", self.body)
 
     def test_the_names_a_loose_rule_would_have_engaged(self):
         # Asserted as data rather than by running Elm: with the attacker

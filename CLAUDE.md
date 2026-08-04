@@ -211,6 +211,15 @@ recorded lines in both directions, plus the four `(combat)` lines in the whole
 corpus that carry "from" and are not damage (`Warp scramble attempt from …`),
 which is why the pattern is anchored on the leading number rather than the word.
 
+**And the other direction is a third node.** Issue #90 needed the half that was
+matched nowhere: `MacOsHostSyntheticOutgoingDamage`, one child per target
+carrying `name`, `hits` and `damage`, lifted into
+`ParsedUserInterface.outgoingDamageSinceLastReading`. It is per target rather
+than one total, unlike the incoming node, because the question it answers is
+about one object — see "What the bot gives up on: shots that land and achieve
+nothing". Its `Nothing` points the opposite way from the retreat's: a host that
+cannot answer must not read as "everything is immune".
+
 **A reading's entries are gone by the next reading, and that shapes every
 consumer.** A branch that reads them and writes nothing down sees a refusal once
 and then behaves exactly as it did before — so the verdict has to be recorded in
@@ -222,10 +231,11 @@ can write memory and the one place that never sees the decision. The ammo swap's
 the tree is being built, so the node holds what the client said between the
 previous read and this one, not a growing buffer that would have the bot
 answering a refusal from four minutes ago. The tail fans one file offset out to
-two queues, because the stderr echo consuming the lines is exactly what kept
-them from the bot in the first place — a second caller of a single-cursor tail
-would have given whichever ran first that cycle's lines and the other nothing,
-intermittently and without a word.
+four queues — the echo, the entries, and one per damage direction — because the
+stderr echo consuming the lines is exactly what kept them from the bot in the
+first place, and a second caller of a single-cursor tail would have given
+whichever ran first that cycle's lines and the others nothing, intermittently
+and without a word.
 
 **`ParseUserInterface.elm` is vendored six times, and the policy is all six,
 identically.** Nothing in this parser is app-specific, and a change that lands
@@ -941,7 +951,137 @@ in the last 45 s, and nothing else here marks it as a target.` — and only when
 nothing else would have selected the row, so the line means "this is new" rather
 than appearing beside every rat in the pocket.
 
-## When the tracker says Dock, the fight is over
+## What the bot gives up on: shots that land and achieve nothing
+
+Everything above adds rows to the target set. This is the one rule that takes
+one away, and it exists because run 27 locked an `Infested Asteroid` and shot it
+with every gun for roughly **290 consecutive readings** — every shot landing,
+every one doing **zero damage**, nine or ten real rats untouched on the same
+overview, and the mission tracker already reading `no instruction (next step:
+Set Destination)`. It ended with the shield at 0% and armour going while three
+named attackers hit the ship and its own guns were still on the rock.
+
+**The bot could not see any of it, and that was the whole issue.** The host
+matched `^(\d+) from (?P<attacker>.+)$` — the incoming half, summed for #32's
+retreat. Outgoing `N to <target>` lines were matched nowhere, so no field in any
+reading said how much damage this ship was *dealing* and no decision could ask.
+That gap had already been named once: `ammoSwapRangeErrorPercent` is documented
+as "the weak half" precisely because what decides whether the other charge is
+better is whether the guns are landing, "which the client states on its outgoing
+combat lines and which this does not read". Same missing instrument, second
+consumer, and the summary now serves both.
+
+**The client distinguishes the three cases in the line itself**, so none of this
+is inferred from a health bar that never moves: a miss carries no damage number
+(`Your Hobgoblin II misses Vigilant Sentry Tower completely`), a landed shot
+reads `104 to Mammon Apis - Hits`, and a landed shot that did nothing reads
+`0 to Infested Asteroid - Hits`.
+
+**Summarised host-side, per target.** `MacOsHostSyntheticOutgoingDamage` is the
+third synthetic node, one child per target carrying `name`, `hits` and `damage`,
+lifted into `ParsedUserInterface.outgoingDamageSinceLastReading : Maybe (List
+OutgoingDamageToTarget)`. Same four safety properties as the other two. The raw
+lines stay withheld — there are 158,850 `(combat)` lines across the recorded
+sessions and 77,316 of them are outgoing, more than twice the incoming count.
+
+**Per target rather than one total**, which is the one place this differs from
+the incoming node, and run 27 is why: its drones were landing real damage on a
+`Mercenary Commander` in the very readings its guns were achieving nothing on
+the asteroid, so a single sum would have read as healthy throughout the incident
+the whole change exists to catch.
+
+**Absent means unknown, and unknown keeps shooting.** `Nothing` from the parser
+is "this host does not carry the channel" and never adds to the evidence or to
+the verdict. The fail-safe direction is the *opposite* of #37's — there an
+absent channel must not read as "the grid is quiet", here it must not read as
+"everything is immune" — and the status line reports
+`zero-damage check: NO COMBAT LOG` rather than leaving it to be inferred from a
+verdict that never arrives.
+
+**Eight landed hits at zero, and the corpus is cleaner than the issue expects.**
+Across 77,316 outgoing lines naming 294 distinct targets, **eight targets ever
+produced a zero and none of those eight ever produced a nonzero**; the other 286
+never read zero once. Resists and glancing hits do not round to zero on this fit
+— a glancing hit reads `15 to Mercenary Commander - Acolyte I - Glances Off` —
+and the longest run of zeros anywhere later broken by a real hit is **zero**. So
+there is no observed overlap for a threshold to clear, and eight is margin
+rather than a separator: it is the largest value that still catches every
+episode worth catching, the eight zero-only episodes having run 3, 3, 10, 28,
+74, 86, 101 and 108 landed hits. It fires 20–75 s into each of the six it
+catches, in place of the 41–414 s those episodes actually ran.
+
+**It is a number about this ship's guns, not about the game.** A fit whose shots
+are small enough to round to zero against a heavily resisted target would
+accumulate against something it could eventually kill, and nothing in this
+corpus covers that — the same warning `defaultRunAwayIncomingDamageThreshold`
+carries. `give-up-after-zero-damage-hits` sets it; `-1` disables it.
+
+**A miss builds no case**, because the host never counts one. Missing is a range
+problem and giving up is not the answer to it — without that, a gun firing out
+of range would give up on everything it could not reach.
+
+**The verdict is latched in `BotMemory.zeroDamage` and kept for the session**,
+the way `missionNamesAbandoned` is. A reading's summary is gone by the next one,
+so a branch that read the zero and wrote nothing down would see it once and go
+straight back to shooting the same rock — `loadRefusedByClient`'s failure. It
+does not un-latch on later damage, deliberately: after giving up the bot stops
+shooting the object, so no further evidence can arrive and a rule waiting for
+some would wait forever.
+
+**Two consumers, and both are needed** — which is what run 27 settles about the
+selection question the issue left open. The bot **never chose that asteroid**:
+across 265 `Lock target from overview entry '…'` lines in that run, not one
+names it. The reading before it appeared shows the bot Ctrl+clicking the row for
+`Sunder Alvi`, and the next reading reads `target Infested Asteroid`. That is
+the distance-sorted overview re-sorting between the reading and the click, the
+same row shift already documented for the loot cascade — so the icon rule is
+exonerated, and **a `never-attack` name list would not have helped, because no
+name-based rule was ever consulted for this object.**
+
+So `shouldAttackOverviewEntry` gains the subtraction (one choke point, since the
+lock candidates, the scroll-to-reveal and `anyAttackableInOverview` all ask it),
+and the branch that matters unlocks it from the *target bar*:
+`activeTargetGivenUpAsImmune` reads the whole overview rather than
+`overviewEntriesToAttack`, because giving up has already removed the row from
+that list. Nothing here chooses which locked target EVE calls the active one, so
+declining to shoot would leave the object in the slot and reach the same branch
+again next reading — run 27 with a different decision line. Freeing the slot is
+all it has to do; `activateOneOfTheLockedTargets` clicks another locked target
+on the next reading. The unlock is the locked-target-bar icon that already
+exists, one of the two cascades needing a 200px tolerance.
+
+**It says so out loud**, which `askForHelpToGetUnstuck` never did for run 27:
+
+```
+Every shot that has landed on 'Infested Asteroid' did zero damage, 8 of them by
+the client's own count -- these shots are achieving nothing. Unlock it
+(Ctrl+Shift+Click) and leave it alone for the rest of the session.
+```
+
+and the status line carries `shots landing for zero: 'X' 3/8` every reading, so
+a target climbing towards the threshold and one that never climbs are
+distinguishable while watching a run.
+
+**No `never-attack` setting was added.** `attack-object` is a positive list and
+there is still no negative one — but a name list is exactly what failed here:
+nobody had predicted `Infested Asteroid`, and the object was never selected by
+name in the first place. What the operator gets instead is a threshold to tune
+and a run that learns the name itself. The lever an operator actually lacked
+mid-run is covered by the web console, which applies a settings change without a
+restart.
+
+**Untested against a live client.** The rule is executed through the real
+`Bot.elm` in `elm repl` and the threshold is checked against the client's own
+recorded lines, but no run has given up on anything. What to watch on the first
+one: the status line's `shots landing for zero:` clause appearing at all — if it
+never does on a run that fights, the outgoing summary is not reaching the bot —
+then the unlock line above, then `GIVEN UP ON` for the rest of the session with
+the object never locked again. The failure to watch for is a lock/unlock
+oscillation: the row shift that produced run 27's asteroid can produce it again,
+and the verdict then costs one reading each time instead of 290, which is a fix
+rather than a cure.
+
+## When the objective is done and the tracker offers a trip, the fight is over
 
 The mission runner's on-grid priority is the fight, then the looting, and only
 then travel — `decideActionInMissionPocket` wraps the whole travel branch in
@@ -955,60 +1095,89 @@ instruction (next step: Dock)` on **77 consecutive in-space readings**; 386 of
 the 453 decision blocks inside them went to locking and shooting; and the first
 in-space click on that Dock button came **603 seconds** — just over ten minutes
 — after the label appeared, on the first reading where the overview finally read
-`Rats in overview: 0`. The objective was carrying no instruction the whole time:
-nothing left to destroy, retrieve or approach, and the only thing the tracker
-wanted was the trip back.
+`Rats in overview: 0`.
 
-**`dockOutranksTheFight` is the whole exception**, and it is placed rather than
-conditioned: it wraps the combat call inside `decideActionInMissionPocket`, so
-the fight becomes the fallback exactly where travel used to be. It fires only
-when the tracker's travel button reads `Dock` **and** the objective's
-`instructionTexts` is empty or blank.
+**#49 fixed that for the label `Dock` and for no other, which turned out to be
+the rarest case there is.** Counted across every recorded run on the readings
+that cost something — in space, objective complete, rats on the overview:
 
-**Both halves are load-bearing, and the recordings say so.** Of the 1,738 `Dock`
-readings across the eleven recorded runs, 326 carry a live courier instruction
-(`Bring <a …>The Damsel</a> to …`) — a mission still asking for something — so
-the label alone would have disengaged on an unfinished objective.
+| travel step | readings | avg rats |
+|---|---:|---:|
+| `Set Destination` | **1,443** | 7.0 |
+| `Destination Set` | **812** | 3.0 |
+| `Start Conversation` | 71 | 1.7 |
+| `Dock` | 35 | 1.8 |
+| `Preparing` | 15 | 2.0 |
+| `Warping` | 3 | 2.0 |
 
-**The label is matched whole, never as a substring, because "Undock" contains
-"dock".** That is the label the tracker shows at the start of every mission, so
-a substring rule would read the ship's own departure as "the objective is
-complete" and try to leave from inside the station. The recordings carry ten
-distinct *text* travel labels — `Warp to Location`, `Destination Set`,
-`Warping`, `Dock`, `Set Destination`, `Preparing`, `Start Conversation`,
-`Undock`, `Abort Undock`, `Read Details` — and exactly one of them ends a
-mission.
+So the label #49 handled is 35 readings and the ones it did not are 2,344, on
+grids carrying up to four times the rats — at two to three seconds a reading,
+about an hour of the corpus spent shooting bounties on a finished mission.
 
-**The client can render a travel step as a glyph with no text at all, so any
-matcher on this field must fail closed.** Run 11 produced an eleventh "label"
-three times:
+**`travelOutranksTheFight` is the whole exception**, and it is placed rather
+than conditioned: it wraps the combat call inside `decideActionInMissionPocket`,
+so the fight becomes the fallback exactly where travel used to be. It fires when
+the objective's `instructionTexts` is empty or blank **and** the tracker is
+offering a travel step at all — whichever step it is.
+
+**The label is no longer part of the condition, and the measurement is why.**
+The words that mean the mission is still running do not appear beside a finished
+objective on a grid with a fight on it. `Warp to Location` is the one that would
+matter, since taking it would leave a pocket that has not been cleared: 10,032
+readings beside a live objective, **three** beside a finished one — a flicker
+between two `Dock` readings as a mission ended — and **none at all** with a rat
+on the overview. `Read Details`, `Docking`, `Undocking` and `Jump` never meet a
+finished objective; `Undock` and `Abort Undock` do, but only on readings with no
+ship UI, which is in station, where this branch is never reached. The objective
+half is what excludes them, and a list of permitted words would repeat #49's own
+mistake — it handles what has been measured and leaves whatever the client
+writes next. The vocabulary has already grown twice without anyone deciding to:
+#62's objective-chain panel added four labels, and run 22 added one that is not
+text.
+
+**`Preparing` and `Warping` are covered too, and that is the one judgement the
+data settles rather than decides.** They read like states rather than commands —
+if the ship is already warping, disengaging is moot rather than wrong — and the
+recordings say the distinction is unobservable from here: on every costly
+reading carrying one, the ship was in warp (15 of 15, and 3 of 3), where
+`decideActionWhenInSpace` answers `I am in warp` long before this branch is
+consulted. Covering them changes no recorded reading; excluding them would be a
+list to maintain for nothing.
+
+**Widening the rule flips the failure direction, so the direction is now
+chosen.** #49's equality test against `Dock` declined a label with no text *by
+accident* — run 11 rendered a travel step three times as
 
 ```
 U+0002 U+0000 U+AD1D8 U+0001 U+0001 U+0000 U+0001
 ```
 
-— six C0 control characters around one codepoint that is **unassigned**
-(category `Cn`, plane 10), *not* private-use. That distinction is the trap: a
-rule that recognised "not text" by private-use membership would classify this as
-text. It arrived on `Recon (3 of 3) -- You need to warp to the mission location`
-and the bot pressed the button carrying it, which is the ordinary travel
-behaviour and not something the Dock change touches.
+six C0 control characters around one codepoint that is **unassigned** (category
+`Cn`, plane 10), *not* private-use. That distinction is still the trap: a rule
+recognising "not text" by private-use membership would classify this as text. A
+rule of the form "any travel step is offered" **matches** it, and would
+disengage on a button the client failed to draw.
 
-Both halves of the condition decline it independently, checked by running them
-rather than by reading them: `missionTravelStepIsDock` answers `False` for that
-string, and `missionHasNoOutstandingInstruction` answers `False` for the
-objective beside it. An exact comparison is what makes that automatic — a
-substring or "starts with" rule on a field that can hold arbitrary bytes has no
-such guarantee.
+`travelLabelIsReadableText` refuses that, and the choice is fail-**closed**: an
+unreadable label is not a step, and the bot keeps fighting, which is exactly
+what it does today. The test is printable ASCII with at least one letter in it —
+every label the client has ever written here is ASCII, and the alternative
+(accepting anything) is the only way this change could make the bot leave a
+pocket it should not.
 
-It also has a lesson for the *tests*. Asserting "the set of travel labels is
-exactly these ten" fails the moment the client emits one of these, on a machine
-whose logs happen to contain it — which is what happened, on a run still being
-written. The assertion is over the **printable** labels, with the non-text case
-tested separately as the property that actually matters.
+**The corpus contains the case that makes this load-bearing rather than
+theoretical.** Run 22 rendered a travel step as `U+0000 U+0000 . 5 0 <space> A U
+U+0000` — a distance readout wrapped in NULs — on `Avenge a Fallen Comrade --
+**no instruction**`. Run 11's glyph sat beside an objective still asking for
+something, so both halves declined it and fail-closed was free. This one sits on
+a finished objective, so the label rule is the only thing declining it.
 
-**What still keeps the guns firing after `Dock` appears**, since the point of
-the branch is to stop:
+The stated cost of that rule: a client rendering this button in a non-Latin
+script switches the branch off entirely and the bot behaves as it did before the
+change. That is the safe direction, and it is the same assumption about the
+client's language the rest of this file already makes.
+
+**What still keeps the guns firing**, since the point of the branch is to stop:
 
 - **Anything warp disrupting the ship.** Docking is a warp, so a scrambler makes
   leaving impossible and killing it is the only thing that restores the option —
@@ -1016,68 +1185,89 @@ the branch is to stop:
   combat candidates. The branch hands the fight back **and says so every reading
   it declines**, for `returnDronesToBay`'s reason. This is the one case where
   being shot outranks leaving.
-- **Any other travel label**, and **an objective still carrying an
-  instruction** — both keep the old order untouched.
+- **An objective still carrying an instruction**, whatever the button offers.
+- **A tracker with nothing to travel to.** The step has to be one the bot can
+  actually take — a button `missionTravelStep` would click, or a route the panel
+  confirms exists — so a reading where the tracker says the route is set and no
+  route is there keeps the old order instead of disengaging into the bottom of
+  the travel branch, where the stall counter and #54's abandonment live.
 - **A lost ship and the two retreats.** `recoverPodAfterShipLoss` still
   short-circuits the docked-or-in-space split above all of this, and
   `runAwayIfLowHealth` still runs before `decideActionWhenInSpace` is called at
   all, so #32's damage-rate retreat outranks this branch. That is the right way
   round: the retreat is the controller for "leave now, this is going badly" and
   this one is for "the job is done, go home". There is no second one — this
-  branch presses the tracker's own button and owns no clock, no counter and no
+  branch takes the tracker's own step and owns no clock, no counter and no
   memory.
 
 **Being shot, otherwise, does not keep the guns on**, and that is a decision.
-#40's rule stands while there is a fight to be in; once the tracker says Dock the
-answer to being shot is to leave. The recordings say the trade is cheap: over
-those 77 readings the client's combat log reported any incoming damage at all on
+#40's rule stands while there is a fight to be in; once the objective is done the
+answer to being shot is to leave. The recordings say the trade is cheap: over run
+11's 77 readings the client's combat log reported any incoming damage at all on
 **4** of them, at most **7 hitpoints** in a 45-second window against a threshold
 of 3,500. Were the damage real, the retreat above would have taken the reading
 before this branch saw it.
 
-**Drones leave through the recall that already exists.** The click is handed to
-`ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping`, exactly as the
-travel branch it hoists always did, so #7's lost drones and the give-up that
-followed apply unchanged and are not duplicated.
+**Nothing new is done to leave, and that is structural rather than careful.**
+The step handed back is `travelTheStepTheTrackerOffers`, the *same value* the
+fight itself falls through to. So the click still goes through
+`ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping` and
+`clickMissionTravelButton`'s settling window, and an acceleration gate on the
+grid still outranks flying a route — which is what keeps a multi-pocket mission
+from being stranded short of its next gate. The branch changes *when* that step
+is taken, never what it is. That also covers `Destination Set`, the second of
+the two labels #49 missed: it is not a click at all (`labelReportsRouteAlreadySet`
+filters it out of `missionTravelStep`), and the trip it names is travelling the
+route the tracker already set, which the same branch does.
 
 **It clears itself, so it needs no bound.** Every condition is re-derived from
-the live reading: the moment the button stops reading `Dock` — the ship docked,
-the mission moved on, the tracker collapsed and took the button out of the tree —
-the fight is the bot's job again on that same reading. Nothing latches.
+the live reading: the moment the tracker stops offering a step — the ship
+docked, the mission moved on, the tracker collapsed and took the button out of
+the tree — the fight is the bot's job again on that same reading. Nothing
+latches.
 
-Two decision-log lines carry it, and an operator should be able to see which:
+Two decision-log lines carry it, and the wording is #49's so an operator's
+existing grep still works:
 
 ```
-+ The objective is complete and the mission tracker says 'Dock' -- stop fighting and leave the rest of the field alone.
++ The objective is complete and the mission tracker says 'Set Destination' -- stop fighting and leave the rest of the field alone.
 + The mission tracker says 'Dock' and the objective asks for nothing more, but 'X' is warp disrupting this ship -- nothing leaves until that is dead, so keep fighting.
 ```
 
 **Verified without a live client**, in
-`tools/macos-host/tests/test_dock_outranks_the_fight.py`: the two pure rules are
-run through the real `Bot.elm` in `elm repl` rather than mirrored in Python (copy
-the app to scratch, open `module Bot exposing (..)`, patch `elm-version`, drive
-it — twelve seconds), against every travel label and objective string the
-recordings contain, including the non-text one, which is rebuilt inside Elm with
-`Char.fromCode` since a NUL cannot go in a string literal; the *text*
-travel-label vocabulary is re-checked against `~/eve-bot-logs` so a client that
-starts writing a different readable label fails loudly; and the ordering, the
-scrambler decline, the drone recall and the absence of a counter are read out of
-the source. Reading a log a run is still appending to is safe — lines are taken
-one at a time and a trailing partial line is skipped.
+`tools/macos-host/tests/test_travel_outranks_the_fight.py` (33 cases): the two
+pure rules are run through the real `Bot.elm` in `elm repl` rather than mirrored
+in Python — every text label the recordings carry reads as a step, both non-text
+ones are declined, and the objective rule is asked about the strings each sat
+beside; the bot's label rule is cross-checked against this file's own
+`Cc/Cf/Cs/Co/Cn` classifier over every label in the corpus, so a client that
+starts writing something new has to be wrong about it in both places to pass;
+the counts above are recounted from `~/eve-bot-logs` as *relations* (these
+labels dwarf `Dock`, the grids are the busy ones, `Warp to Location` never costs
+anything, the transient labels are only ever reached in warp) rather than as
+numbers, since a corpus that grows must not turn a true claim red; and the
+ordering, the scrambler decline, the shared step and the absence of a counter
+are read out of the source through a whitespace-collapsing reader.
 
-Confirmed by mutation, on the code and on the tests' own premises: a substring
-label match, re-wrapping the dock step in combat, dropping the scrambler
-decline, skipping the drone recall and ignoring the objective's instruction each
-fail it — and so do removing a known label from the list (so the drift check is
-live) and making every category count as text (so the glyph is covered by
-classification rather than by luck).
+Confirmed by mutation, eleven of them, each failing a named case: accepting any
+label as text (the fail-open version of this change), classifying by private-use
+membership, dropping the readable-text clause or conjoining it into never
+firing, the same two against the objective clause, disengaging on a route the
+panel does not confirm, dropping the scrambler decline, re-wrapping travel
+inside combat, giving the branch a travel path of its own — and, on the tests'
+own premises, removing a known label from the vocabulary and making every
+Unicode category count as text.
 
-**Not verified: any of this running.** What to watch on the first live run is the
-first line above arriving within a reading or two of `(next step: Dock)` showing
-up, followed by the drone recall and a dock — rather than another ten minutes of
-`I see a locked target`. The looting question is deliberately still open: a wreck
-holding the mission item is not optional the way ordinary salvage is, and this
-change does not answer it.
+**Not verified: any of this running.** No bot was started for it. What to watch
+on the first live run is `The objective is complete and the mission tracker
+says 'Set Destination'` arriving within a reading or two of the label, followed
+by the drone recall and the route being set — rather than another stretch of
+`I see a locked target`. The two things that would show the widening wrong are a
+disengagement on a grid that still has an objective (which would mean the
+tracker's own "no instruction" is not what it says) and a disengagement between
+pockets, which the gate-before-route ordering above is what prevents. The
+looting question is deliberately still open: a wreck holding the mission item is
+not optional the way ordinary salvage is, and this change does not answer it.
 
 ## A mission that cannot be progressed is given back, not asked about forever
 
@@ -1244,6 +1434,115 @@ accidental "Clear All Waypoints" on a real route.
 byte-for-byte unchanged, for 3+ ticks — catching a stray menu on a tick where the
 decision tree isn't touching menu logic at all, which the cascade's own recovery
 cannot do since it only runs while actively driving a cascade.
+
+## Docking is a run-in the ship has to fly, and commanding it again restarts it
+
+`travelToStationByName`'s last step right-clicks the route panel's first marker
+and takes the menu entry containing `"dock"` or `"jump"`. That is right for a
+**jump**, which is instantaneous once commanded, and it cannot finish a **dock**.
+
+Run 27 measured the difference. The ship reached Amarr with the station 17 km
+off and never docked: **1,227** readings of `A route is set`, **414**
+`Click on menu entry 'Dock'` decisions across **117 readings**, and in the
+client's own log **36** × `Setting course to docking perimeter` plus 5 ×
+`Session change already in progress`. The two accepted course-settings at
+readings 346 and 467 are **486 seconds apart** — the run-in's own length, so the
+ship had precisely enough time to arrive — and the bot commanded Dock on **120
+of the 121 readings in between**. The control is one click on the Selected Item
+panel's `selectedItemDock` at the same 17 km, which docked the ship about eight
+minutes later with no further input.
+
+**The bug is not the mechanism, it is the repetition**, and this is the thing
+most likely to be missed: a panel click repeated every reading restarts the
+perimeter run exactly as effectively as a cascade click did. So the fix is two
+parts and the second is the essential one.
+
+**`DockingRunIn` is what stops the re-command.** The client writes
+`Setting course to docking perimeter` on `notify` when it accepts a Dock, and
+that sentence is the *only* evidence a reading carries that a dock is under way
+— `ShipManeuverType` has no docking member (Warp, Jump, Orbit, Approach, Range,
+Align, and none of them is this), the ship keeps its ordinary UI, and the
+station's overview row looks like any other. Latched in
+`updateMemoryForNewReadingFromGame` for the usual reason: a reading's entries
+are gone by the next one.
+
+**That is also why the jump case is untouched, with no test for which leg the
+bot is on.** The client writes the line for a dock and never for a gate jump,
+so the latch cannot be armed by a jump and the declining branch is unreachable
+on one. The alternative — predicting the menu's contents before opening it — is
+both more machinery and less certain than the client's own statement.
+
+**What ends the wait is not a clock**, and picking a number here is the mistake.
+Eight minutes is roughly sixty readings, an order of magnitude past every
+settling window in `Bot.elm` (`approachIndicationTrustedForTicks` is 10, so ten
+readings into run 27's dock the old guard would have commanded another one), and
+a station 200 km off is a longer run-in and just as legitimate. The wait is
+bounded by the run-in *working*: the smallest range to a station seen since the
+course was set, and how long it has been since that fell. A ship that is closing
+gets as long as the distance requires; a ship that has stopped closing gets
+`dockingRunInPatienceReadings` and then the command again. That is
+`stall_watch.py`'s `APPROACH_PATIENCE` — same question, same signal, same unit,
+same value of 20 — so the bot and the watchdog watching it cannot disagree about
+what a stalled approach looks like.
+
+An unreadable range counts as **no gain**, not as a reason to drop the latch.
+`Nothing` covers no station on the overview, a row that is not rendered, and a
+distance in AU, and none of them is evidence the ship is closing. The worst that
+degrades to is one Dock per patience window against run 27's one per reading.
+
+**The panel click is the other half, and it is `selectThenPanelAction`'s
+argument on the one branch never wired to it** — `selectedItemButtonNamed`'s own
+comment already names `selectedItemDock` among the buttons reachable that way,
+and `selectedItemApproach` is recorded taking the ship from 0.0 to 585 m/s after
+a cascade achieved nothing across 180 decisions. `dockAtDestinationStation`
+applies three conditions, each guarding a way it could act on the wrong thing:
+the route panel rendering **exactly one** `AutopilotDestinationIcon` (otherwise a
+station on an intermediate system's gate grid is a station too, and docking
+there would end the trip in the wrong place with every log line reading like
+success); `selectedItemIsOverviewEntry`, because the panel acts on whatever is
+selected; and the Dock button being present at all, which is absent out of
+docking range and is the natural gate between the two mechanisms — the same
+shape as `selectedItemActivateGate`. On that last one it falls back to the
+cascade rather than waiting, which is why `selectThenPanelAction` could not be
+reused directly: its answer to a missing button is to wait and eventually ask for
+help, which here would strand a ship that simply has to fly further first.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_docking_run_in.py` (31 cases). The rule is
+*executed* through the real `Bot.elm` in `elm repl` rather than restated in
+Python: a run-in folded over 200 readings of a falling range survives all of
+them, one folded over exactly `dockingRunInPatienceReadings` readings without a
+gain ends and one reading fewer does not, a growing range is not a gain, an
+unreadable one is not either, docking clears the latch and a second course-
+setting restarts it and counts. The marker is read out of the source and checked
+against every `Setting course to docking perimeter` line in
+`~/Documents/EVE/logs/Gamelogs` — all of them on `notify` — and against the
+three carried into run 27's own log by the game-log channel, which is what makes
+the latch reachable rather than a guard resting on a sentence the bot never
+sees. Run 27's own measurement is re-derived from the log by the test, in
+readings rather than decision lines. Confirmed by mutation, thirteen of them,
+each failing a named case: the patience comparison moved either way, the counter
+pinned, a falling range no longer counting as progress, the marker drifting from
+the client's wording, docking not clearing the latch, course-settings not being
+counted, the jump entry dropped from the cascade, the matcher moved to `info`, an
+AU distance becoming a real range, the panel pressed without confirming what is
+selected, the destination no longer required to be in this system, the dock leg
+no longer consulting the latch, and the status line dropping the count.
+
+**Unverified: any of it running.** The re-command hypothesis is still an
+inference — nobody has watched a single un-repeated Dock succeed from 17 km, and
+the panel click succeeding is the one directly observed part. Two premises have
+never been read off a live client: that the route panel renders exactly one
+marker when the destination is in the current system, and that the destination
+station appears on the overview as a displayed row at all. **Both fail safe** —
+the panel path simply never fires and the bot behaves as it does today, with the
+run-in guard still in place, which is the half that matters. What to watch on
+the first run that docks: the status line's `docking run-in (1 course-setting(s),
+… m, 0/20 since closer)` with the count staying at **1** and the range falling,
+then the dock. A count climbing is the run-in still being restarted; a run-in
+that expires its patience every twenty readings while the range never moves is
+the station not being on the overview, and the tell is `range unreadable` in the
+same clause.
 
 ## Ship modules
 
@@ -1590,7 +1889,7 @@ consume the other's: #33 reads `gameLogEntriesSinceLastReading` and #32 reads
 `incomingDamageSinceLastReading`, both pure fields of a parsed record, and both
 write their verdict into a separate `BotMemory` field in the same
 `updateMemoryForNewReadingFromGame`. The place where they genuinely do share
-state is the host, where one file offset now feeds three queues — see the
+state is the host, where one file offset now feeds four queues — see the
 Architecture section, and `TailFanOutTest` for the assertion that each sees every
 line exactly once in either drain order.
 
@@ -1693,10 +1992,15 @@ on it.
 
 | question | answered by |
 |---|---|
-| which charge is loaded | menu membership — free, and safe to read at any time |
-| did the load land | menu membership on the next read — the charge has gone from the list |
+| which charge is loaded | menu membership where a read arrives; otherwise, since #85, the charge the last load asked for |
+| did the load land | the client's own refusal **not** arriving (#31), since #85; menu membership where a read happens to arrive |
 | where to change over | `ammo-swap-range`, else the midpoint of the two optimal ranges |
 | does this gun need stopping first | `isInActiveState` — the toggle, since #76; it read `ramp_active` before, which is the duty cycle |
+
+The second row is the one that changed direction, and #85 is the argument —
+see "Trusting the load" below. The inference is still never "no refusal
+arrived, so it worked" on its own: it is "the bot dispatched this load, and the
+client did not disown it".
 
 ### The client refuses a load into a running module, silently
 
@@ -2047,6 +2351,120 @@ and it is the run that turns several inferences into observations.
   prints. A resolved charge is the *menu read* working, not a load landing —
   those are different claims and the status line says only the first.
 
+### Trusting the load, because the client says when it fails
+
+Run 26 is the first run in which the swap works: 7 disarms, loads that land, and
+a crossover that self-calibrated to `44000 m (from the midpoint of the two
+optimal ranges seen)` off `seen low: 21000, seen high: 67000`. **What it does
+badly is finish.** Its guns-off windows peak at 3, 7, 10, 16, 17, 18 and 19
+readings against a bound of 20, and almost all of that is spent proving a load
+that has never failed.
+
+Counted over the 90 readings inside those seven windows:
+
+| phase | readings |
+|---|---:|
+| `re-open the last one's menu to see whether it took` | **55** |
+| stale-menu and pause-menu cleanup, downstream of that re-opening | 18 |
+| `Told the guns to stop N of 3 readings ago` | 10 |
+| `Open this weapon's menu` | 6 |
+| the fight getting a reading | 1 |
+
+**And the verification answered on one of the seven swaps.** Run 26's
+`loaded charge reads` went `unknown` → `short-range` exactly once, at step
+`148.2`, and never moved again across 4,138 further status prints — including
+the four later swaps that asked for `Radio M`. The reason is `menuOpenOnGunAtX`:
+it attributes an open context menu to a weapon only where the *previous step*
+right-clicked it, and the client usually takes two or three readings to draw the
+menu, by which time the attribution is gone. So the re-opened menu is read only
+when the client happens to be fast.
+
+**The branch was also not a read.** `loadTheWantedCharge` is a cascade that ends
+in clicking the charge entry, so every re-open re-issued the load. What run 26
+did seven times over was load, re-load, re-load, and time out still asking.
+
+**The replacement is that a load that does not land is not silent.** #31 reads
+`You cannot load or unload <weapon> while it is active` off the game log, and
+the two runs are a control pair:
+
+| run | refusals in the game log | `(satisfied)` prints |
+|---|---:|---:|
+| 22 — every load into a running gun | **134** | 0 |
+| 26 — the guns stopped first | **0** | 2,628 |
+
+So the swap dispatches the load and finishes on the next reading.
+`ammoSwapLoadIsTrusted` is the rule, and its five inputs are each a way it can
+be wrong: the verdict must be the one that issued the load, every gun must have
+been told, the load must have *gone out*, the client must not have refused it,
+and any menu read on that reading wins if it disagrees.
+
+**The dispatch is read from the previous reading, and that is the trap in this
+design.** `loadCascadeReachedTheMenu` is true on the reading a menu offering the
+wanted charge is in the tree, which is the reading the cascade clicks that
+entry — so satisfying the verdict *there* would send the acting path to `idle`
+before the click was dispatched, and the swap would be trusting a load it never
+issued. It is therefore only ever read as `memoryBefore.loadCascadeReachedTheMenu`.
+A menu is judged to be a weapon's by its offering the charge by name, which is a
+wider and steadier test than `menuOpenOnGunAtX` and needs no attribution.
+
+**The identity is kept rather than dropped, which is the part that needed care.**
+The menu read did two jobs and only one was redundant: it is also how the bot
+learns *which* charge is loaded (#26 / #29), and dropping it outright brings back
+`loaded charge reads unknown` — the state runs 17 and 18 were stuck in, which
+stops the next verdict forming. So the trust *writes* the charge it asked for
+into `chargeLoaded`, flags it `chargeLoadedIsAssumed`, and says so on the status
+line as `(assumed from the load, not read back)`. Any menu read overwrites it,
+in both directions. That is strictly more identity than the old design
+delivered: one read in seven swaps becomes an answer on every completed load.
+
+**The optimal-range forget had to follow it.** The number belongs to the charge
+that was in the gun, so an assumed change makes it as stale as a read one does —
+and forgetting it is the only thing that sends the hover back to read the new
+charge's range, which is how the second of the two optimal ranges is ever seen.
+Without `optimalRangeAfterTheLoad` run 26 would have stayed on its 67000 m
+bootstrap instead of reaching the 44000 m midpoint.
+
+**The assumption is exactly as good as #31, and that is recorded in the code.**
+`loadRefusalFromGameLog`'s own doc comment says so, because someone editing that
+matcher is not reading this file: remove it or let it drift, and a discarded
+load goes silent *and* the swap starts reporting a charge the gun does not have.
+Two failures rather than one. `verdictSatisfied` also asks the refusal *before*
+the trust, so a refusal arriving one reading after the click un-satisfies a
+verdict the trust had already closed.
+
+**The bounds are untouched.** `ammoSwapSilencedGiveUpTicks` is still 20 and
+`ammoSwapSilenceSettleTicks` still 3; the window is expected to fall because the
+swap finishes sooner, not because anything was loosened.
+
+**The settle was measured and left alone.** Across run 26's seven disarms, four
+paid nothing for it — the client's own `isInActiveState` confirmation ended the
+settle at one reading or none — and on the other three the client never reported
+the gun off at all within seven readings, so the count of 3 is the only thing
+that ends the wait there. It cost 10 of the 90 readings, and no recorded run
+shows a load accepted earlier than the third reading, while run 22's 134
+refusals are what loading too early costs. Lowering it would be a guess against
+the one number that argues for it.
+
+`tools/macos-host/tests/test_ammo_trusted_load.py` executes the rule through the
+shared `elm repl` harness and reads the rest out of the source through a
+whitespace-collapsing reader. Confirmed by mutation, nine of them, each failing a
+named case: dropping the refusal veto, reading the cascade state from this
+reading instead of the previous one, asking the refusal after the trust rather
+than before, storing only the read charge, keeping the stale optimal range,
+aiming the cascade at the reference gun instead of the gun last right-clicked,
+re-introducing the verification branch, taking the `#31` note out of the
+matcher's doc comment, and hiding the assumption from the status line.
+
+**Unverified: any of it running.** No run has been flown since. What to watch on
+the first one — the guns-off window peaking around **4 to 7** readings rather
+than 16 to 19; `(satisfied)` still appearing, at least as often as run 26's;
+`cannot load or unload` staying at **0**, since a refusal appearing is the
+client saying the trust was misplaced; and `loaded charge reads` *changing* with
+each swap rather than latching once, with `(assumed from the load, not read
+back)` beside it. A run where the charge tracks the verdict and no refusal
+appears is the whole claim. A refusal appearing means the load is going into a
+running gun again, which is #76's territory and not this.
+
 ### Not oscillating
 
 - **The crossover does not move, so the deadband is simple.** It is
@@ -2147,12 +2565,19 @@ and #72 the second, and **run 21 shows the menu read itself working**: it prints
 `loaded charge reads long-range` and derives a crossover from two optimal ranges,
 which is the strongest evidence yet that nothing is wrong downstream of the menu.
 
-**Nobody has yet watched a load land, in twenty-two runs.** `(satisfied)`
-appears **zero** times in run 22 — the run that reached `GUNS OFF` 29 times —
-and its `loaded charge reads` went `unknown` → `short-range` once, when the menu
-read finally resolved, and never changed again while the swap asked for `Radio M`
-on 277 prints. **A resolved charge is the menu read working, not a load
-landing**, and reading the first as the second is the mistake to avoid here.
+**Run 26 is where a load was finally watched landing.** The menu re-opened after
+a load and no longer offered `Multifrequency M`, which is the client stating the
+gun now carries it, and `(satisfied)` appears 2,628 times against run 22's zero.
+It is one confirmed read out of seven swaps, for the attribution reason in
+"Trusting the load" above — the other six completed on the trust rather than on
+a read, and that is what the next run has to show working.
+
+Up to run 22 nobody had watched one. `(satisfied)` appears **zero** times in run
+22 — the run that reached `GUNS OFF` 29 times — and its `loaded charge reads`
+went `unknown` → `short-range` once, when the menu read resolved, and never
+changed again while the swap asked for `Radio M` on 277 prints. **A resolved
+charge is the menu read working, not a load landing**, and reading the first as
+the second is the mistake to avoid here.
 
 **What run 22 does settle is the arbiter.** `You cannot load or unload Focused
 Modulated Medium Energy Beam I while it is active.` appears **134 times** in its
@@ -2960,14 +3385,17 @@ exists.
   recordings show the *middle* row empty on every capsule reading, and every row
   being empty is the stronger form of that, inferred rather than observed.
 
-  And it now **stops fighting once the tracker says `Dock`** with the objective
-  carrying no instruction, instead of clearing the field first — run 11 spent ten
-  minutes and 386 combat decisions doing that after the mission was over. The
-  conditions that still keep it fighting, and why leaving beats shooting back,
-  are in "When the tracker says Dock, the fight is over" above. **Untested
-  against a live client**; the two pure rules behind it are run through the real
-  `Bot.elm` in `elm repl`. Watch for `The objective is complete and the mission
-  tracker says 'Dock'` arriving within a reading or two of the label, rather than
+  And it now **stops fighting once the objective carries no instruction and the
+  tracker offers any travel step**, instead of clearing the field first — run 11
+  spent ten minutes and 386 combat decisions doing that after the mission was
+  over, and #49's fix, which acted on the label `Dock` alone, covered 35 of the
+  2,379 readings that cost anything. Which labels that covers, why the word is
+  no longer part of the condition, and why an unreadable label now fails closed
+  on purpose rather than by accident are in "When the objective is done and the
+  tracker offers a trip, the fight is over" above. **Untested against a live
+  client**; the two pure rules behind it are run through the real `Bot.elm` in
+  `elm repl`. Watch for `The objective is complete and the mission tracker says
+  'Set Destination'` arriving within a reading or two of the label, rather than
   another stretch of `I see a locked target`.
 
   And it now **gives back a mission it cannot progress** instead of asking for
@@ -2989,6 +3417,20 @@ exists.
   only appears when the thing it watches for happens, so a quiet run is not
   evidence the instrument works.
 
+  And it now **stops shooting an object whose every landed shot does zero
+  damage**, unlocks it and leaves it alone for the rest of the session. Run 27
+  shot an `Infested Asteroid` for roughly 290 consecutive readings with the
+  objective already finished, and no field in any reading could say so — the
+  host summed only the incoming half of the combat channel. The third synthetic
+  node, the threshold and its calibration, and why a `never-attack` setting
+  would not have helped are in "What the bot gives up on: shots that land and
+  achieve nothing" above. **Untested against a live client**, though the rule is
+  executed through the real `Bot.elm` and the threshold is checked against the
+  client's own recorded lines. What to watch first is the status line's `shots
+  landing for zero:` clause appearing at all on a run that fights; a run where it
+  never does means the outgoing summary is not reaching the bot, which is the
+  direction this whole change would fail silently in.
+
   And it now **acts on a hitpoint reading only once a second reading agrees**,
   rather than on whatever the gauge said this reading. Run 11 retreated forty
   printed decisions on `Armor reached 0%` with the armour at 82-96%, which is a
@@ -3002,6 +3444,19 @@ exists.
   session` climbing: a couple over a run is the gauge behaving as recorded, a
   count climbing every few readings is a gauge that has started lying properly
   and a different problem.
+
+  And it now **leaves a dock it has already commanded alone** instead of
+  re-issuing it every reading. Docking is a run-in the ship has to fly, and run
+  27 spent 486 seconds — the run-in's own length — commanding Dock on 120 of 121
+  consecutive readings and never arriving. The client's own `Setting course to
+  docking perimeter` is what says a run-in is under way, a falling range to the
+  station is what says it is working, and the dock itself now goes through the
+  Selected Item panel's `selectedItemDock` where the panel offers it. The two
+  halves, why the jump leg is unaffected, and what bounds the wait are in
+  "Docking is a run-in the ship has to fly" above. **Untested against a live
+  client**, and two of its premises are unread — watch the status line's
+  `docking run-in (N course-setting(s), …)` for N staying at 1 while the range
+  falls.
 
   And it now **asks the host to set its route through ESI** rather than driving
   the search bar, which is the only way it can originate a destination carrying a
@@ -3146,11 +3601,20 @@ exists.
   the channel, and `getAllContainedDisplayTexts` empty even with the attacker
   named "No room for more".
 
-  **Four consumers now, and none has been proven live.** #31's ammo-load
+  And it carries **what this ship's own shots achieved, per target**, as
+  `outgoingDamageSinceLastReading` — the other half of the same channel, and the
+  instrument run 27 did not have. See "What the bot gives up on: shots that land
+  and achieve nothing". Verified without a live client: 46 unit tests in
+  `tools/macos-host/tests/test_zero_damage_target.py`, with the accumulation
+  rule executed through the real `Bot.elm` rather than restated in Python and
+  the threshold recounted from the client's own 77,316 outgoing damage lines.
+
+  **Five consumers now, and none has been proven live.** #31's ammo-load
   refusal (`loadRefusedByClient`), #33's capsule refusal (`shipLossFromGameLog`),
-  #41's locked acceleration gate (`gateLockedForWantOfAnItem`) and #32's
-  damage-rate retreat, the last reading the summary rather than the
-  lines. All four take the same three parts a consumer needs: a
+  #41's locked acceleration gate (`gateLockedForWantOfAnItem`), #32's
+  damage-rate retreat and #90's zero-damage verdict, the last two reading a
+  summary rather than the lines. All five take the same three parts a consumer
+  needs: a
   match on the channel and the client's own wording, a `BotMemory`
   field to carry the verdict (a reading's entries are gone by the next one, so a
   branch that does not record what it saw sees it once), and a live run that
@@ -3297,12 +3761,15 @@ load-bearing — see "The home station".
   ship died, with 9,286 hitpoints of incoming fire landing between the old run's
   last log line and the new run's first reading. Nothing inside the bot can see
   that window. Dock or clear the grid before cycling.
-- **Looting has not been asked the question `Dock` was asked.** Once the tracker
-  says `Dock`, combat stops (see "When the tracker says Dock, the fight is
-  over"), but the looting branch keeps its old place under the fight and is
-  simply skipped along with it. That is right for ordinary salvage and wrong for
-  a wreck holding the mission item, and the two are not distinguished today —
-  `isNotableWreck` only asks whether a wreck is worth looting.
+- **Looting has not been asked the question the travel step was asked.** Once
+  the objective is done and the tracker offers a trip, combat stops (see "When
+  the objective is done and the tracker offers a trip, the fight is over"), but
+  the looting branch keeps its old place under the fight and is simply skipped
+  along with it. That is right for ordinary salvage and wrong for a wreck
+  holding the mission item, and the two are not distinguished today —
+  `isNotableWreck` only asks whether a wreck is worth looting. #92 widened the
+  disengage to 2,344 readings from 35, so the branch this skips is skipped
+  sixty-odd times more often than it was.
 - **Quitting a mission has never been driven by the bot**, only by hand. The
   affirmative half of the confirmation dialog is the weakest link: no live UI
   tree in this repo contains one, so the affirmative is identified as "the other
@@ -3320,6 +3787,21 @@ load-bearing — see "The home station".
   whole window, so a bot driven out of a pocket will be brought back into it by
   the mission logic and driven out again. Survivable, and better than the
   alternative it replaced, but it is a loop and it has not been seen live.
+- **The lock click still lands on whatever row the overview re-sorted into
+  place.** Run 27's asteroid was never chosen: 265 lock commands in that run and
+  not one names it, the reading before it appeared shows a Ctrl+click aimed at
+  `Sunder Alvi`, and the next reading reads `target Infested Asteroid`. #90
+  unlocks the object once it has proved itself unhurtable, which turns 290
+  readings into one per recurrence — a fix, not a cure, and a lock/unlock
+  oscillation is what to watch for. The row shift itself is the same one
+  `openCargoOnOverviewEntry` documents for the loot cascade and is unaddressed;
+  nothing verifies that the row clicked is the row locked.
+- **Nothing reads the outgoing damage summary except #90.** The gap it was built
+  for is named twice in this file: `ammoSwapRangeErrorPercent` is "the weak
+  half" precisely because what decides whether the other charge is better is
+  whether the guns are landing, and the summary now says so per target and per
+  reading. Wiring it into the swap's gain term is the obvious follow-up and is
+  deliberately not part of #90 — that rule is being tuned separately.
 - **A webifier that deals no damage is still invisible to the bot.** #40's
   attacker set is built from the combat log, and an EWAR module that applies no
   damage writes no line there. The overview row carries the answer — the client

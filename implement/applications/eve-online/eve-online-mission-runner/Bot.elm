@@ -218,6 +218,16 @@
         recorded client sessions the worst 45-second window the ship *survived*
         was 3114, and the one it died in peaked at 4101 -- so re-derive it for a
         different hull rather than carrying it over.
+      + `give-up-after-zero-damage-hits`: Stop shooting an object once this many
+        shots have *landed* on it for zero total damage, unlock it, and leave it
+        alone for the rest of the session. Defaults to 8 and `-1` disables it.
+        Misses do not count -- the client writes no damage number for one -- and
+        any damage at all resets the count, so a merely well-tanked target never
+        trips it. Calibrated from 77,316 recorded outgoing damage lines, in which
+        no target that ever took damage produced a single zero; see
+        `defaultZeroDamageHitsBeforeGivingUp`. Needs a host that carries the game
+        log: without one the guard is unarmed and the bot keeps shooting, which
+        is the safe direction.
 
       When using more than one setting, start a new line for each setting in the
       text input field. Here is an example of a complete settings string:
@@ -302,6 +312,7 @@ defaultBotSettings =
     , runAwayShieldHitpointsThresholdPercent = -1
     , runAwayArmorHitpointsThresholdPercent = -1
     , runAwayIncomingDamageThreshold = defaultRunAwayIncomingDamageThreshold
+    , zeroDamageHitsBeforeGivingUp = defaultZeroDamageHitsBeforeGivingUp
     , avoidRats = []
     , attackObjectNames = []
     , approachObjectNames = []
@@ -374,6 +385,9 @@ parseBotSettings =
            )
          , ( "run-away-incoming-damage-threshold"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayIncomingDamageThreshold = threshold })
+           )
+         , ( "give-up-after-zero-damage-hits"
+           , AppSettings.valueTypeInteger (\hits settings -> { settings | zeroDamageHitsBeforeGivingUp = hits })
            )
          , ( "avoid-rat"
            , AppSettings.valueTypeString
@@ -460,6 +474,7 @@ type alias BotSettings =
     , runAwayShieldHitpointsThresholdPercent : Int
     , runAwayArmorHitpointsThresholdPercent : Int
     , runAwayIncomingDamageThreshold : Int
+    , zeroDamageHitsBeforeGivingUp : Int
     , avoidRats : List String
     , attackObjectNames : List String
     , approachObjectNames : List String
@@ -514,6 +529,7 @@ type alias BotMemory =
     , targetToUnlockRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , targetToUnlockUnchangedTicks : Int
     , shipApproachingTicks : Int
+    , dockingRunIn : Maybe DockingRunIn
     , lootedWreckIds : List String
     , unlootableWreckIds : List String
     , lootAllRefusedTicks : Int
@@ -545,6 +561,7 @@ type alias BotMemory =
     , lowestArmorPercentSinceHealthy : Int
     , hitpoints : HitpointsMemory
     , incomingDamage : IncomingDamageMemory
+    , zeroDamage : ZeroDamageMemory
     , droneBayOpenedFromShipCard : Bool
     , droneBayWillTakeNoMore : Bool
     , droneRestockLooksWithRoom : Int
@@ -578,6 +595,48 @@ nothing in `UpdateMemoryContext` carries the session clock.
 type alias ShipLossVerdict =
     { reason : String
     , readingsSince : Int
+    }
+
+
+{-| A docking run-in the client has confirmed it is flying, and the evidence that
+it is still making progress.
+
+Docking is not a command that completes when it is issued. The client answers a
+Dock by flying the ship to the station's docking perimeter, and from 17 km that
+run-in takes about eight minutes -- during which the ship looks, to every other
+instrument in a reading, exactly like a ship that has been told nothing. Run 27
+is what that costs: the bot commanded Dock on 120 of the 121 readings between
+two accepted course-settings, and those two are **486 seconds** apart, which is
+the run-in's own length. The ship had precisely enough time to arrive and did
+not, and the session ended in space.
+
+So the latch exists to stop the bot re-commanding an action already under way.
+It is written in `updateMemoryForNewReadingFromGame` for the reason every other
+game-log verdict is: a reading's entries are gone by the next reading, so a
+branch that recognised the client's sentence where it acts on it would see the
+run-in start once and go straight back to commanding it.
+
+**What ends the wait is not a clock.** Eight minutes is roughly sixty readings,
+an order of magnitude past any settling window in this file, and a run-in's
+length is set by a distance nobody chose -- a station 200 km off is a longer one
+and just as legitimate. What the wait is bounded by instead is the run-in
+_working_: `rangeToStationMeters` holds the smallest range to a station seen
+since the course was set, and `readingsSinceCloser` counts how long it has been
+since that fell. A ship that is closing may take as long as the distance
+requires; a ship that has stopped closing gets `dockingRunInPatienceReadings`
+and then the command again. That is `stall_watch.py`'s own rule for the same
+question, in the same unit, and for the same reason -- see CLAUDE.md, "A falling
+distance counts as progress".
+
+`courseSettings` is not read by any decision. It is the number this whole issue
+is about, carried into the status line so a run says outright how many times it
+restarted its own dock: run 27's window shows 3, and a run that works shows 1.
+
+-}
+type alias DockingRunIn =
+    { rangeToStationMeters : Maybe Int
+    , readingsSinceCloser : Int
+    , courseSettings : Int
     }
 
 
@@ -753,6 +812,56 @@ type alias IncomingDamageSample =
     }
 
 
+{-| Which objects this ship's guns have been unable to hurt, and how far along
+the evidence against each one is.
+
+**Issue #90.** Run 27 locked an `Infested Asteroid` and shot it with every gun
+for roughly 290 consecutive readings. Every shot _landed_ and every one did zero
+damage, while nine real rats sat on the same overview untouched and the mission
+objective was already finished. Nothing could see it: the reading carried no
+field saying how much damage this ship was dealing, so no branch could ask.
+
+A reading's `outgoingDamageSinceLastReading` is gone by the next reading, like
+every other part of this channel, so the running count has to be written here --
+`updateMemoryForNewReadingFromGame` is the only place that can write memory and
+the one place that never sees a decision. A branch that read the zero and wrote
+nothing down would see it once and go straight back to shooting the same rock,
+which is the failure `loadRefusedByClient` documents.
+
+`landedHitsAtZero` is the evidence being gathered: per target name, how many
+shots have landed on it for a running total of zero. Any damage at all clears
+that name's tally outright, so a merely well-tanked target -- one taking small
+but real damage -- never accumulates. It is capped by
+`zeroDamageTalliesTracked`, oldest activity dropped first, because the names
+come from the client and nothing else bounds how many there can be.
+
+`namesGivenUpOn` is the verdict, latched for the session the way
+`missionNamesAbandoned` is, and for the same reason: unlocking without
+remembering is a loop, not a fix. Whatever put the object in the target bar will
+put it there again on the very next reading.
+
+`hostCarriesTheChannel` is the parser's `Nothing`-versus-`Just` distinction, and
+here it points the _opposite_ way from `IncomingDamageMemory`'s. A host that
+does not carry the channel reports no shots landing, which must never read as
+"everything is immune" -- absent means unknown, and unknown keeps shooting. So
+nothing is ever added to `namesGivenUpOn` from a reading with no node, and the
+status line says the guard is unarmed rather than leaving it to be inferred from
+an empty list.
+
+-}
+type alias ZeroDamageMemory =
+    { landedHitsAtZero : List ZeroDamageTally
+    , namesGivenUpOn : List String
+    , hostCarriesTheChannel : Bool
+    }
+
+
+type alias ZeroDamageTally =
+    { name : String
+    , hits : Int
+    }
+
+
 {-| A lock the bot has asked the client for and that the client has not
 answered yet.
 
@@ -793,6 +902,22 @@ already in it. Verified live: a weapon holding Radio M offered `Multifrequency M
 [4]` and no Radio M at all. So the charge that is _absent_ is the charge that is
 loaded, and that answer needs no tooltip, no hover, and none of the sprites this
 client does not have.
+
+Since #85 it is also written without a menu read, by
+`ammoSwapLoadIsTrusted`: a load the swap dispatched and the client did not
+refuse puts the charge the swap asked for in the gun. `chargeLoadedIsAssumed`
+says which of the two answers is on the line, because they are not equally good
+and an operator has to be able to tell them apart. A menu read always outranks
+the assumption -- it is the client's own word and it costs nothing when it
+happens to arrive.
+
+`loadCascadeReachedTheMenu` is how the assumption knows a load actually went
+out. It is true on the reading a context menu offering the wanted charge is in
+the tree with every gun already told to load, which is the reading the cascade
+clicks that entry out of it -- and it is read on the **next** reading, never on
+its own. Satisfying the verdict on the reading the menu arrives would send the
+acting path to `idle` before the click was dispatched, so the swap would be
+trusting a load it never issued.
 
 `optimalRangeInMeters` and the `optimalRangeSeen` pair are the secondary reading
 and are now a refinement rather than the mechanism. A weapon's optimal range
@@ -873,11 +998,16 @@ already had.
 
 `menuOpenOnGunAtX` is how the bot knows an open context menu is a weapon's, and
 which weapon's: nothing in the menu itself says where it came from, but the bot
-opened it and the previous step's effects say where it clicked.
+opened it and the previous step's effects say where it clicked. It answers only
+where the _previous step_ did the right-clicking, so it is `Nothing` whenever
+the client took longer than one reading to draw the menu -- which run 26 shows
+is most of the time, and is why the read it gates cannot be what a swap waits
+for.
 
 -}
 type alias AmmoSwapMemory =
     { chargeLoaded : Maybe AmmoRange
+    , chargeLoadedIsAssumed : Bool
     , optimalRangeInMeters : Maybe Int
     , optimalRangeSeenLow : Maybe Int
     , optimalRangeSeenHigh : Maybe Int
@@ -891,6 +1021,7 @@ type alias AmmoSwapMemory =
     , switchOffUndoneByClient : Bool
     , gunsCommandedThisVerdictAtX : List Int
     , menuOpenOnGunAtX : Maybe Int
+    , loadCascadeReachedTheMenu : Bool
     , hoverAwaitingTooltip : Bool
     , hoverUnansweredTicks : Int
     , optimalRangeGivenUp : Bool
@@ -902,6 +1033,7 @@ type alias AmmoSwapMemory =
 initAmmoSwapMemory : AmmoSwapMemory
 initAmmoSwapMemory =
     { chargeLoaded = Nothing
+    , chargeLoadedIsAssumed = False
     , optimalRangeInMeters = Nothing
     , optimalRangeSeenLow = Nothing
     , optimalRangeSeenHigh = Nothing
@@ -915,6 +1047,7 @@ initAmmoSwapMemory =
     , switchOffUndoneByClient = False
     , gunsCommandedThisVerdictAtX = []
     , menuOpenOnGunAtX = Nothing
+    , loadCascadeReachedTheMenu = False
     , hoverAwaitingTooltip = False
     , hoverUnansweredTicks = 0
     , optimalRangeGivenUp = False
@@ -3013,21 +3146,17 @@ missionIsReadyToComplete mission =
         |> List.any (stringContainsIgnoringCase "complete mission")
 
 
-{-| The label on the mission tracker's travel button, if it currently has one
-and it names a step worth taking. No label means the ship is on grid and it is
-the bot's own job to act (fight, loot, or take an acceleration gate) rather
-than to travel.
+{-| The mission tracker's travel button as the client is rendering it now, with
+whatever label it carries -- including the ones that are not steps to take.
 
-Feedback: the same button turns into "Abort Undock" for the several seconds
-an undock takes, and clicking whatever label it happens to show made the bot
-cancel its own undock and then start it again, forever. Observed live as an
-Undock/Abort Undock loop. Labels that undo the step in progress are therefore
-not travel steps at all -- while one is showing, the right move is to wait for
-the action already under way to finish.
+Separate from `missionTravelStep` because two questions are being asked of the
+same widget and only one of them is "what should be clicked". `Destination Set`
+is not a click and is still the tracker saying where the ship is going, which is
+what `travelStepThatEndsTheFight` reads it for.
 
 -}
-missionTravelStep : BotDecisionContext -> Maybe ( String, EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion )
-missionTravelStep context =
+missionTravelButton : BotDecisionContext -> Maybe ( String, EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion )
+missionTravelButton context =
     missionInfoPanelEntry context
         |> Maybe.andThen .locationButton
         |> Maybe.andThen
@@ -3049,23 +3178,39 @@ missionTravelStep context =
                     Nothing
 
                 else
-                    case button.label of
-                        Just label ->
-                            if labelUndoesStepInProgress label then
-                                Nothing
+                    button.label |> Maybe.map (\label -> ( label, button.uiNode ))
+            )
 
-                            else if labelReportsRouteAlreadySet label then
-                                -- Nothing to click: the route is already set. In
-                                -- space the caller travels it instead; docked,
-                                -- there is nothing to do but wait for the button to
-                                -- offer "Undock".
-                                Nothing
 
-                            else
-                                Just ( label, button.uiNode )
+{-| The label on the mission tracker's travel button, if it currently has one
+and it names a step worth taking. No label means the ship is on grid and it is
+the bot's own job to act (fight, loot, or take an acceleration gate) rather
+than to travel.
 
-                        Nothing ->
-                            Nothing
+Feedback: the same button turns into "Abort Undock" for the several seconds
+an undock takes, and clicking whatever label it happens to show made the bot
+cancel its own undock and then start it again, forever. Observed live as an
+Undock/Abort Undock loop. Labels that undo the step in progress are therefore
+not travel steps at all -- while one is showing, the right move is to wait for
+the action already under way to finish.
+
+-}
+missionTravelStep : BotDecisionContext -> Maybe ( String, EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion )
+missionTravelStep context =
+    missionTravelButton context
+        |> Maybe.andThen
+            (\( label, buttonNode ) ->
+                if labelUndoesStepInProgress label then
+                    Nothing
+
+                else if labelReportsRouteAlreadySet label then
+                    -- Nothing to click: the route is already set. In space the
+                    -- caller travels it instead; docked, there is nothing to do
+                    -- but wait for the button to offer "Undock".
+                    Nothing
+
+                else
+                    Just ( label, buttonNode )
             )
 
 
@@ -3567,6 +3712,106 @@ approach is re-issued, which retargets the ship.
 approachIndicationTrustedForTicks : Int
 approachIndicationTrustedForTicks =
     10
+
+
+{-| How many readings a confirmed docking run-in may go without getting closer
+before the bot commands the dock again.
+
+**This is not a budget for the run-in; it is a budget for the run-in showing
+nothing.** The distinction is the whole of #89. A clock would have to be picked
+against the longest dock anybody might fly, and there is no such number -- 17 km
+took eight minutes and a station 200 km off takes longer, legitimately. So the
+run-in is allowed as long as the range keeps falling, and this bounds only the
+case where it has stopped falling: a command that was swallowed, a ship stopped
+by something, a station that left the overview.
+
+Twenty readings, the same unit and the same value as `stall_watch.py`'s
+`APPROACH_PATIENCE`, which was calibrated for exactly this question on exactly
+this signal -- the measured worst case inside a real approach was 22 decisions
+between two strict decreases, about two readings, so twenty is an order of
+magnitude of headroom. Reusing its number rather than inventing one keeps the
+bot and the watchdog watching it from disagreeing about what a stalled approach
+looks like.
+
+Note what it costs when it is wrong in the permissive direction, which is the
+direction it is wrong in: a run-in the bot cannot measure gets one re-command
+every twenty readings rather than one per reading. Run 27 issued 120 in 121.
+
+-}
+dockingRunInPatienceReadings : Int
+dockingRunInPatienceReadings =
+    20
+
+
+{-| The docking run-in as it stands after this reading.
+
+Three inputs and one of them is the client's own sentence, which is what makes
+this a report rather than an inference.
+
+**Docked ends it.** The run-in finished, whatever it was doing, and the latch
+must not survive into the next undock -- it would suppress the first Dock of the
+next trip.
+
+**A fresh course-setting restarts it**, rather than being ignored as
+already-latched. The client writes the line each time it accepts a Dock, so a
+second one means a second run-in from wherever the ship now is, and the range to
+beat is this reading's rather than the old one's. This also picks up a dock an
+operator commanded by hand, which is the same run-in and equally not to be
+interrupted.
+
+**Otherwise it is the falling-range test**, and `Nothing` from the range is
+counted as no gain rather than as a reason to drop the latch -- see
+`rangeToNearestStationInMeters` for why the three ways it can be `Nothing` are
+not worth telling apart here.
+
+The `( Just _, Nothing )` case is a gain: the reading has a range where the
+previous one had none, so there is now something to measure against and the
+patience should start from it rather than from a count already part-spent.
+
+-}
+dockingRunInAfterReading :
+    { before : Maybe DockingRunIn
+    , courseSetThisReading : Bool
+    , rangeNow : Maybe Int
+    , docked : Bool
+    }
+    -> Maybe DockingRunIn
+dockingRunInAfterReading { before, courseSetThisReading, rangeNow, docked } =
+    if docked then
+        Nothing
+
+    else if courseSetThisReading then
+        Just
+            { rangeToStationMeters = rangeNow
+            , readingsSinceCloser = 0
+            , courseSettings = (before |> Maybe.map .courseSettings |> Maybe.withDefault 0) + 1
+            }
+
+    else
+        before
+            |> Maybe.andThen
+                (\runIn ->
+                    let
+                        gotCloser =
+                            case ( rangeNow, runIn.rangeToStationMeters ) of
+                                ( Just now, Just nearestSoFar ) ->
+                                    now < nearestSoFar
+
+                                ( Just _, Nothing ) ->
+                                    True
+
+                                _ ->
+                                    False
+                    in
+                    if gotCloser then
+                        Just { runIn | rangeToStationMeters = rangeNow, readingsSinceCloser = 0 }
+
+                    else if runIn.readingsSinceCloser + 1 < dockingRunInPatienceReadings then
+                        Just { runIn | readingsSinceCloser = runIn.readingsSinceCloser + 1 }
+
+                    else
+                        Nothing
+                )
 
 
 {-| The "do not restart what is already running" guard shared by everything that
@@ -5494,10 +5739,15 @@ has to be entered the tracker carries no label at all, so the gate branch is
 reached; once the mission is done the tracker says "Dock", which correctly
 wins over a gate that is still sitting on the overview.
 
-**The one step that outranks the fight instead of following it is "Dock"**,
-and `dockOutranksTheFight` is the whole of that exception -- see there for why
-it is the only label that gets one, and for what still keeps the guns firing
-after it appears.
+**Once the objective is finished the travel branch outranks the fight instead
+of following it**, and `travelOutranksTheFight` is the whole of that exception
+-- see there for which travel steps count, and for what still keeps the guns
+firing after one appears.
+
+The branch it hands back on those readings is `travelTheStepTheTrackerOffers`
+below, which is the _same value_ the fight falls through to. So disengaging
+never invents a move: it takes the one combat was hiding, and every settling
+window, drone recall and gate precedence in it applies unchanged.
 
 -}
 decideActionInMissionPocket : BotDecisionContext -> SeeUndockingComplete -> DecisionPathNode
@@ -5509,8 +5759,99 @@ decideActionInMissionPocket context seeUndockingComplete =
             -- until the tracker has something else to offer.
             describeBranch "A route is set -- travel towards the mission's system."
                 (jumpToNextSystem context)
+
+        travelTheStepTheTrackerOffers =
+            case missionTravelStep context of
+                Just ( label, buttonNode ) ->
+                    ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
+                        (clickMissionTravelButton context label buttonNode)
+
+                Nothing ->
+                    activateAccelerationGateIfPresent context
+                        |> Maybe.withDefault
+                            (closeSearchResultsWhenRouteIsSet context
+                                |> Maybe.withDefault
+                                    (if routeIsSet context then
+                                        travelTheRoute
+
+                                     else
+                                        approachConfiguredObjectIfPresent context
+                                            |> Maybe.withDefault
+                                                (case missionInfoPanelEntry context of
+                                                    Just _ ->
+                                                        if nothingToDoTicksBeforeCryingStuck < context.memory.nothingToDoTicks then
+                                                            -- Waiting was the right first answer and the wrong
+                                                            -- last one. This branch is the bottom of the tree:
+                                                            -- nothing to shoot, no cargo it can find, no travel
+                                                            -- step, no gate, no route, no configured object on
+                                                            -- grid. If that has not changed in minutes, the
+                                                            -- mission is not "catching up" and nothing here will
+                                                            -- make it.
+                                                            --
+                                                            -- Two runs died in this branch without a word. Run
+                                                            -- 114 sat in it for 14,111 decisions, 37% of the
+                                                            -- session. Run 124 reached it with the tracker
+                                                            -- offering no travel button at all and burned half
+                                                            -- an hour. Neither raised an alarm, because waiting
+                                                            -- looks identical whether the mission is a second
+                                                            -- behind or permanently unreachable.
+                                                            --
+                                                            -- This does not rescue the mission -- it cannot, from
+                                                            -- here. It converts a silently wasted session into
+                                                            -- one that says so, which is what stall_watch
+                                                            -- screenshots and reports.
+                                                            -- Deliberately no reading count in the text. The
+                                                            -- alarm repeats for as long as the state lasts, and
+                                                            -- a counter in the message makes every repeat a
+                                                            -- distinct line -- which defeats stall_watch's
+                                                            -- dedupe and any log filter downstream. Run 126
+                                                            -- emitted 151 unique variants of this one alarm.
+                                                            describeBranch
+                                                                ("Nothing to fight, no travel step, nothing on grid to approach, and over "
+                                                                    ++ String.fromInt nothingToDoTicksBeforeCryingStuck
+                                                                    ++ " readings of it -- this mission is not going to progress on its own."
+                                                                )
+                                                                askForHelpToGetUnstuck
+
+                                                        else
+                                                            describeBranch
+                                                                "Nothing to fight and no travel step offered -- wait for the mission to catch up."
+                                                                waitForProgressInGame
+
+                                                    Nothing ->
+                                                        -- No tracker means no mission, a state that could not
+                                                        -- arise while every hand-in happened docked, since the
+                                                        -- mission then ended with the ship already at the agent.
+                                                        -- Completing remotely ends it in space instead, and the
+                                                        -- agent will only offer the next one in person -- asked
+                                                        -- remotely it answers "Please drop by, so we can
+                                                        -- formalize the mission contract" and offers no buttons.
+                                                        --
+                                                        -- So route back to the station we last undocked from,
+                                                        -- which is the agent's, and let the docked flow ask for
+                                                        -- the next mission. dockAtStation is not the way: it
+                                                        -- reads the surroundings menu, which lists only the
+                                                        -- current system, so it cannot reach an agent two jumps
+                                                        -- out, and inside a deadspace pocket it offers no
+                                                        -- stations at all -- live, it fell through to clicking
+                                                        -- "Approach" and "Warp to Within (0 m)" on whatever was
+                                                        -- in the menu.
+                                                        case context.memory.lastDockedStationNameFromInfoPanel of
+                                                            Just stationName ->
+                                                                routeToStation context stationName
+
+                                                            Nothing ->
+                                                                -- Only before the first dock of a session, so
+                                                                -- there is nothing to aim at yet.
+                                                                describeBranch
+                                                                    "No mission, and I have not docked anywhere this session to head back to."
+                                                                    waitForProgressInGame
+                                                )
+                                    )
+                            )
     in
-    dockOutranksTheFight context
+    travelOutranksTheFight context
+        travelTheStepTheTrackerOffers
         (decideActionInCombat context
             seeUndockingComplete
             (case expandMissionTrackerIfCollapsed context of
@@ -5529,107 +5870,22 @@ decideActionInMissionPocket context seeUndockingComplete =
                             objectiveAction
 
                         Nothing ->
-                            case missionTravelStep context of
-                                Just ( label, buttonNode ) ->
-                                    ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
-                                        (clickMissionTravelButton context label buttonNode)
-
-                                Nothing ->
-                                    activateAccelerationGateIfPresent context
-                                        |> Maybe.withDefault
-                                            (closeSearchResultsWhenRouteIsSet context
-                                                |> Maybe.withDefault
-                                                    (if routeIsSet context then
-                                                        travelTheRoute
-
-                                                     else
-                                                        approachConfiguredObjectIfPresent context
-                                                            |> Maybe.withDefault
-                                                                (case missionInfoPanelEntry context of
-                                                                    Just _ ->
-                                                                        if nothingToDoTicksBeforeCryingStuck < context.memory.nothingToDoTicks then
-                                                                            -- Waiting was the right first answer and the wrong
-                                                                            -- last one. This branch is the bottom of the tree:
-                                                                            -- nothing to shoot, no cargo it can find, no travel
-                                                                            -- step, no gate, no route, no configured object on
-                                                                            -- grid. If that has not changed in minutes, the
-                                                                            -- mission is not "catching up" and nothing here will
-                                                                            -- make it.
-                                                                            --
-                                                                            -- Two runs died in this branch without a word. Run
-                                                                            -- 114 sat in it for 14,111 decisions, 37% of the
-                                                                            -- session. Run 124 reached it with the tracker
-                                                                            -- offering no travel button at all and burned half
-                                                                            -- an hour. Neither raised an alarm, because waiting
-                                                                            -- looks identical whether the mission is a second
-                                                                            -- behind or permanently unreachable.
-                                                                            --
-                                                                            -- This does not rescue the mission -- it cannot, from
-                                                                            -- here. It converts a silently wasted session into
-                                                                            -- one that says so, which is what stall_watch
-                                                                            -- screenshots and reports.
-                                                                            -- Deliberately no reading count in the text. The
-                                                                            -- alarm repeats for as long as the state lasts, and
-                                                                            -- a counter in the message makes every repeat a
-                                                                            -- distinct line -- which defeats stall_watch's
-                                                                            -- dedupe and any log filter downstream. Run 126
-                                                                            -- emitted 151 unique variants of this one alarm.
-                                                                            describeBranch
-                                                                                ("Nothing to fight, no travel step, nothing on grid to approach, and over "
-                                                                                    ++ String.fromInt nothingToDoTicksBeforeCryingStuck
-                                                                                    ++ " readings of it -- this mission is not going to progress on its own."
-                                                                                )
-                                                                                askForHelpToGetUnstuck
-
-                                                                        else
-                                                                            describeBranch
-                                                                                "Nothing to fight and no travel step offered -- wait for the mission to catch up."
-                                                                                waitForProgressInGame
-
-                                                                    Nothing ->
-                                                                        -- No tracker means no mission, a state that could not
-                                                                        -- arise while every hand-in happened docked, since the
-                                                                        -- mission then ended with the ship already at the agent.
-                                                                        -- Completing remotely ends it in space instead, and the
-                                                                        -- agent will only offer the next one in person -- asked
-                                                                        -- remotely it answers "Please drop by, so we can
-                                                                        -- formalize the mission contract" and offers no buttons.
-                                                                        --
-                                                                        -- So route back to the station we last undocked from,
-                                                                        -- which is the agent's, and let the docked flow ask for
-                                                                        -- the next mission. dockAtStation is not the way: it
-                                                                        -- reads the surroundings menu, which lists only the
-                                                                        -- current system, so it cannot reach an agent two jumps
-                                                                        -- out, and inside a deadspace pocket it offers no
-                                                                        -- stations at all -- live, it fell through to clicking
-                                                                        -- "Approach" and "Warp to Within (0 m)" on whatever was
-                                                                        -- in the menu.
-                                                                        case context.memory.lastDockedStationNameFromInfoPanel of
-                                                                            Just stationName ->
-                                                                                routeToStation context stationName
-
-                                                                            Nothing ->
-                                                                                -- Only before the first dock of a session, so
-                                                                                -- there is nothing to aim at yet.
-                                                                                describeBranch
-                                                                                    "No mission, and I have not docked anywhere this session to head back to."
-                                                                                    waitForProgressInGame
-                                                                )
-                                                    )
-                                            )
+                            travelTheStepTheTrackerOffers
             )
         )
 
 
-{-| Take the mission tracker's "Dock" step instead of clearing the field.
+{-| Take the trip the mission tracker is asking for instead of clearing the
+field.
 
-Once the travel button reads "Dock" and the objective carries no instruction,
-the mission is over and the only thing being asked for is the trip back.
-Whatever is still alive on the grid is optional, and killing it is uncompensated
-risk: the site keeps producing rats, every extra minute on grid is more incoming
-fire for no reward, and the time comes out of the next mission's session budget.
+Once the objective carries no instruction and the tracker is offering a travel
+step -- whichever step it is -- the mission here is over and the only thing
+being asked for is the journey. Whatever is still alive on the grid is optional,
+and killing it is uncompensated risk: the site keeps producing rats, every extra
+minute on grid is more incoming fire for no reward, and the time comes out of
+the next mission's session budget.
 
-Run 11 is the measurement. The tracker read
+Run 11 is the original measurement. The tracker read
 `Illegal Activity (3 of 3) -- no instruction (next step: Dock)` on 77
 consecutive in-space readings; 386 of the 453 decision blocks inside them went
 to locking and shooting; and the first in-space click on that Dock button came
@@ -5640,18 +5896,51 @@ branch in `decideActionInCombat`, so travel was the fallback reached only once
 combat had nothing left to offer, and combat has something to offer for as long
 as anything is alive.
 
-**What still keeps the bot fighting after "Dock" appears**, since the point of
-this branch is to stop:
+**The first version of this fired on the label "Dock" alone, and that was the
+rarest case there is.** Counted over the whole corpus on the readings that cost
+something -- in space, objective complete, rats on the overview -- "Dock" is 35
+readings and the labels it ignored are 2,344: `Set Destination` 1,443 at an
+average of 7.0 rats on grid, `Destination Set` 812 at 3.0, `Start Conversation`
+71, `Preparing` 15, `Warping` 3. So the condition is now the objective and the
+_existence_ of a travel step, not which word the button carries.
+
+**Why the word does not need checking, measured rather than assumed.** The
+labels that mean the mission is still running do not appear beside a finished
+objective with a fight on the grid. `Warp to Location` is the one that would
+matter -- taking it would leave a pocket that has not been cleared -- and in
+10,032 readings carrying an objective it has appeared beside a finished one
+**three times**, all three a flicker between `Dock` readings as a mission ended,
+none of them with a rat on the overview. `Read Details`, `Docking`, `Undocking`
+and `Jump` never appear beside a finished objective at all. `Undock` and `Abort
+Undock` do, but only on readings with no ship UI -- in station, where this
+branch is not reached -- and `Abort Undock` is not a travel step in the first
+place (`labelUndoesStepInProgress`). The objective half is what excludes them,
+on the evidence, and a list of permitted words would be the mistake this change
+is fixing: it handles what has been measured and leaves whatever the client says
+next. The vocabulary has already grown twice, and both times silently -- #62's
+objective-chain panel added four labels, and run 22 added one that is not text.
+
+**The transient labels are included, and they cost nothing either way.**
+`Preparing` and `Warping` read like states rather than commands, and the
+recordings say the distinction is unobservable from here: on every reading where
+one of them coincides with a finished objective and rats on the overview, the
+ship was already in warp (15 of 15, 3 of 3), and `decideActionWhenInSpace`
+answers "I am in warp" before this branch is reached. Where they are reached the
+overview is empty and there is no fight to leave.
+
+**A label the client did not render never counts** -- see
+`travelLabelIsReadableText`, which is where the failure direction of this change
+is decided.
+
+**What still keeps the bot fighting**, since the point of this branch is to
+stop:
 
   - **Anything warp disrupting the ship.** Docking is a warp, so a scrambler
     makes leaving impossible, and killing it is the only thing that restores the
     option -- `overviewEntryIsWarpDisruptingMe`'s own reason for existing, and
     the reason the combat path already sorts it to the front. This branch hands
-    the fight back and says so, rather than clicking a Dock button that cannot
-    work. It is the one case where being shot outranks leaving.
-  - **Any other travel label.** "Undock", "Set Destination" and "Warp to
-    Location" all appear mid-mission with work still to do, so they keep the old
-    order. That is why the match is exact -- see `missionTravelStepIsDock`.
+    the fight back and says so, rather than taking a trip that cannot start. It
+    is the one case where being shot outranks leaving.
   - **An objective that still says something.** A tracker still carrying an
     instruction has not finished, whatever its travel button offers, so combat
     stays in front of it. The looting question is deliberately left alone: a
@@ -5660,6 +5949,11 @@ this branch is to stop:
     one thing skipped that is not vacuous under "no instruction" is a gate key
     the _client_ named (`gateKeyWanted`), and a gate key is only ever wanted for
     a pocket this mission no longer has to enter.
+  - **A tracker with nothing to travel to.** The step has to be one the bot can
+    actually take -- a button to click, or a route the panel confirms is set --
+    so a reading where the tracker says the route is set and no route exists
+    keeps the old order rather than disengaging into the bottom of the travel
+    branch, where the stall counter and #54's abandonment live.
   - **A lost ship, and the retreats.** Both already sit above this and neither
     is touched. `recoverPodAfterShipLoss` answers `Just` on every reading its
     verdict exists and short-circuits the whole docked-or-in-space split, and
@@ -5667,23 +5961,27 @@ this branch is to stop:
     So the damage-rate retreat still outranks this, which is the right way
     round: that one is the controller for "leave now, this is going badly", and
     this one is for "the job is done, go home". There is no second "leave now"
-    here -- this branch presses the tracker's own button and owns no clock.
+    here -- this branch takes the tracker's own step and owns no clock.
 
 **Being shot, otherwise, does not keep the guns on.** That is a decision, not an
 oversight. #40's rule -- whatever the client says is shooting this ship is a
 valid target -- is untouched and still applies for as long as there is a fight
-to be in; once the tracker says Dock, the answer to being shot is to leave,
+to be in; once the objective is done, the answer to being shot is to leave,
 which is what every retreat in this file already says. The recordings say the
-trade is cheap: across those 77 readings the client's combat log reported any
+trade is cheap: across run 11's 77 readings the client's combat log reported any
 incoming damage at all on 4 of them, at most 7 hitpoints in a 45-second window
 against a threshold of 3500. The bot was not fighting for its life, it was
 farming a field it had been told to leave. Were the damage real,
 `runAwayIfLowHealth` would have taken the reading before this branch saw it.
 
-**Drones leave through the existing recall**, never a second one: the click is
-handed to `ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping`,
-exactly as the travel branch this hoists always did, so #7's lost drones and the
-give-up that followed it both still apply, unchanged and un-duplicated.
+**Nothing new is done to leave.** The step handed back is
+`travelTheStepTheTrackerOffers`, the same value the fight itself falls through
+to, so the click still goes through
+`ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping` and
+`clickMissionTravelButton`'s settling window, an acceleration gate on the grid
+still outranks flying a route, and #7's lost drones and the give-up that
+followed both still apply, unchanged and un-duplicated. This branch changes
+_when_ that step is taken, never what it is.
 
 Reachability. This runs on every reading that reaches
 `decideActionInMissionPocket` -- in space, ship UI parsing, no ship-loss verdict
@@ -5691,20 +5989,20 @@ latched, no retreat running, no stray context menu, not in warp, no agent
 conversation open, no middle-row module to manage -- and declines on all of them
 but the ones described above. It cannot fire against a collapsed tracker: the
 client removes the travel button from the tree along with the objectives, so
-`missionTravelStep` is Nothing and `expandMissionTrackerIfCollapsed` gets its
+`missionTravelButton` is Nothing and `expandMissionTrackerIfCollapsed` gets its
 turn under combat as before. And it clears itself, with no counter and nothing
 latched: every condition is re-derived from the live reading, so the moment the
-button stops reading "Dock" -- the ship docked, the mission moved on, the
+tracker stops offering a step -- the ship docked, the mission moved on, the
 tracker was collapsed -- the fight is the bot's job again on that same reading.
 
 -}
-dockOutranksTheFight : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
-dockOutranksTheFight context ifTheFightIsStillOurs =
+travelOutranksTheFight : BotDecisionContext -> DecisionPathNode -> DecisionPathNode -> DecisionPathNode
+travelOutranksTheFight context ifTheJobHereIsDone ifTheFightIsStillOurs =
     case travelStepThatEndsTheFight context of
         Nothing ->
             ifTheFightIsStillOurs
 
-        Just ( label, buttonNode ) ->
+        Just label ->
             case scramblerHoldingTheShipHere context of
                 Just holdingUs ->
                     -- Said on every reading it declines, not once, for
@@ -5726,22 +6024,34 @@ dockOutranksTheFight context ifTheFightIsStillOurs =
                             ++ label
                             ++ "' -- stop fighting and leave the rest of the field alone."
                         )
-                        (ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
-                            (clickMissionTravelButton context label buttonNode)
-                        )
+                        ifTheJobHereIsDone
 
 
-{-| The tracker's travel step, when it is the one that means the objective is
-finished and only the trip home is left.
+{-| The tracker's travel step, when it is one that means the objective is
+finished and only the journey is left -- the label, for the decision log.
 
-Both halves are needed. The label alone would disengage on a courier mission
-whose delivery step is also a dock, and the empty objective alone would
-disengage while the tracker still had a gate or a warp to offer.
+Three things have to hold, and each excludes a different thing.
+
+The objective carries no instruction. Of the recorded `Dock` readings, 3,935
+carry a live courier instruction (`Bring <a ...>The Damsel</a> to ...`), so the
+step alone would disengage on a mission still asking for something -- and this
+is also what keeps `Warp to Location` out, which has never once been recorded
+beside a finished objective on a grid with a rat on it.
+
+The label is text the client rendered (`travelLabelIsReadableText`). Widening
+from an equality test to "any step" removes the accident that used to decline a
+glyph, so the check is now explicit.
+
+And the step is one the bot can take: a button `missionTravelStep` would click,
+or the tracker reporting a route that the route panel confirms exists. The
+second is `Destination Set` -- 812 costly readings, and not a click at all
+(`labelReportsRouteAlreadySet`); the trip is travelling the route the tracker
+already set, which the caller's own branch does. Requiring the route to really
+be there is what stops a disengagement into a branch with nothing to do, where
+the stall counter and #54's abandonment wait.
 
 -}
-travelStepThatEndsTheFight :
-    BotDecisionContext
-    -> Maybe ( String, EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion )
+travelStepThatEndsTheFight : BotDecisionContext -> Maybe String
 travelStepThatEndsTheFight context =
     case missionInfoPanelEntry context of
         Nothing ->
@@ -5752,36 +6062,77 @@ travelStepThatEndsTheFight context =
                 Nothing
 
             else
-                missionTravelStep context
+                missionTravelButton context
                     |> Maybe.andThen
-                        (\( label, buttonNode ) ->
-                            if missionTravelStepIsDock label then
-                                Just ( label, buttonNode )
+                        (\( label, _ ) ->
+                            if not (travelLabelIsReadableText label) then
+                                Nothing
 
                             else
-                                Nothing
+                                case missionTravelStep context of
+                                    Just _ ->
+                                        Just label
+
+                                    Nothing ->
+                                        if labelReportsRouteAlreadySet label && routeIsSet context then
+                                            Just label
+
+                                        else
+                                            Nothing
                         )
 
 
-{-| Whether the tracker's travel label is the one that ends the mission.
+{-| Whether the tracker's travel label is something the client rendered for a
+person to read.
 
-Matched whole rather than as a substring, and this is the trap the whole change
-turns on: **"Undock" contains "dock"**. It is the label the tracker shows at the
-start of every single mission, so a substring rule would read the ship's own
-departure as "the objective is complete" and disengage on the station ramp,
-forever, with nothing to dock at. `labelUndoesStepInProgress` keeps "Abort
-Undock" out of `missionTravelStep` already, but that is a different guard
-answering a different question and cannot be leaned on for this one.
+**This is where this change chooses its failure direction, and it is the
+deliberate part.** The rule it replaces was an equality test against "Dock",
+which declined a label with no text by accident -- run 11 rendered a travel step
+three times as the codepoints `U+0002 U+0000 U+AD1D8 U+0001 U+0001 U+0000
+U+0001`, six C0 controls around one codepoint that is unassigned (category `Cn`,
+plane 10) rather than private-use, and an equality test simply did not match it.
+A rule of the form "any travel step is offered" matches anything, so it would
+have disengaged on a button the client failed to render, on a grid the bot can
+see rats on. That is fail-open, and it is refused here: an unreadable label is
+not a step, and the bot keeps fighting, which is exactly what it does today.
 
-Trimmed and lowercased for `isObjectShootingAtUs`'s reason -- nothing here
-should depend on the client's spacing or capitalisation staying put -- and
-checked against the labels the recorded runs actually carry in
-`tools/macos-host/tests/test_dock_outranks_the_fight.py`.
+**The corpus contains the case that makes this load-bearing rather than
+theoretical.** Run 22 rendered a travel step as `U+0000 U+0000 . 5 0 space A U
+U+0000` -- a distance readout wrapped in NULs -- on `Avenge a Fallen Comrade`
+with **no instruction**. The objective half does not decline that one; only this
+does.
+
+The test is that the label is printable ASCII with at least one letter in it.
+Every one of the labels the recorded runs carry is ASCII (`Warp to Location`,
+`Set Destination`, `Destination Set`, `Dock`, `Docking`, `Undock`, `Undocking`,
+`Abort Undock`, `Warping`, `Preparing`, `Start Conversation`, `Read Details`,
+`Jump`, `Jumping`), and neither non-text label is: the first has no letter and
+no printable character at all, the second has letters and NULs around them.
+Deliberately not a private-use-area test, which is the trap -- `U+AD1D8` is
+unassigned, not private-use, and a PUA rule would call it text.
+
+The cost is stated rather than hidden: a client rendering this button in a
+non-Latin script disables this branch entirely and the bot behaves as it did
+before the change. That is the safe direction, and it is the same assumption the
+rest of this file already makes about the client's language.
 
 -}
-missionTravelStepIsDock : String -> Bool
-missionTravelStepIsDock label =
-    (label |> String.trim |> String.toLower) == "dock"
+travelLabelIsReadableText : String -> Bool
+travelLabelIsReadableText label =
+    let
+        trimmed =
+            String.trim label
+
+        characterIsPrintableAscii character =
+            let
+                code =
+                    Char.toCode character
+            in
+            0x20 <= code && code <= 0x7E
+    in
+    not (String.isEmpty trimmed)
+        && String.all characterIsPrintableAscii trimmed
+        && String.any Char.isAlpha trimmed
 
 
 {-| Whether the mission's objective has stopped asking for anything.
@@ -6130,28 +6481,174 @@ jumpToNextSystem context =
 
             else
                 returnDronesToBay context
-                    (useContextMenuCascadeWithCustomConfig
-                        -- Feedback: "Jump Through Stargate" took 3-4 menu
-                        -- opens before being recognized. The route icon is
-                        -- small and sits in a strip that can shift as the
-                        -- route updates, so the default distance tolerance
-                        -- (70, already once widened from 40 for this same
-                        -- kind of drift on other elements) was plausibly
-                        -- discarding a menu that had, in fact, opened
-                        -- correctly. Widened just for this one cascade
-                        -- rather than the shared default, since other
-                        -- cascades' tolerance is already tuned from past
-                        -- observations and this is a different UI element.
-                        (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
-                        { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
-                        (useMenuEntryWithTextContainingFirstOf
-                            [ "dock"
-                            , "jump"
-                            ]
-                            menuCascadeCompleted
-                        )
-                        context
+                    (case context.memory.dockingRunIn of
+                        Just runIn ->
+                            -- The whole of #89. The client is already flying
+                            -- this dock and every further command restarts it.
+                            describeBranch (describeDockingRunIn runIn) waitForProgressInGame
+
+                        Nothing ->
+                            dockAtDestinationStation context
+                                (routeMarkerCascade context infoPanelRouteFirstMarker)
                     )
+
+
+{-| What the bot says on every reading it declines to command a dock again.
+
+Said every time rather than once, for `returnDronesToBay`'s reason: a branch
+that declines has to say so each time it declines, or a stretch of readings where
+nothing happens is indistinguishable from a bot that has fallen through to
+something else. Sixty consecutive readings of this line is what a working dock
+looks like from the log, and the range in it is what makes those sixty readings
+distinguishable from each other -- `stall_watch.py` keys its circling test on the
+decision text changing, and a line that read the same at every range would raise
+an alarm on a ship flying its run-in perfectly, which is `approachOverviewEntry`'s
+lesson from run 107.
+
+-}
+describeDockingRunIn : DockingRunIn -> String
+describeDockingRunIn runIn =
+    "The client is already flying this dock -- '"
+        ++ courseSetToDockingPerimeterMarker
+        ++ "' stands, at "
+        ++ (runIn.rangeToStationMeters
+                |> Maybe.map (\meters -> String.fromInt meters ++ " m")
+                |> Maybe.withDefault "a range this reading cannot say"
+           )
+        ++ ", "
+        ++ String.fromInt runIn.readingsSinceCloser
+        ++ " of "
+        ++ String.fromInt dockingRunInPatienceReadings
+        ++ " readings since it last got closer. Commanding it again would restart the run-in."
+
+
+{-| Dock at the destination station by pressing the Selected Item panel's own
+Dock button.
+
+The pattern `selectThenPanelAction` argues for, on the one branch that had never
+been wired to it. Its own doc comment records the cascade failing "on approach,
+on acceleration gates, and on the retreat, each time as a silent no-op that the
+bot happily repeated for hundreds of readings", and `selectedItemButtonNamed`
+names `selectedItemDock` in the list of buttons reachable that way. The control
+for #89 is one press of it at 17 km, which produced a course-setting and a dock
+about eight minutes later with no further input.
+
+**This is not what fixes #89 on its own, and saying so is the point.** A panel
+click repeated every reading restarts the perimeter run exactly as effectively as
+a cascade click did -- the bug is re-commanding an action already under way, not
+the mechanism the command travels by. What fixes it is `DockingRunIn`, above this
+in `jumpToNextSystem`. This makes the command that arms it more likely to land in
+the first place.
+
+Three conditions, and each is a way it could act on the wrong thing:
+
+**One route marker.** The panel presses a button on a station this function
+picked off the overview, and nothing in that pick says the station is the route's
+destination -- a station on a stargate's grid in an intermediate system is a
+station too, and docking at it would end the trip in the wrong place with every
+log line reading like success. The route panel renders one
+`AutopilotDestinationIcon` per waypoint, so exactly one marker is the reading
+saying the destination is here and there is nothing further to jump to. Where
+that is not true the cascade runs, which is today's behaviour.
+
+**The panel is showing this station.** `selectedItemIsOverviewEntry`, exactly as
+`selectThenPanelAction` does: the panel acts on whatever is selected, which is not
+necessarily what this decision is about. When it is showing something else this
+spends one reading selecting the row, which is the same two-tick shape and the
+same argument.
+
+**The panel offers the button.** The Dock button is absent when the station is out
+of docking range, the same shape as `selectedItemActivateGate`, and that absence
+is the natural gate between the two mechanisms -- so it falls through to the
+cascade rather than waiting, because a cascade Dock at range is what makes the
+client close the distance. `selectThenPanelAction` cannot be reused directly for
+that reason: its own answer to a missing button is to wait and eventually ask for
+help, which here would strand a ship that simply has to fly further first.
+
+-}
+dockAtDestinationStation : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+dockAtDestinationStation context ifThePanelCannotDoIt =
+    let
+        destinationIsInThisSystem =
+            (context.readingFromGameClient.infoPanelContainer
+                |> Maybe.andThen .infoPanelRoute
+                |> Maybe.map (.routeElementMarker >> List.length)
+            )
+                == Just 1
+    in
+    case
+        ( destinationIsInThisSystem
+        , nearestStationOnOverview context.readingFromGameClient
+        )
+    of
+        ( True, Just station ) ->
+            let
+                named =
+                    station.objectName |> Maybe.withDefault "the station"
+
+                withRange =
+                    named ++ " (" ++ (station.objectDistance |> Maybe.withDefault "range unknown") ++ ")"
+            in
+            if not (selectedItemIsOverviewEntry context station) then
+                describeBranch
+                    ("Dock at " ++ withRange ++ " from the selected-item panel (selecting it first).")
+                    (clickUiElement station.uiNode)
+
+            else
+                case selectedItemButtonNamed context "selectedItemDock" of
+                    Just dockButton ->
+                        describeBranch
+                            ("Dock at " ++ withRange ++ " from the selected-item panel.")
+                            (clickUiElement dockButton)
+
+                    Nothing ->
+                        describeBranch
+                            ("Dock at "
+                                ++ withRange
+                                ++ " -- the panel offers no 'selectedItemDock', so it is out of docking range and the menu's own Dock has to close the distance."
+                            )
+                            ifThePanelCannotDoIt
+
+        _ ->
+            ifThePanelCannotDoIt
+
+
+{-| Right-click the route panel's first marker and take whichever of "dock" or
+"jump" the client offers.
+
+Unchanged, and still the whole of the jump leg. What has moved out from under it
+is the dock at the far end -- see `dockAtDestinationStation` for why, and
+`courseSetToDockingPerimeterFromGameLog` for why keeping "dock" in this list
+costs nothing: an out-of-range dock is exactly the case the panel cannot serve,
+and this is what flies the ship there.
+
+-}
+routeMarkerCascade :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.InfoPanelRouteRouteElementMarker
+    -> DecisionPathNode
+routeMarkerCascade context infoPanelRouteFirstMarker =
+    useContextMenuCascadeWithCustomConfig
+        -- Feedback: "Jump Through Stargate" took 3-4 menu
+        -- opens before being recognized. The route icon is
+        -- small and sits in a strip that can shift as the
+        -- route updates, so the default distance tolerance
+        -- (70, already once widened from 40 for this same
+        -- kind of drift on other elements) was plausibly
+        -- discarding a menu that had, in fact, opened
+        -- correctly. Widened just for this one cascade
+        -- rather than the shared default, since other
+        -- cascades' tolerance is already tuned from past
+        -- observations and this is a different UI element.
+        (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
+        { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
+        (useMenuEntryWithTextContainingFirstOf
+            [ "dock"
+            , "jump"
+            ]
+            menuCascadeCompleted
+        )
+        context
 
 
 {-| Every reason this bot has to stop fighting and leave.
@@ -6809,6 +7306,24 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                 |> List.filter overviewEntryIsActiveTarget
                 |> List.head
 
+        -- The active target's own name, when this session has already given up
+        -- on hurting it. Read from the *whole* overview rather than from
+        -- `activeTargetEntry`, because giving up removes the row from
+        -- `overviewEntriesToAttack` -- so looking for it there would find
+        -- nothing and the guns would go on firing at it. Issue #90: run 27's
+        -- asteroid was never a row this bot chose, it arrived in the target bar
+        -- while a lock aimed at a rat, so the fix cannot live in the selection.
+        activeTargetGivenUpAsImmune =
+            context.readingFromGameClient.overviewWindows
+                |> List.concatMap .entries
+                |> List.filter overviewEntryIsActiveTarget
+                |> List.filter
+                    (overviewEntryWasGivenUpAsImmune
+                        (namesGivenUpAsImmune context.memory.zeroDamage)
+                    )
+                |> List.head
+                |> Maybe.andThen .objectName
+
         ensureShipIsOrbitingDecision =
             activeTargetEntry
                 |> Maybe.andThen (ensureShipIsOrbiting context seeUndockingComplete.shipUI)
@@ -6940,7 +7455,47 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
 
                         Just _ ->
                             describeBranch "I see a locked target."
-                                (if activeTargetOverviewEntryIsStray context.readingFromGameClient then
+                                (if activeTargetGivenUpAsImmune /= Nothing then
+                                    -- Unlock it rather than merely declining to
+                                    -- shoot it, for the wreck branch's reason
+                                    -- below and one of its own. The guns follow
+                                    -- whatever EVE calls the active target and
+                                    -- nothing here chooses which of several
+                                    -- locked targets that is, so an immune
+                                    -- object holding the active slot points
+                                    -- every weapon and every drone at itself
+                                    -- however many real rats are locked beside
+                                    -- it. Run 27 ended with the shield at 0%
+                                    -- while three named attackers hit the ship
+                                    -- and its own guns were still on the rock.
+                                    --
+                                    -- Freeing the slot is all this has to do:
+                                    -- `activateOneOfTheLockedTargets` clicks
+                                    -- another locked target on the next reading,
+                                    -- and the memory keeps the object out of
+                                    -- `overviewEntriesToLock` so nothing locks
+                                    -- it again on purpose.
+                                    case context.readingFromGameClient.targets |> List.filter .isActiveTarget |> List.head of
+                                        Just activeTarget ->
+                                            describeBranch
+                                                ("Every shot that has landed on '"
+                                                    ++ (activeTargetGivenUpAsImmune |> Maybe.withDefault "the active target")
+                                                    ++ "' did zero damage, "
+                                                    ++ (context.eventContext.botSettings.zeroDamageHitsBeforeGivingUp |> String.fromInt)
+                                                    ++ " of them by the client's own count -- these shots are achieving nothing. Unlock it (Ctrl+Shift+Click) and leave it alone for the rest of the session."
+                                                )
+                                                (ctrlShiftClickUiElement
+                                                    (activeTarget.barAndImageCont
+                                                        |> Maybe.withDefault activeTarget.uiNode
+                                                    )
+                                                )
+
+                                        Nothing ->
+                                            describeBranch
+                                                "The active target is one I have given up on hurting, but I cannot find it in the target bar to unlock -- hold fire."
+                                                waitForProgressInGame
+
+                                 else if activeTargetOverviewEntryIsStray context.readingFromGameClient then
                                     -- Unlock it, do not merely decline to shoot
                                     -- it. Holding fire leaves the wreck locked
                                     -- and active, so the next reading reaches
@@ -7728,10 +8283,24 @@ rather than dropped.
 
 Note what this does _not_ do. `Nothing` from the game log and `Just []` are
 collapsed here, and that is safe only because of the direction of the inference:
-finding no refusal is never read as the load having been accepted. The menu is
-what says that. Nothing anywhere may conclude "no refusal arrived, so it worked",
-which is the reading of an absent game log that would put this repo's signature
-bug back.
+finding no refusal is never read as the load having been accepted. Nothing
+anywhere may conclude "no refusal arrived, so it worked" _on its own_, which is
+the reading of an absent game log that would put this repo's signature bug back.
+
+**Anything changing this must read `ammoSwapLoadIsTrusted` first.** Since #85 the
+swap no longer re-opens a weapon's menu to see whether a load took: it dispatches
+the load and records the charge it asked for as the charge in the gun, and this
+sentence is what makes that sound. The whole argument is measured -- run 22
+recorded 134 of these refusals when every load was going into a running gun, and
+run 26 recorded none against 819 satisfied readings -- so a load that does not
+land is not silent, and has not been since #31.
+
+Take this matcher away, or let it drift from the client's wording, and the
+failure is two failures rather than one: a discarded load goes silent again
+_and_ the swap starts reporting a charge the gun does not have, which is the
+thing the menu read existed to prevent. Whatever replaces it has to keep saying
+"the client threw that load away" on the reading the client says it, or #85's
+assumption has to go back to being a menu read.
 
 -}
 loadRefusalFromGameLog : ReadingFromGameClient -> Maybe String
@@ -7746,6 +8315,124 @@ loadRefusalFromGameLog readingFromGameClient =
             )
         |> List.head
         |> Maybe.map .text
+
+
+{-| The client saying it has begun flying the ship to a station's docking
+perimeter, in its own words.
+
+    [ 2026.08.04 01:51:41 ] (notify) Setting course to docking perimeter
+
+This is the only evidence a reading carries that a dock is under way. Nothing
+else says so: `ShipManeuverType` has no docking member (the parser knows Warp,
+Jump, Orbit, Approach, Range and Align, and none of them is this), the ship
+keeps its ordinary UI throughout, and the station's overview row looks like any
+other. So the sentence is the signal, and #28's channel is what makes it
+readable at all.
+
+**It is also what keeps the jump case out of this entirely.** The client writes
+this line for a dock and never for a gate jump -- a jump is instantaneous once
+commanded, and there is no run-in to report. So the latch can only ever be armed
+by a dock, and the branch that declines to re-command is unreachable on a jump
+leg without any test for which leg it is on. That is deliberate: the alternative
+is predicting the menu's contents before opening it, and the client's own
+statement is both cheaper and correct.
+
+The channel is `notify`, checked against all 168 occurrences in
+`~/Documents/EVE/logs/Gamelogs` -- every one of them carries it, and 36 of them
+are the client session run 27 was flown in. A `Nothing` channel is a host that
+did not say which, not a line without one, so it is judged on its text alone,
+exactly as #31's and #33's matchers do.
+
+`Nothing` and `Just []` are collapsed, and safely, because of the direction of
+the inference: no line arriving is never read as "the dock finished". It is read
+as "no run-in has been reported", which leaves the bot commanding one -- the
+behaviour it has today. An absent game log therefore costs this guard entirely
+and cannot make the bot wait on a dock that is not happening.
+
+-}
+courseSetToDockingPerimeterFromGameLog : ReadingFromGameClient -> Maybe String
+courseSetToDockingPerimeterFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.filter (\entry -> stringContainsIgnoringCase courseSetToDockingPerimeterMarker entry.text)
+        |> List.head
+        |> Maybe.map .text
+
+
+{-| The client's own words for the start of a docking run-in.
+
+One constant rather than a literal at the match site, because the status line
+quotes it too and a matcher that drifts from what the client writes fails in the
+direction that looks like success -- nothing matches, the latch never arms, and
+the bot goes back to re-commanding with nothing complaining.
+
+-}
+courseSetToDockingPerimeterMarker : String
+courseSetToDockingPerimeterMarker =
+    "Setting course to docking perimeter"
+
+
+{-| Whether the load the swap dispatched may be taken as having landed.
+
+Issue #85. The swap used to answer this by re-opening a weapon's menu and
+looking for the charge to have gone from the list. That read is the client's own
+word and nothing here is better than it -- but it is not free, and run 26
+measured the price: **55 of the 90 readings that run spent with its guns off**
+went on re-opening a menu after the load, and it produced an answer on **one of
+its seven swaps**. The other six ran out their attempt still asking. A
+verification that costs the majority of the disarmed window and answers one time
+in seven is not buying the safety it looks like it is buying.
+
+What replaces it is not "assume it worked". It is **the client is asked, and it
+answers when the answer is no**: `loadRefusalFromGameLog` reads
+`You cannot load or unload <weapon> while it is active` off the game log, run 22
+recorded 134 of them when every load was going into a running gun, and run 26
+recorded none against 819 satisfied readings. So the swap dispatches the load,
+takes the absence of that sentence as the load having gone in, and records the
+charge it asked for as the charge in the gun.
+
+The five inputs are each a way this can be wrong, which is why they are named
+rather than inlined:
+
+  - `verdictIsTheSameOneAsBefore` -- a load belongs to the verdict that issued
+    it. A verdict that has just changed has dispatched nothing yet.
+  - `everyGunVisited` -- every weapon on the row has been told to load, so there
+    is no gun still waiting for its turn. On a multi-weapon row this is what
+    stops the first gun's menu from ending the whole walk.
+  - `loadWasDispatched` -- `loadCascadeReachedTheMenu` as it stood on the
+    **previous** reading, because that is the reading the cascade clicked the
+    charge entry. Read on the same reading it becomes true, the verdict would be
+    satisfied before the click went out and the swap would be trusting a load it
+    never issued.
+  - `loadRefusedByClient` -- #31, and the whole safety of this. See
+    `loadRefusalFromGameLog` for what happens to the rest of the design if that
+    matcher is ever removed or allowed to drift.
+  - `menuContradictsTheLoad` -- a menu read on this reading that still offers
+    the wanted charge. The assumption always yields to a read, in both
+    directions: the read is the client speaking, and when it happens to arrive
+    it costs nothing.
+
+**Being wrong is one swap's worth of wrong, and it is self-correcting.** The
+next verdict opens a menu on its way to its own load, and that read overwrites
+whatever this recorded. What it must not do is what runs 17 and 18 did, which is
+report `loaded charge reads unknown` and never form the next verdict at all.
+
+-}
+ammoSwapLoadIsTrusted :
+    { verdictIsTheSameOneAsBefore : Bool
+    , everyGunVisited : Bool
+    , loadWasDispatched : Bool
+    , loadRefusedByClient : Maybe String
+    , menuContradictsTheLoad : Bool
+    }
+    -> Bool
+ammoSwapLoadIsTrusted trustCase =
+    trustCase.verdictIsTheSameOneAsBefore
+        && trustCase.everyGunVisited
+        && trustCase.loadWasDispatched
+        && (trustCase.loadRefusedByClient == Nothing)
+        && not trustCase.menuContradictsTheLoad
 
 
 gameLogEntryIsFromNotifyChannel : EveOnline.ParseUserInterface.GameLogEntry -> Bool
@@ -8186,15 +8873,18 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
                     Nothing ->
                         memoryBefore.menuOpenOnGunAtX
 
+        openContextMenuEntryTexts =
+            context.readingFromGameClient.contextMenus
+                |> List.head
+                |> Maybe.map (.entries >> List.map .text)
+                |> Maybe.withDefault []
+
         weaponMenuEntryTexts =
             if menuOpenOnGunAtX == Nothing then
                 []
 
             else
-                context.readingFromGameClient.contextMenus
-                    |> List.head
-                    |> Maybe.map (.entries >> List.map .text)
-                    |> Maybe.withDefault []
+                openContextMenuEntryTexts
 
         menuWasRead =
             weaponMenuEntryTexts |> List.isEmpty |> not
@@ -8319,9 +9009,48 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
             (guns |> List.isEmpty |> not)
                 && (guns |> List.all (\gun -> gunsCommandedThisVerdictAtX |> List.member gun.uiNode.totalDisplayRegion.x))
 
-        -- The swap is done when the last gun's own menu says so: the wanted
+        -- A context menu offering the charge this verdict wants is a weapon's
+        -- menu: nothing else the client opens lists a charge by name. That is a
+        -- wider and steadier test than `menuOpenOnGunAtX`, which only answers
+        -- where the right-click was the immediately previous step.
+        wantedChargeIsOfferedByAnOpenMenu =
+            case rangeVerdict of
+                Just ShortRangeAmmo ->
+                    weaponMenuOffersCharge chargeNames.shortRangeAmmoName openContextMenuEntryTexts
+
+                Just LongRangeAmmo ->
+                    weaponMenuOffersCharge chargeNames.longRangeAmmoName openContextMenuEntryTexts
+
+                Nothing ->
+                    False
+
+        -- The reading the cascade clicks the charge out of the menu it opened:
+        -- every gun has been told to load, and the menu is in the tree offering
+        -- the charge. Read on the *next* reading and never on this one -- see
+        -- `ammoSwapLoadIsTrusted`, where satisfying a verdict here would idle
+        -- the acting path before the click was dispatched.
+        loadCascadeReachedTheMenu =
+            everyGunVisited && wantedChargeIsOfferedByAnOpenMenu
+
+        -- A menu read on this reading that still offers the charge the load was
+        -- supposed to put in. The client is saying the gun does not have it, so
+        -- there is nothing to trust.
+        menuContradictsTheLoad =
+            menuWasRead && (chargeLoaded /= rangeVerdict)
+
+        loadIsTrusted =
+            ammoSwapLoadIsTrusted
+                { verdictIsTheSameOneAsBefore = verdictIsTheSameOneAsBefore
+                , everyGunVisited = everyGunVisited
+                , loadWasDispatched = memoryBefore.loadCascadeReachedTheMenu
+                , loadRefusedByClient = loadRefusedByClient
+                , menuContradictsTheLoad = menuContradictsTheLoad
+                }
+
+        -- The swap is done when the last gun's own menu says so -- the wanted
         -- charge has gone from the list, which is the client reporting the
-        -- effect rather than the bot reporting its intent.
+        -- effect rather than the bot reporting its intent -- or, since #85, when
+        -- the load has been dispatched and the client has not refused it.
         --
         -- A verdict that arrives with the wanted charge already loaded is
         -- satisfied on the spot, without opening a menu to find that out. This
@@ -8337,8 +9066,58 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
             else if everyGunVisited && menuWasRead && (chargeLoaded == rangeVerdict) then
                 True
 
+            else if loadRefusedByClient /= Nothing then
+                -- The client says this attempt's load was thrown away, so
+                -- nothing this attempt did may stand as having landed --
+                -- including a trust that fired on an earlier reading, if the
+                -- refusal took one more reading to arrive than the click did.
+                -- Placed below the menu read on purpose: a read that says the
+                -- charge is in the gun is the client contradicting its own
+                -- earlier sentence, and the read wins.
+                False
+
+            else if loadIsTrusted then
+                True
+
             else
                 memoryBefore.verdictSatisfied
+
+        -- What the swap will say is in the gun from here on. The read is used
+        -- where there is one; otherwise the charge the load asked for.
+        chargeLoadedOrAssumed =
+            if loadIsTrusted then
+                rangeVerdict
+
+            else
+                chargeLoaded
+
+        chargeLoadedIsAssumed =
+            if chargeLoadedOrAssumed == Nothing then
+                False
+
+            else if menuWasRead then
+                False
+
+            else if loadIsTrusted then
+                True
+
+            else
+                memoryBefore.chargeLoadedIsAssumed
+
+        -- The optimal range belongs to the charge that was in the gun, so a
+        -- charge the swap has just assumed into it makes the number stale
+        -- exactly as a charge it read would. Forgetting it is what sends the
+        -- hover back to read the new one, which is the only way the second of
+        -- the two optimal ranges is ever seen -- and therefore the only way the
+        -- crossover stops being a bootstrap off a single range. Run 26 reached
+        -- `44000 m (from the midpoint of the two optimal ranges seen)` that
+        -- way, and dropping this would have left it on the 67000 it started at.
+        optimalRangeAfterTheLoad =
+            if chargeLoadedOrAssumed == chargeLoaded then
+                optimalRangeInMeters
+
+            else
+                freshOptimalRange
 
         -- Counts only the readings a verdict has gone *unsatisfied*, which is
         -- what the give-up is about. Reset rather than held once satisfied, so
@@ -8663,8 +9442,9 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
                         -- rather than a client that cannot do this at all.
                         Nothing
     in
-    { chargeLoaded = chargeLoaded
-    , optimalRangeInMeters = optimalRangeInMeters
+    { chargeLoaded = chargeLoadedOrAssumed
+    , chargeLoadedIsAssumed = chargeLoadedIsAssumed
+    , optimalRangeInMeters = optimalRangeAfterTheLoad
     , optimalRangeSeenLow = optimalRangeSeenLow
     , optimalRangeSeenHigh = optimalRangeSeenHigh
     , rangeVerdict = rangeVerdict
@@ -8677,6 +9457,7 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
     , switchOffUndoneByClient = switchOffUndoneByClient
     , gunsCommandedThisVerdictAtX = gunsCommandedThisVerdictAtX
     , menuOpenOnGunAtX = menuOpenOnGunAtX
+    , loadCascadeReachedTheMenu = loadCascadeReachedTheMenu
     , hoverAwaitingTooltip = hoverAwaitingTooltip
     , hoverUnansweredTicks = hoverUnansweredTicks
     , optimalRangeGivenUp = optimalRangeGivenUp
@@ -8843,6 +9624,23 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                             |> List.member gun.uiNode.totalDisplayRegion.x
                             |> not
                     )
+
+        -- The gun whose cascade is still running, which is the most recent
+        -- entry in the walk. The branch below used to aim at `referenceGun`
+        -- whatever it had just right-clicked, which is the same gun only on a
+        -- one-weapon row -- and since #85 that branch is the load itself rather
+        -- than a re-read, so pointing it at the wrong weapon would leave the
+        -- last one holding the old charge.
+        gunCommandedLast =
+            ammoSwap.gunsCommandedThisVerdictAtX
+                |> List.head
+                |> Maybe.andThen
+                    (\commandedX ->
+                        fight.guns
+                            |> List.filter (\gun -> gun.uiNode.totalDisplayRegion.x == commandedX)
+                            |> List.head
+                    )
+                |> Maybe.withDefault fight.referenceGun
 
         -- Whether the switch-off is still settling: a count with a confirmation
         -- in front of it.
@@ -9166,18 +9964,30 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                                         (loadTheWantedCharge gunToVisit)
 
                                 Nothing ->
-                                    -- Every gun has been visited and the swap is
-                                    -- still not confirmed, so re-open the last
-                                    -- one: its menu is where the answer is, and
-                                    -- the charge having vanished from it is the
-                                    -- only evidence a load landed.
+                                    -- The cascade opened on the last gun has not
+                                    -- put its menu in the tree yet. This branch
+                                    -- keeps driving it, and that is all it does:
+                                    -- it *is* the load, not a check of one.
+                                    --
+                                    -- #85: it used to re-open a menu after the
+                                    -- load to see whether the charge had gone
+                                    -- from the list. That verification was 55 of
+                                    -- the 90 readings run 26 spent with its guns
+                                    -- off and answered on one of its seven swaps,
+                                    -- because a re-opened menu is only
+                                    -- attributable to a weapon when the client
+                                    -- draws it on the very next reading. The load
+                                    -- is trusted instead -- see
+                                    -- `ammoSwapLoadIsTrusted`, and
+                                    -- `loadRefusalFromGameLog` for the sentence
+                                    -- the whole assumption rests on.
                                     describeBranch
                                         ("Every weapon has been told to load '"
                                             ++ wantedChargeName
-                                            ++ "' -- re-open the last one's menu to see whether it took."
+                                            ++ "' -- waiting for the last one's menu so the charge can be clicked out of it. Once it goes the load is taken as landed, because the client says so when it is not."
                                             ++ describeTheHold
                                         )
-                                        (loadTheWantedCharge fight.referenceGun)
+                                        (loadTheWantedCharge gunCommandedLast)
 
 
 {-| Rest the mouse on a weapon module until the client shows its tooltip.
@@ -9287,6 +10097,18 @@ describeAmmoSwapState context =
                 Nothing ->
                     "Ammo swap: loaded charge reads "
                         ++ describeAmmoRange ammoSwap.chargeLoaded
+                        ++ (if ammoSwap.chargeLoadedIsAssumed then
+                                -- #85. The two answers are not equally good and
+                                -- an operator has to be able to tell which one
+                                -- is on the line: one is the client's own menu
+                                -- omitting the charge in the gun, the other is
+                                -- the swap taking its own load at its word
+                                -- because the client did not refuse it.
+                                " (assumed from the load, not read back)"
+
+                            else
+                                ""
+                           )
                         ++ ", crossover "
                         ++ (case ammoSwapThreshold context.eventContext.botSettings ammoSwap of
                                 Just crossover ->
@@ -9991,13 +10813,81 @@ escapeTargetOnOverview context =
                     )
                 |> List.head
     in
-    case matching (containsWords "station") of
+    case onGrid |> List.filter overviewEntryIsAStation |> List.head of
         Just station ->
             Just ( station, "selectedItemDock", "dock at it" )
 
         Nothing ->
             matching (containsWords "stargate")
                 |> Maybe.map (\gate -> ( gate, "selectedItemWarpTo", "warp to it" ))
+
+
+{-| Whether an overview row's own words say it is a station.
+
+One definition, read by the retreat's escape target and by the dock leg of the
+travel path. Two copies of "is this a station" would drift silently in both
+directions, and the second one is now load-bearing for a command the ship spends
+eight minutes carrying out.
+
+Whole words rather than a substring, for `containsWords`' usual reason and for
+one that bites here in particular: a "Station Warehouse" and an "Amarr Station"
+both contain the word and both are stations, while a substring rule would also
+take anything merely containing the letters.
+
+-}
+overviewEntryIsAStation : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsAStation entry =
+    [ entry.objectName, entry.objectType ]
+        |> List.filterMap identity
+        |> List.any (containsWords "station")
+
+
+{-| The nearest station the overview is actually rendering, if any.
+
+`overviewEntryIsDisplayed` first, for "Reading the overview"'s reason -- a
+virtualised row keeps a plausible display region belonging to whatever was
+recycled into its place, so a hidden row is worse than absent both to click and
+to measure a distance from.
+
+-}
+nearestStationOnOverview : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+nearestStationOnOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter overviewEntryIsAStation
+        |> List.sortBy overviewEntryDistanceOrFarInMeters
+        |> List.head
+
+
+{-| How far the nearest station is, where the reading can say at all.
+
+`Nothing` covers three different situations and deliberately does not
+distinguish them: no station on the overview, a station whose row is not
+rendered, and a distance the client wrote in AU. The last is why
+`overviewEntryDistanceIsOnGrid` is asked rather than
+`overviewEntryDistanceOrFarInMeters` alone -- that one answers `999999` for an
+unparsed distance, and a placeholder treated as a real range would read as
+"closer than last reading" the moment a real number arrived, which is a gain the
+ship never made.
+
+The consumer treats `Nothing` as "no gain this reading", so a run-in nobody can
+measure spends its patience and the command is issued again. That is the
+conservative direction: the worst it degrades to is one Dock per patience window
+instead of one per reading.
+
+-}
+rangeToNearestStationInMeters : ReadingFromGameClient -> Maybe Int
+rangeToNearestStationInMeters readingFromGameClient =
+    nearestStationOnOverview readingFromGameClient
+        |> Maybe.andThen
+            (\station ->
+                if overviewEntryDistanceIsOnGrid station then
+                    station.objectDistanceInMeters |> Result.toMaybe
+
+                else
+                    Nothing
+            )
 
 
 {-| Activate an acceleration gate from the Selected Item panel.
@@ -10643,6 +11533,7 @@ initBotMemory =
     , targetToUnlockRegion = Nothing
     , targetToUnlockUnchangedTicks = 0
     , shipApproachingTicks = 0
+    , dockingRunIn = Nothing
     , lootedWreckIds = []
     , unlootableWreckIds = []
     , lootAllRefusedTicks = 0
@@ -10681,6 +11572,14 @@ initBotMemory =
         , hostCarriesTheChannel = False
         , lastAttacker = Nothing
         , retreating = False
+        }
+    , zeroDamage =
+        { landedHitsAtZero = []
+        , namesGivenUpOn = []
+
+        -- False until a reading proves otherwise, which is the safe start:
+        -- until the channel is seen, nothing can be given up on.
+        , hostCarriesTheChannel = False
         }
     , droneBayOpenedFromShipCard = False
     , droneBayWillTakeNoMore = False
@@ -10756,6 +11655,29 @@ statusTextFromState context =
             , counter "route-unchanged" context.memory.routeFirstMarkerUnchangedTicks
             , counter "unlock-unchanged" context.memory.targetToUnlockUnchangedTicks
             , counter "loot-open" context.memory.lootWindowOpenTicks
+            , -- Absent unless a dock is under way, like the counters above, and
+              -- carrying the number #89 is about: how many times the client has
+              -- been told to set course this trip. One is a dock the bot
+              -- commanded and then left alone; anything climbing is the run-in
+              -- being restarted, which is what run 27 did three times in eight
+              -- minutes while never arriving.
+              context.memory.dockingRunIn
+                |> Maybe.map
+                    (\runIn ->
+                        "docking run-in ("
+                            ++ String.fromInt runIn.courseSettings
+                            ++ " course-setting(s), "
+                            ++ (runIn.rangeToStationMeters
+                                    |> Maybe.map (\meters -> String.fromInt meters ++ " m")
+                                    |> Maybe.withDefault "range unreadable"
+                               )
+                            ++ ", "
+                            ++ String.fromInt runIn.readingsSinceCloser
+                            ++ "/"
+                            ++ String.fromInt dockingRunInPatienceReadings
+                            ++ " since closer)"
+                    )
+                |> Maybe.withDefault ""
             , describeModulesToActivateAlways readingFromGameClient
             , describeTopRowModuleDictState readingFromGameClient
             ]
@@ -10921,6 +11843,7 @@ statusTextFromState context =
                     -- between short and unwieldy.
                     [ [ describeShip, describeDrones ]
                     , [ describeRatsInOverview, describeCurrentTarget, describeOverview, describeLockRange context ]
+                    , [ describeZeroDamage context ]
                     , describeAccelerationGate context
                     , [ describeOverviewIndicationHints readingFromGameClient ]
                     , [ describeAmmoSwapState context ]
@@ -11364,6 +12287,16 @@ shouldAttackOverviewEntry namesToAttack overviewEntry =
         || isObjectShootingAtUs namesToAttack.fromIncomingDamage overviewEntry
     )
         && overviewEntryDistanceIsOnGrid overviewEntry
+        -- Issue #90's subtraction, and it outranks every disjunct above --
+        -- including a name the objective or the settings asked for. Whatever
+        -- put the object in the list, the client has now said several times
+        -- over that shooting it achieves nothing, and that is a stronger
+        -- statement than any prediction about what should be shootable. A
+        -- structure the mission really does need dead, given up on wrongly,
+        -- ends as a mission that cannot progress -- which is a state this bot
+        -- already recognises and gives back (see `missionToAbandon`) rather
+        -- than one it spends the session on.
+        && not (overviewEntryWasGivenUpAsImmune namesToAttack.givenUpAsImmune overviewEntry)
 
 
 {-| Whether the client's combat log has named this overview row as having hit us.
@@ -11400,17 +12333,42 @@ is empty) is the silent one.
 -}
 isObjectShootingAtUs : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isObjectShootingAtUs attackerNames overviewEntry =
+    anyNameMatchesOverviewLabel attackerNames overviewEntry
+
+
+{-| Exact, trimmed, case-insensitive match of a name from the client's combat
+log against an overview row's own labels.
+
+Shared by the two rules that take a name off that channel and look for its row --
+`isObjectShootingAtUs` (issue #40, which adds the row to the targets) and
+`overviewEntryWasGivenUpAsImmune` (issue #90, which takes it away). One
+definition rather than two copies of four lines, because the two are the same
+question asked in opposite directions and a difference between them would be a
+row that can be engaged for shooting us and never dropped for being unhurtable.
+
+-}
+anyNameMatchesOverviewLabel : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+anyNameMatchesOverviewLabel names overviewEntry =
+    namesMatchLabels names
+        ([ overviewEntry.objectName, overviewEntry.objectType ]
+            |> List.filterMap identity
+        )
+
+
+{-| The string comparison behind `anyNameMatchesOverviewLabel`, on its own so it
+can be executed rather than restated in a test.
+-}
+namesMatchLabels : List String -> List String -> Bool
+namesMatchLabels names labels =
     let
         normalize =
             String.trim >> String.toLower
 
-        labels =
-            [ overviewEntry.objectName, overviewEntry.objectType ]
-                |> List.filterMap identity
-                |> List.map normalize
+        normalisedLabels =
+            labels |> List.map normalize
     in
-    attackerNames
-        |> List.any (\attackerName -> labels |> List.member (normalize attackerName))
+    names
+        |> List.any (\name -> normalisedLabels |> List.member (normalize name))
 
 
 {-| Whether the entry's distance is one the bot can act on at all.
@@ -11531,6 +12489,17 @@ type alias ObjectNamesToAttack =
     { fromObjective : List String
     , fromSettings : List String
     , fromIncomingDamage : List String
+
+    -- The one subtractive member, and the only thing here that can take a row
+    -- *out* of the set: names this session has watched absorb
+    -- `zeroDamageHitsBeforeGivingUp` landed shots for no damage at all. It
+    -- rides on this record rather than being applied at one call site because
+    -- every consumer has to honour it -- `shouldAttackOverviewEntry` is asked
+    -- by the lock candidates, by the scroll-to-reveal, and by
+    -- `anyAttackableInOverview`, and a rule that removed the object from only
+    -- the first would have the bot scrolling the overview to find it again.
+    -- See issue #90 and `ZeroDamageMemory`.
+    , givenUpAsImmune : List String
     }
 
 
@@ -11542,6 +12511,7 @@ objectNamesToAttack context =
             |> Maybe.withDefault []
     , fromSettings = context.eventContext.botSettings.attackObjectNames
     , fromIncomingDamage = namesOfRecentAttackers context.memory.incomingDamage
+    , givenUpAsImmune = namesGivenUpAsImmune context.memory.zeroDamage
     }
 
 
@@ -13469,6 +14439,57 @@ incomingDamageSampleLimit =
     200
 
 
+{-| How many landed shots must achieve nothing before an object is given up on.
+
+**One zero is not evidence, and this is the number that says how much is.** The
+client's own combat log is the whole corpus behind it -- 77,316 outgoing damage
+lines across 139 recorded sessions, naming 294 distinct targets.
+
+What the corpus says is a cleaner separation than the issue expects. Of those
+294 targets, **eight ever produced a zero and none of those eight ever produced
+a nonzero**; the other 286 took damage on every one of their lines and never
+once read zero. So resists and glancing hits do _not_ round to zero here -- a
+glancing hit reads `15 to Mercenary Commander - Acolyte I - Glances Off` -- and
+the largest run of zeros anywhere that was later broken by a real hit on the
+same target is **zero**. Any threshold at all would have produced no false
+positive in that data, so the number is chosen for margin rather than to clear
+an observed overlap.
+
+Eight is the largest value that still catches every episode worth catching. The
+eight zero-only episodes ran 3, 3, 10, 28, 74, 86, 101 and 108 landed hits; the
+two three-hit ones ended on their own inside eight seconds and are nothing to
+fix, and eight sits below the ten of the smallest one that did not. Measured
+against the client's own timestamps, it fires 20 to 75 seconds into each of the
+six it catches, in place of the 41 to 414 seconds those episodes actually ran.
+
+**It is a number about this ship's guns, not about the game.** A fit whose shots
+are small enough to round to zero against a heavily resisted target would
+accumulate against a target it could eventually kill, and nothing in this corpus
+covers that -- so re-derive it rather than carrying it over, the same warning
+`defaultRunAwayIncomingDamageThreshold` carries. `give-up-after-zero-damage-hits`
+sets it and `-1` disables the whole guard.
+
+-}
+defaultZeroDamageHitsBeforeGivingUp : Int
+defaultZeroDamageHitsBeforeGivingUp =
+    8
+
+
+{-| A backstop on how many targets are tracked at once, not a policy.
+
+The names come from the client, so nothing about a pocket bounds how many can
+appear; a tally list growing with every rat engaged would be a leak. Sixteen is
+far more than any recorded reading names -- the busiest carries a handful, guns
+on one target and drones on another -- and the ones dropped are the ones with
+the least evidence against them, which is the harmless direction: a target that
+is genuinely immune keeps producing zeros and climbs back.
+
+-}
+zeroDamageTalliesTracked : Int
+zeroDamageTalliesTracked =
+    16
+
+
 {-| Total hitpoints taken in the window.
 -}
 incomingDamageInWindow : IncomingDamageMemory -> Int
@@ -13618,6 +14639,70 @@ describeIncomingDamage context =
                         " Attackers named in the window: "
                             ++ (names |> List.map (\name -> "'" ++ name ++ "'") |> String.join ", ")
                             ++ " (any overview row with one of these names is a target)."
+               )
+
+
+{-| Whether this ship's own shots are achieving anything, in the status line.
+
+**The instrument run 27 did not have.** That run shot an `Infested Asteroid` for
+roughly 290 consecutive readings, every shot landing for zero damage, and the
+status line said only `rats 10 | target Infested Asteroid` -- which reads
+identically to a fight going well. This clause is what turns the next such run
+into evidence rather than a puzzle.
+
+Whether the host carries the channel is reported first and unconditionally, for
+`describeIncomingDamage`'s reason and with the fail-safe pointing the other way:
+no channel means nothing can ever be given up on, so the guns keep firing and an
+operator has to be able to see that the guard is unarmed rather than infer it
+from a verdict that never arrives.
+
+-}
+describeZeroDamage : BotDecisionContext -> String
+describeZeroDamage context =
+    let
+        memory =
+            context.memory.zeroDamage
+
+        threshold =
+            context.eventContext.botSettings.zeroDamageHitsBeforeGivingUp
+    in
+    if not memory.hostCarriesTheChannel then
+        "zero-damage check: NO COMBAT LOG -- unarmed, so nothing is ever given up on"
+
+    else if threshold < 0 then
+        "zero-damage check: off"
+
+    else
+        -- The tallies are printed even at one hit, because a target climbing
+        -- towards the threshold and a target that never climbs are the two
+        -- things worth telling apart while watching a run, and only the first
+        -- ever reaches a decision line.
+        (case memory.landedHitsAtZero of
+            [] ->
+                "shots landing for zero: none"
+
+            tallies ->
+                "shots landing for zero: "
+                    ++ (tallies
+                            |> List.map
+                                (\tally ->
+                                    "'"
+                                        ++ tally.name
+                                        ++ "' "
+                                        ++ String.fromInt tally.hits
+                                        ++ "/"
+                                        ++ String.fromInt threshold
+                                )
+                            |> String.join ", "
+                       )
+        )
+            ++ (case memory.namesGivenUpOn of
+                    [] ->
+                        ""
+
+                    names ->
+                        ". GIVEN UP ON (not shot at again this session): "
+                            ++ (names |> List.map (\name -> "'" ++ name ++ "'") |> String.join ", ")
                )
 
 
@@ -13856,6 +14941,159 @@ updateIncomingDamageMemory context hitpoints memoryBefore =
     }
 
 
+{-| Everything this session has concluded it cannot hurt.
+
+Read by `shouldAttackOverviewEntry`, so an object given up on stops being a
+candidate, and by the branch that unlocks it when the client makes it the active
+target anyway. Both are needed: run 27 shows the object arriving in the target
+bar without the bot ever having chosen it.
+
+-}
+namesGivenUpAsImmune : ZeroDamageMemory -> List String
+namesGivenUpAsImmune memory =
+    memory.namesGivenUpOn
+
+
+{-| Whether an overview row is one this session has given up on hurting.
+
+Matched exactly and case-insensitively across both label columns, which is
+`isObjectShootingAtUs`'s rule and is here for its reasons. A substring rule on
+"Infested Asteroid" would also refuse to shoot an "Infested Asteroid Cluster"
+nobody has any evidence about, and a wreck's Type is its owner's name with
+" Wreck" appended -- so a target given up on would take its killer's corpse out
+of the loot path with it. The name comes from the client's combat log and is
+compared against the overview's own columns, which is the round trip
+`test_shoot_back_at_attackers` established holds byte for byte.
+
+-}
+overviewEntryWasGivenUpAsImmune : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryWasGivenUpAsImmune givenUpNames overviewEntry =
+    anyNameMatchesOverviewLabel givenUpNames overviewEntry
+
+
+{-| Accumulate what the client says this ship's shots achieved, per target.
+
+**The whole of issue #90 that survives the reading it arrived on.** A reading's
+outgoing summary is gone by the next one, so the count of landed-and-achieved-
+nothing shots lives here, and so does the verdict it eventually produces.
+
+Four properties, each of them the thing that would otherwise go wrong:
+
+**`Nothing` from the parser is "this host does not carry the channel", never
+"nothing landed".** It leaves both the tallies and the verdicts alone, so a host
+with no game log accumulates no evidence and gives up on nothing. That is the
+opposite direction from #32's retreat -- there an absent channel must not read
+as safety, here it must not read as immunity -- and it is the safe one for the
+same underlying reason: the inference that costs something is the one drawn from
+silence. The status line reports `hostCarriesTheChannel` so an operator sees the
+guard is unarmed instead of inferring it from an empty list.
+
+**Any damage at all clears the tally.** A target that is merely well tanked is
+taking _some_ damage, so its count never climbs, and a target that starts taking
+damage after a few unlucky readings goes back to zero evidence rather than
+carrying it. Only `hits > 0` with `damage == 0` adds.
+
+**A miss adds nothing**, because the host never counts one: the client writes no
+damage number for a miss, so it cannot reach `hits`. A gun that is out of range
+and missing everything therefore accumulates no evidence against its target,
+which is right -- missing is a range problem and the answer to it is not to give
+up on the object.
+
+**The verdict latches for the session.** Once a name is in `namesGivenUpOn` it
+stays, and its tally is dropped so nothing keeps counting. Unlatching on later
+damage would be the wrong way round: after giving up, the bot stops shooting the
+object, so no later evidence can arrive and any rule waiting for some would be
+waiting forever. An operator who disagrees restarts the session, exactly as with
+`missionNamesAbandoned`.
+
+-}
+updateZeroDamageMemory : UpdateMemoryContext BotSettings -> ZeroDamageMemory -> ZeroDamageMemory
+updateZeroDamageMemory context memoryBefore =
+    zeroDamageMemoryAfterReading
+        context.botSettings.zeroDamageHitsBeforeGivingUp
+        context.readingFromGameClient.outgoingDamageSinceLastReading
+        memoryBefore
+
+
+{-| The rule itself, taking only what it reads, so a test can run it.
+
+Separated from `updateZeroDamageMemory` for the reason CLAUDE.md's verification
+section gives: a Python restatement of a rule tests the restatement, and this
+one is arithmetic over a list where an off-by-one is invisible in review. Every
+property the doc comment above claims -- absent leaving the verdicts alone, any
+damage clearing a tally, a miss adding nothing, the latch holding -- is a call
+to this function with three arguments.
+
+-}
+zeroDamageMemoryAfterReading : Int -> Maybe (List EveOnline.ParseUserInterface.OutgoingDamageToTarget) -> ZeroDamageMemory -> ZeroDamageMemory
+zeroDamageMemoryAfterReading threshold outgoingDamage memoryBefore =
+    case outgoingDamage of
+        Nothing ->
+            { memoryBefore | hostCarriesTheChannel = False }
+
+        Just targets ->
+            let
+                landedThisReading =
+                    targets |> List.filter (\target -> 0 < target.hits)
+
+                hitsAtZeroFor name =
+                    landedThisReading
+                        |> List.filter (\target -> target.name == name && target.damage <= 0)
+                        |> List.map .hits
+                        |> List.sum
+
+                tookDamage name =
+                    landedThisReading
+                        |> List.any (\target -> target.name == name && 0 < target.damage)
+
+                namesSeen =
+                    (landedThisReading |> List.map .name)
+                        ++ (memoryBefore.landedHitsAtZero |> List.map .name)
+                        |> Common.Basics.listUnique
+                        |> List.filter
+                            (\name -> not (List.member name memoryBefore.namesGivenUpOn))
+
+                tallied =
+                    namesSeen
+                        |> List.filterMap
+                            (\name ->
+                                if tookDamage name then
+                                    Nothing
+
+                                else
+                                    let
+                                        before =
+                                            memoryBefore.landedHitsAtZero
+                                                |> List.filter (\tally -> tally.name == name)
+                                                |> List.map .hits
+                                                |> List.sum
+                                    in
+                                    case before + hitsAtZeroFor name of
+                                        0 ->
+                                            Nothing
+
+                                        hits ->
+                                            Just { name = name, hits = hits }
+                            )
+                        |> List.sortBy (.hits >> negate)
+                        |> List.take zeroDamageTalliesTracked
+
+                givingUpNow =
+                    if threshold < 0 then
+                        []
+
+                    else
+                        tallied
+                            |> List.filter (\tally -> threshold <= tally.hits)
+                            |> List.map .name
+            in
+            { landedHitsAtZero =
+                tallied |> List.filter (\tally -> not (List.member tally.name givingUpNow))
+            , namesGivenUpOn = givingUpNow ++ memoryBefore.namesGivenUpOn
+            , hostCarriesTheChannel = True
+            }
+
+
 updateMemoryForNewReadingFromGame : UpdateMemoryContext BotSettings -> BotMemory -> BotMemory
 updateMemoryForNewReadingFromGame context botMemoryBefore =
     let
@@ -13957,6 +15195,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     weJustFinishedWarping || (dockedNow && not botMemoryBefore.dockedInLastReading)
                 }
 
+        -- Read here rather than where the dock is decided, because a reading's
+        -- game-log entries are gone by the next reading: a branch that saw the
+        -- client start a run-in would see it once and command another one on
+        -- the reading after. See `DockingRunIn`.
+        dockingRunIn =
+            dockingRunInAfterReading
+                { before = botMemoryBefore.dockingRunIn
+                , courseSetThisReading =
+                    courseSetToDockingPerimeterFromGameLog context.readingFromGameClient /= Nothing
+                , rangeNow = rangeToNearestStationInMeters context.readingFromGameClient
+                , docked = dockedNow
+                }
+
         lockRangeLearning =
             updateLockRangeLearning context botMemoryBefore
 
@@ -14056,6 +15307,12 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             botMemoryBefore.lowestArmorPercentSinceHealthy
     , hitpoints = hitpointsNow
     , incomingDamage = incomingDamageNow
+
+    -- The other half of the same channel, and a separate field for the same
+    -- reason the host emits a separate node: the two read different fields of
+    -- one pure record, so neither can consume the other's, and each writes its
+    -- own verdict here. See issue #90.
+    , zeroDamage = updateZeroDamageMemory context botMemoryBefore.zeroDamage
     , readingsCount = botMemoryBefore.readingsCount + 1
     , droneBayOpenedFromShipCard =
         -- Whether our own "Open Drone Bay" on the ship's card has landed since
@@ -14578,6 +15835,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , dockingRunIn = dockingRunIn
     , lockAttempt = lockRangeLearning.attempt
     , lockProvenAtMeters = lockRangeLearning.provenAtMeters
     , lockRefusedAtMeters = lockRangeLearning.refusedAtMeters
