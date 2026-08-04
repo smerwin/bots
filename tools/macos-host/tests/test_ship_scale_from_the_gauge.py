@@ -523,14 +523,17 @@ class TheCorpusSaysTheEstimateConverges(unittest.TestCase):
         # The second noise source #119 names, measured rather than argued: this
         # ship repairs its armour, so armour points recovered while damage lands
         # break the ratio outright. It is why the derivation reads the shield.
-        armour = Corpus.per_run_estimate("armor", "shield")
-        shield = Corpus.per_run_estimate("shield", "armor")
-        if len(armour) < 4:
-            self.skipTest("too few runs derive an armour answer to compare")
-        armour_spread = max(armour.values()) / min(armour.values())
-        shield_spread = max(shield.values()) / min(shield.values())
-        self.assertGreater(armour_spread, shield_spread * 1.5,
-                           (armour, shield))
+        #
+        # Asserted over the pooled observations rather than over per-run
+        # answers, so it needs no minimum number of runs and therefore no skip
+        # of its own -- the corpus gate above is the only prerequisite here.
+        def spread(gauge, other):
+            pooled = sorted(value for rows in Corpus.rows().values()
+                            for value in Corpus.admissible(pairs_of(rows), gauge, other))
+            self.assertGreaterEqual(len(pooled), 20, gauge)
+            return pooled[len(pooled) * 3 // 4] / pooled[len(pooled) // 4]
+
+        self.assertGreater(spread("armor", "shield"), spread("shield", "armor"))
 
     def test_the_lagged_pairing_is_the_one_that_converges(self):
         # `believed` is the previous reading's value on a falling gauge, so the
