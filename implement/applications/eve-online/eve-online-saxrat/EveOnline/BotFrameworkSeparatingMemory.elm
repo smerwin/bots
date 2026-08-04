@@ -63,10 +63,12 @@ type alias DecisionPathNode =
     Common.DecisionPath.DecisionPathNode EndDecisionPathStructure
 
 
-type alias UpdateMemoryContext =
+type alias UpdateMemoryContext botSettings =
     { timeInMilliseconds : Int
     , readingFromGameClient : ReadingFromGameClient
     , screenshot : ReadingFromGameClientScreenshot
+    , previousStepsEffects : List (List Common.EffectOnWindow.EffectOnWindowStruct)
+    , botSettings : botSettings
     }
 
 
@@ -96,7 +98,7 @@ type alias BotState botMemory =
 type alias BotConfiguration botSettings botMemory =
     { parseBotSettings : String -> Result String botSettings
     , selectGameClientInstance : Maybe botSettings -> List EveOnline.BotFramework.GameClientProcessSummary -> Result String { selectedProcess : EveOnline.BotFramework.GameClientProcessSummary, report : List String }
-    , updateMemoryForNewReadingFromGame : UpdateMemoryContext -> botMemory -> botMemory
+    , updateMemoryForNewReadingFromGame : UpdateMemoryContext botSettings -> botMemory -> botMemory
     , statusTextFromDecisionContext : StepDecisionContext botSettings botMemory -> String
     , decideNextStep : StepDecisionContext botSettings botMemory -> DecisionPathNode
     }
@@ -154,7 +156,7 @@ processEvent botConfiguration =
 
 
 processEventInBaseFramework :
-    { updateMemoryForNewReadingFromGame : UpdateMemoryContext -> botMemory -> botMemory
+    { updateMemoryForNewReadingFromGame : UpdateMemoryContext botSettings -> botMemory -> botMemory
     , statusTextFromDecisionContext : StepDecisionContext botSettings botMemory -> String
     , decideNextStep : StepDecisionContext botSettings botMemory -> DecisionPathNode
     }
@@ -177,6 +179,22 @@ processEventInBaseFramework config eventContext event stateBefore =
                     { timeInMilliseconds = eventContext.timeInMilliseconds
                     , readingFromGameClient = readingFromGameClient
                     , screenshot = screenshot
+
+                    -- The same history the decision context gets. A counter
+                    -- that has to measure how long ago the bot *asked* for
+                    -- something -- rather than what the client currently shows
+                    -- -- cannot be derived from the reading alone, and the
+                    -- reading is all this context used to carry.
+                    , previousStepsEffects = stateBefore.lastStepsEffects
+
+                    -- Some readings only mean something against the settings.
+                    -- A weapon's context menu lists the charges the gun can be
+                    -- switched to and omits the one already loaded, so which
+                    -- charge is in the gun is only legible to something that
+                    -- knows the two charge names -- and memory is the only
+                    -- place that can remember the answer across the readings
+                    -- where no menu is open.
+                    , botSettings = eventContext.botSettings
                     }
 
                 botMemory : botMemory
@@ -773,7 +791,19 @@ ensureInfoPanelLocationInfoIsExpanded readingFromGameClient =
                 (Common.DecisionPath.describeBranch "I do not see the location info panel. Enable the info panel."
                     (case readingFromGameClient.infoPanelContainer |> Maybe.andThen .icons |> Maybe.andThen .locationInfo of
                         Nothing ->
-                            Common.DecisionPath.describeBranch "I do not see the icon for the location info panel." askForHelpToGetUnstuck
+                            -- Wait, do not give up. The icon is missing while the
+                            -- client is still building its UI -- after a client
+                            -- restart, and briefly around docking -- and it turns
+                            -- up a tick or two later on its own. Observed live
+                            -- across several runs: three readings without it,
+                            -- askForHelpToGetUnstuck, and then the bot carrying on
+                            -- to hand in missions perfectly well. Nothing was ever
+                            -- actually stuck; the only cost was a stall alert on
+                            -- every dock cycle, and a watcher that cries wolf is
+                            -- one you stop reading.
+                            Common.DecisionPath.describeBranch
+                                "I do not see the icon for the location info panel yet -- wait for the client to draw it."
+                                waitForProgressInGame
 
                         Just iconLocationInfoPanel ->
                             case mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft iconLocationInfoPanel of

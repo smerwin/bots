@@ -49,6 +49,7 @@
       + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping range or aligning.
       + `keep-at-range`: Set this to 'yes' to keep range from the target instead of orbiting or aligning.
       + `targeting-range`: Maximum distance in meters to lock a target from the overview, e.g. `targeting-range=50000`. Beyond this, the bot approaches instead of locking. Defaults to 66000.
+      + `run-away-incoming-damage-threshold`: Hitpoints of incoming damage, summed from the client's own combat log over a rolling 45-second window, past which the bot breaks off and runs. Unlike the two hitpoint settings above this needs no HUD gauge, which is the point of it: the gauge is scraped out of the client's live memory and produces values like 2132822% and a spurious 0%. Defaults to 3500, calibrated against sixteen recorded sessions of one hull -- the worst any session the ship survived absorbed was 3114, and the session it was lost in peaked at 4101. **That is a number about a hull, not about the game**, so re-derive it for a different ship. Set to -1 to disable.
 
       When using more than one setting, start a new line for each setting in the text input field.
       Here is an example of a complete settings string:
@@ -139,6 +140,7 @@ import EveOnline.BotFramework
 import EveOnline.BotFrameworkSeparatingMemory
     exposing
         ( DecisionPathNode
+        , EndDecisionPathStructure(..)
         , UpdateMemoryContext
         , askForHelpToGetUnstuck
         , branchDependingOnDockedOrInSpace
@@ -178,6 +180,14 @@ defaultBotSettings =
     , keepAtRange = AppSettings.No
     , warpAt = 100
     , targetingRangeMeters = 66000
+
+    -- The two gauges above ship disabled, so before this setting existed the
+    -- shipped configuration had no retreat at all. This one is armed by
+    -- default because it is the guard that depends on no gauge: it reads the
+    -- client's own combat log, which states what hit the ship and for how
+    -- much, where `hitpointsPercent` is a float scraped out of a widget the
+    -- client is concurrently mutating.
+    , runAwayIncomingDamageThreshold = defaultRunAwayIncomingDamageThreshold
     }
 
 
@@ -193,6 +203,9 @@ parseBotSettings =
            )
          , ( "run-away-armor-hitpoints-threshold-percent"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayArmorHitpointsThresholdPercent = threshold })
+           )
+         , ( "run-away-incoming-damage-threshold"
+           , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayIncomingDamageThreshold = threshold })
            )
          , ( "anomaly-name"
            , AppSettings.valueTypeString
@@ -266,6 +279,7 @@ type alias BotSettings =
     , keepAtRange : AppSettings.YesOrNo
     , warpAt : Int
     , targetingRangeMeters : Int
+    , runAwayIncomingDamageThreshold : Int
     }
 
 
@@ -289,6 +303,32 @@ type alias BotMemory =
     , shipApproachingTicks : Int
     , lootedWreckIds : List String
     , gateWithinReachTicks : Int
+
+    -- The HUD gauges as this bot is willing to believe them, rather than as
+    -- the last reading happened to report them. See `updateHitpointsGaugeMemory`.
+    , hitpoints : HitpointsMemory
+
+    -- The lowest believed value seen since the last recovery or dock. A single
+    -- live threshold has no hysteresis, so a retreat decided on one reading is
+    -- un-decided by the next one the moment a repairer catches up.
+    , hitpointsLowWaterMark : { shield : Int, armor : Int }
+
+    -- What the client's own combat log says has been hitting this ship, over a
+    -- rolling window. The one retreat instrument here that reads no sprite.
+    , incomingDamage : IncomingDamageMemory
+
+    -- Latched, and never cleared: the cost is asymmetric in one direction
+    -- only. Docking early costs the rest of the session; un-concluding a ship
+    -- loss on a reading that happens to look normal costs the clone.
+    , shipLoss : Maybe ShipLossVerdict
+    , shipUIWithoutModuleButtonsReadings : Int
+
+    -- Readings since the bot last *asked* for a drone recall that the client
+    -- has not answered -- never readings since the drones were launched, which
+    -- is issue #11: drones are deliberately left out for a whole fight.
+    , droneRecallUnansweredTicks : Int
+    , dronesInSpaceCountLastReading : Int
+    , dronesInSpaceTicks : Int
     }
 
 
@@ -296,6 +336,54 @@ type alias MemoryOfAnomaly =
     { arrivalTime : { milliseconds : Int }
     , otherPilotsFoundOnArrival : List String
     , ratsSeen : Set.Set String
+    }
+
+
+type alias HitpointsMemory =
+    { shield : HitpointsGaugeMemory
+    , armor : HitpointsGaugeMemory
+    }
+
+
+type alias HitpointsGaugeMemory =
+    { previousReading : Maybe Int
+    , believed : Maybe Int
+    , readingsWithheld : Int
+    , lastWithheld : Maybe Int
+    }
+
+
+type alias IncomingDamageMemory =
+    { samples : List IncomingDamageSample
+    , hostCarriesTheChannel : Bool
+    , lastAttacker : Maybe String
+    , retreating : Bool
+    }
+
+
+type alias IncomingDamageSample =
+    { atMilliseconds : Int
+    , damage : Int
+
+    -- The HUD reading this sample's own reading was allowed to believe, or
+    -- `Nothing` where there was none: no ship UI, a value
+    -- `plausibleHitpointsPercent` rejected, or one no second reading has
+    -- confirmed yet. A `Nothing` is never counted as the gauge moving, so a
+    -- corrupt reading cannot pass for a gauge that is still working.
+    , hitpoints : Maybe ( Int, Int )
+
+    -- Who the client said hit hardest on this reading, kept per sample rather
+    -- than only in `lastAttacker`, because the *window* of these names is what
+    -- the target selection reads. `topAttacker` is one name and a pocket has
+    -- several, so the set is accumulated across readings rather than widened
+    -- host-side into a list.
+    , attacker : Maybe String
+    }
+
+
+type alias ShipLossVerdict =
+    { reason : String
+    , readingsSince : Int
     }
 
 
@@ -476,60 +564,63 @@ anomalyBotDecisionRootBeforeApplyingSettings : BotDecisionContext -> DecisionPat
 anomalyBotDecisionRootBeforeApplyingSettings context =
     generalSetupInUserInterface context.readingFromGameClient
         |> Maybe.withDefault
-            (branchDependingOnDockedOrInSpace
-                { ifDocked =
-                    continueIfShouldHide
-                        { ifShouldHide =
-                            describeBranch "Stay docked." waitForProgressInGame
-                        }
-                        context
-                        |> Maybe.withDefault
-                            (if
-                                context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
-                                    && (context.readingFromGameClient
-                                            |> infoPanelRouteFirstMarkerFromReadingFromGameClient
-                                            |> (==) Nothing
-                                       )
-                                    -- A "Warp to Site" opportunity takes
-                                    -- precedence over staying docked: the
-                                    -- Opportunities panel this comes from is
-                                    -- part of the persistent left sidebar
-                                    -- (like the route panel), so it's
-                                    -- checkable even while docked. Undocking
-                                    -- here rather than trying to click it
-                                    -- directly from dock -- untested whether
-                                    -- that even works -- lets the very next
-                                    -- tick's normal in-space priority chain
-                                    -- (which already puts this ahead of
-                                    -- tether/dock) pick it up once genuinely
-                                    -- in space.
-                                    && (context.readingFromGameClient
-                                            |> warpToOpportunitySiteIfAvailable
-                                            |> (==) Nothing
-                                       )
-                             then
-                                describeBranch
-                                    "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
-                                    waitForProgressInGame
+            (recoverPodAfterShipLoss context
+                |> Maybe.withDefault
+                    (branchDependingOnDockedOrInSpace
+                        { ifDocked =
+                            continueIfShouldHide
+                                { ifShouldHide =
+                                    describeBranch "Stay docked." waitForProgressInGame
+                                }
+                                context
+                                |> Maybe.withDefault
+                                    (if
+                                        context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
+                                            && (context.readingFromGameClient
+                                                    |> infoPanelRouteFirstMarkerFromReadingFromGameClient
+                                                    |> (==) Nothing
+                                               )
+                                            -- A "Warp to Site" opportunity takes
+                                            -- precedence over staying docked: the
+                                            -- Opportunities panel this comes from is
+                                            -- part of the persistent left sidebar
+                                            -- (like the route panel), so it's
+                                            -- checkable even while docked. Undocking
+                                            -- here rather than trying to click it
+                                            -- directly from dock -- untested whether
+                                            -- that even works -- lets the very next
+                                            -- tick's normal in-space priority chain
+                                            -- (which already puts this ahead of
+                                            -- tether/dock) pick it up once genuinely
+                                            -- in space.
+                                            && (context.readingFromGameClient
+                                                    |> warpToOpportunitySiteIfAvailable
+                                                    |> (==) Nothing
+                                               )
+                                     then
+                                        describeBranch
+                                            "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
+                                            waitForProgressInGame
 
-                             else
-                                undockUsingStationWindow context
-                            )
-                , ifSeeShipUI =
-                    \shipUI ->
-                        runAwayIfLowHealth context shipUI
-                            |> Maybe.withDefault
-                                (continueIfShouldHide
-                                    { ifShouldHide =
-                                        returnDronesToBay context
-                                            |> Maybe.withDefault (dockAtRandomStationOrStructure context)
-                                    }
-                                    context
+                                     else
+                                        undockUsingStationWindow context
+                                    )
+                        , ifSeeShipUI =
+                            \shipUI ->
+                                runAwayIfLowHealth context shipUI
                                     |> Maybe.withDefault
-                                        (decideNextActionWhenInSpace context { shipUI = shipUI })
-                                )
-                }
-                context.readingFromGameClient
+                                        (continueIfShouldHide
+                                            { ifShouldHide =
+                                                returnDronesToBay context
+                                                    (dockAtRandomStationOrStructure context)
+                                            }
+                                            context
+                                            |> Maybe.withDefault
+                                                (decideNextActionWhenInSpace context { shipUI = shipUI })
+                                        )
+                        }
+                        context.readingFromGameClient
+                    )
             )
 
 
@@ -734,33 +825,49 @@ jumpToNextSystem context =
 
             else
                 returnDronesToBay context
-                    |> Maybe.withDefault
-                        (useContextMenuCascadeWithCustomConfig
-                            -- Feedback: "Jump Through Stargate" took 3-4 menu
-                            -- opens before being recognized. The route icon is
-                            -- small and sits in a strip that can shift as the
-                            -- route updates, so the default distance tolerance
-                            -- (70, already once widened from 40 for this same
-                            -- kind of drift on other elements) was plausibly
-                            -- discarding a menu that had, in fact, opened
-                            -- correctly. Widened just for this one cascade
-                            -- rather than the shared default, since other
-                            -- cascades' tolerance is already tuned from past
-                            -- observations and this is a different UI element.
-                            (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
-                            { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
-                            (useMenuEntryWithTextContainingFirstOf
-                                [ "dock"
-                                , "jump"
-                                ]
-                                menuCascadeCompleted
-                            )
-                            context
+                    (useContextMenuCascadeWithCustomConfig
+                        -- Feedback: "Jump Through Stargate" took 3-4 menu
+                        -- opens before being recognized. The route icon is
+                        -- small and sits in a strip that can shift as the
+                        -- route updates, so the default distance tolerance
+                        -- (70, already once widened from 40 for this same
+                        -- kind of drift on other elements) was plausibly
+                        -- discarding a menu that had, in fact, opened
+                        -- correctly. Widened just for this one cascade
+                        -- rather than the shared default, since other
+                        -- cascades' tolerance is already tuned from past
+                        -- observations and this is a different UI element.
+                        (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
+                        { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
+                        (useMenuEntryWithTextContainingFirstOf
+                            [ "dock"
+                            , "jump"
+                            ]
+                            menuCascadeCompleted
                         )
+                        context
+                    )
 
 
+{-| Leave, on the strongest of three instruments rather than on the weakest.
+
+The gauges are read through `BotMemory.hitpointsLowWaterMark`, never live off
+the reading. Two things happen on the way there and both matter. A value has to
+be _believed_ -- confirmed by a second reading -- before anything acts on it,
+because a single corrupt reading is a routine occurrence on this gauge and `0`
+is as reachable as `21328.22` while being the worst possible value to be wrong
+about, clearing every threshold at once. And the believed value is then held at
+its low-water mark until the ship genuinely recovers, so a retreat stays
+committed instead of flipping back the moment a repairer catches up.
+
+The third instrument needs no gauge at all, which is the point of it: the
+client's own combat log, summed over a rolling window. It is the only one of
+the three that was armed in saxrat's shipped configuration, where both
+hitpoint thresholds default to `-1`.
+
+-}
 runAwayIfLowHealth : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> Maybe DecisionPathNode
-runAwayIfLowHealth context shipUI =
+runAwayIfLowHealth context _ =
     let
         runAwayShieldThreshold =
             context.eventContext.botSettings.runAwayShieldHitpointsThresholdPercent
@@ -768,24 +875,542 @@ runAwayIfLowHealth context shipUI =
         runAwayArmorThreshold =
             context.eventContext.botSettings.runAwayArmorHitpointsThresholdPercent
 
-        runAwayWithShieldDescription =
-            describeBranch
-                ("Shield HP " ++ (shipUI.hitpointsPercent.shield |> String.fromInt) ++ "%, get out get out")
-                (runAway context)
+        damageInWindow =
+            incomingDamageInWindow context.memory.incomingDamage
 
-        runAwayWithArmorDescription =
-            describeBranch
-                ("Armor at " ++ (shipUI.hitpointsPercent.armor |> String.fromInt) ++ "%, get out get out get out")
-                (runAway context)
+        hitpointsReadingIsFrozen =
+            (damageThatMustMoveTheHitpointsReading <= damageInWindow)
+                && (hitpointsReadingMovedInWindow context.memory.incomingDamage == Just False)
     in
-    if shipUI.hitpointsPercent.shield < runAwayShieldThreshold then
-        Just runAwayWithShieldDescription
+    if context.memory.hitpointsLowWaterMark.shield < runAwayShieldThreshold then
+        Just
+            (describeBranch
+                ("Shield HP " ++ (context.memory.hitpointsLowWaterMark.shield |> String.fromInt) ++ "%, get out get out")
+                (runAway context)
+            )
 
-    else if shipUI.hitpointsPercent.armor < runAwayArmorThreshold then
-        Just runAwayWithArmorDescription
+    else if context.memory.hitpointsLowWaterMark.armor < runAwayArmorThreshold then
+        Just
+            (describeBranch
+                ("Armor at " ++ (context.memory.hitpointsLowWaterMark.armor |> String.fromInt) ++ "%, get out get out get out")
+                (runAway context)
+            )
+
+    else if context.memory.incomingDamage.retreating then
+        -- Latched in the memory update, and released only by a window that is
+        -- completely empty. A live comparison would cancel its own retreat:
+        -- the moment the ship warps clear the window starts draining.
+        Just
+            (describeBranch
+                ("The client's combat log says this ship has taken "
+                    ++ String.fromInt damageInWindow
+                    ++ " hitpoints in the last "
+                    ++ String.fromInt incomingDamageWindowSeconds
+                    ++ " s, against a threshold of "
+                    ++ String.fromInt context.eventContext.botSettings.runAwayIncomingDamageThreshold
+                    ++ ". Get out -- this does not depend on the HUD gauge."
+                )
+                (runAway context)
+            )
+
+    else if hitpointsReadingIsFrozen then
+        -- A ship that cannot see what is happening to it gets less rope than
+        -- one that can, which is why this threshold sits below the one above.
+        -- A `Nothing` sample never counts as movement, so a window of nothing
+        -- but unreadable values reads as frozen -- the conservative direction.
+        Just
+            (describeBranch
+                ("This ship has taken "
+                    ++ String.fromInt damageInWindow
+                    ++ " hitpoints while its shield and armour readings have not moved at all. A reading that cannot move is not a reading -- get out."
+                )
+                (runAway context)
+            )
 
     else
         Nothing
+
+
+plausibleHitpointsPercent : Int -> Maybe Int
+plausibleHitpointsPercent value =
+    if value < 0 || 100 < value then
+        Nothing
+
+    else
+        Just value
+
+
+initHitpointsGaugeMemory : HitpointsGaugeMemory
+initHitpointsGaugeMemory =
+    { previousReading = Nothing
+    , believed = Nothing
+    , readingsWithheld = 0
+    , lastWithheld = Nothing
+    }
+
+
+{-| Fold one reading into what this gauge is willing to be believed about.
+
+`believed` is the healthier of the last two believable readings. `Maybe.map2`
+is what makes an unbelievable value -- or a reading with no ship UI at all --
+leave nothing behind for the next reading to confirm against, so values either
+side of a gap in the gauge are never treated as agreement across it.
+
+**It delays; it cannot suppress.** On any non-increasing series the believed
+value is the previous reading's, whatever the size of the step, so a hull
+losing armour retreats one reading later than it used to and a hull genuinely
+at 0% still retreats.
+
+-}
+updateHitpointsGaugeMemory : Int -> Maybe Int -> HitpointsGaugeMemory -> HitpointsGaugeMemory
+updateHitpointsGaugeMemory retreatThreshold reading memoryBefore =
+    let
+        believed =
+            case memoryBefore.previousReading of
+                -- Nothing to confirm against: the session's first reading, or
+                -- the one after a gap. The reading stands on its own rather
+                -- than being withheld indefinitely -- a gauge that is only
+                -- readable every other reading would otherwise never be
+                -- believed at all, and a hull really at 0% would never retreat.
+                Nothing ->
+                    reading
+
+                -- Otherwise the healthier of the two, so a drop has to survive
+                -- a second look. An unbelievable reading is `Nothing` here and
+                -- stays `Nothing`, which is what stops the readings either side
+                -- of a gap vouching for each other.
+                Just previous ->
+                    reading |> Maybe.map (max previous)
+
+        wasWithheld =
+            hitpointsReadingWithheld retreatThreshold reading believed
+    in
+    { previousReading = reading
+    , believed = believed
+    , readingsWithheld =
+        memoryBefore.readingsWithheld
+            + (if wasWithheld then
+                1
+
+               else
+                0
+              )
+    , lastWithheld =
+        if wasWithheld then
+            reading
+
+        else
+            memoryBefore.lastWithheld
+    }
+
+
+{-| Would this reading have tripped the retreat that the believed one does not?
+
+Counted only against _this gauge's_ own threshold, so a gauge nobody is reading
+reports nothing -- which matters here, where both hitpoint thresholds ship
+disabled.
+
+-}
+hitpointsReadingWithheld : Int -> Maybe Int -> Maybe Int -> Bool
+hitpointsReadingWithheld retreatThreshold reading believed =
+    let
+        trips value =
+            value |> Maybe.map (\percent -> percent < retreatThreshold) |> Maybe.withDefault False
+    in
+    trips reading && not (trips believed)
+
+
+{-| The lowest believed value seen, until the ship recovers or docks.
+
+Docking forgets outright -- there is no ship UI to read and the next undock is
+a fresh hull. In space it is kept until the gauge reads at or above
+`runAwayRearmPercent`, which is what gives the retreat hysteresis: without it a
+single live threshold flips back the moment a repairer catches up, and the ship
+oscillates between fleeing and returning.
+
+-}
+lowWaterMark : ReadingFromGameClient -> Maybe Int -> Int -> Int
+lowWaterMark readingFromGameClient believed previous =
+    case readingFromGameClient.shipUI of
+        Nothing ->
+            100
+
+        Just _ ->
+            case believed of
+                Nothing ->
+                    previous
+
+                Just current ->
+                    if runAwayRearmPercent <= current then
+                        100
+
+                    else
+                        min previous current
+
+
+{-| Where the mark is released. Above every sane trip level, or it would never
+release at all.
+-}
+runAwayRearmPercent : Int
+runAwayRearmPercent =
+    90
+
+
+incomingDamageInWindow : IncomingDamageMemory -> Int
+incomingDamageInWindow memory =
+    memory.samples |> List.map .damage |> List.sum
+
+
+{-| Every attacker the client named across the window, deduplicated.
+
+`topAttacker` is one name and a pocket has several, so the set is accumulated
+per reading rather than the host being widened to carry a list. Measured over
+the recorded runs, accumulating the per-reading top attacker across the window
+recovers 97.5% of the name-in-window pairs that carrying every name would have.
+
+-}
+namesOfRecentAttackers : IncomingDamageMemory -> List String
+namesOfRecentAttackers memory =
+    memory.samples
+        |> List.filterMap .attacker
+        |> Common.Basics.listUnique
+
+
+{-| Has the HUD reading moved across the window? `Nothing` while the window is
+too short to mean anything either way.
+-}
+hitpointsReadingMovedInWindow : IncomingDamageMemory -> Maybe Bool
+hitpointsReadingMovedInWindow memory =
+    if List.length memory.samples < readingsBeforeAFrozenHitpointsReadingCounts then
+        Nothing
+
+    else
+        Just
+            (memory.samples
+                |> List.filterMap .hitpoints
+                |> Common.Basics.listUnique
+                |> List.length
+                |> (<) 1
+            )
+
+
+incomingDamageWindowSeconds : Int
+incomingDamageWindowSeconds =
+    45
+
+
+damageThatMustMoveTheHitpointsReading : Int
+damageThatMustMoveTheHitpointsReading =
+    1500
+
+
+readingsBeforeAFrozenHitpointsReadingCounts : Int
+readingsBeforeAFrozenHitpointsReadingCounts =
+    4
+
+
+{-| Calibrated from peak 45-second incoming damage across sixteen recorded
+client sessions: the worst any session the ship survived absorbed was 3114, and
+the session it was lost in peaked at 4101. About 12% clear either way, which is
+a real separation rather than a comfortable one -- and **a number about a hull,
+not about the game**.
+-}
+defaultRunAwayIncomingDamageThreshold : Int
+defaultRunAwayIncomingDamageThreshold =
+    3500
+
+
+incomingDamageSampleLimit : Int
+incomingDamageSampleLimit =
+    200
+
+
+updateIncomingDamageMemory : UpdateMemoryContext BotSettings -> HitpointsMemory -> IncomingDamageMemory -> IncomingDamageMemory
+updateIncomingDamageMemory context hitpoints memoryBefore =
+    let
+        hitpointsNow =
+            Maybe.map2 Tuple.pair hitpoints.shield.believed hitpoints.armor.believed
+
+        keptSamples =
+            memoryBefore.samples
+                |> List.filter
+                    (\sample ->
+                        context.timeInMilliseconds
+                            - sample.atMilliseconds
+                            < incomingDamageWindowSeconds
+                            * 1000
+                    )
+                |> List.take incomingDamageSampleLimit
+
+        samples =
+            case context.readingFromGameClient.incomingDamageSinceLastReading of
+                Nothing ->
+                    keptSamples
+
+                Just reading ->
+                    { atMilliseconds = context.timeInMilliseconds
+                    , damage = reading.damage
+                    , hitpoints = hitpointsNow
+                    , attacker = reading.topAttacker
+                    }
+                        :: keptSamples
+
+        updated =
+            { samples = samples
+            , hostCarriesTheChannel =
+                context.readingFromGameClient.incomingDamageSinceLastReading /= Nothing
+            , lastAttacker =
+                case context.readingFromGameClient.incomingDamageSinceLastReading of
+                    Just reading ->
+                        case reading.topAttacker of
+                            Just attacker ->
+                                Just attacker
+
+                            Nothing ->
+                                memoryBefore.lastAttacker
+
+                    Nothing ->
+                        memoryBefore.lastAttacker
+            , retreating = memoryBefore.retreating
+            }
+
+        damageInWindow =
+            incomingDamageInWindow updated
+
+        threshold =
+            context.botSettings.runAwayIncomingDamageThreshold
+    in
+    { updated
+        | retreating =
+            if damageInWindow <= 0 then
+                False
+
+            else if 0 <= threshold && threshold <= damageInWindow then
+                True
+
+            else
+                memoryBefore.retreating
+    }
+
+
+{-| The window, the threshold, and whether the host carries the channel at all.
+
+That last clause is what makes reading this guard's silence safe: "0 hitpoints
+in the last 45 s" reads identically whether the grid is quiet or nothing is
+listening, and only one of those means the ship is fine.
+
+-}
+describeIncomingDamage : BotDecisionContext -> String
+describeIncomingDamage context =
+    let
+        memory =
+            context.memory.incomingDamage
+
+        threshold =
+            context.eventContext.botSettings.runAwayIncomingDamageThreshold
+    in
+    if not memory.hostCarriesTheChannel then
+        "dmg: NO COMBAT LOG -- damage retreat and frozen-reading check unarmed"
+
+    else
+        "dmg "
+            ++ (incomingDamageInWindow memory |> String.fromInt)
+            ++ "/"
+            ++ (if threshold < 0 then
+                    "off"
+
+                else
+                    String.fromInt threshold
+               )
+            ++ " ("
+            ++ (incomingDamageWindowSeconds |> String.fromInt)
+            ++ "s, "
+            ++ (List.length memory.samples |> String.fromInt)
+            ++ "rd)"
+            ++ (if memory.retreating then
+                    " RETREATING"
+
+                else
+                    ""
+               )
+            ++ (case hitpointsReadingMovedInWindow memory of
+                    Just False ->
+                        " hp frozen"
+
+                    _ ->
+                        ""
+               )
+            ++ (case namesOfRecentAttackers memory of
+                    [] ->
+                        " Attackers named in the window: none."
+
+                    names ->
+                        " Attackers named in the window: "
+                            ++ (names |> List.map (\name -> "'" ++ name ++ "'") |> String.join ", ")
+                            ++ " (any overview row with one of these names is a target)."
+               )
+
+
+{-| The client never announces the ship's destruction -- there is no such line
+anywhere in the recorded logs. It states the _consequence_ instead, and only
+when something asks the capsule to lock.
+-}
+shipLossFromGameLog : ReadingFromGameClient -> Maybe String
+shipLossFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.filter
+            (\entry ->
+                stringContainsIgnoringCase "ship you are piloting" entry.text
+                    && stringContainsIgnoringCase "does not have targeting systems" entry.text
+            )
+        |> List.head
+        |> Maybe.map .text
+
+
+gameLogEntryIsFromNotifyChannel : EveOnline.ParseUserInterface.GameLogEntry -> Bool
+gameLogEntryIsFromNotifyChannel entry =
+    case entry.channel of
+        Nothing ->
+            True
+
+        Just channel ->
+            (channel |> String.trim |> String.toLower) == "notify"
+
+
+{-| A docked reading has no ship UI and is no evidence either way, so it answers
+`False` rather than accumulating towards a verdict.
+-}
+shipUIHasNoModuleButtons : ReadingFromGameClient -> Bool
+shipUIHasNoModuleButtons readingFromGameClient =
+    case readingFromGameClient.shipUI of
+        Nothing ->
+            False
+
+        Just shipUI ->
+            List.isEmpty shipUI.moduleButtons
+
+
+shipUIWithoutModuleButtonsReadingsAfter : ReadingFromGameClient -> Int -> Int
+shipUIWithoutModuleButtonsReadingsAfter readingFromGameClient countBefore =
+    if shipUIHasNoModuleButtons readingFromGameClient then
+        countBefore + 1
+
+    else
+        0
+
+
+{-| Several readings rather than one, because the parser drops any slot whose
+display region it cannot read -- so one reading finding none may be a parse that
+missed.
+-}
+shipLossReadingsWithoutModulesBeforeVerdict : Int
+shipLossReadingsWithoutModulesBeforeVerdict =
+    3
+
+
+{-| Once set, returned unchanged forever with only its age moving.
+
+The latch is the cost asymmetry written into the code: docking early costs the
+rest of the session, and un-concluding a loss on a reading that happens to look
+normal costs the clone.
+
+-}
+shipLossVerdictAfter :
+    ReadingFromGameClient
+    -> { withoutModulesReadings : Int, verdictBefore : Maybe ShipLossVerdict }
+    -> Maybe ShipLossVerdict
+shipLossVerdictAfter readingFromGameClient { withoutModulesReadings, verdictBefore } =
+    case verdictBefore of
+        Just latched ->
+            Just { latched | readingsSince = latched.readingsSince + 1 }
+
+        Nothing ->
+            case shipLossFromGameLog readingFromGameClient of
+                Just clientSentence ->
+                    Just
+                        { reason =
+                            "the client said \""
+                                ++ clientSentence
+                                ++ "\", which only a capsule hears"
+                        , readingsSince = 0
+                        }
+
+                Nothing ->
+                    if shipLossReadingsWithoutModulesBeforeVerdict <= withoutModulesReadings then
+                        Just
+                            { reason =
+                                "the ship UI has carried no modules at all for "
+                                    ++ String.fromInt withoutModulesReadings
+                                    ++ " readings, which is the shape of a capsule and not of any ship this bot flies"
+                            , readingsSince = 0
+                            }
+
+                    else
+                        Nothing
+
+
+podRecoveryGiveUpReadings : Int
+podRecoveryGiveUpReadings =
+    150
+
+
+{-| Stop hunting anomalies and get the pod out.
+
+Placed above the docked-or-in-space split rather than conditioned, so "stop
+fighting" is structural: locking, drones, modules and looting all live below
+that split and are simply never reached once this answers `Just`.
+
+Ending the session once the pod is docked is deliberate -- the remaining hours
+are worth nothing without a ship, and the operator has to find out.
+
+-}
+recoverPodAfterShipLoss : BotDecisionContext -> Maybe DecisionPathNode
+recoverPodAfterShipLoss context =
+    context.memory.shipLoss
+        |> Maybe.map
+            (\shipLoss ->
+                describeBranch
+                    ("The ship is gone -- "
+                        ++ shipLoss.reason
+                        ++ ". Stop hunting anomalies and get the pod out ("
+                        ++ String.fromInt shipLoss.readingsSince
+                        ++ " readings since)."
+                    )
+                    (case context.readingFromGameClient.shipUI of
+                        Nothing ->
+                            describeBranch
+                                ("The pod is docked at "
+                                    ++ (context.memory.lastDockedStationNameFromInfoPanel
+                                            |> Maybe.map (\name -> "'" ++ name ++ "'")
+                                            |> Maybe.withDefault "a station"
+                                       )
+                                    ++ " and safe. Ending the session: there is no ship left to hunt anomalies with, and that is for the operator to fix."
+                                )
+                                (Common.DecisionPath.endDecisionPath FinishSession)
+
+                        Just _ ->
+                            if podRecoveryGiveUpReadings <= shipLoss.readingsSince then
+                                describeBranch
+                                    ("The pod has been trying to reach a station for "
+                                        ++ String.fromInt shipLoss.readingsSince
+                                        ++ " readings and has not got there. Ending the session in space rather than retrying forever -- the pod needs recovering by hand."
+                                    )
+                                    (Common.DecisionPath.endDecisionPath FinishSession)
+
+                            else
+                                describeBranch
+                                    ("Pod recovery: docking at whatever this system offers"
+                                        ++ (context.memory.lastDockedStationNameFromInfoPanel
+                                                |> Maybe.map (\name -> ", preferring '" ++ name ++ "'")
+                                                |> Maybe.withDefault ""
+                                           )
+                                        ++ "."
+                                    )
+                                    (dockAtRandomStationOrStructure context)
+                    )
+            )
 
 
 runAway : BotDecisionContext -> DecisionPathNode
@@ -1029,17 +1654,16 @@ dockAtRandomStationOrStructure context =
                 }
     in
     returnDronesToBay context
-        |> Maybe.withDefault
-            (describeBranch "g'wan, git"
-                (useContextMenuCascadeOnListSurroundingsButton
-                    (useMenuEntryWithTextContainingFirstOf [ "structures", "station" ]
-                        (chooseNextMenuEntry
-                            (chooseNextMenuEntry MenuCascadeCompleted)
-                        )
+        (describeBranch "g'wan, git"
+            (useContextMenuCascadeOnListSurroundingsButton
+                (useMenuEntryWithTextContainingFirstOf [ "structures", "station" ]
+                    (chooseNextMenuEntry
+                        (chooseNextMenuEntry MenuCascadeCompleted)
                     )
-                    context
                 )
+                context
             )
+        )
 
 
 decideNextActionWhenInSpace : BotDecisionContext -> SeeUndockingComplete -> DecisionPathNode
@@ -1048,12 +1672,7 @@ decideNextActionWhenInSpace context seeUndockingComplete =
         |> Maybe.withDefault
             (if seeUndockingComplete.shipUI |> shipUIIndicatesShipIsWarpingOrJumping then
                 describeBranch "HOOOOONK in warp"
-                    ([ returnDronesToBay context
-                     ]
-                        |> List.filterMap identity
-                        |> List.head
-                        |> Maybe.withDefault waitForProgressInGame
-                    )
+                    (returnDronesToBay context waitForProgressInGame)
 
              else
                 case context.readingFromGameClient.probeScannerWindow of
@@ -1130,7 +1749,7 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                 -- ever running the unlock cascade, so check for one
                                 -- here too rather than only inside decideActionInAnomaly.
                                 if
-                                    anyAttackableInOverview context.readingFromGameClient
+                                    anyAttackableInOverview (namesOfRecentAttackers context.memory.incomingDamage) context.readingFromGameClient
                                         || anyNotableWreckInOverview context.readingFromGameClient
                                         || (targetsToUnlockFromReadingFromGameClient context.readingFromGameClient |> List.isEmpty |> not)
                                 then
@@ -1154,10 +1773,9 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                         let
                                             returnDronesAndEnterAnomaly { ifNoAcceptableAnomalyAvailable } =
                                                 returnDronesToBay context
-                                                    |> Maybe.withDefault
-                                                        (describeBranch "No drones to return."
-                                                            (enterAnomaly { ifNoAcceptableAnomalyAvailable = ifNoAcceptableAnomalyAvailable } context)
-                                                        )
+                                                    (describeBranch "No drones to return."
+                                                        (enterAnomaly { ifNoAcceptableAnomalyAvailable = ifNoAcceptableAnomalyAvailable } context)
+                                                    )
 
                                             returnDronesAndEnterAnomalyOrWait =
                                                 returnDronesAndEnterAnomaly
@@ -1244,7 +1862,7 @@ decideActionInAnomaly :
 decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplete continueIfCombatComplete =
     let
         overviewEntriesToAttack =
-            overviewEntriesToAttackFromReadingFromGameClient context.readingFromGameClient
+            overviewEntriesToAttackFromReadingFromGameClient (namesOfRecentAttackers context.memory.incomingDamage) context.readingFromGameClient
 
         overviewEntriesToAttackFirst =
             overviewEntriesToAttack
@@ -1277,7 +1895,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                 Nothing
 
             else
-                scrollOverviewToReveal context shouldAttackOverviewEntry
+                scrollOverviewToReveal context (shouldAttackOverviewEntry (namesOfRecentAttackers context.memory.incomingDamage))
 
         targetsToUnlock =
             targetsToUnlockFromReadingFromGameClient context.readingFromGameClient
@@ -1328,8 +1946,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
         decisionAfterLootingNotableWrecks =
             if waitTimeRemainingSeconds <= 0 then
                 returnDronesToBay context
-                    |> Maybe.withDefault
-                        (describeBranch "No drones to return." continueIfCombatComplete)
+                    (describeBranch "No drones to return." continueIfCombatComplete)
 
             else
                 describeBranch
@@ -1765,8 +2382,29 @@ launchAndEngageDrones context =
             )
 
 
-returnDronesToBay : BotDecisionContext -> Maybe DecisionPathNode
-returnDronesToBay context =
+{-| Recall the drones, and give up rather than asking forever.
+
+Warping with drones in space loses them, so this sits in front of every warp,
+every tether and every dock. Shift+R is a bare keypress with nothing to aim at
+and no acknowledgement anywhere in the reading, so the only evidence a recall
+landed is the in-space count falling -- which means the asking has to be
+bounded, and before this port it was not bounded at all. The keypress went out
+on every reading for as long as the drones stayed in space, and because the
+callers took the recall _instead of_ their own next step, a recall that never
+landed meant the ship never docked either.
+
+**It takes the caller's next step rather than returning a `Maybe`.** A give-up
+that returns nothing at all is one an operator cannot see: the log then reads
+exactly like a bot that never had drones out. Handing the continuation in lets
+the branch that abandons the drones name itself, every reading it declines --
+not once, which is the other half of issue #11. The equality test its give-up
+was first written as fired only on the reading the counter was _exactly_ at the
+threshold, and if the ship was mid-fight on that one reading nothing was ever
+logged at all.
+
+-}
+returnDronesToBay : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+returnDronesToBay context ifNothingToRecall =
     context.readingFromGameClient.dronesWindow
         |> Maybe.andThen .droneGroupInSpace
         |> Maybe.andThen
@@ -1780,6 +2418,41 @@ returnDronesToBay context =
                 then
                     Nothing
 
+                else if droneRecallGiveUpTicks < context.memory.droneRecallUnansweredTicks then
+                    -- Stop asking, and go on with whatever the caller wanted to
+                    -- do. Giving up has to latch -- which it does, because the
+                    -- counter holds past the threshold rather than resetting --
+                    -- or the ship alternates forever between abandoning its
+                    -- drones and recalling them.
+                    Just
+                        (describeBranch
+                            ("Drones have not answered "
+                                ++ String.fromInt context.memory.droneRecallUnansweredTicks
+                                ++ " readings of recall and will not come back -- leave without them so the ship can move on."
+                            )
+                            ifNothingToRecall
+                        )
+
+                else if
+                    (droneRecallFocusRecoveryTicks < context.memory.dronesInSpaceTicks)
+                        && not (previousStepClickedMouse context)
+                then
+                    -- Shift+R does nothing at all when the client is not taking
+                    -- keyboard input, and nothing in the reading says so: the
+                    -- decision looks identical whether the key landed or was
+                    -- swallowed. Clicking inside the client first is the
+                    -- documented remedy, and the drone group header is a real
+                    -- target inside the window we are already acting on that
+                    -- does nothing but move focus.
+                    --
+                    -- Gated on not having just clicked, so this alternates
+                    -- click, press, click, press rather than clicking forever.
+                    Just
+                        (describeBranch
+                            "Drones are not coming back -- click the drones window to put keyboard focus back in the client, then press again."
+                            (clickUiElement droneGroupInLocalSpace.header.uiNode)
+                        )
+
                 else
                     Just
                         (describeBranch "I see there are drones in space. Return those to bay."
@@ -1792,13 +2465,83 @@ returnDronesToBay context =
                                     |> List.concat
                                 )
                             )
-                         -- (useContextMenuCascade
-                         --     ( "drones group", droneGroupInLocalSpace.header.uiNode )
-                         --     (useMenuEntryWithTextContaining "Assist" menuCascadeCompleted)
-                         --     context
-                         -- )
                         )
             )
+        |> Maybe.withDefault ifNothingToRecall
+
+
+droneRecallGiveUpTicks : Int
+droneRecallGiveUpTicks =
+    60
+
+
+droneRecallFocusRecoveryTicks : Int
+droneRecallFocusRecoveryTicks =
+    20
+
+
+{-| How far back to look for the bot's own recall keypress.
+
+Wide enough to span the focus-recovery branch above, which alternates a click
+and a keypress, and no wider -- so a bot that has gone back to fighting stops
+counting readings against a recall nobody is making any more.
+
+-}
+droneRecallAskedLookbackSteps : Int
+droneRecallAskedLookbackSteps =
+    3
+
+
+{-| Did the bot ask for a recall recently?
+
+Read out of the effects rather than the decision, because
+`updateMemoryForNewReadingFromGame` is the only place that can write memory and
+it never sees the decision. `vkey_R` is used for nothing else in this bot --
+`vkey_E` is the approach chord and `vkey_W` the orbit -- so the chord is
+unambiguous.
+
+-}
+recentStepAskedForDroneRecall : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+recentStepAskedForDroneRecall previousStepsEffects =
+    previousStepsEffects
+        |> List.take droneRecallAskedLookbackSteps
+        |> List.any (List.member (EffectOnWindow.KeyDown EffectOnWindow.vkey_R))
+
+
+previousStepClickedMouse : BotDecisionContext -> Bool
+previousStepClickedMouse context =
+    context.previousStepsEffects
+        |> List.take 1
+        |> List.any
+            (List.any
+                (\effect ->
+                    case effect of
+                        EffectOnWindow.ButtonDown _ ->
+                            True
+
+                        _ ->
+                            False
+                )
+            )
+
+
+describeDroneRecall : BotDecisionContext -> String
+describeDroneRecall context =
+    "Drones: "
+        ++ (context.memory.dronesInSpaceCountLastReading |> String.fromInt)
+        ++ " in space ("
+        ++ (context.memory.dronesInSpaceTicks |> String.fromInt)
+        ++ " readings), unanswered recall "
+        ++ (context.memory.droneRecallUnansweredTicks |> String.fromInt)
+        ++ "/"
+        ++ (droneRecallGiveUpTicks |> String.fromInt)
+        ++ (if droneRecallGiveUpTicks < context.memory.droneRecallUnansweredTicks then
+                " GIVEN UP -- the ship will leave without them"
+
+            else
+                ""
+           )
+        ++ "."
 
 
 lockTargetFromOverviewEntry : BotDecisionContext -> OverviewWindowEntry -> DecisionPathNode
@@ -1871,6 +2614,23 @@ initBotMemory =
     , shipApproachingTicks = 0
     , lootedWreckIds = []
     , gateWithinReachTicks = 0
+    , hitpoints = { shield = initHitpointsGaugeMemory, armor = initHitpointsGaugeMemory }
+    , hitpointsLowWaterMark = { shield = 100, armor = 100 }
+    , incomingDamage =
+        { samples = []
+
+        -- Assumed absent until a reading says otherwise, so a host that never
+        -- carries the channel is reported as unarmed rather than as a quiet
+        -- grid.
+        , hostCarriesTheChannel = False
+        , lastAttacker = Nothing
+        , retreating = False
+        }
+    , shipLoss = Nothing
+    , shipUIWithoutModuleButtonsReadings = 0
+    , droneRecallUnansweredTicks = 0
+    , dronesInSpaceCountLastReading = 0
+    , dronesInSpaceTicks = 0
     }
 
 
@@ -1918,6 +2678,44 @@ statusTextFromState context =
                 ++ (context.memory.lootedWreckIds |> List.length |> String.fromInt)
                 ++ ". "
                 ++ describeModulesToActivateAlways readingFromGameClient
+                ++ "\n"
+                ++ describeIncomingDamage context
+                ++ " "
+                ++ describeDroneRecall context
+                ++ (case context.memory.shipLoss of
+                        Nothing ->
+                            ""
+
+                        Just shipLoss ->
+                            " SHIP LOST: "
+                                ++ shipLoss.reason
+                                ++ " ("
+                                ++ String.fromInt shipLoss.readingsSince
+                                ++ " readings since, giving up at "
+                                ++ String.fromInt podRecoveryGiveUpReadings
+                                ++ ")."
+                   )
+                ++ (let
+                        withheld =
+                            context.memory.hitpoints.shield.readingsWithheld
+                                + context.memory.hitpoints.armor.readingsWithheld
+                    in
+                    if withheld < 1 then
+                        ""
+
+                    else
+                        -- Evidence that the gauge has started lying, and how
+                        -- often. A couple over a run is the gauge behaving as
+                        -- recorded; a count climbing every few readings is a
+                        -- different problem.
+                        " Readings withheld from the retreat this session: "
+                            ++ String.fromInt withheld
+                            ++ " (retreat is going by shield "
+                            ++ String.fromInt context.memory.hitpointsLowWaterMark.shield
+                            ++ "%, armor "
+                            ++ String.fromInt context.memory.hitpointsLowWaterMark.armor
+                            ++ "%)."
+                   )
                 ++ "\n"
                 ++ describeVisibleCombatMessages readingFromGameClient
 
@@ -2019,10 +2817,65 @@ overviewEntryIsActiveTarget =
         >> Set.member "myActiveTargetIndicator"
 
 
-shouldAttackOverviewEntry : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
-shouldAttackOverviewEntry overviewEntry =
-    iconSpriteHasColorOfRat overviewEntry
+{-| Whatever the client says is shooting this ship is a valid target.
+
+The rule used to be the overview's icon colour alone -- a sprite palette test,
+so it requires somebody to have predicted the object. Anything the palette does
+not cover is invisible **including while it is shooting the ship**, and the
+failure is silent in the worst available direction: "Rats in overview: 0" is
+what the bot prints either way.
+
+The second rule is the client's own statement of fact. EVE's combat log names
+every attacker (`49 from Centior Monster - Penetrates`), the host already
+aggregates that channel, and the names it carries are the same strings the
+overview shows -- 33 of the 37 distinct attackers across the recorded runs
+appear byte for byte as an overview entry's Name.
+
+**Matched exactly, never as a substring.** A wreck's Type is its owner's name
+with " Wreck" appended, so a substring rule would have the bot open fire on the
+corpse of the thing that stopped shooting it -- forever, since a wreck cannot
+die.
+
+**It widens the set; it does not reorder it.** An entry qualifying only because
+it shot us enters the same list at its own distance rank and is subject to every
+guard the colour rule's entries are -- which is why the on-grid test stays
+outside the disjunction rather than being one more alternative inside it. An AU
+distance does not parse as meters and nothing measured in AU is reachable in
+combat.
+
+-}
+shouldAttackOverviewEntry : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+shouldAttackOverviewEntry attackerNames overviewEntry =
+    (iconSpriteHasColorOfRat overviewEntry
+        || isObjectShootingAtUs attackerNames overviewEntry
+    )
         && overviewEntryDistanceIsOnGrid overviewEntry
+
+
+{-| Does the client's combat log name this overview row as having hit us?
+
+Case-insensitive and trimmed, because the two sources are different renderings
+of one name and nothing guarantees the client capitalises them alike. Both the
+Name and the Type column are accepted, which exactness makes safe; the recorded
+evidence is for the Name column specifically.
+
+An empty `attackerNames` matches nothing at all, which is the answer both a
+quiet grid and a host carrying no combat log arrive here as.
+
+-}
+isObjectShootingAtUs : List String -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+isObjectShootingAtUs attackerNames overviewEntry =
+    let
+        normalize =
+            String.trim >> String.toLower
+
+        labels =
+            [ overviewEntry.objectName, overviewEntry.objectType ]
+                |> List.filterMap identity
+                |> List.map normalize
+    in
+    attackerNames
+        |> List.any (\attackerName -> labels |> List.member (normalize attackerName))
 
 
 {-| Whether the entry's distance is one the bot can act on at all.
@@ -2058,12 +2911,12 @@ compute the same "target to unlock" identity from just a reading (no bot
 settings needed) -- used to track how long it's stayed in the same place,
 see routeFirstMarkerUnchangedTicks-style tracking on BotMemory below.
 -}
-overviewEntriesToAttackFromReadingFromGameClient : ReadingFromGameClient -> List EveOnline.ParseUserInterface.OverviewWindowEntry
-overviewEntriesToAttackFromReadingFromGameClient readingFromGameClient =
+overviewEntriesToAttackFromReadingFromGameClient : List String -> ReadingFromGameClient -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+overviewEntriesToAttackFromReadingFromGameClient attackerNames readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
-        |> List.filter shouldAttackOverviewEntry
+        |> List.filter (shouldAttackOverviewEntry attackerNames)
 
 
 {-| Whether the ship's own persistent cargo-hold "Inventory" window (open
@@ -2281,11 +3134,11 @@ reactivates it next tick, forever. Only enforcing "always active" while
 there is something to attack breaks that fight without needing to know
 which module is which.
 -}
-anyAttackableInOverview : ReadingFromGameClient -> Bool
-anyAttackableInOverview readingFromGameClient =
+anyAttackableInOverview : List String -> ReadingFromGameClient -> Bool
+anyAttackableInOverview attackerNames readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
-        |> List.any shouldAttackOverviewEntry
+        |> List.any (shouldAttackOverviewEntry attackerNames)
 
 
 shouldAttackOverviewEntryFirst : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
@@ -2935,8 +3788,7 @@ ensureDronesRecalledBeforeWarping :
     -> DecisionPathNode
     -> DecisionPathNode
 ensureDronesRecalledBeforeWarping context ifReadyToWarp =
-    returnDronesToBay context
-        |> Maybe.withDefault ifReadyToWarp
+    returnDronesToBay context ifReadyToWarp
 
 
 deactivatePropulsionModuleBeforeWarping :
@@ -3073,11 +3925,41 @@ iconSpriteHasColorOfRat =
         >> Maybe.withDefault False
 
 
-updateMemoryForNewReadingFromGame : UpdateMemoryContext -> BotMemory -> BotMemory
+updateMemoryForNewReadingFromGame : UpdateMemoryContext BotSettings -> BotMemory -> BotMemory
 updateMemoryForNewReadingFromGame context botMemoryBefore =
     let
         currentContextMenuDepth =
             context.readingFromGameClient.contextMenus |> List.length
+
+        -- Every verdict this bot draws from a reading has to be written here:
+        -- this is the only place that can write memory, and a reading's game
+        -- log entries are gone by the next one. A branch that recognised
+        -- something where it acts on it would see it once and then behave
+        -- exactly as it did before.
+        hitpointsReading gauge =
+            context.readingFromGameClient.shipUI
+                |> Maybe.map (.hitpointsPercent >> gauge)
+                |> Maybe.andThen plausibleHitpointsPercent
+
+        hitpoints =
+            { shield =
+                updateHitpointsGaugeMemory
+                    context.botSettings.runAwayShieldHitpointsThresholdPercent
+                    (hitpointsReading .shield)
+                    botMemoryBefore.hitpoints.shield
+            , armor =
+                updateHitpointsGaugeMemory
+                    context.botSettings.runAwayArmorHitpointsThresholdPercent
+                    (hitpointsReading .armor)
+                    botMemoryBefore.hitpoints.armor
+            }
+
+        dronesInSpaceCountNow =
+            context.readingFromGameClient.dronesWindow
+                |> Maybe.andThen .droneGroupInSpace
+                |> Maybe.andThen (.header >> .quantityFromTitle)
+                |> Maybe.map .current
+                |> Maybe.withDefault 0
 
         currentRouteFirstMarkerRegion =
             context.readingFromGameClient
@@ -3270,6 +4152,65 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , hitpoints = hitpoints
+    , hitpointsLowWaterMark =
+        { shield =
+            lowWaterMark context.readingFromGameClient
+                hitpoints.shield.believed
+                botMemoryBefore.hitpointsLowWaterMark.shield
+        , armor =
+            lowWaterMark context.readingFromGameClient
+                hitpoints.armor.believed
+                botMemoryBefore.hitpointsLowWaterMark.armor
+        }
+    , incomingDamage =
+        updateIncomingDamageMemory context hitpoints botMemoryBefore.incomingDamage
+    , shipLoss =
+        shipLossVerdictAfter context.readingFromGameClient
+            { withoutModulesReadings =
+                shipUIWithoutModuleButtonsReadingsAfter context.readingFromGameClient
+                    botMemoryBefore.shipUIWithoutModuleButtonsReadings
+            , verdictBefore = botMemoryBefore.shipLoss
+            }
+    , shipUIWithoutModuleButtonsReadings =
+        shipUIWithoutModuleButtonsReadingsAfter context.readingFromGameClient
+            botMemoryBefore.shipUIWithoutModuleButtonsReadings
+    , droneRecallUnansweredTicks =
+        -- Readings since the bot *asked* and the client did not answer -- never
+        -- readings since the drones were launched. That was issue #11: drones
+        -- are deliberately left out for a whole fight, so a counter started at
+        -- the launch reaches any threshold during an ordinary engagement,
+        -- after which the recall declines for the rest of the session and
+        -- every warp abandons whatever is in space.
+        if dronesInSpaceCountNow < 1 then
+            0
+            -- A partial recall is the client answering, so it resets the
+            -- patience rather than counting against it.
+
+        else if dronesInSpaceCountNow < botMemoryBefore.dronesInSpaceCountLastReading then
+            0
+            -- Past the give-up, hold rather than reset. Giving up is what stops
+            -- the asking, so a reset would unwind it and the ship would
+            -- alternate forever between abandoning its drones and recalling
+            -- them.
+
+        else if droneRecallGiveUpTicks < botMemoryBefore.droneRecallUnansweredTicks then
+            botMemoryBefore.droneRecallUnansweredTicks
+
+        else if recentStepAskedForDroneRecall context.previousStepsEffects then
+            botMemoryBefore.droneRecallUnansweredTicks + 1
+
+        else
+            botMemoryBefore.droneRecallUnansweredTicks
+    , dronesInSpaceCountLastReading = dronesInSpaceCountNow
+    , dronesInSpaceTicks =
+        -- How long the drones have been out, which is what the focus-recovery
+        -- click is timed against. Deliberately *not* what the give-up counts.
+        if dronesInSpaceCountNow < 1 then
+            0
+
+        else
+            botMemoryBefore.dronesInSpaceTicks + 1
     }
 
 
@@ -3369,7 +4310,7 @@ manageMiddleRowModules : BotDecisionContext -> SeeUndockingComplete -> Maybe Dec
 manageMiddleRowModules context seeUndockingComplete =
     let
         somethingToFight =
-            anyAttackableInOverview context.readingFromGameClient
+            anyAttackableInOverview (namesOfRecentAttackers context.memory.incomingDamage) context.readingFromGameClient
 
         inactiveTankModule =
             if somethingToFight then

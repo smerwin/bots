@@ -239,9 +239,12 @@ and without a word.
 
 **`ParseUserInterface.elm` is vendored six times, and the policy is all six,
 identically.** Nothing in this parser is app-specific, and a change that lands
-in one copy while the others silently lack it is its own bug. The one deliberate
-divergence in this repo — `BotFrameworkSeparatingMemory.elm`'s
-`previousStepsEffects`, mission-runner only — is documented as such below. The
+in one copy while the others silently lack it is its own bug.
+`BotFrameworkSeparatingMemory.elm`'s `previousStepsEffects` was the one
+deliberate divergence, mission-runner only; it is no longer one, because it was
+never app-specific — saxrat's drone recall is exactly the shape that needs it
+(see below), so the port closed the divergence rather than widening it, and
+`test_saxrat_ported_guards.py` compares the two copies byte for byte. The
 consistency is *checked* rather than remembered: `test_game_log_channel.py`
 compares the block byte for byte across the six copies and pins the type-name
 string the host and the parser have to agree on across languages.
@@ -2893,10 +2896,11 @@ Two consequences worth knowing. The give-up **latches** once reached, because
 giving up is what stops the asking — without the latch the counter resets two
 readings later and the ship alternates forever between abandoning its drones and
 recalling them. And measuring "how long ago did the bot *ask*" needs the
-previous steps' effects, which `UpdateMemoryContext` did not carry; the mission
-runner's copy of `BotFrameworkSeparatingMemory.elm` now passes
-`previousStepsEffects` through, so that file diverges from the other apps'
-copies.
+previous steps' effects, which `UpdateMemoryContext` did not carry;
+`BotFrameworkSeparatingMemory.elm` now passes `previousStepsEffects` through.
+That was a mission-runner-only divergence until saxrat was given the same bound
+— see "What saxrat has of this, and what it does not" — and the two copies are
+now identical and checked to be.
 
 ### #11 held, and the seventeen lost drones were three different things
 
@@ -2971,6 +2975,47 @@ window records this ship's guns hitting a rat, which a docked ship cannot do. Th
 other route is an acceleration gate, which changes pocket without a warp. The
 observation covers the consequences of both, since it watches arrivals rather
 than departures; what it does not do is stop either.
+
+## What saxrat has of this, and what it does not
+
+Almost everything above is about *the client and the ship* rather than about
+missions, agents and stations, and all of that applies to `eve-online-saxrat`
+unchanged. Until this port it had almost none of it, and the gaps were the
+shipped configuration rather than edge cases:
+
+| guard | saxrat before | now |
+|---|---|---|
+| the HUD gauges | compared **live** against the threshold, no confirmation, no low-water mark | `believed` values behind a low-water mark, as above |
+| both hitpoint thresholds | default `-1` — so **no retreat guard at all** | unchanged defaults, and a third guard that is armed |
+| damage-rate retreat (#32) | absent | ported, `run-away-incoming-damage-threshold`, default 3500 |
+| ship loss (#33) | absent — a destroyed ship meant ratting in a capsule, which reads 100/100 | ported, above the docked-or-in-space split, bounded at 150 readings |
+| drone recall (#11) | **no bound of any kind**, in front of every warp, tether and dock | `droneRecallUnansweredTicks`, give-up, focus-recovery click |
+| what it will shoot (#40) | the overview's icon colour and nothing else | plus whatever the combat log names as hitting the ship |
+
+Two things about the port are worth keeping in view.
+
+**The drone recall was the worst of them, and not for the reason #11 was.** The
+mission runner's bug was a counter measuring the wrong thing; saxrat had no
+counter, so Shift+R went out on every reading for as long as the drones stayed
+in space — and because every caller took the recall *instead of* its own next
+step, a recall the client never answered meant the ship never docked and never
+tethered either. That is why `returnDronesToBay` takes the caller's next step
+here too: the shape is what makes the give-up expressible at all.
+
+**One rule is deliberately not identical, and it is the first reading.**
+`updateHitpointsGaugeMemory` believes a reading that has no previous reading to
+confirm against — the session's first, or the one after a gap — where the
+mission runner's `Maybe.map2 max` answers `Nothing` and withholds it. Both are
+pinned by their own suites (`test_hitpoint_reading_confirmation.py` asserts
+`(memoryAfter 70 [ Just 0 ]).believed == Nothing`;
+`test_saxrat_ported_guards.py` asserts a lone `Just 75` is believed), so this is
+a divergence with two specs behind it rather than a drift. What it costs is
+narrow but real: a reading following one that `plausibleHitpointsPercent`
+rejected is acted on unconfirmed. What the mission runner's version costs
+instead is that a gauge readable only every other reading is never believed at
+all. **Neither has been run against a live client**, and the recorded
+corruptions are all *plausible* values, which both versions treat identically —
+so nothing in the corpus separates them.
 
 ## The home station: restocking where the drones actually are
 
@@ -3429,6 +3474,20 @@ exists.
   as its own. Three readings of the ask followed by `Search for '<tail>'` is the
   fallback firing, which means the host did not set the route and its own log
   says why.
+- **`eve-online-saxrat`** now carries the general guards the mission runner
+  learned — the confirmed hitpoint readings behind a low-water mark, the
+  damage-rate retreat, ship-loss detection and pod recovery, a bounded drone
+  recall, and shooting back at whatever the client's combat log names. See
+  "What saxrat has of this, and what it does not" for the table, for the
+  recall's own failure (which was worse than #11's), and for the one rule that
+  is deliberately not identical. **None of it has been run against a live
+  client**: 36 cases execute the ported rules through the real `Bot.elm` in
+  `elm repl` and the app compiles, which is the same standing as every other
+  entry here that says "untested against a live client". The first run to watch
+  it on should show `dmg N/3500 (45s, Nrd)` and `Drones: ... unanswered recall
+  N/60` on every status line — a `NO COMBAT LOG` there instead means the
+  damage retreat is unarmed and the two gauge thresholds, which ship at `-1`,
+  are again the only guards.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
