@@ -957,7 +957,9 @@ missionBotDecisionRootBeforeApplyingSettings context =
         -- only because the pod still needs the location info panel expanded and
         -- stray menus cleared to travel at all.
         [ generalSetupInUserInterface
-            { confirmQuitMission = quitMissionConfirmationIsExpected context }
+            { confirmQuitMission = quitMissionConfirmationIsExpected context
+            , confirmDeclineMission = declineMissionConfirmationIsExpected context
+            }
             context.readingFromGameClient
         , recoverPodAfterShipLoss context
         , windDownBeforeSessionEnd context
@@ -4897,6 +4899,83 @@ quitMissionConfirmationIsExpected context =
         && previousStepClickedMouse context
 
 
+{-| Whether the dialog now on screen is the "Decline Mission?" this bot asked for.
+
+The second state in which the standing rule is wrong, and it is the same shape
+as the first: a verdict, a conversation, and a click into it on the previous
+step.
+
+  - the agent is _offering_ a mission `shouldDeclineMission` says to refuse, so
+    the intent is the bot's own settings rather than an inference about the
+    dialog;
+  - an agent conversation is open, which no travel or station step produces;
+  - the previous step clicked inside it.
+
+**Declining did not need this until run 25**, and that is why it shipped
+unreachable for twenty-five runs. EVE only raises the confirmation inside the
+standing-penalty window; run 20 clicked `Decline` six times and got no dialog at
+all, so the feature looked like it worked. Run 25 clicked it 105 times against
+226 dismissals: `closeMessageBoxByDeclining` answered `No`, which _cancels the
+decline_, so the offer came back and the bot declined it again. A blanket "always
+say no" defeats the one branch whose whole purpose is to say yes.
+
+The standing cost is not a new decision. `skipOfferedMissionButton` already
+prefers `Decline` over `Delay` in so many words -- "declining repeatedly inside
+four hours costs standing with the agent, which is the price of actually moving
+on; delaying costs the whole session" -- so confirming is what that comment
+already committed to, and a `No` was never the cheaper answer. It was the answer
+that bought nothing at all.
+
+Not a test of the dialog's own text, for `quitMissionConfirmationIsExpected`'s
+reason: the wording is the client's language, and the button is
+`quitMissionConfirmationButton`'s job.
+
+**The click is looked for over a window, not on the previous step**, and the
+first version of this got that wrong. `previousStepClickedMouse` was copied
+straight from #60 on the assumption that the dialog lands on the reading after
+the click, and it does not: run 26 ran this branch live and it never once fired,
+because the steps between the click and the dialog dispatch nothing, so the
+strict predicate was already false by the time there was a dialog to answer.
+
+The window is measured rather than guessed. Across runs 25 and 26 the gap from
+the dispatch that clicks Decline to the reading carrying the confirmation is
+**six steps in 158 of 158 instances**, with no other value -- so
+`declineConfirmationClickLookbackSteps` is eight, which covers every recorded
+case with two steps to spare and stays under the ten the framework keeps.
+
+-}
+declineMissionConfirmationIsExpected : BotDecisionContext -> Bool
+declineMissionConfirmationIsExpected context =
+    case context.readingFromGameClient.agentConversationWindows |> List.head of
+        Nothing ->
+            False
+
+        Just conversation ->
+            shouldDeclineMission context conversation.offeredMissionName
+                && recentStepsEffectsPressedMouse
+                    declineConfirmationClickLookbackSteps
+                    context.previousStepsEffects
+
+
+{-| How far back to look for the click that asked for a "Decline Mission?".
+
+Measured: six steps from the dispatch to the dialog, in every one of the 158
+instances across runs 25 and 26, and never any other value. Eight leaves two
+steps of headroom.
+
+It cannot usefully be larger than the ten steps `lastStepsEffects` keeps, and it
+should not be: the window is the only thing separating "the dialog I asked for"
+from "a dialog that happened to appear while an agent was offering a mission I
+decline", and every step added widens that. Eight is a fact about how fast this
+client raises this dialog, not a margin to be relaxed when something else fails
+to fire.
+
+-}
+declineConfirmationClickLookbackSteps : Int
+declineConfirmationClickLookbackSteps =
+    8
+
+
 
 -- Docked
 
@@ -5037,9 +5116,25 @@ previousStepClickedMouse context =
 decision context, can ask the same question.
 -}
 previousStepsEffectsPressedMouse : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
-previousStepsEffectsPressedMouse previousStepsEffects =
+previousStepsEffectsPressedMouse =
+    recentStepsEffectsPressedMouse 1
+
+
+{-| The same question over a window of steps rather than only the last one.
+
+One definition of "pressed the mouse", asked over a lookback, so a caller that
+has to survive the client taking a few steps to answer cannot drift from the
+strict one. `recentStepAskedForDroneRecall` is the same shape for a keypress.
+
+The framework keeps ten steps of effects (`lastStepsEffects`), so a lookback
+larger than that silently becomes ten -- which is why the callers' constants are
+checked against it rather than left to be discovered.
+
+-}
+recentStepsEffectsPressedMouse : Int -> List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+recentStepsEffectsPressedMouse lookbackSteps previousStepsEffects =
     previousStepsEffects
-        |> List.take 1
+        |> List.take lookbackSteps
         |> List.any
             (List.any
                 (\effect ->
@@ -5748,16 +5843,26 @@ labelReportsRouteAlreadySet label =
 {-| The three things that have to be dealt with before any decision can be made
 about the game itself.
 
-`confirmQuitMission` is passed down to `closeMessageBox` rather than read there,
-because whether a confirmation dialog is one the bot asked for is a fact about
-the bot's own intent and not about the reading -- see
-`quitMissionConfirmationIsExpected`. Everything else here is answerable from the
-reading alone and stays that way.
+`confirmQuitMission` and `confirmDeclineMission` are passed down to
+`closeMessageBox` rather than read there, because whether a confirmation dialog
+is one the bot asked for is a fact about the bot's own intent and not about the
+reading -- see `quitMissionConfirmationIsExpected` and
+`declineMissionConfirmationIsExpected`. Everything else here is answerable from
+the reading alone and stays that way.
 
 -}
-generalSetupInUserInterface : { confirmQuitMission : Bool } -> ReadingFromGameClient -> Maybe DecisionPathNode
-generalSetupInUserInterface { confirmQuitMission } readingFromGameClient =
-    [ closeSystemSettingsMenu, closeMessageBox { confirmQuitMission = confirmQuitMission }, ensureInfoPanelLocationInfoIsExpanded ]
+generalSetupInUserInterface :
+    { confirmQuitMission : Bool, confirmDeclineMission : Bool }
+    -> ReadingFromGameClient
+    -> Maybe DecisionPathNode
+generalSetupInUserInterface { confirmQuitMission, confirmDeclineMission } readingFromGameClient =
+    [ closeSystemSettingsMenu
+    , closeMessageBox
+        { confirmQuitMission = confirmQuitMission
+        , confirmDeclineMission = confirmDeclineMission
+        }
+    , ensureInfoPanelLocationInfoIsExpanded
+    ]
         |> List.filterMap
             (\maybeSetupDecisionFromGameReading ->
                 maybeSetupDecisionFromGameReading readingFromGameClient
@@ -5829,26 +5934,40 @@ closeSystemSettingsMenu readingFromGameClient =
             )
 
 
-closeMessageBox : { confirmQuitMission : Bool } -> ReadingFromGameClient -> Maybe DecisionPathNode
-closeMessageBox { confirmQuitMission } readingFromGameClient =
+closeMessageBox :
+    { confirmQuitMission : Bool, confirmDeclineMission : Bool }
+    -> ReadingFromGameClient
+    -> Maybe DecisionPathNode
+closeMessageBox { confirmQuitMission, confirmDeclineMission } readingFromGameClient =
     readingFromGameClient.messageBoxes
         |> List.head
         |> Maybe.map
             (\messageBox ->
                 case
+                    -- The only two dialogs this bot ever answers in the
+                    -- affirmative, and each says which it is, because a log
+                    -- showing only "dismiss it" would hide every click in this
+                    -- whole file that costs standing.
                     if confirmQuitMission then
                         quitMissionConfirmationButton messageBox
+                            |> Maybe.map
+                                (Tuple.pair
+                                    "This is the 'Quit Mission' confirmation I just asked for -- confirm it."
+                                )
+
+                    else if confirmDeclineMission then
+                        quitMissionConfirmationButton messageBox
+                            |> Maybe.map
+                                (Tuple.pair
+                                    "This is the 'Decline Mission?' confirmation for the Decline I just clicked -- confirm it. Saying no here cancels the decline and the agent offers the same mission again."
+                                )
 
                     else
                         Nothing
                 of
-                    Just confirmButton ->
-                        -- The one dialog this bot ever answers in the
-                        -- affirmative, and it says so, because a log that shows
-                        -- only "dismiss it" would hide the single click in this
-                        -- whole file that costs standing.
+                    Just ( reason, confirmButton ) ->
                         describeBranch
-                            "This is the 'Quit Mission' confirmation I just asked for -- confirm it."
+                            reason
                             (decideActionForCurrentStep
                                 (mouseClickOnUIElement MouseButtonLeft confirmButton
                                     |> Result.withDefault []
