@@ -33,7 +33,9 @@ with no Elm -- and that skip carries `NO_TOOLCHAIN_SKIP_REASON`, which
 **The probe cannot drift with the code under test.** Each of the eleven copies
 probed a real function's current behaviour -- `missionNameForDeclining "x"`
 answering `"x" : String`, `missionTravelStepIsDock "Dock"` answering `True` --
-so changing that function disabled the whole file quietly. The probe here is a
+so changing that function disabled the whole file quietly. (#92 has since
+renamed that second one out of existence, which is the same hazard arriving on
+schedule.) The probe here is a
 declaration this module appends to the *scratch* copy of `Bot.elm` and asks for
 by name. Nothing in the checked-in source can change its answer, and it still
 proves what it has to prove: it lives in `Bot.elm`, so a `Bot.elm` that does not

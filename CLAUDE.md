@@ -1078,7 +1078,7 @@ oscillation: the row shift that produced run 27's asteroid can produce it again,
 and the verdict then costs one reading each time instead of 290, which is a fix
 rather than a cure.
 
-## When the tracker says Dock, the fight is over
+## When the objective is done and the tracker offers a trip, the fight is over
 
 The mission runner's on-grid priority is the fight, then the looting, and only
 then travel — `decideActionInMissionPocket` wraps the whole travel branch in
@@ -1092,60 +1092,89 @@ instruction (next step: Dock)` on **77 consecutive in-space readings**; 386 of
 the 453 decision blocks inside them went to locking and shooting; and the first
 in-space click on that Dock button came **603 seconds** — just over ten minutes
 — after the label appeared, on the first reading where the overview finally read
-`Rats in overview: 0`. The objective was carrying no instruction the whole time:
-nothing left to destroy, retrieve or approach, and the only thing the tracker
-wanted was the trip back.
+`Rats in overview: 0`.
 
-**`dockOutranksTheFight` is the whole exception**, and it is placed rather than
-conditioned: it wraps the combat call inside `decideActionInMissionPocket`, so
-the fight becomes the fallback exactly where travel used to be. It fires only
-when the tracker's travel button reads `Dock` **and** the objective's
-`instructionTexts` is empty or blank.
+**#49 fixed that for the label `Dock` and for no other, which turned out to be
+the rarest case there is.** Counted across every recorded run on the readings
+that cost something — in space, objective complete, rats on the overview:
 
-**Both halves are load-bearing, and the recordings say so.** Of the 1,738 `Dock`
-readings across the eleven recorded runs, 326 carry a live courier instruction
-(`Bring <a …>The Damsel</a> to …`) — a mission still asking for something — so
-the label alone would have disengaged on an unfinished objective.
+| travel step | readings | avg rats |
+|---|---:|---:|
+| `Set Destination` | **1,443** | 7.0 |
+| `Destination Set` | **812** | 3.0 |
+| `Start Conversation` | 71 | 1.7 |
+| `Dock` | 35 | 1.8 |
+| `Preparing` | 15 | 2.0 |
+| `Warping` | 3 | 2.0 |
 
-**The label is matched whole, never as a substring, because "Undock" contains
-"dock".** That is the label the tracker shows at the start of every mission, so
-a substring rule would read the ship's own departure as "the objective is
-complete" and try to leave from inside the station. The recordings carry ten
-distinct *text* travel labels — `Warp to Location`, `Destination Set`,
-`Warping`, `Dock`, `Set Destination`, `Preparing`, `Start Conversation`,
-`Undock`, `Abort Undock`, `Read Details` — and exactly one of them ends a
-mission.
+So the label #49 handled is 35 readings and the ones it did not are 2,344, on
+grids carrying up to four times the rats — at two to three seconds a reading,
+about an hour of the corpus spent shooting bounties on a finished mission.
 
-**The client can render a travel step as a glyph with no text at all, so any
-matcher on this field must fail closed.** Run 11 produced an eleventh "label"
-three times:
+**`travelOutranksTheFight` is the whole exception**, and it is placed rather
+than conditioned: it wraps the combat call inside `decideActionInMissionPocket`,
+so the fight becomes the fallback exactly where travel used to be. It fires when
+the objective's `instructionTexts` is empty or blank **and** the tracker is
+offering a travel step at all — whichever step it is.
+
+**The label is no longer part of the condition, and the measurement is why.**
+The words that mean the mission is still running do not appear beside a finished
+objective on a grid with a fight on it. `Warp to Location` is the one that would
+matter, since taking it would leave a pocket that has not been cleared: 10,032
+readings beside a live objective, **three** beside a finished one — a flicker
+between two `Dock` readings as a mission ended — and **none at all** with a rat
+on the overview. `Read Details`, `Docking`, `Undocking` and `Jump` never meet a
+finished objective; `Undock` and `Abort Undock` do, but only on readings with no
+ship UI, which is in station, where this branch is never reached. The objective
+half is what excludes them, and a list of permitted words would repeat #49's own
+mistake — it handles what has been measured and leaves whatever the client
+writes next. The vocabulary has already grown twice without anyone deciding to:
+#62's objective-chain panel added four labels, and run 22 added one that is not
+text.
+
+**`Preparing` and `Warping` are covered too, and that is the one judgement the
+data settles rather than decides.** They read like states rather than commands —
+if the ship is already warping, disengaging is moot rather than wrong — and the
+recordings say the distinction is unobservable from here: on every costly
+reading carrying one, the ship was in warp (15 of 15, and 3 of 3), where
+`decideActionWhenInSpace` answers `I am in warp` long before this branch is
+consulted. Covering them changes no recorded reading; excluding them would be a
+list to maintain for nothing.
+
+**Widening the rule flips the failure direction, so the direction is now
+chosen.** #49's equality test against `Dock` declined a label with no text *by
+accident* — run 11 rendered a travel step three times as
 
 ```
 U+0002 U+0000 U+AD1D8 U+0001 U+0001 U+0000 U+0001
 ```
 
-— six C0 control characters around one codepoint that is **unassigned**
-(category `Cn`, plane 10), *not* private-use. That distinction is the trap: a
-rule that recognised "not text" by private-use membership would classify this as
-text. It arrived on `Recon (3 of 3) -- You need to warp to the mission location`
-and the bot pressed the button carrying it, which is the ordinary travel
-behaviour and not something the Dock change touches.
+six C0 control characters around one codepoint that is **unassigned** (category
+`Cn`, plane 10), *not* private-use. That distinction is still the trap: a rule
+recognising "not text" by private-use membership would classify this as text. A
+rule of the form "any travel step is offered" **matches** it, and would
+disengage on a button the client failed to draw.
 
-Both halves of the condition decline it independently, checked by running them
-rather than by reading them: `missionTravelStepIsDock` answers `False` for that
-string, and `missionHasNoOutstandingInstruction` answers `False` for the
-objective beside it. An exact comparison is what makes that automatic — a
-substring or "starts with" rule on a field that can hold arbitrary bytes has no
-such guarantee.
+`travelLabelIsReadableText` refuses that, and the choice is fail-**closed**: an
+unreadable label is not a step, and the bot keeps fighting, which is exactly
+what it does today. The test is printable ASCII with at least one letter in it —
+every label the client has ever written here is ASCII, and the alternative
+(accepting anything) is the only way this change could make the bot leave a
+pocket it should not.
 
-It also has a lesson for the *tests*. Asserting "the set of travel labels is
-exactly these ten" fails the moment the client emits one of these, on a machine
-whose logs happen to contain it — which is what happened, on a run still being
-written. The assertion is over the **printable** labels, with the non-text case
-tested separately as the property that actually matters.
+**The corpus contains the case that makes this load-bearing rather than
+theoretical.** Run 22 rendered a travel step as `U+0000 U+0000 . 5 0 <space> A U
+U+0000` — a distance readout wrapped in NULs — on `Avenge a Fallen Comrade --
+**no instruction**`. Run 11's glyph sat beside an objective still asking for
+something, so both halves declined it and fail-closed was free. This one sits on
+a finished objective, so the label rule is the only thing declining it.
 
-**What still keeps the guns firing after `Dock` appears**, since the point of
-the branch is to stop:
+The stated cost of that rule: a client rendering this button in a non-Latin
+script switches the branch off entirely and the bot behaves as it did before the
+change. That is the safe direction, and it is the same assumption about the
+client's language the rest of this file already makes.
+
+**What still keeps the guns firing**, since the point of the branch is to stop:
 
 - **Anything warp disrupting the ship.** Docking is a warp, so a scrambler makes
   leaving impossible and killing it is the only thing that restores the option —
@@ -1153,68 +1182,89 @@ the branch is to stop:
   combat candidates. The branch hands the fight back **and says so every reading
   it declines**, for `returnDronesToBay`'s reason. This is the one case where
   being shot outranks leaving.
-- **Any other travel label**, and **an objective still carrying an
-  instruction** — both keep the old order untouched.
+- **An objective still carrying an instruction**, whatever the button offers.
+- **A tracker with nothing to travel to.** The step has to be one the bot can
+  actually take — a button `missionTravelStep` would click, or a route the panel
+  confirms exists — so a reading where the tracker says the route is set and no
+  route is there keeps the old order instead of disengaging into the bottom of
+  the travel branch, where the stall counter and #54's abandonment live.
 - **A lost ship and the two retreats.** `recoverPodAfterShipLoss` still
   short-circuits the docked-or-in-space split above all of this, and
   `runAwayIfLowHealth` still runs before `decideActionWhenInSpace` is called at
   all, so #32's damage-rate retreat outranks this branch. That is the right way
   round: the retreat is the controller for "leave now, this is going badly" and
   this one is for "the job is done, go home". There is no second one — this
-  branch presses the tracker's own button and owns no clock, no counter and no
+  branch takes the tracker's own step and owns no clock, no counter and no
   memory.
 
 **Being shot, otherwise, does not keep the guns on**, and that is a decision.
-#40's rule stands while there is a fight to be in; once the tracker says Dock the
-answer to being shot is to leave. The recordings say the trade is cheap: over
-those 77 readings the client's combat log reported any incoming damage at all on
+#40's rule stands while there is a fight to be in; once the objective is done the
+answer to being shot is to leave. The recordings say the trade is cheap: over run
+11's 77 readings the client's combat log reported any incoming damage at all on
 **4** of them, at most **7 hitpoints** in a 45-second window against a threshold
 of 3,500. Were the damage real, the retreat above would have taken the reading
 before this branch saw it.
 
-**Drones leave through the recall that already exists.** The click is handed to
-`ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping`, exactly as the
-travel branch it hoists always did, so #7's lost drones and the give-up that
-followed apply unchanged and are not duplicated.
+**Nothing new is done to leave, and that is structural rather than careful.**
+The step handed back is `travelTheStepTheTrackerOffers`, the *same value* the
+fight itself falls through to. So the click still goes through
+`ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping` and
+`clickMissionTravelButton`'s settling window, and an acceleration gate on the
+grid still outranks flying a route — which is what keeps a multi-pocket mission
+from being stranded short of its next gate. The branch changes *when* that step
+is taken, never what it is. That also covers `Destination Set`, the second of
+the two labels #49 missed: it is not a click at all (`labelReportsRouteAlreadySet`
+filters it out of `missionTravelStep`), and the trip it names is travelling the
+route the tracker already set, which the same branch does.
 
 **It clears itself, so it needs no bound.** Every condition is re-derived from
-the live reading: the moment the button stops reading `Dock` — the ship docked,
-the mission moved on, the tracker collapsed and took the button out of the tree —
-the fight is the bot's job again on that same reading. Nothing latches.
+the live reading: the moment the tracker stops offering a step — the ship
+docked, the mission moved on, the tracker collapsed and took the button out of
+the tree — the fight is the bot's job again on that same reading. Nothing
+latches.
 
-Two decision-log lines carry it, and an operator should be able to see which:
+Two decision-log lines carry it, and the wording is #49's so an operator's
+existing grep still works:
 
 ```
-+ The objective is complete and the mission tracker says 'Dock' -- stop fighting and leave the rest of the field alone.
++ The objective is complete and the mission tracker says 'Set Destination' -- stop fighting and leave the rest of the field alone.
 + The mission tracker says 'Dock' and the objective asks for nothing more, but 'X' is warp disrupting this ship -- nothing leaves until that is dead, so keep fighting.
 ```
 
 **Verified without a live client**, in
-`tools/macos-host/tests/test_dock_outranks_the_fight.py`: the two pure rules are
-run through the real `Bot.elm` in `elm repl` rather than mirrored in Python (copy
-the app to scratch, open `module Bot exposing (..)`, patch `elm-version`, drive
-it — twelve seconds), against every travel label and objective string the
-recordings contain, including the non-text one, which is rebuilt inside Elm with
-`Char.fromCode` since a NUL cannot go in a string literal; the *text*
-travel-label vocabulary is re-checked against `~/eve-bot-logs` so a client that
-starts writing a different readable label fails loudly; and the ordering, the
-scrambler decline, the drone recall and the absence of a counter are read out of
-the source. Reading a log a run is still appending to is safe — lines are taken
-one at a time and a trailing partial line is skipped.
+`tools/macos-host/tests/test_travel_outranks_the_fight.py` (33 cases): the two
+pure rules are run through the real `Bot.elm` in `elm repl` rather than mirrored
+in Python — every text label the recordings carry reads as a step, both non-text
+ones are declined, and the objective rule is asked about the strings each sat
+beside; the bot's label rule is cross-checked against this file's own
+`Cc/Cf/Cs/Co/Cn` classifier over every label in the corpus, so a client that
+starts writing something new has to be wrong about it in both places to pass;
+the counts above are recounted from `~/eve-bot-logs` as *relations* (these
+labels dwarf `Dock`, the grids are the busy ones, `Warp to Location` never costs
+anything, the transient labels are only ever reached in warp) rather than as
+numbers, since a corpus that grows must not turn a true claim red; and the
+ordering, the scrambler decline, the shared step and the absence of a counter
+are read out of the source through a whitespace-collapsing reader.
 
-Confirmed by mutation, on the code and on the tests' own premises: a substring
-label match, re-wrapping the dock step in combat, dropping the scrambler
-decline, skipping the drone recall and ignoring the objective's instruction each
-fail it — and so do removing a known label from the list (so the drift check is
-live) and making every category count as text (so the glyph is covered by
-classification rather than by luck).
+Confirmed by mutation, eleven of them, each failing a named case: accepting any
+label as text (the fail-open version of this change), classifying by private-use
+membership, dropping the readable-text clause or conjoining it into never
+firing, the same two against the objective clause, disengaging on a route the
+panel does not confirm, dropping the scrambler decline, re-wrapping travel
+inside combat, giving the branch a travel path of its own — and, on the tests'
+own premises, removing a known label from the vocabulary and making every
+Unicode category count as text.
 
-**Not verified: any of this running.** What to watch on the first live run is the
-first line above arriving within a reading or two of `(next step: Dock)` showing
-up, followed by the drone recall and a dock — rather than another ten minutes of
-`I see a locked target`. The looting question is deliberately still open: a wreck
-holding the mission item is not optional the way ordinary salvage is, and this
-change does not answer it.
+**Not verified: any of this running.** No bot was started for it. What to watch
+on the first live run is `The objective is complete and the mission tracker
+says 'Set Destination'` arriving within a reading or two of the label, followed
+by the drone recall and the route being set — rather than another stretch of
+`I see a locked target`. The two things that would show the widening wrong are a
+disengagement on a grid that still has an objective (which would mean the
+tracker's own "no instruction" is not what it says) and a disengagement between
+pockets, which the gate-before-route ordering above is what prevents. The
+looting question is deliberately still open: a wreck holding the mission item is
+not optional the way ordinary salvage is, and this change does not answer it.
 
 ## A mission that cannot be progressed is given back, not asked about forever
 
@@ -3290,14 +3340,17 @@ exists.
   recordings show the *middle* row empty on every capsule reading, and every row
   being empty is the stronger form of that, inferred rather than observed.
 
-  And it now **stops fighting once the tracker says `Dock`** with the objective
-  carrying no instruction, instead of clearing the field first — run 11 spent ten
-  minutes and 386 combat decisions doing that after the mission was over. The
-  conditions that still keep it fighting, and why leaving beats shooting back,
-  are in "When the tracker says Dock, the fight is over" above. **Untested
-  against a live client**; the two pure rules behind it are run through the real
-  `Bot.elm` in `elm repl`. Watch for `The objective is complete and the mission
-  tracker says 'Dock'` arriving within a reading or two of the label, rather than
+  And it now **stops fighting once the objective carries no instruction and the
+  tracker offers any travel step**, instead of clearing the field first — run 11
+  spent ten minutes and 386 combat decisions doing that after the mission was
+  over, and #49's fix, which acted on the label `Dock` alone, covered 35 of the
+  2,379 readings that cost anything. Which labels that covers, why the word is
+  no longer part of the condition, and why an unreadable label now fails closed
+  on purpose rather than by accident are in "When the objective is done and the
+  tracker offers a trip, the fight is over" above. **Untested against a live
+  client**; the two pure rules behind it are run through the real `Bot.elm` in
+  `elm repl`. Watch for `The objective is complete and the mission tracker says
+  'Set Destination'` arriving within a reading or two of the label, rather than
   another stretch of `I see a locked target`.
 
   And it now **gives back a mission it cannot progress** instead of asking for
@@ -3649,12 +3702,15 @@ load-bearing — see "The home station".
   ship died, with 9,286 hitpoints of incoming fire landing between the old run's
   last log line and the new run's first reading. Nothing inside the bot can see
   that window. Dock or clear the grid before cycling.
-- **Looting has not been asked the question `Dock` was asked.** Once the tracker
-  says `Dock`, combat stops (see "When the tracker says Dock, the fight is
-  over"), but the looting branch keeps its old place under the fight and is
-  simply skipped along with it. That is right for ordinary salvage and wrong for
-  a wreck holding the mission item, and the two are not distinguished today —
-  `isNotableWreck` only asks whether a wreck is worth looting.
+- **Looting has not been asked the question the travel step was asked.** Once
+  the objective is done and the tracker offers a trip, combat stops (see "When
+  the objective is done and the tracker offers a trip, the fight is over"), but
+  the looting branch keeps its old place under the fight and is simply skipped
+  along with it. That is right for ordinary salvage and wrong for a wreck
+  holding the mission item, and the two are not distinguished today —
+  `isNotableWreck` only asks whether a wreck is worth looting. #92 widened the
+  disengage to 2,344 readings from 35, so the branch this skips is skipped
+  sixty-odd times more often than it was.
 - **Quitting a mission has never been driven by the bot**, only by hand. The
   affirmative half of the confirmation dialog is the weakest link: no live UI
   tree in this repo contains one, so the affirmative is identified as "the other
