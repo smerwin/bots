@@ -1799,10 +1799,15 @@ on it.
 
 | question | answered by |
 |---|---|
-| which charge is loaded | menu membership — free, and safe to read at any time |
-| did the load land | menu membership on the next read — the charge has gone from the list |
+| which charge is loaded | menu membership where a read arrives; otherwise, since #85, the charge the last load asked for |
+| did the load land | the client's own refusal **not** arriving (#31), since #85; menu membership where a read happens to arrive |
 | where to change over | `ammo-swap-range`, else the midpoint of the two optimal ranges |
 | does this gun need stopping first | `isInActiveState` — the toggle, since #76; it read `ramp_active` before, which is the duty cycle |
+
+The second row is the one that changed direction, and #85 is the argument —
+see "Trusting the load" below. The inference is still never "no refusal
+arrived, so it worked" on its own: it is "the bot dispatched this load, and the
+client did not disown it".
 
 ### The client refuses a load into a running module, silently
 
@@ -2153,6 +2158,120 @@ and it is the run that turns several inferences into observations.
   prints. A resolved charge is the *menu read* working, not a load landing —
   those are different claims and the status line says only the first.
 
+### Trusting the load, because the client says when it fails
+
+Run 26 is the first run in which the swap works: 7 disarms, loads that land, and
+a crossover that self-calibrated to `44000 m (from the midpoint of the two
+optimal ranges seen)` off `seen low: 21000, seen high: 67000`. **What it does
+badly is finish.** Its guns-off windows peak at 3, 7, 10, 16, 17, 18 and 19
+readings against a bound of 20, and almost all of that is spent proving a load
+that has never failed.
+
+Counted over the 90 readings inside those seven windows:
+
+| phase | readings |
+|---|---:|
+| `re-open the last one's menu to see whether it took` | **55** |
+| stale-menu and pause-menu cleanup, downstream of that re-opening | 18 |
+| `Told the guns to stop N of 3 readings ago` | 10 |
+| `Open this weapon's menu` | 6 |
+| the fight getting a reading | 1 |
+
+**And the verification answered on one of the seven swaps.** Run 26's
+`loaded charge reads` went `unknown` → `short-range` exactly once, at step
+`148.2`, and never moved again across 4,138 further status prints — including
+the four later swaps that asked for `Radio M`. The reason is `menuOpenOnGunAtX`:
+it attributes an open context menu to a weapon only where the *previous step*
+right-clicked it, and the client usually takes two or three readings to draw the
+menu, by which time the attribution is gone. So the re-opened menu is read only
+when the client happens to be fast.
+
+**The branch was also not a read.** `loadTheWantedCharge` is a cascade that ends
+in clicking the charge entry, so every re-open re-issued the load. What run 26
+did seven times over was load, re-load, re-load, and time out still asking.
+
+**The replacement is that a load that does not land is not silent.** #31 reads
+`You cannot load or unload <weapon> while it is active` off the game log, and
+the two runs are a control pair:
+
+| run | refusals in the game log | `(satisfied)` prints |
+|---|---:|---:|
+| 22 — every load into a running gun | **134** | 0 |
+| 26 — the guns stopped first | **0** | 2,628 |
+
+So the swap dispatches the load and finishes on the next reading.
+`ammoSwapLoadIsTrusted` is the rule, and its five inputs are each a way it can
+be wrong: the verdict must be the one that issued the load, every gun must have
+been told, the load must have *gone out*, the client must not have refused it,
+and any menu read on that reading wins if it disagrees.
+
+**The dispatch is read from the previous reading, and that is the trap in this
+design.** `loadCascadeReachedTheMenu` is true on the reading a menu offering the
+wanted charge is in the tree, which is the reading the cascade clicks that
+entry — so satisfying the verdict *there* would send the acting path to `idle`
+before the click was dispatched, and the swap would be trusting a load it never
+issued. It is therefore only ever read as `memoryBefore.loadCascadeReachedTheMenu`.
+A menu is judged to be a weapon's by its offering the charge by name, which is a
+wider and steadier test than `menuOpenOnGunAtX` and needs no attribution.
+
+**The identity is kept rather than dropped, which is the part that needed care.**
+The menu read did two jobs and only one was redundant: it is also how the bot
+learns *which* charge is loaded (#26 / #29), and dropping it outright brings back
+`loaded charge reads unknown` — the state runs 17 and 18 were stuck in, which
+stops the next verdict forming. So the trust *writes* the charge it asked for
+into `chargeLoaded`, flags it `chargeLoadedIsAssumed`, and says so on the status
+line as `(assumed from the load, not read back)`. Any menu read overwrites it,
+in both directions. That is strictly more identity than the old design
+delivered: one read in seven swaps becomes an answer on every completed load.
+
+**The optimal-range forget had to follow it.** The number belongs to the charge
+that was in the gun, so an assumed change makes it as stale as a read one does —
+and forgetting it is the only thing that sends the hover back to read the new
+charge's range, which is how the second of the two optimal ranges is ever seen.
+Without `optimalRangeAfterTheLoad` run 26 would have stayed on its 67000 m
+bootstrap instead of reaching the 44000 m midpoint.
+
+**The assumption is exactly as good as #31, and that is recorded in the code.**
+`loadRefusalFromGameLog`'s own doc comment says so, because someone editing that
+matcher is not reading this file: remove it or let it drift, and a discarded
+load goes silent *and* the swap starts reporting a charge the gun does not have.
+Two failures rather than one. `verdictSatisfied` also asks the refusal *before*
+the trust, so a refusal arriving one reading after the click un-satisfies a
+verdict the trust had already closed.
+
+**The bounds are untouched.** `ammoSwapSilencedGiveUpTicks` is still 20 and
+`ammoSwapSilenceSettleTicks` still 3; the window is expected to fall because the
+swap finishes sooner, not because anything was loosened.
+
+**The settle was measured and left alone.** Across run 26's seven disarms, four
+paid nothing for it — the client's own `isInActiveState` confirmation ended the
+settle at one reading or none — and on the other three the client never reported
+the gun off at all within seven readings, so the count of 3 is the only thing
+that ends the wait there. It cost 10 of the 90 readings, and no recorded run
+shows a load accepted earlier than the third reading, while run 22's 134
+refusals are what loading too early costs. Lowering it would be a guess against
+the one number that argues for it.
+
+`tools/macos-host/tests/test_ammo_trusted_load.py` executes the rule through the
+shared `elm repl` harness and reads the rest out of the source through a
+whitespace-collapsing reader. Confirmed by mutation, nine of them, each failing a
+named case: dropping the refusal veto, reading the cascade state from this
+reading instead of the previous one, asking the refusal after the trust rather
+than before, storing only the read charge, keeping the stale optimal range,
+aiming the cascade at the reference gun instead of the gun last right-clicked,
+re-introducing the verification branch, taking the `#31` note out of the
+matcher's doc comment, and hiding the assumption from the status line.
+
+**Unverified: any of it running.** No run has been flown since. What to watch on
+the first one — the guns-off window peaking around **4 to 7** readings rather
+than 16 to 19; `(satisfied)` still appearing, at least as often as run 26's;
+`cannot load or unload` staying at **0**, since a refusal appearing is the
+client saying the trust was misplaced; and `loaded charge reads` *changing* with
+each swap rather than latching once, with `(assumed from the load, not read
+back)` beside it. A run where the charge tracks the verdict and no refusal
+appears is the whole claim. A refusal appearing means the load is going into a
+running gun again, which is #76's territory and not this.
+
 ### Not oscillating
 
 - **The crossover does not move, so the deadband is simple.** It is
@@ -2253,12 +2372,19 @@ and #72 the second, and **run 21 shows the menu read itself working**: it prints
 `loaded charge reads long-range` and derives a crossover from two optimal ranges,
 which is the strongest evidence yet that nothing is wrong downstream of the menu.
 
-**Nobody has yet watched a load land, in twenty-two runs.** `(satisfied)`
-appears **zero** times in run 22 — the run that reached `GUNS OFF` 29 times —
-and its `loaded charge reads` went `unknown` → `short-range` once, when the menu
-read finally resolved, and never changed again while the swap asked for `Radio M`
-on 277 prints. **A resolved charge is the menu read working, not a load
-landing**, and reading the first as the second is the mistake to avoid here.
+**Run 26 is where a load was finally watched landing.** The menu re-opened after
+a load and no longer offered `Multifrequency M`, which is the client stating the
+gun now carries it, and `(satisfied)` appears 2,628 times against run 22's zero.
+It is one confirmed read out of seven swaps, for the attribution reason in
+"Trusting the load" above — the other six completed on the trust rather than on
+a read, and that is what the next run has to show working.
+
+Up to run 22 nobody had watched one. `(satisfied)` appears **zero** times in run
+22 — the run that reached `GUNS OFF` 29 times — and its `loaded charge reads`
+went `unknown` → `short-range` once, when the menu read resolved, and never
+changed again while the swap asked for `Radio M` on 277 prints. **A resolved
+charge is the menu read working, not a load landing**, and reading the first as
+the second is the mistake to avoid here.
 
 **What run 22 does settle is the arbiter.** `You cannot load or unload Focused
 Modulated Medium Energy Beam I while it is active.` appears **134 times** in its
