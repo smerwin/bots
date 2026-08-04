@@ -794,6 +794,22 @@ already in it. Verified live: a weapon holding Radio M offered `Multifrequency M
 loaded, and that answer needs no tooltip, no hover, and none of the sprites this
 client does not have.
 
+Since #85 it is also written without a menu read, by
+`ammoSwapLoadIsTrusted`: a load the swap dispatched and the client did not
+refuse puts the charge the swap asked for in the gun. `chargeLoadedIsAssumed`
+says which of the two answers is on the line, because they are not equally good
+and an operator has to be able to tell them apart. A menu read always outranks
+the assumption -- it is the client's own word and it costs nothing when it
+happens to arrive.
+
+`loadCascadeReachedTheMenu` is how the assumption knows a load actually went
+out. It is true on the reading a context menu offering the wanted charge is in
+the tree with every gun already told to load, which is the reading the cascade
+clicks that entry out of it -- and it is read on the **next** reading, never on
+its own. Satisfying the verdict on the reading the menu arrives would send the
+acting path to `idle` before the click was dispatched, so the swap would be
+trusting a load it never issued.
+
 `optimalRangeInMeters` and the `optimalRangeSeen` pair are the secondary reading
 and are now a refinement rather than the mechanism. A weapon's optimal range
 moves with the charge in it, so it confirms the _effect_ where menu membership
@@ -873,11 +889,16 @@ already had.
 
 `menuOpenOnGunAtX` is how the bot knows an open context menu is a weapon's, and
 which weapon's: nothing in the menu itself says where it came from, but the bot
-opened it and the previous step's effects say where it clicked.
+opened it and the previous step's effects say where it clicked. It answers only
+where the _previous step_ did the right-clicking, so it is `Nothing` whenever
+the client took longer than one reading to draw the menu -- which run 26 shows
+is most of the time, and is why the read it gates cannot be what a swap waits
+for.
 
 -}
 type alias AmmoSwapMemory =
     { chargeLoaded : Maybe AmmoRange
+    , chargeLoadedIsAssumed : Bool
     , optimalRangeInMeters : Maybe Int
     , optimalRangeSeenLow : Maybe Int
     , optimalRangeSeenHigh : Maybe Int
@@ -891,6 +912,7 @@ type alias AmmoSwapMemory =
     , switchOffUndoneByClient : Bool
     , gunsCommandedThisVerdictAtX : List Int
     , menuOpenOnGunAtX : Maybe Int
+    , loadCascadeReachedTheMenu : Bool
     , hoverAwaitingTooltip : Bool
     , hoverUnansweredTicks : Int
     , optimalRangeGivenUp : Bool
@@ -902,6 +924,7 @@ type alias AmmoSwapMemory =
 initAmmoSwapMemory : AmmoSwapMemory
 initAmmoSwapMemory =
     { chargeLoaded = Nothing
+    , chargeLoadedIsAssumed = False
     , optimalRangeInMeters = Nothing
     , optimalRangeSeenLow = Nothing
     , optimalRangeSeenHigh = Nothing
@@ -915,6 +938,7 @@ initAmmoSwapMemory =
     , switchOffUndoneByClient = False
     , gunsCommandedThisVerdictAtX = []
     , menuOpenOnGunAtX = Nothing
+    , loadCascadeReachedTheMenu = False
     , hoverAwaitingTooltip = False
     , hoverUnansweredTicks = 0
     , optimalRangeGivenUp = False
@@ -7728,10 +7752,24 @@ rather than dropped.
 
 Note what this does _not_ do. `Nothing` from the game log and `Just []` are
 collapsed here, and that is safe only because of the direction of the inference:
-finding no refusal is never read as the load having been accepted. The menu is
-what says that. Nothing anywhere may conclude "no refusal arrived, so it worked",
-which is the reading of an absent game log that would put this repo's signature
-bug back.
+finding no refusal is never read as the load having been accepted. Nothing
+anywhere may conclude "no refusal arrived, so it worked" _on its own_, which is
+the reading of an absent game log that would put this repo's signature bug back.
+
+**Anything changing this must read `ammoSwapLoadIsTrusted` first.** Since #85 the
+swap no longer re-opens a weapon's menu to see whether a load took: it dispatches
+the load and records the charge it asked for as the charge in the gun, and this
+sentence is what makes that sound. The whole argument is measured -- run 22
+recorded 134 of these refusals when every load was going into a running gun, and
+run 26 recorded none against 819 satisfied readings -- so a load that does not
+land is not silent, and has not been since #31.
+
+Take this matcher away, or let it drift from the client's wording, and the
+failure is two failures rather than one: a discarded load goes silent again
+_and_ the swap starts reporting a charge the gun does not have, which is the
+thing the menu read existed to prevent. Whatever replaces it has to keep saying
+"the client threw that load away" on the reading the client says it, or #85's
+assumption has to go back to being a menu read.
 
 -}
 loadRefusalFromGameLog : ReadingFromGameClient -> Maybe String
@@ -7746,6 +7784,68 @@ loadRefusalFromGameLog readingFromGameClient =
             )
         |> List.head
         |> Maybe.map .text
+
+
+{-| Whether the load the swap dispatched may be taken as having landed.
+
+Issue #85. The swap used to answer this by re-opening a weapon's menu and
+looking for the charge to have gone from the list. That read is the client's own
+word and nothing here is better than it -- but it is not free, and run 26
+measured the price: **55 of the 90 readings that run spent with its guns off**
+went on re-opening a menu after the load, and it produced an answer on **one of
+its seven swaps**. The other six ran out their attempt still asking. A
+verification that costs the majority of the disarmed window and answers one time
+in seven is not buying the safety it looks like it is buying.
+
+What replaces it is not "assume it worked". It is **the client is asked, and it
+answers when the answer is no**: `loadRefusalFromGameLog` reads
+`You cannot load or unload <weapon> while it is active` off the game log, run 22
+recorded 134 of them when every load was going into a running gun, and run 26
+recorded none against 819 satisfied readings. So the swap dispatches the load,
+takes the absence of that sentence as the load having gone in, and records the
+charge it asked for as the charge in the gun.
+
+The five inputs are each a way this can be wrong, which is why they are named
+rather than inlined:
+
+  - `verdictIsTheSameOneAsBefore` -- a load belongs to the verdict that issued
+    it. A verdict that has just changed has dispatched nothing yet.
+  - `everyGunVisited` -- every weapon on the row has been told to load, so there
+    is no gun still waiting for its turn. On a multi-weapon row this is what
+    stops the first gun's menu from ending the whole walk.
+  - `loadWasDispatched` -- `loadCascadeReachedTheMenu` as it stood on the
+    **previous** reading, because that is the reading the cascade clicked the
+    charge entry. Read on the same reading it becomes true, the verdict would be
+    satisfied before the click went out and the swap would be trusting a load it
+    never issued.
+  - `loadRefusedByClient` -- #31, and the whole safety of this. See
+    `loadRefusalFromGameLog` for what happens to the rest of the design if that
+    matcher is ever removed or allowed to drift.
+  - `menuContradictsTheLoad` -- a menu read on this reading that still offers
+    the wanted charge. The assumption always yields to a read, in both
+    directions: the read is the client speaking, and when it happens to arrive
+    it costs nothing.
+
+**Being wrong is one swap's worth of wrong, and it is self-correcting.** The
+next verdict opens a menu on its way to its own load, and that read overwrites
+whatever this recorded. What it must not do is what runs 17 and 18 did, which is
+report `loaded charge reads unknown` and never form the next verdict at all.
+
+-}
+ammoSwapLoadIsTrusted :
+    { verdictIsTheSameOneAsBefore : Bool
+    , everyGunVisited : Bool
+    , loadWasDispatched : Bool
+    , loadRefusedByClient : Maybe String
+    , menuContradictsTheLoad : Bool
+    }
+    -> Bool
+ammoSwapLoadIsTrusted trustCase =
+    trustCase.verdictIsTheSameOneAsBefore
+        && trustCase.everyGunVisited
+        && trustCase.loadWasDispatched
+        && (trustCase.loadRefusedByClient == Nothing)
+        && not trustCase.menuContradictsTheLoad
 
 
 gameLogEntryIsFromNotifyChannel : EveOnline.ParseUserInterface.GameLogEntry -> Bool
@@ -8186,15 +8286,18 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
                     Nothing ->
                         memoryBefore.menuOpenOnGunAtX
 
+        openContextMenuEntryTexts =
+            context.readingFromGameClient.contextMenus
+                |> List.head
+                |> Maybe.map (.entries >> List.map .text)
+                |> Maybe.withDefault []
+
         weaponMenuEntryTexts =
             if menuOpenOnGunAtX == Nothing then
                 []
 
             else
-                context.readingFromGameClient.contextMenus
-                    |> List.head
-                    |> Maybe.map (.entries >> List.map .text)
-                    |> Maybe.withDefault []
+                openContextMenuEntryTexts
 
         menuWasRead =
             weaponMenuEntryTexts |> List.isEmpty |> not
@@ -8319,9 +8422,48 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
             (guns |> List.isEmpty |> not)
                 && (guns |> List.all (\gun -> gunsCommandedThisVerdictAtX |> List.member gun.uiNode.totalDisplayRegion.x))
 
-        -- The swap is done when the last gun's own menu says so: the wanted
+        -- A context menu offering the charge this verdict wants is a weapon's
+        -- menu: nothing else the client opens lists a charge by name. That is a
+        -- wider and steadier test than `menuOpenOnGunAtX`, which only answers
+        -- where the right-click was the immediately previous step.
+        wantedChargeIsOfferedByAnOpenMenu =
+            case rangeVerdict of
+                Just ShortRangeAmmo ->
+                    weaponMenuOffersCharge chargeNames.shortRangeAmmoName openContextMenuEntryTexts
+
+                Just LongRangeAmmo ->
+                    weaponMenuOffersCharge chargeNames.longRangeAmmoName openContextMenuEntryTexts
+
+                Nothing ->
+                    False
+
+        -- The reading the cascade clicks the charge out of the menu it opened:
+        -- every gun has been told to load, and the menu is in the tree offering
+        -- the charge. Read on the *next* reading and never on this one -- see
+        -- `ammoSwapLoadIsTrusted`, where satisfying a verdict here would idle
+        -- the acting path before the click was dispatched.
+        loadCascadeReachedTheMenu =
+            everyGunVisited && wantedChargeIsOfferedByAnOpenMenu
+
+        -- A menu read on this reading that still offers the charge the load was
+        -- supposed to put in. The client is saying the gun does not have it, so
+        -- there is nothing to trust.
+        menuContradictsTheLoad =
+            menuWasRead && (chargeLoaded /= rangeVerdict)
+
+        loadIsTrusted =
+            ammoSwapLoadIsTrusted
+                { verdictIsTheSameOneAsBefore = verdictIsTheSameOneAsBefore
+                , everyGunVisited = everyGunVisited
+                , loadWasDispatched = memoryBefore.loadCascadeReachedTheMenu
+                , loadRefusedByClient = loadRefusedByClient
+                , menuContradictsTheLoad = menuContradictsTheLoad
+                }
+
+        -- The swap is done when the last gun's own menu says so -- the wanted
         -- charge has gone from the list, which is the client reporting the
-        -- effect rather than the bot reporting its intent.
+        -- effect rather than the bot reporting its intent -- or, since #85, when
+        -- the load has been dispatched and the client has not refused it.
         --
         -- A verdict that arrives with the wanted charge already loaded is
         -- satisfied on the spot, without opening a menu to find that out. This
@@ -8337,8 +8479,58 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
             else if everyGunVisited && menuWasRead && (chargeLoaded == rangeVerdict) then
                 True
 
+            else if loadRefusedByClient /= Nothing then
+                -- The client says this attempt's load was thrown away, so
+                -- nothing this attempt did may stand as having landed --
+                -- including a trust that fired on an earlier reading, if the
+                -- refusal took one more reading to arrive than the click did.
+                -- Placed below the menu read on purpose: a read that says the
+                -- charge is in the gun is the client contradicting its own
+                -- earlier sentence, and the read wins.
+                False
+
+            else if loadIsTrusted then
+                True
+
             else
                 memoryBefore.verdictSatisfied
+
+        -- What the swap will say is in the gun from here on. The read is used
+        -- where there is one; otherwise the charge the load asked for.
+        chargeLoadedOrAssumed =
+            if loadIsTrusted then
+                rangeVerdict
+
+            else
+                chargeLoaded
+
+        chargeLoadedIsAssumed =
+            if chargeLoadedOrAssumed == Nothing then
+                False
+
+            else if menuWasRead then
+                False
+
+            else if loadIsTrusted then
+                True
+
+            else
+                memoryBefore.chargeLoadedIsAssumed
+
+        -- The optimal range belongs to the charge that was in the gun, so a
+        -- charge the swap has just assumed into it makes the number stale
+        -- exactly as a charge it read would. Forgetting it is what sends the
+        -- hover back to read the new one, which is the only way the second of
+        -- the two optimal ranges is ever seen -- and therefore the only way the
+        -- crossover stops being a bootstrap off a single range. Run 26 reached
+        -- `44000 m (from the midpoint of the two optimal ranges seen)` that
+        -- way, and dropping this would have left it on the 67000 it started at.
+        optimalRangeAfterTheLoad =
+            if chargeLoadedOrAssumed == chargeLoaded then
+                optimalRangeInMeters
+
+            else
+                freshOptimalRange
 
         -- Counts only the readings a verdict has gone *unsatisfied*, which is
         -- what the give-up is about. Reset rather than held once satisfied, so
@@ -8663,8 +8855,9 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
                         -- rather than a client that cannot do this at all.
                         Nothing
     in
-    { chargeLoaded = chargeLoaded
-    , optimalRangeInMeters = optimalRangeInMeters
+    { chargeLoaded = chargeLoadedOrAssumed
+    , chargeLoadedIsAssumed = chargeLoadedIsAssumed
+    , optimalRangeInMeters = optimalRangeAfterTheLoad
     , optimalRangeSeenLow = optimalRangeSeenLow
     , optimalRangeSeenHigh = optimalRangeSeenHigh
     , rangeVerdict = rangeVerdict
@@ -8677,6 +8870,7 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
     , switchOffUndoneByClient = switchOffUndoneByClient
     , gunsCommandedThisVerdictAtX = gunsCommandedThisVerdictAtX
     , menuOpenOnGunAtX = menuOpenOnGunAtX
+    , loadCascadeReachedTheMenu = loadCascadeReachedTheMenu
     , hoverAwaitingTooltip = hoverAwaitingTooltip
     , hoverUnansweredTicks = hoverUnansweredTicks
     , optimalRangeGivenUp = optimalRangeGivenUp
@@ -8843,6 +9037,23 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                             |> List.member gun.uiNode.totalDisplayRegion.x
                             |> not
                     )
+
+        -- The gun whose cascade is still running, which is the most recent
+        -- entry in the walk. The branch below used to aim at `referenceGun`
+        -- whatever it had just right-clicked, which is the same gun only on a
+        -- one-weapon row -- and since #85 that branch is the load itself rather
+        -- than a re-read, so pointing it at the wrong weapon would leave the
+        -- last one holding the old charge.
+        gunCommandedLast =
+            ammoSwap.gunsCommandedThisVerdictAtX
+                |> List.head
+                |> Maybe.andThen
+                    (\commandedX ->
+                        fight.guns
+                            |> List.filter (\gun -> gun.uiNode.totalDisplayRegion.x == commandedX)
+                            |> List.head
+                    )
+                |> Maybe.withDefault fight.referenceGun
 
         -- Whether the switch-off is still settling: a count with a confirmation
         -- in front of it.
@@ -9166,18 +9377,30 @@ ensureAmmoSuitsTargetRangeWithGuns context fight nextStep =
                                         (loadTheWantedCharge gunToVisit)
 
                                 Nothing ->
-                                    -- Every gun has been visited and the swap is
-                                    -- still not confirmed, so re-open the last
-                                    -- one: its menu is where the answer is, and
-                                    -- the charge having vanished from it is the
-                                    -- only evidence a load landed.
+                                    -- The cascade opened on the last gun has not
+                                    -- put its menu in the tree yet. This branch
+                                    -- keeps driving it, and that is all it does:
+                                    -- it *is* the load, not a check of one.
+                                    --
+                                    -- #85: it used to re-open a menu after the
+                                    -- load to see whether the charge had gone
+                                    -- from the list. That verification was 55 of
+                                    -- the 90 readings run 26 spent with its guns
+                                    -- off and answered on one of its seven swaps,
+                                    -- because a re-opened menu is only
+                                    -- attributable to a weapon when the client
+                                    -- draws it on the very next reading. The load
+                                    -- is trusted instead -- see
+                                    -- `ammoSwapLoadIsTrusted`, and
+                                    -- `loadRefusalFromGameLog` for the sentence
+                                    -- the whole assumption rests on.
                                     describeBranch
                                         ("Every weapon has been told to load '"
                                             ++ wantedChargeName
-                                            ++ "' -- re-open the last one's menu to see whether it took."
+                                            ++ "' -- waiting for the last one's menu so the charge can be clicked out of it. Once it goes the load is taken as landed, because the client says so when it is not."
                                             ++ describeTheHold
                                         )
-                                        (loadTheWantedCharge fight.referenceGun)
+                                        (loadTheWantedCharge gunCommandedLast)
 
 
 {-| Rest the mouse on a weapon module until the client shows its tooltip.
@@ -9287,6 +9510,18 @@ describeAmmoSwapState context =
                 Nothing ->
                     "Ammo swap: loaded charge reads "
                         ++ describeAmmoRange ammoSwap.chargeLoaded
+                        ++ (if ammoSwap.chargeLoadedIsAssumed then
+                                -- #85. The two answers are not equally good and
+                                -- an operator has to be able to tell which one
+                                -- is on the line: one is the client's own menu
+                                -- omitting the charge in the gun, the other is
+                                -- the swap taking its own load at its word
+                                -- because the client did not refuse it.
+                                " (assumed from the load, not read back)"
+
+                            else
+                                ""
+                           )
                         ++ ", crossover "
                         ++ (case ammoSwapThreshold context.eventContext.botSettings ammoSwap of
                                 Just crossover ->
