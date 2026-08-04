@@ -514,6 +514,7 @@ type alias BotMemory =
     , targetToUnlockRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , targetToUnlockUnchangedTicks : Int
     , shipApproachingTicks : Int
+    , dockingRunIn : Maybe DockingRunIn
     , lootedWreckIds : List String
     , unlootableWreckIds : List String
     , lootAllRefusedTicks : Int
@@ -578,6 +579,48 @@ nothing in `UpdateMemoryContext` carries the session clock.
 type alias ShipLossVerdict =
     { reason : String
     , readingsSince : Int
+    }
+
+
+{-| A docking run-in the client has confirmed it is flying, and the evidence that
+it is still making progress.
+
+Docking is not a command that completes when it is issued. The client answers a
+Dock by flying the ship to the station's docking perimeter, and from 17 km that
+run-in takes about eight minutes -- during which the ship looks, to every other
+instrument in a reading, exactly like a ship that has been told nothing. Run 27
+is what that costs: the bot commanded Dock on 120 of the 121 readings between
+two accepted course-settings, and those two are **486 seconds** apart, which is
+the run-in's own length. The ship had precisely enough time to arrive and did
+not, and the session ended in space.
+
+So the latch exists to stop the bot re-commanding an action already under way.
+It is written in `updateMemoryForNewReadingFromGame` for the reason every other
+game-log verdict is: a reading's entries are gone by the next reading, so a
+branch that recognised the client's sentence where it acts on it would see the
+run-in start once and go straight back to commanding it.
+
+**What ends the wait is not a clock.** Eight minutes is roughly sixty readings,
+an order of magnitude past any settling window in this file, and a run-in's
+length is set by a distance nobody chose -- a station 200 km off is a longer one
+and just as legitimate. What the wait is bounded by instead is the run-in
+_working_: `rangeToStationMeters` holds the smallest range to a station seen
+since the course was set, and `readingsSinceCloser` counts how long it has been
+since that fell. A ship that is closing may take as long as the distance
+requires; a ship that has stopped closing gets `dockingRunInPatienceReadings`
+and then the command again. That is `stall_watch.py`'s own rule for the same
+question, in the same unit, and for the same reason -- see CLAUDE.md, "A falling
+distance counts as progress".
+
+`courseSettings` is not read by any decision. It is the number this whole issue
+is about, carried into the status line so a run says outright how many times it
+restarted its own dock: run 27's window shows 3, and a run that works shows 1.
+
+-}
+type alias DockingRunIn =
+    { rangeToStationMeters : Maybe Int
+    , readingsSinceCloser : Int
+    , courseSettings : Int
     }
 
 
@@ -3593,6 +3636,106 @@ approachIndicationTrustedForTicks =
     10
 
 
+{-| How many readings a confirmed docking run-in may go without getting closer
+before the bot commands the dock again.
+
+**This is not a budget for the run-in; it is a budget for the run-in showing
+nothing.** The distinction is the whole of #89. A clock would have to be picked
+against the longest dock anybody might fly, and there is no such number -- 17 km
+took eight minutes and a station 200 km off takes longer, legitimately. So the
+run-in is allowed as long as the range keeps falling, and this bounds only the
+case where it has stopped falling: a command that was swallowed, a ship stopped
+by something, a station that left the overview.
+
+Twenty readings, the same unit and the same value as `stall_watch.py`'s
+`APPROACH_PATIENCE`, which was calibrated for exactly this question on exactly
+this signal -- the measured worst case inside a real approach was 22 decisions
+between two strict decreases, about two readings, so twenty is an order of
+magnitude of headroom. Reusing its number rather than inventing one keeps the
+bot and the watchdog watching it from disagreeing about what a stalled approach
+looks like.
+
+Note what it costs when it is wrong in the permissive direction, which is the
+direction it is wrong in: a run-in the bot cannot measure gets one re-command
+every twenty readings rather than one per reading. Run 27 issued 120 in 121.
+
+-}
+dockingRunInPatienceReadings : Int
+dockingRunInPatienceReadings =
+    20
+
+
+{-| The docking run-in as it stands after this reading.
+
+Three inputs and one of them is the client's own sentence, which is what makes
+this a report rather than an inference.
+
+**Docked ends it.** The run-in finished, whatever it was doing, and the latch
+must not survive into the next undock -- it would suppress the first Dock of the
+next trip.
+
+**A fresh course-setting restarts it**, rather than being ignored as
+already-latched. The client writes the line each time it accepts a Dock, so a
+second one means a second run-in from wherever the ship now is, and the range to
+beat is this reading's rather than the old one's. This also picks up a dock an
+operator commanded by hand, which is the same run-in and equally not to be
+interrupted.
+
+**Otherwise it is the falling-range test**, and `Nothing` from the range is
+counted as no gain rather than as a reason to drop the latch -- see
+`rangeToNearestStationInMeters` for why the three ways it can be `Nothing` are
+not worth telling apart here.
+
+The `( Just _, Nothing )` case is a gain: the reading has a range where the
+previous one had none, so there is now something to measure against and the
+patience should start from it rather than from a count already part-spent.
+
+-}
+dockingRunInAfterReading :
+    { before : Maybe DockingRunIn
+    , courseSetThisReading : Bool
+    , rangeNow : Maybe Int
+    , docked : Bool
+    }
+    -> Maybe DockingRunIn
+dockingRunInAfterReading { before, courseSetThisReading, rangeNow, docked } =
+    if docked then
+        Nothing
+
+    else if courseSetThisReading then
+        Just
+            { rangeToStationMeters = rangeNow
+            , readingsSinceCloser = 0
+            , courseSettings = (before |> Maybe.map .courseSettings |> Maybe.withDefault 0) + 1
+            }
+
+    else
+        before
+            |> Maybe.andThen
+                (\runIn ->
+                    let
+                        gotCloser =
+                            case ( rangeNow, runIn.rangeToStationMeters ) of
+                                ( Just now, Just nearestSoFar ) ->
+                                    now < nearestSoFar
+
+                                ( Just _, Nothing ) ->
+                                    True
+
+                                _ ->
+                                    False
+                    in
+                    if gotCloser then
+                        Just { runIn | rangeToStationMeters = rangeNow, readingsSinceCloser = 0 }
+
+                    else if runIn.readingsSinceCloser + 1 < dockingRunInPatienceReadings then
+                        Just { runIn | readingsSinceCloser = runIn.readingsSinceCloser + 1 }
+
+                    else
+                        Nothing
+                )
+
+
 {-| The "do not restart what is already running" guard shared by everything that
 acts on an object the ship has not reached yet.
 
@@ -6154,28 +6297,174 @@ jumpToNextSystem context =
 
             else
                 returnDronesToBay context
-                    (useContextMenuCascadeWithCustomConfig
-                        -- Feedback: "Jump Through Stargate" took 3-4 menu
-                        -- opens before being recognized. The route icon is
-                        -- small and sits in a strip that can shift as the
-                        -- route updates, so the default distance tolerance
-                        -- (70, already once widened from 40 for this same
-                        -- kind of drift on other elements) was plausibly
-                        -- discarding a menu that had, in fact, opened
-                        -- correctly. Widened just for this one cascade
-                        -- rather than the shared default, since other
-                        -- cascades' tolerance is already tuned from past
-                        -- observations and this is a different UI element.
-                        (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
-                        { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
-                        (useMenuEntryWithTextContainingFirstOf
-                            [ "dock"
-                            , "jump"
-                            ]
-                            menuCascadeCompleted
-                        )
-                        context
+                    (case context.memory.dockingRunIn of
+                        Just runIn ->
+                            -- The whole of #89. The client is already flying
+                            -- this dock and every further command restarts it.
+                            describeBranch (describeDockingRunIn runIn) waitForProgressInGame
+
+                        Nothing ->
+                            dockAtDestinationStation context
+                                (routeMarkerCascade context infoPanelRouteFirstMarker)
                     )
+
+
+{-| What the bot says on every reading it declines to command a dock again.
+
+Said every time rather than once, for `returnDronesToBay`'s reason: a branch
+that declines has to say so each time it declines, or a stretch of readings where
+nothing happens is indistinguishable from a bot that has fallen through to
+something else. Sixty consecutive readings of this line is what a working dock
+looks like from the log, and the range in it is what makes those sixty readings
+distinguishable from each other -- `stall_watch.py` keys its circling test on the
+decision text changing, and a line that read the same at every range would raise
+an alarm on a ship flying its run-in perfectly, which is `approachOverviewEntry`'s
+lesson from run 107.
+
+-}
+describeDockingRunIn : DockingRunIn -> String
+describeDockingRunIn runIn =
+    "The client is already flying this dock -- '"
+        ++ courseSetToDockingPerimeterMarker
+        ++ "' stands, at "
+        ++ (runIn.rangeToStationMeters
+                |> Maybe.map (\meters -> String.fromInt meters ++ " m")
+                |> Maybe.withDefault "a range this reading cannot say"
+           )
+        ++ ", "
+        ++ String.fromInt runIn.readingsSinceCloser
+        ++ " of "
+        ++ String.fromInt dockingRunInPatienceReadings
+        ++ " readings since it last got closer. Commanding it again would restart the run-in."
+
+
+{-| Dock at the destination station by pressing the Selected Item panel's own
+Dock button.
+
+The pattern `selectThenPanelAction` argues for, on the one branch that had never
+been wired to it. Its own doc comment records the cascade failing "on approach,
+on acceleration gates, and on the retreat, each time as a silent no-op that the
+bot happily repeated for hundreds of readings", and `selectedItemButtonNamed`
+names `selectedItemDock` in the list of buttons reachable that way. The control
+for #89 is one press of it at 17 km, which produced a course-setting and a dock
+about eight minutes later with no further input.
+
+**This is not what fixes #89 on its own, and saying so is the point.** A panel
+click repeated every reading restarts the perimeter run exactly as effectively as
+a cascade click did -- the bug is re-commanding an action already under way, not
+the mechanism the command travels by. What fixes it is `DockingRunIn`, above this
+in `jumpToNextSystem`. This makes the command that arms it more likely to land in
+the first place.
+
+Three conditions, and each is a way it could act on the wrong thing:
+
+**One route marker.** The panel presses a button on a station this function
+picked off the overview, and nothing in that pick says the station is the route's
+destination -- a station on a stargate's grid in an intermediate system is a
+station too, and docking at it would end the trip in the wrong place with every
+log line reading like success. The route panel renders one
+`AutopilotDestinationIcon` per waypoint, so exactly one marker is the reading
+saying the destination is here and there is nothing further to jump to. Where
+that is not true the cascade runs, which is today's behaviour.
+
+**The panel is showing this station.** `selectedItemIsOverviewEntry`, exactly as
+`selectThenPanelAction` does: the panel acts on whatever is selected, which is not
+necessarily what this decision is about. When it is showing something else this
+spends one reading selecting the row, which is the same two-tick shape and the
+same argument.
+
+**The panel offers the button.** The Dock button is absent when the station is out
+of docking range, the same shape as `selectedItemActivateGate`, and that absence
+is the natural gate between the two mechanisms -- so it falls through to the
+cascade rather than waiting, because a cascade Dock at range is what makes the
+client close the distance. `selectThenPanelAction` cannot be reused directly for
+that reason: its own answer to a missing button is to wait and eventually ask for
+help, which here would strand a ship that simply has to fly further first.
+
+-}
+dockAtDestinationStation : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+dockAtDestinationStation context ifThePanelCannotDoIt =
+    let
+        destinationIsInThisSystem =
+            (context.readingFromGameClient.infoPanelContainer
+                |> Maybe.andThen .infoPanelRoute
+                |> Maybe.map (.routeElementMarker >> List.length)
+            )
+                == Just 1
+    in
+    case
+        ( destinationIsInThisSystem
+        , nearestStationOnOverview context.readingFromGameClient
+        )
+    of
+        ( True, Just station ) ->
+            let
+                named =
+                    station.objectName |> Maybe.withDefault "the station"
+
+                withRange =
+                    named ++ " (" ++ (station.objectDistance |> Maybe.withDefault "range unknown") ++ ")"
+            in
+            if not (selectedItemIsOverviewEntry context station) then
+                describeBranch
+                    ("Dock at " ++ withRange ++ " from the selected-item panel (selecting it first).")
+                    (clickUiElement station.uiNode)
+
+            else
+                case selectedItemButtonNamed context "selectedItemDock" of
+                    Just dockButton ->
+                        describeBranch
+                            ("Dock at " ++ withRange ++ " from the selected-item panel.")
+                            (clickUiElement dockButton)
+
+                    Nothing ->
+                        describeBranch
+                            ("Dock at "
+                                ++ withRange
+                                ++ " -- the panel offers no 'selectedItemDock', so it is out of docking range and the menu's own Dock has to close the distance."
+                            )
+                            ifThePanelCannotDoIt
+
+        _ ->
+            ifThePanelCannotDoIt
+
+
+{-| Right-click the route panel's first marker and take whichever of "dock" or
+"jump" the client offers.
+
+Unchanged, and still the whole of the jump leg. What has moved out from under it
+is the dock at the far end -- see `dockAtDestinationStation` for why, and
+`courseSetToDockingPerimeterFromGameLog` for why keeping "dock" in this list
+costs nothing: an out-of-range dock is exactly the case the panel cannot serve,
+and this is what flies the ship there.
+
+-}
+routeMarkerCascade :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.InfoPanelRouteRouteElementMarker
+    -> DecisionPathNode
+routeMarkerCascade context infoPanelRouteFirstMarker =
+    useContextMenuCascadeWithCustomConfig
+        -- Feedback: "Jump Through Stargate" took 3-4 menu
+        -- opens before being recognized. The route icon is
+        -- small and sits in a strip that can shift as the
+        -- route updates, so the default distance tolerance
+        -- (70, already once widened from 40 for this same
+        -- kind of drift on other elements) was plausibly
+        -- discarding a menu that had, in fact, opened
+        -- correctly. Widened just for this one cascade
+        -- rather than the shared default, since other
+        -- cascades' tolerance is already tuned from past
+        -- observations and this is a different UI element.
+        (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
+        { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
+        (useMenuEntryWithTextContainingFirstOf
+            [ "dock"
+            , "jump"
+            ]
+            menuCascadeCompleted
+        )
+        context
 
 
 {-| Every reason this bot has to stop fighting and leave.
@@ -7784,6 +8073,62 @@ loadRefusalFromGameLog readingFromGameClient =
             )
         |> List.head
         |> Maybe.map .text
+
+
+{-| The client saying it has begun flying the ship to a station's docking
+perimeter, in its own words.
+
+    [ 2026.08.04 01:51:41 ] (notify) Setting course to docking perimeter
+
+This is the only evidence a reading carries that a dock is under way. Nothing
+else says so: `ShipManeuverType` has no docking member (the parser knows Warp,
+Jump, Orbit, Approach, Range and Align, and none of them is this), the ship
+keeps its ordinary UI throughout, and the station's overview row looks like any
+other. So the sentence is the signal, and #28's channel is what makes it
+readable at all.
+
+**It is also what keeps the jump case out of this entirely.** The client writes
+this line for a dock and never for a gate jump -- a jump is instantaneous once
+commanded, and there is no run-in to report. So the latch can only ever be armed
+by a dock, and the branch that declines to re-command is unreachable on a jump
+leg without any test for which leg it is on. That is deliberate: the alternative
+is predicting the menu's contents before opening it, and the client's own
+statement is both cheaper and correct.
+
+The channel is `notify`, checked against all 168 occurrences in
+`~/Documents/EVE/logs/Gamelogs` -- every one of them carries it, and 36 of them
+are the client session run 27 was flown in. A `Nothing` channel is a host that
+did not say which, not a line without one, so it is judged on its text alone,
+exactly as #31's and #33's matchers do.
+
+`Nothing` and `Just []` are collapsed, and safely, because of the direction of
+the inference: no line arriving is never read as "the dock finished". It is read
+as "no run-in has been reported", which leaves the bot commanding one -- the
+behaviour it has today. An absent game log therefore costs this guard entirely
+and cannot make the bot wait on a dock that is not happening.
+
+-}
+courseSetToDockingPerimeterFromGameLog : ReadingFromGameClient -> Maybe String
+courseSetToDockingPerimeterFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.filter (\entry -> stringContainsIgnoringCase courseSetToDockingPerimeterMarker entry.text)
+        |> List.head
+        |> Maybe.map .text
+
+
+{-| The client's own words for the start of a docking run-in.
+
+One constant rather than a literal at the match site, because the status line
+quotes it too and a matcher that drifts from what the client writes fails in the
+direction that looks like success -- nothing matches, the latch never arms, and
+the bot goes back to re-commanding with nothing complaining.
+
+-}
+courseSetToDockingPerimeterMarker : String
+courseSetToDockingPerimeterMarker =
+    "Setting course to docking perimeter"
 
 
 {-| Whether the load the swap dispatched may be taken as having landed.
@@ -10226,13 +10571,81 @@ escapeTargetOnOverview context =
                     )
                 |> List.head
     in
-    case matching (containsWords "station") of
+    case onGrid |> List.filter overviewEntryIsAStation |> List.head of
         Just station ->
             Just ( station, "selectedItemDock", "dock at it" )
 
         Nothing ->
             matching (containsWords "stargate")
                 |> Maybe.map (\gate -> ( gate, "selectedItemWarpTo", "warp to it" ))
+
+
+{-| Whether an overview row's own words say it is a station.
+
+One definition, read by the retreat's escape target and by the dock leg of the
+travel path. Two copies of "is this a station" would drift silently in both
+directions, and the second one is now load-bearing for a command the ship spends
+eight minutes carrying out.
+
+Whole words rather than a substring, for `containsWords`' usual reason and for
+one that bites here in particular: a "Station Warehouse" and an "Amarr Station"
+both contain the word and both are stations, while a substring rule would also
+take anything merely containing the letters.
+
+-}
+overviewEntryIsAStation : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsAStation entry =
+    [ entry.objectName, entry.objectType ]
+        |> List.filterMap identity
+        |> List.any (containsWords "station")
+
+
+{-| The nearest station the overview is actually rendering, if any.
+
+`overviewEntryIsDisplayed` first, for "Reading the overview"'s reason -- a
+virtualised row keeps a plausible display region belonging to whatever was
+recycled into its place, so a hidden row is worse than absent both to click and
+to measure a distance from.
+
+-}
+nearestStationOnOverview : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+nearestStationOnOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter overviewEntryIsAStation
+        |> List.sortBy overviewEntryDistanceOrFarInMeters
+        |> List.head
+
+
+{-| How far the nearest station is, where the reading can say at all.
+
+`Nothing` covers three different situations and deliberately does not
+distinguish them: no station on the overview, a station whose row is not
+rendered, and a distance the client wrote in AU. The last is why
+`overviewEntryDistanceIsOnGrid` is asked rather than
+`overviewEntryDistanceOrFarInMeters` alone -- that one answers `999999` for an
+unparsed distance, and a placeholder treated as a real range would read as
+"closer than last reading" the moment a real number arrived, which is a gain the
+ship never made.
+
+The consumer treats `Nothing` as "no gain this reading", so a run-in nobody can
+measure spends its patience and the command is issued again. That is the
+conservative direction: the worst it degrades to is one Dock per patience window
+instead of one per reading.
+
+-}
+rangeToNearestStationInMeters : ReadingFromGameClient -> Maybe Int
+rangeToNearestStationInMeters readingFromGameClient =
+    nearestStationOnOverview readingFromGameClient
+        |> Maybe.andThen
+            (\station ->
+                if overviewEntryDistanceIsOnGrid station then
+                    station.objectDistanceInMeters |> Result.toMaybe
+
+                else
+                    Nothing
+            )
 
 
 {-| Activate an acceleration gate from the Selected Item panel.
@@ -10878,6 +11291,7 @@ initBotMemory =
     , targetToUnlockRegion = Nothing
     , targetToUnlockUnchangedTicks = 0
     , shipApproachingTicks = 0
+    , dockingRunIn = Nothing
     , lootedWreckIds = []
     , unlootableWreckIds = []
     , lootAllRefusedTicks = 0
@@ -10991,6 +11405,29 @@ statusTextFromState context =
             , counter "route-unchanged" context.memory.routeFirstMarkerUnchangedTicks
             , counter "unlock-unchanged" context.memory.targetToUnlockUnchangedTicks
             , counter "loot-open" context.memory.lootWindowOpenTicks
+            , -- Absent unless a dock is under way, like the counters above, and
+              -- carrying the number #89 is about: how many times the client has
+              -- been told to set course this trip. One is a dock the bot
+              -- commanded and then left alone; anything climbing is the run-in
+              -- being restarted, which is what run 27 did three times in eight
+              -- minutes while never arriving.
+              context.memory.dockingRunIn
+                |> Maybe.map
+                    (\runIn ->
+                        "docking run-in ("
+                            ++ String.fromInt runIn.courseSettings
+                            ++ " course-setting(s), "
+                            ++ (runIn.rangeToStationMeters
+                                    |> Maybe.map (\meters -> String.fromInt meters ++ " m")
+                                    |> Maybe.withDefault "range unreadable"
+                               )
+                            ++ ", "
+                            ++ String.fromInt runIn.readingsSinceCloser
+                            ++ "/"
+                            ++ String.fromInt dockingRunInPatienceReadings
+                            ++ " since closer)"
+                    )
+                |> Maybe.withDefault ""
             , describeModulesToActivateAlways readingFromGameClient
             , describeTopRowModuleDictState readingFromGameClient
             ]
@@ -14192,6 +14629,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     weJustFinishedWarping || (dockedNow && not botMemoryBefore.dockedInLastReading)
                 }
 
+        -- Read here rather than where the dock is decided, because a reading's
+        -- game-log entries are gone by the next reading: a branch that saw the
+        -- client start a run-in would see it once and command another one on
+        -- the reading after. See `DockingRunIn`.
+        dockingRunIn =
+            dockingRunInAfterReading
+                { before = botMemoryBefore.dockingRunIn
+                , courseSetThisReading =
+                    courseSetToDockingPerimeterFromGameLog context.readingFromGameClient /= Nothing
+                , rangeNow = rangeToNearestStationInMeters context.readingFromGameClient
+                , docked = dockedNow
+                }
+
         lockRangeLearning =
             updateLockRangeLearning context botMemoryBefore
 
@@ -14813,6 +15263,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , dockingRunIn = dockingRunIn
     , lockAttempt = lockRangeLearning.attempt
     , lockProvenAtMeters = lockRangeLearning.provenAtMeters
     , lockRefusedAtMeters = lockRangeLearning.refusedAtMeters

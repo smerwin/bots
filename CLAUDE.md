@@ -1242,6 +1242,115 @@ byte-for-byte unchanged, for 3+ ticks — catching a stray menu on a tick where 
 decision tree isn't touching menu logic at all, which the cascade's own recovery
 cannot do since it only runs while actively driving a cascade.
 
+## Docking is a run-in the ship has to fly, and commanding it again restarts it
+
+`travelToStationByName`'s last step right-clicks the route panel's first marker
+and takes the menu entry containing `"dock"` or `"jump"`. That is right for a
+**jump**, which is instantaneous once commanded, and it cannot finish a **dock**.
+
+Run 27 measured the difference. The ship reached Amarr with the station 17 km
+off and never docked: **1,227** readings of `A route is set`, **414**
+`Click on menu entry 'Dock'` decisions across **117 readings**, and in the
+client's own log **36** × `Setting course to docking perimeter` plus 5 ×
+`Session change already in progress`. The two accepted course-settings at
+readings 346 and 467 are **486 seconds apart** — the run-in's own length, so the
+ship had precisely enough time to arrive — and the bot commanded Dock on **120
+of the 121 readings in between**. The control is one click on the Selected Item
+panel's `selectedItemDock` at the same 17 km, which docked the ship about eight
+minutes later with no further input.
+
+**The bug is not the mechanism, it is the repetition**, and this is the thing
+most likely to be missed: a panel click repeated every reading restarts the
+perimeter run exactly as effectively as a cascade click did. So the fix is two
+parts and the second is the essential one.
+
+**`DockingRunIn` is what stops the re-command.** The client writes
+`Setting course to docking perimeter` on `notify` when it accepts a Dock, and
+that sentence is the *only* evidence a reading carries that a dock is under way
+— `ShipManeuverType` has no docking member (Warp, Jump, Orbit, Approach, Range,
+Align, and none of them is this), the ship keeps its ordinary UI, and the
+station's overview row looks like any other. Latched in
+`updateMemoryForNewReadingFromGame` for the usual reason: a reading's entries
+are gone by the next one.
+
+**That is also why the jump case is untouched, with no test for which leg the
+bot is on.** The client writes the line for a dock and never for a gate jump,
+so the latch cannot be armed by a jump and the declining branch is unreachable
+on one. The alternative — predicting the menu's contents before opening it — is
+both more machinery and less certain than the client's own statement.
+
+**What ends the wait is not a clock**, and picking a number here is the mistake.
+Eight minutes is roughly sixty readings, an order of magnitude past every
+settling window in `Bot.elm` (`approachIndicationTrustedForTicks` is 10, so ten
+readings into run 27's dock the old guard would have commanded another one), and
+a station 200 km off is a longer run-in and just as legitimate. The wait is
+bounded by the run-in *working*: the smallest range to a station seen since the
+course was set, and how long it has been since that fell. A ship that is closing
+gets as long as the distance requires; a ship that has stopped closing gets
+`dockingRunInPatienceReadings` and then the command again. That is
+`stall_watch.py`'s `APPROACH_PATIENCE` — same question, same signal, same unit,
+same value of 20 — so the bot and the watchdog watching it cannot disagree about
+what a stalled approach looks like.
+
+An unreadable range counts as **no gain**, not as a reason to drop the latch.
+`Nothing` covers no station on the overview, a row that is not rendered, and a
+distance in AU, and none of them is evidence the ship is closing. The worst that
+degrades to is one Dock per patience window against run 27's one per reading.
+
+**The panel click is the other half, and it is `selectThenPanelAction`'s
+argument on the one branch never wired to it** — `selectedItemButtonNamed`'s own
+comment already names `selectedItemDock` among the buttons reachable that way,
+and `selectedItemApproach` is recorded taking the ship from 0.0 to 585 m/s after
+a cascade achieved nothing across 180 decisions. `dockAtDestinationStation`
+applies three conditions, each guarding a way it could act on the wrong thing:
+the route panel rendering **exactly one** `AutopilotDestinationIcon` (otherwise a
+station on an intermediate system's gate grid is a station too, and docking
+there would end the trip in the wrong place with every log line reading like
+success); `selectedItemIsOverviewEntry`, because the panel acts on whatever is
+selected; and the Dock button being present at all, which is absent out of
+docking range and is the natural gate between the two mechanisms — the same
+shape as `selectedItemActivateGate`. On that last one it falls back to the
+cascade rather than waiting, which is why `selectThenPanelAction` could not be
+reused directly: its answer to a missing button is to wait and eventually ask for
+help, which here would strand a ship that simply has to fly further first.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_docking_run_in.py` (31 cases). The rule is
+*executed* through the real `Bot.elm` in `elm repl` rather than restated in
+Python: a run-in folded over 200 readings of a falling range survives all of
+them, one folded over exactly `dockingRunInPatienceReadings` readings without a
+gain ends and one reading fewer does not, a growing range is not a gain, an
+unreadable one is not either, docking clears the latch and a second course-
+setting restarts it and counts. The marker is read out of the source and checked
+against every `Setting course to docking perimeter` line in
+`~/Documents/EVE/logs/Gamelogs` — all of them on `notify` — and against the
+three carried into run 27's own log by the game-log channel, which is what makes
+the latch reachable rather than a guard resting on a sentence the bot never
+sees. Run 27's own measurement is re-derived from the log by the test, in
+readings rather than decision lines. Confirmed by mutation, thirteen of them,
+each failing a named case: the patience comparison moved either way, the counter
+pinned, a falling range no longer counting as progress, the marker drifting from
+the client's wording, docking not clearing the latch, course-settings not being
+counted, the jump entry dropped from the cascade, the matcher moved to `info`, an
+AU distance becoming a real range, the panel pressed without confirming what is
+selected, the destination no longer required to be in this system, the dock leg
+no longer consulting the latch, and the status line dropping the count.
+
+**Unverified: any of it running.** The re-command hypothesis is still an
+inference — nobody has watched a single un-repeated Dock succeed from 17 km, and
+the panel click succeeding is the one directly observed part. Two premises have
+never been read off a live client: that the route panel renders exactly one
+marker when the destination is in the current system, and that the destination
+station appears on the overview as a displayed row at all. **Both fail safe** —
+the panel path simply never fires and the bot behaves as it does today, with the
+run-in guard still in place, which is the half that matters. What to watch on
+the first run that docks: the status line's `docking run-in (1 course-setting(s),
+… m, 0/20 since closer)` with the count staying at **1** and the range falling,
+then the dock. A count climbing is the run-in still being restarted; a run-in
+that expires its patience every twenty readings while the range never moves is
+the station not being on the overview, and the tell is `range unreadable` in the
+same clause.
+
 ## Ship modules
 
 Module buttons come in rows, and the row list is **not a stable index space**:
@@ -3083,6 +3192,19 @@ exists.
   session` climbing: a couple over a run is the gauge behaving as recorded, a
   count climbing every few readings is a gauge that has started lying properly
   and a different problem.
+
+  And it now **leaves a dock it has already commanded alone** instead of
+  re-issuing it every reading. Docking is a run-in the ship has to fly, and run
+  27 spent 486 seconds — the run-in's own length — commanding Dock on 120 of 121
+  consecutive readings and never arriving. The client's own `Setting course to
+  docking perimeter` is what says a run-in is under way, a falling range to the
+  station is what says it is working, and the dock itself now goes through the
+  Selected Item panel's `selectedItemDock` where the panel offers it. The two
+  halves, why the jump leg is unaffected, and what bounds the wait are in
+  "Docking is a run-in the ship has to fly" above. **Untested against a live
+  client**, and two of its premises are unread — watch the status line's
+  `docking run-in (N course-setting(s), …)` for N staying at 1 while the range
+  falls.
 
   And it now **asks the host to set its route through ESI** rather than driving
   the search bar, which is the only way it can originate a destination carrying a
