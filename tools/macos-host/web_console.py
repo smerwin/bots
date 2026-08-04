@@ -79,10 +79,20 @@ def tailnet_address():
 class ConsoleState:
     """Everything the console shows, and everything it asks for, behind a lock."""
 
-    def __init__(self, settings_text="", session_end_at_ms=None):
+    def __init__(self, settings_text="", session_end_at_ms=None,
+                 app_name="", bot_source="", version=""):
         self._lock = threading.Lock()
         self.started_at = time.time()
         self.session_end_at_ms = session_end_at_ms
+
+        # Which bot this console is driving, from where, and what it was built
+        # from. Fixed for the session -- the host resolves all three before the
+        # console exists -- so they are read without the lock and never change
+        # under a handler. An empty string is a host that did not say, which the
+        # page shows as unknown rather than as blank.
+        self.app_name = app_name or ""
+        self.bot_source = bot_source or ""
+        self.version = version or ""
         self.tick = 0
         self.status_text = ""
         self.settings_text = settings_text or ""
@@ -146,6 +156,9 @@ class ConsoleState:
             if self.session_end_at_ms is not None:
                 seconds_left = max(0, int(self.session_end_at_ms / 1000 - time.time()))
             return {
+                "appName": self.app_name,
+                "botSource": self.bot_source,
+                "version": self.version,
                 "uptimeSeconds": int(time.time() - self.started_at),
                 "sessionSecondsLeft": seconds_left,
                 "tick": self.tick,

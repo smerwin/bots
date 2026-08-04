@@ -650,6 +650,86 @@ the run continues without a console. The safety property is unchanged — it sti
 never binds anywhere else — and the warning is loud because a console silently
 absent is worse than none, since the operator goes looking for one.
 
+### The console says which bot it is driving, and what that bot was built from
+
+Its title and heading were the literal string `Host Console` and `ConsoleState`
+carried no notion of a version, so neither the page nor the log said which of
+the two bots was running or what code it was running — while the *log* printed
+the same `# bot source:` path on every run this machine has ever flown, as the
+code underneath it moved constantly. Seven consecutive runs flew five different
+trees (`655053c`, `776a202`, `bfbe090`, `ab7bae7`, `1b7c731`), and establishing
+which took reading git ancestry and grepping the compiled `bot.js` for string
+literals — a method that is itself a trap, since Elm strips doc comments at
+compile time, and it produced a confident false negative before it was caught.
+
+Three things now travel together: the app's own name (the bot directory's leaf,
+`eve-online-mission-runner` against `eve-online-saxrat`), the source path, and a
+version stamp. The name is in `<title>` so two consoles open at once are
+distinguishable tabs, all three are in the console header, and the version is
+printed to stderr beside `# bot source:` — the log is where "which code did this
+run fly" gets asked afterwards, and it outlives every console.
+
+**The version is the part that had to be got right, and `git rev-parse HEAD`
+alone is a wrong answer that looks like a right one.** It would be
+commit-shaped, authoritative-looking, and wrong in two directions this repo has
+already paid for:
+
+- **The host compiles the working tree, not a commit.** `prepare_build_dir`
+  copies `bot_dir` as it stands and `elm make` builds the copy, and the mission
+  runner is edited while runs are in flight, so a clean-looking SHA beside
+  modified sources describes something that never ran. Dirtiness is judged over
+  the **bot source directory** rather than the whole checkout — that directory
+  is what gets copied, so an edit to the host or to a test elsewhere changes
+  nothing about what this bot compiled — and untracked files count, because the
+  copy takes them too.
+- **The commit may exist nowhere but this machine.** Run 29 flew `776a202`, a
+  local revert never pushed, and a reader handed that SHA cannot resolve it
+  against anything. Reachability is asked of the remote-tracking refs this
+  machine holds (`git branch --remotes --contains`), which is local and needs no
+  network; a fetch that has not happened can make a pushed commit read
+  LOCAL-ONLY, which understates rather than overstates what a reader can go and
+  look at.
+
+So the four states read:
+
+```
+1b7c731 (clean, on a remote-tracking branch)
+1b7c731 (DIRTY, on a remote-tracking branch)
+776a202 (clean, LOCAL-ONLY)
+unknown (not a git checkout)
+```
+
+**Absent evidence is never dressed up as a finding**, which is
+`loadRefusalFromGameLog`'s register applied to a version string. `fetch_bot_source`
+takes a plain directory as readily as a GitHub URL, so "not a git checkout" is a
+supported answer rather than a failure; a git that cannot be started or that runs
+past its timeout is `unknown (git could not be run)`; and either half alone can
+be unknown (`dirtiness unknown`, `remote reachability unknown`) rather than
+taking the reassuring default. **Nothing here can fail a launch**: every git call
+is bounded by `BOT_VERSION_GIT_TIMEOUT_SECONDS` (5s, because a hung git would
+hang the launch behind it) and the whole computation is wrapped, so the worst
+case is a bot that starts without a stamp rather than a bot that does not start.
+
+Verified in `tools/macos-host/tests/test_bot_source_version.py` (22 cases), and
+the git cases are *executed* rather than described: each builds a real throwaway
+checkout shaped like this one and runs the real `git`, because a Python
+restatement of "is this tree dirty" would only test the restatement. Confirmed by
+mutation, twelve of them, each failing a named case: dirtiness always reading
+clean, dirtiness judged over the whole repository, a commit on no remote-tracking
+branch reading as pushed, an unanswerable question taking the reassuring default,
+a git that cannot be started raising instead of degrading, the catch-all removed,
+the timeout removed, the stderr line dropped, the version computed from the
+host's own location instead of the bot's, the console not told the app name, the
+snapshot dropping it, and the page no longer naming the tab.
+
+**Unverified: the page itself.** No browser has rendered the new header — the
+console's markup is checked as text, not opened — and no run has been started
+since. What to watch on the first one is `# bot version:` on stderr immediately
+under `# bot source:`, then the tab reading `eve-online-mission-runner — Host
+Console`. A stamp reading `unknown` on a run launched from this checkout would
+mean the version is being computed against something that is not the bot's
+source directory.
+
 Two design points that are load-bearing rather than stylistic. **HTTP handlers
 never touch the pipe to the bot process** — it is a strict request/response
 conversation with the Elm runtime, and a second writer desynchronises it — so
