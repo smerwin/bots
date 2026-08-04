@@ -782,6 +782,8 @@ def bring_window_to_foreground(pid, window_number, retries=4, delay=0.35):
 SYNTHETIC_GAME_LOG_TYPE_NAME = "MacOsHostSyntheticGameLog"
 SYNTHETIC_GAME_LOG_ENTRY_TYPE_NAME = "MacOsHostSyntheticGameLogEntry"
 SYNTHETIC_INCOMING_DAMAGE_TYPE_NAME = "MacOsHostSyntheticIncomingDamage"
+SYNTHETIC_OUTGOING_DAMAGE_TYPE_NAME = "MacOsHostSyntheticOutgoingDamage"
+SYNTHETIC_OUTGOING_DAMAGE_TARGET_TYPE_NAME = "MacOsHostSyntheticOutgoingDamageTarget"
 
 
 def synthetic_game_log_node(entries):
@@ -865,6 +867,67 @@ def synthetic_incoming_damage_node(summary):
         "pythonObjectTypeName": SYNTHETIC_INCOMING_DAMAGE_TYPE_NAME,
         "dictEntriesOfInterest": entries,
         "children": [],
+    }
+
+
+def synthetic_outgoing_damage_node(targets):
+    """A UI-tree node carrying what this ship's shots have achieved, per target.
+
+    The mirror of `synthetic_incoming_damage_node`, with the same four safety
+    properties -- a type name that says in full that the client never wrote
+    this, no display region, nothing under `_setText`/`_text`, and an absent
+    node meaning something different from an empty one.
+
+    Issue #90 is the consumer. Run 27 locked an `Infested Asteroid`, shot it
+    with every gun for roughly 290 consecutive readings, and every one of those
+    shots *landed* for exactly 0 damage while nine real rats sat on the same
+    overview untouched. Nothing in a reading could say so: the incoming half was
+    summed here for #32 and the outgoing half was matched nowhere, so no
+    decision could ask how much damage this ship was dealing.
+
+    The client distinguishes the three cases in the line itself, which is why
+    this needs no health bar and no inference. A miss carries no damage number
+    at all (`Your Hobgoblin II misses Vigilant Sentry Tower completely`), a
+    landed shot reads `104 to Mammon Apis - Hits`, and a landed shot that
+    achieved nothing reads `0 to Infested Asteroid - Hits`.
+
+    **Per target rather than one total**, unlike the incoming node, because the
+    question is about one object. Guns and drones routinely engage different
+    things in the same reading -- run 27's own log has the drones landing real
+    damage on a `Mercenary Commander` in the very readings the guns were
+    achieving nothing on the asteroid -- so a single sum would have read as
+    "our damage is fine" throughout the incident this exists to catch. One child
+    per target name, each carrying `name`, `hits` and `damage`.
+
+    **A target with `hits > 0` and `damage = 0` is the whole signal**, and it is
+    still not a verdict: the bot requires several of them before concluding
+    anything. See `zeroDamageHitsBeforeGivingUp` in the mission runner.
+
+    **Present-with-nothing and absent are different answers**, as everywhere
+    else on this channel. The node is emitted on every reading a game log exists
+    for, so no children means "the client reported no shots landing" while the
+    node's absence means "this host does not carry the channel". Only the second
+    may be read as "we do not know" -- and here the fail-safe direction is the
+    opposite of the retreat's: a host that cannot answer must never read as
+    "everything is immune", so absent has to keep the guns firing.
+    """
+    return {
+        "pythonObjectAddress": "macos-host-synthetic-outgoing-damage",
+        "pythonObjectTypeName": SYNTHETIC_OUTGOING_DAMAGE_TYPE_NAME,
+        "dictEntriesOfInterest": {},
+        "children": [
+            {
+                "pythonObjectAddress": f"macos-host-synthetic-outgoing-damage-{index}",
+                "pythonObjectTypeName": SYNTHETIC_OUTGOING_DAMAGE_TARGET_TYPE_NAME,
+                "dictEntriesOfInterest": {
+                    "name": target["name"],
+                    "hits": target["hits"],
+                    "damage": target["damage"],
+                },
+                "children": [],
+            }
+            for index, target in enumerate(targets)
+        ],
     }
 
 
@@ -1136,6 +1199,15 @@ class VolatileHost:
             # not matter -- which is asserted rather than assumed.
             tree["children"].append(
                 synthetic_incoming_damage_node(self.game_log.incoming_damage_for_reading())
+            )
+            # A third sibling, for the same reason the second is one: how hard
+            # this ship is being hit and whether its own shots are achieving
+            # anything are different questions, and a consumer of either must be
+            # able to find the other absent. The queues are independent, so the
+            # order of these three calls does not matter -- asserted rather than
+            # assumed, in `TailFanOutTest`.
+            tree["children"].append(
+                synthetic_outgoing_damage_node(self.game_log.outgoing_damage_for_reading())
             )
         return {
             "Completed": {
@@ -2129,6 +2201,19 @@ GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT = frozenset({"combat", "bounty"})
 # and none begins with a digit.
 _INCOMING_DAMAGE_LINE = re.compile(r"^(?P<amount>\d+) from (?P<attacker>.+)$")
 
+# Damage dealt, the same shape with "to":
+#   "104 to Mammon Apis - Hits"
+#   "0 to Infested Asteroid - Focused Modulated Medium Energy Beam I - Hits"
+#   "32 to Mercenary Commander - Acolyte I - Smashes"   (a drone's hit)
+# Anchored on the leading number and on " to " immediately after it, which is
+# what keeps two other shapes out. `100 GJ energy neutralized Sleepless Outguard
+# - Sleepless Outguard` begins with a digit and is not damage (19 of them across
+# the corpus), and every `Warp disruption attempt from X - to Y` line -- which
+# is the only other place " to " appears on this channel -- begins with a word.
+# A miss carries no number at all and so cannot match, which is the point: a
+# miss costs nothing and is not evidence that a target is immune.
+_OUTGOING_DAMAGE_LINE = re.compile(r"^(?P<amount>\d+) to (?P<target>.+)$")
+
 # A backstop on each queue, not a policy. Both are drained once per reading, so
 # reaching either means nothing drained for a long time (a paused session, or a
 # run still searching for the UI root) rather than a busy client.
@@ -2170,6 +2255,31 @@ def parse_incoming_damage(entry):
     return int(match.group("amount")), (attacker or None)
 
 
+def parse_outgoing_damage(entry):
+    """`(amount, target)` for a combat line that is damage *dealt*, else None.
+
+    The target is the name up to the first " - ", exactly as the attacker is on
+    the incoming side, because the rest of the line is the weapon and the
+    quality of the hit and both differ per shot.
+
+    **Zero is a value here, not an absence**, which is the one way this differs
+    from its incoming twin. `0 to Infested Asteroid - Hits` is a shot that
+    landed and achieved nothing, and it is the single most informative line on
+    this channel -- discarding it as "no damage" would throw away the whole
+    signal issue #90 is about. A miss still returns `None`, because it carries
+    no number and never reaches this pattern.
+    """
+    if entry is None or entry["channel"] != "combat":
+        return None
+    match = _OUTGOING_DAMAGE_LINE.match(entry["text"])
+    if match is None:
+        return None
+    target = match.group("target").split(" - ")[0].strip()
+    if not target:
+        return None
+    return int(match.group("amount")), target
+
+
 class GameLogTail:
     """Follow EVE's own game log, the only timestamped record in this system.
 
@@ -2188,19 +2298,23 @@ class GameLogTail:
     we start at its end: the point is what happened since the last decision, not
     a replay of the session so far.
 
-    **Three readers, one file offset.** This used to serve the stderr echo
+    **Four readers, one file offset.** This used to serve the stderr echo
     alone, and that echo consuming the lines is precisely what kept them from
     the bot (issue #28). `_poll` is now the only thing that moves the offset,
-    and it fans each line out to three independent queues -- so
-    `lines_for_echo`, `entries_for_reading` and `incoming_damage_for_reading`
-    each see every line exactly once and none can eat another's. Adding a second
-    caller of a single-cursor tail would have given whichever ran first that
-    cycle's lines and the others nothing, intermittently and without a word.
+    and it fans each line out to four independent queues -- so
+    `lines_for_echo`, `entries_for_reading`, `incoming_damage_for_reading` and
+    `outgoing_damage_for_reading` each see every line exactly once and none can
+    eat another's. Adding a second caller of a single-cursor tail would have
+    given whichever ran first that cycle's lines and the others nothing,
+    intermittently and without a word.
 
-    The damage queue is fed from the `(combat)` lines that the reading queue
-    deliberately drops (issue #32): withholding the channel from the bot was
-    right about the *lines* and wrong about the *total*, which is a number no
-    other instrument in this system reports.
+    Both damage queues are fed from the `(combat)` lines that the reading queue
+    deliberately drops (issues #32 and #90): withholding the channel from the
+    bot was right about the *lines* and wrong about the *summary*, which is a
+    fact no other instrument in this system reports. They are separate queues
+    rather than one because they answer opposite questions -- how hard this ship
+    is being hit, and whether its own shots are achieving anything -- and a
+    consumer of either must be able to find the other absent.
     """
 
     def __init__(self, directory):
@@ -2210,6 +2324,7 @@ class GameLogTail:
         self._echo_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
         self._reading_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
         self._damage_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
+        self._outgoing_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
 
     def _newest_file(self):
         try:
@@ -2259,6 +2374,9 @@ class GameLogTail:
             damage = parse_incoming_damage(entry)
             if damage is not None:
                 self._damage_queue.append(damage)
+            dealt = parse_outgoing_damage(entry)
+            if dealt is not None:
+                self._outgoing_queue.append(dealt)
 
     def lines_for_echo(self, limit=25):
         """The stderr/web-console echo: whole lines, capped for readability."""
@@ -2308,6 +2426,40 @@ class GameLogTail:
             "hits": len(events),
             "topAttacker": by_attacker.most_common(1)[0][0] if by_attacker else None,
         }
+
+    def outgoing_damage_for_reading(self):
+        """What this ship's shots achieved since the last reading, per target.
+
+        A list of `{"name": …, "hits": N, "damage": N}`, one entry per target
+        the client named, ordered by hits and then by name so two identical
+        readings produce two identical nodes.
+
+        **`hits` counts shots that landed, and a landed shot for zero damage is
+        counted.** That is the distinction the whole of issue #90 rests on: a
+        miss writes no number and never gets here, so `hits > 0` with
+        `damage = 0` means the guns are hitting an object they cannot hurt,
+        which is what run 27 did for roughly 290 readings while the mission
+        objective was already finished.
+
+        An empty list is an answer -- the client reported nothing landing this
+        reading -- and the caller turns it into a node all the same. "Nothing is
+        reporting" lives in whether the node exists at all, the same rule the
+        rest of this channel follows, and here reading the second as the first
+        would have a bot conclude every target is immune on a host that simply
+        has no game log.
+        """
+        self._poll()
+        events = list(self._outgoing_queue)
+        self._outgoing_queue.clear()
+        hits = collections.Counter()
+        damage = collections.Counter()
+        for amount, target in events:
+            hits[target] += 1
+            damage[target] += amount
+        return [
+            {"name": name, "hits": count, "damage": damage[name]}
+            for name, count in sorted(hits.items(), key=lambda pair: (-pair[1], pair[0]))
+        ]
 
 
 def main():

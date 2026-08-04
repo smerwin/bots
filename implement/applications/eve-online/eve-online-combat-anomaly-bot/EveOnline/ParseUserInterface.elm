@@ -58,6 +58,7 @@ type alias ParsedUserInterface =
     , compressionWindow : Maybe CompressionWindow
     , gameLogEntriesSinceLastReading : Maybe (List GameLogEntry)
     , incomingDamageSinceLastReading : Maybe IncomingDamage
+    , outgoingDamageSinceLastReading : Maybe (List OutgoingDamageToTarget)
     }
 
 
@@ -644,6 +645,7 @@ parseUserInterfaceFromUITree uiTree =
     , compressionWindow = parseCompressionWindowFromUITreeRoot uiTree
     , gameLogEntriesSinceLastReading = parseGameLogEntriesSinceLastReadingFromUITreeRoot uiTree
     , incomingDamageSinceLastReading = parseIncomingDamageSinceLastReadingFromUITreeRoot uiTree
+    , outgoingDamageSinceLastReading = parseOutgoingDamageSinceLastReadingFromUITreeRoot uiTree
     }
 
 
@@ -782,6 +784,88 @@ getIntPropertyFromDictEntries dictEntryKey node =
     node.dictEntriesOfInterest
         |> Dict.get dictEntryKey
         |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.int >> Result.toMaybe)
+
+
+{-| What this ship's own shots achieved since the last reading, per target, as
+carried by the macOS host in this fork.
+
+`hits` counts the shots that **landed** on that target -- a miss carries no
+damage number in the client's log and is not counted -- and `damage` is what
+those hits took off it. So `hits = 12, damage = 0` is the client stating that
+twelve shots connected with an object and achieved nothing, which is a fact
+about that object that no other reading in this system reports.
+
+**Issue #90.** Run 27 locked an `Infested Asteroid` and shot it for roughly 290
+consecutive readings, every shot landing for zero, while nine real rats sat on
+the same overview untouched and the mission objective was already finished. The
+bot could not see it: the host summed the _incoming_ half of the combat channel
+for #32 and matched the outgoing half nowhere, so no field in any reading said
+how much damage this ship was dealing.
+
+**Per target rather than one total**, unlike `IncomingDamage`, because the
+question is about one object. Guns and drones engage different things in the
+same reading -- run 27's drones were landing real damage on a rat in the very
+readings its guns were achieving nothing on the asteroid -- so a single sum
+would have read as healthy throughout the incident this exists for.
+
+`Nothing` and `Just []` are different answers, and the fail-safe direction here
+is the **opposite** of the retreat's. `Just []` is "the client reported no shot
+landing this reading"; `Nothing` is "this host does not carry the channel", and
+a bot that read the second as evidence would conclude every target is immune on
+a host that simply has no game log. Absent means unknown, and unknown must keep
+shooting.
+
+The node this reads is **not from the game client**: the macOS host appends it
+to the tree it emits, which is why its type name says so in full. It carries no
+display region, so no other parser in this module can reach it, and its values
+sit under plain keys rather than `_setText`/`_text` so `getDisplayText` cannot
+mistake a target's name for something rendered on screen.
+
+Scoped to the reading by the host, which drains its queue as it builds the tree,
+so this is what the shots since the previous read achieved rather than a running
+total.
+
+-}
+type alias OutgoingDamageToTarget =
+    { name : String
+    , hits : Int
+    , damage : Int
+    }
+
+
+parseOutgoingDamageSinceLastReadingFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe (List OutgoingDamageToTarget)
+parseOutgoingDamageSinceLastReadingFromUITreeRoot uiTreeRoot =
+    uiTreeRoot.uiNode.children
+        |> Maybe.withDefault []
+        |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
+        |> List.filter (.pythonObjectTypeName >> (==) syntheticOutgoingDamageNodeTypeName)
+        |> List.head
+        |> Maybe.map
+            (\outgoingDamageNode ->
+                outgoingDamageNode.children
+                    |> Maybe.withDefault []
+                    |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
+                    |> List.filterMap parseOutgoingDamageToTarget
+            )
+
+
+parseOutgoingDamageToTarget : EveOnline.MemoryReading.UITreeNode -> Maybe OutgoingDamageToTarget
+parseOutgoingDamageToTarget targetNode =
+    case getStringPropertyFromDictEntries "name" targetNode of
+        Nothing ->
+            Nothing
+
+        Just name ->
+            Just
+                { name = name
+                , hits = targetNode |> getIntPropertyFromDictEntries "hits" |> Maybe.withDefault 0
+                , damage = targetNode |> getIntPropertyFromDictEntries "damage" |> Maybe.withDefault 0
+                }
+
+
+syntheticOutgoingDamageNodeTypeName : String
+syntheticOutgoingDamageNodeTypeName =
+    "MacOsHostSyntheticOutgoingDamage"
 
 
 asUITreeNodeWithDisplayRegion :
