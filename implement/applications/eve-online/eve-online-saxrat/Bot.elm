@@ -567,58 +567,58 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
             (recoverPodAfterShipLoss context
                 |> Maybe.withDefault
                     (branchDependingOnDockedOrInSpace
-                { ifDocked =
-                    continueIfShouldHide
-                        { ifShouldHide =
-                            describeBranch "Stay docked." waitForProgressInGame
-                        }
-                        context
-                        |> Maybe.withDefault
-                            (if
-                                context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
-                                    && (context.readingFromGameClient
-                                            |> infoPanelRouteFirstMarkerFromReadingFromGameClient
-                                            |> (==) Nothing
-                                       )
-                                    -- A "Warp to Site" opportunity takes
-                                    -- precedence over staying docked: the
-                                    -- Opportunities panel this comes from is
-                                    -- part of the persistent left sidebar
-                                    -- (like the route panel), so it's
-                                    -- checkable even while docked. Undocking
-                                    -- here rather than trying to click it
-                                    -- directly from dock -- untested whether
-                                    -- that even works -- lets the very next
-                                    -- tick's normal in-space priority chain
-                                    -- (which already puts this ahead of
-                                    -- tether/dock) pick it up once genuinely
-                                    -- in space.
-                                    && (context.readingFromGameClient
-                                            |> warpToOpportunitySiteIfAvailable
-                                            |> (==) Nothing
-                                       )
-                             then
-                                describeBranch
-                                    "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
-                                    waitForProgressInGame
+                        { ifDocked =
+                            continueIfShouldHide
+                                { ifShouldHide =
+                                    describeBranch "Stay docked." waitForProgressInGame
+                                }
+                                context
+                                |> Maybe.withDefault
+                                    (if
+                                        context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
+                                            && (context.readingFromGameClient
+                                                    |> infoPanelRouteFirstMarkerFromReadingFromGameClient
+                                                    |> (==) Nothing
+                                               )
+                                            -- A "Warp to Site" opportunity takes
+                                            -- precedence over staying docked: the
+                                            -- Opportunities panel this comes from is
+                                            -- part of the persistent left sidebar
+                                            -- (like the route panel), so it's
+                                            -- checkable even while docked. Undocking
+                                            -- here rather than trying to click it
+                                            -- directly from dock -- untested whether
+                                            -- that even works -- lets the very next
+                                            -- tick's normal in-space priority chain
+                                            -- (which already puts this ahead of
+                                            -- tether/dock) pick it up once genuinely
+                                            -- in space.
+                                            && (context.readingFromGameClient
+                                                    |> warpToOpportunitySiteIfAvailable
+                                                    |> (==) Nothing
+                                               )
+                                     then
+                                        describeBranch
+                                            "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
+                                            waitForProgressInGame
 
-                             else
-                                undockUsingStationWindow context
-                            )
-                , ifSeeShipUI =
-                    \shipUI ->
-                        runAwayIfLowHealth context shipUI
-                            |> Maybe.withDefault
-                                (continueIfShouldHide
-                                    { ifShouldHide =
-                                        returnDronesToBay context
-                                            (dockAtRandomStationOrStructure context)
-                                    }
-                                    context
+                                     else
+                                        undockUsingStationWindow context
+                                    )
+                        , ifSeeShipUI =
+                            \shipUI ->
+                                runAwayIfLowHealth context shipUI
                                     |> Maybe.withDefault
-                                        (decideNextActionWhenInSpace context { shipUI = shipUI })
-                                )
-                }
+                                        (continueIfShouldHide
+                                            { ifShouldHide =
+                                                returnDronesToBay context
+                                                    (dockAtRandomStationOrStructure context)
+                                            }
+                                            context
+                                            |> Maybe.withDefault
+                                                (decideNextActionWhenInSpace context { shipUI = shipUI })
+                                        )
+                        }
                         context.readingFromGameClient
                     )
             )
@@ -825,35 +825,35 @@ jumpToNextSystem context =
 
             else
                 returnDronesToBay context
-                                            (useContextMenuCascadeWithCustomConfig
-                            -- Feedback: "Jump Through Stargate" took 3-4 menu
-                            -- opens before being recognized. The route icon is
-                            -- small and sits in a strip that can shift as the
-                            -- route updates, so the default distance tolerance
-                            -- (70, already once widened from 40 for this same
-                            -- kind of drift on other elements) was plausibly
-                            -- discarding a menu that had, in fact, opened
-                            -- correctly. Widened just for this one cascade
-                            -- rather than the shared default, since other
-                            -- cascades' tolerance is already tuned from past
-                            -- observations and this is a different UI element.
-                            (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
-                            { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
-                            (useMenuEntryWithTextContainingFirstOf
-                                [ "dock"
-                                , "jump"
-                                ]
-                                menuCascadeCompleted
-                            )
-                            context
+                    (useContextMenuCascadeWithCustomConfig
+                        -- Feedback: "Jump Through Stargate" took 3-4 menu
+                        -- opens before being recognized. The route icon is
+                        -- small and sits in a strip that can shift as the
+                        -- route updates, so the default distance tolerance
+                        -- (70, already once widened from 40 for this same
+                        -- kind of drift on other elements) was plausibly
+                        -- discarding a menu that had, in fact, opened
+                        -- correctly. Widened just for this one cascade
+                        -- rather than the shared default, since other
+                        -- cascades' tolerance is already tuned from past
+                        -- observations and this is a different UI element.
+                        (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
+                        { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
+                        (useMenuEntryWithTextContainingFirstOf
+                            [ "dock"
+                            , "jump"
+                            ]
+                            menuCascadeCompleted
                         )
+                        context
+                    )
 
 
 {-| Leave, on the strongest of three instruments rather than on the weakest.
 
 The gauges are read through `BotMemory.hitpointsLowWaterMark`, never live off
 the reading. Two things happen on the way there and both matter. A value has to
-be *believed* -- confirmed by a second reading -- before anything acts on it,
+be _believed_ -- confirmed by a second reading -- before anything acts on it,
 because a single corrupt reading is a routine occurrence on this gauge and `0`
 is as reachable as `21328.22` while being the worst possible value to be wrong
 about, clearing every threshold at once. And the believed value is then held at
@@ -1006,7 +1006,7 @@ updateHitpointsGaugeMemory retreatThreshold reading memoryBefore =
 
 {-| Would this reading have tripped the retreat that the believed one does not?
 
-Counted only against *this gauge's* own threshold, so a gauge nobody is reading
+Counted only against _this gauge's_ own threshold, so a gauge nobody is reading
 reports nothing -- which matters here, where both hitpoint thresholds ship
 disabled.
 
@@ -1252,7 +1252,7 @@ describeIncomingDamage context =
 
 
 {-| The client never announces the ship's destruction -- there is no such line
-anywhere in the recorded logs. It states the *consequence* instead, and only
+anywhere in the recorded logs. It states the _consequence_ instead, and only
 when something asks the capsule to lock.
 -}
 shipLossFromGameLog : ReadingFromGameClient -> Maybe String
@@ -1654,16 +1654,16 @@ dockAtRandomStationOrStructure context =
                 }
     in
     returnDronesToBay context
-                    (describeBranch "g'wan, git"
-                (useContextMenuCascadeOnListSurroundingsButton
-                    (useMenuEntryWithTextContainingFirstOf [ "structures", "station" ]
-                        (chooseNextMenuEntry
-                            (chooseNextMenuEntry MenuCascadeCompleted)
-                        )
+        (describeBranch "g'wan, git"
+            (useContextMenuCascadeOnListSurroundingsButton
+                (useMenuEntryWithTextContainingFirstOf [ "structures", "station" ]
+                    (chooseNextMenuEntry
+                        (chooseNextMenuEntry MenuCascadeCompleted)
                     )
-                    context
                 )
+                context
             )
+        )
 
 
 decideNextActionWhenInSpace : BotDecisionContext -> SeeUndockingComplete -> DecisionPathNode
@@ -1773,9 +1773,9 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                         let
                                             returnDronesAndEnterAnomaly { ifNoAcceptableAnomalyAvailable } =
                                                 returnDronesToBay context
-                                                                                                            (describeBranch "No drones to return."
-                                                            (enterAnomaly { ifNoAcceptableAnomalyAvailable = ifNoAcceptableAnomalyAvailable } context)
-                                                        )
+                                                    (describeBranch "No drones to return."
+                                                        (enterAnomaly { ifNoAcceptableAnomalyAvailable = ifNoAcceptableAnomalyAvailable } context)
+                                                    )
 
                                             returnDronesAndEnterAnomalyOrWait =
                                                 returnDronesAndEnterAnomaly
@@ -1946,7 +1946,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
         decisionAfterLootingNotableWrecks =
             if waitTimeRemainingSeconds <= 0 then
                 returnDronesToBay context
-                                            (describeBranch "No drones to return." continueIfCombatComplete)
+                    (describeBranch "No drones to return." continueIfCombatComplete)
 
             else
                 describeBranch
@@ -2390,7 +2390,7 @@ and no acknowledgement anywhere in the reading, so the only evidence a recall
 landed is the in-space count falling -- which means the asking has to be
 bounded, and before this port it was not bounded at all. The keypress went out
 on every reading for as long as the drones stayed in space, and because the
-callers took the recall *instead of* their own next step, a recall that never
+callers took the recall _instead of_ their own next step, a recall that never
 landed meant the ship never docked either.
 
 **It takes the caller's next step rather than returning a `Maybe`.** A give-up
@@ -2398,7 +2398,7 @@ that returns nothing at all is one an operator cannot see: the log then reads
 exactly like a bot that never had drones out. Handing the continuation in lets
 the branch that abandons the drones name itself, every reading it declines --
 not once, which is the other half of issue #11. The equality test its give-up
-was first written as fired only on the reading the counter was *exactly* at the
+was first written as fired only on the reading the counter was _exactly_ at the
 threshold, and if the ship was mid-fight on that one reading nothing was ever
 logged at all.
 
@@ -4184,13 +4184,11 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- every warp abandons whatever is in space.
         if dronesInSpaceCountNow < 1 then
             0
-
             -- A partial recall is the client answering, so it resets the
             -- patience rather than counting against it.
 
         else if dronesInSpaceCountNow < botMemoryBefore.dronesInSpaceCountLastReading then
             0
-
             -- Past the give-up, hold rather than reset. Giving up is what stops
             -- the asking, so a reset would unwind it and the ship would
             -- alternate forever between abandoning its drones and recalling
