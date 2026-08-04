@@ -324,18 +324,45 @@ class ElmRepl:
         return answers
 
     def ask(self, expressions):
+        """The answers to `expressions`, asked as one `List Bool`.
+
+        Asked as a list rather than one expression per line because the repl
+        recompiles the module for every line it is given. Measured against this
+        app: twenty expressions cost 36.5s a line at a time and 5.8s as a
+        single list, which is the whole reason this suite took twenty-one
+        minutes. The answers come back in the order asked either way.
+
+        `evaluate_values` below deliberately still asks line by line -- it
+        parses the repl's printed form with a caller's own pattern, and inside
+        a list that form is the list's, not each answer's.
+        """
+        if not expressions:
+            return [], "", ""
+        plain, stderr = self.run_repl("[ %s ]" % ", ".join(expressions))
+        # The repl wraps, so `: List Bool` can land on the line after the list.
+        listed = re.search(r"\[([^\]]*)\]\s*:\s*List Bool", plain.replace("\n", " "))
+        answers = ([answer == "True"
+                    for answer in re.findall(r"True|False", listed.group(1))]
+                   if listed else [])
+        return answers, plain, stderr
+
+    def run_repl(self, *lines):
+        """One repl process, given `lines` verbatim after the import."""
         script = "import Bot exposing (..)\n" + "".join(
-            expression + "\n" for expression in expressions)
+            line + "\n" for line in lines)
         result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
                                 capture_output=True, text=True)
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-        answers = [answer == "True"
-                   for answer in re.findall(r"(True|False) : Bool", plain)]
-        return answers, plain, result.stderr
+        return re.sub(r"\x1b\[[0-9;]*m", "", result.stdout), result.stderr
 
     def evaluate_values(self, expressions, pattern):
-        """The repl's own printed answers, for the ones that are not `Bool`."""
-        _, plain, stderr = self.ask(expressions)
+        """The repl's own printed answers, for the ones that are not `Bool`.
+
+        Still asked one expression per line, unlike `ask` above: the caller
+        matches the repl's printed form with its own pattern, and inside a list
+        that form is the list's rather than each answer's. These calls are the
+        minority, so the line-at-a-time cost stays where it is understood.
+        """
+        plain, stderr = self.run_repl(*expressions)
         answers = re.findall(pattern, plain)
         if len(answers) != len(expressions):
             raise AssertionError(

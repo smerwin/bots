@@ -222,13 +222,23 @@ class ElmRepl:
         return answers
 
     def ask(self, expressions):
-        script = "import Bot exposing (..)\n" + "".join(
-            expression + "\n" for expression in expressions)
+        # Asked as one `List Bool` rather than one expression per line,
+        # because the repl recompiles the module for every line it is given.
+        # Measured against this app: twenty expressions cost 36.5s a line at a
+        # time and 5.8s as a single list. The answers come back in the order
+        # asked either way, which is all any caller here relies on.
+        if not expressions:
+            return [], "", ""
+        script = "import Bot exposing (..)\n[ %s ]\n" % ", ".join(expressions)
         result = subprocess.run(["elm", "repl"], cwd=self.app, input=script,
                                 capture_output=True, text=True)
         plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-        answers = [answer == "True"
-                   for answer in re.findall(r"(True|False) : Bool", plain)]
+        # The repl wraps, so `: List Bool` can land on the line after the list.
+        listed = re.search(r"\[([^\]]*)\]\s*:\s*List Bool",
+                           plain.replace("\n", " "))
+        answers = ([answer == "True"
+                    for answer in re.findall(r"True|False", listed.group(1))]
+                   if listed else [])
         return answers, plain, result.stderr
 
     def works(self):
