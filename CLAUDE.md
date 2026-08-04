@@ -1414,6 +1414,143 @@ takes other work. A stall at the confirmation means the dialog is not a
 two-button `no_dialog_button` pair after all, and the tell is 200 readings of
 the abandonment line followed by the session ending.
 
+## A decline costs standing, so the entry that armed it has to be nameable
+
+`decline-mission` is matched as a **substring** of the offered mission name, and
+it was parsed with no empty check at all:
+
+```elm
+( "decline-mission"
+, AppSettings.valueTypeString
+     (\missionName settings ->
+         { settings | missionNamesToDecline = String.trim missionName :: settings.missionNamesToDecline })
+)
+```
+
+The empty string is a substring of every mission name, so one `decline-mission=`
+line with nothing after it puts `""` in that list and hands back **every mission
+the agent ever offers**, one standing hit at a time, while the log reports each
+as an ordinary skip. **The codebase already knew.** `missionNameFromTracker`'s
+own comment says an empty entry "is a filter that declines every mission the
+agent ever offers", and `splitSettingIntoNames` filters `String.isEmpty >> not`
+for exactly that reason. The tracker side was guarded and the settings side was
+not.
+
+**Rejected rather than dropped, and the two conventions already here are what
+decide it.** An empty value has two documented meanings in this file and neither
+covers this one. `nonEmptySettingValue` reads it as *unset*, which is how
+`short-range-ammo=` switches the ammo swap off from the web console without
+deleting the line. `splitSettingIntoNames` drops it, because a trailing comma is
+how one gets written by accident and the other entries on the line still carry
+what was meant. Neither applies where the whole assigned value is empty: nothing
+is left to read the intent from, and "I meant to delete this line" and "I meant
+to paste a name here" want opposite behaviour. Dropping picks one without saying
+so, which is this repo's signature failure; `AppSettings`' own answer to a value
+it cannot use is an `Err` naming the setting, which `valueTypeInteger` and
+`listAllSupportedValues` already give. `valueTypeNonEmptyString` is that answer
+for the four settings that name one thing.
+
+**The price is stated rather than hidden.** `BotFramework` answers a settings
+parse error with `InternalFinishSession`, and that is the same event the web
+console's live settings change sends — so a bad value typed mid-run ends the
+session. That is what every other unusable value in the file already costs, and
+it is paid here on a string one keystroke from declining everything.
+
+**Three other handlers had the identical unguarded shape**, and all three are
+now guarded by the same helper:
+
+| setting | what an empty value did |
+|---|---|
+| `agent-name` | `stringContainsIgnoringCase ""` matches every agent in the station, so the bot picks the first row rather than the documented default of the first *available* agent in this station |
+| `drone-type` | `droneNameNeedle` becomes empty, so the restock drags whatever item the hangar view lists first |
+| `avoid-rat` | nothing, because **nothing reads `avoidRats` at all** |
+
+That last one is a finding rather than a fix. `avoidRats` is written by the
+parser, carried in `BotSettings`, documented in the bot's own header and
+reported by `--help`, and read by no decision anywhere — a setting that does
+nothing. It is guarded anyway, because "no filter is armed" is a fact about a
+dead setting rather than a property to leave a hole under, and
+`AvoidRatIsParsedAndNeverRead` pins the three uses so a fourth has to be
+noticed.
+
+**The second half is that a decline said why.** The branch printed
+`Skip this mission (<name>) using '<label>'.` and nothing else, which reads
+identically whether the match came from an operator's own `decline-mission`
+line, from this session's `missionNamesAbandoned`, or from an entry matching
+everything. Run 25 clicked Decline 105 times, so a wrongly armed filter is a
+bill that starts running on the first offer. `declineMatchFromLists` now names
+the list **and the entry** — the entry because a list of several does not say
+which one matched and a substring does not read back off the mission's name:
+
+```
+++ Skip this mission (Illegal Activity (1 of 3)) using 'Decline' -- the 'decline-mission' setting matches it on 'Illegal Activity'.
+```
+
+The setting is asked first and wins a tie, because it is the answer an operator
+can act on: an entry they wrote is a line they can delete, where the session's
+own list is gone at the next restart. The give-up beside it carries the same
+clause, which matters more there than here — `I want to skip this mission but
+see no way to.` has never fired in any recorded run, and a branch that fires
+once a session is the one whose single line has to carry everything.
+
+**No warning for a short entry.** A one-character entry matches almost every
+mission, and the obvious follow-up is to warn about entries below some length.
+There is nothing to place such a threshold in: the only entries the corpus
+carries are `Illegal Activity` and `Survey Rendezvous`, and the abandoned list's
+entries come from `missionNameForDeclining`, which strips only a `(N of 3)`
+suffix. That is no distribution at all, unlike the 44-versus-32,585 gap the
+message-box escalation sits in. With the empty value rejected the remaining
+cases are all deliberate, and the decision line now names the entry on the
+**first** offer it refuses, which is the evidence a later threshold would need.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_decline_mission_entries.py` (35 cases). Both rules
+are executed through the real `Bot.elm` in `elm repl` rather than restated: the
+parser is asked what it does with an empty value for each of the four settings,
+with the three that mean *unset* by being empty and the three comma-separated
+lists asserted unchanged beside them; and `declineMatchFromLists` is asked which
+list refuses a name, on which entry, which of the two wins a tie, and what it
+would have printed for the empty entry the parser now refuses to build. The
+wiring is read out of the source through a whitespace-collapsing reader. The
+corpus is asserted as the relation a decline-everything filter would break — a
+run that declined anything also accepted something — rather than as the issue's
+own counts, which a growing corpus would turn red.
+
+Confirmed by mutation, **fourteen** of them, each failing a named case:
+accepting the empty entry, dropping it silently instead of rejecting it, judging
+the untrimmed value, putting `decline-mission` back on `AppSettings
+.valueTypeString`, applying the guard to `short-range-ammo` or to the list
+settings, asking the abandoned list first, collapsing the two lists into one
+labelled as the setting's, naming the list without the entry, dropping the
+reason from the line that clicks the button or from the give-up beside it,
+giving `shouldDeclineMission` its own copy of the matching rule, dropping the
+entry from the sentence — and, on the tests' own premises, giving `avoidRats` a
+reader.
+
+**Two mutations survived the first time and both were real holes.** The guard's
+own `String.trim` was unreachable through `parseBotSettings`, because
+`parseSimpleListOfAssignments` trims every assigned value before a handler sees
+it — so a guard that only worked because its caller trimmed passed every case;
+`valueTypeNonEmptyString` is now asked directly. And the reason clause was
+asserted over the whole branch, where the give-up's copy of it satisfied the
+assertion with the clicking line reverted.
+
+**Unverified: any of it running, and the incident the issue was filed on.** The
+operator's report of `Save A Man's Career` being declined at a cost in standing
+is **not explained by this and is not claimed to be**. Nothing in
+`~/eve-bot-logs` records it: the decline branch has fired 486 times across every
+recorded run, on `Illegal Activity (1 of 3)` (480) and `Survey Rendezvous` (6),
+both configured, and `Save a Man's Career` appears once in the whole corpus — in
+run 1, where the bot **accepted** it. The shipped `run_mission.sh` carries one
+non-empty entry, so the empty-filter failure was latent rather than active and
+cannot be what happened either. What the issue's second half points at is the
+indiscriminate message-box matcher, which is #101's and merged as PR #109; this
+change deliberately does not touch `closeMessageBoxByDeclining` or
+`parseMessageBoxesFromUITreeRoot`, and a case asserts both are as #109 left
+them. What to watch on the next run that declines anything is the new clause
+naming a list and an entry an operator recognises — a decline whose clause names
+an entry nobody wrote is the case this was built for.
+
 ## A message box the answer does not close is bounded, and the bot stops answering it
 
 Dismissing message boxes is the first thing `generalSetupInUserInterface` does
@@ -3751,6 +3888,22 @@ exists.
   **Untested against a live client**, and whether Escape closes such a window is
   the open question — watch the status line's `message box N/120`, which should
   appear briefly and vanish on a healthy run.
+
+  And it now **refuses an empty `decline-mission` value instead of arming a
+  filter with it**, and says which list refused a mission and on what entry.
+  That setting is matched as a substring, so `decline-mission=` put `""` in the
+  list and would have handed back every mission the agent ever offered, each one
+  a standing hit logged as an ordinary skip; `agent-name`, `drone-type` and
+  `avoid-rat` had the same unguarded shape and are guarded with it. Why an
+  `Err` rather than a silent drop, what the empty value did in each of the four,
+  that `avoidRats` turns out to be read nowhere at all, and why no warning for a
+  short entry are in "A decline costs standing, so the entry that armed it has
+  to be nameable" above. **Untested against a live client**, and the operator
+  report the issue was filed on — `Save A Man's Career` declined at a cost in
+  standing — remains **unexplained**: nothing in the recordings shows the
+  decline branch firing on anything but the two configured missions, and this
+  does not claim to fix it. Watch the new clause on the next run that declines:
+  it should name an entry an operator recognises.
 
   And it now **says when it leaves drones behind** — how many and where, once in
   the decision log and then in the status line for the rest of the session. This
