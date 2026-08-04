@@ -4930,6 +4930,19 @@ Not a test of the dialog's own text, for `quitMissionConfirmationIsExpected`'s
 reason: the wording is the client's language, and the button is
 `quitMissionConfirmationButton`'s job.
 
+**The click is looked for over a window, not on the previous step**, and the
+first version of this got that wrong. `previousStepClickedMouse` was copied
+straight from #60 on the assumption that the dialog lands on the reading after
+the click, and it does not: run 26 ran this branch live and it never once fired,
+because the steps between the click and the dialog dispatch nothing, so the
+strict predicate was already false by the time there was a dialog to answer.
+
+The window is measured rather than guessed. Across runs 25 and 26 the gap from
+the dispatch that clicks Decline to the reading carrying the confirmation is
+**six steps in 158 of 158 instances**, with no other value -- so
+`declineConfirmationClickLookbackSteps` is eight, which covers every recorded
+case with two steps to spare and stays under the ten the framework keeps.
+
 -}
 declineMissionConfirmationIsExpected : BotDecisionContext -> Bool
 declineMissionConfirmationIsExpected context =
@@ -4939,7 +4952,28 @@ declineMissionConfirmationIsExpected context =
 
         Just conversation ->
             shouldDeclineMission context conversation.offeredMissionName
-                && previousStepClickedMouse context
+                && recentStepsEffectsPressedMouse
+                    declineConfirmationClickLookbackSteps
+                    context.previousStepsEffects
+
+
+{-| How far back to look for the click that asked for a "Decline Mission?".
+
+Measured: six steps from the dispatch to the dialog, in every one of the 158
+instances across runs 25 and 26, and never any other value. Eight leaves two
+steps of headroom.
+
+It cannot usefully be larger than the ten steps `lastStepsEffects` keeps, and it
+should not be: the window is the only thing separating "the dialog I asked for"
+from "a dialog that happened to appear while an agent was offering a mission I
+decline", and every step added widens that. Eight is a fact about how fast this
+client raises this dialog, not a margin to be relaxed when something else fails
+to fire.
+
+-}
+declineConfirmationClickLookbackSteps : Int
+declineConfirmationClickLookbackSteps =
+    8
 
 
 
@@ -5082,9 +5116,25 @@ previousStepClickedMouse context =
 decision context, can ask the same question.
 -}
 previousStepsEffectsPressedMouse : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
-previousStepsEffectsPressedMouse previousStepsEffects =
+previousStepsEffectsPressedMouse =
+    recentStepsEffectsPressedMouse 1
+
+
+{-| The same question over a window of steps rather than only the last one.
+
+One definition of "pressed the mouse", asked over a lookback, so a caller that
+has to survive the client taking a few steps to answer cannot drift from the
+strict one. `recentStepAskedForDroneRecall` is the same shape for a keypress.
+
+The framework keeps ten steps of effects (`lastStepsEffects`), so a lookback
+larger than that silently becomes ten -- which is why the callers' constants are
+checked against it rather than left to be discovered.
+
+-}
+recentStepsEffectsPressedMouse : Int -> List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
+recentStepsEffectsPressedMouse lookbackSteps previousStepsEffects =
     previousStepsEffects
-        |> List.take 1
+        |> List.take lookbackSteps
         |> List.any
             (List.any
                 (\effect ->

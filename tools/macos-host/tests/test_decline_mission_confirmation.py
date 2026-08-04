@@ -85,10 +85,14 @@ class TheGateIsTheSameShapeAsTheQuitMissionOne(unittest.TestCase):
 
     def setUp(self):
         self.source = bot_elm()
+        # Ends at the lookback constant that follows it, not at the section
+        # break: that constant's own doc comment names the dialog, and a looser
+        # slice would make `test_it_does_not_read_the_dialog_text` fail on prose
+        # rather than on the rule it is about.
         self.expected = collapsed(function_body(
             self.source,
             "declineMissionConfirmationIsExpected : BotDecisionContext",
-            "\n\n\n-- Docked"))
+            "\n{-| How far back to look for the click"))
 
     def test_it_needs_the_agent_to_be_offering_a_mission_we_decline(self):
         # The verdict is the bot's own settings naming this mission, which is
@@ -103,8 +107,28 @@ class TheGateIsTheSameShapeAsTheQuitMissionOne(unittest.TestCase):
                       self.expected)
         self.assertIn("Nothing -> False", self.expected)
 
-    def test_it_needs_a_click_on_the_previous_step(self):
-        self.assertIn("previousStepClickedMouse context", self.expected)
+    def test_it_looks_for_the_click_over_a_window_not_on_the_previous_step(self):
+        """The bug the first version of this shipped with.
+
+        Copied straight from #60, which asks whether the *previous* step
+        clicked. Run 26 ran that live and the branch never fired once: the
+        steps between the click and the dialog dispatch nothing, so the strict
+        predicate is already false by the time there is a dialog to answer.
+        """
+        self.assertIn("recentStepsEffectsPressedMouse", self.expected)
+        self.assertIn("declineConfirmationClickLookbackSteps", self.expected)
+        self.assertNotIn(
+            "previousStepClickedMouse context", self.expected,
+            "the strict previous-step predicate cannot see this dialog -- "
+            "measured six steps after the click, every time")
+
+    def test_the_strict_predicate_still_exists_for_its_other_callers(self):
+        # Widening this one caller must not widen #60's gate or the cascade's.
+        strict = collapsed(function_body(
+            self.source,
+            "previousStepsEffectsPressedMouse :",
+            "\n{-| The same question over a window"))
+        self.assertIn("recentStepsEffectsPressedMouse 1", strict)
 
     def test_it_does_not_read_the_dialog_text(self):
         # The wording is the client's language. Matching it would make the
@@ -116,6 +140,71 @@ class TheGateIsTheSameShapeAsTheQuitMissionOne(unittest.TestCase):
                 wording, self.expected,
                 "the gate must be a fact about the bot's intent, not about "
                 "how the client happens to word its dialog")
+
+
+class TheLookbackIsMeasured(unittest.TestCase):
+    """Eight steps, because six is what the client does and ten is the cap."""
+
+    def setUp(self):
+        self.source = bot_elm()
+        self.lookback = int(re.search(
+            r"declineConfirmationClickLookbackSteps : Int\s+"
+            r"declineConfirmationClickLookbackSteps =\s+(\d+)",
+            self.source).group(1))
+
+    def test_the_constant_is_the_measured_gap_with_headroom(self):
+        self.assertEqual(8, self.lookback)
+
+    def test_it_fits_inside_the_history_the_framework_keeps(self):
+        """A lookback past the cap silently becomes the cap."""
+        framework = os.path.join(
+            REPO_DIR, "implement", "applications", "eve-online",
+            "eve-online-mission-runner", "EveOnline",
+            "BotFrameworkSeparatingMemory.elm")
+        with open(framework, encoding="utf-8") as handle:
+            kept = int(re.search(
+                r"effectsOnGameClientWindow\s*::\s*stateBefore\.lastStepsEffects"
+                r"\s*\|>\s*List\.take (\d+)",
+                collapsed(handle.read())).group(1))
+        self.assertLessEqual(
+            self.lookback, kept,
+            "asking for more steps than the framework keeps would make the "
+            "window silently the cap rather than the measured number")
+
+    def test_the_recorded_gap_is_what_the_constant_is_set_from(self):
+        """Re-measured from the logs, so a client that changes says so here.
+
+        The gap is the number of framework steps from the dispatch that clicks
+        Decline to the reading carrying the confirmation.
+        """
+        gaps = []
+        for run in (25, 26):
+            path = os.path.join(LOG_DIR, "mission_run%d.log" % run)
+            if not os.path.exists(path):
+                continue
+            steps = 0
+            last_dispatch = None
+            declined = False
+            counted = True
+            for line in log_lines(path):
+                if line.startswith("# ["):
+                    steps += 1
+                elif "using 'Decline'" in line:
+                    declined, counted = True, False
+                elif "send-effects" in line and declined:
+                    last_dispatch = steps
+                elif ("I see a message box to close" in line
+                      and last_dispatch is not None and not counted):
+                    gaps.append(steps - last_dispatch)
+                    counted, declined = True, False
+        if not gaps:
+            self.skipTest("neither run 25 nor run 26 is on this machine")
+        self.assertGreater(len(gaps), 100, "the measurement rests on 158 cases")
+        self.assertEqual(
+            {6}, set(gaps),
+            "the recorded gap was six steps with no other value; a different "
+            "number here means the client changed and the lookback is stale")
+        self.assertGreaterEqual(self.lookback, max(gaps))
 
 
 class TheAffirmativeIsStillNarrow(unittest.TestCase):
