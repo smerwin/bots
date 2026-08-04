@@ -90,9 +90,16 @@
 
       + `agent-name` : Name of the agent to run missions for, as it appears in the
         station's Agents tab. Defaults to the first agent listed as available.
-      + `decline-mission` : Name of a mission to skip rather than run. The bot uses
+      + `decline-mission` : Name of a mission to skip rather than run, matched as a
+        substring of the offered name, so `Illegal Activity` also refuses
+        `Illegal Activity (2 of 3)`. The bot uses
         the agent's "Delay" button rather than "Decline", since declining more than
-        once every four hours costs standing. Repeatable.
+        once every four hours costs standing. Repeatable. An empty value is
+        **rejected** rather than ignored: the empty string is a substring of every
+        mission name, so `decline-mission=` would hand back every mission the agent
+        ever offers. Delete the line instead. `agent-name`, `avoid-rat` and
+        `drone-type` name one thing each and reject an empty value for the same
+        reason.
       + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. Repeatable.
       + `approach-object` : Names (or types) of objects to fly up to, as a
         comma-separated list -- `approach-object=Abandoned Mining Station, Amarr
@@ -368,13 +375,13 @@ parseBotSettings : String -> Result String BotSettings
 parseBotSettings =
     AppSettings.parseSimpleListOfAssignmentsSeparatedByNewlines
         ([ ( "agent-name"
-           , AppSettings.valueTypeString
-                (\agentName settings -> { settings | agentName = Just (String.trim agentName) })
+           , valueTypeNonEmptyString
+                (\agentName settings -> { settings | agentName = Just agentName })
            )
          , ( "decline-mission"
-           , AppSettings.valueTypeString
+           , valueTypeNonEmptyString
                 (\missionName settings ->
-                    { settings | missionNamesToDecline = String.trim missionName :: settings.missionNamesToDecline }
+                    { settings | missionNamesToDecline = missionName :: settings.missionNamesToDecline }
                 )
            )
          , ( "run-away-shield-hitpoints-threshold-percent"
@@ -390,9 +397,9 @@ parseBotSettings =
            , AppSettings.valueTypeInteger (\hits settings -> { settings | zeroDamageHitsBeforeGivingUp = hits })
            )
          , ( "avoid-rat"
-           , AppSettings.valueTypeString
+           , valueTypeNonEmptyString
                 (\ratToAvoid settings ->
-                    { settings | avoidRats = String.trim ratToAvoid :: settings.avoidRats }
+                    { settings | avoidRats = ratToAvoid :: settings.avoidRats }
                 )
            )
          , ( "attack-object"
@@ -439,8 +446,8 @@ parseBotSettings =
                 (\targetingRangeMeters settings -> { settings | targetingRangeMeters = targetingRangeMeters })
            )
          , ( "drone-type"
-           , AppSettings.valueTypeString
-                (\droneTypeName settings -> { settings | droneTypeName = String.trim droneTypeName })
+           , valueTypeNonEmptyString
+                (\droneTypeName settings -> { settings | droneTypeName = droneTypeName })
            )
          , ( "home-station"
            , AppSettings.valueTypeString
@@ -508,6 +515,61 @@ nonEmptySettingValue value =
 
         trimmed ->
             Just trimmed
+
+
+{-| A setting whose value is a name, and which therefore has no empty value.
+
+Issue #113. `decline-mission` took whatever it was given, and
+`shouldDeclineMission` matches each entry as a **substring** of the offered
+mission name -- so a `decline-mission=` line with nothing after it puts `""` in
+that list and hands back every mission the agent ever offers, one standing hit
+at a time, while the log reports each as an ordinary skip. The codebase already
+knew: `missionNameFromTracker` excludes a blank name for exactly this reason and
+says so in its own comment, and `splitSettingIntoNames` drops empties for
+exactly this reason. The tracker side was guarded and the settings side was not.
+
+**Rejecting rather than dropping, and the two existing conventions are what
+decide it.** An empty value already has two meanings here and both are argued at
+their own definitions. `nonEmptySettingValue` reads it as _unset_, which is how
+`short-range-ammo=` switches the ammo swap off from the web console without
+deleting the line. `splitSettingIntoNames` drops it, because a trailing comma is
+how one gets written by accident and the other entries on the line still carry
+what was meant. Neither applies to a setting whose whole assigned value is
+empty: nothing is left to read the intent from, and the two readings -- "I meant
+to delete this line" and "I meant to paste a name here" -- want opposite
+behaviour. Dropping picks one of them without saying so, which is the shape this
+repo keeps paying for; `AppSettings`' own answer to a value it cannot use is an
+`Err` naming the setting, which is what `valueTypeInteger` and
+`listAllSupportedValues` already do.
+
+**The price is stated rather than hidden: a rejected settings string ends the
+session.** `BotFramework`'s `BotSettingsChangedEvent` answers a parse error with
+`InternalFinishSession`, and that event is also what the web console's live
+settings change sends -- so a bad value typed mid-run costs the session. That is
+the price every other unusable value in this file already carries, and it is
+paid here on a string one keystroke away from declining every mission there is.
+
+-}
+valueTypeNonEmptyString : (String -> BotSettings -> BotSettings) -> AppSettings.SettingValueType BotSettings
+valueTypeNonEmptyString integrateSettingValue settingValueAsString =
+    case String.trim settingValueAsString of
+        "" ->
+            Err emptySettingValueRejected
+
+        trimmed ->
+            Ok (integrateSettingValue trimmed)
+
+
+{-| What an operator is told when a name setting is left empty.
+
+One constant rather than a literal at each of the four call sites, because it is
+the whole of what the rejection buys: the framework prepends the setting's name,
+so this has to carry the reason and the fix and nothing else.
+
+-}
+emptySettingValueRejected : String
+emptySettingValueRejected =
+    "this setting takes a name and the value given is empty. These names are matched against the client's own text as substrings, and the empty string is a substring of every text there is -- so an empty entry is not a filter that matches nothing, it is one that matches everything. Delete the line to mean 'no such name'."
 
 
 type alias State =
@@ -4763,15 +4825,78 @@ name recorded without its `(1 of 3)` suffix covers the rest of the chain -- see
 -}
 shouldDeclineMission : BotDecisionContext -> Maybe String -> Bool
 shouldDeclineMission context missionName =
-    case missionName of
-        Nothing ->
-            False
+    declineMissionMatch context missionName /= Nothing
 
-        Just name ->
-            (context.eventContext.botSettings.missionNamesToDecline
-                ++ context.memory.missionNamesAbandoned
+
+{-| Which list refused a mission, and the entry in it that did the refusing.
+-}
+type alias DeclineMatch =
+    { source : String
+    , entry : String
+    }
+
+
+declineSourceSetting : String
+declineSourceSetting =
+    "the 'decline-mission' setting"
+
+
+declineSourceAbandoned : String
+declineSourceAbandoned =
+    "a mission this session already gave up on"
+
+
+{-| Which of the two decline lists refuses this name, and on which entry.
+
+Issue #113. The branch this feeds printed `Skip this mission (<name>) using
+'<label>'.` and nothing more, which reads identically whether the refusal came
+from a `decline-mission` line an operator wrote, from a mission this session
+abandoned, or from an entry that matches every mission there is. Each of those
+lines is a standing hit -- run 25 clicked Decline 105 times -- so a wrongly
+armed filter is a bill that starts running on the first offer, and the first
+line it prints is the only place an operator can still stop it. The entry is
+named as well as the list because a list with several entries does not say which
+one matched, and a substring entry does not read back off the mission's name.
+
+The setting is asked first and wins where both would match, because it is the
+answer an operator can act on: an entry they wrote is a line they can delete,
+where the session's own list is gone at the next restart anyway.
+
+Takes the two lists directly rather than a `BotDecisionContext`, so the
+attribution is executed rather than restated in a test -- see
+`tools/macos-host/tests/test_decline_mission_entries.py`.
+
+-}
+declineMatchFromLists : List String -> List String -> String -> Maybe DeclineMatch
+declineMatchFromLists namesToDecline namesAbandoned name =
+    let
+        matchIn source entries =
+            entries
+                |> List.filter (\toDecline -> stringContainsIgnoringCase toDecline name)
+                |> List.head
+                |> Maybe.map (\entry -> { source = source, entry = entry })
+    in
+    case matchIn declineSourceSetting namesToDecline of
+        Just fromSetting ->
+            Just fromSetting
+
+        Nothing ->
+            matchIn declineSourceAbandoned namesAbandoned
+
+
+declineMissionMatch : BotDecisionContext -> Maybe String -> Maybe DeclineMatch
+declineMissionMatch context missionName =
+    missionName
+        |> Maybe.andThen
+            (declineMatchFromLists
+                context.eventContext.botSettings.missionNamesToDecline
+                context.memory.missionNamesAbandoned
             )
-                |> List.any (\toDecline -> stringContainsIgnoringCase toDecline name)
+
+
+describeDeclineMatch : DeclineMatch -> String
+describeDeclineMatch declineMatch =
+    declineMatch.source ++ " matches it on '" ++ declineMatch.entry ++ "'"
 
 
 
@@ -5711,6 +5836,17 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                                                     "This mission does not admit this ship and I see no way to skip it."
 
                     else if shouldDeclineMission context offeredMissionName then
+                        let
+                            -- Every one of these costs standing, so the line
+                            -- says which list refused the mission and on what
+                            -- entry: the same sentence otherwise covers an
+                            -- operator's own filter, this session's
+                            -- abandonments, and a filter matching everything.
+                            declineReason =
+                                declineMissionMatch context offeredMissionName
+                                    |> Maybe.map describeDeclineMatch
+                                    |> Maybe.withDefault "no entry in either decline list matches it"
+                        in
                         case skipOfferedMissionButton of
                             Just ( label, skipButton ) ->
                                 describeBranch
@@ -5718,12 +5854,18 @@ decideActionInAgentConversationAfterReadingSettled context conversation =
                                         ++ (offeredMissionName |> Maybe.withDefault "unnamed")
                                         ++ ") using '"
                                         ++ label
-                                        ++ "'."
+                                        ++ "' -- "
+                                        ++ declineReason
+                                        ++ "."
                                     )
                                     (clickUiElement skipButton)
 
                             Nothing ->
-                                closeConversation "I want to skip this mission but see no way to."
+                                closeConversation
+                                    ("I want to skip this mission ("
+                                        ++ declineReason
+                                        ++ ") but see no way to."
+                                    )
 
                     else
                         describeBranch
