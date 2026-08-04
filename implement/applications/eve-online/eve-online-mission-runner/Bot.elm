@@ -516,6 +516,7 @@ type alias State =
 
 type alias BotMemory =
     { lastDockedStationNameFromInfoPanel : Maybe String
+    , undockedFromStation : Maybe String
     , shipModules : ShipModulesMemory
     , shipWarpingInLastReading : Maybe Bool
     , contextMenuLastDepth : Int
@@ -6551,6 +6552,15 @@ log line reading like success. The route panel renders one
 saying the destination is here and there is nothing further to jump to. Where
 that is not true the cascade runs, which is today's behaviour.
 
+**Not the station this ship just undocked from.** #98, and the hole in the
+paragraph above: one marker says the destination is in this system, and says
+nothing about the destination being a station or about _which_ station, so
+"nearest" filled the gap and the nearest station to a ship in an undock is the
+one it just left. `stationIsTheOneJustUndockedFrom` is the check that was
+missing; `InfoPanelRouteRouteElementMarker` carries a `uiNode` and no name, so
+matching the row against the route's own destination -- the reading that would
+settle it outright -- is not something this parse can do.
+
 **The panel is showing this station.** `selectedItemIsOverviewEntry`, exactly as
 `selectThenPanelAction` does: the panel acts on whatever is selected, which is not
 necessarily what this decision is about. When it is showing something else this
@@ -6582,35 +6592,136 @@ dockAtDestinationStation context ifThePanelCannotDoIt =
         )
     of
         ( True, Just station ) ->
-            let
-                named =
-                    station.objectName |> Maybe.withDefault "the station"
-
-                withRange =
-                    named ++ " (" ++ (station.objectDistance |> Maybe.withDefault "range unknown") ++ ")"
-            in
-            if not (selectedItemIsOverviewEntry context station) then
+            if stationIsTheOneJustUndockedFrom context station then
                 describeBranch
-                    ("Dock at " ++ withRange ++ " from the selected-item panel (selecting it first).")
-                    (clickUiElement station.uiNode)
+                    ("The nearest station is '"
+                        ++ (station.objectName |> Maybe.withDefault "the station")
+                        ++ "', which this ship undocked from and has not left -- docking there again would undo the undock rather than end the trip."
+                    )
+                    ifThePanelCannotDoIt
 
             else
-                case selectedItemButtonNamed context "selectedItemDock" of
-                    Just dockButton ->
-                        describeBranch
-                            ("Dock at " ++ withRange ++ " from the selected-item panel.")
-                            (clickUiElement dockButton)
+                let
+                    named =
+                        station.objectName |> Maybe.withDefault "the station"
 
-                    Nothing ->
-                        describeBranch
-                            ("Dock at "
-                                ++ withRange
-                                ++ " -- the panel offers no 'selectedItemDock', so it is out of docking range and the menu's own Dock has to close the distance."
-                            )
-                            ifThePanelCannotDoIt
+                    withRange =
+                        named ++ " (" ++ (station.objectDistance |> Maybe.withDefault "range unknown") ++ ")"
+                in
+                if not (selectedItemIsOverviewEntry context station) then
+                    describeBranch
+                        ("Dock at " ++ withRange ++ " from the selected-item panel (selecting it first).")
+                        (clickUiElement station.uiNode)
+
+                else
+                    case selectedItemButtonNamed context "selectedItemDock" of
+                        Just dockButton ->
+                            describeBranch
+                                ("Dock at " ++ withRange ++ " from the selected-item panel.")
+                                (clickUiElement dockButton)
+
+                        Nothing ->
+                            describeBranch
+                                ("Dock at "
+                                    ++ withRange
+                                    ++ " -- the panel offers no 'selectedItemDock', so it is out of docking range and the menu's own Dock has to close the distance."
+                                )
+                                ifThePanelCannotDoIt
 
         _ ->
             ifThePanelCannotDoIt
+
+
+{-| Whether the station picked off the overview is the one the ship is standing
+in the doorway of, having just undocked from it.
+
+Issue #98, and the gap `dockAtDestinationStation`'s own "One route marker"
+paragraph left open: one marker says the destination is in this system, and
+nothing in it says the destination is a station, let alone which one. Run 28's
+mission wanted the ship in Sarum Prime, where it already was and already docked
+-- so the marker count was 1, the nearest station was the one at 0 m the ship had
+just left, and the dock fired every reading against a tracker that was saying
+`Undock`.
+
+Compared the way `dockedAtHomeStation` compares, because the two names come from
+different windows: the latch carries the info panel's `currentStationName` and
+the row carries the overview's `objectName`, and nothing guarantees they are
+written identically.
+
+-}
+stationIsTheOneJustUndockedFrom : BotDecisionContext -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+stationIsTheOneJustUndockedFrom context station =
+    stationNameIsTheOneUndockedFrom context.memory.undockedFromStation station.objectName
+
+
+{-| The station this ship undocked from and has not left yet, carried forward.
+
+Issue #98. The state that matters is "has not left", and no single reading
+carries it: the station reads 0 m away on the way out and on the way in alike,
+which is why a distance floor cannot serve as the guard.
+`lastDockedStationNameFromInfoPanel` cannot either -- it still names the agent
+station on the trip _back_ to it, where docking is the entire point of the trip.
+
+Four cases, and the order matters:
+
+  - **Docked.** Nothing to avoid. Whatever this ship does next starts from here,
+    and the name it would need is `lastDockedStationNameFromInfoPanel` anyway.
+  - **The undock itself**, read as "not docked now, docked in the last reading".
+    This is the only reading that can name the station being left, because it is
+    the last one the info panel had it.
+  - **Warping.** The ship is demonstrably somewhere else, so the latch is spent.
+    Cleared here rather than on arrival because arrival has no reading of its own
+    -- a ship that warps to a station and docks never passes through a state that
+    says "arrived, not yet docked" reliably enough to key on.
+  - **Otherwise**, carried forward unchanged. A ship that undocks and comes back
+    without ever warping is the ship this exists for: it never left.
+
+-}
+undockedFromStationAfterReading :
+    { dockedNow : Bool
+    , dockedInLastReading : Bool
+    , warpingNow : Maybe Bool
+    , lastDockedStationName : Maybe String
+    , before : Maybe String
+    }
+    -> Maybe String
+undockedFromStationAfterReading state =
+    if state.dockedNow then
+        Nothing
+
+    else if state.dockedInLastReading then
+        state.lastDockedStationName
+
+    else if state.warpingNow == Just True then
+        Nothing
+
+    else
+        state.before
+
+
+{-| The name comparison behind `stationIsTheOneJustUndockedFrom`, as two names.
+
+Separated from the reading for the reason `ammoSwapLoadIsTrusted` is: the rule is
+the part that can be wrong, and a rule reachable only through a whole
+`BotDecisionContext` is a rule no case can execute. `Nothing` on either side is
+"this reading cannot say", and the answer is then `False` -- the direction that
+leaves the dock available, because refusing to dock on a name nobody read would
+strand a ship that has arrived.
+
+-}
+stationNameIsTheOneUndockedFrom : Maybe String -> Maybe String -> Bool
+stationNameIsTheOneUndockedFrom undockedFrom overviewName =
+    case ( undockedFrom, overviewName ) of
+        ( Just undockedName, Just rowName ) ->
+            let
+                normalise =
+                    String.trim >> String.toLower
+            in
+            (normalise rowName == normalise undockedName)
+                || stringContainsIgnoringCase (String.trim rowName) undockedName
+
+        _ ->
+            False
 
 
 {-| Right-click the route panel's first marker and take whichever of "dock" or
@@ -11520,6 +11631,7 @@ botMain =
 initBotMemory : BotMemory
 initBotMemory =
     { lastDockedStationNameFromInfoPanel = Nothing
+    , undockedFromStation = Nothing
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , shipWarpingInLastReading = Nothing
     , contextMenuLastDepth = 0
@@ -15179,6 +15291,31 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         dockedNow =
             currentStationNameFromInfoPanel /= Nothing
 
+        -- #98. The station a ship has just undocked from is the nearest one
+        -- there is, at 0 m, with its Dock button necessarily offered -- so
+        -- `dockAtDestinationStation`, which picks the nearest station and
+        -- never asks whether it is the destination, docked straight back into
+        -- it. Run 28 did that 498 times without the ship ever leaving.
+        --
+        -- Latched rather than read from the reading, because the state that
+        -- matters is "has not left yet" and no single reading carries it: 0 m
+        -- reads the same on the way out as on the way in, which is why a
+        -- distance floor cannot serve here. `lastDockedStationNameFromInfoPanel`
+        -- alone cannot either -- it still names the agent station on the trip
+        -- back to it, where docking is the whole point.
+        --
+        -- Cleared by the warp, because that is the ship demonstrably somewhere
+        -- else. A ship that undocks and returns without ever warping is one
+        -- that never left, which is the case this exists for.
+        undockedFromStation =
+            undockedFromStationAfterReading
+                { dockedNow = dockedNow
+                , dockedInLastReading = botMemoryBefore.dockedInLastReading
+                , warpingNow = shipIsWarping
+                , lastDockedStationName = botMemoryBefore.lastDockedStationNameFromInfoPanel
+                , before = botMemoryBefore.undockedFromStation
+                }
+
         -- The two ways a site is left. Both are read at the far end of the
         -- departure rather than at its start: a ship lining up to warp still
         -- has time to get its drones back, and run 11 spent 21 readings of
@@ -15277,6 +15414,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
             |> List.filterMap identity
             |> List.head
+    , undockedFromStation = undockedFromStation
     , shipModules =
         botMemoryBefore.shipModules
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient

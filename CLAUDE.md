@@ -1507,6 +1507,31 @@ cascade rather than waiting, which is why `selectThenPanelAction` could not be
 reused directly: its answer to a missing button is to wait and eventually ask for
 help, which here would strand a ship that simply has to fly further first.
 
+**A fourth condition, and the one those three were missing.** #98: the marker
+count says the destination is in *this system* and says nothing about the
+destination being a station, let alone which one — so "nearest" filled the gap,
+and the nearest station to a ship in an undock is the one it just left, at 0 m,
+with its Dock button necessarily offered. Run 28 docked straight back in **498
+times** while the tracker's own next step read `Undock`. The guard is identity
+plus a latch: `undockedFromStationAfterReading` carries the name from the one
+reading that can name it — not docked now, docked in the last reading — and drops
+it on the warp, the ship being demonstrably somewhere else.
+
+Neither cheaper signal works, and both were tried on the corpus before this was
+written. **The tracker's step does not**: bucketing every zero-metre dock by the
+step on the same reading gives 357 under `Destination Set` and **none** under
+`Undock` or `Abort Undock`, because those land on *docked* readings where the bot
+correctly clicks Undock and the dock decision happens on the next one, in space.
+**Distance does not either**: 0 m reads the same on the way out as on the way in,
+so no floor separates "just undocked from" from "just arrived at".
+`lastDockedStationNameFromInfoPanel` on its own does not, either — it still names
+the agent station on the trip *back* to it, where docking is the entire point.
+
+The fail direction is stated: a name neither window read declines to block, which
+leaves the dock available. Refusing on a name nobody read would strand a ship
+that has arrived, and a declined dock costs only the panel optimisation — it
+falls through to the cascade, which still travels the route.
+
 **Verified without a live client**, in
 `tools/macos-host/tests/test_docking_run_in.py` (31 cases). The rule is
 *executed* through the real `Bot.elm` in `elm repl` rather than restated in
