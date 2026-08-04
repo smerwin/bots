@@ -278,7 +278,7 @@ class TheDeclineNameIsExecutedRatherThanMirrored(unittest.TestCase):
             # right only for *nothing* to read -- a machine that has logs but
             # whose names no longer parse out of them is drift worth failing on,
             # which is why the assertion below is not the skip condition. Same
-            # split `test_dock_outranks_the_fight` makes.
+            # split `test_travel_outranks_the_fight` makes.
             self.skipTest("no recorded runs in ~/eve-bot-logs")
         self.assertGreater(len(names), 20,
                            "recorded runs are present but hold almost no "
@@ -367,7 +367,7 @@ class TheThresholdIsARelationNotANumber(unittest.TestCase):
         pocket = collapsed(function_body(
             self.source,
             "decideActionInMissionPocket context seeUndockingComplete =",
-            "\ndockOutranksTheFight :"))
+            "\ntravelOutranksTheFight :"))
         self.assertIn("this mission is not going to progress on its own", pocket)
         self.assertIn(
             "if nothingToDoTicksBeforeCryingStuck < context.memory.nothingToDoTicks then",

@@ -37,7 +37,7 @@ catastrophic 100 -> 0 drop as well as a gentle one. The rule can postpone a
 retreat by a reading; it can never suppress one.
 
 The rules are **executed** rather than mirrored, through `elm repl` against the
-bot's own compiled code -- the recipe `test_dock_outranks_the_fight.py`
+bot's own compiled code -- the recipe `test_travel_outranks_the_fight.py`
 established. Those cases need `elm` on PATH and the app's dependencies already
 fetched, which is what `compile_bot.sh` leaves behind; without it they **fail**
 rather than skipping, for the reason `prerequisites.py` gives. The log-derived

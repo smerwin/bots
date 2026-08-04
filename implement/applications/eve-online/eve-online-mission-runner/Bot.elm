@@ -3013,21 +3013,17 @@ missionIsReadyToComplete mission =
         |> List.any (stringContainsIgnoringCase "complete mission")
 
 
-{-| The label on the mission tracker's travel button, if it currently has one
-and it names a step worth taking. No label means the ship is on grid and it is
-the bot's own job to act (fight, loot, or take an acceleration gate) rather
-than to travel.
+{-| The mission tracker's travel button as the client is rendering it now, with
+whatever label it carries -- including the ones that are not steps to take.
 
-Feedback: the same button turns into "Abort Undock" for the several seconds
-an undock takes, and clicking whatever label it happens to show made the bot
-cancel its own undock and then start it again, forever. Observed live as an
-Undock/Abort Undock loop. Labels that undo the step in progress are therefore
-not travel steps at all -- while one is showing, the right move is to wait for
-the action already under way to finish.
+Separate from `missionTravelStep` because two questions are being asked of the
+same widget and only one of them is "what should be clicked". `Destination Set`
+is not a click and is still the tracker saying where the ship is going, which is
+what `travelStepThatEndsTheFight` reads it for.
 
 -}
-missionTravelStep : BotDecisionContext -> Maybe ( String, EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion )
-missionTravelStep context =
+missionTravelButton : BotDecisionContext -> Maybe ( String, EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion )
+missionTravelButton context =
     missionInfoPanelEntry context
         |> Maybe.andThen .locationButton
         |> Maybe.andThen
@@ -3049,23 +3045,39 @@ missionTravelStep context =
                     Nothing
 
                 else
-                    case button.label of
-                        Just label ->
-                            if labelUndoesStepInProgress label then
-                                Nothing
+                    button.label |> Maybe.map (\label -> ( label, button.uiNode ))
+            )
 
-                            else if labelReportsRouteAlreadySet label then
-                                -- Nothing to click: the route is already set. In
-                                -- space the caller travels it instead; docked,
-                                -- there is nothing to do but wait for the button to
-                                -- offer "Undock".
-                                Nothing
 
-                            else
-                                Just ( label, button.uiNode )
+{-| The label on the mission tracker's travel button, if it currently has one
+and it names a step worth taking. No label means the ship is on grid and it is
+the bot's own job to act (fight, loot, or take an acceleration gate) rather
+than to travel.
 
-                        Nothing ->
-                            Nothing
+Feedback: the same button turns into "Abort Undock" for the several seconds
+an undock takes, and clicking whatever label it happens to show made the bot
+cancel its own undock and then start it again, forever. Observed live as an
+Undock/Abort Undock loop. Labels that undo the step in progress are therefore
+not travel steps at all -- while one is showing, the right move is to wait for
+the action already under way to finish.
+
+-}
+missionTravelStep : BotDecisionContext -> Maybe ( String, EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion )
+missionTravelStep context =
+    missionTravelButton context
+        |> Maybe.andThen
+            (\( label, buttonNode ) ->
+                if labelUndoesStepInProgress label then
+                    Nothing
+
+                else if labelReportsRouteAlreadySet label then
+                    -- Nothing to click: the route is already set. In space the
+                    -- caller travels it instead; docked, there is nothing to do
+                    -- but wait for the button to offer "Undock".
+                    Nothing
+
+                else
+                    Just ( label, buttonNode )
             )
 
 
@@ -5494,10 +5506,15 @@ has to be entered the tracker carries no label at all, so the gate branch is
 reached; once the mission is done the tracker says "Dock", which correctly
 wins over a gate that is still sitting on the overview.
 
-**The one step that outranks the fight instead of following it is "Dock"**,
-and `dockOutranksTheFight` is the whole of that exception -- see there for why
-it is the only label that gets one, and for what still keeps the guns firing
-after it appears.
+**Once the objective is finished the travel branch outranks the fight instead
+of following it**, and `travelOutranksTheFight` is the whole of that exception
+-- see there for which travel steps count, and for what still keeps the guns
+firing after one appears.
+
+The branch it hands back on those readings is `travelTheStepTheTrackerOffers`
+below, which is the _same value_ the fight falls through to. So disengaging
+never invents a move: it takes the one combat was hiding, and every settling
+window, drone recall and gate precedence in it applies unchanged.
 
 -}
 decideActionInMissionPocket : BotDecisionContext -> SeeUndockingComplete -> DecisionPathNode
@@ -5509,8 +5526,99 @@ decideActionInMissionPocket context seeUndockingComplete =
             -- until the tracker has something else to offer.
             describeBranch "A route is set -- travel towards the mission's system."
                 (jumpToNextSystem context)
+
+        travelTheStepTheTrackerOffers =
+            case missionTravelStep context of
+                Just ( label, buttonNode ) ->
+                    ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
+                        (clickMissionTravelButton context label buttonNode)
+
+                Nothing ->
+                    activateAccelerationGateIfPresent context
+                        |> Maybe.withDefault
+                            (closeSearchResultsWhenRouteIsSet context
+                                |> Maybe.withDefault
+                                    (if routeIsSet context then
+                                        travelTheRoute
+
+                                     else
+                                        approachConfiguredObjectIfPresent context
+                                            |> Maybe.withDefault
+                                                (case missionInfoPanelEntry context of
+                                                    Just _ ->
+                                                        if nothingToDoTicksBeforeCryingStuck < context.memory.nothingToDoTicks then
+                                                            -- Waiting was the right first answer and the wrong
+                                                            -- last one. This branch is the bottom of the tree:
+                                                            -- nothing to shoot, no cargo it can find, no travel
+                                                            -- step, no gate, no route, no configured object on
+                                                            -- grid. If that has not changed in minutes, the
+                                                            -- mission is not "catching up" and nothing here will
+                                                            -- make it.
+                                                            --
+                                                            -- Two runs died in this branch without a word. Run
+                                                            -- 114 sat in it for 14,111 decisions, 37% of the
+                                                            -- session. Run 124 reached it with the tracker
+                                                            -- offering no travel button at all and burned half
+                                                            -- an hour. Neither raised an alarm, because waiting
+                                                            -- looks identical whether the mission is a second
+                                                            -- behind or permanently unreachable.
+                                                            --
+                                                            -- This does not rescue the mission -- it cannot, from
+                                                            -- here. It converts a silently wasted session into
+                                                            -- one that says so, which is what stall_watch
+                                                            -- screenshots and reports.
+                                                            -- Deliberately no reading count in the text. The
+                                                            -- alarm repeats for as long as the state lasts, and
+                                                            -- a counter in the message makes every repeat a
+                                                            -- distinct line -- which defeats stall_watch's
+                                                            -- dedupe and any log filter downstream. Run 126
+                                                            -- emitted 151 unique variants of this one alarm.
+                                                            describeBranch
+                                                                ("Nothing to fight, no travel step, nothing on grid to approach, and over "
+                                                                    ++ String.fromInt nothingToDoTicksBeforeCryingStuck
+                                                                    ++ " readings of it -- this mission is not going to progress on its own."
+                                                                )
+                                                                askForHelpToGetUnstuck
+
+                                                        else
+                                                            describeBranch
+                                                                "Nothing to fight and no travel step offered -- wait for the mission to catch up."
+                                                                waitForProgressInGame
+
+                                                    Nothing ->
+                                                        -- No tracker means no mission, a state that could not
+                                                        -- arise while every hand-in happened docked, since the
+                                                        -- mission then ended with the ship already at the agent.
+                                                        -- Completing remotely ends it in space instead, and the
+                                                        -- agent will only offer the next one in person -- asked
+                                                        -- remotely it answers "Please drop by, so we can
+                                                        -- formalize the mission contract" and offers no buttons.
+                                                        --
+                                                        -- So route back to the station we last undocked from,
+                                                        -- which is the agent's, and let the docked flow ask for
+                                                        -- the next mission. dockAtStation is not the way: it
+                                                        -- reads the surroundings menu, which lists only the
+                                                        -- current system, so it cannot reach an agent two jumps
+                                                        -- out, and inside a deadspace pocket it offers no
+                                                        -- stations at all -- live, it fell through to clicking
+                                                        -- "Approach" and "Warp to Within (0 m)" on whatever was
+                                                        -- in the menu.
+                                                        case context.memory.lastDockedStationNameFromInfoPanel of
+                                                            Just stationName ->
+                                                                routeToStation context stationName
+
+                                                            Nothing ->
+                                                                -- Only before the first dock of a session, so
+                                                                -- there is nothing to aim at yet.
+                                                                describeBranch
+                                                                    "No mission, and I have not docked anywhere this session to head back to."
+                                                                    waitForProgressInGame
+                                                )
+                                    )
+                            )
     in
-    dockOutranksTheFight context
+    travelOutranksTheFight context
+        travelTheStepTheTrackerOffers
         (decideActionInCombat context
             seeUndockingComplete
             (case expandMissionTrackerIfCollapsed context of
@@ -5529,107 +5637,22 @@ decideActionInMissionPocket context seeUndockingComplete =
                             objectiveAction
 
                         Nothing ->
-                            case missionTravelStep context of
-                                Just ( label, buttonNode ) ->
-                                    ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
-                                        (clickMissionTravelButton context label buttonNode)
-
-                                Nothing ->
-                                    activateAccelerationGateIfPresent context
-                                        |> Maybe.withDefault
-                                            (closeSearchResultsWhenRouteIsSet context
-                                                |> Maybe.withDefault
-                                                    (if routeIsSet context then
-                                                        travelTheRoute
-
-                                                     else
-                                                        approachConfiguredObjectIfPresent context
-                                                            |> Maybe.withDefault
-                                                                (case missionInfoPanelEntry context of
-                                                                    Just _ ->
-                                                                        if nothingToDoTicksBeforeCryingStuck < context.memory.nothingToDoTicks then
-                                                                            -- Waiting was the right first answer and the wrong
-                                                                            -- last one. This branch is the bottom of the tree:
-                                                                            -- nothing to shoot, no cargo it can find, no travel
-                                                                            -- step, no gate, no route, no configured object on
-                                                                            -- grid. If that has not changed in minutes, the
-                                                                            -- mission is not "catching up" and nothing here will
-                                                                            -- make it.
-                                                                            --
-                                                                            -- Two runs died in this branch without a word. Run
-                                                                            -- 114 sat in it for 14,111 decisions, 37% of the
-                                                                            -- session. Run 124 reached it with the tracker
-                                                                            -- offering no travel button at all and burned half
-                                                                            -- an hour. Neither raised an alarm, because waiting
-                                                                            -- looks identical whether the mission is a second
-                                                                            -- behind or permanently unreachable.
-                                                                            --
-                                                                            -- This does not rescue the mission -- it cannot, from
-                                                                            -- here. It converts a silently wasted session into
-                                                                            -- one that says so, which is what stall_watch
-                                                                            -- screenshots and reports.
-                                                                            -- Deliberately no reading count in the text. The
-                                                                            -- alarm repeats for as long as the state lasts, and
-                                                                            -- a counter in the message makes every repeat a
-                                                                            -- distinct line -- which defeats stall_watch's
-                                                                            -- dedupe and any log filter downstream. Run 126
-                                                                            -- emitted 151 unique variants of this one alarm.
-                                                                            describeBranch
-                                                                                ("Nothing to fight, no travel step, nothing on grid to approach, and over "
-                                                                                    ++ String.fromInt nothingToDoTicksBeforeCryingStuck
-                                                                                    ++ " readings of it -- this mission is not going to progress on its own."
-                                                                                )
-                                                                                askForHelpToGetUnstuck
-
-                                                                        else
-                                                                            describeBranch
-                                                                                "Nothing to fight and no travel step offered -- wait for the mission to catch up."
-                                                                                waitForProgressInGame
-
-                                                                    Nothing ->
-                                                                        -- No tracker means no mission, a state that could not
-                                                                        -- arise while every hand-in happened docked, since the
-                                                                        -- mission then ended with the ship already at the agent.
-                                                                        -- Completing remotely ends it in space instead, and the
-                                                                        -- agent will only offer the next one in person -- asked
-                                                                        -- remotely it answers "Please drop by, so we can
-                                                                        -- formalize the mission contract" and offers no buttons.
-                                                                        --
-                                                                        -- So route back to the station we last undocked from,
-                                                                        -- which is the agent's, and let the docked flow ask for
-                                                                        -- the next mission. dockAtStation is not the way: it
-                                                                        -- reads the surroundings menu, which lists only the
-                                                                        -- current system, so it cannot reach an agent two jumps
-                                                                        -- out, and inside a deadspace pocket it offers no
-                                                                        -- stations at all -- live, it fell through to clicking
-                                                                        -- "Approach" and "Warp to Within (0 m)" on whatever was
-                                                                        -- in the menu.
-                                                                        case context.memory.lastDockedStationNameFromInfoPanel of
-                                                                            Just stationName ->
-                                                                                routeToStation context stationName
-
-                                                                            Nothing ->
-                                                                                -- Only before the first dock of a session, so
-                                                                                -- there is nothing to aim at yet.
-                                                                                describeBranch
-                                                                                    "No mission, and I have not docked anywhere this session to head back to."
-                                                                                    waitForProgressInGame
-                                                                )
-                                                    )
-                                            )
+                            travelTheStepTheTrackerOffers
             )
         )
 
 
-{-| Take the mission tracker's "Dock" step instead of clearing the field.
+{-| Take the trip the mission tracker is asking for instead of clearing the
+field.
 
-Once the travel button reads "Dock" and the objective carries no instruction,
-the mission is over and the only thing being asked for is the trip back.
-Whatever is still alive on the grid is optional, and killing it is uncompensated
-risk: the site keeps producing rats, every extra minute on grid is more incoming
-fire for no reward, and the time comes out of the next mission's session budget.
+Once the objective carries no instruction and the tracker is offering a travel
+step -- whichever step it is -- the mission here is over and the only thing
+being asked for is the journey. Whatever is still alive on the grid is optional,
+and killing it is uncompensated risk: the site keeps producing rats, every extra
+minute on grid is more incoming fire for no reward, and the time comes out of
+the next mission's session budget.
 
-Run 11 is the measurement. The tracker read
+Run 11 is the original measurement. The tracker read
 `Illegal Activity (3 of 3) -- no instruction (next step: Dock)` on 77
 consecutive in-space readings; 386 of the 453 decision blocks inside them went
 to locking and shooting; and the first in-space click on that Dock button came
@@ -5640,18 +5663,51 @@ branch in `decideActionInCombat`, so travel was the fallback reached only once
 combat had nothing left to offer, and combat has something to offer for as long
 as anything is alive.
 
-**What still keeps the bot fighting after "Dock" appears**, since the point of
-this branch is to stop:
+**The first version of this fired on the label "Dock" alone, and that was the
+rarest case there is.** Counted over the whole corpus on the readings that cost
+something -- in space, objective complete, rats on the overview -- "Dock" is 35
+readings and the labels it ignored are 2,344: `Set Destination` 1,443 at an
+average of 7.0 rats on grid, `Destination Set` 812 at 3.0, `Start Conversation`
+71, `Preparing` 15, `Warping` 3. So the condition is now the objective and the
+_existence_ of a travel step, not which word the button carries.
+
+**Why the word does not need checking, measured rather than assumed.** The
+labels that mean the mission is still running do not appear beside a finished
+objective with a fight on the grid. `Warp to Location` is the one that would
+matter -- taking it would leave a pocket that has not been cleared -- and in
+10,032 readings carrying an objective it has appeared beside a finished one
+**three times**, all three a flicker between `Dock` readings as a mission ended,
+none of them with a rat on the overview. `Read Details`, `Docking`, `Undocking`
+and `Jump` never appear beside a finished objective at all. `Undock` and `Abort
+Undock` do, but only on readings with no ship UI -- in station, where this
+branch is not reached -- and `Abort Undock` is not a travel step in the first
+place (`labelUndoesStepInProgress`). The objective half is what excludes them,
+on the evidence, and a list of permitted words would be the mistake this change
+is fixing: it handles what has been measured and leaves whatever the client says
+next. The vocabulary has already grown twice, and both times silently -- #62's
+objective-chain panel added four labels, and run 22 added one that is not text.
+
+**The transient labels are included, and they cost nothing either way.**
+`Preparing` and `Warping` read like states rather than commands, and the
+recordings say the distinction is unobservable from here: on every reading where
+one of them coincides with a finished objective and rats on the overview, the
+ship was already in warp (15 of 15, 3 of 3), and `decideActionWhenInSpace`
+answers "I am in warp" before this branch is reached. Where they are reached the
+overview is empty and there is no fight to leave.
+
+**A label the client did not render never counts** -- see
+`travelLabelIsReadableText`, which is where the failure direction of this change
+is decided.
+
+**What still keeps the bot fighting**, since the point of this branch is to
+stop:
 
   - **Anything warp disrupting the ship.** Docking is a warp, so a scrambler
     makes leaving impossible, and killing it is the only thing that restores the
     option -- `overviewEntryIsWarpDisruptingMe`'s own reason for existing, and
     the reason the combat path already sorts it to the front. This branch hands
-    the fight back and says so, rather than clicking a Dock button that cannot
-    work. It is the one case where being shot outranks leaving.
-  - **Any other travel label.** "Undock", "Set Destination" and "Warp to
-    Location" all appear mid-mission with work still to do, so they keep the old
-    order. That is why the match is exact -- see `missionTravelStepIsDock`.
+    the fight back and says so, rather than taking a trip that cannot start. It
+    is the one case where being shot outranks leaving.
   - **An objective that still says something.** A tracker still carrying an
     instruction has not finished, whatever its travel button offers, so combat
     stays in front of it. The looting question is deliberately left alone: a
@@ -5660,6 +5716,11 @@ this branch is to stop:
     one thing skipped that is not vacuous under "no instruction" is a gate key
     the _client_ named (`gateKeyWanted`), and a gate key is only ever wanted for
     a pocket this mission no longer has to enter.
+  - **A tracker with nothing to travel to.** The step has to be one the bot can
+    actually take -- a button to click, or a route the panel confirms is set --
+    so a reading where the tracker says the route is set and no route exists
+    keeps the old order rather than disengaging into the bottom of the travel
+    branch, where the stall counter and #54's abandonment live.
   - **A lost ship, and the retreats.** Both already sit above this and neither
     is touched. `recoverPodAfterShipLoss` answers `Just` on every reading its
     verdict exists and short-circuits the whole docked-or-in-space split, and
@@ -5667,23 +5728,27 @@ this branch is to stop:
     So the damage-rate retreat still outranks this, which is the right way
     round: that one is the controller for "leave now, this is going badly", and
     this one is for "the job is done, go home". There is no second "leave now"
-    here -- this branch presses the tracker's own button and owns no clock.
+    here -- this branch takes the tracker's own step and owns no clock.
 
 **Being shot, otherwise, does not keep the guns on.** That is a decision, not an
 oversight. #40's rule -- whatever the client says is shooting this ship is a
 valid target -- is untouched and still applies for as long as there is a fight
-to be in; once the tracker says Dock, the answer to being shot is to leave,
+to be in; once the objective is done, the answer to being shot is to leave,
 which is what every retreat in this file already says. The recordings say the
-trade is cheap: across those 77 readings the client's combat log reported any
+trade is cheap: across run 11's 77 readings the client's combat log reported any
 incoming damage at all on 4 of them, at most 7 hitpoints in a 45-second window
 against a threshold of 3500. The bot was not fighting for its life, it was
 farming a field it had been told to leave. Were the damage real,
 `runAwayIfLowHealth` would have taken the reading before this branch saw it.
 
-**Drones leave through the existing recall**, never a second one: the click is
-handed to `ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping`,
-exactly as the travel branch this hoists always did, so #7's lost drones and the
-give-up that followed it both still apply, unchanged and un-duplicated.
+**Nothing new is done to leave.** The step handed back is
+`travelTheStepTheTrackerOffers`, the same value the fight itself falls through
+to, so the click still goes through
+`ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping` and
+`clickMissionTravelButton`'s settling window, an acceleration gate on the grid
+still outranks flying a route, and #7's lost drones and the give-up that
+followed both still apply, unchanged and un-duplicated. This branch changes
+_when_ that step is taken, never what it is.
 
 Reachability. This runs on every reading that reaches
 `decideActionInMissionPocket` -- in space, ship UI parsing, no ship-loss verdict
@@ -5691,20 +5756,20 @@ latched, no retreat running, no stray context menu, not in warp, no agent
 conversation open, no middle-row module to manage -- and declines on all of them
 but the ones described above. It cannot fire against a collapsed tracker: the
 client removes the travel button from the tree along with the objectives, so
-`missionTravelStep` is Nothing and `expandMissionTrackerIfCollapsed` gets its
+`missionTravelButton` is Nothing and `expandMissionTrackerIfCollapsed` gets its
 turn under combat as before. And it clears itself, with no counter and nothing
 latched: every condition is re-derived from the live reading, so the moment the
-button stops reading "Dock" -- the ship docked, the mission moved on, the
+tracker stops offering a step -- the ship docked, the mission moved on, the
 tracker was collapsed -- the fight is the bot's job again on that same reading.
 
 -}
-dockOutranksTheFight : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
-dockOutranksTheFight context ifTheFightIsStillOurs =
+travelOutranksTheFight : BotDecisionContext -> DecisionPathNode -> DecisionPathNode -> DecisionPathNode
+travelOutranksTheFight context ifTheJobHereIsDone ifTheFightIsStillOurs =
     case travelStepThatEndsTheFight context of
         Nothing ->
             ifTheFightIsStillOurs
 
-        Just ( label, buttonNode ) ->
+        Just label ->
             case scramblerHoldingTheShipHere context of
                 Just holdingUs ->
                     -- Said on every reading it declines, not once, for
@@ -5726,22 +5791,34 @@ dockOutranksTheFight context ifTheFightIsStillOurs =
                             ++ label
                             ++ "' -- stop fighting and leave the rest of the field alone."
                         )
-                        (ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
-                            (clickMissionTravelButton context label buttonNode)
-                        )
+                        ifTheJobHereIsDone
 
 
-{-| The tracker's travel step, when it is the one that means the objective is
-finished and only the trip home is left.
+{-| The tracker's travel step, when it is one that means the objective is
+finished and only the journey is left -- the label, for the decision log.
 
-Both halves are needed. The label alone would disengage on a courier mission
-whose delivery step is also a dock, and the empty objective alone would
-disengage while the tracker still had a gate or a warp to offer.
+Three things have to hold, and each excludes a different thing.
+
+The objective carries no instruction. Of the recorded `Dock` readings, 3,935
+carry a live courier instruction (`Bring <a ...>The Damsel</a> to ...`), so the
+step alone would disengage on a mission still asking for something -- and this
+is also what keeps `Warp to Location` out, which has never once been recorded
+beside a finished objective on a grid with a rat on it.
+
+The label is text the client rendered (`travelLabelIsReadableText`). Widening
+from an equality test to "any step" removes the accident that used to decline a
+glyph, so the check is now explicit.
+
+And the step is one the bot can take: a button `missionTravelStep` would click,
+or the tracker reporting a route that the route panel confirms exists. The
+second is `Destination Set` -- 812 costly readings, and not a click at all
+(`labelReportsRouteAlreadySet`); the trip is travelling the route the tracker
+already set, which the caller's own branch does. Requiring the route to really
+be there is what stops a disengagement into a branch with nothing to do, where
+the stall counter and #54's abandonment wait.
 
 -}
-travelStepThatEndsTheFight :
-    BotDecisionContext
-    -> Maybe ( String, EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion )
+travelStepThatEndsTheFight : BotDecisionContext -> Maybe String
 travelStepThatEndsTheFight context =
     case missionInfoPanelEntry context of
         Nothing ->
@@ -5752,36 +5829,77 @@ travelStepThatEndsTheFight context =
                 Nothing
 
             else
-                missionTravelStep context
+                missionTravelButton context
                     |> Maybe.andThen
-                        (\( label, buttonNode ) ->
-                            if missionTravelStepIsDock label then
-                                Just ( label, buttonNode )
+                        (\( label, _ ) ->
+                            if not (travelLabelIsReadableText label) then
+                                Nothing
 
                             else
-                                Nothing
+                                case missionTravelStep context of
+                                    Just _ ->
+                                        Just label
+
+                                    Nothing ->
+                                        if labelReportsRouteAlreadySet label && routeIsSet context then
+                                            Just label
+
+                                        else
+                                            Nothing
                         )
 
 
-{-| Whether the tracker's travel label is the one that ends the mission.
+{-| Whether the tracker's travel label is something the client rendered for a
+person to read.
 
-Matched whole rather than as a substring, and this is the trap the whole change
-turns on: **"Undock" contains "dock"**. It is the label the tracker shows at the
-start of every single mission, so a substring rule would read the ship's own
-departure as "the objective is complete" and disengage on the station ramp,
-forever, with nothing to dock at. `labelUndoesStepInProgress` keeps "Abort
-Undock" out of `missionTravelStep` already, but that is a different guard
-answering a different question and cannot be leaned on for this one.
+**This is where this change chooses its failure direction, and it is the
+deliberate part.** The rule it replaces was an equality test against "Dock",
+which declined a label with no text by accident -- run 11 rendered a travel step
+three times as the codepoints `U+0002 U+0000 U+AD1D8 U+0001 U+0001 U+0000
+U+0001`, six C0 controls around one codepoint that is unassigned (category `Cn`,
+plane 10) rather than private-use, and an equality test simply did not match it.
+A rule of the form "any travel step is offered" matches anything, so it would
+have disengaged on a button the client failed to render, on a grid the bot can
+see rats on. That is fail-open, and it is refused here: an unreadable label is
+not a step, and the bot keeps fighting, which is exactly what it does today.
 
-Trimmed and lowercased for `isObjectShootingAtUs`'s reason -- nothing here
-should depend on the client's spacing or capitalisation staying put -- and
-checked against the labels the recorded runs actually carry in
-`tools/macos-host/tests/test_dock_outranks_the_fight.py`.
+**The corpus contains the case that makes this load-bearing rather than
+theoretical.** Run 22 rendered a travel step as `U+0000 U+0000 . 5 0 space A U
+U+0000` -- a distance readout wrapped in NULs -- on `Avenge a Fallen Comrade`
+with **no instruction**. The objective half does not decline that one; only this
+does.
+
+The test is that the label is printable ASCII with at least one letter in it.
+Every one of the labels the recorded runs carry is ASCII (`Warp to Location`,
+`Set Destination`, `Destination Set`, `Dock`, `Docking`, `Undock`, `Undocking`,
+`Abort Undock`, `Warping`, `Preparing`, `Start Conversation`, `Read Details`,
+`Jump`, `Jumping`), and neither non-text label is: the first has no letter and
+no printable character at all, the second has letters and NULs around them.
+Deliberately not a private-use-area test, which is the trap -- `U+AD1D8` is
+unassigned, not private-use, and a PUA rule would call it text.
+
+The cost is stated rather than hidden: a client rendering this button in a
+non-Latin script disables this branch entirely and the bot behaves as it did
+before the change. That is the safe direction, and it is the same assumption the
+rest of this file already makes about the client's language.
 
 -}
-missionTravelStepIsDock : String -> Bool
-missionTravelStepIsDock label =
-    (label |> String.trim |> String.toLower) == "dock"
+travelLabelIsReadableText : String -> Bool
+travelLabelIsReadableText label =
+    let
+        trimmed =
+            String.trim label
+
+        characterIsPrintableAscii character =
+            let
+                code =
+                    Char.toCode character
+            in
+            0x20 <= code && code <= 0x7E
+    in
+    not (String.isEmpty trimmed)
+        && String.all characterIsPrintableAscii trimmed
+        && String.any Char.isAlpha trimmed
 
 
 {-| Whether the mission's objective has stopped asking for anything.
