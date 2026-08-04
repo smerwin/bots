@@ -3016,6 +3016,7 @@ shipped configuration rather than edge cases:
 | ship loss (#33) | absent — a destroyed ship meant ratting in a capsule, which reads 100/100 | ported, above the docked-or-in-space split, bounded at 150 readings |
 | drone recall (#11) | **no bound of any kind**, in front of every warp, tether and dock | `droneRecallUnansweredTicks`, give-up, focus-recovery click |
 | what it will shoot (#40) | the overview's icon colour and nothing else | plus whatever the combat log names as hitting the ship |
+| setting its own route | could only *follow* one a human set | `hunt-system` circuit, asked for through the host's ESI directive |
 
 Two things about the port are worth keeping in view.
 
@@ -3026,6 +3027,56 @@ in space — and because every caller took the recall *instead of* its own next
 step, a recall the client never answered meant the ship never docked and never
 tethered either. That is why `returnDronesToBay` takes the caller's next step
 here too: the shape is what makes the give-up expressible at all.
+
+**It can now originate a route, which is the one thing it never could.**
+saxrat could always *follow* a route — `jumpToNextSystem` right-clicks the route
+panel's first marker and takes the jump entry — but with the anomalies in a
+system exhausted and no route set it fell through to `tetherAtStructure` and
+parked. `noProbeScanResultsAndNoRouteLastTimeInSpace` exists precisely because
+it would otherwise undock straight back into the same dead end. Moving to the
+next system was a human's job.
+
+The gap was never the travelling; it was that a solar system name cannot be
+spelled in the vocabulary a decision has. So the ask rides the status text, the
+same channel #69 opened: `hunt-system` gives the bot a circuit,
+`setRouteToNextHuntingGround` writes `@host set-destination <system>` from
+`jumpToNextSystem`'s no-route case, and the host — whose directive regex is
+bot-agnostic and was already live for saxrat — sets it through ESI.
+
+**Solar systems are the easy ESI case, unlike the stations #17 struggled with.**
+`resolve_name` answers them straight out of `/universe/ids/`'s `systems` bucket;
+the fallback that enumerates a system's stations exists because that endpoint
+does not index every NPC station, and no such problem applies to a system name.
+
+Three things make it bounded rather than another forever-loop. The rotation is
+an *index* advanced when the ship is standing in the system it points at, not a
+"first name that is not here" rule — that one ping-pongs between the first two
+entries and never reaches the third. `routeAskGiveUpReadings` (20) bounds the
+asking and **latches**, because a host with no ESI credentials will never
+answer. And the counter behind it advances only while the ship is in space with
+no route and an empty probe scanner — narrower than the condition the ask
+itself fires on, deliberately, so it can never run up while the bot is happily
+fighting in a system that still has anomalies. Counting that would be #11's
+mistake a third time.
+
+`home-system` is consulted only once the circuit has been walked once. With no
+`hunt-system` at all the bot names nowhere and parks exactly as before, so an
+existing settings string is unaffected.
+
+**Pod recovery deliberately does *not* use it.** A pod is safe the moment it
+docks, and `dockAtRandomStationOrStructure` gets it there immediately; routing a
+capsule across systems to reach the staging system trades that for a longer trip
+through whatever killed the ship. Docking locally is the safer answer even
+though it is the less tidy one.
+
+**Unverified: any of it running.** No route has ever been set from a bot
+decision on any bot here — the plumbing is proven, the ask is not. What to watch
+on the first run: `Hunt circuit: A -> B -> C, next B` in the status line, then
+`@host set-destination 'B'` in the decision log, then the host's own
+`# ESI: destination … set` on stderr, then the route panel flipping from `No
+Destination` and `jumpToNextSystem` taking over. `Asked for 'B' N/20 readings
+ago with no route yet` climbing to `ROUTE SETTING GIVEN UP` is the host not
+answering, and its own log says why.
 
 **One rule is deliberately not identical, and it is the first reading.**
 `updateHitpointsGaugeMemory` believes a reading that has no previous reading to
