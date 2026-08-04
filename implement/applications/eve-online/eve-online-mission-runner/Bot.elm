@@ -1134,6 +1134,14 @@ missionBotDecisionRoot context =
 missionBotDecisionRootBeforeApplyingSettings : BotDecisionContext -> DecisionPathNode
 missionBotDecisionRootBeforeApplyingSettings context =
     case
+        -- An expired deadline is first, above even the user-interface setup,
+        -- and that placement is the whole of #102: a bound tested where the
+        -- tree happens to reach is not a bound. Ending the session needs no
+        -- panel expanded and no menu cleared, so nothing here has a reason to
+        -- sit above it -- and anything that did could starve it exactly as run
+        -- 30's message box starved the same comparison inside
+        -- `abandonMissionThatCannotProgress`. See `abandonmentOutOfTime`.
+        --
         -- The pod recovery sits above the wind-down, and above the
         -- docked-or-in-space split below, because a lost ship outranks both:
         -- there is no mission left to wind down from, and every branch that
@@ -1141,7 +1149,8 @@ missionBotDecisionRootBeforeApplyingSettings context =
         -- `recoverPodAfterShipLoss`. It is below `generalSetupInUserInterface`
         -- only because the pod still needs the location info panel expanded and
         -- stray menus cleared to travel at all.
-        [ generalSetupInUserInterface
+        [ endSessionOnAnExpiredBound context
+        , generalSetupInUserInterface
             { confirmQuitMission = quitMissionConfirmationIsExpected context
             , confirmDeclineMission = declineMissionConfirmationIsExpected context
             , messageBoxStandoff = context.memory.messageBoxStandoff
@@ -1176,6 +1185,39 @@ missionBotDecisionRootBeforeApplyingSettings context =
                                 )
                 }
                 context.readingFromGameClient
+
+
+{-| End the session on a bound that has already expired, before anything else.
+
+**The one entry in the list that has no work to do and no state to reach.** It
+neither clicks nor waits, so it can be evaluated on any reading at all -- which
+is what lets it sit above `generalSetupInUserInterface` and makes the deadline it
+carries independent of everything else the tree is doing. Issue #102: that
+independence is the property `abandonMissionGiveUpReadings` always claimed and,
+until now, did not have.
+
+One deadline lives here today, the abandonment's. The pod recovery's
+(`podRecoveryGiveUpReadings`) and the wind-down's are the same shape and are
+deliberately left where they are for now. **They were not spared in run 30** --
+`generalSetupInUserInterface` answered on every reading of it, so nothing below
+it ran at all and both of those were starved exactly as this was. They had no
+verdict latched, so neither counter was running and neither bound had anything to
+be late for. That is the whole of why this shape has been paid for once rather
+than three times, and it is not a reason to think the other two are sound. Moving
+a bound is still a behaviour change that wants its own evidence, and what is true
+of all three is stated in `abandonmentOutOfTime`: a give-up that ends the session
+is counted in elapsed readings, and belongs where nothing can decline to ask it.
+
+-}
+endSessionOnAnExpiredBound : BotDecisionContext -> Maybe DecisionPathNode
+endSessionOnAnExpiredBound context =
+    abandonmentOutOfTime { missionToAbandon = context.memory.missionToAbandon }
+        |> Maybe.map
+            (\verdict ->
+                describeBranch
+                    (describeAbandonmentOutOfTime verdict)
+                    (Common.DecisionPath.endDecisionPath FinishSession)
+            )
 
 
 {-| How long before the planned session end to stop taking new work and park.
@@ -4811,17 +4853,115 @@ headroom for a sequence that takes about five is deliberate, since each step
 waits a reading for the client to catch up.
 
 When it expires the session **ends**, naming the mission it could not give back.
-That is the bound the issue asks for: quitting can fail in more ways than can be
+That is the bound #54 asks for: quitting can fail in more ways than can be
 enumerated -- the ship cannot dock, the agent is not in the station we returned
 to, the conversation offers no Quit Mission, the confirmation is not recognised
 -- and every one of them would otherwise be a second forever-loop replacing the
 first. Ending loudly is worth more than not ending, which is the same conclusion
 the wind-down and the pod recovery both reached.
 
+**Issue #102 is the way it failed that #54 did not enumerate: the tree never
+reached the branch that asks.** `readingsSince` is advanced in
+`updateMemoryForNewReadingFromGame`, which runs on every reading unconditionally,
+and the comparison used to sit inside `abandonMissionThatCannotProgress`, below
+the docked-or-in-space split. Run 30 held an undismissable window in
+`generalSetupInUserInterface` (#101) and the two halves came apart completely:
+
+    the counter reached                        10,811   54x this bound
+    the branch printed a decision line             211   of 32,813 status lines
+
+The counter had every reading and the bound had 0.7% of them. The comparison was
+never wrong: on the last reading of the run the box was gone, the tree reached
+the branch for the first time in three hours and forty-four minutes, and the
+deadline fired on that reading and ended the session. So the comparison
+now lives in `abandonmentOutOfTime`, asked from the head of
+`missionBotDecisionRootBeforeApplyingSettings` where nothing can be above it --
+see that rule for why a deadline that ends the session is counted in readings
+and not in attempts.
+
 -}
 abandonMissionGiveUpReadings : Int
 abandonMissionGiveUpReadings =
     200
+
+
+{-| The abandonment that has run past that bound, asked where nothing sits above.
+
+**Issue #102.** A bound is only a bound where it is asked, and this one used to
+be asked from inside `abandonMissionThatCannotProgress`, below the
+docked-or-in-space split. `readingsSince` is advanced in
+`updateMemoryForNewReadingFromGame`, which runs on every reading whatever the bot
+is doing, so the counter and the comparison were measuring different things the
+moment anything above held the tree. Run 30 is that: 10,811 against 200, three
+hours and forty-four minutes, and the session ended at the far end of it rather
+than at the deadline. This is therefore asked from the head of
+`missionBotDecisionRootBeforeApplyingSettings` -- above
+`generalSetupInUserInterface`, above the pod recovery, above the wind-down, above
+the split -- because each of those is something that can decline to answer, and
+ending a session needs none of them.
+
+**Counted in readings rather than in attempts, and that is the choice.** The
+other shape available is to advance the counter only on readings this branch was
+reached on, so that 200 means 200 attempts. It reads better and it is wrong for
+this bound: a bot held elsewhere would then spend none of the budget, which is
+precisely the runaway the bound exists for. Run 30 reached the branch on 211
+readings in three and three-quarter hours, so an attempt counter would have stood
+at 211 and gone on standing there. #54's own promise is that "every way quitting
+can fail runs under that one clock", and a clock that stops while the bot is
+stuck elsewhere is not one.
+
+The cost of that direction is real and is not hidden: a bot starved above this
+branch for an unrelated reason now ends its session at 200 readings with the quit
+never attempted, where before it ran until something else stopped it. Ending
+loudly, naming the mission, is what an operator can act on; that is the same
+conclusion `windDownBeforeSessionEnd` and `podRecoveryGiveUpReadings` reached,
+and it is why the give-up line below says the count is readings and not attempts.
+
+**`droneRecallUnansweredTicks` is the counter-example in this file**, and the two
+are not in conflict. That one deliberately advances only on readings the branch
+acted -- it reads the ask out of `previousStepsEffects` -- and is right to,
+because its give-up is _stop asking and hand the caller's own step back_, so a
+fight that legitimately kept the bot elsewhere must not spend a budget whose
+purpose is to bound a repeated action. What decides the shape is what the give-up
+does: one that ends the session bounds elapsed time, one that declines an action
+bounds effort.
+
+-}
+abandonmentOutOfTime : { missionToAbandon : Maybe MissionToAbandon } -> Maybe MissionToAbandon
+abandonmentOutOfTime { missionToAbandon } =
+    missionToAbandon
+        |> Maybe.andThen
+            (\verdict ->
+                if abandonMissionGiveUpReadings <= verdict.readingsSince then
+                    Just verdict
+
+                else
+                    Nothing
+            )
+
+
+{-| The one line an operator gets when the abandonment runs out of time.
+
+It names the mission, because "which mission is still accepted and still stuck"
+is the fact a person needs in order to finish the job by hand at the agent.
+
+It also says what the count is, which is new in #102 and is the half run 30 could
+not answer. The number is readings since the verdict, not attempts, so a session
+that ends here having never reached the agent is telling the operator something
+about the _rest_ of the bot rather than about the quit -- run 30's own log would
+have read `10811 readings` beside 211 decision lines, and the sentence points at
+the gap rather than leaving it to be noticed.
+
+-}
+describeAbandonmentOutOfTime : MissionToAbandon -> String
+describeAbandonmentOutOfTime verdict =
+    "I have been trying to quit '"
+        ++ verdict.name
+        ++ "' for "
+        ++ String.fromInt verdict.readingsSince
+        ++ " readings, after it went nowhere for "
+        ++ String.fromInt verdict.stalledReadings
+        ++ ", and have not managed it. Ending the session rather than retrying forever -- the mission is still accepted and still stuck, and it needs quitting by hand at the agent. That count is readings since the verdict rather than attempts, so if the decision log shows the bot never got as far as the agent, something above this branch was holding the whole tree."
 
 
 {-| One reading of a mission that is not moving, as narrowly as a reading alone
@@ -5030,9 +5170,15 @@ to be able to read back:
     that follows is answered in `closeMessageBox`, which is where the standing
     "always decline a confirmation" rule lives and therefore where its one
     exception belongs.
-  - **Out of time.** `abandonMissionGiveUpReadings` readings, and the session
-    ends saying which mission is still accepted and still stuck, so the operator
-    knows what to quit by hand.
+
+**There is deliberately no fourth outcome here, and #102 is why.** Running out
+of time used to be a branch of this function, and a bound tested only where the
+tree happens to reach is not a bound: run 30's counter ran to 10,811 against 200
+because an undismissable window held `generalSetupInUserInterface` and nothing
+below it was ever evaluated. `abandonmentOutOfTime` now owns the deadline, from
+the head of `missionBotDecisionRootBeforeApplyingSettings`, so this function is
+only ever reached while the attempt still has time -- and there is one comparison
+rather than two places that could disagree about whether it has.
 
 **Placed below the retreats and above everything mission-shaped.** It sits
 inside the docked-or-in-space split rather than in the pre-split list, so
@@ -5061,49 +5207,36 @@ abandonMissionThatCannotProgress context =
                         ++ verdict.name
                         ++ "': it cannot be progressed, so I am giving it back to the agent rather than asking for help until the session ends."
                     )
-                    (if abandonMissionGiveUpReadings <= verdict.readingsSince then
-                        describeBranch
-                            ("I have been trying to quit '"
-                                ++ verdict.name
-                                ++ "' for "
-                                ++ String.fromInt verdict.readingsSince
-                                ++ " readings, after it went nowhere for "
-                                ++ String.fromInt verdict.stalledReadings
-                                ++ ", and have not managed it. Ending the session rather than retrying forever -- the mission is still accepted and still stuck, and it needs quitting by hand at the agent."
-                            )
-                            (Common.DecisionPath.endDecisionPath FinishSession)
+                    (case context.readingFromGameClient.shipUI of
+                        Nothing ->
+                            case context.readingFromGameClient.agentConversationWindows |> List.head of
+                                Just conversation ->
+                                    quitMissionInConversation context verdict conversation
 
-                     else
-                        case context.readingFromGameClient.shipUI of
-                            Nothing ->
-                                case context.readingFromGameClient.agentConversationWindows |> List.head of
-                                    Just conversation ->
-                                        quitMissionInConversation context verdict conversation
+                                Nothing ->
+                                    describeBranch
+                                        "Docked -- open the agent conversation, which is the only place 'Quit Mission' lives."
+                                        (openAgentConversation context)
 
-                                    Nothing ->
-                                        describeBranch
-                                            "Docked -- open the agent conversation, which is the only place 'Quit Mission' lives."
-                                            (openAgentConversation context)
+                        Just _ ->
+                            case stationToReturnToForAbandonment context of
+                                Just stationName ->
+                                    travelToStationByName context
+                                        stationName
+                                        { whileSettingRoute =
+                                            "Set the route to '"
+                                                ++ stationName
+                                                ++ "' -- the mission can only be quit face to face with the agent."
+                                        , whileTravelling =
+                                            "Travelling to '"
+                                                ++ stationName
+                                                ++ "' to give the mission back."
+                                        }
 
-                            Just _ ->
-                                case stationToReturnToForAbandonment context of
-                                    Just stationName ->
-                                        travelToStationByName context
-                                            stationName
-                                            { whileSettingRoute =
-                                                "Set the route to '"
-                                                    ++ stationName
-                                                    ++ "' -- the mission can only be quit face to face with the agent."
-                                            , whileTravelling =
-                                                "Travelling to '"
-                                                    ++ stationName
-                                                    ++ "' to give the mission back."
-                                            }
-
-                                    Nothing ->
-                                        describeBranch
-                                            "I have not docked anywhere this session and no 'home-station' is configured, so there is no station I can name to return to."
-                                            askForHelpToGetUnstuck
+                                Nothing ->
+                                    describeBranch
+                                        "I have not docked anywhere this session and no 'home-station' is configured, so there is no station I can name to return to."
+                                        askForHelpToGetUnstuck
                     )
             )
 
