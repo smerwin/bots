@@ -3600,16 +3600,63 @@ parseAgentMissionInfoPanelEntry entryNode =
                     }
                 )
     , isExpanded =
-        -- A collapsed entry keeps only its header row in the tree: the
-        -- objectives and the travel button are gone entirely, which is
-        -- indistinguishable from "on grid, nothing to travel to" unless the
-        -- collapsed state itself is read. Observed live -- the panel got
-        -- collapsed mid-mission and the bot would have waited forever.
-        entryNode.uiNode.dictEntriesOfInterest
-            |> Dict.get "_expanded"
-            |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.bool >> Result.toMaybe)
-            |> Maybe.withDefault True
+        -- A collapsed entry keeps only its header row: the objectives and the
+        -- travel button are gone, which is indistinguishable from "on grid,
+        -- nothing to travel to" unless the collapsed state itself is read.
+        --
+        -- **`_expanded` is not that state, and reading it is what run 30 was.**
+        -- This was `Dict.get "_expanded" |> Maybe.withDefault True`, and the
+        -- key is present on the entry and read `True` while the entry was
+        -- collapsed -- measured on the live client, against a
+        -- `content_container` of `384x0` in the same reading. So
+        -- `expandMissionTrackerIfCollapsed` answered `Nothing`, the branch it
+        -- guards was never reached, and the bot printed `A mission is running
+        -- but the tracker offers no travel step from here` **512 times** while
+        -- four manual clicks on the header opened it (`384x0` -> `384x135`) and
+        -- the run resumed. Run 28 lost a whole session to the same thing.
+        --
+        -- The client's own layout is the observable that does distinguish
+        -- them: the content container is present in both states and carries a
+        -- height only when the entry is open. Measured collapsed at `384x0`
+        -- and expanded at `384x135`, `384x144` and `384x186` as an objective
+        -- grew, so the test is "has any height at all" rather than a size.
+        --
+        -- `_isCollapsed` is also on the entry and reads `False` while expanded,
+        -- but it has never been observed in the collapsed state and so is not
+        -- relied on here. It is the obvious thing to check first if this ever
+        -- needs revisiting.
+        entryNode
+            |> listDescendantsWithDisplayRegion
+            |> List.filter
+                (.uiNode >> getNameFromDictEntries >> (==) (Just "content_container"))
+            |> List.head
+            |> Maybe.map (.totalDisplayRegion >> .height)
+            |> missionEntryIsExpandedFromContentHeight
     }
+
+
+{-| Whether a mission tracker entry is open, from its content's height.
+
+Separated from the reading for the reason `idSuffixAfterSeparator` is: the rule
+is the part that can be wrong, and a rule reachable only by parsing a whole live
+UI tree is a rule no test case can execute. The walk finds the container; this
+decides what its height means.
+
+`Nothing` -- no container to measure -- reads as **expanded**, which is the
+direction that fails the way the old bug did rather than a worse way. A client
+naming that node something else leaves the tracker shut and the bot waiting,
+which is what run 30 already did; the other answer would have the bot clicking a
+header it can never open for a whole session.
+
+-}
+missionEntryIsExpandedFromContentHeight : Maybe Int -> Bool
+missionEntryIsExpandedFromContentHeight contentHeight =
+    case contentHeight of
+        Just height ->
+            height > 0
+
+        Nothing ->
+            True
 
 
 {-| Pulls the numeric id out of the composite element names the mission UI
