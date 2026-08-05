@@ -2987,6 +2987,183 @@ prints the clause means the counter is not being written. **What this does not
 protect against is the retreat itself being slow** — nothing here shortens the
 interval by one reading, and run 36 replayed today would go exactly as it did.
 
+### The unit was the problem, and in readings run 36 is not an outlier
+
+Issue #141 asked for a bound on #139's counter, on the ground that run 36 is "an
+outlier by twenty times" and that the bot "commanded a warp 296 times and never
+formed the thought that none of them had worked". The bound shipped. **Three of
+the numbers behind it did not survive being recounted, and the recount is what
+decided where the bound goes.**
+
+**The per-reading identity #139 says the logs do not have is in them**, just not
+in a decision line, which is where it was looked for: the framework issues exactly
+one `RequestToVolatileProcess` memory read per reading, so every decision printed
+between two of them belongs to one reading. Run 36 carries a second and
+independent counter to check that against — the ammo swap's `given up N readings
+ago`, advanced in the memory update — and over its retreat the two agree to within
+3%. `test_retreat_not_executing.TheUnitIsTheReading` pins that, because everything
+below is a reading rather than a block only if it holds.
+
+Recounted that way, from the verdict until hostiles leave the overview — #139's
+own episode proxy, unchanged — the 29 episodes in 9 runs are a **median of 3
+readings**, with 19 of the 29 at four or fewer, and ten longer ones at 8, 11, 11,
+11, 11, 16, 24, 29, **43** and **44**.
+
+- **Run 36's 154 blocks are 44 readings and run 10's 142 blocks are 43.** The same
+  number, in a run nobody had looked at. Run 36 is not an outlier by twenty times;
+  it is tied for first in a corpus of two.
+- **Run 36's warp did take.** Its overview went to `rats 0` and the escape target
+  closed 13.9 → 8.8 → 4.7 → 2.6 → 0.7 AU while the believed armour recovered 17% →
+  48% and the damage window drained 1170 → 331. #139 says this in passing; the
+  issue reads its 296 as one uninterrupted failure.
+- **The 1% armour is one corrupt reading.** Shield and armour both read 1% on the
+  same reading, taken with nothing on the overview and the ship already off the
+  grid, bracketed by 37% either side — the single-reading corruption #120 exists
+  because of, which `believed` rejects and the status line prints raw. The deepest
+  value the retreat ever saw is 17%.
+- **The 296 warp commands are two different things.** 124 of those blocks were
+  issued with something still on the overview and **172 after it had emptied**,
+  because the hysteresis keeps the verdict latched and `runAwayIfLowHealth`
+  short-circuits the `I am in warp` branch that would otherwise have taken those
+  readings. In readings the failure is 34 of them.
+
+**And the failure is not one step.** `selectThenPanelAction` is two — click the
+overview row, then press the panel's `selectedItemWarpTo` — and it prints
+`(selecting it first)` for the first and the bare description for the second.
+**163 of run 36's 296 blocks are the first**, the panel never having come to show
+the row, including one stretch of 55 consecutive blocks on one celestial. Run 31's
+28-reading retreat alternates the two the same way. So whatever is wrong is wrong
+about a click on an overview row at least as often as about the panel button.
+
+**What ships is a bound and a line, and no change to the retreat.**
+`retreatNotExecutingAlarm` is a pure rule over two `Int`s that answers on the one
+reading the interval crosses `retreatNotExecutingAlarmReadings`, and the line goes
+out at the root:
+
+```
++ RETREAT NOT EXECUTING: I have decided to leave on 36 consecutive readings --
+readings, not decisions -- and the ship has not been in warp on any of them. The
+warp is being commanded and it is not taking. I do not know why, I have no other
+way out of a pocket, and I am still commanding it because stopping cannot help.
+I am stuck here and need help to continue.
+```
+
+That last sentence is `stall_watch.py`'s `STUCK_TEXT`, matched as a substring of
+any log line, so the alarm is answered by a screenshot of the client and by the
+watchdog stopping. It is **carried into the line rather than reached by branching
+to `askForHelpToGetUnstuck`**, because that leaf dispatches no effects: taking it
+would stop the retreat commanding the warp, which is the one thing that must not
+happen while the ship is in the pocket. `askForHelpToGetUnstuckText` is the shared
+literal and a case reads all three copies — `Bot.elm`'s, the vendored framework's
+and the watchdog's — because a drift there is silent in the direction that looks
+like a healthy run.
+
+**36, written as `runAwayCelestialStickyReadings * 3`.** The escape choice rotates
+every 12 readings so that "a retreat that has not worked yet tries a different
+corner of the system"; three full rotations is where the only self-correction the
+retreat owns has been spent on three separate destinations and the ship is still
+on the grid. `missionStalledReadingsBeforeAbandoning`'s form, for its reason: the
+argument cannot drift away from the number. The measurement independently puts it
+in the same place — above run 31's 28 and below run 10's 43 and run 36's 40, which
+is the only gap the upper tail has.
+
+**It will fire on retreats that would have recovered, and that is chosen.** All
+ten long episodes ended in a warp that took, run 36's included, so there is no
+threshold that separates the incident from the rest — there is nothing to
+separate, and a bound above 44 is a bound that never fires. What the corpus does
+separate is a manoeuvre that works, at two to four readings, from one being
+retried, at eight and up. A retreat retried for three rotations while the ship is
+being shot is worth a person's attention whether or not it would have fixed
+itself: a false alarm costs a screenshot and a line, a late one costs the ship.
+
+**Three escalations were considered and all three are worse than reporting.**
+
+- **A different destination** is what the retreat already does and what every
+  recorded episode did — three celestials in run 36, three in run 31, seven in run
+  10. It is the thing that has already failed.
+- **A different mechanism** is what this repo escalates with elsewhere
+  (`beginCascade` and `clearStrayContextMenu` press Escape; #109 goes declining
+  button, Escape, stand aside) and **there is not one here.** The only other way
+  this bot can act on an overview row is a context-menu cascade, which begins with
+  a click on the same row at the same coordinates — the half run 36 says stalls
+  more often — and then adds a flyout that has to render and an entry that has to
+  be found, on the retreat path, under fire. It would replace the working half and
+  keep the failing one. Escape closes menus rather than warping ships, and the two
+  branches that press it already run above this one on every reading.
+- **Ending the session** is worse than doing nothing. The bot is the only thing
+  still commanding a warp, and ending leaves a ship under fire in a pocket with
+  nobody at the controls — which is how run 7 lost its ship, in the four minutes
+  between one run's last reading and the next run's first. `FinishSession` is the
+  right answer to a bound whose subject is an errand (#102, #126) and the wrong
+  one to a bound whose subject is the ship.
+
+**Said at the root, where nothing can decline to ask it.** #102's placement rule,
+and it applies here for a reason particular to this bound: `runAwayIfLowHealth`
+sits inside the docked-or-in-space split, so a message-box standoff above it can
+hold the tree off the retreat entirely — and a held tree is one of the ways a
+retreat comes to be 36 readings long in the first place. The verdict is settled in
+`updateMemoryForNewReadingFromGame` beside the counter and folded in at
+`missionBotDecisionRoot` alongside `dronesLeftBehindLastChange`, first in that
+list because it is the only one of them about the ship being destroyed.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_retreat_not_executing.py` (32 cases). The alarm and
+the status clause are executed through the real `Bot.elm` in `elm repl` — the
+crossing at both sides and against fixed values either side, run 36's own shape
+folded through the rule as one line rather than two, a second interval saying so
+again, and the longest recorded retreat *below* the bound saying nothing. The
+corpus is recomputed as relations rather than as the numbers above: run 36 is not
+the only retreat within a fifth of the worst, most of its warp commands were
+issued after the grid emptied, a large share of them are the selection half, and
+its 1% readings are taken off the grid beside healthy neighbours.
+
+Confirmed by mutation, **twenty** of them, each failing a named case: the bound
+removed entirely; written as a bare number; tightened to one rotation so it cuts
+the distribution; loosened past everything recorded so it never fires; the
+crossing weakened to `<=` so the line repeats; the crossing no longer judged
+against the previous reading; the alarm made to end the session; the root no
+longer printing it; the retreat made to consult the bound; the watchdog's sentence
+drifted in `Bot.elm` and, separately, in the vendored framework; the line dropping
+its "still commanding it" clause and its "readings, not decisions" clause; **the
+alarm rule made to read the gauge** and made to reach for the whole context; **the
+gauge-free threshold made to read the gauge**; the status line no longer naming
+the bound; the drone recall taken out of the warp path; `droneRecallGiveUpTicks`
+tightened; and, on the cases' own premise, the per-reading identity swapped for
+the framework tick.
+
+**Two mutations survived the first pass and both were real holes.** The status
+line's bound was read out of the source, and a mutation that dropped it from the
+count while leaving it in the sentence below passed — so the rendering is now
+`describeRetreatLatencyFromProgress`, a function of the record, and the case
+executes it. And the "reads nothing but its own record" case was mutated with an
+expression that named nothing forbidden, which proved nothing; it is now mutated
+by giving the record a gauge field and by reaching for the context.
+
+**Unverified: why the warp did not take, and it is not addressed here.** Nothing
+in this change makes a warp take, and run 36 replayed today would go exactly as it
+did — with one line more in its log. The two shapes the corpus shows are a panel
+that never comes to show the row and a panel button pressed dozens of times with
+nothing happening, and neither is explained. Whether the click reaches the client
+at all cannot be read from a recording. What to watch on the first run that
+retreats: `RETREAT NOT EXECUTING: N of 36` in the status line, climbing and then
+going away within a few readings. A run that reaches 36 and prints the alarm is the
+first live instance of run 36's shape, and the screenshot `stall_watch.py` takes on
+that reading is the evidence a repair would need — specifically whether the
+Selected Item panel is showing the celestial at all. **A run that retreats and
+never prints the clause at all means the counter is not being written**, which is
+#139's own tell rather than this change's.
+
+Two things this leaves as they are, stated so they are not rediscovered.
+`retreatProgressAfterReading` resets on any reading that is not a retreat,
+including one whose ship UI failed to parse, so a single unparsed reading inside a
+long retreat restarts the interval and delays the alarm by the whole of it; #139
+chose that reset and this does not revisit it. And the retreat goes on commanding
+a warp at a ship that is already in one — 172 of run 36's 296 blocks — because
+`runAwayIfLowHealth` outranks `decideActionWhenInSpace`'s `I am in warp` branch.
+That is noise rather than damage, it is most of what made the issue's count
+misleading, and changing it is a behaviour change on the retreat path that wants
+its own evidence.
+
 ## Lock range is learned from the client, not set
 
 `targeting-range` (default 66000) decides whether `lockTargetFromOverviewEntry`
@@ -5322,6 +5499,21 @@ exists.
   appearing and then going away within a few readings; a worst that reaches
   double figures is run 36's shape recurring, and it is the first evidence anyone
   will have had.
+
+  And since #141 it **asks for a person when that interval reaches 36 readings**,
+  once, in a line carrying the sentence `stall_watch.py` answers by screenshotting
+  the client — and goes on commanding the warp while it does, because the bot is
+  the only thing still trying and ending the session would leave a ship under fire
+  with nobody at the controls. Why there is no mechanical escalation to take
+  instead, and what recounting the corpus in readings rather than in decision
+  blocks says about run 36 — that its warp did take, that its 1% armour is one
+  corrupt reading, and that run 10 did the same thing at the same length — are in
+  "The unit was the problem, and in readings run 36 is not an outlier" above.
+  **Untested against a live client, and it does not make a warp take**: run 36
+  replayed today would go exactly as it did, with one line more in its log. Watch
+  the status line's `RETREAT NOT EXECUTING: N of 36`; a run that reaches 36 is the
+  first live instance of that shape, and the screenshot taken on that reading is
+  the evidence a repair would need.
 
   And it now **leaves a dock it has already commanded alone** instead of
   re-issuing it every reading. Docking is a run-in the ship has to fly, and run
