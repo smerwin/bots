@@ -4180,6 +4180,7 @@ shipped configuration rather than edge cases:
 | damage-rate retreat (#32) | absent | ported, `run-away-incoming-damage-threshold`, default 3500 |
 | ship loss (#33) | absent — a destroyed ship meant ratting in a capsule, which reads 100/100 | ported, above the docked-or-in-space split, bounded at 150 readings |
 | the pod recovery's bound (#133) | the comparison sat inside `recoverPodAfterShipLoss`, below `generalSetupInUserInterface`, over a counter that advanced anyway — and with no message-box standoff, nothing here ends the starvation | `podRecoveryOutOfTime`, asked from `endSessionOnAnExpiredBound` at the head of the decision root |
+| the message-box standoff (#138) | `closeMessageBox` clicked its dismissal every reading for as long as a box was showing and **counted nothing** — neither of the mission runner's two bounds existed here | `MessageBoxStandoff`, the same ladder: answer, Escape, then `Nothing` so the rest of the tree runs |
 | drone recall (#11) | **no bound of any kind**, in front of every warp, tether and dock | `droneRecallUnansweredTicks`, give-up, focus-recovery click |
 | what it will shoot (#40) | the overview's icon colour and nothing else | plus whatever the combat log names as hitting the ship |
 | setting its own route | could only *follow* one a human set | `hunt-system` circuit, asked for through the host's ESI directive |
@@ -4660,11 +4661,11 @@ something above this branch holding the tree, which is what the give-up line now
 tells the operator to go and look for.
 
 **saxrat carried the same defect and is fixed in #133** — see "The same bound in
-saxrat, where nothing catches the standoff" below. It was left alone here
+saxrat, hoisted above the same starvation" below. It was left alone here
 deliberately, because #126 is about the mission runner and moving a bound in a
 second bot is a second behaviour change.
 
-### The same bound in saxrat, where nothing catches the standoff
+### The same bound in saxrat, hoisted above the same starvation
 
 Issue #133 is the section above, in `eve-online-saxrat`, and the argument that
 decides the shape is #132's rather than a new one: the expired branch is a
@@ -4704,14 +4705,16 @@ reach, so requiring it costs the bound nothing, and it is the very test
 is a pod that is docked and safe while something above holds the tree, which is
 the state the bound exists to produce.
 
-**Why it matters more here than there, stated as a relation the cases check.**
-The mission runner answered #101 with `MessageBoxStandoff` — the ladder that
-makes `closeMessageBox` eventually hand the tree back. None of it was ported:
-neither `messageBoxAnswersBeforeEscape` nor `messageBoxStandoffGiveUpReadings`
-exists in saxrat, and its `closeMessageBox` clicks its dismissal every reading
-for as long as a box is showing, counting nothing. So the starvation that held
-the mission runner's tree for three hours and forty-four minutes is not only
-possible here, it is unguarded — and saxrat rats unattended.
+**Why it mattered more here than there when this landed.** The mission runner
+answered #101 with `MessageBoxStandoff` — the ladder that makes
+`closeMessageBox` eventually hand the tree back — and none of it had been
+ported, so the starvation that held that bot's tree for three hours and
+forty-four minutes was not only possible here but unguarded, in a bot that rats
+unattended. #138 ported it (see "The message box that will not close is bounded
+here too"), so this hoist and that ladder now cover the same starvation from
+both ends. **Neither makes the other redundant**, and the hoist is the one that
+generalises: the ladder bounds one known way the setup list can repeat forever,
+while the hoist means this bound is asked whatever holds the list.
 
 **The give-up line says what an operator can act on**, which for this bot is not
 a `home-station` — there is no such setting, and pod recovery deliberately does
@@ -4735,8 +4738,9 @@ repl answering `True` to everything cannot pass. The placement, the absence of a
 second comparison, the branch doing nothing but ending the session, the rule
 reaching for nothing the setup list produces, the counter's unconditional
 advance, the docked outcome's memory read (against the mission runner's live
-parse, so the divergence is read out of both sources) and the standoff's absence
-are read out of the source through a whitespace-collapsing reader. The three
+parse, so the divergence is read out of both sources) and the message-box
+standoff's relation to this bound are read out of the source through a
+whitespace-collapsing reader. The three
 recorded saxrat runs are asked what they can say, which is that they are silent:
 plenty of status lines, no `SHIP LOST:` and no message box at all.
 
@@ -4765,6 +4769,121 @@ possible where it was not before. What to watch on the first real loss is
 `Pod recovery: docking at …` in between; a session that ends at N=150 having
 printed no `Pod recovery:` line is something above this branch holding the tree,
 which is what the give-up line now says to go and look for.
+
+### The message box that will not close is bounded here too
+
+Issue #138 is the mission runner's #101 in `eve-online-saxrat`, and the design
+is PR #109's ported whole rather than re-derived: the ordinary declining answer
+for `messageBoxAnswersBeforeEscape` (60) readings, then **Escape** at the same
+box for another 60, then `closeMessageBox` answers `Nothing` and the rest of the
+tree runs with the box still on the screen. See "A message box the answer does
+not close is bounded" above for the argument; what follows is only what saxrat
+changes about it, and what had to be established here rather than assumed.
+
+**Why it is worse in this bot.** `closeMessageBox` here clicked its dismissal
+every reading for as long as a box was showing and counted nothing at all --
+neither bound existed. saxrat's `generalSetupInUserInterface` is evaluated in
+the same place as the mission runner's, above the docked-or-in-space split, and
+`parseMessageBoxesFromUITreeRoot` in saxrat's vendored parser matches
+`pythonObjectTypeName == "MessageBox"` and nothing else, exactly as the other
+copy does -- a case compares the two declarations. So the same window produces
+the same standoff, and this bot rats **unattended**, with nobody at the console
+to notice 32,585 identical lines. #133 hoisted the pod recovery's deadline above
+the starvation for this reason; that protects one bound and nothing else in the
+tree.
+
+**The bound's size rests on the mission runner's corpus, and saxrat's own says
+nothing.** `saxrat_run1.log`, `saxrat_run2.log` and `saxrat_run3.log` hold
+**49,235 readings and not one message box** -- no `Dismiss it using`, no `I see
+a message box to close`, nothing on any channel. So there is no distribution
+here to place a threshold in, and inventing a saxrat-specific number would be
+inventing it. What transfers is a measurement about *the client* rather than
+about that bot: the same widget, the same parser filter, the same three
+dismissal options in the same order. Against the mission runner's corpus, the
+recovered runs' stretches are 6, 10, 11, 18, 20 and 44 readings and nothing
+else, while run 30's one box ran to 32,585, so 60 sits in a gap rather than
+cutting a distribution. Both halves are checked:
+`TheRecordedSaxratRunsCannotSizeThisBoundTest` asserts the silence with a
+positive control beside it, and `TheMissionRunnersCorpusIsWhatSizesThisBoundTest`
+recounts the separation. The two apps' constants are compared, so a retune of
+one that leaves the other behind is caught.
+
+**The parser already exposed what the identity needs, and no parser change was
+required.** The identity is the box's display texts plus its buttons' `_name`s
+and labels, deliberately not its display region -- and saxrat's diverged
+`ParseUserInterface` copy carries `MessageBox.buttons` as
+`{ uiNode, mainText }`, with `getNameFromDictEntries` and
+`getAllContainedDisplayTexts` both present and the module exposing everything.
+The identity cases build UI trees and run them through that **real** parser
+rather than hand-rolling a `MessageBox`, so what they assert is what the bot
+would have been handed: two dialogs whose labels are identical and whose
+`_name`s differ read as different boxes, and the same box drawn at a different
+origin reads as the same box.
+
+**Escape is safe here for the mission runner's reason, and the reason is a
+placement.** A naked Escape can open the client's own Settings/pause menu --
+`closeSystemSettingsMenu` records that happening live *in this file*, from
+exactly this key. What covers it is that `closeSystemSettingsMenu` is the entry
+**before** `closeMessageBox` in `generalSetupInUserInterface`, and that list
+answers with `List.head` after a `filterMap`, so a pause menu opened on one
+reading is closed on the next by the branch that exists for it. saxrat's
+ordering was read rather than inherited, and all three halves are pinned: the
+order, the head-resolution that makes "before" mean anything, and that the
+earlier branch really is the one that closes that menu.
+
+**What is deliberately unchanged.** The declining answer is still the default
+rung and `closeMessageBoxByDeclining` still contains no affirmative at all; the
+parser is not narrowed, because narrowing treats the instance and leaves the
+shape; and the give-up hands the tree back rather than raising
+`askForHelpToGetUnstuck`, which is the entire point -- an alarm leaves every
+starved branch exactly as starved. The status line carries
+`Message box: N/120` with `(pressing Escape at it)` and
+`(GIVEN UP ON, still open)`, which is the only thing on a reading that says a
+box is still there once the decision line has gone, and the give-up names the
+box and both rungs once at the root through `lockRangeLastChange`'s mechanism.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_message_box_standoff.py` (46 cases). The
+four pure rules are executed through the real `Bot.elm` in `elm repl` rather
+than restated in Python -- the standoff folded over a whole session of readings
+as well as asked at single numbers, the ladder at both boundaries and either
+side of each, the identity over boxes the real parser produced, and the give-up
+line -- and the wiring, the placement, the ordering and the parser's deliberate
+unchangedness are read out of the source through a whitespace-collapsing reader.
+
+Confirmed by mutation, **fifteen** of them, each failing a named case: the
+escalation cut to 44 so it slices the recorded distribution; either boundary
+comparison moved by one; the give-up written as a bare `120` instead of a
+multiple; the give-up raising `askForHelpToGetUnstuck` instead of handing the
+tree back; the escalation clicking the box instead of pressing Escape; the
+identity dropping the box's text or its buttons; the count not resetting on a
+different box; the count surviving a reading with no box at all;
+`closeSystemSettingsMenu` reordered after `closeMessageBox`, which uncovers the
+pause-menu risk; the status clause neutralised; the branch not consulting the
+verdict at all; the give-up line dropping the box's name; the doc comment in
+`endSessionOnAnExpiredBound` left saying the standoff is absent; and saxrat's
+constant retuned away from the mission runner's.
+
+**One mutation survived the first run and the hole was real** -- the same one
+#109 found on the other bot. The status clause was asserted by substring, so a
+version that still named `context.memory.messageBoxStandoff` while answering
+`Nothing` for every standoff printed nothing and passed. The case now reads the
+clause's *form*: a `case` directly on the memory field, the verdict consulted,
+and both numbers printed.
+
+**Unverified: any of it running, and more thoroughly than in the mission
+runner.** No recorded saxrat run has ever met a message box, so the starvation
+this bounds is reasoned from saxrat's source and from run 30 rather than from
+anything saxrat has been watched doing -- the argument is that saxrat had
+nothing that would end one, not that one has happened. Whether Escape closes
+such a window is the same open question it is over there; if it does not, the
+ladder costs 60 extra readings and ends in the same place, which is why the
+give-up rather than the escalation is the half that matters. What to watch on
+the first saxrat run that meets a box: `Message box: N/120` appearing briefly
+and vanishing, since the recorded dialogs close in 6 readings. A give-up on a
+run where boxes are being answered normally means the identity is churning; a
+`Message box:` clause that never appears on a run that dismisses one means the
+standoff is not being written.
 
 ## Elm toolchain
 
@@ -5160,14 +5279,30 @@ exists.
   it**, which is #126 in this second bot: the comparison over
   `podRecoveryGiveUpReadings` sat inside `recoverPodAfterShipLoss`, below
   `generalSetupInUserInterface`, while the counter it reads advanced on every
-  reading regardless. It matters more here than there, because saxrat has no
-  message-box standoff at all — the ladder that ends such a standoff in the
-  mission runner was never ported, so the three-hour hold that starved run 30 is
-  unguarded in a bot that rats unattended. What differs from #132, and it is the
-  docked outcome rather than the deadline, is in "The same bound in saxrat, where
-  nothing catches the standoff" above. **Untested against a live client**, and
-  more thoroughly so than most: no saxrat run has ever latched a ship-loss
-  verdict, so neither the recovery nor its bound has ever run here.
+  reading regardless. It mattered more here than there when it landed, because
+  saxrat then had no message-box standoff at all, so the three-hour hold that
+  starved run 30 was unguarded in a bot that rats unattended. What differs from
+  #132, and it is the docked outcome rather than the deadline, is in "The same
+  bound in saxrat, hoisted above the same starvation" above. **Untested against a
+  live client**, and more thoroughly so than most: no saxrat run has ever latched
+  a ship-loss verdict, so neither the recovery nor its bound has ever run here.
+
+  And it now **stops answering a message box that will not close**, after sixty
+  readings of the ordinary declining answer and another sixty of Escape, and
+  lets the rest of the decision tree run with the box still on the screen. This
+  is #109 ported whole (#138): saxrat's `closeMessageBox` clicked its dismissal
+  every reading for as long as a box was showing and counted nothing, while
+  meeting the same client through the same parser filter — and unattended, so
+  nobody would have seen the 32,585 identical lines run 30 produced. **The
+  bound's size is the mission runner's measurement, not saxrat's**: the three
+  recorded saxrat runs hold 49,235 readings and not one message box, which is
+  checked rather than remembered. saxrat's diverged parser needed **no change**
+  — it already exposes the button `_name`s and labels the identity needs — and
+  Escape is safe here for the same placement reason, `closeSystemSettingsMenu`
+  being the entry before this one in a list resolved by `List.head`. See "The
+  message box that will not close is bounded here too" above. **Untested against
+  a live client**; watch the status line's `Message box: N/120`, which should
+  appear briefly and vanish on a healthy run.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and

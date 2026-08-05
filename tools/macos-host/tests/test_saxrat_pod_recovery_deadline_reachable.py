@@ -13,14 +13,16 @@ inside `recoverPodAfterShipLoss`, which
 `generalSetupInUserInterface` has declined -- so anything answering up there
 starved the bound while the number it is compared against went on climbing.
 
-**Here the starvation is unguarded, and that is the difference from the mission
-runner rather than a restatement of it.** #109 answered that bot's run 30 -- an
-undismissable window that held `generalSetupInUserInterface` for 32,585 readings,
-three hours and forty-four minutes -- with `MessageBoxStandoff`, a counter that
-makes `closeMessageBox` eventually hand the tree back. None of it was ported --
-neither of its two bounds exists here -- and saxrat's `closeMessageBox` clicks
-its dismissal every reading for as long as a box is showing, counting nothing.
-`WhatSaxratHasInsteadOfAMessageBoxStandoffTest` checks that relation out of the
+**The starvation was unguarded here when this landed, and that was the
+difference from the mission runner rather than a restatement of it.** #109
+answered that bot's run 30 -- an undismissable window that held
+`generalSetupInUserInterface` for 32,585 readings, three hours and forty-four
+minutes -- with `MessageBoxStandoff`, and none of it had been ported: saxrat's
+`closeMessageBox` clicked its dismissal every reading for as long as a box was
+showing, counting nothing. #138 ported it, so both ends are covered now, and
+**neither makes the other redundant** -- the ladder bounds one known starver
+while this hoist covers whatever else holds the list.
+`WhatSaxratHasAgainstAMessageBoxStandoffTest` checks that relation out of the
 two sources rather than leaving it remembered.
 
 **Two of PR #132's conclusions hold here unchanged and one does not.** The
@@ -82,10 +84,10 @@ def without_comments(text):
 def code_only(text):
     """The source with its doc comments and `--` lines dropped.
 
-    Needed by any case counting *uses* of a name across a whole file: this
-    change writes `MessageBoxStandoff` and both of its bounds into saxrat's own
-    doc comments, as the machinery it does not have, so a count over the raw
-    text can no longer tell a mention from a use and would go red on prose.
+    Needed by any case counting *uses* of a name across a whole file: both
+    files discuss `MessageBoxStandoff` and its two bounds at length in their doc
+    comments, so a count over the raw text cannot tell a mention from a use and
+    would answer for the prose.
     """
     return without_comments(re.sub(r"\{-.*?-\}", "", text, flags=re.DOTALL))
 
@@ -388,58 +390,66 @@ class TheDockedOutcomeNamesItsStationFromMemoryTest(unittest.TestCase):
                         source_of(MISSION_RUNNER_BOT_ELM)))
 
 
-class WhatSaxratHasInsteadOfAMessageBoxStandoffTest(unittest.TestCase):
-    """Nothing, and that is why this bound matters more here than there.
+class WhatSaxratHasAgainstAMessageBoxStandoffTest(unittest.TestCase):
+    """The ladder, which #138 ported after this bound was hoisted.
 
-    The mission runner answered #101 with a ladder over one box -- the ordinary
-    declining answer, then Escape, then `closeMessageBox` hands the tree back
-    and everything below it runs again. saxrat has none of that machinery, so
-    the standoff that starved the mission runner's tree for 32,585 readings has
-    nothing here to end it.
+    When #133 landed, saxrat had none of it: `closeMessageBox` answered a box on
+    the first reading exactly as it answered it on the thirty-thousandth, so the
+    standoff that starved the mission runner's tree for 32,585 readings had
+    nothing here to end it, and that is what made hoisting this deadline urgent.
+    Both ends are now covered and **neither makes the other redundant** -- the
+    ladder bounds one known way `generalSetupInUserInterface` can repeat
+    forever, while the hoist means this deadline is asked whatever holds that
+    list. These cases pin that relation, because it is what the doc comment in
+    `endSessionOnAnExpiredBound` now argues.
     """
 
     def setUp(self):
         self.saxrat = source_of(SAXRAT_BOT_ELM)
         self.mission_runner = source_of(MISSION_RUNNER_BOT_ELM)
 
-    def test_the_standoff_is_in_one_of_the_two_bots_only(self):
-        # Over the code rather than the prose: saxrat's doc comments now name
-        # the standoff and both of its bounds as machinery it does not have.
+    def test_both_bots_now_carry_the_standoff(self):
+        # Over the code rather than the prose, since both files discuss the
+        # machinery at length in their doc comments.
         saxrat, mission_runner = code_only(self.saxrat), code_only(
             self.mission_runner)
         for name in ("MessageBoxStandoff", "messageBoxStandoffGiveUpReadings",
                      "messageBoxAnswersBeforeEscape"):
-            self.assertGreater(
-                mission_runner.count(name), 0,
-                "the mission runner is supposed to be the bot that has this")
-            self.assertEqual(
-                saxrat.count(name), 0,
-                "saxrat has gained a message-box standoff, which weakens the "
-                "argument in `endSessionOnAnExpiredBound` -- rewrite it rather "
-                "than deleting this case")
+            for source, bot in ((mission_runner, "the mission runner"),
+                                (saxrat, "saxrat")):
+                self.assertGreater(
+                    source.count(name), 0,
+                    "%s no longer carries %s, so the argument in "
+                    "`endSessionOnAnExpiredBound` is stale -- rewrite it "
+                    "rather than deleting this case" % (bot, name))
 
-    def test_saxrats_dismissal_counts_nothing_and_never_gives_up(self):
-        # The consequence, read out of the branch rather than inferred from the
-        # name being absent: it answers a box on the first reading exactly as it
-        # answers it on the thirty-thousandth.
+    def test_saxrats_dismissal_now_counts_and_eventually_gives_up(self):
+        # The consequence, read out of the branch rather than inferred from a
+        # name being present: the ordinary answer is still the default rung, and
+        # the give-up hands the tree back rather than raising an alarm.
         body = declaration("closeMessageBox", self.saxrat)
-        self.assertIn("Dismiss it using", body)
-        for giving_up in ["Ticks", "GiveUp", "readingsSince", "standoff"]:
-            self.assertNotIn(
-                giving_up, body,
-                "saxrat's message-box dismissal appears to have gained a "
-                "counter")
+        self.assertIn("messageBoxStandoffVerdict standoff", body)
+        self.assertIn("LeaveTheMessageBoxAlone -> Nothing", body)
+        self.assertIn("closeMessageBoxByDeclining messageBox", body)
 
-    def test_the_setup_list_is_what_it_would_hold(self):
-        # `closeMessageBox` is in `generalSetupInUserInterface`, which is
-        # directly above the pod recovery -- so a box it cannot close holds
-        # everything the deadline used to be asked from.
+    def test_the_ladder_bounds_one_starver_and_not_the_list(self):
+        # What the hoist is still for. `closeMessageBox` is one of three entries
+        # in `generalSetupInUserInterface`, and the other two carry no bound of
+        # their own -- so the list can still repeat forever in a way the ladder
+        # says nothing about.
         setup = declaration("generalSetupInUserInterface", self.saxrat)
         self.assertIn("closeMessageBox", setup)
+        for unbounded in ("closeSystemSettingsMenu",
+                          "ensureInfoPanelLocationInfoIsExpanded"):
+            self.assertIn(unbounded, setup)
         root = declaration("anomalyBotDecisionRootBeforeApplyingSettings",
                            self.saxrat)
         self.assertLess(root.index("generalSetupInUserInterface"),
                         root.index("recoverPodAfterShipLoss context"))
+        self.assertLess(root.index("endSessionOnAnExpiredBound"),
+                        root.index("generalSetupInUserInterface"),
+                        "the deadline has to be asked above the list, since "
+                        "the list is only partly bounded")
 
 
 class TheCounterStillCountsReadingsAndNotAttemptsTest(unittest.TestCase):
