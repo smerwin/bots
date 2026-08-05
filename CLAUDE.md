@@ -4502,6 +4502,7 @@ shipped configuration rather than edge cases:
 | setting its own route | could only *follow* one a human set | `hunt-system` circuit, asked for through the host's ESI directive |
 | the client's transient popup (#123) | parsed on every reading and read by nothing — the same five references and the same zero readers | printed in the status line, carried forward with an age, and still read by no decision |
 | the lock range (#121) | `targeting-range` asserted and never revised — `lockProvenAtMeters` appeared 0 times | the setting clamped into `[proven, refused)`, learned from the client's own answers, with the row-identity discipline unchanged |
+| the ammo swap (#122) | absent, not unconfigured — `ammoSwap`, `Charge`, `chargeName` and `optimalRange` all appeared 0 times, and there was no setting to turn on | ported without its tooltip half, with `ammo-swap-range` **required** rather than optional — see "saxrat swaps ammo at a distance it is told" below |
 
 Two things about the port are worth keeping in view.
 
@@ -4631,6 +4632,165 @@ attempt none)` never moving on a run that fights means no evidence was collected
 which is the expected outcome here and not a fault. What *would* be a fault is a
 bound moving on a grid of identically named rats, since that is the rule
 attributing something it should have refused.
+
+### saxrat swaps ammo at a distance it is told, not one it works out
+
+Issue #122. The capability was **absent rather than unconfigured**: `ammoSwap`
+appeared 165 times in the mission runner and 0 times here, as did `Charge`,
+`chargeName` and `optimalRange`, and none of `short-range-ammo`,
+`long-range-ammo` or `ammo-swap-range` existed in the settings. There was no
+switch to turn on. Nothing structural blocked it either — neither app's
+`ParseUserInterface` exposes charges (the count is 0 in both), and the mission
+runner's swap is built entirely on tooltip and menu interaction, so this was a
+port rather than a new instrument.
+
+**The tooltip half is not here, and requiring `ammo-swap-range` is what makes
+that a simplification rather than a loss of function.** The mission runner has
+three sources for its crossover distance: the setting, the midpoint of two
+optimal ranges read off a weapon's tooltip, and the loaded charge's own optimal
+range as a bootstrap. The second and third depend on resting the mouse on a
+module until a Photon flyout appears, which is the fragile half — #106 exists
+because five unanswered hover readings latched the whole swap off for a session,
+and #128 is still open against it. And `weaponTooltipIsWorthAsking`'s own first
+clause is `not crossoverIsConfigured`: **with the setting present the hover is
+never asked at all.** So making it required makes the whole hover unreachable,
+and porting it would have been porting dead code. `ammoSwapConfigFromSettings`
+is the one place that says the swap needs all three settings, and it answers
+`Err` naming the ones that are absent rather than `Nothing`, because an operator
+who set two of the three and got silence cannot otherwise tell a decision from a
+typo.
+
+**The stated cost.** The tooltip is the only way a *second* optimal range is ever
+observed, so saxrat never refines its crossover and uses the number it is given.
+For a bot whose ships and ranges are operator-known that is a reasonable trade,
+and it is the trade the mission runner already makes on every run where the
+setting is present — its run 34 read `crossover 29000 m (+/-3000, from the
+ammo-swap-range setting)` with `tooltip unanswered 0` for the whole run.
+
+**Issue #122's premise about saxrat's warps is measurably wrong, and it does not
+change the answer.** The issue argues the in-warp hover window "may barely exist
+here", from 7 warp-related source references against 103 anomaly ones. That is a
+count of identifiers, not of behaviour. Across the recorded saxrat runs the bot
+warps between anomalies constantly: run 2 spent 3,018 of 24,865 readings in warp
+across **64** separate warp episodes, run 3 4,548 of 24,030 across **119**, with
+median episodes of 42 to 57 readings. The mission runner's own median episode is
+45 and its busiest recorded run has 28. So the in-warp dwell #111's fix depends
+on is *more* available here, not less — and it is still irrelevant, because the
+setting being required is what switches the hover off. Worth recording so a
+later change rests on the measurement rather than on the reference count.
+
+**What came across whole is the swap's own safety**, which is where the design
+earns its keep and is most of what the cases are about:
+
+- **`ammoSwapLoadIsTrusted` and `loadRefusalFromGameLog` are a pair, and a port
+  that keeps one and drops the other compiles.** The trust rule takes a
+  `Maybe String` and `Nothing` is a perfectly good value for it, so the failure
+  is silent and it is exactly the one the removed menu read existed to prevent:
+  the swap starts reporting charges the guns do not have. Run 22 recorded 134
+  refusals when every load was going into a running gun; run 26 recorded none
+  against 819 satisfied readings. `TheTrustRuleReadsTheRefusalTest` asserts the
+  wiring between them, and the matcher's own doc comment carries the argument,
+  because somebody editing it is not reading this file.
+- **`ammoSwapDisarmDamageBudget` reads its configured setting**, at every call
+  site, which is what PR #120 kept deliberately in the mission runner. saxrat
+  scales nothing yet, so the constraint is presently free — which is why it is
+  asserted, since the port that adds #119's scaling is the one that would sweep
+  it up. Note also that the damage-rate retreat has never fired in 36 runs: the
+  budget is an *eighth* of its threshold, so 437 declines swaps on windows that
+  3500 never sees, and the shield is the fuse rather than this number. Nothing
+  in the swap reads a hitpoint gauge, deliberately.
+- **`ammoSwapRangeErrorPercent`'s documented weakness carries over unchanged.**
+  What decides whether the other charge is better is whether the guns are
+  landing, not the geometry; the client says so on its outgoing combat lines and
+  neither app reads them here.
+
+**One rule has no counterpart in the mission runner, and it is the only part of
+this that is new rather than moved.** saxrat's `clearStrayContextMenu` presses
+Escape at a context menu that has sat at the same cascade depth for
+`strayContextMenuStuckTicksThreshold` (3) readings, and it is reached from the
+head of `decideNextActionWhenInSpace` — above everything. The swap holds a
+weapon's context menu open across `ammoSwapSilenceSettleTicks` (also 3) while it
+waits for the guns to go quiet, and `menuOpenOnGunAtX` attributes a menu to a gun
+only where the right-click was the immediately previous step, which run 26 shows
+is usually not the case. So from that branch the swap's own menu looks exactly
+like a stray one, and without a guard the two take turns: Escape closes the menu,
+the swap re-opens it, and the attempt runs out its bound having loaded nothing.
+`strayContextMenuIsStray` is the rule, over a record, and the suppression is
+bounded by the swap's own deadlines — `ammoSwapIsActingOnAVerdict` goes false the
+moment the verdict is satisfied or abandoned, and both `ammoSwapVerdictGiveUpTicks`
+(25) and `ammoSwapSilencedGiveUpTicks` (20) abandon it. The stray-menu guard's
+promise, that a menu cannot sit forever, therefore survives. What it costs is
+stated: a genuinely stray menu opened while the swap is working a verdict waits
+that window out instead of being cleared on the third reading.
+
+**Two other divergences, both consequences of saxrat firing its guns by hotkey.**
+`decideActionInAnomaly` presses F1–F4 and reads `.isActive` to decide whether to;
+the swap reads `isInActiveState` through `weaponIsSwitchedOn`, because `.isActive`
+is `ramp_active`, the duty cycle, and reading it here was the mission runner's
+#76 — run 21 was told no gun was firing on 605 of 674 module clauses of a ship
+that was. And the swap switches a gun *off* by clicking its button rather than by
+pressing its hotkey, because `doEffectsClickModuleButton` is what
+`swapJustCommandedAGunOff` reads and it attributes the press to a gun by region,
+where a hotkey covers only the first four weapons and names one by list position.
+The cost is that the fight's own settling window does not see that click, so it
+may re-arm the gun on the next reading — which no bound depends on, and which is
+the state `switchOffUndoneByClient` already reports for the mission runner's own
+reason (#72: the client does it there anyway, on every swap).
+
+Both readers of the weapon row go through one `weaponModuleButtonsLeftToRight`,
+because the swap silences a gun the fight re-arms by its list position and two
+sorts would be two opinions about which physical weapon that is.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_ammo_swap.py` (58 cases). The pure rules are
+executed through the real `Bot.elm` in `elm repl` rather than restated in Python:
+the settings gate over all eight combinations of present and absent, the trust
+rule with each of its five inputs falsified on its own, the disarm budget at both
+sides of every boundary it has, the range error symmetric about the crossover and
+`Nothing` where it cannot be measured, the refusal matcher against a real parsed
+reading, and the stray-menu rule at both sides of its threshold and with the swap
+holding. The wiring, the placement and the counters' arithmetic are read out of
+the source through a whitespace-collapsing reader; `gunsSilencedTicks` is checked
+to evaluate to `0`, `1` or `previous + 1` in every branch and to consult nothing
+the module says, which is the property #34 was. The tooltip half's absence is
+asserted as a *relation* between the two files rather than as a count in one, so
+a case cannot pass on a file where the swap itself was deleted. The corpus is
+recounted as relations: no recorded saxrat run carries an ammo clause at all, and
+the warp figures above.
+
+Confirmed by mutation, **eleven** of them, each failing a named case: removing
+the refusal matcher while keeping the trust rule, dropping the refusal from the
+trust rule's five inputs, reading the cascade state from this reading instead of
+the previous one, making `ammo-swap-range` optional again, the disarm budget
+reading a scaled threshold rather than the setting, its worthwhile-percent
+comparison moved by one, `gunsSilencedTicks` pinned at a constant,
+`weaponIsSwitchedOn` reading `.isActive`, the stray-menu guard reverted to the
+bare threshold, one arm of the movement dispatch left on the fight so the swap is
+never reached, and the memory update never called at all.
+
+**The first of those survived on the first attempt, and the hole was real.**
+`TheTrustRuleReadsTheRefusalTest` asserted `loadRefusedByClient =
+loadRefusedByClient` over the whole of `updateAmmoSwapMemoryWithConfig` — and
+the record that function *returns* carries a field of exactly that shape, so the
+assertion was satisfied by the output record while the trust rule was being
+handed `Nothing`. That is this port's worst available failure passing a case
+written to catch it. Both the slice and a second case asserting none of the five
+inputs is a literal are what catch it now, which is the "mutate the code and
+watch a test fail" convention doing the thing it is for.
+
+**Unverified: any of it running, and whether saxrat's ships have two ammo types
+worth switching between.** The three recorded saxrat runs carry no ammo clause at
+all, so the corpus cannot say what a swap would have gained — that is the issue's
+own assumption from the operator's request and it is not measured. What to watch
+on the first run with all three settings: `Ammo swap: loaded charge reads …,
+crossover N m (+/-3000, from the ammo-swap-range setting)` in the status line at
+all, then `GUNS OFF for N of 20` with N small and the client confirming the
+switch-off by reading 2, then `(satisfied)` and `loaded charge reads` *changing*
+with each swap. `cannot load or unload` appearing in the game log means the load
+is going into a running gun. A run where the swap opens a menu and the next
+reading reads `A context menu has sat at the same depth` means the stray-menu
+guard is still firing on the swap's own menu, which is the one new rule here and
+the thing most likely to be wrong.
 
 **One rule is deliberately not identical, and it is the first reading.**
 `updateHitpointsGaugeMemory` believes a reading that has no previous reading to
@@ -5608,6 +5768,24 @@ exists.
   rules are the same declarations under the same names and a case compares them
   byte for byte, while the line each is placed in follows each app's own status
   conventions.
+
+  And it now **swaps ammo**, which it could not do at all — the capability was
+  absent rather than unconfigured, with `ammoSwap` appearing 165 times in the
+  mission runner and 0 times here. The port leaves the tooltip half behind and
+  makes `ammo-swap-range` required rather than optional, which is what turns that
+  into a simplification: the mission runner only ever hovers a module when the
+  setting is *unset*, so requiring it makes the whole fragile half unreachable.
+  What the swap's own safety needed — the game-log refusal matcher under the
+  trust rule, the disarm budget on the operator's own setting — came across
+  whole. See "saxrat swaps ammo at a distance it is told, not one it works out"
+  for the argument, for the one rule that is new rather than moved (the
+  stray-menu guard, which would otherwise close the menu the load is clicked out
+  of), and for issue #122's own premise about this bot's warps, which the
+  recordings contradict without changing the answer. **Untested against a live
+  client**, and no recorded saxrat run carries an ammo clause at all, so the
+  corpus cannot say what a swap would have gained here. Watch for `Ammo swap:`
+  in the status line naming a crossover, then `GUNS OFF for N of 20` with the
+  client confirming the switch-off, then `(satisfied)`.
 
   And it now **learns its lock range from the client** rather than carrying
   `targeting-range=66000` and never revising it — the setting clamped into
