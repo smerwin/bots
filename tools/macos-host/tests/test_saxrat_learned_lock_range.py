@@ -926,8 +926,11 @@ class StatusAndWiringTest(unittest.TestCase):
         root = collapsed(body_of(source_of(SAXRAT_BOT_ELM),
                                  "anomalyBotDecisionRoot"))
         self.assertIn(
-            "[ context.memory.lockRangeLastChange ] |> List.filterMap identity "
-            "|> List.foldr describeBranch", root,
+            "|> List.filterMap identity |> List.foldr describeBranch", root,
+            "the root no longer folds the memory update's own conclusions in")
+        folded = root[:root.index("|> List.filterMap identity")]
+        self.assertIn(
+            "context.memory.lockRangeLastChange", folded,
             "a bound the bot moved for itself no longer names itself in the "
             "decision log")
 

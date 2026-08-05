@@ -324,6 +324,15 @@ type alias BotMemory =
     , lootedWreckIds : List String
     , gateWithinReachTicks : Int
 
+    -- The box `closeMessageBox` is trying to close and how many readings it has
+    -- been at it, so a window the dismissal does not close eventually hands the
+    -- tree back rather than holding it forever. `messageBoxLastChange` holds a
+    -- sentence only on the reading the give-up was reached, which is what makes
+    -- one line per give-up need no "already reported" flag. See
+    -- `MessageBoxStandoff`.
+    , messageBoxStandoff : Maybe MessageBoxStandoff
+    , messageBoxLastChange : Maybe String
+
     -- The client's own transient popup, carried forward with its age because a
     -- reading is seconds apart and the popup is not. Read by no decision, and
     -- deliberately so until a run has recorded what one says. See
@@ -507,6 +516,49 @@ type alias ShipLossVerdict =
     }
 
 
+{-| The message box the bot has been trying to close, and how many readings it
+has been at it.
+
+**Issue #138, which is the mission runner's #101 in this file.** `closeMessageBox`
+here had no counter, no bound and no give-up: it clicked its dismissal on the
+first reading and would have clicked it identically on the thirty-thousandth.
+The mission runner's run 30 is what that costs. Something the client draws on
+the `MessageBox` widget -- an emoji picker, by every sign -- carried a
+`no_dialog_button`, so `Dismiss it using No.` was the right-looking answer and
+the box was still there afterwards: **32,585 readings, three hours and
+forty-four minutes**, with everything below `generalSetupInUserInterface`
+unreachable for all of them. This bot's copy of that list is evaluated in the
+same place and `parseMessageBoxesFromUITreeRoot` here matches the same widget on
+`pythonObjectTypeName` alone, so the same window produces the same standoff --
+and this bot rats unattended, with nobody at the console to notice.
+
+**`identity` is what makes the count mean something.** A global tally of
+dismissals accumulates across a session that legitimately closes many dialogs
+and reaches a give-up it should never reach; the mission runner's recovered runs
+answer 175 separate stretches of message box between them. Counted per box,
+those stretches are 6 to 44 readings long and nothing else, against run 30's
+32,585 on one box. So the count is keyed on the thing it bounds, the way
+`lootedWreckIds` is keyed on the wreck rather than counting wrecks.
+
+**What the identity is made of, and what it deliberately leaves out.** The box's
+own display texts and its buttons, and _not_ its display region.
+`targetToUnlockUnchangedTicks` and `routeFirstMarkerUnchangedTicks` are both
+region comparisons and both record what that costs: a widget re-rendered every
+tick can differ sub-pixel while looking identical, and an exact-equality test
+over its region then never accumulates at all -- which is precisely the failure
+this bound exists to prevent. What a dialog says and what buttons it offers are
+read out of the tree as strings and do not drift that way. The side effect is
+that a dialog whose wording changes starts a fresh count, which is the wanted
+direction: a box saying something new is one the next answer has not been tried
+on.
+
+-}
+type alias MessageBoxStandoff =
+    { identity : String
+    , readings : Int
+    }
+
+
 type alias BotDecisionContext =
     EveOnline.BotFrameworkSeparatingMemory.StepDecisionContext BotSettings BotMemory
 
@@ -682,7 +734,9 @@ anomalyBotDecisionRoot context =
     -- being evaluated. The field holds a message only on the reading its
     -- conclusion changed, so this is one line per change with no separate
     -- "already reported" flag to get wrong.
-    ([ context.memory.lockRangeLastChange ]
+    ([ context.memory.messageBoxLastChange
+     , context.memory.lockRangeLastChange
+     ]
         |> List.filterMap identity
         |> List.foldr describeBranch (anomalyBotDecisionRootBeforeApplyingSettings context)
     )
@@ -700,7 +754,8 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
     -- See `endSessionOnAnExpiredBound`.
     endSessionOnAnExpiredBound context
         |> Maybe.withDefault
-            (generalSetupInUserInterface context.readingFromGameClient
+            (generalSetupInUserInterface context.memory.messageBoxStandoff
+                context.readingFromGameClient
                 |> Maybe.withDefault
                     (recoverPodAfterShipLoss context
                         |> Maybe.withDefault
@@ -781,17 +836,17 @@ the action is. This one is a `describeBranch` around `FinishSession` and nothing
 else -- no click, no dock, no menu, no wait -- so it needs no state reached and
 can be evaluated on any reading at all.
 
-**The starvation is unguarded here in a way it is not in the mission runner.**
-That bot answered #109 with `MessageBoxStandoff`, a counter that makes
-`closeMessageBox` hand the tree back once a box has refused to close for long
-enough. None of it was ported -- neither of its two bounds
-(`messageBoxAnswersBeforeEscape`, `messageBoxStandoffGiveUpReadings`) exists
-here. saxrat's `closeMessageBox` clicks its dismissal every reading for as
-long as a box is showing and counts nothing at all. Run 30 held the mission
-runner's tree that way for 32,585 readings -- three hours and forty-four minutes
--- and this bot has no equivalent of the thing that now stops it. A ship lost
-while a box holds this tree is a capsule sitting in the pocket that killed it,
-with the bound that should end the session never asked.
+**The largest starvation this list can produce is now bounded, and the hoist is
+still what makes the bound reachable.** #138 ported `MessageBoxStandoff` from
+the mission runner's #109: `closeMessageBox` counts the readings one box has
+survived and answers `Nothing` once it has survived
+`messageBoxStandoffGiveUpReadings`, so a window nothing closes no longer holds
+this list forever. That is a bound on one known starver, not a guarantee about
+the list -- everything else in it is still evaluated above this branch, and a
+new entry without a bound of its own would starve the pod recovery exactly as
+run 30 starved the mission runner's abandonment. A ship lost while something up
+there repeats is a capsule sitting in the pocket that killed it, and this rule
+is what stops the session ending only when a person notices.
 
 One bound so far, so this is a `Maybe.map` rather than the mission runner's list
 of them: it has a second (`abandonmentOutOfTime`) and there is no mission to
@@ -816,9 +871,28 @@ endSessionOnAnExpiredBound context =
             )
 
 
-generalSetupInUserInterface : ReadingFromGameClient -> Maybe DecisionPathNode
-generalSetupInUserInterface readingFromGameClient =
-    [ closeSystemSettingsMenu, closeMessageBox, ensureInfoPanelLocationInfoIsExpanded ]
+{-| The three things that have to be dealt with before any decision can be made
+about the game itself.
+
+`messageBoxStandoff` is passed down rather than read in `closeMessageBox`
+because it is not a fact about this reading: it is how many readings the box in
+front of the bot has already survived, and only `BotMemory` can say. Everything
+else here is answerable from the reading alone and stays that way.
+
+**This whole list is evaluated above the docked-or-in-space split**, so anything
+in it that can repeat forever freezes the entire bot rather than one branch.
+That is #101 in the mission runner and #138 here. `closeMessageBox` is the one
+entry with a bound of its own and may not lose it; the other two are unbounded,
+which is why `endSessionOnAnExpiredBound` is asked above this list rather than
+below it.
+
+-}
+generalSetupInUserInterface : Maybe MessageBoxStandoff -> ReadingFromGameClient -> Maybe DecisionPathNode
+generalSetupInUserInterface messageBoxStandoff readingFromGameClient =
+    [ closeSystemSettingsMenu
+    , closeMessageBox messageBoxStandoff
+    , ensureInfoPanelLocationInfoIsExpanded
+    ]
         |> List.filterMap
             (\maybeSetupDecisionFromGameReading ->
                 maybeSetupDecisionFromGameReading readingFromGameClient
@@ -890,76 +964,323 @@ closeSystemSettingsMenu readingFromGameClient =
             )
 
 
-closeMessageBox : ReadingFromGameClient -> Maybe DecisionPathNode
-closeMessageBox readingFromGameClient =
+closeMessageBox : Maybe MessageBoxStandoff -> ReadingFromGameClient -> Maybe DecisionPathNode
+closeMessageBox standoff readingFromGameClient =
     readingFromGameClient.messageBoxes
         |> List.head
-        |> Maybe.map
+        |> Maybe.andThen
             (\messageBox ->
-                describeBranch "I see a message box to close."
-                    (let
-                        buttonCanBeUsedToClose =
-                            .mainText
-                                >> Maybe.map (String.trim >> String.toLower >> (\buttonText -> [ "close", "ok" ] |> List.member buttonText))
-                                >> Maybe.withDefault False
+                case messageBoxStandoffVerdict standoff of
+                    LeaveTheMessageBoxAlone ->
+                        -- The whole of #138: `Nothing` here is what lets the
+                        -- rest of the tree run. The box is still on the screen
+                        -- and every branch below is now working around it,
+                        -- which is worse than a closed box and incomparably
+                        -- better than nothing running at all -- the pod
+                        -- recovery's deadline included, since a capsule left
+                        -- in the pocket is what an unattended bot pays for a
+                        -- held tree. The give-up said so once at the root on
+                        -- the reading it was reached, and the status line
+                        -- keeps saying so.
+                        Nothing
 
-                        namedButton name =
-                            messageBox.buttons
-                                |> List.filter
-                                    (.uiNode
-                                        >> .uiNode
-                                        >> EveOnline.ParseUserInterface.getNameFromDictEntries
-                                        >> (==) (Just name)
-                                    )
-                                |> List.head
-
-                        labelled description button =
-                            ( description, button.uiNode )
-
-                        {- Dismissal options in descending order of confidence.
-                           They deliberately never include a positive answer:
-                           these dialogs guard destructive actions, so the bot's
-                           automatic reply must always be the one that declines.
-
-                           1. A plain "Close"/"OK" acknowledgement.
-                           2. "No" on a confirmation dialog -- which has no
-                              Close/OK button at all, so nothing above matches
-                              it. `no_dialog_button` is stable across client
-                              languages.
-                           3. The window's own close ('X') control, for a
-                              dialog whose buttons we do not recognise at all.
-                              Seen live sitting in front of one of these for
-                              several ticks with nothing to click.
-                        -}
-                        dismissOptions =
-                            [ messageBox.buttons
-                                |> List.filter buttonCanBeUsedToClose
-                                |> List.head
-                                |> Maybe.map
-                                    (\button ->
-                                        labelled (button.mainText |> Maybe.withDefault "close") button
-                                    )
-                            , namedButton "no_dialog_button"
-                                |> Maybe.map (labelled "No")
-                            , messageBox.uiNode
-                                |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
-                                |> Maybe.andThen .closeButton
-                                |> Maybe.map (\node -> ( "the window's close button", node ))
-                            ]
-                     in
-                     case dismissOptions |> List.filterMap identity |> List.head of
-                        Nothing ->
-                            describeBranch "I see no way to close this message box." askForHelpToGetUnstuck
-
-                        Just ( description, nodeToClick ) ->
-                            describeBranch ("Dismiss it using " ++ description ++ ".")
-                                (decideActionForCurrentStep
-                                    (mouseClickOnUIElement MouseButtonLeft nodeToClick
-                                        |> Result.withDefault []
-                                    )
+                    PressEscapeAtTheMessageBox ->
+                        Just
+                            (describeBranch
+                                ("This message box has not closed in "
+                                    ++ String.fromInt messageBoxAnswersBeforeEscape
+                                    ++ " readings of answering it, so the answer does not fit it -- press Escape at it instead."
                                 )
-                    )
+                                (decideActionForCurrentStep
+                                    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_ESCAPE
+                                    , EffectOnWindow.KeyUp EffectOnWindow.vkey_ESCAPE
+                                    ]
+                                )
+                            )
+
+                    AnswerTheMessageBox ->
+                        Just (closeMessageBoxByDeclining messageBox)
             )
+
+
+{-| What to do about the box in front of the bot, given how long it has been
+there.
+
+**The declining answer stays the default and that is not negotiable** -- #54's
+standing lesson in the mission runner, and the reason the ladder starts where
+this branch always did rather than at something cleverer. These dialogs guard
+destructive actions. What #138 adds is only what happens once the answer has
+demonstrably not worked.
+
+-}
+type MessageBoxStandoffVerdict
+    = AnswerTheMessageBox
+    | PressEscapeAtTheMessageBox
+    | LeaveTheMessageBoxAlone
+
+
+{-| How many readings the ordinary answer gets before the escalation.
+
+**60, and it rests on the mission runner's corpus rather than on this bot's.**
+The three recorded saxrat runs hold **49,235 readings and not one message box**
+-- `TheRecordedSaxratRunsCannotSizeThisBoundTest` checks that silence rather
+than leaving it remembered -- so there is nothing here to measure a threshold
+against, and inventing a saxrat-specific number would be inventing it. What the
+mission runner measured transfers because the thing being measured is the
+client's, not the bot's: the same widget, parsed by the same
+`parseMessageBoxesFromUITreeRoot` matching on `pythonObjectTypeName` alone, and
+dismissed by the same three options in the same order. Counting consecutive
+readings with a box on the screen, that bot's recovered runs give 175 stretches
+of 6, 10, 11, 18, 20 and 44 readings and nothing else, while run 30's one box
+ran to 32,585. **Nothing recorded lies between 44 and the incident**, so 60 is
+placed in a gap rather than cut through a distribution: a third again on top of
+the slowest dialog anyone has recorded, and still an end inside a minute where
+run 30 spent three hours and forty-four.
+
+A stretch is an upper bound on any one box, since a stretch can hold several
+dialogs back to back, so the real separation is wider than those numbers. That
+is the safe direction for a threshold that must never fire on a box the answer
+was about to close. Mission runner run 35 is the one live outing the ladder has
+had: 728 boxes dismissed with the counter never above **2**.
+
+**It is not the count of clicks dispatched**, which is roughly half of it -- the
+framework reads on some readings and acts on others. Readings are the unit
+`contextMenuStuckTicks` and `lootWindowOpenTicks` are already counted in, they
+are what the corpus above was measured in, and a reading spent looking at a box
+that will not close is spent either way, because nothing else in the tree runs
+on it.
+
+-}
+messageBoxAnswersBeforeEscape : Int
+messageBoxAnswersBeforeEscape =
+    60
+
+
+{-| How many readings the whole standoff gets before the bot stops answering.
+
+Twice `messageBoxAnswersBeforeEscape`, so Escape gets exactly as long to work as
+the answer it replaced -- written as a multiple for `routeAskGiveUpReadings`'s
+reason, so the argument cannot drift away from the number.
+
+-}
+messageBoxStandoffGiveUpReadings : Int
+messageBoxStandoffGiveUpReadings =
+    messageBoxAnswersBeforeEscape * 2
+
+
+{-| The ladder, over the standoff `updateMemoryForNewReadingFromGame` recorded.
+
+**Escape is what this codebase already escalates with**, and it needs no focus:
+`clearStrayContextMenu` presses it at a menu that has not advanced in three
+ticks. A message box that has not closed in sixty readings is the same shape.
+
+**Ctrl+W is deliberately not in the ladder**, though it is the client's own
+"close the active window". It acts on the _focused_ window, and the mission
+runner's loot window paid for that lesson already -- a version that pressed it
+at an unfocused window managed 650 presses in one run and closed nothing, and
+the live recovery needed the window's title bar clicked first. Clicking an
+unidentified modal to focus it is a click into a dialog nobody has read, which
+is the one thing `closeMessageBoxByDeclining` refuses to do.
+
+**A naked Escape can open the client's own pause menu**, which
+`closeSystemSettingsMenu` records happening live in this very file from exactly
+this key. That is covered rather than risked here for the same reason it is
+there: `closeSystemSettingsMenu` is the entry _before_ this one in
+`generalSetupInUserInterface`, so a pause menu opened on one reading is closed
+on the next by the branch that exists for it, and it is closed first because
+that list answers with its head.
+
+-}
+messageBoxStandoffVerdict : Maybe MessageBoxStandoff -> MessageBoxStandoffVerdict
+messageBoxStandoffVerdict standoff =
+    case standoff of
+        Nothing ->
+            AnswerTheMessageBox
+
+        Just { readings } ->
+            if messageBoxStandoffGiveUpReadings <= readings then
+                LeaveTheMessageBoxAlone
+
+            else if messageBoxAnswersBeforeEscape <= readings then
+                PressEscapeAtTheMessageBox
+
+            else
+                AnswerTheMessageBox
+
+
+{-| What a message box is, for the purpose of counting how long this one has
+been in the way.
+
+Its own display texts and its buttons, joined into one string -- see
+`MessageBoxStandoff` for why the display region is deliberately not in it, and
+why a box that changes its wording is treated as a new box.
+
+The buttons carry their `_name` as well as their label, because the label is
+what a person reads and the name is what this file acts on: `no_dialog_button`
+is the one name relied on across client languages, and a dialog offering it is a
+different dialog from one offering an unnamed OK even where both render the same
+word. Reading both also means the identity is never empty for a box that has
+buttons, which the window that started this had.
+
+-}
+messageBoxIdentity : EveOnline.ParseUserInterface.MessageBox -> String
+messageBoxIdentity messageBox =
+    let
+        nonEmpty =
+            List.map String.trim >> List.filter (String.isEmpty >> not)
+
+        textOfBox =
+            messageBox.uiNode.uiNode
+                |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+                |> nonEmpty
+                |> String.join " / "
+
+        describeButton button =
+            [ button.uiNode.uiNode |> EveOnline.ParseUserInterface.getNameFromDictEntries
+            , button.mainText
+            ]
+                |> List.filterMap identity
+                |> nonEmpty
+                |> String.join "="
+    in
+    "message box saying '"
+        ++ textOfBox
+        ++ "' with buttons ["
+        ++ (messageBox.buttons |> List.map describeButton |> String.join ", ")
+        ++ "]"
+
+
+{-| The one line the operator gets when the bot stops answering a box.
+
+32,585 identical `Dismiss it using No.` lines is what the mission runner's run
+30 gave instead, and `stall_watch.py` deduped them into a single alarm, so
+nothing escalated. This says which box it was and everything that was tried on
+it, once, at the root -- `lockRangeLastChange`'s mechanism, for its reason: the
+verdict is reached in the memory update, which runs whatever the bot is doing,
+and the branch that would otherwise say so is precisely the branch that has just
+stopped running.
+
+The identity is cut to `messageBoxGiveUpIdentityLength` because it carries the
+box's whole rendered text, and a dialog with a paragraph in it would otherwise
+push the rest of the sentence off whatever the operator is reading.
+
+-}
+describeMessageBoxGivenUpOn : String -> String
+describeMessageBoxGivenUpOn identity =
+    "Nothing closes this "
+        ++ (if messageBoxGiveUpIdentityLength < String.length identity then
+                String.left messageBoxGiveUpIdentityLength identity ++ "..."
+
+            else
+                identity
+           )
+        ++ " -- answered it "
+        ++ String.fromInt messageBoxAnswersBeforeEscape
+        ++ " readings running and then pressed Escape at it for another "
+        ++ String.fromInt (messageBoxStandoffGiveUpReadings - messageBoxAnswersBeforeEscape)
+        ++ ", and it is still there. Leaving it open and getting on with the rest of the bot rather than answering it forever -- it needs closing by hand."
+
+
+{-| How much of a box's identity the give-up line prints.
+-}
+messageBoxGiveUpIdentityLength : Int
+messageBoxGiveUpIdentityLength =
+    200
+
+
+{-| The standoff as it stands after this reading.
+
+No box in the reading ends it outright, which is what keeps the count about
+_this_ box: a session that closes forty dialogs starts from zero at each one,
+and only a box in front of the bot on every consecutive reading can accumulate
+towards the give-up.
+
+-}
+messageBoxStandoffAfterReading :
+    { before : Maybe MessageBoxStandoff, identityNow : Maybe String }
+    -> Maybe MessageBoxStandoff
+messageBoxStandoffAfterReading { before, identityNow } =
+    identityNow
+        |> Maybe.map
+            (\identity ->
+                case before of
+                    Just standoff ->
+                        if standoff.identity == identity then
+                            { standoff | readings = standoff.readings + 1 }
+
+                        else
+                            { identity = identity, readings = 1 }
+
+                    Nothing ->
+                        { identity = identity, readings = 1 }
+            )
+
+
+closeMessageBoxByDeclining : EveOnline.ParseUserInterface.MessageBox -> DecisionPathNode
+closeMessageBoxByDeclining messageBox =
+    describeBranch "I see a message box to close."
+        (let
+            buttonCanBeUsedToClose =
+                .mainText
+                    >> Maybe.map (String.trim >> String.toLower >> (\buttonText -> [ "close", "ok" ] |> List.member buttonText))
+                    >> Maybe.withDefault False
+
+            namedButton name =
+                messageBox.buttons
+                    |> List.filter
+                        (.uiNode
+                            >> .uiNode
+                            >> EveOnline.ParseUserInterface.getNameFromDictEntries
+                            >> (==) (Just name)
+                        )
+                    |> List.head
+
+            labelled description button =
+                ( description, button.uiNode )
+
+            {- Dismissal options in descending order of confidence.
+               They deliberately never include a positive answer:
+               these dialogs guard destructive actions, so the bot's
+               automatic reply must always be the one that declines.
+
+               1. A plain "Close"/"OK" acknowledgement.
+               2. "No" on a confirmation dialog -- which has no
+                  Close/OK button at all, so nothing above matches
+                  it. `no_dialog_button` is stable across client
+                  languages.
+               3. The window's own close ('X') control, for a
+                  dialog whose buttons we do not recognise at all.
+                  Seen live sitting in front of one of these for
+                  several ticks with nothing to click.
+            -}
+            dismissOptions =
+                [ messageBox.buttons
+                    |> List.filter buttonCanBeUsedToClose
+                    |> List.head
+                    |> Maybe.map
+                        (\button ->
+                            labelled (button.mainText |> Maybe.withDefault "close") button
+                        )
+                , namedButton "no_dialog_button"
+                    |> Maybe.map (labelled "No")
+                , messageBox.uiNode
+                    |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
+                    |> Maybe.andThen .closeButton
+                    |> Maybe.map (\node -> ( "the window's close button", node ))
+                ]
+         in
+         case dismissOptions |> List.filterMap identity |> List.head of
+            Nothing ->
+                describeBranch "I see no way to close this message box." askForHelpToGetUnstuck
+
+            Just ( description, nodeToClick ) ->
+                describeBranch ("Dismiss it using " ++ description ++ ".")
+                    (decideActionForCurrentStep
+                        (mouseClickOnUIElement MouseButtonLeft nodeToClick
+                            |> Result.withDefault []
+                        )
+                    )
+        )
 
 
 {-| Shared by `tetherAtStructure`, `alignToStructure` and
@@ -3774,6 +4095,8 @@ initBotMemory =
     , shipApproachingTicks = 0
     , lootedWreckIds = []
     , gateWithinReachTicks = 0
+    , messageBoxStandoff = Nothing
+    , messageBoxLastChange = Nothing
     , quickMessage = Nothing
     , hitpoints = { shield = initHitpointsGaugeMemory, armor = initHitpointsGaugeMemory }
     , hitpointsLowWaterMark = { shield = 100, armor = 100 }
@@ -3872,6 +4195,32 @@ statusTextFromState context =
                                 ++ " readings since, giving up at "
                                 ++ String.fromInt podRecoveryGiveUpReadings
                                 ++ ")."
+                   )
+                ++ (case context.memory.messageBoxStandoff of
+                        Nothing ->
+                            ""
+
+                        Just standoff ->
+                            -- #138's counter, and the one clause here that
+                            -- keeps speaking after its branch has stopped:
+                            -- once the give-up is reached `closeMessageBox`
+                            -- answers `Nothing` and prints no decision line at
+                            -- all, so this is the only thing on a reading that
+                            -- says a box is still in front of the bot.
+                            " Message box: "
+                                ++ String.fromInt standoff.readings
+                                ++ "/"
+                                ++ String.fromInt messageBoxStandoffGiveUpReadings
+                                ++ (case messageBoxStandoffVerdict (Just standoff) of
+                                        AnswerTheMessageBox ->
+                                            " (answering it)."
+
+                                        PressEscapeAtTheMessageBox ->
+                                            " (pressing Escape at it)."
+
+                                        LeaveTheMessageBoxAlone ->
+                                            " (GIVEN UP ON, still open)."
+                                   )
                    )
                 ++ (let
                         withheld =
@@ -5193,6 +5542,36 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 , attempt = botMemoryBefore.lockAttempt
                 }
 
+        -- Written here rather than where the box is answered, because the
+        -- branch that would keep the count is the branch that stops running
+        -- the moment the count reaches its bound. See `MessageBoxStandoff`.
+        messageBoxStandoff =
+            messageBoxStandoffAfterReading
+                { before = botMemoryBefore.messageBoxStandoff
+                , identityNow =
+                    context.readingFromGameClient.messageBoxes
+                        |> List.head
+                        |> Maybe.map messageBoxIdentity
+                }
+
+        -- Said on the reading the give-up is reached and on no other, like
+        -- `lockRangeLastChange`. The bound is crossed once, because the count
+        -- only ever rises while one box stays.
+        messageBoxLastChange =
+            case ( botMemoryBefore.messageBoxStandoff, messageBoxStandoff ) of
+                ( Just before, Just now ) ->
+                    if
+                        (before.readings < messageBoxStandoffGiveUpReadings)
+                            && (messageBoxStandoffGiveUpReadings <= now.readings)
+                    then
+                        Just (describeMessageBoxGivenUpOn now.identity)
+
+                    else
+                        Nothing
+
+                _ ->
+                    Nothing
+
         weJustFinishedWarping =
             (botMemoryBefore.shipWarpingInLastReading == Just True) && (shipIsWarping == Just False)
 
@@ -5358,6 +5737,8 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , messageBoxStandoff = messageBoxStandoff
+    , messageBoxLastChange = messageBoxLastChange
     , quickMessage =
         quickMessageAfterReading
             { onScreenNow = quickMessageOnScreen context.readingFromGameClient
