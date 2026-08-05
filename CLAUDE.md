@@ -2862,8 +2862,8 @@ not.** `returnDronesToBay` sits in front of the warp (#11, #59), the client was
 not answering Shift+R, and `Drones are not coming back -- click the drones window
 …` appears 107 times in run 36 — which reads like the cause and is not. Those 107
 are *decision blocks across the whole run*, 23 of which are inside the retreat;
-the recall held it for the first five readings, the drones came home, and the
-decline that nearly killed the ship — 53% to 17% — happened **entirely
+the recall held it for **seven** readings, the drones came home at 53% armour,
+and the decline that nearly killed the ship — 53% to 17% — happened **entirely
 afterwards**, with the bot issuing `Get out -- warp to …` into a client that did
 not warp.
 
@@ -2902,8 +2902,8 @@ in run 10, and **none at all** in run 31's two episodes (46 and 89 blocks) or ru
 11's (30). A slow retreat is fully reachable with the recall nowhere in it.
 
 **So the ordering is not changed, and that is the finding rather than caution.**
-Reordering would have bought run 36 five readings, cost five drones, and left the
-other 125 blocks exactly as they were. `droneRecallGiveUpTicks` is 60 and **has
+Reordering would have bought run 36 seven readings, cost five drones, and left
+the other 125 blocks exactly as they were. `droneRecallGiveUpTicks` is 60 and **has
 never been reached in any recorded run** — the give-up names itself on every
 reading it declines since #11, so zero is evidence rather than silence — so
 tightening it would be retuning a number nothing recorded has approached, on the

@@ -7987,9 +7987,10 @@ finding that decided what this change does and does not do.
 under-fire entries after a verdict across the corpus, **147 (about a fifth) were
 spent on `returnDronesToBay`** and the rest on the warp command already issued
 and not yet taken effect. In run 36 the split is 29 against 125: the recall held
-the retreat for its first five readings, the drones came home, and **every point
-of the decline that nearly killed the ship -- 53% to 17% -- happened after the
-drones were in the bay.** The longest episode outside run 36 is run 10's, 142
+the retreat for its first **seven** readings -- counted off that run's own
+per-reading counter rather than off the blocks -- the drones came home at 53%
+armour, and **every point of the decline that nearly killed the ship, 53% to
+17%, happened after they were in the bay.** The longest episode outside run 36 is run 10's, 142
 entries of which six are the recall; and run 31's two, at 46 and 89 entries, and
 run 11's at 30, contain **no drone-recall entry at all** -- so a slow retreat is
 fully reachable without the recall being in it.
