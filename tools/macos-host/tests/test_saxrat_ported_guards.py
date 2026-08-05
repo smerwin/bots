@@ -813,17 +813,25 @@ class ShipLossTest(unittest.TestCase):
 
     def test_the_recovery_is_bounded_and_the_bound_ends_the_session(self):
         """Every way this can fail runs under one clock, so none of them can
-        become a forever-loop -- issues #7 and #14 twice over."""
+        become a forever-loop -- issues #7 and #14 twice over.
+
+        Since #133 the comparison is asked from `podRecoveryOutOfTime` at the
+        head of the decision root rather than from inside this branch, which is
+        what makes the clock reachable on a reading something above holds the
+        tree. `test_saxrat_pod_recovery_deadline_reachable.py` owns that; what
+        this case still pins is that the bound exists and that the one outcome
+        left here -- the pod docked -- still ends the session.
+        """
         recovery = collapsed(body_of(source_of(SAXRAT_BOT_ELM),
                                      "recoverPodAfterShipLoss"))
-        self.assertIn(
-            "if podRecoveryGiveUpReadings <= shipLoss.readingsSince then",
-            recovery, "the pod recovery is no longer bounded")
+        self.assertNotIn(
+            "podRecoveryGiveUpReadings", recovery,
+            "the deadline is back inside the branch a held tree cannot reach")
         self.assertEqual(
-            2, recovery.count(
+            1, recovery.count(
                 "Common.DecisionPath.endDecisionPath FinishSession"),
-            "both the docked outcome and the give-up must end the session -- "
-            "the remaining hours are worth nothing without a ship")
+            "the docked outcome must still end the session -- the remaining "
+            "hours are worth nothing without a ship")
         [bound] = self.repl.evaluate(["podRecoveryGiveUpReadings == 150"])
         self.assertTrue(bound)
 

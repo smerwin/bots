@@ -692,65 +692,127 @@ anomalyBotDecisionRoot context =
 
 anomalyBotDecisionRootBeforeApplyingSettings : BotDecisionContext -> DecisionPathNode
 anomalyBotDecisionRootBeforeApplyingSettings context =
-    generalSetupInUserInterface context.readingFromGameClient
+    -- The head is a bound whose expiry ends the session and nothing else, so it
+    -- sits above `generalSetupInUserInterface` rather than below it. Everything
+    -- from the setup list down needs some state the client has to be in --
+    -- a menu cleared, a panel expanded, a ship UI showing -- and a bound
+    -- counted in readings must be asked on readings where none of that holds.
+    -- See `endSessionOnAnExpiredBound`.
+    endSessionOnAnExpiredBound context
         |> Maybe.withDefault
-            (recoverPodAfterShipLoss context
+            (generalSetupInUserInterface context.readingFromGameClient
                 |> Maybe.withDefault
-                    (branchDependingOnDockedOrInSpace
-                        { ifDocked =
-                            continueIfShouldHide
-                                { ifShouldHide =
-                                    describeBranch "Stay docked." waitForProgressInGame
-                                }
-                                context
-                                |> Maybe.withDefault
-                                    (if
-                                        context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
-                                            && (context.readingFromGameClient
-                                                    |> infoPanelRouteFirstMarkerFromReadingFromGameClient
-                                                    |> (==) Nothing
-                                               )
-                                            -- A "Warp to Site" opportunity takes
-                                            -- precedence over staying docked: the
-                                            -- Opportunities panel this comes from is
-                                            -- part of the persistent left sidebar
-                                            -- (like the route panel), so it's
-                                            -- checkable even while docked. Undocking
-                                            -- here rather than trying to click it
-                                            -- directly from dock -- untested whether
-                                            -- that even works -- lets the very next
-                                            -- tick's normal in-space priority chain
-                                            -- (which already puts this ahead of
-                                            -- tether/dock) pick it up once genuinely
-                                            -- in space.
-                                            && (context.readingFromGameClient
-                                                    |> warpToOpportunitySiteIfAvailable
-                                                    |> (==) Nothing
-                                               )
-                                     then
-                                        describeBranch
-                                            "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
-                                            waitForProgressInGame
+                    (recoverPodAfterShipLoss context
+                        |> Maybe.withDefault
+                            (branchDependingOnDockedOrInSpace
+                                { ifDocked =
+                                    continueIfShouldHide
+                                        { ifShouldHide =
+                                            describeBranch "Stay docked." waitForProgressInGame
+                                        }
+                                        context
+                                        |> Maybe.withDefault
+                                            (if
+                                                context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
+                                                    && (context.readingFromGameClient
+                                                            |> infoPanelRouteFirstMarkerFromReadingFromGameClient
+                                                            |> (==) Nothing
+                                                       )
+                                                    -- A "Warp to Site" opportunity takes
+                                                    -- precedence over staying docked: the
+                                                    -- Opportunities panel this comes from is
+                                                    -- part of the persistent left sidebar
+                                                    -- (like the route panel), so it's
+                                                    -- checkable even while docked. Undocking
+                                                    -- here rather than trying to click it
+                                                    -- directly from dock -- untested whether
+                                                    -- that even works -- lets the very next
+                                                    -- tick's normal in-space priority chain
+                                                    -- (which already puts this ahead of
+                                                    -- tether/dock) pick it up once genuinely
+                                                    -- in space.
+                                                    && (context.readingFromGameClient
+                                                            |> warpToOpportunitySiteIfAvailable
+                                                            |> (==) Nothing
+                                                       )
+                                             then
+                                                describeBranch
+                                                    "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
+                                                    waitForProgressInGame
 
-                                     else
-                                        undockUsingStationWindow context
-                                    )
-                        , ifSeeShipUI =
-                            \shipUI ->
-                                runAwayIfLowHealth context shipUI
-                                    |> Maybe.withDefault
-                                        (continueIfShouldHide
-                                            { ifShouldHide =
-                                                returnDronesToBay context
-                                                    (dockAtRandomStationOrStructure context)
-                                            }
-                                            context
+                                             else
+                                                undockUsingStationWindow context
+                                            )
+                                , ifSeeShipUI =
+                                    \shipUI ->
+                                        runAwayIfLowHealth context shipUI
                                             |> Maybe.withDefault
-                                                (decideNextActionWhenInSpace context { shipUI = shipUI })
-                                        )
-                        }
-                        context.readingFromGameClient
+                                                (continueIfShouldHide
+                                                    { ifShouldHide =
+                                                        returnDronesToBay context
+                                                            (dockAtRandomStationOrStructure context)
+                                                    }
+                                                    context
+                                                    |> Maybe.withDefault
+                                                        (decideNextActionWhenInSpace context { shipUI = shipUI })
+                                                )
+                                }
+                                context.readingFromGameClient
+                            )
                     )
+            )
+
+
+{-| The bounds whose expiry ends the session, asked where nothing can decline to
+ask them.
+
+Issue #133, which is the mission runner's #126 in this file and #102 before that.
+`shipLoss.readingsSince` is advanced in `updateMemoryForNewReadingFromGame` --
+unconditionally, on every reading, with no reference to what the bot managed to
+do with the reading -- while the comparison over it sat inside
+`recoverPodAfterShipLoss`, below `generalSetupInUserInterface`. Anything
+answering up there starved the bound while the number it is compared against
+went on climbing.
+
+**A give-up that ends the session is counted in elapsed readings and belongs
+where nothing can decline to ask it**, which is PR #115's rule and what decides
+the shape. A give-up that declines an _action_ bounds effort and belongs where
+the action is. This one is a `describeBranch` around `FinishSession` and nothing
+else -- no click, no dock, no menu, no wait -- so it needs no state reached and
+can be evaluated on any reading at all.
+
+**The starvation is unguarded here in a way it is not in the mission runner.**
+That bot answered #109 with `MessageBoxStandoff`, a counter that makes
+`closeMessageBox` hand the tree back once a box has refused to close for long
+enough. None of it was ported -- neither of its two bounds
+(`messageBoxAnswersBeforeEscape`, `messageBoxStandoffGiveUpReadings`) exists
+here. saxrat's `closeMessageBox` clicks its dismissal every reading for as
+long as a box is showing and counts nothing at all. Run 30 held the mission
+runner's tree that way for 32,585 readings -- three hours and forty-four minutes
+-- and this bot has no equivalent of the thing that now stops it. A ship lost
+while a box holds this tree is a capsule sitting in the pocket that killed it,
+with the bound that should end the session never asked.
+
+One bound so far, so this is a `Maybe.map` rather than the mission runner's list
+of them: it has a second (`abandonmentOutOfTime`) and there is no mission to
+abandon here.
+
+-}
+endSessionOnAnExpiredBound : BotDecisionContext -> Maybe DecisionPathNode
+endSessionOnAnExpiredBound context =
+    podRecoveryOutOfTime
+        { shipLoss = context.memory.shipLoss
+        , shipUIIsShowing = context.readingFromGameClient.shipUI /= Nothing
+        }
+        |> Maybe.map
+            (\verdict ->
+                describeBranch
+                    (describePodRecoveryOutOfTime
+                        { lastDockedStationName = context.memory.lastDockedStationNameFromInfoPanel
+                        , verdict = verdict
+                        }
+                    )
+                    (Common.DecisionPath.endDecisionPath FinishSession)
             )
 
 
@@ -1623,9 +1685,112 @@ shipLossVerdictAfter readingFromGameClient { withoutModulesReadings, verdictBefo
                         Nothing
 
 
+{-| How long the pod gets to reach a station before the session ends anyway.
+
+A pod that has been trying to dock for this long is not going to, and an
+unbounded retry loop reads in the log exactly like a bot working. When it
+expires the session _ends_, so an operator finds out rather than discovering a
+capsule parked in a hostile pocket hours later.
+
+Counted in readings, at the eight seconds a reading the recorded runs average --
+so about twenty minutes of trying, for a dock that needs no route and no jumps
+at all here (`dockAtRandomStationOrStructure` takes whatever this system offers).
+
+**Where the comparison over it is asked is issue #133**, and it is the mission
+runner's #126 in this file. See `podRecoveryOutOfTime`, which owns the
+comparison now, and `endSessionOnAnExpiredBound`, which asks it from the head of
+the decision root.
+
+-}
 podRecoveryGiveUpReadings : Int
 podRecoveryGiveUpReadings =
     150
+
+
+{-| The pod recovery that has run past that bound, as a value a case can build.
+
+**Issue #133.** The comparison used to sit inside `recoverPodAfterShipLoss`,
+which is below `generalSetupInUserInterface` -- so it was asked only on readings
+the tree got that far, while `shipLoss.readingsSince` climbed on every reading
+whatever the bot was doing. It is a rule over a record rather than a branch for
+the reason `LockRangeState` gives: a rule reachable only through a whole
+`BotDecisionContext` can be checked by reading it and no other way.
+
+**The ship UI is a condition and not decoration, and the argument here is not
+the mission runner's.** There, the docked outcome names its station through
+`dockedStationNameFromInfoPanel`, a live parse that needs
+`ensureInfoPanelLocationInfoIsExpanded` to have run, and that is why it cannot
+be hoisted. saxrat's docked outcome reads
+`context.memory.lastDockedStationNameFromInfoPanel` instead -- memory, readable
+on any reading at all -- so nothing about the _reading_ stops it hoisting. It
+stays where it is anyway: it is success rather than a bound, and hoisting a
+success outcome would change when an ordinary session ends as well as a starved
+one, which is a behaviour change this issue has no evidence for.
+
+Which leaves the condition doing the same job it does there for a different
+reason. The docked outcome is below the setup list, so a starved-but-docked
+session reaches only this rule -- and without the ship UI it would end the
+session saying the pod never reached a station, which is false on the reading it
+would be printed. `shipUI` is a parse of the reading rather than a state the tree
+has to reach, so requiring it costs this bound nothing it needs, and it is the
+very test `recoverPodAfterShipLoss` already uses to mean "docked". What is left
+uncovered is a pod that is docked and safe while something above holds the tree,
+and a docked pod is the state this bound exists to produce.
+
+**Counted in readings rather than attempts.** The other shape -- advance the
+counter only on readings this branch was reached -- means a bot held elsewhere
+spends none of the budget, which is precisely the runaway the bound exists for.
+The cost is stated rather than hidden: a bot starved above this branch for an
+unrelated reason now ends its session at 150 readings with the recovery never
+attempted, where before it ran until something else stopped it. That is the
+better half of the trade, because the pod was not being flown anywhere on any of
+those readings either.
+
+-}
+podRecoveryOutOfTime :
+    { shipLoss : Maybe ShipLossVerdict, shipUIIsShowing : Bool }
+    -> Maybe ShipLossVerdict
+podRecoveryOutOfTime { shipLoss, shipUIIsShowing } =
+    if not shipUIIsShowing then
+        Nothing
+
+    else
+        shipLoss
+            |> Maybe.andThen
+                (\verdict ->
+                    if podRecoveryGiveUpReadings <= verdict.readingsSince then
+                        Just verdict
+
+                    else
+                        Nothing
+                )
+
+
+{-| The one line an operator gets when the pod recovery runs out of time.
+
+It names the station the dock was preferring, where one had been docked at this
+session, because "which station was it trying to reach" is what a person needs
+in order to go and find the capsule. Without one there was never a named
+destination, only whatever the surroundings menu offered, which the sentence says
+rather than inventing a name.
+
+It also says what the count is. The number is readings since the verdict, not
+attempts, so a session that ends here having never printed a `Pod recovery:` line
+is telling the operator something about the _rest_ of the bot rather than about
+the recovery -- and this bot has no message-box standoff, so that is the likelier
+of the two.
+
+-}
+describePodRecoveryOutOfTime : { lastDockedStationName : Maybe String, verdict : ShipLossVerdict } -> String
+describePodRecoveryOutOfTime { lastDockedStationName, verdict } =
+    "The pod has spent "
+        ++ String.fromInt verdict.readingsSince
+        ++ " readings trying to dock at whatever this system offers"
+        ++ (lastDockedStationName
+                |> Maybe.map (\name -> ", preferring '" ++ name ++ "'")
+                |> Maybe.withDefault " (no station has been docked at this session, so there was none to prefer)"
+           )
+        ++ ", and has not got there. Ending the session in space rather than retrying forever -- the pod needs recovering by hand. That count is readings since the ship was lost rather than attempts, so if the decision log shows no 'Pod recovery:' line, something above this branch was holding the whole tree."
 
 
 {-| Stop hunting anomalies and get the pod out.
@@ -1635,7 +1800,20 @@ fighting" is structural: locking, drones, modules and looting all live below
 that split and are simply never reached once this answers `Just`.
 
 Ending the session once the pod is docked is deliberate -- the remaining hours
-are worth nothing without a ship, and the operator has to find out.
+are worth nothing without a ship, and the operator has to find out. That outcome
+stays here rather than joining the deadline above because it is success rather
+than a bound: hoisting it would change when an ordinary session ends as well as
+a starved one.
+
+**The out-of-time outcome is gone from here, and that is #133.** Running out of
+time was tested in this branch, below `generalSetupInUserInterface`, over a
+counter advanced on every reading -- so anything holding the tree starved the
+bound while the number it is compared against went on climbing.
+`podRecoveryOutOfTime` owns that comparison now, from the head of
+`anomalyBotDecisionRootBeforeApplyingSettings`, and this function is reached only
+while the recovery still has time. There is deliberately no second copy of the
+test: two places could disagree about whether the pod still has time, and the one
+in here is the one a starved tree never reaches.
 
 -}
 recoverPodAfterShipLoss : BotDecisionContext -> Maybe DecisionPathNode
@@ -1663,24 +1841,15 @@ recoverPodAfterShipLoss context =
                                 (Common.DecisionPath.endDecisionPath FinishSession)
 
                         Just _ ->
-                            if podRecoveryGiveUpReadings <= shipLoss.readingsSince then
-                                describeBranch
-                                    ("The pod has been trying to reach a station for "
-                                        ++ String.fromInt shipLoss.readingsSince
-                                        ++ " readings and has not got there. Ending the session in space rather than retrying forever -- the pod needs recovering by hand."
-                                    )
-                                    (Common.DecisionPath.endDecisionPath FinishSession)
-
-                            else
-                                describeBranch
-                                    ("Pod recovery: docking at whatever this system offers"
-                                        ++ (context.memory.lastDockedStationNameFromInfoPanel
-                                                |> Maybe.map (\name -> ", preferring '" ++ name ++ "'")
-                                                |> Maybe.withDefault ""
-                                           )
-                                        ++ "."
-                                    )
-                                    (dockAtRandomStationOrStructure context)
+                            describeBranch
+                                ("Pod recovery: docking at whatever this system offers"
+                                    ++ (context.memory.lastDockedStationNameFromInfoPanel
+                                            |> Maybe.map (\name -> ", preferring '" ++ name ++ "'")
+                                            |> Maybe.withDefault ""
+                                       )
+                                    ++ "."
+                                )
+                                (dockAtRandomStationOrStructure context)
                     )
             )
 

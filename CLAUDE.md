@@ -4318,6 +4318,7 @@ shipped configuration rather than edge cases:
 | both hitpoint thresholds | default `-1` — so **no retreat guard at all** | unchanged defaults, and a third guard that is armed |
 | damage-rate retreat (#32) | absent | ported, `run-away-incoming-damage-threshold`, default 3500 |
 | ship loss (#33) | absent — a destroyed ship meant ratting in a capsule, which reads 100/100 | ported, above the docked-or-in-space split, bounded at 150 readings |
+| the pod recovery's bound (#133) | the comparison sat inside `recoverPodAfterShipLoss`, below `generalSetupInUserInterface`, over a counter that advanced anyway — and with no message-box standoff, nothing here ends the starvation | `podRecoveryOutOfTime`, asked from `endSessionOnAnExpiredBound` at the head of the decision root |
 | drone recall (#11) | **no bound of any kind**, in front of every warp, tether and dock | `droneRecallUnansweredTicks`, give-up, focus-recovery click |
 | what it will shoot (#40) | the overview's icon colour and nothing else | plus whatever the combat log names as hitting the ship |
 | setting its own route | could only *follow* one a human set | `hunt-system` circuit, asked for through the host's ESI directive |
@@ -4797,11 +4798,112 @@ dock. A session ending at N=150 having printed no `Pod recovery:` line at all is
 something above this branch holding the tree, which is what the give-up line now
 tells the operator to go and look for.
 
-**saxrat carries the same defect and is deliberately untouched.**
-`eve-online-saxrat`'s ported pod recovery has the identical comparison inside its
-own `recoverPodAfterShipLoss`, below `generalSetupInUserInterface` in
-`anomalyBotDecisionRootBeforeApplyingSettings`, and #126 is about the mission
-runner. It is the same fix and wants its own change.
+**saxrat carried the same defect and is fixed in #133** — see "The same bound in
+saxrat, where nothing catches the standoff" below. It was left alone here
+deliberately, because #126 is about the mission runner and moving a bound in a
+second bot is a second behaviour change.
+
+### The same bound in saxrat, where nothing catches the standoff
+
+Issue #133 is the section above, in `eve-online-saxrat`, and the argument that
+decides the shape is #132's rather than a new one: the expired branch is a
+`describeBranch` around `FinishSession` and nothing else, so it hoists; the
+recovery is an errand and does not; the counter stays a reading counter, because
+an attempt counter spends none of its budget in exactly the runaway the bound
+exists for. What had to be checked against saxrat's own source rather than
+assumed is everything else, and two of those came back different.
+
+**saxrat's decision root had no always-evaluated head to hoist into.** The
+mission runner's `missionBotDecisionRootBeforeApplyingSettings` is a list
+resolved by `List.head` and `endSessionOnAnExpiredBound` was already its first
+entry. `anomalyBotDecisionRootBeforeApplyingSettings` is a chain of
+`Maybe.withDefault` beginning at `generalSetupInUserInterface`, so the head is
+new here: `endSessionOnAnExpiredBound` sits above the setup list, above the pod
+recovery, above the docked-or-in-space split. It holds one bound rather than two
+— there is no mission to abandon in this bot — so it is a `Maybe.map` rather
+than a filtered list.
+
+**The docked outcome can be hoisted here, and is deliberately not.** #132's
+stated reason for the `shipUIIsShowing` condition does not hold in saxrat: the
+mission runner names the station through `dockedStationNameFromInfoPanel`, a
+live parse needing `ensureInfoPanelLocationInfoIsExpanded` to have run, while
+saxrat reads `context.memory.lastDockedStationNameFromInfoPanel` — memory, which
+every reading can answer. So nothing about the reading stops that outcome
+hoisting. It stays where it is because it is *success* rather than a bound, and
+hoisting it would change when an ordinary session ends as well as a starved one,
+which is a behaviour change this issue has no evidence for.
+
+**The condition is needed anyway, for the other half of #132's argument.** With
+the docked outcome left below the setup list, a starved-but-docked session
+reaches only the hoisted rule — and without the ship UI that rule would end the
+session saying the pod never got there, which is false on the reading it would be
+printed. `shipUI` is a parse of the reading rather than a state the tree has to
+reach, so requiring it costs the bound nothing, and it is the very test
+`recoverPodAfterShipLoss` already uses to mean "docked". What is left uncovered
+is a pod that is docked and safe while something above holds the tree, which is
+the state the bound exists to produce.
+
+**Why it matters more here than there, stated as a relation the cases check.**
+The mission runner answered #101 with `MessageBoxStandoff` — the ladder that
+makes `closeMessageBox` eventually hand the tree back. None of it was ported:
+neither `messageBoxAnswersBeforeEscape` nor `messageBoxStandoffGiveUpReadings`
+exists in saxrat, and its `closeMessageBox` clicks its dismissal every reading
+for as long as a box is showing, counting nothing. So the starvation that held
+the mission runner's tree for three hours and forty-four minutes is not only
+possible here, it is unguarded — and saxrat rats unattended.
+
+**The give-up line says what an operator can act on**, which for this bot is not
+a `home-station` — there is no such setting, and pod recovery deliberately does
+not use the `hunt-system` circuit either (see the section above for why). It
+names the station `dockAtRandomStationOrStructure` was preferring, or says there
+was none docked at this session, and it carries #102's clause: `That count is
+readings since the ship was lost rather than attempts, so if the decision log
+shows no 'Pod recovery:' line, something above this branch was holding the whole
+tree.`
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_pod_recovery_deadline_reachable.py` (31
+cases). The two pure rules are executed through the real `Bot.elm` in `elm repl`
+rather than restated in Python: the deadline at both sides of its boundary, at
+zero, at the mission runner's own run 30 count, against a verdict whose reason is
+empty so nothing conjoined onto the comparison can hide, and against a docked pod
+at the bound and far past it; and the give-up line, which has to name the station
+or say there was none, carry the count, say the count is readings and not
+attempts, and say the pod still needs a person. A control row rides along so a
+repl answering `True` to everything cannot pass. The placement, the absence of a
+second comparison, the branch doing nothing but ending the session, the rule
+reaching for nothing the setup list produces, the counter's unconditional
+advance, the docked outcome's memory read (against the mission runner's live
+parse, so the divergence is read out of both sources) and the standoff's absence
+are read out of the source through a whitespace-collapsing reader. The three
+recorded saxrat runs are asked what they can say, which is that they are silent:
+plenty of status lines, no `SHIP LOST:` and no message box at all.
+
+Confirmed by mutation, fourteen of them, each failing a named case: the
+comparison as `<` instead of `<=`; the comparison one reading early; the ship-UI
+condition dropped so a docked pod expires; the ship-UI condition inverted; the
+verdict's reason conjoined onto the deadline; the deadline dropped from the head
+of the decision root; **the deadline asked below `generalSetupInUserInterface`,
+where it starves**; the expired branch waiting instead of ending the session; the
+give-up dropping the station's name; the give-up dropping the
+readings-not-attempts clause; the clock advanced only on readings the branch
+could act (the attempt-counting shape); **the comparison put back inside
+`recoverPodAfterShipLoss` where it was**; the status line dropping the count
+against the bound; and the docked outcome re-parsing the info panel instead of
+reading memory, which is the divergence above going stale.
+
+**Unverified: any of it running, and rather more than in the mission runner.** No
+saxrat run has ever latched a ship-loss verdict — that machinery has never run
+here at all, let alone its bound — and no recorded saxrat run has ever met a
+message box, so the starvation this guards against is reasoned from saxrat's
+source and from the mission runner's run 30 rather than from anything saxrat has
+been watched doing. The new failure mode has never been seen either: a session
+that ends at exactly 150 readings with the pod never flown anywhere is now
+possible where it was not before. What to watch on the first real loss is
+`SHIP LOST: … (N readings since, giving up at 150)` climbing with
+`Pod recovery: docking at …` in between; a session that ends at N=150 having
+printed no `Pod recovery:` line is something above this branch holding the tree,
+which is what the give-up line now says to go and look for.
 
 ## Elm toolchain
 
@@ -5209,6 +5311,19 @@ exists.
   at all — watch the status line's `Lock range:` clause, where `attempt none` on
   every reading of a fight means the identity rule is declining to attribute,
   which is correct rather than broken.
+
+  And it now **asks the pod recovery's deadline where nothing can decline to ask
+  it**, which is #126 in this second bot: the comparison over
+  `podRecoveryGiveUpReadings` sat inside `recoverPodAfterShipLoss`, below
+  `generalSetupInUserInterface`, while the counter it reads advanced on every
+  reading regardless. It matters more here than there, because saxrat has no
+  message-box standoff at all — the ladder that ends such a standoff in the
+  mission runner was never ported, so the three-hour hold that starved run 30 is
+  unguarded in a bot that rats unattended. What differs from #132, and it is the
+  docked outcome rather than the deadline, is in "The same bound in saxrat, where
+  nothing catches the standoff" above. **Untested against a live client**, and
+  more thoroughly so than most: no saxrat run has ever latched a ship-loss
+  verdict, so neither the recovery nor its bound has ever run here.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
