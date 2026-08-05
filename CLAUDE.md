@@ -3232,6 +3232,149 @@ targeted and targeting rows out of its candidates; the reachable unbounded
 shape was the *click* repeating every reading, and that is what the learned
 bound ends.
 
+## The lock-slot ceiling is stated by the client, not hardcoded
+
+`maxTargetCount = 4` was a hardcoded constant in **both** apps -- a field in
+`BotSettings` with no setting able to reach it -- and the real number on this
+character is **6**. saxrat paid for that on **2,149 readings** across its runs 2
+to 5, printing `Enough locked targets.` with two lock slots sitting unused; the
+mission runner paid silently, since its `List.take` says nothing at all.
+
+**The client had been stating the answer the whole time, on a channel the bot
+already reads.** `You are already managing 6 targets, as many as you have skill
+to.` arrives on `(notify)` -- the same channel `loadRefusalFromGameLog` reads --
+**228 distinct entries** across the recorded runs of both apps, and **491**
+across the client's own game logs in `~/Documents/EVE/logs/Gamelogs`. So this
+needed no new plumbing, only somebody reading it.
+
+**The number is not a constant even for one character**, which is the argument
+against a constant rather than against this particular value. Across the client's
+own logs it reads **5** from 19:16:52 to 20:46:12 on 31 July 2026 and **6**
+before and since -- a targeting skill completing. A hardcoded ceiling is
+therefore not merely wrong once; it is wrong in a way that drifts under the bot
+while nothing notices, which is the argument `targeting-range` was rewritten on.
+
+### Two halves, and they fail differently
+
+- **The floor is the target bar**, and it is the half that costs nothing and
+  cannot be wrong. A reading whose bar holds N is this ship holding N -- the bar
+  is the ship's own state, not an overview row that could have belonged to
+  something else. It only ever rises. **This is also what covers the ship
+  auto-locking past whatever the bot asked for**, which is how six targets came
+  to be held while the shipped ceiling was four.
+- **The stated maximum is the client's own sentence**, and it can move either
+  way. It replaces the setting rather than clamping it, because it is the client
+  stating a fact about this character where the setting was a guess about it.
+
+Where the two disagree the floor wins: a bar demonstrably holding six is not
+contradicted by a sentence the client wrote before a skill finished.
+
+**No row identity is involved anywhere in this, and that is a finding rather
+than an omission.** The lock range needs `overviewEntryLockHandle` because it
+attributes a *lock outcome* to an *object*, and in an anomaly of identically
+named rats that rule correctly yields no evidence at all. Nothing here attributes
+anything: the target bar is a count of this ship's own slots and the game log is
+the client speaking about itself. So the rule fires on every reading in an
+anomaly where the lock range's would stay silent, without weakening the
+discipline by one line -- `TheRowIdentityDisciplineIsUntouched` pins that the
+ceiling reaches for no overview row, so a later version that starts to has to
+notice it is taking on a problem this one does not have.
+
+### Absent evidence never raises the ceiling
+
+`loadRefusalFromGameLog`'s register, applied to a ceiling. With no statement and
+no bar ever seen carrying anything, `maxTargetsCeiling` is **exactly** the
+setting, so a session that learns nothing behaves as it always did.
+
+The direction matters more here than for a lock range, and asymmetrically:
+a ceiling raised on a guess makes the bot spend readings asking for locks the
+client will never grant, and **nothing would ever teach it back down**. The bot
+learns only from what the client grants, and a slot that does not exist grants
+nothing. A lock range has a refusal that walks the bound back; this has no such
+thing.
+
+### The sentence is not the drone one, and it is excluded three times over
+
+The client writes a refusal of exactly this shape about **drones**: `You cannot
+launch Acolyte I because you are already controlling 5 drones, as much as you
+have skill to.` -- and it is the *more* common of the two, 188 live sightings
+against 40 in saxrat's run 5. Reading it as a lock ceiling would cap this ship at
+the number of drones it can fly, on a reading that said nothing about targeting.
+
+It is declined by `controlling` not being `managing`, by `much` not being `many`,
+and by the number being sliced out *after* `maxTargetsStatedMarker` rather than
+taken as the first integer in the line -- so it lands on a word rather than a
+digit. That was expected to be one exclusion and turned out to be three; no
+single loosening admits the sentence, and the mutation that does is the naive
+matcher with all three gone. `maxTargetsStatedMarker` is the one constant both
+the matcher and the slice use, so an extraction can never succeed on a sentence
+the matcher would have rejected -- `gateKeyClosingMarker`'s arrangement.
+
+### The popup channel captured it too, which settles #123's first question
+
+`Quick message (on screen now): "<center>You are already managing 6 targets, as
+many as you have skill to."` appears **40 times live** in saxrat's run 5. That
+is the black status popup the operator reported, so `quickMessage` **is** the
+widget they are seeing -- the first Unverified item in #123, answered by PR
+#130's clause doing exactly what it was built to do, with no new machinery and
+nobody watching.
+
+**The game log is what the rule reads all the same**, and the choice is not
+arbitrary: game-log entries are scoped to the reading and drained by the host,
+where a quick message is carried forward with an age and would have to be dated
+before it could be believed. The two agree word for word, modulo the popup's
+`<center>` wrapper.
+
+Counted **live**, as #130's clause requires -- `on screen now` rather than the
+carried-forward form, whose totals are three orders of magnitude larger and rank
+the wordings differently.
+
+### `max-targets`, and the empty value
+
+The setting mirrors `targeting-range`: a starting value clamped by what the
+client reveals, defaulting to the 4 both apps shipped so no existing settings
+string changes behaviour. It is parsed with `AppSettings.valueTypeInteger`, which
+is what carries PR #116's rule here -- `String.toInt ""` is `Nothing`, so
+`max-targets=` with nothing after it answers `Err` naming the value and
+`BotFramework` ends the session, rather than silently leaving a ceiling of 4 that
+reads exactly like one an operator set.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_learned_max_targets.py` (38 cases, run against
+**both** apps). The rules are executed through the real `Bot.elm` in `elm repl`
+rather than restated in Python, and the game-log entries they are asked about
+come from the real `EveOnline.ParseUserInterface` -- which is also the evidence
+that saxrat's diverged copy of that parser carries this channel. **Neither
+parser needed a change.** The corpus is recounted as *relations* rather than as
+the numbers above: every statement the runs hold names a number and every one is
+above the shipped 4, the shipped markers read all of them and recover the count
+the client wrote, the drone refusal really occurs, and saxrat's cap really did
+stop it on readings it wanted more.
+
+Confirmed by mutation, **sixteen** of them, each failing a named case, listed in
+that file -- including the ceiling raised on absent evidence, which is the one
+failure this whole design refuses, and `overviewEntryLockHandle`'s same-name
+exclusion loosened, which fails the lock-range suite next door.
+
+**Unverified: any of it running, and one thing about the ceiling itself.** No run
+has been flown since. **Why six targets were held while the bot's own ceiling was
+four is still not established** -- an auto-targeting module is the obvious
+candidate (there is an `Auto Targeting System I` in the character's hangar) and
+EVE's own "auto-target back" setting is another, and neither is confirmed. It
+does not change what the rule learns, since a bar holding six proves six slots
+whatever filled them, but it does mean the *floor* may be reached without the bot
+having asked for it.
+
+What to watch on the first run: `Max targets: 4 (setting 4, client stated -, most
+held at once -)` on every reading, then `client stated 6` within a reading or two
+of the first refusal, then `Learned max targets: ... max-targets moves from 4 to
+6.` once in the decision log and never again. A run that fights and never leaves
+`client stated -` means the game log is not reaching the bot; a run whose
+`most held at once` never rises past the ceiling is the ordinary case and not a
+fault. The failure to watch for is `Enough locked targets.` still appearing at
+four locked rats after the ceiling has moved, which would mean the decision is
+reading something other than the rule.
+
 ## Ammo: the module's own menu says which charge is loaded
 
 `eve-online-mission-runner` swaps between two charges as the current target's
@@ -4109,17 +4252,29 @@ character on its way out — so a message that really carried a newline and one
 that carried the two characters `\` and `n` printed identically and the case
 passed with the escape removed. It is compared inside Elm now.
 
-**Unverified: everything about what the popup actually says.** No wording has
-been captured, whether `quickMessage` is the widget the operator is seeing is
-still an inference from `l_abovemain` being the natural place for a transient
-centre-screen notice, and whether a popup survives long enough to land in a
-reading at all is the first thing a run will answer. What to watch on the first
-one: `Quick message:` on every reading, saying `none ... none seen this session`
-on a quiet run and carrying a quoted string with `(on screen now)` the first time
-the client shows one — then the age climbing on the readings after it. A run that
-never prints the clause at all means the status line is not carrying it. A run
-that prints `1 of 2 quick messages in the layer` settles the head-only question
-in the direction that says the parser needs fixing.
+**Settled by saxrat's run 5, which is what this was built for.** Popups survive
+long enough to land in a reading — dozens of distinct wordings, the commonest
+being `<center>Cargo is too far away. Ship is on automatic approach to cargo.` at
+340 live sightings — and **`quickMessage` is the widget the operator was
+describing**, since the lock-capacity refusal they reported is among them:
+`<center>You are already managing 6 targets, as many as you have skill to.`, 40
+times on screen. That was the first Unverified item here, answered with no new
+machinery and nobody watching, which is the whole argument for logging a channel
+before matching on it. Note the `<center>` wrapper the client puts on these and
+the game log does not.
+
+**Count them live.** The clause carries a stale message forward with an age, so
+`on screen now` and `NOT on screen now` have to be separated before anything is
+counted: the carried-forward totals are three orders of magnitude larger and rank
+the wordings differently.
+
+**Still unverified: whether `l_abovemain` ever holds more than one message**,
+which the parser drops without a word and the clause counts — a run that prints
+`1 of 2 quick messages in the layer` settles that in the direction that says the
+parser needs fixing. And **nothing decides anything on a quick message yet**,
+which a case still asserts: #110 reads the capacity refusal off the game log
+instead, because those entries are scoped to the reading where a quick message
+would have to be dated first.
 
 ## Acceleration gates: a gate that will not open says why, on a channel nobody read
 
@@ -4502,6 +4657,7 @@ shipped configuration rather than edge cases:
 | setting its own route | could only *follow* one a human set | `hunt-system` circuit, asked for through the host's ESI directive |
 | the client's transient popup (#123) | parsed on every reading and read by nothing — the same five references and the same zero readers | printed in the status line, carried forward with an age, and still read by no decision |
 | the lock range (#121) | `targeting-range` asserted and never revised — `lockProvenAtMeters` appeared 0 times | the setting clamped into `[proven, refused)`, learned from the client's own answers, with the row-identity discipline unchanged |
+| the lock-slot ceiling (#110) | `maxTargetCount = 4` hardcoded with no setting able to reach it, against a real maximum of 6 — 2,149 readings of `Enough locked targets.` across runs 2-5 | `max-targets`, clamped by the maximum the client states on the game log and by what the target bar has held |
 | the ammo swap (#122) | absent, not unconfigured — `ammoSwap`, `Charge`, `chargeName` and `optimalRange` all appeared 0 times, and there was no setting to turn on | ported without its tooltip half, with `ammo-swap-range` **required** rather than optional — see "saxrat swaps ammo at a distance it is told" below |
 
 Two things about the port are worth keeping in view.
@@ -5822,6 +5978,18 @@ exists.
   watch for `Quick message:` on every reading, then a quoted string with
   `(on screen now)` the first time the client shows one.
 
+  And it now **learns how many targets the ship can hold** rather than carrying
+  a hardcoded `maxTargetCount = 4` no setting could reach, against a client that
+  states its own maximum of **6** on the game log 228 distinct times across the
+  recorded corpus. The floor is the target bar, which needs no attribution at
+  all; the ceiling is the client's own sentence, which is not a constant even
+  for one character. See "The lock-slot ceiling is stated by the client, not
+  hardcoded" above for the drone refusal it must not be confused with, and for
+  why absent evidence must never raise it. **Untested against a live client**,
+  and why six targets were held while the bot's own ceiling was four is still
+  unexplained — watch the status line's `Max targets:` clause for
+  `client stated 6` arriving within a reading or two of the first refusal.
+
   And it now **flies to a station it knows has an agent** when the one it is
   standing in has none, instead of asking for help there until somebody
   notices. Run 35 raised that alarm on 371 readings with `home-station` in its
@@ -5888,6 +6056,18 @@ exists.
   at all — watch the status line's `Lock range:` clause, where `attempt none` on
   every reading of a fight means the identity rule is declining to attribute,
   which is correct rather than broken.
+
+  And it now **learns how many rats it may hold locked at once**, which cost it
+  more than the mission runner: `maxTargetCount = 4` stopped it on **2,149
+  readings** across runs 2 to 5, printing `Enough locked targets.` while the
+  client was stating a maximum of 6 on a channel the bot already read. Both
+  apps got the same rule and both parsers needed **no change**. The half that
+  matters here is the target bar, because it needs no row identity — an anomaly
+  is a pocket of identically named rats, so the lock range's attribution rule
+  correctly yields nothing there while this one answers on every reading. See
+  "The lock-slot ceiling is stated by the client, not hardcoded" above.
+  **Untested against a live client**; watch `Max targets:` in the status line
+  and `Enough locked targets.` becoming rarer once it moves.
 
   And it now **asks the pod recovery's deadline where nothing can decline to ask
   it**, which is #126 in this second bot: the comparison over
@@ -6203,9 +6383,15 @@ load-bearing — see "The home station".
   because you are already controlling 5 drones` (17 occurrences — the drone
   launch retries blind), `You cannot do that while warping` and `while docking`
   (6 between them), and `You cannot activate that module as the target is no
-  longer present`. The learned lock range is a fourth: `You are already managing
-  N targets` would separate "no free slot" from "too far" outright, where today
-  it is inferred from the target bar being empty at both ends of an attempt.
+  longer present`. **`You are already managing N targets` is no longer among
+  them** — #110 reads it, in both apps, to learn the lock-slot ceiling. What it
+  does *not* yet do is hand that line to the **lock range**, whose refusal test
+  still requires the target bar empty at both ends of an attempt precisely
+  because "the client's maximum is not in the reading at all". It is now in the
+  reading, in `BotMemory.maxTargetsStatedByClient`, so the condition that throws
+  away the common case could be replaced by one that compares the bar against the
+  learned ceiling. That is a change to the lock-range rule and wants its own
+  evidence; #110 deliberately does not make it.
 - **A run cycled inside a mission pocket leaves the ship unattended for
   minutes.** `run_mission.sh` kills the previous bot before the new one compiles,
   and the slow `elm make` path takes several minutes; that gap is when run 7's
@@ -6282,17 +6468,20 @@ load-bearing — see "The home station".
   recorded runs, so there is nothing to derive a matcher from without a live
   reading. The status line now prints the rendered rows'
   `rightAlignedIconsHints`, so the next run that meets one records the literal.
-- **No quick message has ever been recorded, so nothing can be matched on one
-  yet.** #123 put the client's transient popup into the status line of both
-  apps — see "The client's transient popup was parsed on every reading and read
-  by nothing" — and deliberately stopped there. The follow-up needs a run: the
-  lock-capacity refusal the operator describes is the first candidate, and it
-  would give the learned lock range the direct signal it currently infers from
-  the target bar being empty at both ends of an attempt. Two things that run
-  also settles and neither is answerable off-line: whether a popup survives long
-  enough to land in a reading at all, and whether `l_abovemain` ever holds more
-  than one message, which the parser drops without a word and the clause now
-  counts.
+- **Quick messages have now been recorded, and the first two questions are
+  answered.** #123 put the client's transient popup into the status line of both
+  apps and deliberately stopped there; saxrat's run 5 is the run that paid it
+  off. Popups **do** survive long enough to land in a reading — dozens of
+  distinct wordings, the commonest being
+  `<center>Cargo is too far away. Ship is on automatic approach to cargo.` at 340
+  live sightings — and the lock-capacity refusal the operator described is among
+  them, `<center>You are already managing 6 targets, as many as you have skill
+  to.` at 40, which settles that `quickMessage` **is** the widget they were
+  seeing. #110 reads that fact off the game log rather than off this channel, for
+  the scoping reason given there, so **nothing yet decides anything on a quick
+  message** and the case asserting so still holds. What a run has still not
+  settled is whether `l_abovemain` ever holds more than one message, which the
+  parser drops without a word and the clause counts.
 - No automated Elm-toolchain bootstrap if `elm` isn't on `PATH`.
 - `reload_drones.py` only searches the root Item hangar, no sub-folders. The
   mission runner's port of it inherits that, and also takes the first

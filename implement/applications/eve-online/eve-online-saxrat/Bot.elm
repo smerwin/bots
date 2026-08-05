@@ -49,6 +49,7 @@
       + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping range or aligning.
       + `keep-at-range`: Set this to 'yes' to keep range from the target instead of orbiting or aligning.
       + `targeting-range`: Maximum distance in meters to lock a target from the overview, e.g. `targeting-range=50000`. Beyond this, the bot approaches instead of locking. Defaults to 66000. This is a starting value, not the last word: the bot narrows it during the session from the client's own answers -- the greatest distance at which a lock was accepted and the smallest at which one was provably refused -- and the setting is clamped between the two. Set it to pin the starting point; it still gives way to what the client has actually granted. See `lockRangeThresholdInMeters`.
+      + `max-targets`: How many rats to hold locked at once, e.g. `max-targets=6`. Defaults to 4. This is a starting value, not the last word: the client states its own maximum on the game log -- `You are already managing 6 targets, as many as you have skill to.` -- and the target bar proves a floor by holding that many, so the bot raises or lowers this from what the client has actually granted. With no evidence it is exactly the setting. See `maxTargetsCeiling`.
       + `hunt-system`: Name of a solar system to hunt anomalies in, e.g. `hunt-system=Irnin`. Use it several times to give the bot a circuit. When a system has nothing left worth hunting and no route is set, the bot asks the host to set the autopilot destination to the next system on this list and flies there on its own. Without this setting the bot behaves as it always did: it parks and waits for a human to set a route.
       + `home-system`: Name of the solar system to fall back to once every `hunt-system` has been tried, e.g. `home-system=Amarr`. Optional, and only consulted after the circuit is exhausted.
       + `run-away-incoming-damage-threshold`: Hitpoints of incoming damage, summed from the client's own combat log over a rolling 45-second window, past which the bot breaks off and runs. Unlike the two hitpoint settings above this needs no HUD gauge, which is the point of it: the gauge is scraped out of the client's live memory and produces values like 2132822% and a spurious 0%. Defaults to 3500, calibrated against sixteen recorded sessions of one hull -- the worst any session the ship survived absorbed was 3114, and the session it was lost in peaked at 4101. **That is a number about a hull, not about the game**, so re-derive it for a different ship. Set to -1 to disable.
@@ -280,6 +281,19 @@ parseBotSettings =
                     { settings | targetingRangeMeters = targetingRangeMeters }
                 )
            )
+
+         -- `valueTypeInteger` is what refuses `max-targets=` with nothing after
+         -- it: `String.toInt ""` is `Nothing`, so the parse answers `Err` naming
+         -- the value and `BotFramework` ends the session. That is PR #116's rule
+         -- -- an empty value is rejected rather than dropped -- reached by
+         -- picking the value type that already carries it, since a ceiling
+         -- silently defaulting to 4 reads exactly like one an operator set.
+         , ( "max-targets"
+           , AppSettings.valueTypeInteger
+                (\maxTargetCount settings ->
+                    { settings | maxTargetCount = maxTargetCount }
+                )
+           )
          , ( "short-range-ammo"
            , AppSettings.valueTypeString
                 (\ammoName settings -> { settings | shortRangeAmmoName = nonEmptySettingValue ammoName })
@@ -427,6 +441,15 @@ type alias BotMemory =
     , lockProvenAtMeters : Maybe Int
     , lockRefusedAtMeters : Maybe Int
     , lockRangeLastChange : Maybe String
+
+    -- What the client has answered about how many targets this ship can hold at
+    -- once: the maximum it stated in its own game log, and the most the target
+    -- bar has actually carried. `maxTargetsLastChange` holds a sentence only on
+    -- the reading the ceiling moved, `lockRangeLastChange`'s mechanism for its
+    -- reason. See `maxTargetsCeiling`.
+    , maxTargetsStatedByClient : Maybe Int
+    , maxTargetsHeldAtOnce : Maybe Int
+    , maxTargetsLastChange : Maybe String
 
     -- Everything the ammo swap knows, in one field so the rest of this record
     -- is untouched by a feature that is off unless three settings are set.
@@ -780,6 +803,7 @@ anomalyBotDecisionRoot context =
     -- "already reported" flag to get wrong.
     ([ context.memory.messageBoxLastChange
      , context.memory.lockRangeLastChange
+     , context.memory.maxTargetsLastChange
      ]
         |> List.filterMap identity
         |> List.foldr describeBranch (anomalyBotDecisionRootBeforeApplyingSettings context)
@@ -3124,7 +3148,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                                                 (launchAndEngageDrones context
                                                     |> Maybe.withDefault
                                                         (describeBranch "No idling drones."
-                                                            (if context.eventContext.botSettings.maxTargetCount <= (context.readingFromGameClient.targets |> List.length) then
+                                                            (if maxTargetsCeiling (maxTargetsStateFrom context) <= (context.readingFromGameClient.targets |> List.length) then
                                                                 -- TODO branch if bouncing or brawling
                                                                 -- describeBranch "Enough locked targets." (enterAnomaly { ifNoAcceptableAnomalyAvailable = tetherAtStructure context } context)
                                                                 describeBranch "Enough locked targets." waitForProgressInGame
@@ -4120,6 +4144,302 @@ describeLockRange state =
         ++ ")."
 
 
+{-| The setting, and everything the client has said about this ship's lock slots.
+
+Every rule below is a function of this record rather than of a whole
+`BotDecisionContext`, which is what makes them executable in `elm repl` at all:
+a decision context carries a screenshot and a framework event context, and a
+rule reachable only through one can be checked by reading it and in no other
+way. `LockRangeState`'s reason, and #106's.
+
+-}
+type alias MaxTargetsState =
+    { fromSetting : Int
+    , statedByClient : Maybe Int
+    , heldAtOnce : Maybe Int
+    }
+
+
+maxTargetsStateFrom : BotDecisionContext -> MaxTargetsState
+maxTargetsStateFrom context =
+    { fromSetting = context.eventContext.botSettings.maxTargetCount
+    , statedByClient = context.memory.maxTargetsStatedByClient
+    , heldAtOnce = context.memory.maxTargetsHeldAtOnce
+    }
+
+
+{-| The clause the client's own statement is recognised by, and the one the
+number is sliced out after.
+
+One constant for both, so an extraction can never succeed on a sentence the
+matcher would have rejected -- `gateKeyClosingMarker`'s arrangement, for its
+reason.
+
+-}
+maxTargetsStatedMarker : String
+maxTargetsStatedMarker =
+    "already managing"
+
+
+{-| The second clause, and it is not a guard against a rewording the way #31's
+pair is -- it carries a distinction the corpus contains.
+
+The client writes a refusal of exactly this shape about **drones**:
+`You cannot launch Acolyte I because you are already controlling 5 drones, as
+much as you have skill to.` -- 188 live sightings in saxrat's run 5 against 40
+of the targeting one. It differs in two words, `controlling` for `managing` and
+`much` for `many`, and both matchers here decline it on both. Reading a drone
+count as a lock ceiling would cap this ship at five targets on a reading that
+said nothing about targeting at all.
+
+-}
+maxTargetsSkillMarker : String
+maxTargetsSkillMarker =
+    "as many as you have skill to"
+
+
+{-| The maximum the client stated on this reading, if it stated one.
+
+`You are already managing 6 targets, as many as you have skill to.` on
+`(notify)` -- the channel `loadRefusalFromGameLog` already reads, so this needed
+no new plumbing. 228 distinct entries across the recorded runs of both apps, and
+491 across the client's own game logs.
+
+**The same sentence arrives on the quick-message channel too**, as
+`<center>You are already managing 6 targets, as many as you have skill to.`, 40
+times on screen in saxrat's run 5 -- which is what settles #123's first open
+question, since that is the black popup the operator reported. The game log is
+what this reads all the same: those entries are scoped to the reading and drained
+by the host, where a quick message is carried forward with an age and would have
+to be dated before it could be believed.
+
+The number is sliced out after `maxTargetsStatedMarker` rather than taken as the
+first integer in the sentence, so it is the count that clause is about. A
+sentence that matches both markers and yields no number is **no evidence** and
+never a default -- see `maxTargetsCeiling` for why that direction is the whole
+safety of this.
+
+-}
+maxTargetsStatedInGameLog : List EveOnline.ParseUserInterface.GameLogEntry -> Maybe Int
+maxTargetsStatedInGameLog entries =
+    entries
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.filter
+            (\entry ->
+                stringContainsIgnoringCase maxTargetsStatedMarker entry.text
+                    && stringContainsIgnoringCase maxTargetsSkillMarker entry.text
+            )
+        |> List.filterMap (.text >> maxTargetsInStatement)
+        |> List.head
+
+
+{-| The count the client named, out of a sentence already matched.
+
+Lowercased before slicing only so that the marker matches the way the matcher's
+own `stringContainsIgnoringCase` does; nothing lowercased here is stored or
+printed, so no normalisation reaches a later reader. A capitalisation the slice
+misses therefore yields `Nothing`, which is the safe direction rather than a
+guess.
+
+-}
+maxTargetsInStatement : String -> Maybe Int
+maxTargetsInStatement text =
+    case text |> String.toLower |> String.split maxTargetsStatedMarker of
+        _ :: afterMarker :: _ ->
+            afterMarker |> String.words |> List.head |> Maybe.andThen String.toInt
+
+        _ ->
+            Nothing
+
+
+{-| How many targets the bot will hold locked at once.
+
+`max-targets` is a guess about the ship and a wrong one is costly in both
+directions: too low and the bot leaves lock slots empty on every engagement, too
+high and it spends readings asking for locks the client will never grant. It
+shipped as a hardcoded 4 in both apps, and **the real number on this character is
+6** -- so saxrat declined to lock a fifth rat on 2,149 readings across its runs
+2 to 5, printing `Enough locked targets.` while two slots sat unused.
+
+The client answers the question itself, in two ways, and neither is inferred
+from several conditions holding at once the way a lock-range refusal is:
+
+  - **It states the maximum outright**, on the game log -- see
+    `maxTargetsStatedInGameLog`. That number is not a constant even for one
+    character: across the client's own logs it reads **5** from 19:16:52 to
+    20:46:12 on 31 July 2026 and **6** before and since, which is a targeting
+    skill completing. A hardcoded ceiling is therefore not merely wrong once, it
+    is wrong in a way that drifts under the bot while nothing notices.
+  - **The target bar proves a floor.** A reading whose bar holds N is this ship
+    holding N, which needs no attribution at all -- the bar is the ship's own
+    state, not a row that could have been somebody else's. It only ever rises.
+    This is the half that costs nothing and cannot be wrong, and it is also what
+    covers the ship auto-locking past whatever the bot asked for.
+
+With neither, this is exactly the setting, so a session that learns nothing
+behaves as it always did. **That direction is the whole safety of it.** Absent
+evidence never raises the cap, because a ceiling raised on a guess makes the bot
+spend readings asking for locks the client will never grant -- and, unlike a lock
+range, nothing would ever teach it back down: the bot only learns from what the
+client grants, and a slot that does not exist grants nothing. That is
+`loadRefusalFromGameLog`'s register applied to a ceiling.
+
+The stated maximum replaces the setting rather than clamping it, because it is
+the client stating a fact about this character where the setting was a guess
+about it. The floor wins over both, since a bar demonstrably holding N is not
+contradicted by a sentence the client wrote before a skill finished.
+
+-}
+maxTargetsCeiling : MaxTargetsState -> Int
+maxTargetsCeiling state =
+    max
+        (state.heldAtOnce |> Maybe.withDefault 0)
+        (state.statedByClient |> Maybe.withDefault state.fromSetting)
+
+
+{-| Everything about one reading this rule looks at.
+
+Takes the two fields rather than an `UpdateMemoryContext` so that a case can
+build one and fold a whole session through it.
+
+-}
+type alias MaxTargetsReading =
+    { targetsCount : Int
+    , gameLogEntries : List EveOnline.ParseUserInterface.GameLogEntry
+    }
+
+
+maxTargetsReadingFrom : UpdateMemoryContext BotSettings -> MaxTargetsReading
+maxTargetsReadingFrom context =
+    { targetsCount = context.readingFromGameClient.targets |> List.length
+    , gameLogEntries =
+        context.readingFromGameClient.gameLogEntriesSinceLastReading
+            |> Maybe.withDefault []
+    }
+
+
+{-| What the two learned halves look like after this reading.
+
+Returned as one record rather than written field by field, so the whole of the
+rule lives in one place -- `LockRangeLearning`'s reason.
+
+-}
+type alias MaxTargetsLearning =
+    { statedByClient : Maybe Int
+    , heldAtOnce : Maybe Int
+    , change : Maybe String
+    }
+
+
+{-| Move the ceiling on what the client has just said or just shown.
+
+The stated maximum takes the **latest** statement rather than the largest or the
+smallest, because it is the client's answer about this character now and the
+recorded logs show it changing as a skill completes. The floor takes the largest
+bar ever seen and never falls: an empty bar is a ship between engagements, not a
+ship that has lost slots.
+
+A reading holding no targets is left out of the floor entirely rather than
+recorded as `Just 0`, so the status line can tell "the bar has never been seen
+carrying anything" from "it carried nothing on this reading" -- absent against
+false, in a field an operator reads.
+
+`change` is set on the reading the ceiling moves and on no other, by comparing
+the rule's own answer before and against after. That needs no "already reported"
+flag: a repeated statement of the same number moves nothing and says nothing.
+
+-}
+updateMaxTargetsLearning : MaxTargetsReading -> MaxTargetsState -> MaxTargetsLearning
+updateMaxTargetsLearning reading stateBefore =
+    let
+        statedOnThisReading : Maybe Int
+        statedOnThisReading =
+            maxTargetsStatedInGameLog reading.gameLogEntries
+
+        statedAfter : Maybe Int
+        statedAfter =
+            case statedOnThisReading of
+                Just stated ->
+                    Just stated
+
+                Nothing ->
+                    stateBefore.statedByClient
+
+        heldAfter : Maybe Int
+        heldAfter =
+            if reading.targetsCount <= 0 then
+                stateBefore.heldAtOnce
+
+            else
+                Just (max reading.targetsCount (stateBefore.heldAtOnce |> Maybe.withDefault 0))
+
+        stateAfter : MaxTargetsState
+        stateAfter =
+            { fromSetting = stateBefore.fromSetting
+            , statedByClient = statedAfter
+            , heldAtOnce = heldAfter
+            }
+
+        ceilingBefore : Int
+        ceilingBefore =
+            maxTargetsCeiling stateBefore
+
+        ceilingAfter : Int
+        ceilingAfter =
+            maxTargetsCeiling stateAfter
+    in
+    { statedByClient = statedAfter
+    , heldAtOnce = heldAfter
+    , change =
+        if ceilingAfter == ceilingBefore then
+            Nothing
+
+        else
+            Just
+                ("Learned max targets: "
+                    ++ (case statedOnThisReading of
+                            Just stated ->
+                                "the client says it is already managing "
+                                    ++ (stated |> String.fromInt)
+                                    ++ " targets, as many as this character has skill to"
+
+                            Nothing ->
+                                "the target bar is holding "
+                                    ++ (reading.targetsCount |> String.fromInt)
+                                    ++ " targets at once, more than it ever has"
+                       )
+                    ++ " -- max-targets moves from "
+                    ++ (ceilingBefore |> String.fromInt)
+                    ++ " to "
+                    ++ (ceilingAfter |> String.fromInt)
+                    ++ "."
+                )
+    }
+
+
+{-| The ceiling and where each half of it came from, for the status line.
+
+Continuous rather than once-per-change, unlike the decision-log line: a number
+the bot adjusts for itself is worth being able to read at any moment, not only on
+the reading it moved. Both halves are named separately because they fail
+differently -- a run whose `client stated` never leaves `-` is one whose game log
+is not reaching the bot, where a `most held at once` stuck below the ceiling is
+simply a ship that has not filled its slots yet.
+
+-}
+describeMaxTargets : MaxTargetsState -> String
+describeMaxTargets state =
+    "Max targets: "
+        ++ (maxTargetsCeiling state |> String.fromInt)
+        ++ " (setting "
+        ++ (state.fromSetting |> String.fromInt)
+        ++ ", client stated "
+        ++ (state.statedByClient |> Maybe.map String.fromInt |> Maybe.withDefault "-")
+        ++ ", most held at once "
+        ++ (state.heldAtOnce |> Maybe.map String.fromInt |> Maybe.withDefault "-")
+        ++ ")."
+
+
 botMain : InterfaceToHost.BotConfig State
 botMain =
     { init = EveOnline.BotFrameworkSeparatingMemory.initState initBotMemory
@@ -4184,6 +4504,9 @@ initBotMemory =
     , lockProvenAtMeters = Nothing
     , lockRefusedAtMeters = Nothing
     , lockRangeLastChange = Nothing
+    , maxTargetsStatedByClient = Nothing
+    , maxTargetsHeldAtOnce = Nothing
+    , maxTargetsLastChange = Nothing
     , ammoSwap = initAmmoSwapMemory
     }
 
@@ -6288,6 +6611,8 @@ statusTextFromState context =
                 ++ " "
                 ++ describeLockRange (lockRangeStateFrom context)
                 ++ " "
+                ++ describeMaxTargets (maxTargetsStateFrom context)
+                ++ " "
                 ++ describeAmmoSwapState context
                 ++ (case context.memory.shipLoss of
                         Nothing ->
@@ -7698,6 +8023,13 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 , attempt = botMemoryBefore.lockAttempt
                 }
 
+        maxTargetsLearning =
+            updateMaxTargetsLearning (maxTargetsReadingFrom context)
+                { fromSetting = context.botSettings.maxTargetCount
+                , statedByClient = botMemoryBefore.maxTargetsStatedByClient
+                , heldAtOnce = botMemoryBefore.maxTargetsHeldAtOnce
+                }
+
         -- Written here rather than where the box is answered, because the
         -- branch that would keep the count is the branch that stops running
         -- the moment the count reaches its bound. See `MessageBoxStandoff`.
@@ -8012,6 +8344,9 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     , lockProvenAtMeters = lockRangeLearning.provenAtMeters
     , lockRefusedAtMeters = lockRangeLearning.refusedAtMeters
     , lockRangeLastChange = lockRangeLearning.change
+    , maxTargetsStatedByClient = maxTargetsLearning.statedByClient
+    , maxTargetsHeldAtOnce = maxTargetsLearning.heldAtOnce
+    , maxTargetsLastChange = maxTargetsLearning.change
     , ammoSwap =
         -- This reading's damage window rather than the previous one's, which is
         -- why `incomingDamageNow` is a binding: `swapMayDisarmTheGuns` is
