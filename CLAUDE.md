@@ -4503,6 +4503,7 @@ shipped configuration rather than edge cases:
 | the client's transient popup (#123) | parsed on every reading and read by nothing — the same five references and the same zero readers | printed in the status line, carried forward with an age, and still read by no decision |
 | the lock range (#121) | `targeting-range` asserted and never revised — `lockProvenAtMeters` appeared 0 times | the setting clamped into `[proven, refused)`, learned from the client's own answers, with the row-identity discipline unchanged |
 | the ammo swap (#122) | absent, not unconfigured — `ammoSwap`, `Charge`, `chargeName` and `optimalRange` all appeared 0 times, and there was no setting to turn on | ported without its tooltip half, with `ammo-swap-range` **required** rather than optional — see "saxrat swaps ammo at a distance it is told" below |
+| an in-range acceleration gate (#145) | a context-menu cascade, and a give-up counting readings *near* a gate rather than readings spent asking one — `selectedItem` appeared 0 times in `Bot.elm`, so it had never pressed a panel button for anything | `selectThenPanelAction`'s shape over `selectedItemActivateGate`, inside `unlessAlreadyClosingIn`; the counter counts the ask — see "An in-range acceleration gate is opened from the panel here too" below |
 
 Two things about the port are worth keeping in view.
 
@@ -5433,6 +5434,160 @@ run where boxes are being answered normally means the identity is churning; a
 `Message box:` clause that never appears on a run that dismisses one means the
 standoff is not being written.
 
+### An in-range acceleration gate is opened from the panel here too
+
+Issue #145 is `activateGateOnOverviewEntry` in `eve-online-saxrat`: an in-range
+gate was driven with `useContextMenuCascadeOnOverviewEntry`, and the mission
+runner stopped doing that on evidence its own doc comment carries — the panel's
+`selectedItemActivateGate` verified live on the gate that had refused 124
+D-clicks, the objective going from "You need to activate the Acceleration Gate"
+to "Warping" on the press and the overview turning over from 17 rows to 22.
+Ported whole, wrapped in `unlessAlreadyClosingIn` because EVE flies the ship the
+last of the way and takes the gate on arrival, so re-issuing restarts the
+manoeuvre.
+
+**The case for it is one gate, not 829 failures, and the recount is most of what
+this change is.** The two newest saxrat runs carry 829 `has not taken me
+anywhere` lines. That give-up prints on every reading once
+`gateRefusesThisShipTicks` (40) is passed, so 829 lines are **two** in-reach
+episodes — one per run, and the only two in the whole recorded corpus that ever
+passed the bound. Counted as episodes rather than as lines:
+
+| run | in-reach episodes | peaks |
+|---|---:|---|
+| 1, 2 | 0 | — |
+| 3 | 4 | 5, 10, 15, 18 |
+| 4 | 3 | 1, 6, **282** |
+| 5 | 3 | 1, 8, **3,504** |
+
+**Only run 4's is this mechanism failing.** In the 40 readings before its give-up
+the bot completed 30 context-menu cascades and clicked `Activate Gate` on an
+`Ancient Acceleration Gate` inside 2,000 m; the gate never opened, the client
+wrote no refusal on any channel, and after 238 readings of the give-up the bot
+went back to ratting. That is the same silent no-op signature the mission
+runner's D-clicks had.
+
+**Run 5's is not about the mechanism at all, and it is the more useful finding.**
+Its counter reached 3,504 while the bot printed `I see a 'Warp to Site'
+opportunity -- warp there` **10,353** times and reached an in-range gate
+activation decision **three** times. `warpToOpportunitySiteIfAvailable` is
+consulted before the gate branch, so for that whole stretch the gate was merely
+nearby and was never asked to open — and `gateWithinReachTicks` was counting
+`accelerationGateIsWithinReach`, the ship's proximity, so it ran up anyway and
+produced 108 give-ups about a gate this session had made three attempts on. That
+is #42's correction arriving in the second bot, and #102's shape underneath it: a
+counter and the thing it is supposed to bound measuring different quantities.
+
+**Why the branch went unreached is #147, and the recordings confirm that reading
+rather than contradict it.** `warpToOpportunitySiteIfAvailable` answers `Just`
+whenever a "Warp to Site" button is anywhere in the tree, and
+`pickAnotherAnomalyOrLeave` puts it ahead of the gate branch, so the gate is
+unreachable for as long as that button is drawn — which stays true after arrival.
+The give-ups cluster exactly as that predicts: **one contiguous block per run**,
+run 5's holding 108 lines with **zero** opportunity-warp lines inside it and the
+last one 20 lines before it, against 10,485 in the run as a whole. Run 4 is the
+control — one block too, and 12 opportunity lines in the entire run, none near
+it. So a low give-up count in a saxrat run is not evidence a gate opened; it can
+equally be the branch never being asked, and any before-and-after comparison on
+this bot has to say which. **Fixing that ordering is #147's and is deliberately
+not part of this change**, but the counter here is what stops the shadowing being
+*paid for*: counting the ask, run 5's shadowed readings hold at 0 and its
+reachable window is about 36 readings, short of the bound, so that give-up would
+not have fired at all.
+
+So the counter now counts the **ask** — `askingAnAccelerationGateToOpen`, the
+Selected Item panel showing an acceleration gate that is already in reach — holds
+on a reading in reach that did not ask, and resets only on leaving reach. The
+hold is the mission runner's, for its reason: a reset on a reading that did not
+ask is the shape that pinned `gunsSilencedTicks` at 1 forever, so anything
+holding the tree between two attempts would wipe the evidence.
+
+**One deliberate divergence from the mission runner's rule, and it is a bound
+rather than a preference.** That one counts only the readings the panel made the
+offer, and leaves "the gate is selected and the panel offers nothing" to
+`nothingToDoTicks` from the bottom of its decision tree. saxrat has no such
+counter and this branch answers `Just`, so an uncounted no-button state is a ship
+parked at a gate with nothing to end it. Counting it keeps one bound over both
+shapes — a gate the panel offers and does not open, and a gate the panel will not
+offer to open at all.
+
+**The bound stays at 40, and the corpus rather than caution is why.** The worry
+is real — a number placed against a failing cascade may be wrong for a working
+panel press — but what it bounds is how long the ship stands at a gate that is
+not opening, and that cost is the same whichever way the bot is asking. The
+recorded episodes leave nothing in the middle: every one peaks at 1 to 18
+readings or at 282 and 3,504. 40 sits in that gap with an order of magnitude
+either side, and no version of this mechanism moves an episode across it. What
+was wrong was the counter, not the number.
+
+**The give-up no longer names a cause.** It said the gate "most likely will not
+admit this ship", which is an inference, and run 4's is the case where it is
+wrong: the client said nothing at all, so the reading that is available is the
+silence and not the restriction. Sending an operator to look at the hull when the
+evidence points at the click is the cost. The wording now names what it was
+doing, says the client was silent, and names the three readings it cannot tell
+apart. The mission runner *can* say a gate wants an item — it reads `This gate is
+locked! … in your cargo hold` off the `info` channel — and that sentence appears
+in **no** recorded saxrat run beside either episode, which is what makes the
+weaker claim the honest one.
+
+**The out-of-range branch is untouched**, deliberately. saxrat's own comment
+records that "Activate Gate" from a distance does the whole thing, and the panel
+carries `selectedItemActivateGate` only while the gate is in range — that absence
+is the natural gate between the two mechanisms, the same argument
+`dockAtDestinationStation` makes.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_gate_panel_button.py` (42 cases). The four
+pure rules are executed through the real `Bot.elm` in `elm repl` rather than
+restated in Python — the step rule asked as four equalities per case so a rule
+answering two things at once or none would fail, at both sides of the bound and
+against fixed values either side; the counter folded over whole sessions
+including run 5's own 3,504-reading shape; the give-up and the status clause
+rendered. The panel reads go through the real `EveOnline.ParseUserInterface`,
+which is also the evidence that saxrat's diverged copy exposes the selected-item
+window — the part of that parser this bot had never used, `Bot.elm` naming
+`selectedItem` zero times before this. The wiring and the range split are read
+out of the source through a whitespace-collapsing reader. The corpus is recounted
+as *relations* rather than as the numbers above: give-up lines far outnumber
+episodes, the episodes separate around the bound by more than a factor of four,
+run 5's opportunity branch dwarfs its gate activations, and no client refusal was
+ever recorded beside a gate.
+
+Confirmed by mutation, **thirteen** of them, each failing a named case: the
+in-range branch reverted to the context-menu cascade; the press no longer wrapped
+in `unlessAlreadyClosingIn`; the lookup pointed at `selectedItemApproach`; the
+counter advanced on proximity again, which is run 5's defect; the counter
+resetting rather than holding; a gate selected with no button no longer counted;
+the bound's comparison moved either way; the select-first step dropped so the
+panel is pressed while showing something else; the range split neutralised so a
+40 km gate takes the panel path; the ship-restriction sentence restored; the
+give-up dropping its reading count; and the status clause no longer separating
+asking from being near.
+
+**Two mutations survived the first pass and both were real holes.** The
+named-button case asserted the string occurred anywhere in the branch, and the
+branch's own wait message quotes the button by name — so pointing the *lookup* at
+`selectedItemApproach` passed, which is the press acting on the wrong button
+while the log still names the right one. And the "a gate selected with no button
+is still an ask" case was written over the counter, which is *handed* `asking` as
+an input and therefore cannot notice that rule being narrowed; it is asked of
+`askingAnAccelerationGateToOpen` directly now.
+
+**Unverified: any of it running, and whether either recorded gate would have
+opened.** No run has been flown since. Nothing here establishes that run 4's gate
+was openable at all — the panel press is proven on the mission runner's client
+and not on this one, and a gate that genuinely restricts this hull would produce
+the same give-up with the same silence. What to watch on the first saxrat run
+that meets a gate in range: `Readings spent asking an acceleration gate to open:
+N of 40` in the status line, `(asking now)` beside it, and the count staying in
+single figures before the pocket changes. A count that climbs to 41 with
+`(asking now)` throughout is a gate that will not open for this ship whatever the
+mechanism, and is the first evidence anyone will have of that. A count that
+climbs while the clause reads `(a gate is in reach, not being asked)` means
+something above this branch is holding the tree, which is run 5's shape and is
+now visible rather than being spent as budget.
+
 ## Elm toolchain
 
 `brew install elm` (arm64-native bottle) — **not** `npm install -g elm`, which
@@ -5917,6 +6072,23 @@ exists.
   message box that will not close is bounded here too" above. **Untested against
   a live client**; watch the status line's `Message box: N/120`, which should
   appear briefly and vanish on a healthy run.
+
+  And it now **presses the Selected Item panel's own `selectedItemActivateGate`**
+  on a gate the ship is already sitting on, rather than driving a context-menu
+  cascade at it — the mechanism the mission runner verified live on a gate that
+  had refused 124 D-clicks. Before this, `Bot.elm` named `selectedItem` zero
+  times: it had never pressed a panel button for anything. The out-of-range
+  branch is deliberately unchanged, since the panel carries that button only
+  while the gate is in range. **The give-up's counter is the other half and is
+  the finding**: it counted readings *near* a gate, so run 5 took it to 3,504
+  while the opportunity-warp branch held the tree and the gate was asked three
+  times, and 829 give-up lines across two runs turn out to be two gates rather
+  than 829 failures. See "An in-range acceleration gate is opened from the panel
+  here too" above for the recount, for why the bound stays at 40, and for the
+  give-up that no longer claims the gate "will not admit this ship" on a reading
+  where the client said nothing. **Untested against a live client**; watch
+  `Readings spent asking an acceleration gate to open: N of 40` with
+  `(asking now)` beside it and N staying in single figures.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
