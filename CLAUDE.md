@@ -1644,14 +1644,9 @@ is.**
 **Four other bounds in this file share the asymmetry, and none has cost anything
 yet.** Stated so the next one is recognised rather than rediscovered:
 
-- **`podRecoveryGiveUpReadings`** is the identical shape —
-  `shipLoss.readingsSince` advances every reading, `recoverPodAfterShipLoss` is
-  in the pre-split list *below* `generalSetupInUserInterface`, and run 30's box
-  starved it exactly as it starved this one — nothing below that list ran on any
-  reading of the incident. It has never been *seen* only because no verdict was
-  latched, so its counter was not running and its bound had nothing to be late
-  for. That is luck, not soundness. Left where it is deliberately: moving a bound
-  is a behaviour change and wants its own evidence.
+- **`podRecoveryGiveUpReadings`** was the identical shape and is **fixed in
+  #126** — see the section below. Left alone here deliberately at the time,
+  because moving a bound is a behaviour change and wants its own evidence.
 - **`messageBoxStandoffGiveUpReadings`** counts every reading with a box and is
   tested in `closeMessageBox`, which sits below `closeSystemSettingsMenu` in the
   same list. It over-counts if the pause menu holds it, which makes it give up
@@ -4344,6 +4339,136 @@ out. `podRecoveryGiveUpReadings` (150, about twenty minutes at the eight seconds
 a reading the recorded runs average) bounds it and ends the session saying the
 pod is still in space, for the same reason every other bound here exists.
 
+### The same bound, asked where a held tree could not starve it
+
+Issue #126 is #102 a second time, in the same file, on the bound PR #115's own
+report named as the next one worth fixing. `shipLoss.readingsSince` is advanced
+in `updateMemoryForNewReadingFromGame`, unconditionally and with no reference to
+what the bot managed to do with the reading; the comparison sat inside
+`recoverPodAfterShipLoss`, which is in the pre-split list but *below*
+`generalSetupInUserInterface`. Anything answering up there starved the bound
+while the number it is compared against went on climbing.
+
+**Run 30 starved it and it cost nothing by luck.** The undismissable window held
+the setup entry for 32,585 readings, three hours and forty-four minutes, and
+`recoverPodAfterShipLoss` is the very next entry in a list resolved by
+`List.head` — so it was not consulted once. What saved it is that no ship-loss
+verdict was ever latched: the ship-loss status clause printed on 39,843 lines of
+that run and every one of them reads `ship ok`, so the counter was not running
+and the bound had nothing to be late for. A ship lost during that same standoff
+would have reproduced run 30 with the pod recovery as the victim, and the bot
+sitting in a capsule in the pocket that killed the ship.
+
+**Which kind of give-up it is, is the question #115's rule asks, and the answer
+is the first kind.** *A give-up that ends the session bounds elapsed time and
+belongs where nothing can decline to ask it; a give-up that declines an action
+bounds effort and belongs where the action is.* This one is a `describeBranch`
+around `FinishSession` and nothing else — no click, no travel, no dock, no menu
+— so it hoists. `podRecoveryOutOfTime` is the comparison, extracted as a pure
+rule over a record, and `endSessionOnAnExpiredBound` asks it from the head of
+`missionBotDecisionRootBeforeApplyingSettings` alongside the abandonment's.
+`recoverPodAfterShipLoss` lost that branch entirely, so there is one comparison
+rather than two places that could disagree.
+
+**What does *not* hoist is the recovery, and that is the half worth stating.**
+Flying a pod to a station is an errand: it sets a route, travels and docks, and
+it needs the location info panel expanded and stray menus cleared, which is
+exactly why the branch sits below `generalSetupInUserInterface` and still does.
+Nor does the *docked* outcome hoist, though it also ends the session — it names
+the station out of `dockedStationNameFromInfoPanel`, and that read needs
+`ensureInfoPanelLocationInfoIsExpanded` to have run. Having state to reach is
+precisely the property the hoisted entry must lack.
+
+**So the ship UI is a condition on the rule**, not decoration. A deadline asked
+without it would end a docked session printing "has not got there" about a pod
+that had. `shipUI` is a parse of the reading rather than a state the tree has to
+reach, so requiring it costs the bound nothing it needs, and what is left
+uncovered — a pod that is docked and safe while something above holds the tree —
+is the state the bound exists to produce.
+
+**The pod is asked before the abandonment** where both are expired on the same
+reading. A capsule is what an operator has to go and deal with; a mission still
+accepted can wait for them, and every other ordering in this file already says a
+lost ship outranks a stuck mission.
+
+**The counter still counts readings and not attempts, and the stakes make that
+argument stronger here, not weaker.** An attempt counter means a bot held
+elsewhere spends none of the budget, which is precisely the runaway — and here
+the runaway is a capsule sitting still where the ship died, where the abandonment's
+was a mission going unquit. The cost is stated rather than hidden: a bot starved
+above this branch for an unrelated reason now ends its session at 150 readings
+with the recovery never attempted, where before it ran until something else
+stopped it. That is the better half of the trade, because the pod was not being
+flown anywhere on any of those readings either; what changes is whether a person
+is told within twenty minutes or after the session runs out. The give-up line
+says so — *readings since the ship was lost rather than attempts* — and names the
+`home-station` the pod was routed to, or says there was none and it was taking
+whatever the surroundings menu offered.
+
+**The four other bounds were re-read and all four still fail safe**, after #109
+and #115 moved things. None is changed, and three of them turn out to be safer
+than #115 recorded:
+
+- **`messageBoxStandoffGiveUpReadings`** — unchanged in kind. Over-counting makes
+  it give up sooner, and giving up is `closeMessageBox` answering `Nothing` so
+  the rest of the tree runs. Safe direction, and it is the mechanism #109 built.
+- **`dockingRunInPatienceReadings`** is not actually in this family any more:
+  the comparison lives inside `dockingRunInAfterReading`, which the memory update
+  calls, so the counter and the test are the same code on the same reading and
+  nothing can starve it. What sits under the split only reads the latch, and
+  losing it early costs one re-commanded dock.
+- **`lootWindowOutOfRangeTicks` / `lootAllRefusedTicks`** — the *effect* of both
+  bounds is applied in the memory update too: `unlootableWreckIds` is written
+  there on the reading the bound is reached, so the write-off cannot be starved.
+  `giveUpOnOpenContainerReason`, down under the split, only supplies the log
+  line. Over-counting costs one abandoned wreck.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_pod_recovery_deadline_reachable.py` (31 cases). The
+two pure rules are executed through the real `Bot.elm` in `elm repl` rather than
+restated in Python — the deadline at both sides of its boundary, at zero, at run
+30's own 10,811, against a verdict whose reason is empty so nothing conjoined
+onto the comparison can hide, and against a docked pod at the bound and far past
+it; and the give-up line, which has to name the station or say there was none,
+carry the count, say the count is readings and not attempts, and say the pod
+still needs a person. A control row rides along so a repl answering `True` to
+everything cannot pass. The placement, the ordering against the abandonment, the
+absence of a second comparison, the branch doing nothing but ending the session,
+the rule reaching for nothing the setup list produces, and the counter's own
+unconditional advance are read out of the source through a whitespace-collapsing
+reader — as are the three fail-safe claims above. Run 30 is recounted as
+relations: the box held the tree for more than fifty times this bound, the
+memory update printed on more readings than the box did, and the run never lost
+its ship.
+
+Confirmed by mutation, twelve of them, each failing a named case: the comparison
+as `<` instead of `<=`; the comparison one reading early; the ship-UI condition
+dropped so a docked pod expires; the verdict's reason conjoined onto the
+deadline; the pod deadline dropped from the expired-bounds entry; the abandonment
+asked before it; the expired-deadline branch waiting instead of ending the
+session; the give-up dropping the station's name; the give-up dropping the
+readings-not-attempts clause; the clock advanced only on readings the client said
+something (the attempt-counting shape); **the comparison put back inside
+`recoverPodAfterShipLoss` where it is today**; and the message box's give-up made
+to act rather than hand the tree back, which is the fail-safe claim above.
+
+**Unverified: any of it running.** No run has been flown since, and no run has
+ever latched a ship-loss verdict at all — the whole path needs a ship destroyed
+while the bot is watching, which is not something to stage. **The new failure
+mode has never been seen either**: a session that ends at exactly 150 readings
+with the pod never flown anywhere is now possible where it was not before. What
+to watch on the first real loss is the status line's `SHIP LOST:` with
+`N of 150 readings spent` climbing, then `Pod recovery: travelling to …` and a
+dock. A session ending at N=150 having printed no `Pod recovery:` line at all is
+something above this branch holding the tree, which is what the give-up line now
+tells the operator to go and look for.
+
+**saxrat carries the same defect and is deliberately untouched.**
+`eve-online-saxrat`'s ported pod recovery has the identical comparison inside its
+own `recoverPodAfterShipLoss`, below `generalSetupInUserInterface` in
+`anomalyBotDecisionRootBeforeApplyingSettings`, and #126 is about the mission
+runner. It is the same fix and wants its own change.
+
 ## Elm toolchain
 
 `brew install elm` (arm64-native bottle) — **not** `npm install -g elm`, which
@@ -4505,7 +4630,12 @@ exists.
   `Pod recovery:` reaching a dock. If the verdict never arrives, the thing to
   check is whether `shipUI.moduleButtons` is genuinely empty on a capsule — the
   recordings show the *middle* row empty on every capsule reading, and every row
-  being empty is the stronger form of that, inferred rather than observed.
+  being empty is the stronger form of that, inferred rather than observed. Since
+  #126 the recovery's own 150-reading deadline is asked from the head of the
+  decision root rather than from inside the branch, where run 30 would have
+  starved it — see "The same bound, asked where a held tree could not starve
+  it". A session that ends at N=150 having printed no `Pod recovery:` line is
+  the new failure mode and means something above the branch held the tree.
 
   And it now **stops fighting once the objective carries no instruction and the
   tracker offers any travel step**, instead of clearing the field first — run 11
