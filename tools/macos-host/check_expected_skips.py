@@ -44,6 +44,9 @@ EXPECTED = [
      "the recorded runs in ~/eve-bot-logs"),
     (r"^run \d+'s log is not on this machine",
      "one named recorded run this machine does not have"),
+    (r"^no recorded saxrat runs\b",
+     "the recorded saxrat runs in ~/eve-bot-logs, which are named differently "
+     "from the mission runner's and so are gated separately"),
     (r"^no recorded game logs\b",
      "the client's own game logs, which only a machine that has played has"),
     (r"^no game log lines recorded under ",
