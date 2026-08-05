@@ -4943,6 +4943,78 @@ it — the callers differ only in the two log lines they hand it, because the
 *reason* is what an operator reads and the mechanism is not something this bot
 should have two of.
 
+## A station with no agent in it is a place to leave, not a reason to stop
+
+Run 35 printed `I do not see an agent to talk to in this station` on **371
+readings**, each with `I am stuck here and need help to continue` under it, and
+on every one of them the status line read `Home station: 'Amarr VIII (Oris) -
+Emperor Family Academy' (... docked elsewhere)`. The bot knew a station with an
+agent in it, knew it was not standing in that station, and asked a person to
+come and fix it.
+
+**The docking was correct, and that is the finding, because the issue assumed
+the opposite.** #127 named "why the bot was docked there at all" as the likely
+real defect. It is not. Run 35's mission was the courier `The Heir's Favorite
+Slave -- Bring Slaves to Ashokon Bofazan`; the mission tracker's own travel
+steps flew the ship to Bofazan's station, the tracker offered `Dock` and then
+`Start Conversation`, and the mission was handed in there. A courier mission
+ends at somebody else's agent, by design. What follows the hand-in is the gap:
+the bot asks whatever station it is standing in for the next mission, and when
+the Agents panel yields nobody it has nothing else to try.
+
+**The stall's size was overstated by an order of magnitude, in the unit this
+file keeps a section on.** The issue's "roughly 12,800 readings" is the *line*
+count of the span. It is **1,064 readings across 304 framework steps and 383
+seconds** — six and a half minutes. `[N.M]` is a step spanning several readings,
+and counting in steps or in lines instead of readings is how a six-minute stall
+was written up as an all-session one.
+
+**The trip is bounded by the wind-down and nothing else.**
+`travelToAnAgentWhenThisStationHasNone` fires only from the "no mission running"
+caller, only on a reading whose Agents tab is *selected* and holds no usable
+row, and only when `agentStationTrip` — a pure rule over a record — says there is
+somewhere to go and time to get there. It drops the station the info panel says
+the ship is already in, so `lastDockedStationNameFromInfoPanel` naming the
+current station falls through to `home-station` rather than routing the ship to
+its own hangar; it refuses outright when the panel cannot name the station,
+which is `goToHomeStationWhileDocked`'s rule for its reason. The clock bound is
+`secondsBeforeSessionEndToWindDown + strandedAgentTripSeconds`: the trip has to
+fit *before* the wind-down starts, since the wind-down sits above this branch
+and takes the tree back at that point.
+
+600 seconds is three times the longer of the two trips of this shape in the
+corpus — run 35's own six gate jumps from Penirgman to Bhizheba, 120 steps and
+190 seconds, and run 30's abandonment trip to Amarr VI (Zorast), 15 steps and
+106 seconds. It is generous because the asymmetry runs the other way from most
+bounds here: overshooting hands the ship to the wind-down, which docks it or
+ends the session where it is, while refusing a trip that would have fitted costs
+every mission the rest of the session could have run.
+
+**Only the two steps before the undock are new.** Run 35 flew the rest of this
+trip already: a person undocked the ship mid-stall, and the bot — no mission, a
+route standing — took `decideActionInMissionPocket`'s `travelTheRoute` branch,
+flew six jumps and docked at Bhizheba unaided. Setting the route and undocking
+are what #127 added; the flight and the dock at the far end were already
+exercised.
+
+**Asking for help is still the answer with nowhere to go**, and the log now says
+which "nowhere" it was. `describeNoAgentToTalkTo` carries what the tab held,
+because the bare sentence could not tell an empty panel — a station with no
+agents, or a parse that missed — from a populated one every row of which
+`selectedAgentEntry` rejected for not being `isAvailable` or for having an
+`agentLocation` somewhere else. Both kinds of row really occur: runs 18 and 19
+list `Fisten Akulf, Security, here, not available` alongside an agent the bot
+could use. Which of them run 35 hit is still unknown and this change does not
+claim to have found out — see "Open gaps".
+
+**What ended run 35's stall was a person.** For the 284 readings before it the
+bot dispatched no input at all, the help branch clicking nothing; then an agent
+conversation appeared in a single reading with `Seek and Destroy` in it, and the
+framework's next dispatch carried `standing down: someone used the mouse/keyboard
+1.5s ago`. The stand-down note is only written on a step that had effects to
+send, which is why a person at the keyboard is invisible for the whole of a stall
+and shows up on the reading after it breaks.
+
 ## Losing the ship: the client never says so, and a capsule reads 100%
 
 Run 7's ship was destroyed mid-mission and the bot carried on for the whole of
@@ -5749,6 +5821,22 @@ exists.
   nothing" above. **Untested against a live client, and the run is the point** —
   watch for `Quick message:` on every reading, then a quoted string with
   `(on screen now)` the first time the client shows one.
+
+  And it now **flies to a station it knows has an agent** when the one it is
+  standing in has none, instead of asking for help there until somebody
+  notices. Run 35 raised that alarm on 371 readings with `home-station` in its
+  settings the whole time. The docking itself was correct and the issue's
+  suspicion of it is answered against — the mission was a courier delivering to
+  another agent's station, and the tracker's own travel steps took it there — so
+  what is new is only the two steps before the undock; run 35 flew the rest of
+  the trip unaided once a person had undocked it. The trip drops the station the
+  info panel says the ship is already in, refuses when the panel cannot name it,
+  and must fit before the wind-down starts. See "A station with no agent in it is
+  a place to leave, not a reason to stop" above, including the recount that puts
+  the stall at 1,064 readings rather than the issue's 12,800. **Untested against
+  a live client**; watch for `No agent here to take a mission from -- set the
+  route to '<station>' before undocking.` followed by an undock, and note that
+  whether those stations really had no agent is still unknown.
 - **`eve-online-saxrat`** now carries the general guards the mission runner
   learned — the confirmed hitpoint readings behind a low-water mark, the
   damage-rate retreat, ship-loss detection and pod recovery, a bounded drone
@@ -6078,6 +6166,18 @@ load-bearing — see "The home station".
   system: Unknown" for a name that isn't a plain string in memory.
 - `MouseMoveRelative` and `CharacterDown`/`CharacterUp` (raw Unicode text input)
   aren't implemented in `botlab_host.py`.
+- **Whether run 35's stations really had no agent is still unknown**, and it is
+  the one question #127 raised that measurement could not close. `Start a
+  conversation with` never printed once in that run's 26,487 readings, so
+  `selectedAgentEntry` chose nothing at either station — but the failure line
+  carried no evidence about what the panel held, and the run is over. Both
+  causes are live and they want opposite fixes: an empty panel is a parse
+  problem, where a populated one is `isAvailable` or `agentIsInThisStation`
+  being too strict. `describeNoAgentToTalkTo` now prints the rows, so the next
+  occurrence answers it in one line; until then nothing should be relaxed on a
+  guess. Note that a conversation with a usable agent appeared at *both*
+  stations shortly afterwards, which is evidence against "these stations have no
+  agents" and for something the panel path could not see.
 - **The acceleration-gate path does not filter on `_display`**, which
   "Reading the overview" says every path that acts on a row must. A hidden row
   keeps a plausible region belonging to whatever was recycled into its place, so

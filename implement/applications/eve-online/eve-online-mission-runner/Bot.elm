@@ -1712,13 +1712,27 @@ dockedAtHomeStation context homeName =
     dockedStationNameFromInfoPanel context
         |> Maybe.map
             (\stationName ->
-                let
-                    normalise =
-                        String.trim >> String.toLower
-                in
-                (normalise stationName == normalise homeName)
-                    || stringContainsIgnoringCase (String.trim homeName) stationName
+                stationNameMatches { fromInfoPanel = stationName, wanted = homeName }
             )
+
+
+{-| Whether a station name the bot is holding names the station the info panel
+is showing.
+
+Split out of `dockedAtHomeStation` when `agentStationTrip` needed the same
+question about a station that is not the home one. Two copies of this would be
+two things that can disagree about whether the bot is already standing where it
+is about to fly, and the wrong answer to that undocks a ship for nothing.
+
+-}
+stationNameMatches : { fromInfoPanel : String, wanted : String } -> Bool
+stationNameMatches names =
+    let
+        normalise =
+            String.trim >> String.toLower
+    in
+    (normalise names.fromInfoPanel == normalise names.wanted)
+        || stringContainsIgnoringCase (String.trim names.wanted) names.fromInfoPanel
 
 
 {-| The overrun the wind-down allows itself while in space, in seconds past the
@@ -5635,11 +5649,29 @@ station.
 -}
 stationToReturnToForAbandonment : BotDecisionContext -> Maybe String
 stationToReturnToForAbandonment context =
+    stationsKnownToHaveAnAgent context |> List.head
+
+
+{-| Every station this bot can name that an agent has been seen in, best first.
+
+The same two places `stationToReturnToForAbandonment` chooses between, kept as
+a list because #127 needs the second one: a bot standing in the first of them
+has to be able to skip it and still have somewhere to go.
+
+Both entries are evidenced rather than assumed. The last station we undocked
+from is the agent's, because a mission was taken there. `home-station` is where
+the operator points the bot at the start of a session, and the recorded surveys
+show it listing local agents -- runs 1, 5, 27 and 29 all print
+`Almananeg Erafeke, Security, here, available` for
+`Amarr VIII (Oris) - Emperor Family Academy` while docked there.
+
+-}
+stationsKnownToHaveAnAgent : BotDecisionContext -> List String
+stationsKnownToHaveAnAgent context =
     [ context.memory.lastDockedStationNameFromInfoPanel
     , context.eventContext.botSettings.homeStationName
     ]
         |> List.filterMap identity
-        |> List.head
 
 
 {-| Press Quit Mission, once the conversation is open.
@@ -5857,7 +5889,9 @@ decideActionWhenDockedWithMissionTracker context =
 
         Nothing ->
             describeBranch "No mission running -- get one from the agent."
-                (openAgentConversation context)
+                (travelToAnAgentWhenThisStationHasNone context
+                    |> Maybe.withDefault (openAgentConversation context)
+                )
 
 
 {-| Opens the conversation with the chosen agent. The lobby keeps the Agents
@@ -5885,7 +5919,11 @@ openAgentConversation context =
                         case selectedAgentEntry context of
                             Nothing ->
                                 describeBranch
-                                    "I do not see an agent to talk to in this station."
+                                    (describeNoAgentToTalkTo
+                                        (stationWindow.agentEntries
+                                            |> List.map describeStationAgentEntry
+                                        )
+                                    )
                                     askForHelpToGetUnstuck
 
                             Just agentEntry ->
@@ -5902,6 +5940,267 @@ openAgentConversation context =
                                                 ++ "."
                                             )
                                             (clickUiElement conversationButton)
+
+
+{-| The alarm for "the Agents tab is up and there is nobody in it for me",
+carrying what the tab actually listed.
+
+**The list is there because the log cannot otherwise tell the two causes
+apart, and they want opposite fixes.** Run 35 printed the bare sentence on 371
+readings and it is still unknown whether the panel was empty -- a parse
+failure, or a station with no agents -- or whether it was populated and
+`selectedAgentEntry` rejected every row, which it does for a row that is not
+`isAvailable` and for one whose `agentLocation` puts the agent somewhere else.
+The recorded surveys show both kinds of row really occur: runs 18 and 19 list
+`Fisten Akulf, Security, here, not available` in the same panel as an agent the
+bot could use. Nothing in the failure line distinguished them, so #127 could
+not answer its own second question, and neither can this fix -- it only makes
+the next occurrence answerable.
+
+Rendered from `describeStationAgentEntry`, the same strings
+`surveyAgentsInStation` prints, rather than from a second rendering of the same
+records.
+
+The text is a function of the panel and not of the reading, which is what keeps
+it safe to repeat: `stall_watch.py` dedupes on the whole line, and a line
+carrying a per-reading counter defeats that -- run 126 emitted 151 unique
+variants of one alarm. A station's agent list does not change while the ship is
+docked in it, so this is one line however long the state lasts.
+
+-}
+describeNoAgentToTalkTo : List String -> String
+describeNoAgentToTalkTo listedAgents =
+    "I do not see an agent to talk to in this station. "
+        ++ (if List.isEmpty listedAgents then
+                "The Agents tab is selected and lists nobody at all, so either this station has no agents or the panel did not parse."
+
+            else
+                "The tab lists "
+                    ++ String.fromInt (List.length listedAgents)
+                    ++ ", none of them both available and in this station: "
+                    ++ String.join " | " listedAgents
+           )
+
+
+{-| Whether this station's Agents panel has been read and has nobody in it for
+us.
+
+Deliberately narrower than "the conversation could not be opened".
+`openAgentConversation` fails four ways and only this one is evidence about the
+_station_: no station window means the reading is incomplete, no Agents tab
+means the panel has not been read yet, and a tab that is not selected has a
+click still to come. Only a selected tab with no usable row says the thing a
+trip would act on, which is that staying here cannot produce a mission.
+
+-}
+thisStationHasNoAgentForUs : BotDecisionContext -> Bool
+thisStationHasNoAgentForUs context =
+    case context.readingFromGameClient.stationWindow |> Maybe.andThen .agentsTab of
+        Nothing ->
+            False
+
+        Just agentsTab ->
+            agentsTab.isSelected
+                && (case selectedAgentEntry context of
+                        Nothing ->
+                            True
+
+                        Just _ ->
+                            False
+                   )
+
+
+{-| Whether to fly to another agent's station instead of asking for help, and
+which one.
+
+Issue #127, and the shape of it is the point: run 35 finished a courier mission
+by delivering it to `Ashokon Bofazan`, whose station is not the bot's home, and
+the tracker's own travel steps are what took it there. So the docking was
+correct and the mission ran to completion. What the bot then did was ask _that_
+station for the next mission, find nobody in its Agents panel, and print the
+help alarm on 371 readings across the 1,063 that span -- 383 seconds -- while
+`home-station` sat in its settings the whole time.
+
+A pure rule over a record because every part of it can be wrong and each wrong
+answer costs something different: travelling to the station we are standing in
+undocks for nothing, travelling on an unreadable location undocks on a guess,
+and travelling with no time left ends the session in space.
+
+The order of the tests is the order of what the bot can know.
+
+  - **Not knowing where we are refuses the trip**, which is
+    `goToHomeStationWhileDocked`'s rule for the same reason: "undocking towards
+    a station we may already be standing in costs the session".
+  - **The station we are docked at is dropped from the candidates**, by
+    `stationNameMatches`, so the common case -- `lastDockedStationNameFromInfoPanel`
+    naming the station we are currently in, which is what the memory update
+    leaves it holding while docked -- falls through to `home-station` rather
+    than routing the ship to its own hangar.
+  - **The session clock is asked last**, so a bot with nowhere to go says that
+    rather than blaming the clock for it.
+
+`Nothing` for the clock means the host was given no `--session-duration-minutes`
+and there is no deadline to fit inside, which is the same thing
+`windDownBeforeSessionEnd` concludes from it.
+
+-}
+type AgentStationTrip
+    = TravelToAgentStation String
+    | NoTripToAnAgentStation String
+
+
+agentStationTrip :
+    { candidateStations : List String
+    , dockedStationName : Maybe String
+    , secondsToSessionEnd : Maybe Int
+    , secondsBeforeWindDown : Int
+    , tripSecondsNeeded : Int
+    }
+    -> AgentStationTrip
+agentStationTrip trip =
+    case trip.dockedStationName of
+        Nothing ->
+            NoTripToAnAgentStation
+                "the info panel does not name the station I am docked at, so I cannot tell whether a station I know of is this one"
+
+        Just dockedStationName ->
+            case
+                trip.candidateStations
+                    |> List.filter
+                        (\candidate ->
+                            not
+                                (stationNameMatches
+                                    { fromInfoPanel = dockedStationName
+                                    , wanted = candidate
+                                    }
+                                )
+                        )
+                    |> List.head
+            of
+                Nothing ->
+                    if List.isEmpty trip.candidateStations then
+                        NoTripToAnAgentStation
+                            "I know of no station with an agent in it: no 'home-station' is configured and I have not undocked from anywhere this session"
+
+                    else
+                        NoTripToAnAgentStation
+                            "every station I know of with an agent in it is the one I am already docked at"
+
+                Just candidate ->
+                    case trip.secondsToSessionEnd of
+                        Nothing ->
+                            TravelToAgentStation candidate
+
+                        Just secondsRemaining ->
+                            if
+                                (secondsRemaining - trip.secondsBeforeWindDown)
+                                    < trip.tripSecondsNeeded
+                            then
+                                NoTripToAnAgentStation
+                                    ("the session ends in "
+                                        ++ String.fromInt secondsRemaining
+                                        ++ " seconds and the trip needs "
+                                        ++ String.fromInt trip.tripSecondsNeeded
+                                        ++ " of them before the wind-down starts"
+                                    )
+
+                            else
+                                TravelToAgentStation candidate
+
+
+{-| How much of the session has to be left before a stranded bot will undock
+towards another agent.
+
+Measured against the two trips of this shape in the corpus, both counted in
+framework steps rather than readings -- the unit CLAUDE.md keeps a section on:
+
+  - run 35's own trip, `Penirgman` to `Bhizheba IX - Moon 1 - Amarr Navy
+    Logistic Support`: six gate jumps and a dock, **120 steps / 448 readings /
+    190 seconds**;
+  - run 30's abandonment trip to `Amarr VI (Zorast) - Moon 2 - Theology Council
+    Tribunal`, route set to Quit Mission pressed: **15 steps / 221 readings /
+    106 seconds**.
+
+600 is three times the longer of them, because this is a floor on time
+_remaining_ rather than a prediction of a route nobody has computed yet, and
+neither number bounds a route that happens to be twice as long.
+
+**The asymmetry runs the other way from most bounds in this file, which is why
+it can be generous.** Overshooting does not strand the ship: the wind-down sits
+above this branch and takes the tree back at 200 seconds remaining, flies the
+home trip or docks where it is, and `secondsPastSessionEndBeforeGivingUpOnDocking`
+ends the session either way. Refusing a trip that would have fitted, on the
+other hand, costs every mission the rest of the session could have run -- which
+is the whole of run 35's second half.
+
+-}
+strandedAgentTripSeconds : Int
+strandedAgentTripSeconds =
+    600
+
+
+{-| Leave for an agent we know of, when this station has none.
+
+Returns Nothing on every reading that is not the stranded state, so the docked
+flow is untouched for a bot whose station has an agent -- which is every
+recorded run but 35.
+
+The docked half is all this needs. Setting the route happens from inside the
+station, where failing it costs nothing, and undocking is the last step --
+`goToHomeStationWhileDocked`'s order, for its reason. Once in space the
+existing tree flies it: `decideActionInMissionPocket` reaches
+`travelTheRoute` on any reading with a route set and no tracker step, and it is
+what docks at the far end too. **Run 35 executed that half already** -- a person
+undocked the ship at step 624 and the bot flew six jumps and docked at Bhizheba
+unaided -- so what #127 adds is the two steps before it, not the flight.
+
+The `NoTripToAnAgentStation` reason is printed and then the reading is handed to
+`openAgentConversation`, which prints `describeNoAgentToTalkTo` and raises the
+alarm. Asking for help stays the answer when there is nowhere known to go; what
+changes is that the log now says which of those it was.
+
+-}
+travelToAnAgentWhenThisStationHasNone : BotDecisionContext -> Maybe DecisionPathNode
+travelToAnAgentWhenThisStationHasNone context =
+    if not (thisStationHasNoAgentForUs context) then
+        Nothing
+
+    else
+        Just
+            (case
+                agentStationTrip
+                    { candidateStations = stationsKnownToHaveAnAgent context
+                    , dockedStationName = dockedStationNameFromInfoPanel context
+                    , secondsToSessionEnd = secondsToSessionEnd context.eventContext
+                    , secondsBeforeWindDown = secondsBeforeSessionEndToWindDown
+                    , tripSecondsNeeded = strandedAgentTripSeconds
+                    }
+             of
+                TravelToAgentStation stationName ->
+                    if homeStationRouteIsSet context stationName then
+                        describeBranch
+                            ("No agent here to take a mission from -- the route to '"
+                                ++ stationName
+                                ++ "' is set, so undock and travel there."
+                            )
+                            (undockUsingStationWindow context)
+
+                    else
+                        describeBranch
+                            ("No agent here to take a mission from -- set the route to '"
+                                ++ stationName
+                                ++ "' before undocking."
+                            )
+                            (routeToStation context stationName)
+
+                NoTripToAnAgentStation reason ->
+                    describeBranch
+                        ("No agent here to take a mission from, and I am not travelling to another: "
+                            ++ reason
+                            ++ "."
+                        )
+                        (openAgentConversation context)
+            )
 
 
 {-| Whether the previous step clicked a mouse button. Used to make the agent
