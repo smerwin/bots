@@ -52,7 +52,10 @@ rectangle, and dropping the filter attributes the client's answer to whichever
 comes first in the tree.
 `test_a_recycled_region_is_resolved_to_the_row_being_drawn` builds exactly that.
 
-Nothing here reads a live game client, a bot, or the game log directory.
+Nothing here reads a live game client or a running bot. Two cases read the
+recorded saxrat runs in `~/eve-bot-logs`, and only read them; they skip with a
+stated reason on a machine that has none, which is the answer an absent piece of
+*evidence* gets rather than the one an absent toolchain does.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
