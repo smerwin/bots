@@ -7959,7 +7959,7 @@ afterwards, and the corpus below could not be measured at all until it was.
 
 **Deciding is not leaving, and the corpus says the gap is where the damage is.**
 Run 36's guard fired correctly at 66% believed armour and the armour went on
-falling to 17% -- 36 further points -- while the bot printed
+falling to 17% -- 49 further points -- while the bot printed
 `get out get out get out` and the ship stayed on the grid. Nothing in a reading
 said how long that had been going on.
 
@@ -7990,13 +7990,13 @@ and not yet taken effect. In run 36 the split is 29 against 125: the recall held
 the retreat for its first **seven** readings -- counted off that run's own
 per-reading counter rather than off the blocks -- the drones came home at 53%
 armour, and **every point of the decline that nearly killed the ship, 53% to
-17%, happened after they were in the bay.** The longest episode outside run 36 is run 10's, 142
-entries of which six are the recall; and run 31's two, at 46 and 89 entries, and
-run 11's at 30, contain **no drone-recall entry at all** -- so a slow retreat is
-fully reachable without the recall being in it.
+17%, happened after they were in the bay.** The longest episode outside run 36 is
+run 10's, 142 entries of which six are the recall; and run 31's two, at 46 and 89
+entries, and run 11's at 30, contain **no drone-recall entry at all** -- so a slow
+retreat is fully reachable without the recall being in it.
 
 **So the recall's placement in front of the warp is not changed, and that is a
-decision rather than an omission.** Reordering it would have bought run 36 five
+decision rather than an omission.** Reordering it would have bought run 36 seven
 readings and cost five drones, and left the other 125 entries exactly as they
 were. `droneRecallGiveUpTicks` is 60 and **has never been reached in any recorded
 run** -- the give-up branch names itself on every reading it declines, so zero is
