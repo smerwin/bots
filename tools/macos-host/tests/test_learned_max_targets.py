@@ -535,10 +535,14 @@ class TheStatusLineSaysWhereTheCeilingCameFrom(
                  "describeMaxTargets %s"
                  % state(SHIPPED_DEFAULT, stated=CLIENT_MAXIMUM, held=5)],
                 repl.with_helpers([]))
+            # `probing for 5` is #150's clause and is present exactly while
+            # `client stated` is `-`: the statement is the only thing that ends
+            # the probing, so a run whose two clauses disagree has a rule
+            # reading something other than its own state.
             self.assertEqual(
                 said[0],
                 "Max targets: 4 (setting 4, client stated -, most held at "
-                "once -).", app)
+                "once -, probing for 5).", app)
             self.assertEqual(
                 said[1],
                 "Max targets: 6 (setting 4, client stated 6, most held at "
@@ -602,8 +606,13 @@ class TheWiringIsWhatMakesAnyOfThisReachable(unittest.TestCase):
                 "List.take context.eventContext.botSettings.maxTargetCount",
                 source,
                 "%s still takes the raw setting as its lock candidates" % app)
+            # The decision reaches the ceiling *through*
+            # `maxTargetsRowsToTake` since #150, which adds the one row the
+            # probe needs and is the only caller of `maxTargetsCeiling` at a
+            # lock site. Asserting the ceiling's own name here would now pass
+            # for a decision that consulted it and took the raw setting anyway.
             self.assertIn(
-                "maxTargetsCeiling (maxTargetsStateFrom context)", source,
+                "maxTargetsRowsToTake (maxTargetsStateFrom context)", source,
                 "%s never consults the learned ceiling from a decision" % app)
 
     def test_the_setting_is_read_only_where_the_state_is_assembled(self):
@@ -776,8 +785,14 @@ class WhatTheRecordedRunsSayAboutTheCeiling(unittest.TestCase):
 
         cls.statements = set()
         cls.drone_refusals = 0
-        cls.max_targets_clauses = 0
+        # Runs that flew the rule, and what it did there. A run appears here
+        # only if its status line carries the clause, which is what separates a
+        # run from before #149 from one after it -- the log's own
+        # `# bot version:` names a commit and says nothing about which rules
+        # were in it.
+        cls.runs_reporting_a_ceiling = {}
         for name in logs:
+            reported = {"clauses": 0, "moved": 0, "stated": 0}
             with open(os.path.join(EVE_BOT_LOGS, name),
                       encoding="utf-8", errors="replace") as handle:
                 for line in handle:
@@ -787,7 +802,13 @@ class WhatTheRecordedRunsSayAboutTheCeiling(unittest.TestCase):
                     if "already controlling" in line and "drones" in line:
                         cls.drone_refusals += 1
                     if "Max targets:" in line:
-                        cls.max_targets_clauses += 1
+                        reported["clauses"] += 1
+                        if "client stated -" not in line:
+                            reported["stated"] += 1
+                    if "Learned max targets" in line:
+                        reported["moved"] += 1
+            if reported["clauses"]:
+                cls.runs_reporting_a_ceiling[name] = reported
 
     def test_the_client_states_a_maximum_and_it_is_above_the_shipped_default(self):
         """The whole argument for the change, recounted rather than remembered.
@@ -841,15 +862,35 @@ class WhatTheRecordedRunsSayAboutTheCeiling(unittest.TestCase):
             "the closing marker no longer distinguishes the targeting refusal "
             "from the drone one, which says 'as much'")
 
-    def test_no_recorded_run_has_ever_reported_a_learned_ceiling(self):
-        """And that is the other half, which only a run can answer: the corpus
-        predates the clause entirely, so a ceiling has never been watched
-        moving."""
-        self.assertEqual(
-            self.max_targets_clauses, 0,
-            "a recorded run carries a max-targets clause after all, so the "
-            "corpus can be asked what the ceiling did and this file should be "
-            "asking it")
+    def test_a_run_has_now_flown_the_rule_and_learned_nothing_from_it(self):
+        """The other half, which only a run could answer -- and one has flown.
+
+        This case used to assert that the corpus carried no `Max targets:`
+        clause at all, and that premise expired the moment saxrat's run 6
+        launched from the merge commit of #149. What the run says is what #150
+        argues: the clause is on every reading, `client stated` never leaves
+        `-`, the client wrote its sentence **not once**, and no ceiling ever
+        moved. Neither half of the rule can move while the lock site stops at
+        the ceiling it already believes in.
+
+        Asserted as an *existence* claim over the corpus rather than as a
+        property of every run, because a run flown after #150 should be
+        expected to learn something -- and that later run makes this one no
+        less true.
+        """
+        self.assertTrue(
+            self.runs_reporting_a_ceiling,
+            "no recorded run carries a max-targets clause, so nothing here "
+            "says what the rule does in flight -- which was true when #149 "
+            "merged and stopped being true with the next launch")
+        inert = [name for name, run in self.runs_reporting_a_ceiling.items()
+                 if not run["moved"] and not run["stated"]]
+        self.assertTrue(
+            inert,
+            "every recorded run that flew the rule learned something from it, "
+            "which contradicts #150's premise that neither half of it can move "
+            "on its own -- go and read what moved it: %r"
+            % (self.runs_reporting_a_ceiling,))
 
 
 class WhatTheCeilingCostSaxrat(unittest.TestCase):
