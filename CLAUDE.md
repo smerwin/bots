@@ -2848,6 +2848,145 @@ does **not** protect against is unchanged and stated plainly: a run configured
 with no percentage threshold is exactly as exposed to attrition as it was
 before — the change makes that visible, not survivable.
 
+### Deciding to leave is not leaving, and nothing measured the gap
+
+If the armour percentage guard *is* the attrition guard, then what stands between
+the ship and the thing grinding it down is how long the retreat takes to execute.
+Issue #136: run 36's guard fired correctly at 66% believed armour and the armour
+went on falling to 17% while the bot printed `get out get out get out`, and **no
+reading recorded any of that interval.** Reconstructing it meant replaying a log
+by hand.
+
+**The issue attributes the interval to the drone recall, and the corpus does
+not.** `returnDronesToBay` sits in front of the warp (#11, #59), the client was
+not answering Shift+R, and `Drones are not coming back -- click the drones window
+…` appears 107 times in run 36 — which reads like the cause and is not. Those 107
+are *decision blocks across the whole run*, 23 of which are inside the retreat;
+the recall held it for **seven** readings, the drones came home at 53% armour,
+and the decline that nearly killed the ship — 53% to 17% — happened **entirely
+afterwards**, with the bot issuing `Get out -- warp to …` into a client that did
+not warp.
+
+**This was the first time retreat latency had been measured at all, and it needed
+care in two places.**
+
+**Deciding is not the same as being slow.** `runAwayRearmPercent` keeps the
+verdict latched until the gauge recovers past 90%, so a retreat that *worked*
+goes on firing all the way home: run 36 printed the verdict on 325 blocks and was
+off the grid for the last two-thirds of them, recovering. Counting readings the
+retreat was decided reports a completed retreat as a two-hundred-reading failure,
+which is the instrument reporting success as failure. What is counted instead is
+readings the retreat is decided **and the ship is not in warp**.
+
+**The logs have no per-reading identity, which is itself part of #136's third
+point.** `# [N.M]` is a framework step, and one step spans fifteen readings when
+the client stalls — run 36's does. So the corpus was measured in decision blocks,
+the same unit the issue's own "107 occurrences" and "325 times" are in, and the
+end of an episode was proxied by hostiles leaving the overview, since no recorded
+run carries the counter this change adds.
+
+Measured that way, across all 36 runs the retreat fired on **29 episodes in 9
+runs**, and the blocks spent still under the guns after a verdict are:
+
+| | blocks |
+|---|---:|
+| median episode | **7** |
+| longest, run 36 | **154** |
+| longest outside run 36, run 10 | 142 |
+| corpus total | 748 |
+| of which the drone recall | **147 (a fifth)** |
+
+**Run 36 is an outlier, not the norm** — twenty times the median. And the recall
+is a minority everywhere it appears: 29 blocks against 125 in run 36, six of 142
+in run 10, and **none at all** in run 31's two episodes (46 and 89 blocks) or run
+11's (30). A slow retreat is fully reachable with the recall nowhere in it.
+
+**So the ordering is not changed, and that is the finding rather than caution.**
+Reordering would have bought run 36 seven readings, cost five drones, and left
+the other 125 blocks exactly as they were. `droneRecallGiveUpTicks` is 60 and **has
+never been reached in any recorded run** — the give-up names itself on every
+reading it declines since #11, so zero is evidence rather than silence — so
+tightening it would be retuning a number nothing recorded has approached, on the
+retreat path, on n=1. The asymmetry the issue names is real and points the other
+way from the bound: abandoning drones is a certain, bounded, recoverable cost and
+losing the ship is not. It is the measurement that does not support acting on it
+yet.
+
+**The focus-recovery click is untouched for the same reason**, and for one more.
+It is 45 of the 748 blocks, 20 of them in run 36 — and it cannot explain the 125:
+the warp is a *mouse* action, select-then-press on the Selected Item panel, so a
+client not taking keyboard input does not account for a warp that did not happen.
+Why it did not is unanswered and is where the next run has to look.
+
+**What ships is `retreatProgressAfterReading`**, a pure rule over a record, read
+by the status line and by no decision — #135's precedent, and the right one while
+the population is 29 episodes and one outlier:
+
+```
+RETREAT NOT EXECUTING: 34 consecutive readings deciding to leave with the ship
+not in warp (worst this session 34).
+```
+
+**The verdict behind it is `runAwayIfLowHealth`'s own.** The counter lives in
+`updateMemoryForNewReadingFromGame`, the only place that can write memory and the
+one place that never sees the decision, so the four guards were extracted into
+`retreatReason : RetreatCase -> Maybe RetreatReason` and both callers ask it —
+`hitpointsReadingWithheld`'s rule applied to the most consequential condition in
+the file. Same four conditions, same precedence, same inputs; what moved is where
+they live. `lowestPercentSinceHealthy` went the same way for the same reason.
+
+**Gated on the ship UI**, because that is `runAwayIfLowHealth`'s own gate — it is
+only reached through `branchDependingOnDockedOrInSpace`'s `ifSeeShipUI`, and
+without it a docked reading with the damage latch still set would count against a
+retreat there is no ship to make. **Not** gated on the tree having reached the
+branch: a reading where the retreat's condition is true and the ship is not
+warping is a reading under the guns whatever the tree spent it on, and #101 is
+precisely the case where that is the thing worth counting.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_retreat_latency.py` (29 cases). The two rules are
+executed through the real `Bot.elm` in `elm repl` — every guard at both sides of
+its boundary *and* against fixed values either side, every precedence pair, and
+the progress rule folded over whole sessions including run 36's own shape. The
+corpus is recomputed as relations rather than as the numbers above (the recall is
+a minority, a slow retreat exists with none of it in, the give-up has never
+fired), so a growing corpus cannot turn a true claim red. The ordering, the
+bounds, the single copy of the conditions and #120's gauge-free property are read
+out of the source through a whitespace-collapsing reader.
+
+Confirmed by mutation, **twenty** of them, each failing a named case: the armour
+comparison weakened to `<=`; the armour guard asked before the shield guard; an
+unanswerable reading counted as frozen; the damage guard reading the live window
+instead of the latch; the frozen-reading guard's damage floor dropped; the mark
+ignored so the retreat goes by one reading; the warping clause dropped so the
+hysteresis inflates every retreat; the peak made the latest interval rather than
+the largest; the peak discarded when the interval ends; the counter no longer
+requiring the ship UI; the memory update carrying a second copy of the
+conditions; the drone recall taken out of the warp path; the recall's give-up
+tightened to 10; **the gauge-free threshold made to read the gauge**; the latch's
+verdict made a function of the believed gauge; the rule made to reach into a
+reading; the retreat made to decide on the measurement; the status-line clause
+dropped; and — against the neighbouring case #135 owns, which this change had to
+update — a guard dropped from the rule, and a guard given another's decision line.
+
+**Two mutations survived the first pass and both were real holes in the cases.**
+The single-copy case counted comparisons of the *record's* field names, so a
+second copy reaching for `runAwayArmorHitpointsThresholdPercent` instead passed;
+it now refuses either threshold setting as an operand of a comparison anywhere.
+And the latch's forbidden list did not include `hitpoints`, the sample record's
+own field, so a verdict consulting the stored gauge readings passed.
+
+**Unverified: any of it running, and why the warp did not take.** No run has been
+flown since, and the 125 blocks run 36 spent issuing a warp that did not happen
+are **not explained by this change and are not claimed to be** — the measurement
+says where the time goes, not why. What to watch on the first run that retreats
+is `RETREAT NOT EXECUTING: N` appearing at all and then going away within a few
+readings; a run whose worst reaches double figures is run 36's shape recurring,
+and it is the first evidence anyone will have had. A run that retreats and never
+prints the clause means the counter is not being written. **What this does not
+protect against is the retreat itself being slow** — nothing here shortens the
+interval by one reading, and run 36 replayed today would go exactly as it did.
+
 ## Lock range is learned from the client, not set
 
 `targeting-range` (default 66000) decides whether `lockTargetFromOverviewEntry`
@@ -5047,6 +5186,23 @@ exists.
   **Untested against a live client.** Watch for `Retreat marks:` on every
   in-space reading, and for `ATTRITION UNGUARDED` appearing only on a run started
   without `run_mission.sh`.
+
+  And it now **says how long it has been trying to leave**. Run 36's guard fired
+  correctly at 66% armour and the ship reached 17% while the retreat could not
+  execute, and nothing recorded that interval — it had to be counted by hand out
+  of a log. `retreatProgressAfterReading` counts consecutive readings on which
+  the retreat is decided and the ship is not in warp, which is narrower than
+  "readings the retreat was decided" for a reason the hysteresis makes
+  load-bearing. **No behaviour changed**: the drone recall still sits in front of
+  the warp and its give-up bound is still 60, because the corpus says the recall
+  is a fifth of retreat latency and none of it in the longest retreats outside
+  run 36 — see "Deciding to leave is not leaving, and nothing measured the gap"
+  for the 29 episodes this was measured over and for why the focus-recovery click
+  was left alone too. **Untested against a live client**, and nothing here
+  shortens a retreat by one reading. Watch for `RETREAT NOT EXECUTING: N`
+  appearing and then going away within a few readings; a worst that reaches
+  double figures is run 36's shape recurring, and it is the first evidence anyone
+  will have had.
 
   And it now **leaves a dock it has already commanded alone** instead of
   re-issuing it every reading. Docking is a run-in the ship has to fly, and run
