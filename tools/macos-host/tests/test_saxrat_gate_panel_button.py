@@ -43,17 +43,22 @@ The wiring and the placement, which are not expressions, are read out of the
 source through a whitespace-collapsing reader so an `elm-format` pass cannot
 break them.
 
-Confirmed by mutation, twelve of them, each failing a named case: the in-range
+Confirmed by mutation, thirteen of them, each failing a named case: the in-range
 branch reverted to the context-menu cascade; the press no longer wrapped in
-`unlessAlreadyClosingIn`; the panel press aimed at a button the panel does not
-name; the counter advanced on proximity again (run 5's defect); the counter
+`unlessAlreadyClosingIn`; the panel lookup aimed at a button that is not this
+one; the counter advanced on proximity again (run 5's defect); the counter
 resetting rather than holding on a reading that did not ask; a reading with the
 gate selected and no button no longer counted, which is the unbounded wait
 saxrat has nothing else to end; the bound's comparison moved either way; the
 select-first step dropped so the panel is pressed while showing something else;
-the give-up's ship-restriction sentence restored; the give-up dropping its
-reading count; and the out-of-range branch converted to a panel press it cannot
-make.
+the range split neutralised so a 40 km gate takes the panel path; the give-up's
+ship-restriction sentence restored; the give-up dropping its reading count; and
+the status clause no longer separating asking from being near.
+
+Two survived the first pass and both were real holes -- the named-button case
+satisfied by the branch's own wait message quoting the button, and the
+"selected with no button is still an ask" case written over the counter, which
+is handed `asking` as an input and cannot notice that rule being narrowed.
 
 Two cases read the recorded saxrat runs in `~/eve-bot-logs`, and only read them;
 they skip with a stated reason on a machine that has none.
@@ -86,6 +91,7 @@ def saxrat_runs(*numbers):
             "no recorded saxrat runs in ~/eve-bot-logs, so what those runs "
             "say about this gate cannot be consulted here")
     return logs
+
 
 def read_log(path):
     with open(path, encoding="utf-8", errors="replace") as handle:

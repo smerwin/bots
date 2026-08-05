@@ -5538,7 +5538,7 @@ is the natural gate between the two mechanisms, the same argument
 `dockAtDestinationStation` makes.
 
 **Verified without a live client**, in
-`tools/macos-host/tests/test_saxrat_gate_panel_button.py` (42 cases). The four
+`tools/macos-host/tests/test_saxrat_gate_panel_button.py` (44 cases). The four
 pure rules are executed through the real `Bot.elm` in `elm repl` rather than
 restated in Python — the step rule asked as four equalities per case so a rule
 answering two things at once or none would fail, at both sides of the bound and
