@@ -13166,12 +13166,11 @@ so an attempt begun while the ship already held a target can never move either
 bound however long it is carried: it fails that condition rather than the wait,
 and no later reading can undo the count it started with.
 
-That makes the wait pure cost, and it is a measured one. Across the recorded
-runs the pending attempt sits at `for 8 readings` -- the verdict count, latched
--- on **more than three thousand** status lines across 22 recorded runs,
-while `stop waiting for it` has fired **zero**
-times in the whole corpus: the give-up is only asked of a row that reads
-`targeting`, and a lock the client declines never does. Run 37 is the shape,
+That makes the wait pure cost, and it is a measured one. The pending attempt
+sits at `for 8 readings` -- the verdict count, latched -- on **more than three
+thousand** status lines across 22 recorded runs, while `stop waiting for it` has
+fired **zero** times in the whole corpus: the give-up is only asked of a row that
+reads `targeting`, and a lock the client declines never does. Run 37 is the shape,
 live and unattended: `Lock more targets.` clicked a row while the bar was full
 at six, the client answered `You are already managing 6 targets, as many as you
 have skill to.` on the next reading, and the attempt climbed to the bound and
