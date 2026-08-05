@@ -650,6 +650,7 @@ type alias BotMemory =
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
     , retreatProgress : RetreatProgress
+    , retreatNotExecutingLastChange : Maybe String
     , hitpoints : HitpointsMemory
     , incomingDamage : IncomingDamageMemory
     , shipScale : ShipScaleMemory
@@ -1305,7 +1306,11 @@ missionBotDecisionRoot context =
     -- what made #7 take a whole session to diagnose. Each field holds a message
     -- only on the reading its conclusion changed, so each is one line per
     -- change with no separate "already reported" flag to get wrong.
-    ([ context.memory.dronesLeftBehindLastChange
+    -- The retreat's is first because it is the only one of them about the ship
+    -- being destroyed: a reader who sees several of these on one reading should
+    -- read that one first, and it carries the sentence `stall_watch.py` acts on.
+    ([ context.memory.retreatNotExecutingLastChange
+     , context.memory.dronesLeftBehindLastChange
      , context.memory.lockRangeLastChange
      , context.memory.messageBoxLastChange
      ]
@@ -8057,20 +8062,208 @@ retreatProgressAfterReading input =
         }
 
 
+{-| How long a commanded warp may fail to happen before a person is told.
+
+**Issue #141, and it is a report rather than a repair.** #139 shipped
+`retreatProgressAfterReading` and nothing read it, so the bot commanded a warp on
+every reading of run 36's retreat and never formed the thought that none of them
+had worked. This is that thought. It does not make the warp take, and it does not
+claim to know why the warp did not take -- that needs a live run.
+
+**Recounting the corpus in readings rather than in decision blocks changed what
+run 36 was.** #139 counted in blocks because "the logs carry no per-reading
+identity at all", and there is one after all: the framework issues exactly one
+`RequestToVolatileProcess` memory read per reading, and run 36 carries a second
+and independent per-reading counter in its own `Ammo swap: ... given up N readings
+ago` clause. Over run 36's retreat the two agree to within 3%. Measured that way,
+from the first verdict until hostiles leave the overview -- #139's own episode
+proxy, unchanged -- the 29 episodes in 9 runs are:
+
+  - a median of **3 readings**, with 19 of the 29 at four or fewer;
+  - and ten longer ones: 8, 11, 11, 11, 11, 16, 24, 29, **43** and **44**.
+
+**Run 36 is not an outlier, and its warp did take.** Its 154 blocks are 44
+readings and run 10's 142 blocks are 43 -- the same number, in a run nobody had
+looked at. On run 36's own readings the overview emptied and the escape target
+closed 13.9 -> 8.8 -> 4.7 -> 2.6 -> 0.7 AU while the believed armour recovered
+17% -> 48%: the ship warped, at about the 40th reading of a manoeuvre that takes
+two to four when it works. **The 1% armour the issue reports is one reading of the
+gauge #120 exists because of** -- shield and armour both reading 1% on the same
+reading, taken with `rats 0` and the ship already off the grid, bracketed by 37%
+either side. The deepest value the retreat ever believed is 17%.
+
+**So the 296 warp commands are two different things and only one is the
+failure.** 124 of those blocks were issued with something still on the overview
+and **172 after it had emptied**, because `runAwayRearmPercent` keeps the verdict
+latched and `runAwayIfLowHealth` short-circuits the `I am in warp` branch that
+would otherwise have taken those readings. In readings the failure is 34 of them,
+not 296 of anything.
+
+**The failure itself is the same shape in all three runs that have it**, and it is
+not one step. `selectThenPanelAction` is two: click the overview row, then press
+the Selected Item panel's `selectedItemWarpTo`, and it prints
+`(selecting it first)` for the first and the bare description for the second.
+**163 of run 36's 296 blocks are the first** -- the panel never came to show the
+row -- including one stretch of 55 consecutive blocks on one celestial, and 133
+are the second. Run 31's 28-reading retreat alternates the two the same way. So
+whatever is wrong is wrong about a click on an overview row at least as often as
+about the panel button, which is the fact that decides what this bound may do.
+
+**36 readings, written as three rotations of the escape choice rather than as a
+number.** `runAwayCelestialStickyReadings` is 12, and the choice rotates precisely
+so that "a retreat that has not worked yet tries a different corner of the
+system"; three full rotations is where the only self-correction the retreat owns
+has been spent on three separate destinations and the ship is still on the grid.
+The measurement puts it in the same place: above run 31's 28 and below run 10's 43
+and run 36's 40, which is the only gap the upper tail has.
+
+**It will fire on retreats that would have recovered, and that is chosen rather
+than overlooked.** All ten long episodes ended in a warp that took, run 36's
+included, so there is no threshold that separates the incident from the rest --
+there is nothing to separate, and a bound above 44 would be a bound that never
+fires. What the corpus does separate is a manoeuvre that works, at two to four
+readings, from one that is being retried, at eight and up. A retreat that has been
+retried for three rotations while the ship is being shot is worth a person's
+attention whether or not it would have fixed itself: a false one costs a
+screenshot and a log line, and a late one costs the ship.
+
+**What it does is say so, and the alternatives were weighed rather than skipped.**
+
+  - _Retrying a different destination_ is what the retreat already does, and what
+    every recorded episode did -- three celestials in run 36, three in run 31,
+    seven in run 10. It is the thing that has already failed, not an escalation.
+  - _A different mechanism_ is what this repo escalates with elsewhere, and there
+    is not one here. The only other way this bot can act on an overview row is a
+    context-menu cascade, which **begins with a click on the same row at the same
+    coordinates** -- the half of the manoeuvre run 36 says stalls more often --
+    and then adds a flyout that has to render and an entry that has to be found,
+    on the retreat path, under fire. It would replace the working half and keep
+    the failing one. Escape, this repo's other escalation, closes menus rather
+    than warping ships, and the two branches that press it
+    (`clearStrayContextMenu`, `closeMessageBox`) already run above this one on
+    every reading.
+  - _Ending the session_ is worse than doing nothing. The bot is the only thing
+    still commanding a warp, and ending leaves a ship under fire in a pocket with
+    nobody at the controls -- which is how run 7 lost its ship, in the four
+    minutes between one run's last reading and the next run's first.
+    `FinishSession` is the right answer to a bound whose subject is an errand and
+    the wrong one to a bound whose subject is the ship.
+
+So the escalation is to a person, and the way this repo escalates to a person is
+`askForHelpToGetUnstuck`'s sentence, which `stall_watch.py` matches literally and
+answers by screenshotting the client. The sentence is **carried into this line
+rather than reached by branching to that leaf**, because the leaf dispatches no
+effects: taking it would stop the retreat commanding the warp, which is the one
+thing that must not happen while the ship is still in the pocket.
+`askForHelpToGetUnstuckText` is the shared literal, pinned against the framework's
+copy and the watchdog's.
+
+**Said at the root, on the reading the bound is crossed, and nowhere else.**
+`dronesLeftBehindLastChange`'s mechanism, for #102's reason: the verdict is
+settled in `updateMemoryForNewReadingFromGame`, which runs on every reading
+whatever the tree is doing, while the branch that would otherwise carry the line
+is `runAwayIfLowHealth` -- which a message-box standoff above the split can
+decline to reach, and which is itself one of the ways a retreat gets to be
+36 readings long. The status line carries the count against the bound
+continuously, so the number can be watched climbing rather than only reported
+once it has arrived.
+
+**Nothing decides on it and the retreat is unchanged**: the same four guards, the
+same rotation, the same drone recall in front of the warp, the same
+`droneRecallGiveUpTicks` of 60. A run whose alarm fires flies exactly as it would
+have without this change.
+
+-}
+retreatNotExecutingAlarmReadings : Int
+retreatNotExecutingAlarmReadings =
+    runAwayCelestialStickyReadings * 3
+
+
+type alias RetreatNotExecutingCase =
+    { unexecutedReadingsBefore : Int
+    , unexecutedReadings : Int
+    }
+
+
+retreatNotExecutingAlarm : RetreatNotExecutingCase -> Maybe String
+retreatNotExecutingAlarm alarmCase =
+    if
+        (alarmCase.unexecutedReadingsBefore < retreatNotExecutingAlarmReadings)
+            && (retreatNotExecutingAlarmReadings <= alarmCase.unexecutedReadings)
+    then
+        Just (describeRetreatNotExecuting alarmCase.unexecutedReadings)
+
+    else
+        Nothing
+
+
+{-| The one line an operator gets when a commanded warp is not happening.
+
+It says what was commanded and how often, that the cause is unknown, and that the
+bot is still commanding it -- the last because a reader who has just been told the
+bot is stuck would otherwise reasonably assume it had stopped trying, and the
+whole argument for reporting rather than acting is that it has not.
+
+The count is in readings and the sentence says so, for
+`describeAbandonmentOutOfTime`'s reason: this file has two units and the one a log
+is easiest to mis-read in is the other one.
+
+-}
+describeRetreatNotExecuting : Int -> String
+describeRetreatNotExecuting readings =
+    "RETREAT NOT EXECUTING: I have decided to leave on "
+        ++ (readings |> String.fromInt)
+        ++ " consecutive readings -- readings, not decisions -- and the ship has"
+        ++ " not been in warp on any of them. The warp is being commanded and it"
+        ++ " is not taking. I do not know why, I have no other way out of a"
+        ++ " pocket, and I am still commanding it because stopping cannot help."
+        ++ " "
+        ++ askForHelpToGetUnstuckText
+
+
+{-| The exact sentence the watchdog treats as an alarm, shared rather than spelt
+twice.
+
+`EveOnline.BotFrameworkSeparatingMemory.askForHelpToGetUnstuck` writes it and
+`stall_watch.py` matches it as a substring of any log line, which is what turns it
+into a screenshot of the client. Three copies of one string across two languages
+is a coupling of exactly the kind this repo pins with a test rather than
+remembers, and a drift here is silent in the direction that looks like a healthy
+run -- the line still prints and nothing escalates.
+
+The framework's copy is not imported because that value is a `DecisionPathNode`
+rather than the string inside it, and the module is vendored six times: exporting
+one more name from it would be six edits to make a literal reachable.
+
+-}
+askForHelpToGetUnstuckText : String
+askForHelpToGetUnstuckText =
+    "I am stuck here and need help to continue."
+
+
 {-| The retreat's latency, for the status line.
 
 Absent until a retreat has been decided at all, so a run that never retreats
 reads exactly as it did before. Both numbers, because the live one goes to zero
 the moment the ship warps and the session's worst is what an operator compares
-against run 36's.
+against run 36's -- and since #141 the live one is shown against the bound, so
+that a retreat climbing towards the alarm is distinguishable from one that is
+merely slow while it is still climbing.
+
+The rendering is a function of the record rather than of the context, so a case
+can execute it. A first version read the whole clause out of the source instead,
+and a mutation that dropped the bound from the count while leaving it in the
+sentence below survived that -- the status line then said what it always said and
+the number an operator watches climb had nothing to climb towards.
 
 -}
 describeRetreatLatency : BotDecisionContext -> String
 describeRetreatLatency context =
-    let
-        progress =
-            context.memory.retreatProgress
-    in
+    describeRetreatLatencyFromProgress context.memory.retreatProgress
+
+
+describeRetreatLatencyFromProgress : RetreatProgress -> String
+describeRetreatLatencyFromProgress progress =
     if progress.longestUnexecutedReadings < 1 then
         ""
 
@@ -8082,10 +8275,18 @@ describeRetreatLatency context =
     else
         " RETREAT NOT EXECUTING: "
             ++ (progress.unexecutedReadings |> String.fromInt)
+            ++ " of "
+            ++ (retreatNotExecutingAlarmReadings |> String.fromInt)
             ++ " consecutive readings deciding to leave with the ship not in warp"
             ++ " (worst this session "
             ++ (progress.longestUnexecutedReadings |> String.fromInt)
-            ++ ")."
+            ++ ")"
+            ++ (if retreatNotExecutingAlarmReadings <= progress.unexecutedReadings then
+                    " -- past the bound, and a person has been asked for."
+
+                else
+                    "."
+               )
 
 
 {-| How many readings one escape choice stays put.
@@ -13108,6 +13309,7 @@ initBotMemory =
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
     , retreatProgress = { unexecutedReadings = 0, longestUnexecutedReadings = 0 }
+    , retreatNotExecutingLastChange = Nothing
     , hitpoints =
         { shield = initHitpointsGaugeMemory
         , armor = initHitpointsGaugeMemory
@@ -17593,6 +17795,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 , before = botMemoryBefore.retreatProgress
                 }
 
+        -- #141's bound over #139's counter. Settled here rather than in
+        -- `runAwayIfLowHealth` for the reason the counter itself is settled here:
+        -- a tree held above the docked-or-in-space split cannot decline to ask
+        -- it, and a held tree is one of the ways a retreat comes to be this long.
+        -- Crossed once per interval, because `retreatProgressAfterReading` only
+        -- ever adds one or resets to zero -- so a second episode that reaches the
+        -- bound says so again, and one that does not never does.
+        retreatNotExecutingLastChange =
+            retreatNotExecutingAlarm
+                { unexecutedReadingsBefore = botMemoryBefore.retreatProgress.unexecutedReadings
+                , unexecutedReadings = retreatProgressNow.unexecutedReadings
+                }
+
         dronesInSpaceCountNow =
             dronesInSpaceCount context.readingFromGameClient
 
@@ -17844,6 +18059,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     , lowestShieldPercentSinceHealthy = lowestShieldNow
     , lowestArmorPercentSinceHealthy = lowestArmorNow
     , retreatProgress = retreatProgressNow
+    , retreatNotExecutingLastChange = retreatNotExecutingLastChange
     , hitpoints = hitpointsNow
     , incomingDamage = incomingDamageNow
     , shipScale = shipScaleNow
