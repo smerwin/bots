@@ -4023,6 +4023,7 @@ shipped configuration rather than edge cases:
 | what it will shoot (#40) | the overview's icon colour and nothing else | plus whatever the combat log names as hitting the ship |
 | setting its own route | could only *follow* one a human set | `hunt-system` circuit, asked for through the host's ESI directive |
 | the client's transient popup (#123) | parsed on every reading and read by nothing — the same five references and the same zero readers | printed in the status line, carried forward with an age, and still read by no decision |
+| the lock range (#121) | `targeting-range` asserted and never revised — `lockProvenAtMeters` appeared 0 times | the setting clamped into `[proven, refused)`, learned from the client's own answers, with the row-identity discipline unchanged |
 
 Two things about the port are worth keeping in view.
 
@@ -4083,6 +4084,75 @@ on the first run: `Hunt circuit: A -> B -> C, next B` in the status line, then
 Destination` and `jumpToNextSystem` taking over. `Asked for 'B' N/20 readings
 ago with no route yet` climbing to `ROUTE SETTING GIVEN UP` is the host not
 answering, and its own log says why.
+
+### The lock range is learned here too, and the "no evidence" branch is the common one
+
+The rule is the mission runner's, ported whole: two bounds in `BotMemory`, each
+moving one way only, and `lockRangeThresholdInMeters` clamping `targeting-range`
+into `[lockProvenAtMeters, lockRefusedAtMeters)`. See "Lock range is learned from
+the client, not set" for the argument and the calibration; what follows is only
+what saxrat changes about it.
+
+**The row-identity discipline is unchanged and the two apps' copies of it are
+compared byte for byte.** `overviewEntryLockHandle` keys on EVE's `itemID`, falls
+back to the row's name only where no other row shares it, and yields no evidence
+at all from a pocket of same-named rats. That last branch is the *ordinary* case
+here rather than the exception the mission runner meets: an anomaly is a pocket
+of identically named rats by construction. Loosening it to make the feature fire
+more often is the one change that must not be made — a wrong bound is sticky for
+the session, where a rule that stays silent costs only the learning.
+
+**The rules are functions of records rather than of a `BotDecisionContext`**,
+which is the one deliberate shape difference from the mission runner's copy.
+`lockRangeThresholdInMeters`, `describeLockRange` and `updateLockRangeLearning`
+take `LockRangeState` and `LockRangeReading`, assembled by two thin callers, so a
+case can fold a whole session through the rule in `elm repl`. #106 records what
+the other shape costs: a rule reachable only through a whole decision context
+"could not be executed ... which is exactly why the shipped version was checked
+by reading it".
+
+**One premise of the mission runner's is not true here and is not relied on.**
+Its `lockClickLocationFromStepEffects` argues that the lock chord "is the only
+place in this bot that presses Ctrl without Shift". saxrat presses Ctrl in three
+places: the lock, `ctrlShiftClickUiElement` (which holds Shift too), and the loot
+window's Ctrl+W. The third has no mouse effect at all, so there is no
+`MouseMoveTo` for the rule to take — both conditions are load-bearing here where
+one was there, and a case asks each of the three.
+
+**What the refusal costs more of here.** Only the first lock of an engagement can
+ever teach a refusal, because the evidence needs the target bar empty at both
+ends — and this bot locks up to `max-target-count` rats and holds them. Nothing
+in a reading states the *client's* own maximum; `max-target-count` is the bot's
+ceiling, not the client's, so it cannot stand in for one.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_learned_lock_range.py` (31 cases). The rules
+are executed through the real `Bot.elm` in `elm repl` and folded over sessions
+rather than single readings, and the overview rows they are asked about come from
+the real `EveOnline.ParseUserInterface` — which is also the evidence that
+saxrat's diverged copy of that parser exposes `objectItemID`, the lock indicators
+and the per-row region the identity rule needs. It does; **no parser change was
+required**. Confirmed by mutation, thirteen of them, each failing a named case,
+listed in that file.
+
+**The recordings settle half of "do the rats carry item ids".** The field
+reaches this client: `lootedWreckIds` only grows through
+`Maybe.andThen .objectItemID` on an overview row, and saxrat runs 2 and 3 reach
+`Wrecks already opened: 4` and `3` — so real ids were resolved off real rows,
+tens of thousands of readings' worth. What that does *not* say is whether a
+**rat's** row carries one, because a wreck is the only consumer saxrat had. No
+recorded run carries a `Lock range:` clause at all, so a rat's row has never been
+asked; both relations are pinned as cases rather than remembered.
+
+**Unverified, and only a run can answer it: whether an anomaly's rats carry
+`itemID`s**, which decides how much evidence this ever collects. If they do,
+attribution is by id and the name rule rarely runs; if they do not, an anomaly of
+identical rats teaches nothing at all. Both are correct behaviour and the clause
+tells them apart: `Lock range: 66000 m (setting 66000, proven -, refused -,
+attempt none)` never moving on a run that fights means no evidence was collected,
+which is the expected outcome here and not a fault. What *would* be a fault is a
+bound moving on a grid of identically named rats, since that is the rule
+attributing something it should have refused.
 
 **One rule is deliberately not identical, and it is the first reading.**
 `updateHitpointsGaugeMemory` believes a reading that has no previous reading to
@@ -4658,6 +4728,20 @@ exists.
   rules are the same declarations under the same names and a case compares them
   byte for byte, while the line each is placed in follows each app's own status
   conventions.
+
+  And it now **learns its lock range from the client** rather than carrying
+  `targeting-range=66000` and never revising it — the setting clamped into
+  `[proven, refused)` from what the client has actually granted, with the
+  row-identity discipline carried across unchanged and compared byte for byte
+  against the mission runner's. See "The lock range is learned here too" above
+  for what saxrat changes about it, for the Ctrl chord premise that is not true
+  here, and for why the "no evidence" branch is the ordinary case in an anomaly.
+  saxrat's diverged parser needed **no change**: it already exposes
+  `objectItemID`, the lock indicators and the per-row region. **Untested against
+  a live client**, and the open question is whether anomaly rats carry `itemID`s
+  at all — watch the status line's `Lock range:` clause, where `attempt none` on
+  every reading of a fight means the identity rule is declining to attribute,
+  which is correct rather than broken.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
