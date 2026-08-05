@@ -349,12 +349,32 @@ class TheRetreatItselfIsUnchanged(unittest.TestCase):
         cls.flat = collapsed(cls.source)
 
     def test_the_retreat_still_has_exactly_its_three_guards(self):
-        body = collapsed(definition_body(self.source, "runAwayIfLowHealth"))
-        self.assertIn("if lowestShield < runAwayShieldThreshold then", body)
-        self.assertIn("else if lowestArmor < runAwayArmorThreshold then", body)
-        self.assertIn("else if context.memory.incomingDamage.retreating then", body)
+        # #136 extracted these four conditions into `retreatReason` so the memory
+        # update could ask the decision's own question rather than carry a second
+        # copy of it. They are unchanged and in the same order; what moved is
+        # where they live, so this reads them there and separately asserts that
+        # `runAwayIfLowHealth` still maps each one to its own decision line.
+        rule = collapsed(definition_body(self.source, "retreatReason"))
         self.assertIn(
-            "damageThatMustMoveTheHitpointsReading <= damageInWindow", body)
+            "if retreatCase.lowestShieldPercent < retreatCase.shieldThresholdPercent then",
+            rule)
+        self.assertIn(
+            "else if retreatCase.lowestArmorPercent < retreatCase.armorThresholdPercent then",
+            rule)
+        self.assertIn("else if retreatCase.damageLatchIsRetreating then", rule)
+        self.assertIn(
+            "damageThatMustMoveTheHitpointsReading <= retreatCase.damageInWindow",
+            rule)
+
+        body = collapsed(definition_body(self.source, "runAwayIfLowHealth"))
+        self.assertIn("case retreatReason", body)
+        for reason, description in (
+                ("RetreatOnShieldMark", "runAwayWithShieldDescription"),
+                ("RetreatOnArmorMark", "runAwayWithArmorDescription"),
+                ("RetreatOnDamageWindow", "runAwayFromIncomingDamage"),
+                ("RetreatOnFrozenReading", "runAwayFromAnInstrumentThatIsNotMoving")):
+            self.assertIn("Just %s -> Just %s" % (reason, description), body,
+                          "each guard must keep its own decision line")
 
     def test_the_gauge_free_guard_does_not_read_a_gauge(self):
         """The property #120 calls non-negotiable, in the two places it lives.

@@ -649,6 +649,7 @@ type alias BotMemory =
     , readingsCount : Int
     , lowestShieldPercentSinceHealthy : Int
     , lowestArmorPercentSinceHealthy : Int
+    , retreatProgress : RetreatProgress
     , hitpoints : HitpointsMemory
     , incomingDamage : IncomingDamageMemory
     , shipScale : ShipScaleMemory
@@ -7723,14 +7724,12 @@ runAwayIfLowHealth context shipUI =
         -- retreats: the mark held 0% for ten readings while the gauge read
         -- 82-86%, none of them high enough to re-arm.
         lowestShield =
-            context.memory.hitpoints.shield.believed
-                |> Maybe.map (\current -> min current context.memory.lowestShieldPercentSinceHealthy)
-                |> Maybe.withDefault context.memory.lowestShieldPercentSinceHealthy
+            lowestPercentSinceHealthy context.memory.hitpoints.shield.believed
+                context.memory.lowestShieldPercentSinceHealthy
 
         lowestArmor =
-            context.memory.hitpoints.armor.believed
-                |> Maybe.map (\current -> min current context.memory.lowestArmorPercentSinceHealthy)
-                |> Maybe.withDefault context.memory.lowestArmorPercentSinceHealthy
+            lowestPercentSinceHealthy context.memory.hitpoints.armor.believed
+                context.memory.lowestArmorPercentSinceHealthy
 
         runAwayWithShieldDescription =
             describeBranch
@@ -7752,28 +7751,133 @@ runAwayIfLowHealth context shipUI =
                 )
                 (runAway context)
     in
-    if lowestShield < runAwayShieldThreshold then
-        Just runAwayWithShieldDescription
+    case retreatReason (retreatCaseFromMemory context.eventContext.botSettings context.memory) of
+        Just RetreatOnShieldMark ->
+            Just runAwayWithShieldDescription
 
-    else if lowestArmor < runAwayArmorThreshold then
-        Just runAwayWithArmorDescription
+        Just RetreatOnArmorMark ->
+            Just runAwayWithArmorDescription
 
-    else if context.memory.incomingDamage.retreating then
-        -- The latch, not the live comparison. Set and released in
-        -- updateIncomingDamageMemory, which is the only place that can hold a
-        -- verdict across readings -- and holding it is the whole point: the
-        -- moment the ship warps clear the window starts draining, so a live
-        -- comparison would cancel its own retreat halfway through.
-        Just runAwayFromIncomingDamage
+        Just RetreatOnDamageWindow ->
+            Just runAwayFromIncomingDamage
+
+        Just RetreatOnFrozenReading ->
+            Just runAwayFromAnInstrumentThatIsNotMoving
+
+        Nothing ->
+            Nothing
+
+
+{-| The low-water mark the retreat compares, folding in this reading's own value.
+
+One definition with two readers -- `runAwayIfLowHealth` and the memory update's
+`retreatCaseFromMemory` -- for `hitpointsReadingWithheld`'s reason. Two copies of
+"how low has this gauge been" would drift, and the one that drifted would be the
+one deciding whether the ship leaves.
+
+The mark alone is one reading behind: `lowWaterMark` folds a reading in _after_
+the decision has read it, so a gauge that has just dropped is not in the mark yet.
+Taking the `min` of the two is what makes the retreat act on the reading it
+arrives rather than the one after.
+
+-}
+lowestPercentSinceHealthy : Maybe Int -> Int -> Int
+lowestPercentSinceHealthy believed markSinceHealthy =
+    believed
+        |> Maybe.map (\current -> min current markSinceHealthy)
+        |> Maybe.withDefault markSinceHealthy
+
+
+{-| Which of the retreat's four guards says leave, in the order they are asked.
+
+**Extracted so the memory update can ask the same question the decision asks.**
+Issue #136 needs to count the readings between deciding to leave and leaving, and
+that counter lives in `updateMemoryForNewReadingFromGame` -- the only place that
+can write memory and the one place that never sees the decision. A second copy of
+"is the retreat firing" there would be two definitions of the most consequential
+condition in this file, drifting silently, and the one that drifted would be the
+instrument rather than the guard. `hitpointsReadingWithheld` records the same
+argument for a smaller condition.
+
+The order is `runAwayIfLowHealth`'s own and is preserved exactly, because it is
+what decides which reason an operator reads on a reading where two guards agree.
+Nothing else about the retreat changed with this extraction: same four
+conditions, same precedence, same inputs.
+
+`damageThatMustMoveTheHitpointsReading` is referenced here rather than carried in
+the record because it is a module constant, not a fact about a reading -- the
+record holds what a reading and the settings say and nothing else, which is what
+lets a case build one by hand.
+
+-}
+type RetreatReason
+    = RetreatOnShieldMark
+    | RetreatOnArmorMark
+    | RetreatOnDamageWindow
+    | RetreatOnFrozenReading
+
+
+type alias RetreatCase =
+    { lowestShieldPercent : Int
+    , shieldThresholdPercent : Int
+    , lowestArmorPercent : Int
+    , armorThresholdPercent : Int
+
+    -- The latch, not the live comparison. Set and released in
+    -- `updateIncomingDamageMemory`, which is the only place that can hold a
+    -- verdict across readings -- and holding it is the whole point: the moment
+    -- the ship warps clear the window starts draining, so a live comparison
+    -- would cancel its own retreat halfway through.
+    , damageLatchIsRetreating : Bool
+    , damageInWindow : Int
+    , hitpointsReadingMoved : Maybe Bool
+    }
+
+
+retreatReason : RetreatCase -> Maybe RetreatReason
+retreatReason retreatCase =
+    if retreatCase.lowestShieldPercent < retreatCase.shieldThresholdPercent then
+        Just RetreatOnShieldMark
+
+    else if retreatCase.lowestArmorPercent < retreatCase.armorThresholdPercent then
+        Just RetreatOnArmorMark
+
+    else if retreatCase.damageLatchIsRetreating then
+        Just RetreatOnDamageWindow
 
     else if
-        (damageThatMustMoveTheHitpointsReading <= damageInWindow)
-            && (hitpointsReadingMovedInWindow context.memory.incomingDamage == Just False)
+        (damageThatMustMoveTheHitpointsReading <= retreatCase.damageInWindow)
+            && (retreatCase.hitpointsReadingMoved == Just False)
     then
-        Just runAwayFromAnInstrumentThatIsNotMoving
+        Just RetreatOnFrozenReading
 
     else
         Nothing
+
+
+{-| The retreat's four inputs, gathered from a memory this reading has updated.
+
+Built twice from two different contexts -- the decision has a
+`BotDecisionContext` and the memory update has an `UpdateMemoryContext` -- so
+this takes the two records both can produce rather than either context. The
+_rule_ is `retreatReason` and there is one of it; only the gathering happens in
+two places, and the gathering is a field read.
+
+-}
+retreatCaseFromMemory : BotSettings -> BotMemory -> RetreatCase
+retreatCaseFromMemory botSettings memory =
+    { lowestShieldPercent =
+        lowestPercentSinceHealthy memory.hitpoints.shield.believed
+            memory.lowestShieldPercentSinceHealthy
+    , shieldThresholdPercent = botSettings.runAwayShieldHitpointsThresholdPercent
+    , lowestArmorPercent =
+        lowestPercentSinceHealthy memory.hitpoints.armor.believed
+            memory.lowestArmorPercentSinceHealthy
+    , armorThresholdPercent = botSettings.runAwayArmorHitpointsThresholdPercent
+    , damageLatchIsRetreating = memory.incomingDamage.retreating
+    , damageInWindow = incomingDamageInWindow memory.incomingDamage
+    , hitpointsReadingMoved = hitpointsReadingMovedInWindow memory.incomingDamage
+    }
 
 
 {-| Whether anything is watching for a ship being ground down rather than burst.
@@ -7843,6 +7947,144 @@ its silence is otherwise indistinguishable from its working.
 attritionIsUnguarded : { shieldThresholdPercent : Int, armorThresholdPercent : Int } -> Bool
 attritionIsUnguarded coverCase =
     (coverCase.shieldThresholdPercent <= 0) && (coverCase.armorThresholdPercent <= 0)
+
+
+{-| How long the retreat has been decided without the ship being in warp.
+
+**Issue #136, and the whole of it: this interval had never been recorded
+anywhere.** #135 established that the armour percentage guard _is_ the attrition
+guard, which makes the time between deciding to leave and leaving the thing
+standing between the two. Run 36's had to be counted by hand out of a log
+afterwards, and the corpus below could not be measured at all until it was.
+
+**Deciding is not leaving, and the corpus says the gap is where the damage is.**
+Run 36's guard fired correctly at 66% believed armour and the armour went on
+falling to 17% -- 36 further points -- while the bot printed
+`get out get out get out` and the ship stayed on the grid. Nothing in a reading
+said how long that had been going on.
+
+**What is counted is consecutive readings on which the retreat is decided and the
+ship is not warping**, which is narrower than "readings the retreat was decided"
+and the difference is not a detail. `runAwayRearmPercent` keeps the verdict
+latched until the gauge recovers past 90%, so a retreat that _worked_ goes on
+firing for as long as the ship is hurt: run 36 printed the verdict on 325 log
+entries and was off the grid for the last ~230 of them, recovering. Counting
+those would report a two-hundred-reading retreat latency for a retreat that
+completed, which is the instrument reporting success as failure. `shipIsWarping`
+is what separates them, and it is the same predicate `decideActionWhenInSpace`
+short-circuits on.
+
+**What the corpus says about retreat latency, measured for the first time here.**
+Across all 36 recorded runs the retreat fired on **29 episodes in 9 runs**. Taking
+the readings from the first verdict until hostiles leave the overview -- the
+observable proxy for "still on the grid it decided to leave", since no recorded
+run carries this counter and the logs have no per-reading identity of their own --
+the median episode is **7** entries and the longest is run 36's at **154**, more
+than twenty times it. **Run 36 is an outlier, not the norm**, and that is the
+finding that decided what this change does and does not do.
+
+**The drone recall is a minority of it, including in run 36.** Of the 748
+under-fire entries after a verdict across the corpus, **147 (about a fifth) were
+spent on `returnDronesToBay`** and the rest on the warp command already issued
+and not yet taken effect. In run 36 the split is 29 against 125: the recall held
+the retreat for its first five readings, the drones came home, and **every point
+of the decline that nearly killed the ship -- 53% to 17% -- happened after the
+drones were in the bay.** The longest episode outside run 36 is run 10's, 142
+entries of which six are the recall; and run 31's two, at 46 and 89 entries, and
+run 11's at 30, contain **no drone-recall entry at all** -- so a slow retreat is
+fully reachable without the recall being in it.
+
+**So the recall's placement in front of the warp is not changed, and that is a
+decision rather than an omission.** Reordering it would have bought run 36 five
+readings and cost five drones, and left the other 125 entries exactly as they
+were. `droneRecallGiveUpTicks` is 60 and **has never been reached in any recorded
+run** -- the give-up branch names itself on every reading it declines, so zero is
+evidence rather than silence -- which means tightening that bound would be
+retuning a number no recorded run has approached, on the retreat path, on n=1.
+The asymmetry is real and points the other way from the bound: abandoning drones
+is a certain, bounded, recoverable cost and losing the ship is not. It is not the
+measurement that argues for acting on it here.
+
+**The focus-recovery click is untouched for the same reason.** It accounts for 45
+of those 748 entries, 20 of them in run 36. It is also not the explanation for the
+125: the warp is a mouse action -- select the celestial, press the panel's
+`WarpTo` -- so a client not taking _keyboard_ input does not account for a warp
+that did not happen.
+
+**This is read by the status line and by no decision**, which is #135's precedent
+and the right one while the population is 29 episodes and one outlier. It reports
+the interval; it does not shorten it. What it makes possible is the next run
+saying how long its own retreats took, which is the evidence a change to the
+ordering would need and which nothing in the corpus can supply.
+
+-}
+type alias RetreatProgress =
+    { unexecutedReadings : Int
+    , longestUnexecutedReadings : Int
+    }
+
+
+type alias RetreatProgressInput =
+    { retreatIsDecided : Bool
+    , shipIsWarping : Bool
+    , before : RetreatProgress
+    }
+
+
+retreatProgressAfterReading : RetreatProgressInput -> RetreatProgress
+retreatProgressAfterReading input =
+    if not input.retreatIsDecided then
+        -- Not a retreat, so nothing to be slow about. The peak is kept: it is
+        -- what the session is reporting, and a run whose worst retreat is over
+        -- must still be able to say how bad it was.
+        { unexecutedReadings = 0, longestUnexecutedReadings = input.before.longestUnexecutedReadings }
+
+    else if input.shipIsWarping then
+        -- The ship is leaving, so the retreat is executing however long the
+        -- verdict stays latched afterwards. Reset rather than hold, because a
+        -- warp that lands the ship somewhere still hostile starts a fresh
+        -- interval and that one is the one worth reporting.
+        { unexecutedReadings = 0, longestUnexecutedReadings = input.before.longestUnexecutedReadings }
+
+    else
+        let
+            unexecuted =
+                input.before.unexecutedReadings + 1
+        in
+        { unexecutedReadings = unexecuted
+        , longestUnexecutedReadings = max unexecuted input.before.longestUnexecutedReadings
+        }
+
+
+{-| The retreat's latency, for the status line.
+
+Absent until a retreat has been decided at all, so a run that never retreats
+reads exactly as it did before. Both numbers, because the live one goes to zero
+the moment the ship warps and the session's worst is what an operator compares
+against run 36's.
+
+-}
+describeRetreatLatency : BotDecisionContext -> String
+describeRetreatLatency context =
+    let
+        progress =
+            context.memory.retreatProgress
+    in
+    if progress.longestUnexecutedReadings < 1 then
+        ""
+
+    else if progress.unexecutedReadings < 1 then
+        " Retreat latency: not retreating now; worst this session "
+            ++ (progress.longestUnexecutedReadings |> String.fromInt)
+            ++ " readings deciding to leave with the ship not in warp."
+
+    else
+        " RETREAT NOT EXECUTING: "
+            ++ (progress.unexecutedReadings |> String.fromInt)
+            ++ " consecutive readings deciding to leave with the ship not in warp"
+            ++ " (worst this session "
+            ++ (progress.longestUnexecutedReadings |> String.fromInt)
+            ++ ")."
 
 
 {-| How many readings one escape choice stays put.
@@ -12864,6 +13106,7 @@ initBotMemory =
     , readingsCount = 0
     , lowestShieldPercentSinceHealthy = 100
     , lowestArmorPercentSinceHealthy = 100
+    , retreatProgress = { unexecutedReadings = 0, longestUnexecutedReadings = 0 }
     , hitpoints =
         { shield = initHitpointsGaugeMemory
         , armor = initHitpointsGaugeMemory
@@ -13082,6 +13325,7 @@ statusTextFromState context =
                                 ++ ". "
                                 ++ describeIncomingDamage context
                                 ++ describeRetreatCover context
+                                ++ describeRetreatLatency context
                                 ++ describeWithheldSoFar
 
                         -- The left-behind clause is appended outside the case
@@ -17303,6 +17547,51 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         incomingDamageNow =
             updateIncomingDamageMemory context hitpointsNow shipScaleNow botMemoryBefore.incomingDamage
 
+        lowestShieldNow =
+            lowWaterMark context.readingFromGameClient
+                hitpointsNow.shield.believed
+                botMemoryBefore.lowestShieldPercentSinceHealthy
+
+        lowestArmorNow =
+            lowWaterMark context.readingFromGameClient
+                hitpointsNow.armor.believed
+                botMemoryBefore.lowestArmorPercentSinceHealthy
+
+        -- #136's instrument. The verdict is `retreatReason`'s, the same
+        -- definition `runAwayIfLowHealth` decides on, asked here against the
+        -- memory this reading has just produced -- which is the memory the
+        -- decision will read a moment later, so the two cannot disagree about
+        -- whether this reading is a retreat.
+        --
+        -- Gated on the ship UI parsing, because that is `runAwayIfLowHealth`'s
+        -- own gate: `branchDependingOnDockedOrInSpace` only reaches it through
+        -- `ifSeeShipUI`. Without it a docked reading whose damage latch is still
+        -- set would count against a retreat there is no ship to make.
+        --
+        -- What it deliberately does *not* model is the tree declining to reach
+        -- the branch -- a message-box standoff, a pod recovery, the wind-down.
+        -- A reading on which the retreat's own condition is true and the ship is
+        -- not warping is a reading under the guns whatever the tree spent it on,
+        -- and #101 is precisely the case where that is worth counting.
+        retreatProgressNow =
+            retreatProgressAfterReading
+                { retreatIsDecided =
+                    (context.readingFromGameClient.shipUI /= Nothing)
+                        && (retreatReason
+                                (retreatCaseFromMemory context.botSettings
+                                    { botMemoryBefore
+                                        | hitpoints = hitpointsNow
+                                        , incomingDamage = incomingDamageNow
+                                        , lowestShieldPercentSinceHealthy = lowestShieldNow
+                                        , lowestArmorPercentSinceHealthy = lowestArmorNow
+                                    }
+                                )
+                                /= Nothing
+                           )
+                , shipIsWarping = shipIsWarping == Just True
+                , before = botMemoryBefore.retreatProgress
+                }
+
         dronesInSpaceCountNow =
             dronesInSpaceCount context.readingFromGameClient
 
@@ -17551,14 +17840,9 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.lootWindowOpenTicks + 1
-    , lowestShieldPercentSinceHealthy =
-        lowWaterMark context.readingFromGameClient
-            hitpointsNow.shield.believed
-            botMemoryBefore.lowestShieldPercentSinceHealthy
-    , lowestArmorPercentSinceHealthy =
-        lowWaterMark context.readingFromGameClient
-            hitpointsNow.armor.believed
-            botMemoryBefore.lowestArmorPercentSinceHealthy
+    , lowestShieldPercentSinceHealthy = lowestShieldNow
+    , lowestArmorPercentSinceHealthy = lowestArmorNow
+    , retreatProgress = retreatProgressNow
     , hitpoints = hitpointsNow
     , incomingDamage = incomingDamageNow
     , shipScale = shipScaleNow
