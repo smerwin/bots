@@ -2460,15 +2460,32 @@ The same measurement says no recorded run's armour ever went below 59% for two
 consecutive readings, so the armour threshold of 70 has fired on real evidence
 exactly once in fourteen runs.
 
-**Armour on this hull is not a second opinion, it is a later one.** The ship is
-shield-tanked, so armour takes no damage until the shield is at zero: across
-runs 2-8 the armour gauge read exactly 100% in every one of thousands of samples
-while the shield reached 9%, 12% and 44%. The launcher shipped
-`run-away-shield-hitpoints-threshold-percent=-1`, which therefore did not leave
-one guard, it left none. It now ships 25 — chosen because the two recorded
-sessions that went below it went to 9% and 12%, and the worst any other reached
-was 44%. Both of those two completed their missions, so this costs an aborted
-mission on a run like them.
+**Armour on this hull is not a second opinion, it is the whole tank**, and this
+paragraph used to say the opposite. It read "the ship is shield-tanked, so
+armour takes no damage until the shield is at zero", inferred from runs 2-8
+where the armour gauge sat at exactly 100% while the shield reached 9%, 12% and
+44% — and concluded that the launcher should ship
+`run-away-shield-hitpoints-threshold-percent=25`. Those runs simply never got
+into a long fight.
+
+**This hull is armour-tanked**, which #119's own measurement independently
+confirms: it repairs its armour and does not boost its shield, which is why the
+shield ratio derives a consistent pool and the armour one does not. The shield
+is a fuse rather than a buffer. Across the 9,461 readings taken under fire in
+the 19 recorded runs that fought, the believed shield sits at or below 5% on
+**60%** of them, and in every run whose shield fell at all it went from over 95%
+to under 5% within 15 to 168 seconds *with the armour still reading 98-100%*,
+and then stayed there for the rest of the fight. 0% shield is this ship's resting
+condition, not a warning.
+
+So a shield threshold of 25 does not guard anything — it trips a minute into
+every fight and, since the low-water mark only re-arms above 90%, never releases.
+Run 10 raised the retreat 142 times that way in one session and had to be
+corrected live through the web console. `run_mission.sh` has shipped
+`run-away-armor-hitpoints-threshold-percent=70` with the shield one disabled ever
+since, and its own comments have said why for longer than this file has; #129 is
+what finally propagated the correction into `Bot.elm`'s settings documentation,
+which was still telling operators to "set the shield one".
 
 **`run-away-incoming-damage-threshold` is the guard that needs no gauge.** EVE's
 own combat log, summed by the host per reading, over a rolling 45-second window
@@ -2722,6 +2739,113 @@ listening. It also now annotates an implausible gauge value in place: #32 was
 filed partly on the status line printing `Shield: 385%`, which the retreat guard
 had already rejected and never acted on while the log gave every appearance that
 it had.
+
+### The three guards are independent, and the independence is asymmetric
+
+#120 established the property that keeps them independent: the damage-rate guard
+must not become a function of the gauge, so that a corrupt HUD costs two guards
+and leaves the third armed. #129 is the same relationship read the other way, and
+it had never been written down. **Against a burst, the gauge-free guard is cover
+for a corrupt gauge. Against attrition there is no cover at all** — the
+gauge-based guard is the only instrument, and the gauge-free one is not weakly
+armed, it is inert.
+
+Run 36 is the shape. Believed armour walked from 95% to 17% over 34 readings,
+about 53 seconds, under `Tower Sentry Gallente I` and a `Gallente Light Missile
+Battery`. The 45-second damage window's peak *for the whole run* — 1854 against
+3500 — arrived at reading 1290, with the armour still at 78% and the ship in no
+trouble. At the ship's worst it read 1232, and at the moment the armour gauge
+showed 1% it read 602. **The guard read higher while the ship was healthy than
+while it was dying.**
+
+**No threshold on that instrument separates those two, and the reason is
+structural.** The combat log reports *gross* incoming damage; survival is
+governed by *net*; and this hull's armour repairer is of the same order as the
+fire it was under — run 36's armour climbed back from 17% to 48% while the log
+still reported 1115 falling to 378 hitpoints a window. A gauge-free instrument
+cannot see the repairer, and cumulative damage over a longer clock is not bounded
+by the tank on a ship that repairs, so a longer window does not rescue it either.
+Only the gauge reads net.
+
+**Three things that look like fixes and are not.** Lowering
+`run-away-incoming-damage-threshold` trades this failure for the one 3500 exists
+to avoid, since it sits between 3114 (the worst window any surviving session
+absorbed) and 4101 (the window the session that lost the ship peaked at). #120's
+EHP scaling does not reach it, because 1854 never approaches 3500 whatever the
+hull is. And a fourth guard on time-to-death was measured and deliberately not
+built: it separates run 36 (a projected 10.5 s to zero) from every genuine
+decline in the corpus (next is 42.7 s), but it fires *later* than the armour
+threshold already did in run 36 — 22 readings later — and it fires spuriously on
+the two-reading gauge corruptions in runs 14 and 26 that `believed` cannot
+filter. A guard calibrated on one incident, on the retreat path, that adds nothing
+where the existing guard is armed, is not worth the corruption it inherits.
+
+**What the corpus says about which guard has ever mattered.** Across all 36
+recorded mission runs the retreat has fired **1054 times on the armour percentage
+and 142 on the shield percentage, and not once on the damage window or on the
+frozen reading**; `IncomingDamageMemory.retreating` has never been set on any
+recorded reading. That is not an argument the gauge-free guard is useless — it is
+calibrated to a burst nothing recorded has produced, and the session that did
+produce one predates the channel. It is the measurement behind the asymmetry:
+every retreat this bot has ever made came from a gauge.
+
+**How rare the shape is** — #129 lists this as unmeasured. Run 36's is the only
+one. Measuring it needs care, because the raw gauge minimum gets it badly wrong:
+nine runs appear to reach 0-11% armour and run 36 looks ordinary. Every one of
+those is a corruption two to four readings wide bracketed by 91-100% either side.
+Taking the deepest level the *believed* armour was held at or below for four
+consecutive readings — one past the longest corruption anywhere — run 36 answers
+20% and the next deepest run answers 74%.
+
+**So what shipped is documentation and a report, not a guard.** `attritionIsUnguarded`
+is a pure rule over the two percentage thresholds, read by the status line and by
+no decision, that says on every reading when the configuration leaves this shape
+uncovered:
+
+```
+ATTRITION UNGUARDED: both percentage thresholds are off, and the damage window
+only bounds a burst -- nothing here can see the ship being ground down. Set
+run-away-armor-hitpoints-threshold-percent.
+```
+
+Both percentage thresholds default to `-1`, so that is exactly what a run started
+without `run_mission.sh` gets. The bound is read off `runAwayIfLowHealth`'s own
+`lowestArmor < threshold` rather than off the `-1` convention, so a threshold of
+`0` — a keystroke away, and equally unable to fire — reads as uncovered too. The
+status line also now carries the low-water marks themselves, which nothing
+reported before: reconstructing run 36's decline meant replaying the whole log.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_attrition_is_unguarded.py` (19 cases). The rule is
+executed through the real `Bot.elm` in `elm repl` at both sides of each
+threshold's boundary *and* against fixed values either side of it — the hole four
+of #120's own cases had was a boundary pair that any constant satisfies. #120's
+gauge-free property is re-asserted here because this change sits next to it: the
+scaled threshold and the latch's `retreating` verdict are read out of the source
+and must name no gauge, while the latch's *sample* record still may, since the
+frozen-reading guard is what reads it. The corpus is recounted as relations —
+the damage guard has never fired, run 36 is the deepest sustained decline, every
+believed zero recovers within four readings, the shield collapses ahead of the
+armour in every run that fought, most readings under fire are taken with the
+shield already gone.
+
+Confirmed by mutation, ten of them, each failing a named case: `&&` for `||` so
+one armed threshold no longer counts as cover; `<= 0` weakened to `< 0` so a
+threshold of `0` reads as armed; either clause dropped; the damage threshold
+counted as cover; `runAwayIfLowHealth` made to decide on the rule; the
+gauge-free threshold made to read `shipUI.hitpointsPercent`; the latch's verdict
+made a function of the believed gauge; the status-line clause dropped; and the
+launcher's armour threshold disabled.
+
+**Unverified: any of it running.** No run has been flown since. What to watch on
+the first one is `Retreat marks: shield N% / armour M% since healthy` on every
+in-space reading, tracking the gauges as they fall and resetting to 100% when the
+ship recovers past 90%. `ATTRITION UNGUARDED` should **not** appear on a run
+started by `run_mission.sh`; if it does, the launcher's settings are not reaching
+the bot. It should appear on every reading of a run started without it. What this
+does **not** protect against is unchanged and stated plainly: a run configured
+with no percentage threshold is exactly as exposed to attrition as it was
+before — the change makes that visible, not survivable.
 
 ## Lock range is learned from the client, not set
 
@@ -4734,6 +4858,22 @@ exists.
   session` climbing: a couple over a run is the gauge behaving as recorded, a
   count climbing every few readings is a gauge that has started lying properly
   and a different problem.
+
+  And it now **says when nothing is watching for the ship being ground down**,
+  and reports the retreat's own low-water marks. Run 36 walked from 95% to 17%
+  armour while `run-away-incoming-damage-threshold` peaked at 1854 of 3500 — its
+  highest reading all run, taken while the ship was still healthy — and survived
+  only because the armour percentage threshold was set. **No guard was added**:
+  the honest reading of the corpus is that the percentage guards already are the
+  attrition guard and that no gauge-free instrument could be one, since the
+  combat log reports gross damage while survival is governed by net. See "The
+  three guards are independent, and the independence is asymmetric" for the
+  measurement, for the time-to-death guard that was measured and deliberately not
+  built, and for the settings advice this corrects — `Bot.elm` was telling
+  operators to set the *shield* threshold on a hull whose shield rests at 0%.
+  **Untested against a live client.** Watch for `Retreat marks:` on every
+  in-space reading, and for `ATTRITION UNGUARDED` appearing only on a run started
+  without `run_mission.sh`.
 
   And it now **leaves a dock it has already commanded alone** instead of
   re-issuing it every reading. Docking is a run-in the ship has to fly, and run

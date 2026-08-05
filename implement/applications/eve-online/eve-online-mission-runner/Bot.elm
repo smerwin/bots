@@ -213,9 +213,25 @@
       + `run-away-shield-hitpoints-threshold-percent` /
         `run-away-armor-hitpoints-threshold-percent`: Dock up when the ship drops
         below these. Disabled by default. Both read the ship's HUD gauges, which
-        are not a reliable instrument -- see `plausibleHitpointsPercent` -- and on
-        a shield-tanked hull the armour gauge cannot move until the shield is
-        already gone, so armour alone is not a guard. Set the shield one.
+        are not a reliable instrument -- see `plausibleHitpointsPercent`.
+
+        **Set one of them.** They are the only two guards that can see a ship
+        being ground down: `run-away-incoming-damage-threshold` bounds a burst
+        and is structurally blind to attrition, which is issue #129 and is
+        argued in `attritionIsUnguarded`. Leaving both at `-1` leaves the bot
+        with no cover at all against the one shape the recorded corpus has
+        actually produced, and the status line says so on every reading.
+
+        **Which one depends on the hull, and it is the armour one here.** On the
+        ship this account flies the shield is a fuse rather than a tank -- in
+        every recorded run whose shield fell at all it went from over 95% to
+        under 5% within 15 to 168 seconds while the armour still read 98-100%,
+        and then stayed at 0-5% for the rest of the fight, so a shield threshold
+        above 0 trips on the ship's ordinary condition and never re-arms. Run 10
+        raised the retreat 142 times that way and had to be corrected mid-run.
+        `run_mission.sh` therefore ships `run-away-armor-hitpoints-threshold-percent=70`
+        and leaves the shield one off. On a genuinely shield-tanked hull the
+        reverse holds, since armour there cannot move until the shield is spent.
       + `run-away-incoming-damage-threshold`: Dock up when the client's own combat
         log reports this much damage taken inside
         `incomingDamageWindowSeconds` (45 s). Defaults to 3500 and `-1` disables
@@ -224,7 +240,15 @@
         default is calibrated for the hull flown on this account -- across sixteen
         recorded client sessions the worst 45-second window the ship *survived*
         was 3114, and the one it died in peaked at 4101 -- so re-derive it for a
-        different hull rather than carrying it over.
+        different hull rather than carrying it over. Since #119 the session
+        scales it to the hull it turns out to be flying.
+
+        **What it bounds is a burst, and it cannot see a grind.** Sentries and
+        batteries take a ship apart at a rate this window never registers: run 36
+        walked from 95% to 17% armour with the window peaking at 1854 of 3500,
+        and read 602 at the moment the armour gauge showed 1%. This threshold is
+        not the guard for that and no value of it would be -- see
+        `attritionIsUnguarded` for why, and set an armour threshold above.
       + `give-up-after-zero-damage-hits`: Stop shooting an object once this many
         shots have *landed* on it for zero total damage, unlock it, and leave it
         alone for the rest of the session. Defaults to 8 and `-1` disables it.
@@ -7569,19 +7593,19 @@ routeMarkerCascade context infoPanelRouteFirstMarker =
 Three, and they are deliberately not variations on one instrument.
 
 **The two hitpoint thresholds** are the original guard and read the ship's HUD
-gauges. They are the weakest of the three: the value is a float scraped out of a
-widget in live memory (see `plausibleHitpointsPercent`), and on a shield-tanked
-hull the armour gauge cannot move at all until the shield is spent -- across the
-recorded runs the shield reached 9%, 12% and 44% while armour sat at exactly
-100% in every one of thousands of samples. An armour threshold on such a hull is
-not a conservative guard, it is a guard that fires after the tank is already
-gone. Both read a value two readings agree on rather than the live one, because
-a single garbage reading landing inside [0, 100] is what issue #56 was: see
-`HitpointsMemory`.
+gauges. They are the weakest instrument of the three -- the value is a float
+scraped out of a widget in live memory, see `plausibleHitpointsPercent` -- and
+both read a value two readings agree on rather than the live one, because a
+single garbage reading landing inside [0, 100] is what issue #56 was: see
+`HitpointsMemory`. **They are also the only two of the three that can see a ship
+being ground down**, which is `attritionIsUnguarded`'s subject and is the
+opposite of what this comment used to claim about them.
 
 **The damage rate** needs no gauge at all. It is the client's own combat log,
 summed by the host, and it answers the question the HUD is only a proxy for:
-how fast is this ship being taken apart.
+how fast is this ship being taken apart. What it bounds is a **burst**; issue
+#129 is what that leaves uncovered, and `attritionIsUnguarded` carries the
+argument and the measurement.
 
 **The frozen reading.** A gauge that does not move while the ship absorbs
 `damageThatMustMoveTheHitpointsReading` is not reporting the ship, and an
@@ -7623,6 +7647,16 @@ would have fired in the session the ship was lost (peak 4101 in 45 s) and in
 none of the fifteen it survived (worst 3114); the frozen-reading guard would not
 have fired in any of the three runs whose gauge was live, where the most damage
 absorbed during an unchanged reading was 595.
+
+**Which of them has ever fired is a separate question from which of them is
+armed, and the corpus answers it.** Counting the decision lines across all 36
+recorded mission runs, the retreat has fired **1054 times on the armour
+percentage and 142 on the shield percentage, and not once on the damage window
+or on the frozen reading** -- `IncomingDamageMemory.retreating` has never been
+set on any recorded reading. That is not a claim that the gauge-free guard is
+useless; it is calibrated to a burst nothing recorded has produced, and the one
+session that did produce one predates this channel. It is the measurement behind
+`attritionIsUnguarded`: every retreat this bot has ever made came from a gauge.
 
 -}
 runAwayIfLowHealth : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> Maybe DecisionPathNode
@@ -7740,6 +7774,74 @@ runAwayIfLowHealth context shipUI =
 
     else
         Nothing
+
+
+{-| Whether anything is watching for a ship being ground down rather than burst.
+
+**Issue #129, and it is the property PR #120 established read the other way
+round.** The retreat's three guards are deliberately independent so that a
+corrupt gauge cannot disarm them all at once, and
+`run-away-incoming-damage-threshold` is the one that needs no gauge. That
+independence is real and it is **asymmetric**, which had never been written
+down: the gauge-free guard is cover against a _burst_ only, and against
+attrition it is not weakly armed, it is inert.
+
+Run 36 is the shape. Believed armour walked from 95% to 17% over 34 readings --
+about 53 seconds -- under `Tower Sentry Gallente I` and a
+`Gallente Light Missile Battery`, while the window's own peak for the whole run,
+**1854 against 3500**, arrived at reading 1290 with the armour still at 78% and
+the ship in no trouble at all. At the ship's worst the window read 1232. **The
+guard read higher while the ship was healthy than while it was dying**, and it
+went on reading 1115 falling to 378 across the 43 readings the armour climbed
+back from 17% to 48%.
+
+**The reason is not calibration, so moving the number cannot fix it.** The
+combat log reports _gross_ incoming damage; what kills a ship is _net_; and this
+hull's armour repairer is of the same order as the fire it was under -- 31
+points of armour recovered while the log still reported over a thousand
+hitpoints a window. A gauge-free instrument cannot see the repairer, so it
+cannot order the danger, and cumulative damage over a longer window is not
+bounded by the tank on a ship that repairs. Lowering the threshold only trades
+this failure for the one 3500 exists to avoid: it sits between 3114, the worst
+window any surviving session absorbed, and 4101, the window the session that
+lost the ship peaked at. #120's scaling does not reach it either -- 1854 never
+approaches 3500 whatever the hull is.
+
+**So the only cover against attrition is a percentage threshold**, and that is
+what this answers. `run-away-incoming-damage-threshold` being armed is
+deliberately **not** an input: counting it is precisely the mistake #129 was
+filed on, and it is why the record carries the two gauges' settings and nothing
+else.
+
+Which of the two is the one that matters is a fact about the hull rather than
+about the game, and on this one it is the armour. Across the 9,461 readings
+taken under fire in the 19 recorded runs that fought, the believed shield sits
+at or below 5% on **60%** of them: in every run whose shield fell at all it went
+from over 95% to under 5% in 15 to 168 seconds with the armour still reading 98
+to 100%, and then stayed there. The shield is a fuse, not a tank. `run_mission.sh`
+therefore ships the armour threshold and disables the shield one, and run 36
+survived because of it.
+
+**The test is "can this guard ever fire", not "is it the documented `-1`".**
+`runAwayIfLowHealth` compares `lowestShield < runAwayShieldThreshold`, and a
+low-water mark is a percentage that never goes below 0, so a threshold of `0` is
+as inert as `-1` while looking configured. `-1` is what the settings document and
+what the launcher writes; `0` is a keystroke away from it and would otherwise be
+reported as cover. The bound is read off that comparison rather than off the
+disabling convention, so the two cannot drift apart.
+
+**This is read by the status line and by no decision**, which is the whole of its
+placement. `runAwayIfLowHealth` is untouched: a run that was covered before is
+covered identically now, and one that was not is not -- the difference is that it
+says so on every reading rather than leaving it to be reconstructed from a log
+afterwards, which is what #129 had to do. That is `describeIncomingDamage`'s own
+rule applied one level up: a safety net that is not armed has to say so, because
+its silence is otherwise indistinguishable from its working.
+
+-}
+attritionIsUnguarded : { shieldThresholdPercent : Int, armorThresholdPercent : Int } -> Bool
+attritionIsUnguarded coverCase =
+    (coverCase.shieldThresholdPercent <= 0) && (coverCase.armorThresholdPercent <= 0)
 
 
 {-| How many readings one escape choice stays put.
@@ -12978,6 +13080,7 @@ statusTextFromState context =
                                     shipUI.hitpointsPercent.armor
                                 ++ ". "
                                 ++ describeIncomingDamage context
+                                ++ describeRetreatCover context
                                 ++ describeWithheldSoFar
 
                         -- The left-behind clause is appended outside the case
@@ -15993,9 +16096,13 @@ plausibleHitpointsPercent value =
 {-| Hitpoints per `incomingDamageWindowSeconds` the ship will sit through.
 
 On rather than disabled, unlike the two hitpoint thresholds, because a guard
-shipped off is what issue #32 was: the launcher disabled the shield one, leaving
-the armour gauge as the only instrument, and on this shield-tanked hull the
-armour gauge cannot move until the tank is already gone.
+shipped off is what issue #32 was: the launcher disabled the shield one and left
+nothing else armed.
+
+**Being on is not the same as being cover for everything**, and `attritionIsUnguarded`
+is where that is argued. This guard bounds a burst. A hull ground down slowly
+never reaches it at any setting, so it does not substitute for a percentage
+threshold and shipping it on does not make one unnecessary.
 
 3500 is measured, not chosen. Peak incoming damage in any 45-second window,
 taken from the client's own timestamps across sixteen recorded sessions: the
@@ -16583,6 +16690,50 @@ describeIncomingDamage context =
                             ++ " (any overview row with one of these names is a target)."
                )
             ++ describeShipScale context
+
+
+{-| The retreat's low-water marks, and whether attrition has anyone watching it.
+
+Two things the status line could not say before issue #129, both of which that
+issue had to reconstruct from a log afterwards.
+
+**The marks.** `lowestArmorPercentSinceHealthy` is the memory half of what the
+two percentage guards compare against -- `runAwayIfLowHealth` takes the `min` of
+it and this reading's own believed value, so the printed number can be one
+reading behind the comparison and never ahead of it. Neither it nor the live
+gauge the line already prints is the other, and nothing reported this one at all.
+Run 36's whole shape is the armour mark walking down while `dmg` stays low, and
+that pairing is one clause once both halves are on the same line.
+
+**The warning.** Printed unconditionally when it applies rather than once the
+ship is already down to 17%, because a report that waits for the decline arrives
+too late to act on: what an operator can do about it is set a threshold, and that
+is a thing to know before the fight. Both percentage thresholds ship disabled, so
+a run started without `run_mission.sh` gets exactly the configuration
+`attritionIsUnguarded` names -- the damage window armed, the frozen-reading check
+armed, and neither able to see a grind.
+
+-}
+describeRetreatCover : BotDecisionContext -> String
+describeRetreatCover context =
+    " Retreat marks: shield "
+        ++ (context.memory.lowestShieldPercentSinceHealthy |> String.fromInt)
+        ++ "% / armour "
+        ++ (context.memory.lowestArmorPercentSinceHealthy |> String.fromInt)
+        ++ "% since healthy."
+        ++ (if
+                attritionIsUnguarded
+                    { shieldThresholdPercent = context.eventContext.botSettings.runAwayShieldHitpointsThresholdPercent
+                    , armorThresholdPercent = context.eventContext.botSettings.runAwayArmorHitpointsThresholdPercent
+                    }
+            then
+                " ATTRITION UNGUARDED: both percentage thresholds are off, and the"
+                    ++ " damage window only bounds a burst -- nothing here can see the"
+                    ++ " ship being ground down. Set run-away-armor-hitpoints-threshold-percent."
+
+            else
+                ""
+           )
 
 
 {-| What the session has worked out about the ship's size, in the status line.
