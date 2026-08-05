@@ -5821,6 +5821,22 @@ exists.
   nothing" above. **Untested against a live client, and the run is the point** —
   watch for `Quick message:` on every reading, then a quoted string with
   `(on screen now)` the first time the client shows one.
+
+  And it now **flies to a station it knows has an agent** when the one it is
+  standing in has none, instead of asking for help there until somebody
+  notices. Run 35 raised that alarm on 371 readings with `home-station` in its
+  settings the whole time. The docking itself was correct and the issue's
+  suspicion of it is answered against — the mission was a courier delivering to
+  another agent's station, and the tracker's own travel steps took it there — so
+  what is new is only the two steps before the undock; run 35 flew the rest of
+  the trip unaided once a person had undocked it. The trip drops the station the
+  info panel says the ship is already in, refuses when the panel cannot name it,
+  and must fit before the wind-down starts. See "A station with no agent in it is
+  a place to leave, not a reason to stop" above, including the recount that puts
+  the stall at 1,064 readings rather than the issue's 12,800. **Untested against
+  a live client**; watch for `No agent here to take a mission from -- set the
+  route to '<station>' before undocking.` followed by an undock, and note that
+  whether those stations really had no agent is still unknown.
 - **`eve-online-saxrat`** now carries the general guards the mission runner
   learned — the confirmed hitpoint readings behind a low-water mark, the
   damage-rate retreat, ship-loss detection and pod recovery, a bounded drone
