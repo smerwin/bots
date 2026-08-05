@@ -3526,6 +3526,125 @@ button at all. And the hover, which holds the mouse still for several readings,
 cannot age a pending lock attempt into a false refusal: a refusal needs the
 target bar empty at both ends, and the ammo path only runs with an active target.
 
+## The client's transient popup was parsed on every reading and read by nothing
+
+`ParsedUserInterface.layerAbovemain` carries `quickMessage : Maybe QuickMessage`,
+which is `{ uiNode, text }` — the literal text of EVE's transient centre-screen
+popup, lifted off the `l_abovemain` node on **every** reading since the mission
+runner was added. It appears five times in each app's
+`EveOnline/ParseUserInterface.elm` and, until #123, **zero times in either
+`Bot.elm`**. So every message this client has ever shown a bot was decoded into a
+string and discarded, unexamined, on every reading of every recorded run.
+
+**The corpus looked empty because nobody was looking at the right place.** The
+operator reports a black popup on trying to lock beyond the ship's capacity,
+which is exactly the signal "Lock range is learned from the client" is missing —
+and the search that concluded no distinguishable slot-limit refusal exists looked
+in the *game log*, where the channels are `combat`, `notify`, `bounty`,
+`question`, `info` and `hint`. A quick message is a UI-tree widget, not a log
+line, so it was never going to appear there. This is the same shape as
+`avoidRats` (parsed, documented, advertised by `--help`, read by no decision) and
+as the game log's `(question)` continuation (`Do you wish to proceed?` parses to
+`None` and is dropped), and it is the worse one: evidence that arrived, was
+decoded, and was thrown away.
+
+**Logging it is the whole of #123, and the ordering is the point.** No wording
+has ever been captured, so a matcher written now would rest on guessed strings —
+precisely the trap #92 documents, where a rule keyed on a word list the client's
+vocabulary then grew past, twice, without anyone noticing, and precisely what
+`briefingSaysClearingIsOptional` avoided by being checked against all 46 recorded
+briefings. Both apps now print the message in the status line and **nothing
+decides anything on it**, which a case asserts by name: the memory field is read
+in exactly two declarations, the update that writes it and the status line that
+prints it.
+
+**The clause is carried forward with an age rather than reported live**, and
+which of the two it is saying is never left to be inferred:
+
+```
+Quick message: none on this reading, and none seen this session.
+Quick message (on screen now): "<the client's words>".
+Quick message (NOT on screen now -- last seen 12 readings ago): "<the client's words>".
+```
+
+A reading is about eight seconds apart and the popup is not, so a live-only
+clause would put each message on one line of a log holding thousands of
+near-identical ones. Two things need it to persist. The first Unverified item in
+#123 is whether `quickMessage` is even the widget the operator is seeing, and
+only the operator watching the console can answer that — which nobody can do for
+a string that flashes for one reading and is gone. And a popup has to be
+readable *beside the decision that followed it*, which is the whole point for a
+lock refusal: the popup lands on the reading of the click and the failure is
+diagnosed several readings later. The risk carrying it forward creates — a stale
+message read as current — is the one this file already answers everywhere by
+naming what a number is, and it is named here. The risk live-only creates is the
+message being missed, which is not recoverable.
+
+Nothing expires the sighting within a session, for `ShipLossVerdict`'s reason:
+an expiry would be a number with no evidence behind it, and the age already says
+how stale the message is.
+
+**The text is reproduced, not tidied.** Case, punctuation and interior spacing
+are exactly what the client wrote, because the next matcher will be written
+against this string and a normalisation applied here is one nobody downstream can
+undo. Two transformations only: a cap at `quickMessageStatusCharacterBudget`
+(400) which the clause announces with both numbers whenever it bites, and
+newline/tab/carriage-return escaped rather than emitted, because the status line
+is line-structured — the host prints it after the tick marker and
+`stall_watch.py` reads the first line.
+
+**One `l_abovemain` can hold more than one message, and the parser drops all but
+the first — in two places.** `parseQuickMessage` filters the layer's descendants
+for `pythonObjectTypeName == "QuickMessage"` and takes `List.head`, then takes
+`List.head` of that node's `getAllContainedDisplayTexts`. So a second popup is
+lost, and so is the second line of a single popup whose text spans two labels.
+Nothing in the recordings says whether either happens, so the clause **counts
+both and says what it dropped** — `(1 of 2 quick messages in the layer -- the
+parser keeps the first and drops the rest)` — which turns the question into
+something the next run answers rather than something the parser's `Maybe` leaves
+open. The counts are silent when there is one of each, so an ordinary reading is
+unaffected.
+
+**Placed outside the ship-UI case in both apps**, because a quick message can be
+shown while docked and `describeCurrentReading` is only built for a reading with
+a ship UI. The two apps' status lines differ and the clause follows each: the
+mission runner's is its own line in the outer list, ahead of the host directive
+that has to stay last; saxrat's is its own line ahead of `describeCurrentReading`.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_quick_message_logged.py` (29 cases, run against
+**both** apps). The rules are executed through the real `Bot.elm` in `elm repl`
+rather than restated in Python, and the readings go through the real
+`EveOnline.ParseUserInterface` from a UI tree carrying two `QuickMessage` nodes
+and a message split across two labels, so the counts the clause prints are the
+parser's own arithmetic. Confirmed by mutation, fifteen of them, each failing a
+named case: the age never advancing, nothing being carried forward at all (the
+live-only version of this change), a stale message reading as current, the text
+lower-cased, the cap cut to a few characters, the cap biting silently, a newline
+emitted rather than escaped, the dropped-message counts pinned at one, the quiet
+reading saying nothing, the clause moved inside the ship-UI case in either app,
+the memory update no longer ageing the sighting, a decision starting to consult
+the message, saxrat's cap drifting from the mission runner's, and saxrat's rule
+diverging from it.
+
+One of those mutations survived the first time and the hole was real. The newline
+case compared the rendered string in Python, and `elm repl` escapes a control
+character on its way out — so a message that really carried a newline and one
+that carried the two characters `\` and `n` printed identically and the case
+passed with the escape removed. It is compared inside Elm now.
+
+**Unverified: everything about what the popup actually says.** No wording has
+been captured, whether `quickMessage` is the widget the operator is seeing is
+still an inference from `l_abovemain` being the natural place for a transient
+centre-screen notice, and whether a popup survives long enough to land in a
+reading at all is the first thing a run will answer. What to watch on the first
+one: `Quick message:` on every reading, saying `none ... none seen this session`
+on a quiet run and carrying a quoted string with `(on screen now)` the first time
+the client shows one — then the age climbing on the readings after it. A run that
+never prints the clause at all means the status line is not carrying it. A run
+that prints `1 of 2 quick messages in the layer` settles the head-only question
+in the direction that says the parser needs fixing.
+
 ## Acceleration gates: a gate that will not open says why, on a channel nobody read
 
 Run 10 raised `askForHelpToGetUnstuck` — the first time in eleven runs — while
@@ -3903,6 +4022,7 @@ shipped configuration rather than edge cases:
 | drone recall (#11) | **no bound of any kind**, in front of every warp, tether and dock | `droneRecallUnansweredTicks`, give-up, focus-recovery click |
 | what it will shoot (#40) | the overview's icon colour and nothing else | plus whatever the combat log names as hitting the ship |
 | setting its own route | could only *follow* one a human set | `hunt-system` circuit, asked for through the host's ESI directive |
+| the client's transient popup (#123) | parsed on every reading and read by nothing — the same five references and the same zero readers | printed in the status line, carried forward with an age, and still read by no decision |
 
 Two things about the port are worth keeping in view.
 
@@ -4507,6 +4627,18 @@ exists.
   run, then `shield reads N hitpoints` with N near 1900 on this hull. A run that
   fights hard and stays at `0/6` means the shield is not the gauge taking the
   damage.
+
+  And it now **prints the client's transient centre-screen popup** rather than
+  parsing it into a string and throwing it away, which is what has happened on
+  every reading of every recorded run since this app was added. Nothing decides
+  anything on it and a case asserts so: no wording has ever been captured, so a
+  matcher would rest on guessed strings, which is #92's trap. The clause, why it
+  carries the last message forward with an age instead of reporting only the
+  live value, and the two places the parser's head-only read drops a message are
+  in "The client's transient popup was parsed on every reading and read by
+  nothing" above. **Untested against a live client, and the run is the point** —
+  watch for `Quick message:` on every reading, then a quoted string with
+  `(on screen now)` the first time the client shows one.
 - **`eve-online-saxrat`** now carries the general guards the mission runner
   learned — the confirmed hitpoint readings behind a low-water mark, the
   damage-rate retreat, ship-loss detection and pod recovery, a bounded drone
@@ -4521,6 +4653,11 @@ exists.
   N/60` on every status line — a `NO COMBAT LOG` there instead means the
   damage retreat is unarmed and the two gauge thresholds, which ship at `-1`,
   are again the only guards.
+
+  It also carries the mission runner's quick-message clause, identically: the
+  rules are the same declarations under the same names and a case compares them
+  byte for byte, while the line each is placed in follows each app's own status
+  conventions.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
@@ -4864,6 +5001,17 @@ load-bearing — see "The home station".
   recorded runs, so there is nothing to derive a matcher from without a live
   reading. The status line now prints the rendered rows'
   `rightAlignedIconsHints`, so the next run that meets one records the literal.
+- **No quick message has ever been recorded, so nothing can be matched on one
+  yet.** #123 put the client's transient popup into the status line of both
+  apps — see "The client's transient popup was parsed on every reading and read
+  by nothing" — and deliberately stopped there. The follow-up needs a run: the
+  lock-capacity refusal the operator describes is the first candidate, and it
+  would give the learned lock range the direct signal it currently infers from
+  the target bar being empty at both ends of an attempt. Two things that run
+  also settles and neither is answerable off-line: whether a popup survives long
+  enough to land in a reading at all, and whether `l_abovemain` ever holds more
+  than one message, which the parser drops without a word and the clause now
+  counts.
 - No automated Elm-toolchain bootstrap if `elm` isn't on `PATH`.
 - `reload_drones.py` only searches the root Item hangar, no sub-folders. The
   mission runner's port of it inherits that, and also takes the first
