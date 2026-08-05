@@ -211,11 +211,20 @@ def guard_firings(path):
 
 
 def every_recorded_run():
+    """Every recorded run, for the claims that are about the corpus as a whole.
+
+    `prerequisites.recorded_runs` is the gate where a case names the runs it
+    needs; these cases cannot, because what they assert is a relation over
+    whatever is there. The skip reason is deliberately worded as that helper's
+    is -- the prerequisite is the same one, and `check_expected_skips.py` reads
+    these strings, so a second spelling of one answer is a second entry it would
+    have to carry.
+    """
     runs = sorted(glob.glob(LOG_GLOB))
     if not runs:
         raise unittest.SkipTest(
-            "no mission_run*.log in ~/eve-bot-logs, so the recorded runs "
-            "cannot be consulted here")
+            "no recorded runs in ~/eve-bot-logs, so a claim about the corpus "
+            "as a whole cannot be made here")
     return runs
 
 
@@ -511,7 +520,7 @@ class WhatTheRecordedRunsSay(unittest.TestCase):
         if not held:
             self.skipTest("no recorded run carries the damage-window status line")
         if "mission_run36.log" not in held:
-            self.skipTest("mission_run36.log is not on this machine")
+            self.skipTest("no recorded run36 in ~/eve-bot-logs")
 
         others = {name: value for name, value in held.items()
                   if name != "mission_run36.log"}
@@ -569,7 +578,7 @@ class WhatTheRecordedRunsSay(unittest.TestCase):
         (_, path), = recorded_runs("36")
         rows = readings_from_log(path)
         if len(rows) < 100:
-            self.skipTest("mission_run36.log carries too few readings to replay")
+            self.skipTest("no recorded run36 carrying enough readings to replay")
 
         armour = believed([row[2] for row in rows])
         peak = max(range(len(rows)), key=lambda i: rows[i][3])
@@ -601,7 +610,7 @@ class WhatTheRecordedRunsSay(unittest.TestCase):
         (_, path), = recorded_runs("36")
         rows = readings_from_log(path)
         if len(rows) < 100:
-            self.skipTest("mission_run36.log carries too few readings to replay")
+            self.skipTest("no recorded run36 carrying enough readings to replay")
 
         armour = believed([row[2] for row in rows])
         marks = low_water(armour)
@@ -671,7 +680,7 @@ class WhatTheRecordedRunsSay(unittest.TestCase):
                     if shield[i] <= 5:
                         shield_gone += 1
         if under_fire < 100:
-            self.skipTest("the corpus carries too few readings under fire")
+            self.skipTest("no recorded runs carrying enough readings under fire")
 
         self.assertGreater(
             shield_gone * 2, under_fire,
