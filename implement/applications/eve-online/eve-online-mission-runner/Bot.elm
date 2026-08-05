@@ -216,7 +216,11 @@
         already managing 6 targets, as many as you have skill to.` -- and the
         target bar proves a floor by holding that many, so the bot raises or
         lowers this from what the client has actually granted. With no evidence
-        it is exactly the setting. See `maxTargetsCeiling`.
+        it is exactly the setting. **Until the client has stated its maximum the
+        bot asks for one more than it believes in**, once per reading it has a
+        row to spare, because that sentence is only written when a lock is
+        attempted beyond the cap. See `maxTargetsCeiling` and
+        `maxTargetsRowsToTake`.
       + `run-away-shield-hitpoints-threshold-percent` /
         `run-away-armor-hitpoints-threshold-percent`: Dock up when the ship drops
         below these. Disabled by default. Both read the ship's HUD gauges, which
@@ -9040,11 +9044,49 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
         -- into its place, and clicking it locks the wrong object. The filter
         -- comes before taking the nearest few, so a scrolled overview yields
         -- the nearest few it can actually click rather than an empty list.
+        --
+        -- One row more than the ceiling until the client has stated its
+        -- maximum -- see `maxTargetsRowsToTake`. The order and the places of
+        -- the rows the ceiling covers are untouched by that, so the extra one
+        -- is only ever reached once every one of them is already locked.
         overviewEntriesToLock =
             overviewEntriesToAttack
                 |> List.filter overviewEntryIsDisplayed
-                |> List.take (maxTargetsCeiling (maxTargetsStateFrom context))
+                |> List.take (maxTargetsRowsToTake (maxTargetsStateFrom context))
                 |> List.filter (overviewEntryIsTargetedOrTargeting >> not)
+
+        -- The candidates the ship can lock from where it is. Only these can be
+        -- probed with: `lockTargetFromOverviewEntry` approaches a row it cannot
+        -- reach, and moving the ship is not a price a measurement gets to
+        -- charge. A real target is still approached, exactly as before.
+        overviewEntriesToLockInRange : List OverviewWindowEntry
+        overviewEntriesToLockInRange =
+            overviewEntriesToLock |> List.filter (overviewEntryIsWithinLockRange context)
+
+        maxTargetsProbeNow : MaxTargetsProbe
+        maxTargetsProbeNow =
+            maxTargetsProbe
+                { state = maxTargetsStateFrom context
+                , targetsHeld = context.readingFromGameClient.targets |> List.length
+                , rowsToSpare = overviewEntriesToLockInRange |> List.length
+                }
+
+        -- The row a lock is asked of now, which is the nearest candidate as
+        -- ever except where the probe is due. `MaxTargetsProbeNothingToSpare`
+        -- answers `Nothing` rather than falling back to the nearest, since the
+        -- bar is full at the believed ceiling and the only row left is one the
+        -- ship would have to fly at first.
+        nextOverviewEntryToLockOrProbe : Maybe OverviewWindowEntry
+        nextOverviewEntryToLockOrProbe =
+            case maxTargetsProbeNow of
+                MaxTargetsProbeOneMore _ ->
+                    overviewEntriesToLockInRange |> List.head
+
+                MaxTargetsProbeNothingToSpare _ ->
+                    Nothing
+
+                _ ->
+                    overviewEntriesToLock |> List.head
 
         -- Something to attack, but not one row of it rendered. The overview
         -- virtualises, so a mission structure sitting further down the list --
@@ -9339,16 +9381,19 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                                                 (launchAndEngageDrones context
                                                     |> Maybe.withDefault
                                                         (describeBranch "No idling drones."
-                                                            (case overviewEntriesToLock of
-                                                                [] ->
+                                                            (case nextOverviewEntryToLockOrProbe of
+                                                                Nothing ->
                                                                     revealEntryToLock
                                                                         |> Maybe.withDefault
-                                                                            (describeBranch "Everything worth locking is locked."
+                                                                            (describeBranch
+                                                                                (describeMaxTargetsNothingToLock maxTargetsProbeNow
+                                                                                    "Everything worth locking is locked."
+                                                                                )
                                                                                 waitForProgressInGame
                                                                             )
 
-                                                                nextOverviewEntryToLock :: _ ->
-                                                                    describeBranch "Lock more targets."
+                                                                Just nextOverviewEntryToLock ->
+                                                                    describeBranch (describeMaxTargetsProbe maxTargetsProbeNow)
                                                                         (lockTargetFromOverviewEntry context nextOverviewEntryToLock)
                                                             )
                                                         )
@@ -13114,6 +13159,38 @@ lockAttemptReadingsBeforeVerdict =
     8
 
 
+{-| Whether a lock the bot asked for can still teach the lock range anything.
+
+The refusal below needs the target bar **empty at both ends** of the attempt,
+so an attempt begun while the ship already held a target can never move either
+bound however long it is carried: it fails that condition rather than the wait,
+and no later reading can undo the count it started with.
+
+That makes the wait pure cost, and it is a measured one. The pending attempt
+sits at `for 8 readings` -- the verdict count, latched -- on **more than three
+thousand** status lines across 22 recorded runs, while `stop waiting for it` has
+fired **zero** times in the whole corpus: the give-up is only asked of a row that
+reads `targeting`, and a lock the client declines never does. Run 37 is the shape,
+live and unattended: `Lock more targets.` clicked a row while the bar was full
+at six, the client answered `You are already managing 6 targets, as many as you
+have skill to.` on the next reading, and the attempt climbed to the bound and
+stayed there for nineteen readings of an operator's status line saying a lock
+had not landed.
+
+So a click the client declines with the bar occupied is discharged at once
+rather than waited out. That is also what keeps #150's probe out of this
+machinery entirely -- a probe is by definition asked with the bar at the ceiling
+-- so a refused probe spends none of this budget and can never trip the give-up.
+What it costs is the _proven_ bound: a lock that lands slowly with a target
+already held is now credited from the reading the bot re-asked rather than the
+first, which is the weaker claim of two and so the safe direction.
+
+-}
+lockAttemptCanTeachRange : LockAttempt -> Bool
+lockAttemptCanTeachRange attempt =
+    attempt.targetsCount == 0
+
+
 {-| Whether the lock the bot asked for on this row has run out its readings.
 
 Stays true while the row is still there and still unanswered, because
@@ -13174,6 +13251,27 @@ lockRangeThresholdInMeters context =
 
         Just provenAt ->
             max provenAt loweredByRefusal
+
+
+{-| Whether the ship can lock this row from where it is standing.
+
+Only used to choose a row to **probe** with. `lockTargetFromOverviewEntry`
+answers an out-of-range row by approaching it, which is right for a target the
+bot wants and wrong for a measurement: flying at a rat to find out whether a
+fifth lock slot exists would spend the ship's position on a question the next
+row in range answers for nothing. A row whose distance does not parse is not
+one the ship can reach either -- an AU distance is an `Err`, and the whole
+overview section of CLAUDE.md is about not treating that as merely far.
+
+-}
+overviewEntryIsWithinLockRange : BotDecisionContext -> OverviewWindowEntry -> Bool
+overviewEntryIsWithinLockRange context entry =
+    case entry.objectDistanceInMeters of
+        Ok distanceInMeters ->
+            distanceInMeters <= lockRangeThresholdInMeters context
+
+        Err _ ->
+            False
 
 
 allOverviewEntries : ReadingFromGameClient -> List OverviewWindowEntry
@@ -13496,6 +13594,13 @@ updateLockRangeLearning context botMemoryBefore =
                         else
                             { unchanged | attempt = attemptAfter }
 
+                    else if not (lockAttemptCanTeachRange attempt) then
+                        -- The client did not take this lock and the bar was not
+                        -- empty when it was asked, so there is nothing here for
+                        -- either bound and nothing to wait for. See
+                        -- `lockAttemptCanTeachRange`.
+                        { unchanged | attempt = Nothing }
+
                     else if attempt.readingsWaited < lockAttemptReadingsBeforeVerdict then
                         { unchanged | attempt = attemptCarried }
 
@@ -13507,6 +13612,14 @@ updateLockRangeLearning context botMemoryBefore =
                         -- ends is the one reading that rules out both at once,
                         -- and only then is a lock that never landed evidence
                         -- about range rather than about capacity.
+                        --
+                        -- The first of the two is unreachable now, since
+                        -- `lockAttemptCanTeachRange` discharges such an attempt
+                        -- several branches above. It is written out anyway
+                        -- because it is this condition rather than that
+                        -- placement that makes the claim true, and a later
+                        -- version that moves the discharge must not silently
+                        -- start learning a range from a full bar.
                         { unchanged | attempt = attemptCarried }
 
                     else
@@ -13592,6 +13705,22 @@ maxTargetsStateFrom context =
     { fromSetting = context.eventContext.botSettings.maxTargetCount
     , statedByClient = context.memory.maxTargetsStatedByClient
     , heldAtOnce = context.memory.maxTargetsHeldAtOnce
+    }
+
+
+{-| The same state, on the side of the reading where memory is written.
+
+One reader of `max-targets` per side, so the decision and the memory update
+cannot come to hold two opinions about the ceiling -- `updateLockRangeLearning`
+asks this too, to tell a probe it made on purpose from a lock that never
+completed.
+
+-}
+maxTargetsStateBefore : UpdateMemoryContext BotSettings -> BotMemory -> MaxTargetsState
+maxTargetsStateBefore context botMemoryBefore =
+    { fromSetting = context.botSettings.maxTargetCount
+    , statedByClient = botMemoryBefore.maxTargetsStatedByClient
+    , heldAtOnce = botMemoryBefore.maxTargetsHeldAtOnce
     }
 
 
@@ -13724,6 +13853,168 @@ maxTargetsCeiling state =
         (state.statedByClient |> Maybe.withDefault state.fromSetting)
 
 
+{-| How many overview rows the lock site takes, which is one more than the
+ceiling until the client has stated its maximum.
+
+**Without this the ceiling cannot bootstrap, and #110's two halves were both
+inert.** `maxTargetsCeiling` is the larger of the setting and what the client
+has granted, and it is that number the lock site takes -- so the bot locks four,
+sees four held, and learns four. It cannot discover a fifth slot because it
+never asks for one, and `statedByClient` comes from a refusal the client only
+writes when a lock is attempted **beyond** the cap. The constraint being learned
+is the one that prevents the attempt, which is why #110's corpus is hand-fed:
+all 228 recorded statements exist because a person locked the extra targets.
+
+So while `statedByClient` is unknown the lock site takes one row more than it
+believes in. A probe that **lands** raises `heldAtOnce`, which raises the
+ceiling, so the next probe is one higher -- it ratchets until the client
+declines. A probe the client **declines** produces the sentence, which sets
+`statedByClient`, and this drops back to the ceiling for the rest of the
+session. The refused attempt is not waste; it _is_ the measurement, and there is
+one of them per session rather than one per reading.
+
+Taking one _more_ row rather than choosing a different one is what keeps the
+probe from displacing a real target: the rows the ceiling covers keep their
+order and their places, and the extra one is only ever reached once every one of
+them is already locked. `maxTargetsProbe` is what decides whether the row about
+to be clicked is that extra one.
+
+-}
+maxTargetsRowsToTake : MaxTargetsState -> Int
+maxTargetsRowsToTake state =
+    case state.statedByClient of
+        Just _ ->
+            maxTargetsCeiling state
+
+        Nothing ->
+            maxTargetsCeiling state + 1
+
+
+{-| Everything the lock site needs to know about whether to probe now.
+
+`rowsToSpare` is the lockable rows the bot has in hand **and can reach from
+here**. Range is part of it because a row beyond the lock range is not something
+to probe with: `lockTargetFromOverviewEntry` approaches a row it cannot reach,
+and moving the ship is not a price a measurement gets to charge.
+
+-}
+type alias MaxTargetsProbeSituation =
+    { state : MaxTargetsState
+    , targetsHeld : Int
+    , rowsToSpare : Int
+    }
+
+
+type MaxTargetsProbe
+    = MaxTargetsProbeSettled Int
+    | MaxTargetsProbeFillingSlots
+    | MaxTargetsProbeOneMore Int
+    | MaxTargetsProbeNothingToSpare Int
+
+
+{-| Whether the next lock the bot asks for is the probe.
+
+Four answers rather than a `Bool`, because three of them are different enough at
+the lock site to want their own words in the decision log, and because the one
+that decides nothing -- `MaxTargetsProbeFillingSlots`, the bot still working
+through the slots it already believes in -- is the common case and must keep the
+wording an operator greps for.
+
+**The probing ends on the client's statement and on nothing else.**
+`MaxTargetsProbeSettled` is the only answer that stops it, so a client that
+never names a number is probed at forever rather than given up on after some
+count nobody has evidence for. That direction is deliberate: a count would stop
+the learning before the answer arrived, and the cost of being wrong about it is
+one lock click on a reading the bot was otherwise going to spend waiting. All
+228 recorded refusals name the number, so the evidence there is says the
+statement comes.
+
+The bar reaching the ceiling is what makes the _next_ click a probe, and the
+ceiling already includes `heldAtOnce` -- so a bar the ship filled by itself,
+past whatever the bot asked for, is a ceiling that rose rather than a probe that
+is due.
+
+-}
+maxTargetsProbe : MaxTargetsProbeSituation -> MaxTargetsProbe
+maxTargetsProbe situation =
+    case situation.state.statedByClient of
+        Just stated ->
+            MaxTargetsProbeSettled stated
+
+        Nothing ->
+            if situation.targetsHeld < maxTargetsCeiling situation.state then
+                MaxTargetsProbeFillingSlots
+
+            else if situation.rowsToSpare < 1 then
+                MaxTargetsProbeNothingToSpare (maxTargetsCeiling situation.state + 1)
+
+            else
+                MaxTargetsProbeOneMore (maxTargetsCeiling situation.state + 1)
+
+
+{-| What the lock site says about the attempt it is about to make.
+
+`Lock more targets.` wherever nothing is being probed, so the line an operator
+has been grepping for since before any of this is unchanged on the readings it
+was already about.
+
+The two probing answers say the slot number they are about, because that is what
+tells a run that ratcheted from a run that did not: `Probing for lock slot 5`
+followed by `Probing for lock slot 6` is the ceiling climbing, where the same
+number reading after reading is a probe nothing is answering.
+
+-}
+describeMaxTargetsProbe : MaxTargetsProbe -> String
+describeMaxTargetsProbe probe =
+    case probe of
+        MaxTargetsProbeSettled _ ->
+            "Lock more targets."
+
+        MaxTargetsProbeFillingSlots ->
+            "Lock more targets."
+
+        MaxTargetsProbeOneMore attemptingToHold ->
+            "Probing for lock slot "
+                ++ (attemptingToHold |> String.fromInt)
+                ++ ": the client has not stated its maximum, so this attempt is one beyond the "
+                ++ (attemptingToHold - 1 |> String.fromInt)
+                ++ " this session believes in. It either lands, which proves the slot, or the client states the number and the probing stops for the session."
+
+        MaxTargetsProbeNothingToSpare _ ->
+            -- Unreachable from a branch that clicks, since what produces this
+            -- answer is there being no row to click. Said the ordinary way
+            -- rather than invented, so a caller that reaches it anyway reports
+            -- the lock it is making instead of a probe it is not.
+            "Lock more targets."
+
+
+{-| What the lock site says on a reading where it has nothing to click at all.
+
+`otherwise` is the app's own wording for that, which the two bots have never
+said the same way -- so the shared part is the probe clause and each caller
+keeps its own sentence for the ordinary case.
+
+A probe that is due with no row to spare is **not** an attempt and must not be
+counted as one: there is nothing to ask, so the reading says so and the ceiling
+stays where it is. Without this the branch would read `Everything worth locking
+is locked.` on a reading where the bot had also just declined to find out
+whether it could hold one more, which are different facts about the same
+reading.
+
+-}
+describeMaxTargetsNothingToLock : MaxTargetsProbe -> String -> String
+describeMaxTargetsNothingToLock probe otherwise =
+    case probe of
+        MaxTargetsProbeNothingToSpare attemptingToHold ->
+            otherwise
+                ++ " Nothing to spare for a probe either: no lockable row in range beyond the ones already held, so lock slot "
+                ++ (attemptingToHold |> String.fromInt)
+                ++ " goes untested on this reading rather than counting as an attempt."
+
+        _ ->
+            otherwise
+
+
 {-| Everything about one reading this rule looks at.
 
 Takes the two fields rather than an `UpdateMemoryContext` so that a case can
@@ -13853,6 +14144,11 @@ differently -- a run whose `client stated` never leaves `-` is one whose game lo
 is not reaching the bot, where a `most held at once` stuck below the ceiling is
 simply a ship that has not filled its slots yet.
 
+`probing for N` is present exactly while `client stated` is `-`, since the
+statement is the only thing that ends the probing. The two are printed side by
+side on purpose: a run that says `client stated 6` and still says `probing for`
+anything has a rule reading something other than its own state.
+
 -}
 describeMaxTargets : MaxTargetsState -> String
 describeMaxTargets state =
@@ -13864,6 +14160,13 @@ describeMaxTargets state =
         ++ (state.statedByClient |> Maybe.map String.fromInt |> Maybe.withDefault "-")
         ++ ", most held at once "
         ++ (state.heldAtOnce |> Maybe.map String.fromInt |> Maybe.withDefault "-")
+        ++ (case state.statedByClient of
+                Just _ ->
+                    ""
+
+                Nothing ->
+                    ", probing for " ++ (maxTargetsCeiling state + 1 |> String.fromInt)
+           )
         ++ ")."
 
 
@@ -18559,10 +18862,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         maxTargetsLearning =
             updateMaxTargetsLearning (maxTargetsReadingFrom context)
-                { fromSetting = context.botSettings.maxTargetCount
-                , statedByClient = botMemoryBefore.maxTargetsStatedByClient
-                , heldAtOnce = botMemoryBefore.maxTargetsHeldAtOnce
-                }
+                (maxTargetsStateBefore context botMemoryBefore)
 
         -- Only settled readings count as a look. The selected container
         -- renders empty for one reading while it is being switched (40 -> 0 ->

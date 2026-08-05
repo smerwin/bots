@@ -3356,9 +3356,17 @@ that file -- including the ceiling raised on absent evidence, which is the one
 failure this whole design refuses, and `overviewEntryLockHandle`'s same-name
 exclusion loosened, which fails the lock-range suite next door.
 
-**Unverified: any of it running, and one thing about the ceiling itself.** No run
-has been flown since. **Why six targets were held while the bot's own ceiling was
-four is still not established** -- an auto-targeting module is the obvious
+**Run 6 flew it, and it learned nothing** -- which is #150 rather than a fault
+in this. saxrat's run 6 launched from this change's own merge commit and carried
+`Max targets: 4 (setting 4, client stated -, most held at once N)` on **every one
+of 2,193 readings**, with `client stated` never leaving `-`, the client's
+sentence arriving **not once**, and `Learned max targets:` never printed. The
+clause works, the plumbing works, and there was nothing for either half to learn
+because the lock site stops at the ceiling it already believes in. See "Neither
+half could move on its own, so the bot asks for one more" below.
+
+**Unverified: one thing about the ceiling itself.** **Why six targets were held
+while the bot's own ceiling was four is still not established** -- an auto-targeting module is the obvious
 candidate (there is an `Auto Targeting System I` in the character's hangar) and
 EVE's own "auto-target back" setting is another, and neither is confirmed. It
 does not change what the rule learns, since a bar holding six proves six slots
@@ -3366,14 +3374,141 @@ whatever filled them, but it does mean the *floor* may be reached without the bo
 having asked for it.
 
 What to watch on the first run: `Max targets: 4 (setting 4, client stated -, most
-held at once -)` on every reading, then `client stated 6` within a reading or two
-of the first refusal, then `Learned max targets: ... max-targets moves from 4 to
-6.` once in the decision log and never again. A run that fights and never leaves
-`client stated -` means the game log is not reaching the bot; a run whose
-`most held at once` never rises past the ceiling is the ordinary case and not a
-fault. The failure to watch for is `Enough locked targets.` still appearing at
-four locked rats after the ceiling has moved, which would mean the decision is
-reading something other than the rule.
+held at once -, probing for 5)` on every reading, then `client stated 6` within a
+reading or two of the first refusal, then `Learned max targets: ... max-targets
+moves from 4 to 6.` once in the decision log and never again. A run that fights
+and never leaves `client stated -` means the game log is not reaching the bot; a
+run whose `most held at once` never rises past the ceiling is the ordinary case
+and not a fault. The failure to watch for is `Enough locked targets.` still
+appearing at four locked rats after the ceiling has moved, which would mean the
+decision is reading something other than the rule.
+
+### Neither half could move on its own, so the bot asks for one more
+
+Issue #150. `maxTargetsCeiling` is what the lock site's `List.take` took, so the
+bot locked four, saw four held and learned four -- **the floor cannot rise past
+the ceiling, because the ceiling is what it asks for.** And `statedByClient`
+comes from a refusal the client writes only when a lock is attempted *beyond*
+the cap, which stopping at the ceiling never provokes. Both halves were inert
+for the same reason: the constraint being learned is the one that prevents the
+attempt. The corpus above is hand-fed -- all 228 statements exist because a
+person locked the extra targets.
+
+So while `statedByClient` is unknown the lock site takes **one row more than it
+believes in**. A probe that lands raises `heldAtOnce`, which raises the ceiling,
+so the next probe is one higher and it ratchets; a probe the client declines
+produces the sentence, which sets `statedByClient` and ends the probing for the
+session. The refused attempt is not waste, it *is* the measurement, and there is
+one of them per session rather than one per reading.
+
+**The first live run of #149 is the proof that it is inert.** saxrat's run 6 was
+launched from that change's merge commit while this one was being written: 2,193
+readings, the clause on every one of them, `client stated -` on every one of
+them, not one statement from the client and not one ceiling moved. The bot held
+at most three targets against a believed four, so the *floor* had nothing to say
+either. That is the argument above observed rather than reasoned.
+
+**The mission runner already provokes the statement, and run 37 is the
+evidence.** That run was in flight and unattended when this was written, and it
+holds eight distinct `(notify) You are already managing 6 targets` entries, each
+on the reading *after* the bot's own `Lock more targets.` click, with no
+`standing down: someone used the mouse` anywhere in the window. So the sentence
+is one a click provokes, it arrives within one reading, and the issue's
+"hand-fed" is true of saxrat's corpus and not of the newest mission run. What it
+could not do is *ratchet*, because those clicks are aimed at rows inside the
+believed ceiling that happened not to be locked.
+
+**Taking one more row rather than a different one is what keeps the probe from
+displacing a real target.** `List.take (n + 1)` extends `List.take n`, so the
+rows the ceiling covers keep their order and their places and the extra one is
+reachable only once every one of them is locked -- which is also what
+`maxTargetsProbe` says, answering `MaxTargetsProbeFillingSlots` while the bar is
+below the ceiling.
+
+**A refused probe must not read as a stuck lock, and measuring what one costs
+turned up a defect in the lock range.** `lockAttempt` bounds a lock the client
+*accepted* and never finished, and its give-up is only asked of a row that reads
+`targeting` -- which a lock the client declines never does. So a declined lock
+ran the attempt to `lockAttemptReadingsBeforeVerdict` and **latched there**:
+`for 8 readings` appears on **more than three thousand** status lines across 22
+recorded runs, while
+`stop waiting for it` has fired **zero** times in the whole corpus. Run 37 shows
+nineteen consecutive status lines reporting a lock that had not landed, on a
+click the client had already answered.
+
+`lockAttemptCanTeachRange` ends that, and it needs nothing new to know: the
+refusal test already requires **an empty target bar at both ends** of an
+attempt, so an attempt begun with a target already held can never move either
+bound however long it is carried -- it fails that condition rather than the
+wait. Such an attempt is now discharged on the reading it fails to land instead
+of being carried to a verdict it cannot reach. Every probe is by definition
+asked with the bar at the ceiling, so a probe spends none of that budget and the
+give-up can never see one. What it costs is the *proven* bound: a lock that
+lands slowly with a target already held is credited from the reading the bot
+re-asked rather than the first, which is the weaker claim of two.
+
+**Nothing to spare means no probe.** With the bar at the ceiling and no lockable
+row left *in range* beyond it there is nothing to attempt, so the reading says so
+rather than counting one. Range is part of that on purpose:
+`lockTargetFromOverviewEntry` answers an out-of-range row by approaching it,
+which is right for a target the bot wants and wrong for a measurement -- flying
+at a rat to find out whether a fifth slot exists spends the ship's position on a
+question the next row in range answers for nothing.
+
+**The probing stops on the statement and on no count.** A client that never
+names a number is asked again rather than given up on, because a count would
+stop the learning before the answer arrived and what it would save is one lock
+click on a reading the bot was going to spend waiting anyway. All 228 recorded
+refusals name the number, so the evidence there is says the statement comes. The
+status line carries `probing for N` exactly while `client stated` is `-`, so the
+two clauses cannot disagree about whether the question is still open.
+
+**saxrat needed a second fix its own gate had hidden.** Its candidate window was
+`List.take 4` -- the shipped ceiling written out a second time -- so a client
+stating six left two slots unreachable however far `Enough locked targets.` was
+raised. That take is the learned count now, and the gate compares against the
+same rule, so the two cannot disagree about whether there is room.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_max_targets_probe.py` (31 cases, run against
+**both** apps). The rules are executed through the real `Bot.elm` in `elm repl`,
+and the lock-range half is folded over whole sessions through saxrat's own
+`updateLockRangeLearning`, which is a function of records -- so "a declined lock
+is discharged and an empty-bar one is still judged exactly as before" is run
+rather than read. The corpus is recounted as *relations*: a declined lock does
+reach the verdict count in the recorded runs, the give-up never fired on one,
+and at least one statement follows the bot's own click with no human at the
+keyboard.
+
+Confirmed by mutation, **fifteen** of them, each failing a named case, listed in
+that file -- including the take back at the ceiling, which is the shape that
+cannot bootstrap; the probe due below the ceiling and a row dropped ahead of the
+take, which are the two ways it would displace a real target; and
+`lockAttemptCanTeachRange` made to answer `True`, which is a refused probe
+spending the give-up's budget again.
+
+**Unverified: any of *this* running, and what a refused lock costs in the game.**
+No run has been flown with the probe in it -- run 6 is #149's code, and what it
+shows is the state this change is trying to leave. What the corpus establishes is what a refusal costs
+*the bot* -- a reading, a click, and (until now) the whole lock-attempt budget.
+Whether it costs anything **in game** -- aggression, a module cycle, an alarm --
+is still not established, and it is what decides whether "always" is right or
+whether the probe should be rarer. The recorded refusals are accompanied by no
+other client sentence and by no change the bot records, which is evidence of
+absence only as far as the bot can see. Also still unverified: whether every
+client states the cap at all, since all 228 entries come from one account with
+one skill set, and whether the probe interacts with an auto-targeting module
+filling the bar without the bot asking -- a bar the ship filled itself raises the
+ceiling rather than making a probe due, so that case reads as a ceiling that rose
+and not as a probe that failed.
+
+What to watch on the first run that probes: `probing for 5` in the status line,
+then `Probing for lock slot 5:` in the decision log, then `most held at once 5`
+and `probing for 6` -- the ratchet -- and then `client stated 6` with the probing
+clause gone for the rest of the session. `Probing for lock slot 5` repeating for
+many readings with the number never moving is a probe nothing is answering, which
+is the case the corpus says should not happen and the one that would argue for
+bounding it. `attempt N m for 8 readings` should now be rare rather than routine.
 
 ## Ammo: the module's own menu says which charge is loaded
 
@@ -4657,7 +4792,7 @@ shipped configuration rather than edge cases:
 | setting its own route | could only *follow* one a human set | `hunt-system` circuit, asked for through the host's ESI directive |
 | the client's transient popup (#123) | parsed on every reading and read by nothing — the same five references and the same zero readers | printed in the status line, carried forward with an age, and still read by no decision |
 | the lock range (#121) | `targeting-range` asserted and never revised — `lockProvenAtMeters` appeared 0 times | the setting clamped into `[proven, refused)`, learned from the client's own answers, with the row-identity discipline unchanged |
-| the lock-slot ceiling (#110) | `maxTargetCount = 4` hardcoded with no setting able to reach it, against a real maximum of 6 — 2,149 readings of `Enough locked targets.` across runs 2-5 | `max-targets`, clamped by the maximum the client states on the game log and by what the target bar has held |
+| the lock-slot ceiling (#110, #150) | `maxTargetCount = 4` hardcoded with no setting able to reach it, against a real maximum of 6 — 2,149 readings of `Enough locked targets.` across runs 2-5, and a `List.take 4` candidate window that would have capped it there anyway | `max-targets`, clamped by the maximum the client states on the game log and by what the target bar has held, and asking for one row more than that until the client states the number |
 | the ammo swap (#122) | absent, not unconfigured — `ammoSwap`, `Charge`, `chargeName` and `optimalRange` all appeared 0 times, and there was no setting to turn on | ported without its tooltip half, with `ammo-swap-range` **required** rather than optional — see "saxrat swaps ammo at a distance it is told" below |
 | an in-range acceleration gate (#145) | a context-menu cascade, and a give-up counting readings *near* a gate rather than readings spent asking one — `selectedItem` appeared 0 times in `Bot.elm`, so it had never pressed a panel button for anything | `selectThenPanelAction`'s shape over `selectedItemActivateGate`, inside `unlessAlreadyClosingIn`; the counter counts the ask — see "An in-range acceleration gate is opened from the panel here too" below |
 
@@ -6145,6 +6280,19 @@ exists.
   unexplained — watch the status line's `Max targets:` clause for
   `client stated 6` arriving within a reading or two of the first refusal.
 
+  And since #150 it **asks for one more than it believes in** until the client
+  states that number, because neither half of that rule could move on its own:
+  the floor cannot rise past the ceiling when the ceiling is what the bot asks
+  for, and the client writes its sentence only for a lock beyond the cap. The
+  probe is one extra row rather than a different one, is only taken from rows
+  the ship can already lock, and is discharged from the lock-range machinery
+  rather than spending its budget — which fixed a defect of its own, since a
+  declined lock used to latch at the verdict count on thousands of recorded
+  readings while the give-up written for it never once fired. See "Neither half
+  could move on its own, so the bot asks for one more" above. **Untested against
+  a live client**; watch `probing for 5` in the status line and then
+  `Probing for lock slot 5:` in the decision log.
+
   And it now **flies to a station it knows has an agent** when the one it is
   standing in has none, instead of asking for help there until somebody
   notices. Run 35 raised that alarm on 371 readings with `home-station` in its
@@ -6223,6 +6371,16 @@ exists.
   "The lock-slot ceiling is stated by the client, not hardcoded" above.
   **Untested against a live client**; watch `Max targets:` in the status line
   and `Enough locked targets.` becoming rarer once it moves.
+
+  And since #150 it **asks for one more than it believes in** until the client
+  states that number, which took a second fix here that its own gate had hidden:
+  saxrat's candidate window was `List.take 4`, the shipped ceiling written out
+  again, so a client stating six left two slots unreachable however far the gate
+  was raised. Both are the learned count now, and `Enough locked targets.` never
+  fires while the question is still open — the bot has one more to ask for. See
+  "Neither half could move on its own, so the bot asks for one more" above.
+  **Untested against a live client**; watch `probing for 5` in the status line
+  and the number climbing before `client stated` fills in.
 
   And it now **asks the pod recovery's deadline where nothing can decline to ask
   it**, which is #126 in this second bot: the comparison over
@@ -6563,7 +6721,12 @@ load-bearing — see "The home station".
   reading, in `BotMemory.maxTargetsStatedByClient`, so the condition that throws
   away the common case could be replaced by one that compares the bar against the
   learned ceiling. That is a change to the lock-range rule and wants its own
-  evidence; #110 deliberately does not make it.
+  evidence; #110 deliberately does not make it, and #150 only went as far as
+  *discharging* such an attempt rather than judging it —
+  `lockAttemptCanTeachRange` reads the bar the attempt began with and nothing the
+  client said. The prize is still the one #134 named: only the first lock of an
+  engagement can teach a refusal today, and the client's own sentence would
+  separate "no free slot" from "too far" outright.
 - **A run cycled inside a mission pocket leaves the ship unattended for
   minutes.** `run_mission.sh` kills the previous bot before the new one compiles,
   and the slow `elm make` path takes several minutes; that gap is when run 7's
