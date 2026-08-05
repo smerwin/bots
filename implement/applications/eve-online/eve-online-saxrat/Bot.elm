@@ -6273,8 +6273,12 @@ statusTextFromState context =
                    )
                 ++ ". Approaching ticks: "
                 ++ (context.memory.shipApproachingTicks |> String.fromInt)
-                ++ ". Ticks on an acceleration gate in reach: "
-                ++ (context.memory.gateWithinReachTicks |> String.fromInt)
+                ++ ". "
+                ++ describeGateActivationAsk
+                    { asked = askingAnAccelerationGateToOpen readingFromGameClient
+                    , gateWithinReach = accelerationGateIsWithinReach readingFromGameClient
+                    , askedReadings = context.memory.gateWithinReachTicks
+                    }
                 ++ ". Wrecks already opened: "
                 ++ (context.memory.lootedWreckIds |> List.length |> String.fromInt)
                 ++ ". "
@@ -6957,6 +6961,73 @@ closeInOnOverviewEntry context { description, menuEntries } entry =
         )
 
 
+{-| Whether `pattern` occurs in `text` as whole words rather than as a substring.
+
+Substring matching has cost this codebase real bugs -- a live rogue drone called
+a "Wrecker" contains "wreck", and a station named "Expert Distribution Warehouse"
+contains "warehouse" -- so the panel test below compares on word boundaries.
+Whitespace is normalised and both sides padded, so a match can neither begin nor
+end mid-word and a multi-word pattern still matches as a sequence.
+
+-}
+containsWords : String -> String -> Bool
+containsWords pattern text =
+    let
+        padded value =
+            " " ++ (value |> String.toLower |> String.words |> String.join " ") ++ " "
+    in
+    String.contains (padded pattern) (padded text)
+
+
+{-| A button in the Selected Item panel, by its own `_name`.
+
+`ParseUserInterface` exposes only `orbitButton` off this window, so every other
+button is reached by name. `selectedItemActivateGate` is the one this bot presses
+and, before this, the only panel button it had ever pressed for anything.
+
+-}
+selectedItemButtonNamed :
+    ReadingFromGameClient
+    -> String
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+selectedItemButtonNamed readingFromGameClient name =
+    readingFromGameClient.selectedItemWindow
+        |> Maybe.map (.uiNode >> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion)
+        |> Maybe.withDefault []
+        |> List.filter
+            (\node ->
+                (node.uiNode |> EveOnline.ParseUserInterface.getNameFromDictEntries) == Just name
+            )
+        |> List.head
+
+
+{-| Whether the Selected Item panel is showing this overview entry.
+
+Asked before pressing any of the panel's buttons, because they act on whatever is
+selected rather than on whatever the decision is about.
+
+A function of the reading rather than of a `BotDecisionContext`, which is the one
+shape difference from the mission runner's copy of this and is deliberate:
+`updateMemoryForNewReadingFromGame` never sees a decision and has to ask this
+same question, since the readings the bot spends asking a gate to open are
+exactly the readings that gate is the selected item. Two copies of "is the panel
+showing this row" would be two answers that could disagree.
+
+-}
+selectedItemIsOverviewEntry :
+    ReadingFromGameClient
+    -> EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> Bool
+selectedItemIsOverviewEntry readingFromGameClient entry =
+    case ( readingFromGameClient.selectedItemWindow, entry.objectName ) of
+        ( Just window, Just name ) ->
+            EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode.uiNode
+                |> List.any (containsWords name)
+
+        _ ->
+            False
+
+
 {-| Bring a wanted overview row into view by turning the mouse wheel over the
 overview, a notch at a time, re-reading between notches.
 
@@ -7097,21 +7168,220 @@ to contribute.
 -}
 accelerationGateIsWithinReach : ReadingFromGameClient -> Bool
 accelerationGateIsWithinReach readingFromGameClient =
+    accelerationGatesWithinReach readingFromGameClient |> List.isEmpty |> not
+
+
+accelerationGatesWithinReach :
+    ReadingFromGameClient
+    -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+accelerationGatesWithinReach readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.filter isAccelerationGate
-        |> List.any
+        |> List.filter
             (\entry ->
                 (entry.objectDistanceInMeters |> Result.withDefault 999999)
                     <= interactionRangeInMeters
             )
 
 
-{-| Right-clicks the nearest acceleration gate and activates it to move on to
-the next pocket (EVE's own menu text for these is "Activate Gate", mirrored on
-`jumpToNextSystem`'s "dock"/"jump" cascade for regular stargates).
+{-| Whether this reading is one the bot spent asking a gate to open.
 
-From further out the same "Activate Gate" command is what gets issued: the
+The Selected Item panel showing an acceleration gate that is already in reach.
+That is what the in-range branch below produces -- it selects the row and then
+presses the panel's own button -- so it is the condition under which the gate
+failing to open says something about the gate.
+
+**Proximity is not that condition, and saxrat's own runs are what say so.** The
+counter this feeds used to advance on `accelerationGateIsWithinReach`, and run 5
+took it to 3,504 while the bot pressed `warpToOpportunitySiteIfAvailable` 10,353
+times: that branch outranks this one, so for the whole of those readings the
+gate was merely nearby and was never once asked to open. 108 give-ups came out
+of it, about a gate this session had made three attempts on. The mission
+runner's `gateWithinReachTicks` carries the same correction for the same reason
+(#42), and what saxrat needs on top of it is that a missing button counts too --
+see `gateAskedReadingsAfterReading`.
+
+**Why the branch was not reached is #147 and is deliberately not fixed here**,
+but the recordings confirm its claim rather than contradicting it, and that is
+worth writing down beside the counter that pays for it.
+`warpToOpportunitySiteIfAvailable` answers `Just` whenever a "Warp to Site"
+button is anywhere in the tree, and `pickAnotherAnomalyOrLeave` puts it ahead of
+this branch, so the gate is unreachable while that button is drawn. Run 5's
+give-ups are one contiguous block of 108 lines with **zero** opportunity-warp
+lines inside it and the last one 20 lines before it -- the window where the
+button went away and the branch became reachable, arriving with a counter
+already past the bound because proximity had been spending it for thousands of
+readings. Run 4 is the control: one contiguous block too, and **12** opportunity
+lines in the whole run, none of them anywhere near it.
+
+So counting the ask changes run 5's outcome outright rather than merely tidying
+it. Shadowed readings hold the count at 0, and the reachable window is about 36
+readings -- short of 40 -- so that give-up does not fire at all, which is the
+correct answer for a gate the bot asked three times.
+
+-}
+askingAnAccelerationGateToOpen : ReadingFromGameClient -> Bool
+askingAnAccelerationGateToOpen readingFromGameClient =
+    accelerationGatesWithinReach readingFromGameClient
+        |> List.any (selectedItemIsOverviewEntry readingFromGameClient)
+
+
+{-| Readings in a row spent asking one gate to open, and it did not open.
+
+Advances on a reading the bot was asking (`askingAnAccelerationGateToOpen`),
+**holds** on a reading with a gate in reach that the bot was not asking, and
+resets only when the ship leaves reach.
+
+The hold is the mission runner's, for its reason: a reset on a reading that did
+not ask is the shape that pinned `gunsSilencedTicks` at 1 forever, and anything
+that legitimately holds the tree beside a gate -- a message box, a fight, an
+opportunity warp -- would otherwise wipe the evidence between attempts. Leaving
+reach resets, because that is the ship no longer asking this gate for anything.
+
+**A reading with the gate selected and no Activate Gate button on the panel is
+counted, not held**, which is where this differs from the mission runner's rule.
+That one counts only the readings the panel made the offer, and leaves the
+no-button state to be bounded by `nothingToDoTicks` from the bottom of its
+decision tree. saxrat has no such counter, and this branch answers `Just`, so an
+uncounted no-button state is a ship parked at a gate with nothing to end it.
+Counting it keeps one bound over both shapes: a gate the panel offers and does
+not open, and a gate the panel will not offer to open at all. Both are the ship
+asking and getting nowhere, which is what the give-up says.
+
+-}
+gateAskedReadingsAfterReading :
+    { asking : Bool, gateWithinReach : Bool, before : Int }
+    -> Int
+gateAskedReadingsAfterReading readingCase =
+    if readingCase.asking then
+        readingCase.before + 1
+
+    else if readingCase.gateWithinReach then
+        readingCase.before
+
+    else
+        0
+
+
+{-| What to do about an acceleration gate the ship is already sitting on.
+
+A pure function over a record so a case can execute it rather than describe it.
+
+-}
+type alias GateActivationCase =
+    { panelShowsTheGate : Bool
+    , panelOffersActivateGate : Bool
+    , askedReadings : Int
+    }
+
+
+type GateActivationStep
+    = SelectTheGate
+    | PressActivateGate
+    | WaitForTheActivateButton
+    | GiveUpOnThisGate
+
+
+gateActivationStep : GateActivationCase -> GateActivationStep
+gateActivationStep gateCase =
+    if gateRefusesThisShipTicks < gateCase.askedReadings then
+        GiveUpOnThisGate
+
+    else if not gateCase.panelShowsTheGate then
+        SelectTheGate
+
+    else if gateCase.panelOffersActivateGate then
+        PressActivateGate
+
+    else
+        WaitForTheActivateButton
+
+
+{-| The give-up, which says what is known and stops there.
+
+It used to say the gate "most likely will not admit this ship", and that
+inference is wrong whenever the mechanism is what failed -- which is what run 4
+was: 30 completed context-menu cascades clicking `Activate Gate` on an
+`Ancient Acceleration Gate` at under 2,000 m, the gate never opening, and the
+client's game log carrying **no** refusal of any kind. A sentence naming a ship
+restriction sends an operator to look at the hull, and the hull was not what the
+evidence pointed at.
+
+So the wording names the three readings this bot cannot tell apart and says the
+client is silent, which is the fact that makes them indistinguishable from here.
+The client does have a sentence for a gate that wants an item -- the mission
+runner reads `This gate is locked! ... in your cargo hold` off the `info`
+channel -- and its absence here is why nothing stronger can be claimed.
+
+-}
+describeGateGaveUp : Int -> String
+describeGateGaveUp askedReadings =
+    "I have been asking this acceleration gate to open for "
+        ++ String.fromInt askedReadings
+        ++ " readings -- selecting it and pressing the panel's Activate Gate where it offers one -- and it has not taken me anywhere. The client has said nothing at all, so I cannot tell a gate that will not admit this ship from one whose button is not landing. Stopping rather than asking it any longer."
+
+
+{-| The gate clause in the status line.
+
+`stall_watch.py` reads decision lines and this is not one; what it is for is an
+operator watching a run, who could previously see only a count of readings spent
+near a gate and had no way to tell that from readings spent asking one.
+
+-}
+describeGateActivationAsk : { asked : Bool, gateWithinReach : Bool, askedReadings : Int } -> String
+describeGateActivationAsk gateCase =
+    "Readings spent asking an acceleration gate to open: "
+        ++ String.fromInt gateCase.askedReadings
+        ++ " of "
+        ++ String.fromInt gateRefusesThisShipTicks
+        ++ (if gateCase.asked then
+                " (asking now)"
+
+            else if gateCase.gateWithinReach then
+                " (a gate is in reach, not being asked)"
+
+            else
+                ""
+           )
+
+
+{-| Takes the nearest acceleration gate, to move on to the next pocket.
+
+**In range this presses the Selected Item panel's own `selectedItemActivateGate`
+rather than driving a context-menu cascade**, which is what it did before and
+what the mission runner's `activateGateOnOverviewEntry` records the argument
+against. That comment's evidence is a live one: on the very gate that had
+refused 124 D-clicks, the panel button took the ship through -- the objective
+went from "You need to activate the Acceleration Gate" to "Warping" and the
+overview turned over from 17 rows to 22. Where the panel offers a named button,
+press it rather than reaching for a keybind or a cascade.
+
+saxrat's own evidence is thinner than the give-up count suggests, and the honest
+version is worth having here rather than in a pull request nobody re-reads. Its
+two newest runs carry 829 `has not taken me anywhere` lines, but that give-up
+prints on every reading once the bound is passed, so 829 lines are **two**
+in-reach episodes -- one per run, and the only two in the whole recorded corpus
+that ever passed 40. Only run 4's is this mechanism failing: 30 completed
+cascades clicking `Activate Gate` on an `Ancient Acceleration Gate` inside
+2,000 m, the gate never opening, no refusal on any game-log channel, and then
+238 readings of the give-up before the bot went back to ratting. Run 5's is not
+about the mechanism at all -- see `askingAnAccelerationGateToOpen`, whose counter
+this changes for that reason. No saxrat run has ever demonstrably taken a gate:
+run 3 has the only sub-bound episodes and each of those ends in a retreat or in
+a warp that the "Warp to Site" branch firing in the same window can equally
+explain.
+
+So this is one gate's worth of evidence for a mechanism that is proven elsewhere,
+not 829 failures, and it is scoped as such.
+
+Two ticks by design, `selectThenPanelAction`'s shape: the panel acts on whatever
+is selected, so this presses the button only once the panel is showing the gate
+and otherwise spends a tick selecting it. That cannot act on the wrong object,
+where a cascade fired at a re-sorted overview row can.
+
+**The out-of-range branch is deliberately untouched.** From further out the same
+"Activate Gate" command is what gets issued: the
 client flies the ship in and takes the gate on arrival, so the bot never spends
 a tick sitting at the gate working out that it has arrived. That leaves no
 arrival step to prepare in, so whatever has to be settled before the ship leaves
@@ -7124,6 +7394,12 @@ gate is often tens of km away. Leaving it running costs a slower align into the
 gate's own warp; that is the cheaper end of the trade and the one deliberately
 chosen here. Drones get no such choice -- ones left in space stay in the old
 pocket.
+
+The panel carries `selectedItemActivateGate` only while the gate is in range, so
+the button's absence out there is the natural gate between the two mechanisms --
+the same argument `dockAtDestinationStation` makes in the mission runner. There
+is nothing to press from 40 km away, and the command that flies the ship in is
+one the cascade does land.
 
 -}
 activateAccelerationGateIfPresent : BotDecisionContext -> Maybe DecisionPathNode
@@ -7146,6 +7422,14 @@ activateAccelerationGateIfPresent context =
             let
                 distanceInMeters =
                     accelerationGateEntry.objectDistanceInMeters |> Result.withDefault 999999
+
+                activateGateButton =
+                    selectedItemButtonNamed context.readingFromGameClient "selectedItemActivateGate"
+
+                waitForTheActivateButton =
+                    describeBranch
+                        "The acceleration gate is selected but the panel offers no 'selectedItemActivateGate' yet."
+                        waitForProgressInGame
             in
             Just
                 (if interactionRangeInMeters < distanceInMeters then
@@ -7166,33 +7450,70 @@ activateAccelerationGateIfPresent context =
                             accelerationGateEntry
                         )
 
-                 else if gateRefusesThisShipTicks < context.memory.gateWithinReachTicks then
-                    describeBranch
-                        ("I have been sitting on this acceleration gate for "
-                            ++ String.fromInt context.memory.gateWithinReachTicks
-                            ++ " readings and it has not taken me anywhere. It most likely will not admit this ship. Stopping rather than clicking it any longer."
-                        )
-                        askForHelpToGetUnstuck
-
                  else
-                    describeBranch "I see an acceleration gate -- activate it to move to the next pocket."
-                        (ensureDronesRecalledBeforeWarping context
-                            (useContextMenuCascadeOnOverviewEntry
-                                (useMenuEntryWithTextContainingFirstOf
-                                    [ "activate gate", "activate" ]
-                                    menuCascadeCompleted
-                                )
-                                accelerationGateEntry
-                                context
-                            )
-                        )
+                    case
+                        gateActivationStep
+                            { panelShowsTheGate =
+                                selectedItemIsOverviewEntry context.readingFromGameClient accelerationGateEntry
+                            , panelOffersActivateGate = activateGateButton /= Nothing
+                            , askedReadings = context.memory.gateWithinReachTicks
+                            }
+                    of
+                        GiveUpOnThisGate ->
+                            describeBranch
+                                (describeGateGaveUp context.memory.gateWithinReachTicks)
+                                askForHelpToGetUnstuck
+
+                        SelectTheGate ->
+                            describeBranch
+                                "I see an acceleration gate -- select it, so the panel's own Activate Gate acts on it."
+                                (clickUiElement accelerationGateEntry.uiNode)
+
+                        WaitForTheActivateButton ->
+                            waitForTheActivateButton
+
+                        PressActivateGate ->
+                            activateGateButton
+                                |> Maybe.map
+                                    (\button ->
+                                        -- Wrapped in `unlessAlreadyClosingIn`
+                                        -- like every other close-in command: EVE
+                                        -- flies the ship the last of the way and
+                                        -- takes the gate on arrival, so
+                                        -- re-issuing this while that is running
+                                        -- restarts the manoeuvre.
+                                        unlessAlreadyClosingIn context
+                                            "I see an acceleration gate -- activate it to move to the next pocket."
+                                            (ensureDronesRecalledBeforeWarping context
+                                                (clickUiElement button)
+                                            )
+                                    )
+                                |> Maybe.withDefault waitForTheActivateButton
                 )
 
 
-{-| How many readings to keep trying a gate that is already in range before
-concluding it will not admit this ship. A working gate goes through in a few;
-the mission bot hit a restricted one and clicked it 741 times over half an
-hour, with no error dialog and nothing to notice.
+{-| How many readings to keep asking a gate that is already in range before
+giving up on it. A working gate goes through in a few; the mission bot hit one
+that would not open and clicked it 741 times over half an hour, with no error
+dialog and nothing to notice.
+
+**Left at 40 when the mechanism changed under it, and the corpus is why.** The
+obvious worry is that a number placed against a failing cascade is wrong for a
+working panel press, and it would be if the number were a patience budget for
+one mechanism. It is not: what it bounds is how long the ship stands at a gate
+that is not opening, and that cost is the same whichever way the bot is asking.
+What the recorded runs put beside it is a distribution with nothing in the
+middle. Every in-reach episode saxrat has ever had peaks at 1, 5, 6, 8, 10, 15
+or 18 readings -- gates the ship left within a few of arriving -- or at 282 and
+3,504, the two that never opened at all. 40 sits in that gap with an order of
+magnitude of clearance on both sides, and no version of this mechanism moves an
+episode across it.
+
+What _was_ wrong was the counter rather than the bound, and that is fixed --
+see `gateAskedReadingsAfterReading`. Raising the number would have been the
+wrong repair for run 5 and would have bought run 4 nothing but more of the same
+30 clicks.
+
 -}
 gateRefusesThisShipTicks : Int
 gateRefusesThisShipTicks =
@@ -7883,16 +8204,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     else
                         nearestId :: botMemoryBefore.lootedWreckIds |> List.take 200
     , gateWithinReachTicks =
-        -- Readings in a row with an acceleration gate close enough to use. A
-        -- gate that works goes through in a handful of them; one that refuses
-        -- the ship never goes through at all and reports no error, so counting
-        -- them is what turns "clicking forever" into something the bot can act
-        -- on. See `activateAccelerationGateIfPresent`.
-        if accelerationGateIsWithinReach context.readingFromGameClient then
-            botMemoryBefore.gateWithinReachTicks + 1
-
-        else
-            0
+        -- Readings in a row spent asking one gate to open, and it did not open.
+        -- The name is the mission runner's and is kept so the two bots' copies
+        -- read alike; what it counts is the ask rather than the proximity, and
+        -- `gateAskedReadingsAfterReading` carries the argument and run 5's
+        -- measurement.
+        gateAskedReadingsAfterReading
+            { asking = askingAnAccelerationGateToOpen context.readingFromGameClient
+            , gateWithinReach = accelerationGateIsWithinReach context.readingFromGameClient
+            , before = botMemoryBefore.gateWithinReachTicks
+            }
     , messageBoxStandoff = messageBoxStandoff
     , messageBoxLastChange = messageBoxLastChange
     , quickMessage =
