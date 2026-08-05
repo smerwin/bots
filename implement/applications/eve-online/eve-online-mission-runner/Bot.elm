@@ -585,6 +585,7 @@ type alias BotMemory =
     , contextMenuStuckTicks : Int
     , messageBoxStandoff : Maybe MessageBoxStandoff
     , messageBoxLastChange : Maybe String
+    , quickMessage : Maybe QuickMessageSighting
     , lootWindowOpenTicks : Int
     , routeFirstMarkerRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , routeFirstMarkerUnchangedTicks : Int
@@ -747,6 +748,56 @@ is saying something new is one the next answer has not been tried on.
 type alias MessageBoxStandoff =
     { identity : String
     , readings : Int
+    }
+
+
+{-| The last transient centre-screen popup the client showed, and how stale it is.
+
+`ParsedUserInterface.layerAbovemain.quickMessage` has been parsed on every
+reading since this app was added and read by nothing -- #123. So every message
+this client has ever shown the bot was decoded into a string and discarded, and
+**the wording of one has never been recorded**. The operator reports a black
+popup on trying to lock past the ship's capacity, which is the signal #110 is
+blocked on; that search looked in the game log, where the channels are `combat`,
+`notify`, `bounty`, `question`, `info` and `hint`, and a quick message is a UI
+widget rather than a log line, so it was never going to be found there.
+
+Nothing decides anything on this, deliberately. A matcher written now would rest
+on guessed strings, which is #92's trap exactly -- a rule keyed on a word list
+the client's vocabulary outgrew twice with nobody noticing. The corpus comes
+first; the matcher comes after there is one.
+
+**Carried forward rather than reported live, with the age beside it.** The
+message is transient and a reading is about eight seconds apart, so a live-only
+clause would put each one on a single line of a log holding thousands of
+near-identical ones. Two things need it to persist. The first Unverified item in
+#123 is whether `quickMessage` is even the widget the operator is seeing, and
+the only person who can answer that is the operator watching the console -- who
+cannot confirm a string that flashes for one reading and is gone. The second is
+correlating a popup with the decision that followed it, which is the whole point
+for a lock refusal: the popup lands on the reading of the click and the failure
+is diagnosed several readings later.
+
+The failure this risks -- a stale message read as current -- is the one this
+file already answers everywhere by naming what a number is, and
+`describeQuickMessage` names it: `on screen now` against `NOT on screen now --
+last seen N readings ago`. The failure live-only risks is the message being
+missed, which is not recoverable and is the one #123 exists to end.
+
+`messagesInLayer` and `displayTextsInMessage` answer #123's last Unverified item
+with evidence rather than reasoning. `parseQuickMessage` filters the layer's
+descendants for `QuickMessage` and takes `List.head`, then takes the head of the
+chosen node's display texts, so **both** are places a second message or a second
+line of one message is dropped without a word. Counting them costs one walk of a
+layer that is almost always absent, and a run that meets a `2` settles the
+question the parser's `Maybe` cannot.
+
+-}
+type alias QuickMessageSighting =
+    { text : String
+    , messagesInLayer : Int
+    , displayTextsInMessage : Int
+    , readingsSince : Int
     }
 
 
@@ -12540,6 +12591,7 @@ initBotMemory =
     , contextMenuStuckTicks = 0
     , messageBoxStandoff = Nothing
     , messageBoxLastChange = Nothing
+    , quickMessage = Nothing
     , lootWindowOpenTicks = 0
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
@@ -12906,6 +12958,11 @@ statusTextFromState context =
             |> String.join " | "
       ]
     , describeCurrentReading
+    , -- Its own line, and outside `describeCurrentReading`, which is only built
+      -- when there is a ship UI: a quick message can be shown while docked, and
+      -- the docked case is exactly where a client notice nobody has read is
+      -- most likely to be sitting.
+      [ describeQuickMessage context.memory.quickMessage ]
     , -- Last, and on its own line. The host prints the status text inline after
       -- the tick marker, so the first line is what an operator and
       -- `stall_watch.py` both read as "what is this reading about" -- and that
@@ -13292,6 +13349,171 @@ describeOverviewIndicationHints readingFromGameClient =
         hints ->
             "Overview indications: "
                 ++ (hints |> List.map (\hint -> "'" ++ hint ++ "'") |> String.join ", ")
+                ++ "."
+
+
+{-| The quick message this reading carries, with what the parser dropped to get it.
+
+Reads the same two `List.head`s `parseQuickMessage` does, and reports how many
+candidates each of them chose from -- see `QuickMessageSighting` for why those
+counts are the evidence rather than an ornament. `readingsSince` is `0` here
+because this is a message on the screen now; ageing it is
+`quickMessageAfterReading`'s job.
+
+The text is trimmed of surrounding whitespace and nothing else. Case,
+punctuation and interior spacing are exactly what the client wrote, because the
+next matcher is going to be written against this string and a normalisation
+applied here is one nobody downstream can undo.
+
+-}
+quickMessageOnScreen : ReadingFromGameClient -> Maybe QuickMessageSighting
+quickMessageOnScreen readingFromGameClient =
+    readingFromGameClient.layerAbovemain
+        |> Maybe.andThen
+            (\layerAbovemain ->
+                layerAbovemain.quickMessage
+                    |> Maybe.map
+                        (\quickMessage ->
+                            { text = String.trim quickMessage.text
+                            , messagesInLayer =
+                                layerAbovemain.uiNode
+                                    |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+                                    |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "QuickMessage")
+                                    |> List.length
+                            , displayTextsInMessage =
+                                quickMessage.uiNode.uiNode
+                                    |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+                                    |> List.length
+                            , readingsSince = 0
+                            }
+                        )
+            )
+
+
+{-| The sighting to carry into the next reading.
+
+A message on the screen replaces whatever was remembered and starts the age at
+zero; a reading with no message ages the last one by one. Nothing expires it
+within the session, because an expiry would be a number with no evidence behind
+it and the age already says how stale the sighting is -- the same reasoning
+`ShipLossVerdict` is latched on.
+
+Written as a rule over a record rather than inline in
+`updateMemoryForNewReadingFromGame` so a case can fold it over a sequence of
+readings and see the age advance, which is the half that can be wrong.
+
+-}
+quickMessageAfterReading :
+    { onScreenNow : Maybe QuickMessageSighting
+    , before : Maybe QuickMessageSighting
+    }
+    -> Maybe QuickMessageSighting
+quickMessageAfterReading state =
+    case state.onScreenNow of
+        Just onScreenNow ->
+            Just { onScreenNow | readingsSince = 0 }
+
+        Nothing ->
+            state.before
+                |> Maybe.map (\before -> { before | readingsSince = before.readingsSince + 1 })
+
+
+{-| How much of a quick message the status line will carry.
+
+Generous on purpose. The point of printing this at all is that the wording
+becomes evidence, and a message clipped to a few characters is a message nobody
+can write a matcher from -- the cap exists so one pathological string cannot push
+the rest of the status line out of the host's own 4,000-character log truncation,
+not to keep the line tidy.
+
+-}
+quickMessageStatusCharacterBudget : Int
+quickMessageStatusCharacterBudget =
+    400
+
+
+{-| A quick message rendered as one line, losing nothing that cannot be undone.
+
+Two transformations and no others. The text is cut to
+`quickMessageStatusCharacterBudget` characters -- and `describeQuickMessage` says
+so, with the original length, whenever it cuts. And a newline, carriage return or
+tab is escaped rather than emitted, because the status line is line-structured:
+the host prints it after the tick marker, `stall_watch.py` reads the first line,
+and a message carrying a newline would otherwise split a clause across two lines
+of the log. Backslash is escaped first so the mapping stays reversible.
+
+Case, punctuation and interior spacing are untouched.
+
+-}
+quickMessageTextForStatusLine : String -> String
+quickMessageTextForStatusLine text =
+    text
+        |> String.left quickMessageStatusCharacterBudget
+        |> String.replace "\\" "\\\\"
+        |> String.replace "\n" "\\n"
+        |> String.replace "\u{000D}" "\\r"
+        |> String.replace "\t" "\\t"
+
+
+{-| The quick message clause, which says what the client wrote and how old it is.
+
+Printed on every reading, including the ones with nothing to report, for
+`describeOverviewIndicationHints`' reason: a clause that appears only when there
+is something to say leaves "the client said nothing" and "nothing is reading the
+client" grepping identically, and telling those apart is the first thing #123
+wants from a run.
+
+Whether the message is on the screen _now_ is the first thing in the clause and
+is never implied. A stale message printed as if it were current would be worse
+than not printing one at all, since a later reader would date the wording to the
+wrong decision.
+
+-}
+describeQuickMessage : Maybe QuickMessageSighting -> String
+describeQuickMessage sighting =
+    case sighting of
+        Nothing ->
+            "Quick message: none on this reading, and none seen this session."
+
+        Just seen ->
+            "Quick message"
+                ++ (if seen.readingsSince == 0 then
+                        " (on screen now)"
+
+                    else
+                        " (NOT on screen now -- last seen "
+                            ++ String.fromInt seen.readingsSince
+                            ++ " readings ago)"
+                   )
+                ++ ": \""
+                ++ quickMessageTextForStatusLine seen.text
+                ++ "\""
+                ++ (if String.length seen.text <= quickMessageStatusCharacterBudget then
+                        ""
+
+                    else
+                        " (CAPPED at "
+                            ++ String.fromInt quickMessageStatusCharacterBudget
+                            ++ " of "
+                            ++ String.fromInt (String.length seen.text)
+                            ++ " characters)"
+                   )
+                ++ (if seen.messagesInLayer <= 1 then
+                        ""
+
+                    else
+                        " (1 of "
+                            ++ String.fromInt seen.messagesInLayer
+                            ++ " quick messages in the layer -- the parser keeps the first and drops the rest)"
+                   )
+                ++ (if seen.displayTextsInMessage <= 1 then
+                        ""
+
+                    else
+                        " (1 of "
+                            ++ String.fromInt seen.displayTextsInMessage
+                            ++ " display texts in the message -- the parser keeps the first and drops the rest)"
+                   )
                 ++ "."
 
 
@@ -17036,6 +17258,11 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             botMemoryBefore.contextMenuStuckTicks + 1
     , messageBoxStandoff = messageBoxStandoff
     , messageBoxLastChange = messageBoxLastChange
+    , quickMessage =
+        quickMessageAfterReading
+            { onScreenNow = quickMessageOnScreen context.readingFromGameClient
+            , before = botMemoryBefore.quickMessage
+            }
     , lootWindowOpenTicks =
         if context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.isEmpty then
             0
