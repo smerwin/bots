@@ -26,20 +26,37 @@ the client saying nothing; a reading without the node is a host that has no game
 log to give. Collapsing those two is how a bot concludes a command was accepted
 because no refusal arrived.
 
+**An entry the client wrapped is one entry.** Only the first physical line of a
+long message carries the `[ timestamp ] (channel) ` prefix, so the rest used to
+parse as nothing and be dropped -- issue #124, and 113 times in run 35 the bot
+was given a standings-penalty warning with `Do you wish to proceed?` cut off the
+end of it. The rule is that a prefix-less line continues the entry above it, and
+the corpus is what says that rule is safe: nothing the client wraps begins with
+`[`, so no continuation can pass for a new entry, and the one prefix-less shape
+that is *not* a continuation -- a file's header block -- has no entry above it
+to attach to.
+
 The lines here are real, taken from `~/eve-bot-logs/mission_run*.log` where the
 host echoed them during recorded runs. Nothing here reads the live game log
 directory, a game client, or a bot.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
+import glob
 import json
 import os
+import re
+import shutil
 import sys
 import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
+REPO_DIR = os.path.dirname(os.path.dirname(MACOS_HOST_DIR))
+MISSION_RUNNER_BOT_ELM = os.path.join(
+    REPO_DIR, "implement", "applications", "eve-online",
+    "eve-online-mission-runner", "Bot.elm")
 sys.path.insert(0, MACOS_HOST_DIR)
 sys.path.insert(0, os.path.join(MACOS_HOST_DIR, "botlab_host"))
 import botlab_host  # noqa: E402
@@ -69,6 +86,41 @@ COMBAT_LINE_WITH_MARKUP = (
     "[ 2026.08.02 23:56:24 ] (combat) <color=0xffcc0000><b>127</b><color=0x77ffffff> "
     "from <b>Rogue Pirate Escort</b> - Mjolnir Heavy Missile - Hits"
 )
+
+# The wrapped entry issue #124 is about, as run 35 carries it 113 times: the
+# standings-penalty warning on one line, the question on the next.
+QUESTION_WARNING = (
+    "[ 2026.08.04 21:43:33 ] (question) Aggression against this peaceful entity "
+    "may have consequences such as a standings penalty or returned aggression. "
+    "It is recommended that you reconsider."
+)
+QUESTION_CONTINUATION = "Do you wish to proceed?"
+
+# Four lines, one entry, from ~/Documents/EVE/logs/Gamelogs. The corpus of bot
+# runs has only two-line examples; the client's own logs go deeper, which is why
+# nothing counts to two.
+REDEEM_ENTRY = (
+    "[ 2022.12.21 17:20:45 ] (question) 5 items will be moved to Johnny "
+    "Fivehonks's hangar at J130832 - Honk's Moving Castle."
+)
+REDEEM_CONTINUATIONS = [
+    "25,000 Skill Points will be redeemed and directly injected to Johnny Fivehonks.",
+    "The following items will be redeemed and applied to Johnny Fivehonks Typhoon "
+    "Halcyon Dawn SKINInterStellar Kredits (ISK)Winter Nexus Expert System.",
+    "Do you wish to proceed?",
+]
+
+# The block every game log file opens with, verbatim. Prefix-less, like a
+# continuation, and not one -- `Session Started:` even carries a timestamp of
+# its own, which is the shape a rule testing the line rather than its position
+# would have to tell apart.
+FILE_HEADER = [
+    "------------------------------------------------------------",
+    "Gamelog",
+    "Listener: Johnny Fivehonks",
+    "Session Started: 2022.12.21 17:19:50",
+    "------------------------------------------------------------",
+]
 
 
 class TailingGameLog:
@@ -128,6 +180,102 @@ class ParseLineTest(unittest.TestCase):
         self.assertIsNone(botlab_host.parse_game_log_line(
             "  Gamelog"))
         self.assertIsNone(botlab_host.parse_game_log_line(""))
+
+    def test_a_continuation_on_its_own_is_still_not_an_entry(self):
+        # The line-level contract is unchanged, and deliberately: a line with
+        # no prefix carries no timestamp and no channel, so inventing an entry
+        # for it would be inventing both. Which of the two things a `None`
+        # means -- header, or the rest of the entry above -- is the caller's
+        # question, and `game_log_entries_from_lines` is where it is answered.
+        self.assertIsNone(botlab_host.parse_game_log_line(QUESTION_CONTINUATION))
+
+
+class MultiLineEntryTest(unittest.TestCase):
+    """Issue #124: the client wraps a long message and only the first line of
+    it carries the prefix, so the rest was parsed as nothing and dropped."""
+
+    def test_a_wrapped_entry_is_one_entry_carrying_both_halves(self):
+        entries = botlab_host.game_log_entries_from_lines(
+            [QUESTION_WARNING, QUESTION_CONTINUATION])
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["timestamp"], "2026.08.04 21:43:33")
+        self.assertEqual(entries[0]["channel"], "question")
+        self.assertIn("standings penalty", entries[0]["text"])
+        self.assertIn("Do you wish to proceed?", entries[0]["text"])
+
+    def test_the_two_halves_are_joined_by_a_single_space(self):
+        # Exactly, rather than "contains both": a newline here would be a
+        # `text` no downstream matcher was written against, and a missing
+        # separator would run the last word of one line into the first of the
+        # next and break a substring that spans the join.
+        entries = botlab_host.game_log_entries_from_lines(
+            [QUESTION_WARNING, QUESTION_CONTINUATION])
+        self.assertEqual(
+            entries[0]["text"],
+            QUESTION_WARNING.split(") ", 1)[1] + " " + QUESTION_CONTINUATION)
+
+    def test_an_entry_is_not_limited_to_two_lines(self):
+        # The recorded bot runs carry only two-line examples; the client's own
+        # logs carry seven three-line entries and three four-line ones. A rule
+        # that folded one continuation would drop two thirds of this entry.
+        entries = botlab_host.game_log_entries_from_lines(
+            [REDEEM_ENTRY] + REDEEM_CONTINUATIONS)
+        self.assertEqual(len(entries), 1)
+        for continuation in REDEEM_CONTINUATIONS:
+            self.assertIn(continuation, entries[0]["text"])
+        self.assertTrue(entries[0]["text"].endswith(REDEEM_CONTINUATIONS[-1]))
+
+    def test_the_continuations_are_kept_in_the_order_the_client_wrote_them(self):
+        entries = botlab_host.game_log_entries_from_lines(
+            [REDEEM_ENTRY] + REDEEM_CONTINUATIONS)
+        positions = [entries[0]["text"].index(line)
+                     for line in REDEEM_CONTINUATIONS]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_an_entry_nobody_wrapped_is_untouched(self):
+        # The whole safety argument for appending to `text` rests on this:
+        # every existing consumer is a substring test over that field, and a
+        # single-line entry has to come back byte for byte as it always did.
+        singles = [REFUSAL_LOAD_WHILE_ACTIVE, REFUSAL_TARGET_LIMIT,
+                   REFUSAL_DRONE_LIMIT, COMBAT_LINE, BOUNTY_LINE, JUMP_LINE]
+        self.assertEqual(
+            botlab_host.game_log_entries_from_lines(singles),
+            [botlab_host.parse_game_log_line(line) for line in singles])
+
+    def test_a_continuation_goes_to_the_entry_above_it_and_no_other(self):
+        entries = botlab_host.game_log_entries_from_lines(
+            [QUESTION_WARNING, QUESTION_CONTINUATION, REFUSAL_TARGET_LIMIT])
+        self.assertEqual(len(entries), 2)
+        self.assertIn("Do you wish to proceed?", entries[0]["text"])
+        self.assertNotIn("Do you wish to proceed?", entries[1]["text"])
+        self.assertEqual(
+            entries[1], botlab_host.parse_game_log_line(REFUSAL_TARGET_LIMIT))
+
+    def test_a_file_header_has_nothing_above_it_and_so_continues_nothing(self):
+        # The one prefix-less shape that is not a continuation. It is declined
+        # by position rather than by wording, because there is no wording these
+        # share that a continuation could not also have -- `Session Started:
+        # 2022.12.21 17:19:50` is a header line carrying a timestamp.
+        self.assertEqual(botlab_host.game_log_entries_from_lines(FILE_HEADER), [])
+
+    def test_a_header_is_not_folded_into_the_entry_that_follows_it(self):
+        entries = botlab_host.game_log_entries_from_lines(
+            FILE_HEADER + [REFUSAL_TARGET_LIMIT])
+        self.assertEqual(
+            entries, [botlab_host.parse_game_log_line(REFUSAL_TARGET_LIMIT)])
+
+    def test_a_header_after_an_entry_would_be_folded_and_that_is_the_bound(self):
+        # Stated rather than left to be found. Nothing places a header after an
+        # entry -- all 143 in the client's logs open their file, and the tail
+        # drops its open entry whenever the file it is reading changes or is
+        # truncated under it -- so the case below is unreachable through
+        # `GameLogTail`. The rule itself cannot tell the two apart, and this
+        # says so out loud instead of implying a discrimination it does not
+        # have.
+        entries = botlab_host.game_log_entries_from_lines(
+            [REFUSAL_TARGET_LIMIT] + FILE_HEADER)
+        self.assertEqual(len(entries), 1)
+        self.assertIn("Gamelog", entries[0]["text"])
 
 
 class TailTest(unittest.TestCase):
@@ -204,6 +352,93 @@ class TailTest(unittest.TestCase):
         entries = log.tail.entries_for_reading()
         self.assertEqual(len(entries), 1)
         self.assertIn("cannot load or unload", entries[0]["text"])
+
+    def test_a_wrapped_entry_reaches_the_reading_whole(self):
+        log = TailingGameLog(self)
+        log.append(QUESTION_WARNING, QUESTION_CONTINUATION)
+        entries = log.tail.entries_for_reading()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["channel"], "question")
+        self.assertIn("standings penalty", entries[0]["text"])
+        self.assertIn("Do you wish to proceed?", entries[0]["text"])
+
+    def test_a_wrapped_entry_split_across_two_polls_is_still_whole(self):
+        # The two halves are two writes, so a read can land between them. The
+        # open entry is therefore held across polls and not only within one --
+        # an entry that arrives whole only when the timing is lucky is the bug
+        # this fixes, happening less often.
+        log = TailingGameLog(self)
+        log.append(QUESTION_WARNING)
+        log.tail._poll()
+        log.append(QUESTION_CONTINUATION)
+        entries = log.tail.entries_for_reading()
+        self.assertEqual(len(entries), 1)
+        self.assertIn("Do you wish to proceed?", entries[0]["text"])
+
+    def test_a_continuation_arriving_after_the_entry_was_given_away_is_dropped(self):
+        # The stated price of never holding an entry back. Once a reading has
+        # taken it, appending to it would be writing into something the bot
+        # already has -- so the half that arrives late is dropped, and what
+        # must not happen is that it becomes an entry with no timestamp and no
+        # channel of its own.
+        log = TailingGameLog(self)
+        log.append(QUESTION_WARNING)
+        delivered = log.tail.entries_for_reading()
+        self.assertEqual(len(delivered), 1)
+        log.append(QUESTION_CONTINUATION)
+        self.assertEqual(log.tail.entries_for_reading(), [])
+        self.assertNotIn("Do you wish to proceed?", delivered[0]["text"])
+
+    def test_a_wrapped_entry_does_not_swallow_the_line_after_it(self):
+        log = TailingGameLog(self)
+        log.append(QUESTION_WARNING, QUESTION_CONTINUATION, REFUSAL_TARGET_LIMIT)
+        entries = log.tail.entries_for_reading()
+        self.assertEqual([entry["channel"] for entry in entries],
+                         ["question", "notify"])
+        self.assertNotIn("Do you wish to proceed?", entries[1]["text"])
+
+    def test_the_echo_still_carries_the_clients_own_lines(self):
+        # The echo is the verbatim record of what the client wrote, and the
+        # recorded runs are that record -- joining there would rewrite the one
+        # ground truth every corpus-reading case in this suite consults.
+        log = TailingGameLog(self)
+        log.append(QUESTION_WARNING, QUESTION_CONTINUATION)
+        self.assertEqual(log.tail.lines_for_echo(),
+                         [QUESTION_WARNING, QUESTION_CONTINUATION])
+
+    def test_a_newer_file_does_not_continue_the_previous_files_entry(self):
+        # A new file is joined at its end, and its end can be *inside* an entry
+        # the client had already wrapped -- so the first line read from it can
+        # be a continuation belonging to a message this tail never saw the
+        # start of. Attaching that to whatever the previous file left open
+        # would put one session's text into another session's entry.
+        log = TailingGameLog(self)
+        log.append(REFUSAL_TARGET_LIMIT)
+        log.tail._poll()
+        newer = os.path.join(log.directory, "20260803_010000_91000000.txt")
+        with open(newer, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(FILE_HEADER + [QUESTION_WARNING]) + "\n")
+        os.utime(newer, (2 ** 31, 2 ** 31))
+        log.tail._poll()
+        with open(newer, "a", encoding="utf-8") as handle:
+            handle.write(QUESTION_CONTINUATION + "\n")
+        entries = log.tail.entries_for_reading()
+        self.assertEqual(len(entries), 1)
+        self.assertIn("already managing", entries[0]["text"])
+        self.assertNotIn("Do you wish to proceed?", entries[0]["text"])
+
+    def test_a_file_truncated_under_us_does_not_fold_its_header(self):
+        # The one path that re-reads a file from the top, and so the one that
+        # meets a header block at all. The entry left open before the
+        # truncation is what that block would attach to.
+        log = TailingGameLog(self)
+        log.append(REFUSAL_TARGET_LIMIT)
+        log.tail._poll()
+        with open(log.path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(FILE_HEADER) + "\n")
+        entries = log.tail.entries_for_reading()
+        self.assertEqual(len(entries), 1)
+        self.assertNotIn("Gamelog", entries[0]["text"])
 
     def test_a_missing_directory_is_not_an_error(self):
         # `~/Documents/EVE/logs/Gamelogs` is behind a macOS Documents-folder
@@ -374,15 +609,26 @@ class RecordedRunTest(unittest.TestCase):
                       if not line.startswith("(")]
         if not self.lines:
             self.skipTest(f"no game log lines recorded under {self.LOG_DIR}")
+        self.entries = botlab_host.game_log_entries_from_lines(self.lines)
 
     def test_every_recorded_line_parses(self):
-        unparsed = [line for line in self.lines
-                    if botlab_host.parse_game_log_line(line) is None]
-        self.assertEqual(unparsed, [])
+        # Kept under its own name, and what it asserts has widened by exactly
+        # what issue #124 was: a recorded line is now read either as an entry
+        # or as the rest of the entry above it, and neither is a line the host
+        # threw away. Before the fix this failed on 113 lines, every one of
+        # them `Do you wish to proceed?`.
+        wrapped = [after["text"] for _, after in self.wrapped_entries()]
+        unread = []
+        seen_an_entry = False
+        for line in self.lines:
+            if botlab_host.parse_game_log_line(line) is not None:
+                seen_an_entry = True
+            elif not seen_an_entry or not any(line in text for text in wrapped):
+                unread.append(line)
+        self.assertEqual(unread, [])
 
     def test_the_refusals_the_issue_names_are_carried(self):
-        carried = [botlab_host.parse_game_log_line(line) for line in self.lines]
-        carried = [entry["text"] for entry in carried
+        carried = [entry["text"] for entry in self.entries
                    if entry["channel"] not in
                    botlab_host.GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT]
         for refusal in ["already managing", "already controlling", "cannot load or unload",
@@ -391,13 +637,261 @@ class RecordedRunTest(unittest.TestCase):
                             f"no recorded line contains {refusal!r}")
 
     def test_the_combat_channel_is_most_of_the_file_and_none_of_the_channel(self):
-        channels = [botlab_host.parse_game_log_line(line)["channel"] for line in self.lines]
+        channels = [entry["channel"] for entry in self.entries]
         combat = channels.count("combat")
         self.assertGreater(combat, len(channels) / 2)
         carried = [channel for channel in channels
                    if channel not in botlab_host.GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT]
         self.assertNotIn("combat", carried)
         self.assertNotIn("bounty", carried)
+
+    def wrapped_entries(self):
+        """The entries that absorbed a continuation, and their first lines."""
+        wrapped = []
+        opened = (entry for entry in
+                  (botlab_host.parse_game_log_line(line) for line in self.lines)
+                  if entry is not None)
+        for before, after in zip(opened, self.entries):
+            if before["text"] != after["text"]:
+                wrapped.append((before, after))
+        return wrapped
+
+    def test_the_corpus_carries_wrapped_entries_and_they_are_read_whole(self):
+        # Asserted as a relation rather than as run 35's 113, so a corpus that
+        # grows cannot turn a true claim red. What must hold is that the corpus
+        # still contains the thing the fix is for, and that every instance of
+        # it ends up inside an entry rather than beside one.
+        wrapped = self.wrapped_entries()
+        self.assertTrue(wrapped, "no recorded run carries a wrapped entry")
+        dropped = [line for line in self.lines
+                   if botlab_host.parse_game_log_line(line) is None]
+        self.assertTrue(dropped, "no recorded run carries a continuation")
+        for line in dropped:
+            self.assertTrue(
+                any(line in after["text"] for _, after in wrapped),
+                "no entry carries %r" % line)
+
+    def test_reading_the_wrapped_entries_changes_nothing_else(self):
+        # The claim the whole appending design rests on, checked over 64,000
+        # real lines rather than assumed: folding leaves the number of entries
+        # alone, leaves every timestamp and channel alone, and touches the text
+        # of exactly the entries that absorbed something.
+        per_line = [botlab_host.parse_game_log_line(line)
+                    for line in self.lines]
+        per_line = [entry for entry in per_line if entry is not None]
+        self.assertEqual(len(per_line), len(self.entries))
+        changed = 0
+        for before, after in zip(per_line, self.entries):
+            self.assertEqual(before["timestamp"], after["timestamp"])
+            self.assertEqual(before["channel"], after["channel"])
+            if before["text"] != after["text"]:
+                changed += 1
+                self.assertTrue(after["text"].startswith(before["text"]))
+        self.assertTrue(changed)
+        self.assertLess(changed, len(self.entries) / 100)
+
+    def test_the_damage_summaries_read_exactly_what_they_read_before(self):
+        # Both are host-side consumers of this entry's text, and #32's retreat
+        # and #90's zero-damage verdict are built on their numbers. Nothing
+        # wraps on `(combat)`, so the two summaries have to be identical
+        # before and after -- not merely close.
+        for parse in (botlab_host.parse_incoming_damage,
+                      botlab_host.parse_outgoing_damage):
+            before = [parse(botlab_host.parse_game_log_line(line))
+                      for line in self.lines
+                      if botlab_host.parse_game_log_line(line) is not None]
+            after = [parse(entry) for entry in self.entries]
+            self.assertEqual([x for x in before if x is not None],
+                             [x for x in after if x is not None])
+
+    def test_no_wrapped_entry_is_on_a_channel_withheld_from_the_bot(self):
+        for entry in self.entries:
+            if "Do you wish to proceed?" in entry["text"]:
+                self.assertNotIn(
+                    entry["channel"],
+                    botlab_host.GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT)
+
+    def test_the_ammo_load_refusal_matches_the_same_entries_as_before(self):
+        # `loadRefusalFromGameLog` is the oldest consumer of this channel and
+        # the one #85 made the ammo swap's whole confirmation depend on. Its
+        # two substrings are read out of `Bot.elm` rather than restated, for
+        # the reason `test_ammo_load_refusal.py` gives, and applied to the
+        # corpus both ways: appending to `text` must not add a refusal and must
+        # not lose one.
+        needles = load_refusal_substrings()
+        self.assertEqual(len(needles), 2, needles)
+
+        def refusals(entries):
+            return [entry["text"] for entry in entries
+                    if entry["channel"].strip().lower() == "notify"
+                    and all(needle.lower() in entry["text"].lower()
+                            for needle in needles)]
+
+        before = refusals([botlab_host.parse_game_log_line(line)
+                           for line in self.lines
+                           if botlab_host.parse_game_log_line(line) is not None])
+        self.assertTrue(before, "no recorded run carries a refused load")
+        self.assertEqual(before, refusals(self.entries))
+
+    def test_the_tail_and_the_pure_rule_agree_over_the_whole_corpus(self):
+        # The rule is written twice -- once as a fold over lines a caller
+        # already has, once as `GameLogTail._poll` reading a file that grows --
+        # and a change landing in one and not the other is this repo's
+        # signature failure. Replaying the corpus through a real tail is what
+        # makes the two checkable rather than remembered.
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "20260804_000000_91000000.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("")
+        tail = botlab_host.GameLogTail(directory)
+        tail.entries_for_reading()
+
+        from_tail = []
+        for chunk in self.chunks_that_do_not_split_an_entry(200):
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write("".join(line + "\n" for line in chunk))
+            from_tail.extend(tail.entries_for_reading())
+
+        expected = [entry for entry in self.entries
+                    if entry["channel"] not in
+                    botlab_host.GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT]
+        self.assertEqual(from_tail, expected)
+
+    def chunks_that_do_not_split_an_entry(self, size):
+        """The corpus in drained-sized pieces, none ending mid-entry.
+
+        Drained in pieces because `GAME_LOG_QUEUE_LIMIT` caps the queue at 500
+        and this corpus is two orders of magnitude larger -- one write and one
+        drain would compare the last 500 entries against all of them and call
+        the cap a disagreement.
+
+        No piece ends between an entry and its continuation, because that is
+        the one place the two forms are *documented* to differ: a drain hands
+        the open entry away, so the half arriving after it is dropped. Placing
+        a boundary there would be measuring the bound rather than the rule.
+        """
+        start = 0
+        while start < len(self.lines):
+            end = min(start + size, len(self.lines))
+            while end < len(self.lines) and \
+                    botlab_host.parse_game_log_line(self.lines[end]) is None:
+                end += 1
+            yield self.lines[start:end]
+            start = end
+
+
+def load_refusal_substrings():
+    """The two literals `loadRefusalFromGameLog` matches, out of `Bot.elm`."""
+    with open(MISSION_RUNNER_BOT_ELM, encoding="utf-8") as handle:
+        source = handle.read()
+    start = source.index("loadRefusalFromGameLog readingFromGameClient =")
+    body = source[start:source.index("|> List.head", start)]
+    return re.findall(r'stringContainsIgnoringCase "([^"]+)" entry\.text', body)
+
+
+class ClientGameLogTest(unittest.TestCase):
+    """The client's own logs, which say more about wrapping than the bot runs do.
+
+    `~/eve-bot-logs` holds what the host echoed during recorded runs, and every
+    wrapped entry in it is the same `(question)` one. The client's own
+    directory is 145 files and 214,630 lines going back years, and it is what
+    the two unverified halves of issue #124 had to be settled against: whether
+    a continuation can pass for a new entry, and whether an entry stops at two
+    lines. Only a machine that has played this game has it.
+    """
+
+    GAMELOGS_GLOB = os.path.expanduser("~/Documents/EVE/logs/Gamelogs/*.txt")
+
+    def setUp(self):
+        self.paths = sorted(glob.glob(self.GAMELOGS_GLOB))
+        if not self.paths:
+            self.skipTest("no recorded game logs in ~/Documents/EVE/logs/Gamelogs")
+
+    def files(self):
+        """Each file's lines, de-marked up the way `_poll` does it."""
+        for path in self.paths:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                lines = []
+                for raw in handle:
+                    line = " ".join(
+                        botlab_host._GAME_LOG_MARKUP.sub("", raw.rstrip("\n")).split())
+                    if line:
+                        lines.append(line)
+            yield path, lines
+
+    def prefixless_groups(self):
+        """Every run of prefix-less lines, with the entry above it or `None`."""
+        for path, lines in self.files():
+            above, run = None, []
+            for line in lines:
+                if botlab_host.parse_game_log_line(line) is None:
+                    run.append(line)
+                    continue
+                if run:
+                    yield path, above, run
+                    run = []
+                above = line
+            if run:
+                yield path, above, run
+
+    def test_no_continuation_can_pass_for_a_new_entry(self):
+        # The half issue #124 called unverified, and the whole safety of the
+        # rule. A continuation beginning `[ something ] (something) ` would be
+        # read as a new entry and its own entry would be truncated silently.
+        # There is no such line: not one prefix-less line in this corpus even
+        # begins with `[`, so the client's prefix separates the two shapes
+        # completely.
+        offenders = [line for _, _, run in self.prefixless_groups()
+                     for line in run if line.startswith("[")]
+        self.assertEqual(offenders, [])
+
+    def test_an_entry_can_run_past_two_lines(self):
+        # The other unverified half. The bot-run corpus has only two-line
+        # examples; the client's own logs go to four, so a rule that folded one
+        # continuation would silently keep a third of such an entry.
+        depths = sorted({len(run) for _, above, run in self.prefixless_groups()
+                         if above is not None})
+        self.assertTrue(depths, "no wrapped entry in the client's logs")
+        self.assertGreater(max(depths), 1)
+
+    def test_every_prefixless_group_with_nothing_above_it_is_a_file_header(self):
+        # What makes "continues the entry above it" safe rather than lucky: the
+        # only prefix-less lines that are not continuations are the header
+        # blocks, and every one of them opens its file.
+        for path, above, run in self.prefixless_groups():
+            if above is None:
+                self.assertIn("Gamelog", run, path)
+
+    def test_the_client_wraps_on_channels_the_bot_is_given(self):
+        # Which is what makes this worth fixing at all -- a wrapping confined
+        # to `(combat)` or `(bounty)` would never have reached a decision. It
+        # is also why the damage summaries are untouched by the change.
+        channels = {botlab_host.parse_game_log_line(above)["channel"]
+                    for _, above, _ in self.prefixless_groups() if above}
+        self.assertTrue(channels)
+        self.assertFalse(
+            channels & set(botlab_host.GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT))
+
+    def test_reading_a_whole_client_file_keeps_every_line_but_its_header(self):
+        # End to end over the real files, header block and all. Two things
+        # have to hold at once: one entry per prefixed line, so no continuation
+        # has quietly become an entry of its own; and every continuation --
+        # every prefix-less line with an entry somewhere above it -- inside one
+        # of those entries rather than beside it. Files with no entries at all
+        # exist here (a session that opened and wrote nothing), and for those
+        # the answer is no entries and a dropped header.
+        for path, lines in self.files():
+            entries = botlab_host.game_log_entries_from_lines(lines)
+            texts = [entry["text"] for entry in entries]
+            prefixed = 0
+            for line in lines:
+                if botlab_host.parse_game_log_line(line) is not None:
+                    prefixed += 1
+                elif prefixed:
+                    self.assertTrue(any(line in text for text in texts),
+                                    "%s dropped %r" % (path, line))
+            self.assertEqual(len(entries), prefixed, path)
 
 
 class VendoredParserTest(unittest.TestCase):

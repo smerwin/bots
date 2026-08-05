@@ -149,9 +149,49 @@ controlling 5 drones` — and until issue #28 the bot could not read a word of i
 while `stall_watch.py` read the same file as ground truth. The watchdog watching
 the bot had better information than the bot. The host now appends a
 `MacOsHostSyntheticGameLog` node to the tree it emits, one
-`MacOsHostSyntheticGameLogEntry` child per line carrying `timestamp`, `channel`
-and `text`, and `ParseUserInterface.elm` lifts it into
+`MacOsHostSyntheticGameLogEntry` child per **entry** carrying `timestamp`,
+`channel` and `text`, and `ParseUserInterface.elm` lifts it into
 `ParsedUserInterface.gameLogEntriesSinceLastReading : Maybe (List GameLogEntry)`.
+
+**An entry is not a line, and reading it as one cost half of every wrapped
+message.** The client puts the `[ timestamp ] (channel) ` prefix on the first
+physical line of a long message and on none of the rest, so `parse_game_log_line`
+answered `None` for the continuations and `_poll` dropped them — issue #124, and
+113 times in run 35 the bot was handed a `(question)` standings-penalty warning
+with `Do you wish to proceed?` cut off the end of it. **The loss was in the
+parser, not the capture**: the continuations reached the echo, which is why the
+recorded runs contain them and the fix could be measured before it was written.
+
+A prefix-less line now continues the entry above it, and the client's own logs
+are what say that rule is safe rather than merely plausible. Across the 214,630
+lines in `~/Documents/EVE/logs/Gamelogs`, not one prefix-less line begins with
+`[`, so no continuation can pass for a new entry — the half #124 flagged as
+unverified. The wrapping goes deeper than the bot-run corpus shows (138 entries
+of two lines, 7 of three, 3 of four), so nothing counts to two. And the only
+prefix-less lines that are *not* continuations are the header block a file opens
+with, all 143 of which sit above their file's first entry, so a rule phrased as
+"continues the entry above it" declines them by having nothing to continue.
+There is no wording those share that a continuation could not also have, which
+is why the rule is about position rather than about the line.
+
+**The continuation is appended to `text`, not carried as a fourth key**, because
+`ParseUserInterface.elm` reads exactly three and does so in six vendored copies —
+a new key is six Elm edits before a decision can see the second half of a
+sentence. Every consumer of this channel is a substring test over `text`, so
+appending can only widen what matches and can never break a match that used to
+happen; checked over the whole corpus rather than assumed, where folding leaves
+the entry count, every timestamp and every channel identical, changes the text of
+exactly the 113 wrapped entries, and leaves `loadRefusalFromGameLog`'s matches and
+both damage summaries byte for byte as they were. Nothing wraps on `(combat)` or
+`(bounty)`, so the damage half of this channel is untouched.
+
+The one thing this does not do is hold an entry back waiting for a continuation.
+`GameLogTail` carries the open entry across polls, so a wrapped entry split
+between two reads still arrives whole, but a drain hands the entry over as it
+stands — delaying a refusal until the client says something else would be worse
+than losing a clause. So a wrap whose halves fall either side of a *reading* is
+delivered as its first half, and the rest is dropped rather than becoming an
+entry with no timestamp and no channel.
 
 **It rides the UI tree rather than extending the protocol**, for the same reason
 #17 could not extend it either. `ReadFromWindowResult` is decoded by the closed
@@ -4599,11 +4639,21 @@ exists.
   vendoring policy are in the Architecture section.
 
   **Verified without a live client, and that is most of what a live client
-  would have added.** 30 unit tests in
+  would have added.** 58 unit tests in
   `tools/macos-host/tests/test_game_log_channel.py` cover the tail, the
-  filtering, the node and `_read_from_window`, replaying the real lines the
-  host echoed during five recorded runs — including a check that every one of
-  those ~4,850 recorded lines parses. The Elm half was driven end to end
+  filtering, the node, `_read_from_window` and #124's wrapped entries,
+  replaying the real lines the host echoed during the recorded runs — including
+  a check that every one of those 64,000-odd recorded lines is read, as an
+  entry or as the rest of the one above it, and that folding the wrapped ones
+  leaves every other entry and both damage summaries exactly as they were.
+  Confirmed by mutation, eleven of them, each failing a named case: the tail
+  dropping continuations again (the revert), the pure fold dropping them,
+  folding only the first continuation (hard-coding two lines), a continuation
+  becoming an entry of its own, joining with no separator, prepending instead
+  of appending, the open entry surviving a file change or surviving being
+  handed to a reading, the tail folding only within one poll, the echo joining
+  too, and a continuation recognised by its wording rather than by its
+  position. The Elm half was driven end to end
   off-line: a host-built reading, double-encoded exactly as the real one is,
   through `decodeMemoryReadingFromString` and the real vendored
   `parseUserInterfaceFromUITree` (mission-runner's copy and saxrat's), giving

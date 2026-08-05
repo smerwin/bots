@@ -2317,13 +2317,46 @@ _OUTGOING_DAMAGE_LINE = re.compile(r"^(?P<amount>\d+) to (?P<target>.+)$")
 # run still searching for the UI root) rather than a busy client.
 GAME_LOG_QUEUE_LIMIT = 500
 
+# What joins a wrapped entry back together. The client writes a long message
+# across several physical lines and puts the "[ ts ] (channel) " prefix on the
+# first alone:
+#
+#   [ 2026.08.04 21:43:33 ] (question) Aggression against this peaceful entity
+#   may have consequences such as a standings penalty ... It is recommended
+#   that you reconsider.
+#   Do you wish to proceed?
+#
+# So a line the prefix does not match, arriving while an entry is open, is the
+# rest of that entry rather than something to drop -- and dropping it is issue
+# #124: run 35 carries 113 of these, and the bot got the caveat and lost the
+# question on every one.
+#
+# **Two things about the rule were measured before it was built**, over the
+# 214,630 non-blank lines in the 145 files of `~/Documents/EVE/logs/Gamelogs`.
+# Not one line lacking the prefix begins with `[`, so nothing the client wraps
+# can be mistaken for a new entry by the only test used to tell them apart --
+# which is the half the issue flagged as unverified. And the wrapping runs
+# deeper than two: 138 entries of two lines, 7 of three and 3 of four, so
+# nothing here counts to a fixed number of continuations.
+#
+# The one shape that is *not* a continuation is the header block every file
+# opens with (`----`, `Gamelog`, `Listener: X`, `Session Started: <when>`),
+# four or five prefix-less lines. All 143 of them in that corpus sit above
+# their file's first entry, so a rule phrased as "continues the entry above it"
+# declines them by having nothing to continue. That is why it is phrased that
+# way round rather than as a test on the line itself -- there is no wording
+# these share that a continuation could not also have.
+GAME_LOG_CONTINUATION_JOIN = " "
+
 
 def parse_game_log_line(line):
     """Split one already-de-markup'd game log line into its three parts.
 
-    Returns `None` for anything not in the client's own line shape -- the file
-    opens with a header block, and a line wrapped mid-write has no reason to
-    parse. A caller wanting the raw text has it already.
+    Returns `None` for anything not in the client's own line shape. That covers
+    two different things and the caller decides between them: the header block
+    a file opens with, which is dropped, and the second and later lines of a
+    wrapped entry, which belong to the entry above -- see
+    `continue_game_log_entry`. A caller wanting the raw text has it already.
     """
     match = _GAME_LOG_LINE.match(line)
     if match is None:
@@ -2333,6 +2366,52 @@ def parse_game_log_line(line):
         "channel": match.group("channel"),
         "text": match.group("text"),
     }
+
+
+def continue_game_log_entry(entry, line):
+    """Fold a wrapped line back into the entry it belongs to.
+
+    **Appended to the entry's own text rather than carried as a field of its
+    own**, and what reads it is the reason. `ParseUserInterface.elm` lifts
+    exactly `timestamp`, `channel` and `text` out of the synthetic node, in six
+    vendored copies that the policy says must stay identical -- so a fourth key
+    is six Elm edits before any decision can see the second half of a sentence,
+    where appending needs none. And every consumer of this channel is a
+    substring test over `text`: `loadRefusalFromGameLog`'s two, the locked-gate
+    verdict, the capsule refusal, the docking-perimeter marker. Appending can
+    only make more of an entry matchable and can never stop a match that used
+    to happen, which is what makes this safe for entries nobody wrapped --
+    they get nothing appended, because nothing was wrapped.
+
+    Joined with a space rather than a newline because `_poll` has already
+    collapsed the whitespace inside each line, and what the client wrapped is
+    one paragraph rather than two sentences -- so a space puts the entry back
+    into the single-line shape every other entry already has, and keeps it out
+    of the one thing a newline would cost, which is a `text` no existing
+    matcher was written against.
+    """
+    entry["text"] = GAME_LOG_CONTINUATION_JOIN.join(
+        part for part in (entry["text"], line) if part)
+    return entry
+
+
+def game_log_entries_from_lines(lines):
+    """Every entry `lines` carries, each one read whole.
+
+    The pure form of what `GameLogTail._poll` does as the file grows, for a
+    caller that already holds the lines -- a recorded run's echo, or a whole
+    file. A line the client's prefix does not match continues the entry above
+    it; one with no entry above it is dropped, exactly as it always was.
+    """
+    entries = []
+    for line in lines:
+        entry = parse_game_log_line(line)
+        if entry is None:
+            if entries:
+                continue_game_log_entry(entries[-1], line)
+            continue
+        entries.append(entry)
+    return entries
 
 
 def parse_incoming_damage(entry):
@@ -2419,6 +2498,16 @@ class GameLogTail:
         self.directory = os.path.expanduser(directory)
         self.path = None
         self.offset = 0
+        # The entry a continuation would belong to: the last one parsed out of
+        # this file, still sitting in the queue below and not yet handed to
+        # anybody. Held across polls rather than only within one, because the
+        # two halves of a wrapped entry are two writes and a read can land
+        # between them -- an entry that arrives whole only when the poll
+        # happens to catch both lines is the bug fixed here, arriving less
+        # often. It is dropped the moment appending to it would be a lie:
+        # `entries_for_reading` has given it away, or the file it came from is
+        # no longer the one being read.
+        self._entry_open = None
         self._echo_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
         self._reading_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
         self._damage_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
@@ -2439,6 +2528,7 @@ class GameLogTail:
             return
         if path != self.path:
             self.path = path
+            self._entry_open = None
             try:
                 self.offset = os.path.getsize(path)
             except OSError:
@@ -2450,6 +2540,11 @@ class GameLogTail:
             # seeking past the end and reporting nothing forever.
             if size < self.offset:
                 self.offset = 0
+                # And the next lines are a file's header block rather than the
+                # rest of whatever was open, which is the one case where
+                # "continues the entry above it" would reach across a boundary
+                # it should not.
+                self._entry_open = None
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
                 handle.seek(self.offset)
                 data = handle.read()
@@ -2466,9 +2561,18 @@ class GameLogTail:
             self._echo_queue.append(line)
             entry = parse_game_log_line(line)
             if entry is None:
+                # A wrapped entry's second or later line, or -- with nothing
+                # open -- a header line, which is dropped as it always was.
+                if self._entry_open is not None:
+                    continue_game_log_entry(self._entry_open, line)
                 continue
+            self._entry_open = entry
             if entry["channel"] not in GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT:
                 self._reading_queue.append(entry)
+            # Both damage reads take the entry as its first line stands, which
+            # costs nothing: no `(combat)` line wraps -- 0 of the 191,689 in
+            # `~/Documents/EVE/logs/Gamelogs` -- and both patterns anchor on
+            # the leading number and stop at the first " - " regardless.
             damage = parse_incoming_damage(entry)
             if damage is not None:
                 self._damage_queue.append(damage)
@@ -2493,10 +2597,20 @@ class GameLogTail:
         No cap and no placeholder line: a "(N earlier lines not shown)" marker
         is fine in a log a human reads and would be a fabricated game log entry
         in a channel a decision branches on.
+
+        **An entry is handed over as it stands and never held back for a
+        continuation that may be coming.** The alternative -- keep the last
+        entry until the line after it proves it complete -- would delay every
+        refusal by however long the client stays quiet, and a refusal read a
+        reading late is the failure this channel exists to end. The price is
+        stated rather than hidden: a wrapped entry whose halves fall either
+        side of a drain is delivered as its first half, and its second half is
+        dropped rather than becoming an entry of its own.
         """
         self._poll()
         entries = list(self._reading_queue)
         self._reading_queue.clear()
+        self._entry_open = None
         return entries
 
     def incoming_damage_for_reading(self):
