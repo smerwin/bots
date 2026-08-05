@@ -1308,7 +1308,8 @@ missionBotDecisionRootBeforeApplyingSettings context =
         -- locks, shoots, approaches or loots lives under the split. See
         -- `recoverPodAfterShipLoss`. It is below `generalSetupInUserInterface`
         -- only because the pod still needs the location info panel expanded and
-        -- stray menus cleared to travel at all.
+        -- stray menus cleared to travel at all -- which is why #126 hoisted its
+        -- deadline into the entry above rather than the branch itself.
         [ endSessionOnAnExpiredBound context
         , generalSetupInUserInterface
             { confirmQuitMission = quitMissionConfirmationIsExpected context
@@ -1356,28 +1357,52 @@ carries independent of everything else the tree is doing. Issue #102: that
 independence is the property `abandonMissionGiveUpReadings` always claimed and,
 until now, did not have.
 
-One deadline lives here today, the abandonment's. The pod recovery's
-(`podRecoveryGiveUpReadings`) and the wind-down's are the same shape and are
-deliberately left where they are for now. **They were not spared in run 30** --
-`generalSetupInUserInterface` answered on every reading of it, so nothing below
-it ran at all and both of those were starved exactly as this was. They had no
-verdict latched, so neither counter was running and neither bound had anything to
-be late for. That is the whole of why this shape has been paid for once rather
-than three times, and it is not a reason to think the other two are sound. Moving
-a bound is still a behaviour change that wants its own evidence, and what is true
-of all three is stated in `abandonmentOutOfTime`: a give-up that ends the session
-is counted in elapsed readings, and belongs where nothing can decline to ask it.
+Two deadlines live here, the pod recovery's (#126) and the abandonment's (#102),
+and both arrived the same way: a counter advanced on every reading in the memory
+update, compared in a branch a held tree could decline to reach. **Neither was
+spared in run 30** -- `generalSetupInUserInterface` answered on every reading of
+it, so nothing below it ran at all -- and the pod recovery's cost nothing only
+because no ship-loss verdict was latched, so its counter was not running.
+
+**The pod recovery is asked first**, because a lost ship outranks a stuck
+mission everywhere else in this file and there is no reason for the one reading
+that ends the session to say the lesser of the two facts. A capsule is what the
+operator has to go and deal with; a mission still accepted can wait for them.
+
+The wind-down's deadlines are the same family and stay where they are: they are
+reached from `windDownBeforeSessionEnd`, whose own condition is a clock the
+framework supplies rather than a counter this file advances, and moving a bound
+is a behaviour change that wants its own evidence. What is true of all of them is
+stated in `abandonmentOutOfTime`: a give-up that ends the session is counted in
+elapsed readings, and belongs where nothing can decline to ask it.
 
 -}
 endSessionOnAnExpiredBound : BotDecisionContext -> Maybe DecisionPathNode
 endSessionOnAnExpiredBound context =
-    abandonmentOutOfTime { missionToAbandon = context.memory.missionToAbandon }
+    [ podRecoveryOutOfTime
+        { shipLoss = context.memory.shipLoss
+        , shipUIIsShowing = context.readingFromGameClient.shipUI /= Nothing
+        }
+        |> Maybe.map
+            (\verdict ->
+                describeBranch
+                    (describePodRecoveryOutOfTime
+                        { homeStationName = context.eventContext.botSettings.homeStationName
+                        , verdict = verdict
+                        }
+                    )
+                    (Common.DecisionPath.endDecisionPath FinishSession)
+            )
+    , abandonmentOutOfTime { missionToAbandon = context.memory.missionToAbandon }
         |> Maybe.map
             (\verdict ->
                 describeBranch
                     (describeAbandonmentOutOfTime verdict)
                     (Common.DecisionPath.endDecisionPath FinishSession)
             )
+    ]
+        |> List.filterMap identity
+        |> List.head
 
 
 {-| How long before the planned session end to stop taking new work and park.
@@ -2010,17 +2035,120 @@ shipLossReadingsWithoutModulesBeforeVerdict =
 A pod that has been trying to reach a station for this long is not going to, and
 an unbounded retry loop reads in the log exactly like a bot working -- issues #7
 and #14 twice over. When it expires the session _ends_, naming the station the
-pod never reached, so an operator finds out rather than discovering it later.
+pod was routed to if one was configured, so an operator finds out rather than
+discovering it later.
 
 Calibrated in readings, at the eight seconds a reading the recorded runs
 average -- so this is about twenty minutes of trying, against the roughly fifty
 readings `homeStationTripSecondsPastSessionEnd` (420s) already budgets for the
 same route, jumps and dock. Three times the headroom the trip that works needs.
 
+**Issue #126 is where the comparison over it is asked, which is #102's defect a
+second time and in the same file.** `shipLoss.readingsSince` is advanced in
+`updateMemoryForNewReadingFromGame`, unconditionally, and the comparison sat
+inside `recoverPodAfterShipLoss` -- in the pre-split list, but _below_
+`generalSetupInUserInterface`, so anything answering up there starved it. Run 30
+starved it for three hours and forty-four minutes and it cost nothing only
+because no ship-loss verdict was ever latched: the counter was not running, so
+the bound had nothing to be late for. That is luck, not soundness, and a ship
+lost during that same standoff would have reproduced run 30 with a capsule
+sitting in the pocket that killed the ship instead of a mission going unquit. So
+the comparison now lives in `podRecoveryOutOfTime` and is asked from
+`endSessionOnAnExpiredBound`, above everything -- see that rule for why this
+give-up is the kind that belongs there.
+
 -}
 podRecoveryGiveUpReadings : Int
 podRecoveryGiveUpReadings =
     150
+
+
+{-| The pod recovery that has run past that bound, asked where nothing sits above.
+
+**Issue #126, and it is `abandonmentOutOfTime` a second time**, on the bound
+PR #115's own report named as the next one worth fixing. The argument that
+decides the shape is that one's: a give-up that ends the session bounds elapsed
+time and belongs where nothing can decline to ask it; one that declines an action
+bounds effort and belongs where the action is. **This give-up ends the session**
+-- it is a `describeBranch` around `FinishSession` and nothing else, with no
+click, no travel, no dock and no menu -- so it is the first kind, and its home is
+the head of the decision root. It is not the recovery that moves: flying the pod
+to a station is an errand needing the location info panel expanded and stray
+menus cleared, which is exactly why `recoverPodAfterShipLoss` sits below
+`generalSetupInUserInterface` and still does.
+
+**The ship UI is a condition and not decoration.** The recovery's other
+session-ending outcome is the pod being _docked_, which is success rather than a
+bound, and it names the station from `dockedStationNameFromInfoPanel` -- a read
+that needs `ensureInfoPanelLocationInfoIsExpanded` to have run, so that outcome
+genuinely cannot be hoisted and is deliberately left where it is. Asking this one
+without the ship UI would therefore end a docked session saying the pod never
+reached a station, which is false on the reading it would be printed. `shipUI` is
+a parse of the reading rather than a state the tree has to reach, so requiring it
+costs this bound nothing it needs: what is left uncovered is a pod that is docked
+and safe while something above holds the tree, and a docked pod is what the bound
+exists to produce.
+
+**Counted in readings rather than attempts, and the stakes make that stronger
+here than for the abandonment.** The other shape -- advance the counter only on
+readings this branch was reached -- means a bot held elsewhere spends none of the
+budget, which is precisely the runaway. Run 30's abandonment would have stood at
+211 attempts for three and three-quarter hours; a starved pod recovery is that
+with a capsule in a hostile pocket, where the runaway costs the clone rather than
+a mission's standing. The cost of this direction is stated rather than hidden: a
+bot starved above this branch for an unrelated reason now ends its session at 150
+readings with the recovery never attempted, where before it ran until something
+else stopped it. That is the better half of the trade, because the pod was not
+being flown anywhere on any of those readings either -- the difference is only
+whether a person is told about it within twenty minutes or after the session runs
+out.
+
+-}
+podRecoveryOutOfTime :
+    { shipLoss : Maybe ShipLossVerdict, shipUIIsShowing : Bool }
+    -> Maybe ShipLossVerdict
+podRecoveryOutOfTime { shipLoss, shipUIIsShowing } =
+    if not shipUIIsShowing then
+        Nothing
+
+    else
+        shipLoss
+            |> Maybe.andThen
+                (\verdict ->
+                    if podRecoveryGiveUpReadings <= verdict.readingsSince then
+                        Just verdict
+
+                    else
+                        Nothing
+                )
+
+
+{-| The one line an operator gets when the pod recovery runs out of time.
+
+It names the station the pod was being routed to, where `home-station` gave one,
+because "which station was it trying to reach" is what a person needs in order to
+go and find the capsule -- and because without the setting there was never a
+named destination, only `dockAtStation` off the surroundings menu, which the
+sentence says rather than inventing a name.
+
+It also says what the count is, for `describeAbandonmentOutOfTime`'s reason and
+with more at stake. The number is readings since the verdict, not attempts, so a
+session that ends here having never printed a `Pod recovery:` line is telling the
+operator something about the _rest_ of the bot rather than about the recovery --
+which is the shape run 30 would have had, and the one thing its operator had no
+way to read out of the number they were given.
+
+-}
+describePodRecoveryOutOfTime : { homeStationName : Maybe String, verdict : ShipLossVerdict } -> String
+describePodRecoveryOutOfTime { homeStationName, verdict } =
+    "The pod has been trying to reach "
+        ++ (homeStationName
+                |> Maybe.map (\name -> "'" ++ name ++ "'")
+                |> Maybe.withDefault "a station (no 'home-station' is configured, so it was taking whatever the surroundings menu offered)"
+           )
+        ++ " for "
+        ++ String.fromInt verdict.readingsSince
+        ++ " readings and has not got there. Ending the session in space rather than retrying forever -- the pod needs recovering by hand. That count is readings since the ship was lost rather than attempts, so if the decision log shows no 'Pod recovery:' line, something above this branch was holding the whole tree."
 
 
 {-| The client saying, in its own words, that the ship being flown cannot lock
@@ -2185,20 +2313,31 @@ fighting" structural rather than a list of things not to do: locking, module
 activation, approach and looting all live below this branch and are simply never
 reached. There is nothing aboard a capsule to fight with.
 
-Four outcomes, and every one of them says in the decision log that the ship was
+Three outcomes, and every one of them says in the decision log that the ship was
 lost, because that is the one fact an operator has to be able to read back:
 
   - **Docked.** The pod is safe and the run is over. A ship loss is something the
     operator has to act on, and the session's remaining hours are worth nothing
-    without a ship, so this ends the session rather than parking.
+    without a ship, so this ends the session rather than parking. It stays here
+    rather than joining the deadline above because it names the station out of
+    the location info panel, which `ensureInfoPanelLocationInfoIsExpanded` is
+    what makes readable -- so unlike the deadline it does have state to reach.
   - **In space with a `home-station`.** The same route-travel-dock path #16 built
     for the drone restock, via `travelToStationByName`.
   - **In space with no `home-station`.** `dockAtStation` off the surroundings
     menu, preferring the station last docked at. Weaker -- it can only reach a
     station in this system, and it says so -- but a pod docked anywhere beats a
     pod stationary in the pocket that just killed the ship.
-  - **Out of time.** `podRecoveryGiveUpReadings` readings of trying, and the
-    session ends saying so.
+
+**The fourth outcome is gone from here, and that is #126.** Running out of time
+was tested in this branch, below `generalSetupInUserInterface`, over a counter
+advanced on every reading -- so anything holding the tree starved the bound while
+the number it is compared against went on climbing. `podRecoveryOutOfTime` owns
+that comparison now, from the head of
+`missionBotDecisionRootBeforeApplyingSettings`, and this function is reached only
+while the recovery still has time. There is deliberately no second copy of the
+test: two places could disagree about whether the pod still has time, and the one
+in here is the one a starved tree never reaches.
 
 -}
 recoverPodAfterShipLoss : BotDecisionContext -> Maybe DecisionPathNode
@@ -2226,42 +2365,33 @@ recoverPodAfterShipLoss context =
                                 (Common.DecisionPath.endDecisionPath FinishSession)
 
                         Just _ ->
-                            if podRecoveryGiveUpReadings <= shipLoss.readingsSince then
-                                describeBranch
-                                    ("The pod has been trying to reach a station for "
-                                        ++ String.fromInt shipLoss.readingsSince
-                                        ++ " readings and has not got there. Ending the session in space rather than retrying forever -- the pod needs recovering by hand."
-                                    )
-                                    (Common.DecisionPath.endDecisionPath FinishSession)
+                            case context.eventContext.botSettings.homeStationName of
+                                Just stationName ->
+                                    travelToStationByName context
+                                        stationName
+                                        { whileSettingRoute =
+                                            "Pod recovery: set the route to '"
+                                                ++ stationName
+                                                ++ "' before anything else."
+                                        , whileTravelling =
+                                            "Pod recovery: travelling to '"
+                                                ++ stationName
+                                                ++ "' to get the pod docked."
+                                        }
 
-                            else
-                                case context.eventContext.botSettings.homeStationName of
-                                    Just stationName ->
-                                        travelToStationByName context
-                                            stationName
-                                            { whileSettingRoute =
-                                                "Pod recovery: set the route to '"
-                                                    ++ stationName
-                                                    ++ "' before anything else."
-                                            , whileTravelling =
-                                                "Pod recovery: travelling to '"
-                                                    ++ stationName
-                                                    ++ "' to get the pod docked."
-                                            }
-
-                                    Nothing ->
-                                        describeBranch
-                                            ("Pod recovery: no 'home-station' is configured, so there is no station this pod can be routed to by name. Docking at whatever this system offers"
-                                                ++ (context.memory.lastDockedStationNameFromInfoPanel
-                                                        |> Maybe.map (\name -> ", preferring '" ++ name ++ "'")
-                                                        |> Maybe.withDefault ""
-                                                   )
-                                                ++ " instead."
-                                            )
-                                            (dockAtStation
-                                                context.memory.lastDockedStationNameFromInfoPanel
-                                                context
-                                            )
+                                Nothing ->
+                                    describeBranch
+                                        ("Pod recovery: no 'home-station' is configured, so there is no station this pod can be routed to by name. Docking at whatever this system offers"
+                                            ++ (context.memory.lastDockedStationNameFromInfoPanel
+                                                    |> Maybe.map (\name -> ", preferring '" ++ name ++ "'")
+                                                    |> Maybe.withDefault ""
+                                               )
+                                            ++ " instead."
+                                        )
+                                        (dockAtStation
+                                            context.memory.lastDockedStationNameFromInfoPanel
+                                            context
+                                        )
                     )
             )
 
