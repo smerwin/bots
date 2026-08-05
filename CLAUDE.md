@@ -2762,7 +2762,8 @@ while it was dying.**
 structural.** The combat log reports *gross* incoming damage; survival is
 governed by *net*; and this hull's armour repairer is of the same order as the
 fire it was under — run 36's armour climbed back from 17% to 48% while the log
-still reported 1115 falling to 378 hitpoints a window. A gauge-free instrument
+still reported 1232 falling to 378 hitpoints a window, reaching 29% before that
+window dropped below a thousand at all. A gauge-free instrument
 cannot see the repairer, and cumulative damage over a longer clock is not bounded
 by the tank on a ship that repairs, so a longer window does not rescue it either.
 Only the gauge reads net.

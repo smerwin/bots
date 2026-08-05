@@ -7792,14 +7792,15 @@ about 53 seconds -- under `Tower Sentry Gallente I` and a
 **1854 against 3500**, arrived at reading 1290 with the armour still at 78% and
 the ship in no trouble at all. At the ship's worst the window read 1232. **The
 guard read higher while the ship was healthy than while it was dying**, and it
-went on reading 1115 falling to 378 across the 43 readings the armour climbed
+went on reading 1232 falling to 378 across the 43 readings the armour climbed
 back from 17% to 48%.
 
 **The reason is not calibration, so moving the number cannot fix it.** The
 combat log reports _gross_ incoming damage; what kills a ship is _net_; and this
-hull's armour repairer is of the same order as the fire it was under -- 31
-points of armour recovered while the log still reported over a thousand
-hitpoints a window. A gauge-free instrument cannot see the repairer, so it
+hull's armour repairer is of the same order as the fire it was under -- the
+armour climbed from 17% to 29% before the window fell below a thousand at all,
+and to 48% by the time it reached 378. A gauge-free instrument cannot see the
+repairer, so it
 cannot order the danger, and cumulative damage over a longer window is not
 bounded by the tank on a ship that repairs. Lowering the threshold only trades
 this failure for the one 3500 exists to avoid: it sits between 3114, the worst
