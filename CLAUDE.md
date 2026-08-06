@@ -4406,10 +4406,148 @@ the wordings differently.
 **Still unverified: whether `l_abovemain` ever holds more than one message**,
 which the parser drops without a word and the clause counts — a run that prints
 `1 of 2 quick messages in the layer` settles that in the direction that says the
-parser needs fixing. And **nothing decides anything on a quick message yet**,
-which a case still asserts: #110 reads the capacity refusal off the game log
-instead, because those entries are scoped to the reading where a quick message
-would have to be dated first.
+parser needs fixing.
+
+**One message is now read, and exactly one.** #146 wires the drone-launch
+refusal, in both apps — see the section below. #110 still reads the *targeting*
+capacity refusal off the game log rather than off this channel, and the two must
+not come to read each other's sentence. What replaced "nothing decides anything
+on a quick message" as the case pinning the boundary is a count: exactly one
+declaration per app takes a `QuickMessageSighting` and compares its text, and its
+name is written down. A second one fails that case, which is the point at which
+somebody has to argue for it against a vocabulary this corpus shows growing.
+
+## The client names the drone cap the drones window does not
+
+The drones-in-space group's title carries a maximum, and `launchAndEngageDrones`
+in **both** apps took it as the number of drones the ship may have out. That is
+bandwidth and bay. The binding constraint on this character is the drone-control
+skill, the two differ, and the client says so every time it refuses a launch:
+
+```
+<center>You cannot launch Hammerhead I because you are already controlling 5 drones, as much as you have skill to.
+```
+
+saxrat's run 6 read `In bay: 3, in space: 5` on **17,919 readings**, pressed
+Shift+F **826** times, and had **1,316** of those refusals live on the screen when
+a reading was taken — the single most common thing the client said to either bot
+in that run, and about a quarter of every live quick message in the corpus. The
+mission runner's run 37 shows the same shape at 101 live and saxrat's run 5 at
+224. The bot could not tell the launch was refused, so it pressed again on the
+next reading, all session.
+
+**This is #110's rule applied to drones, and the two are deliberately kept
+apart.** `You are already managing 6 targets, as many as you have skill to.` is
+the same sentence to within two words and is already consumed, off the game log,
+to set the lock-slot ceiling. Two rules reading each other's sentence would be
+two wrong ceilings — a lock ceiling capped at the number of drones, or a drone
+ceiling capped at the number of lock slots — so the exclusion is over-determined
+in both directions, exactly as #151's is: `controlling` is not `managing`, `much`
+is not `many`, and the count is sliced after `already controlling`, a clause the
+targeting sentence does not contain at all.
+
+**The matcher is checked against every wording the corpus holds**, which is
+`briefingSaysClearingIsOptional`'s discipline applied to a channel with a much
+larger vocabulary: **108 distinct quick messages** across mission run 37 and
+saxrat runs 5 and 6. Two of them match both markers and both are this refusal,
+differing only in the drone's name — `Acolyte I` and `Hammerhead I`, which is why
+nothing in the matcher reads the name. Everything else is declined, including the
+four nearest misses: `Acolyte I cannot be dropped because it is not in your drone
+bay.`, `Drone cannot be commanded as it is not actually present.`, `The drones
+fail to execute your commands as the target … is not within your … drone command
+range.`, and the narration `Drones engaging …`.
+
+**`Cargo is too far away. Ship is on automatic approach to cargo.` is declined,
+and it is the reason there is no general rule.** It is the commonest message in
+the mission runner's run 37 at 795 live, and it is **not** a refusal — the client
+is confirming it took the command and is flying there. A rule keyed on "a quick
+message means something went wrong" would be wrong about it 795 times in one run,
+and a case executes the shipped matcher against it for that reason.
+
+**Counted live, and the rule refuses an aged sighting itself.**
+`quickMessageAfterReading` carries the last message forward with an age until
+another replaces it, so carried-forward totals are three orders of magnitude
+larger and rank the wordings differently — the ranking this whole section rests
+on inverts if they are counted. `droneLaunchRefusalStatedInQuickMessage` requires
+`readingsSince == 0` inside itself rather than trusting its callers, because
+`memory.quickMessage` and `quickMessageOnScreen` both type-check at the call
+site and a rule wired to the first would learn a cap from a popup shown before
+the last dock.
+
+**`min`, not replacement, because neither number is a guess.** Unlike
+`maxTargetsCeiling` — where the setting was an operator's guess and the client's
+sentence a fact — both halves here are read off the client: the window's maximum
+is a real bound this ship has, the sentence is a real bound this character has,
+and the lower of two real bounds is the one that binds. A statement naming a
+number *above* what the window offers raises nothing.
+
+**Absent evidence never moves the limit.** With nothing stated the ceiling is
+exactly the window's own number, so a session in which the client never refuses a
+launch behaves precisely as every session did before this rule existed. And
+nothing latches across sessions: `initBotMemory` starts at `Nothing`, so each
+session launches up to the window's maximum, is refused at most once, and stops —
+one refusal per session against run 6's 1,316. That is also what keeps this from
+freezing a character whose drone skill is still training, and within a session the
+latest statement wins.
+
+**The status line carries both halves separately**, because they fail
+differently: `Drone launch ceiling: 5 (drones window says 8, client stated 5).`
+A run whose `client stated` never leaves `-` is one whose popups are not reaching
+the rule; a window number that never drops below the ceiling is a ship whose skill
+was not the binding constraint. The move is announced once at the root, beside
+`maxTargetsLastChange`, through `lockRangeLastChange`'s mechanism.
+
+**The bot re-issues commands the client has already accepted, and this change
+does not fix that.** Measured on the readings the automatic-approach message was
+live: the mission runner re-commanded an open-cargo or loot on **691 of 795**, and
+saxrat re-issued an approach (`Press the 'W' key and click on the overview entry`)
+on **307 of 340**. Whether that is harmful is not established — the client may
+simply be re-accepting a command it is already executing, as it appears to for
+the approach — and the same shape is what the docking run-in section already
+records costing run 27 an eight-minute dock. It is recorded here because it is the
+next thing this corpus points at, not because #146 acts on it.
+
+**`Drone cannot be commanded as it is not actually present.` was considered
+alongside and deliberately left**, at 76 live in run 37, 117 in run 5 and 449 in
+run 6. It does not share a consumer: the launch refusal is answered by the launch
+branch's own limit, where "cannot be commanded" arrives from the engage and recall
+commands and has no existing bound to feed. Wiring it is its own change with its
+own evidence.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_drone_launch_refusal.py` (35 cases, run against
+**both** apps). The rules are executed through the real `Bot.elm` in `elm repl`
+rather than restated in Python, and the sightings they are asked about come from
+the real `EveOnline.ParseUserInterface` off a UI tree — **neither parser needed a
+change**. The corpus is recounted as *relations* rather than as the numbers above:
+the refusal really occurs and names more than one drone, the shipped markers read
+every recorded refusal and recover the count, the shipped markers admit nothing
+else out of the 108 wordings, the automatic-approach message is among the ones
+declined, and the bot really did press launch again on a reading whose screen
+already carried the refusal.
+
+Confirmed by mutation, **twelve** of them, each failing a named case: a general
+"any live quick message means the launch failed" rule (which admits the
+automatic-approach message, and is the rule #146 forbids by name); the naive
+matcher with all three exclusions gone (which admits the targeting sentence);
+the live-only guard dropped so a carried-forward sighting teaches a cap;
+`min` for `max` so a stated skill cap raises the launch site above the window;
+absent evidence taking a default; the smallest statement winning rather than the
+latest; the launch site reading the window's maximum directly again; the count
+taken as the first integer in the sentence; the status clause neutralised; the
+move never announced at the root; the rule landing in one app only; and a second
+matcher on the quick message, which fails #123's own boundary case next door.
+
+**Unverified: any of it running.** No run has been flown since. What to watch on
+the first one is `Drone launch ceiling: N (drones window says M, client stated -)`
+on every in-space reading, then `client stated 5` within a reading or two of the
+first refusal, then `Learned drone launch ceiling: …` once in the decision log and
+never again — and then `You cannot launch` disappearing from the quick-message
+clause for the rest of the session. A run that fights and never leaves
+`client stated -` while the refusal is on screen means the sighting is not
+reaching the rule. The failure to watch for is the opposite: a ceiling learned
+from a *stale* popup, whose tell is `client stated N` appearing on a reading whose
+quick-message clause reads `NOT on screen now`.
 
 ## Acceleration gates: a gate that will not open says why, on a channel nobody read
 
@@ -4790,7 +4928,7 @@ shipped configuration rather than edge cases:
 | drone recall (#11) | **no bound of any kind**, in front of every warp, tether and dock | `droneRecallUnansweredTicks`, give-up, focus-recovery click |
 | what it will shoot (#40) | the overview's icon colour and nothing else | plus whatever the combat log names as hitting the ship |
 | setting its own route | could only *follow* one a human set | `hunt-system` circuit, asked for through the host's ESI directive |
-| the client's transient popup (#123) | parsed on every reading and read by nothing — the same five references and the same zero readers | printed in the status line, carried forward with an age, and still read by no decision |
+| the client's transient popup (#123) | parsed on every reading and read by nothing — the same five references and the same zero readers | printed in the status line, carried forward with an age, and since #146 read by exactly one decision (the drone-launch cap) |
 | the lock range (#121) | `targeting-range` asserted and never revised — `lockProvenAtMeters` appeared 0 times | the setting clamped into `[proven, refused)`, learned from the client's own answers, with the row-identity discipline unchanged |
 | the lock-slot ceiling (#110, #150) | `maxTargetCount = 4` hardcoded with no setting able to reach it, against a real maximum of 6 — 2,149 readings of `Enough locked targets.` across runs 2-5, and a `List.take 4` candidate window that would have capped it there anyway | `max-targets`, clamped by the maximum the client states on the game log and by what the target bar has held, and asking for one row more than that until the client states the number |
 | the ammo swap (#122) | absent, not unconfigured — `ammoSwap`, `Charge`, `chargeName` and `optimalRange` all appeared 0 times, and there was no setting to turn on | ported without its tooltip half, with `ammo-swap-range` **required** rather than optional — see "saxrat swaps ammo at a distance it is told" below |
@@ -6417,6 +6555,20 @@ exists.
   watch for `Quick message:` on every reading, then a quoted string with
   `(on screen now)` the first time the client shows one.
 
+  And since #146 it **reads one of those popups**: the client's refusal to launch
+  more drones than the pilot's skill allows, which caps the launch site at the
+  number the client names instead of at the drones window's own maximum. Run 37
+  pressed Shift+F into that refusal on 101 readings and saxrat's run 6 on 1,316,
+  the drones window offering more while three drones sat in the bay. Why the rule
+  is per message rather than "a quick message means failure", why it declines
+  `Cargo is too far away. Ship is on automatic approach to cargo.` (the commonest
+  message in either bot, and a *success*), and how it is kept off #110's
+  near-identical targeting sentence are in "The client names the drone cap the
+  drones window does not" above. **Untested against a live client**; watch the
+  status line's `Drone launch ceiling: N (drones window says M, client stated -)`
+  for `client stated` filling in within a reading or two of the first refusal, and
+  then the refusal not recurring.
+
   And it now **learns how many targets the ship can hold** rather than carrying
   a hardcoded `maxTargetCount = 4` no setting could reach, against a client that
   states its own maximum of **6** on the game log 228 distinct times across the
@@ -6475,7 +6627,13 @@ exists.
   It also carries the mission runner's quick-message clause, identically: the
   rules are the same declarations under the same names and a case compares them
   byte for byte, while the line each is placed in follows each app's own status
-  conventions.
+  conventions. Since #146 that includes the **drone-launch cap read off one of
+  those popups**, and this is the bot the corpus indicts: run 6 pressed Shift+F
+  826 times with three drones in the bay and five in space, and was refused on
+  1,316 readings — a quarter of every live quick message ever recorded from either
+  bot. The rule is identical in both apps and a case compares all ten shared
+  declarations byte for byte. **Untested against a live client**; watch
+  `Drone launch ceiling:` in the status line.
 
   And it now **swaps ammo**, which it could not do at all — the capability was
   absent rather than unconfigured, with `ammoSwap` appearing 165 times in the
@@ -6891,11 +7049,15 @@ load-bearing — see "The home station".
   consumers of
   `gameLogEntriesSinceLastReading`'s *lines*, so every other guard that infers a
   refusal indirectly still does. The candidates the recorded runs actually
-  contain: `You cannot launch Acolyte I
-  because you are already controlling 5 drones` (17 occurrences — the drone
-  launch retries blind), `You cannot do that while warping` and `while docking`
+  contain: `You cannot do that while warping` and `while docking`
   (6 between them), and `You cannot activate that module as the target is no
-  longer present`. **`You are already managing N targets` is no longer among
+  longer present`. **`You cannot launch <drone> because you are already
+  controlling N drones` is no longer among them either** — #146 reads it, in both
+  apps, off the *quick message* rather than the game log, and both channels carry
+  it (215 `(notify)` entries in saxrat's run 6 against 1,316 live popups). It was
+  read off the popup because the popup is on the reading whatever the game-log
+  window is doing, and because #146 is the issue that asked for the quick-message
+  corpus to be used. **`You are already managing N targets` is no longer among
   them** — #110 reads it, in both apps, to learn the lock-slot ceiling. What it
   does *not* yet do is hand that line to the **lock range**, whose refusal test
   still requires the target bar empty at both ends of an attempt precisely

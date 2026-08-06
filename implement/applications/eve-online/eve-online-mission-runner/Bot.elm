@@ -697,6 +697,14 @@ type alias BotMemory =
     , maxTargetsStatedByClient : Maybe Int
     , maxTargetsHeldAtOnce : Maybe Int
     , maxTargetsLastChange : Maybe String
+
+    -- How many drones the client has said this ship is already controlling,
+    -- read off the quick message on the reading it refused a launch.
+    -- `droneLaunchLastChange` holds a sentence only on the reading that number
+    -- moved, `maxTargetsLastChange`'s mechanism for its reason. See
+    -- `droneLaunchCeiling`.
+    , droneLaunchRefusedAbove : Maybe Int
+    , droneLaunchLastChange : Maybe String
     , ammoSwap : AmmoSwapMemory
     }
 
@@ -1344,6 +1352,7 @@ missionBotDecisionRoot context =
      , context.memory.dronesLeftBehindLastChange
      , context.memory.lockRangeLastChange
      , context.memory.maxTargetsLastChange
+     , context.memory.droneLaunchLastChange
      , context.memory.messageBoxLastChange
      ]
         |> List.filterMap identity
@@ -12321,6 +12330,302 @@ describeAmmoSwapState context =
             "Ammo swap: off (needs both short-range-ammo and long-range-ammo)."
 
 
+{-| The clause a drone-launch refusal is recognised by, and the one the count is
+sliced out after.
+
+One constant for both, so an extraction can never succeed on a sentence the
+matcher would have rejected -- `maxTargetsStatedMarker`'s arrangement, for its
+reason.
+
+-}
+droneLaunchRefusedMarker : String
+droneLaunchRefusedMarker =
+    "already controlling"
+
+
+{-| The second clause, and it is what keeps this rule off the targeting refusal
+#110 already consumes.
+
+`You are already managing 6 targets, as many as you have skill to.` is the same
+sentence to within two words, and `maxTargetsStatedInGameLog` reads it off the
+game log to set the lock-slot ceiling. Two rules reading each other's sentence
+would be two wrong ceilings -- a lock ceiling capped at the number of drones, or
+a drone ceiling capped at the number of lock slots -- so the exclusion is
+deliberately over-determined and holds in both directions: `controlling` is not
+`managing`, `much` is not `many`, and the count is sliced after
+`droneLaunchRefusedMarker`, a clause the targeting sentence does not contain at
+all. No single loosening admits the other sentence.
+
+Checked against every wording the corpus holds: 108 distinct quick messages
+across mission run 37 and saxrat runs 5 and 6. Two of them match both markers and
+both are this refusal, differing only in the drone's name.
+
+-}
+droneLaunchSkillMarker : String
+droneLaunchSkillMarker =
+    "as much as you have skill to"
+
+
+{-| How many drones the client says this ship is already flying, off the quick
+message that is on the screen **now**.
+
+`<center>You cannot launch Acolyte I because you are already controlling 5
+drones, as much as you have skill to.` -- 101 live sightings in mission run 37,
+224 in saxrat run 5 and 1,316 in saxrat run 6, which is the single most common
+thing the client said to either bot in run 6. The drone's name varies with what
+is in the bay (`Acolyte I` and `Hammerhead I` both occur) and nothing here reads
+it.
+
+**A carried-forward sighting teaches nothing, and is refused here rather than at
+the call site.** `quickMessageAfterReading` keeps the last message with an age
+until another replaces it, so the same popup is still in memory hundreds of
+readings after the launch it refused -- carried-forward totals across these runs
+are three orders of magnitude above the live ones and rank the wordings
+differently. A ceiling learned from an age-200 sighting would be learned from a
+ship that has since docked, restocked and undocked. So `readingsSince` must be
+`0`, and the one call site that could pass an aged sighting cannot make this rule
+believe it.
+
+The count is sliced out after `droneLaunchRefusedMarker` rather than taken as the
+first integer in the sentence, so it is the number that clause is about: the text
+in front of the clause is the drone's own name, which is client text this rule
+does not control. No recorded wording puts a digit there, and the slice is what
+keeps one that did from being read as a drone count. A sentence that matches both
+markers and yields no number is **no evidence** and never a default -- see
+`droneLaunchCeiling` for why that direction is the whole safety of this.
+
+-}
+droneLaunchRefusalStatedInQuickMessage : Maybe QuickMessageSighting -> Maybe Int
+droneLaunchRefusalStatedInQuickMessage sighting =
+    sighting
+        |> Maybe.andThen
+            (\seen ->
+                if seen.readingsSince /= 0 then
+                    Nothing
+
+                else if
+                    stringContainsIgnoringCase droneLaunchRefusedMarker seen.text
+                        && stringContainsIgnoringCase droneLaunchSkillMarker seen.text
+                then
+                    droneLaunchCountInStatement seen.text
+
+                else
+                    Nothing
+            )
+
+
+{-| The count the client named, out of a sentence already matched.
+
+Lowercased before slicing only so that the marker matches the way the matcher's
+own `stringContainsIgnoringCase` does; nothing lowercased here is stored or
+printed. A capitalisation the slice misses therefore yields `Nothing`, which is
+the safe direction rather than a guess -- and so does the client wrapping the
+number in markup the way it wraps `<b>86 km</b>` elsewhere in this corpus.
+
+-}
+droneLaunchCountInStatement : String -> Maybe Int
+droneLaunchCountInStatement text =
+    case text |> String.toLower |> String.split droneLaunchRefusedMarker of
+        _ :: afterMarker :: _ ->
+            afterMarker |> String.words |> List.head |> Maybe.andThen String.toInt
+
+        _ ->
+            Nothing
+
+
+{-| The two numbers that bound a launch, kept as a record so a case can execute
+the rule that combines them.
+
+`fromWindow` is what the drones-in-space group's own title says; `statedByClient`
+is what the client said when it refused a launch. Neither is a setting -- both
+are read off the client -- which is why this pair has no `fromSetting` the way
+`MaxTargetsState` does.
+
+-}
+type alias DroneLaunchState =
+    { fromWindow : Int
+    , statedByClient : Maybe Int
+    }
+
+
+{-| The pair as this reading has it, assembled in one place.
+
+One reader of the drones window's maximum per side of a reading, so the launch
+decision and the status clause cannot come to hold two opinions about the
+ceiling -- `maxTargetsStateFrom`'s reason.
+
+-}
+droneLaunchStateFrom : BotDecisionContext -> DroneLaunchState
+droneLaunchStateFrom context =
+    { fromWindow = dronesInSpaceLimitFromWindow context.readingFromGameClient
+    , statedByClient = context.memory.droneLaunchRefusedAbove
+    }
+
+
+{-| The limit assumed where the drones-in-space group's title carries no maximum.
+
+The value both apps have always used. It is kept as a constant rather than
+inlined so that the launch site and the status clause cannot come to assume
+different ones.
+
+-}
+droneLaunchLimitWithoutATitle : Int
+droneLaunchLimitWithoutATitle =
+    2
+
+
+{-| How many drones the drones window says this ship may have out.
+
+The window's own arithmetic and nothing else, so that "what the window says" and
+"what the client says" stay two separate readings a status clause can print side
+by side. A reading with no drones window answers the same default the launch site
+always used, since a launch is not attempted without one anyway.
+
+-}
+dronesInSpaceLimitFromWindow : ReadingFromGameClient -> Int
+dronesInSpaceLimitFromWindow readingFromGameClient =
+    readingFromGameClient.dronesWindow
+        |> Maybe.andThen .droneGroupInSpace
+        |> Maybe.andThen (.header >> .quantityFromTitle)
+        |> Maybe.andThen .maximum
+        |> Maybe.withDefault droneLaunchLimitWithoutATitle
+
+
+{-| How many drones the launch site will try to have in space.
+
+**The drones window's maximum is not the drone-control skill cap, and the launch
+site had been treating it as one.** saxrat's run 6 read `In bay: 3, in space: 5`
+on 17,919 readings -- three drones sitting in the bay, a window whose title
+admitted more, and a client that answered `You cannot launch Hammerhead I because
+you are already controlling 5 drones, as much as you have skill to.` to every one
+of the 826 launches the bot pressed. 1,316 of those refusals were on screen when
+a reading was taken. Mission run 37 shows the same shape at 101, saxrat run 5 at
+
+1.  The bot could not tell the launch was refused, so it pressed again on the
+    next reading, for the whole session.
+
+`min` rather than replacement, because unlike `maxTargetsCeiling` neither number
+here is a guess: the window's maximum is a real bound this ship has (bandwidth
+and bay), and the client's sentence is a real bound this character has (the
+drone-control skill). The lower of two real bounds is the one that binds, and a
+statement naming a number **above** what the window offers must not raise
+anything.
+
+**Absent evidence never moves the limit.** With `statedByClient` unknown this is
+exactly the window's own number, so a session in which the client never refuses a
+launch behaves precisely as every session did before this rule existed. That
+direction is the whole safety of it: a ceiling raised on a guess spends readings
+pressing a launch the client will never grant, which is the failure being fixed.
+
+**And nothing latches across sessions**, which is what keeps this from freezing a
+character whose drone skill is still training. `initBotMemory` starts at
+`Nothing`, so every session launches up to the window's maximum, is refused at
+most once, and stops -- one refusal per session against run 6's 1,316. Within a
+session the latest statement wins, so a cap that moves while the bot is flying
+moves this with it.
+
+-}
+droneLaunchCeiling : DroneLaunchState -> Int
+droneLaunchCeiling state =
+    case state.statedByClient of
+        Just stated ->
+            min stated state.fromWindow
+
+        Nothing ->
+            state.fromWindow
+
+
+{-| What the rule knows after this reading.
+
+Returned as one record rather than written field by field, so the whole of the
+rule lives in one place -- `MaxTargetsLearning`'s reason.
+
+-}
+type alias DroneLaunchLearning =
+    { statedByClient : Maybe Int
+    , change : Maybe String
+    }
+
+
+{-| Move the learned cap on what the client has just refused.
+
+The **latest** statement wins rather than the smallest, for `maxTargetsCeiling`'s
+reason: it is the client's answer about this character now, and a skill
+completing mid-session moves it up. Taking the smallest would make one refusal
+permanent for the session and unable to follow that.
+
+`change` is set on the reading the learned number moves and on no other, by
+comparing what this reading stated against what was believed. That needs no
+"already reported" flag: the same popup sits on screen for several readings in a
+row -- 1,316 live sightings against 215 refusals in saxrat run 6's own game log --
+and every reading after the first states the number already held, which moves
+nothing and says nothing.
+
+-}
+updateDroneLaunchLearning :
+    { onScreenNow : Maybe QuickMessageSighting
+    , statedBefore : Maybe Int
+    }
+    -> DroneLaunchLearning
+updateDroneLaunchLearning state =
+    let
+        statedOnThisReading : Maybe Int
+        statedOnThisReading =
+            droneLaunchRefusalStatedInQuickMessage state.onScreenNow
+    in
+    { statedByClient =
+        case statedOnThisReading of
+            Just stated ->
+                Just stated
+
+            Nothing ->
+                state.statedBefore
+    , change =
+        case statedOnThisReading of
+            Nothing ->
+                Nothing
+
+            Just stated ->
+                if Just stated == state.statedBefore then
+                    Nothing
+
+                else
+                    Just
+                        ("Learned drone launch ceiling: the client refused a launch, saying this ship is already controlling "
+                            ++ String.fromInt stated
+                            ++ " drones, as much as this character has skill to -- no further launch is attempted above "
+                            ++ String.fromInt stated
+                            ++ (case state.statedBefore of
+                                    Just before ->
+                                        ", rather than the " ++ String.fromInt before ++ " learned earlier this session."
+
+                                    Nothing ->
+                                        ", whatever maximum the drones window's own title offers."
+                               )
+                        )
+    }
+
+
+{-| The launch ceiling and where each half of it came from, for the status line.
+
+Continuous rather than once-per-change, unlike the decision-log line, and both
+halves are named separately because they fail differently -- a run whose `client
+stated` never leaves `-` is one whose popups are not reaching the rule, where a
+window number that never drops below the ceiling is a ship whose skill is not the
+binding constraint at all. `describeMaxTargets`' argument, applied to this pair.
+
+-}
+describeDroneLaunchCeiling : DroneLaunchState -> String
+describeDroneLaunchCeiling state =
+    "Drone launch ceiling: "
+        ++ (droneLaunchCeiling state |> String.fromInt)
+        ++ " (drones window says "
+        ++ (state.fromWindow |> String.fromInt)
+        ++ ", client stated "
+        ++ (state.statedByClient |> Maybe.map String.fromInt |> Maybe.withDefault "-")
+        ++ ")."
+
+
 launchAndEngageDrones : BotDecisionContext -> Maybe DecisionPathNode
 launchAndEngageDrones context =
     context.readingFromGameClient.dronesWindow
@@ -12349,10 +12654,12 @@ launchAndEngageDrones context =
                                     |> Maybe.map .current
                                     |> Maybe.withDefault 0
 
+                            -- The window's own maximum is a real bound and
+                            -- the drone-control skill is another, and until
+                            -- #146 only the first was consulted. See
+                            -- `droneLaunchCeiling`.
                             dronesInSpaceQuantityLimit =
-                                droneGroupInSpace.header.quantityFromTitle
-                                    |> Maybe.andThen .maximum
-                                    |> Maybe.withDefault 2
+                                droneLaunchCeiling (droneLaunchStateFrom context)
                         in
                         if 0 < (idlingDrones |> List.length) then
                             Just
@@ -14272,6 +14579,8 @@ initBotMemory =
     , maxTargetsStatedByClient = Nothing
     , maxTargetsHeldAtOnce = Nothing
     , maxTargetsLastChange = Nothing
+    , droneLaunchRefusedAbove = Nothing
+    , droneLaunchLastChange = Nothing
     , ammoSwap = initAmmoSwapMemory
     }
 
@@ -14547,7 +14856,7 @@ statusTextFromState context =
                     -- are absent on most readings and long when present, so
                     -- folding them into a shared line would make that line jump
                     -- between short and unwieldy.
-                    [ [ describeShip, describeDrones ]
+                    [ [ describeShip, describeDrones, describeDroneLaunchCeiling (droneLaunchStateFrom context) ]
                     , [ describeRatsInOverview, describeCurrentTarget, describeOverview, describeLockRange context, describeMaxTargets (maxTargetsStateFrom context) ]
                     , [ describeZeroDamage context ]
                     , [ describeClearing context ]
@@ -18864,6 +19173,12 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             updateMaxTargetsLearning (maxTargetsReadingFrom context)
                 (maxTargetsStateBefore context botMemoryBefore)
 
+        droneLaunchLearning =
+            updateDroneLaunchLearning
+                { onScreenNow = quickMessageOnScreen context.readingFromGameClient
+                , statedBefore = botMemoryBefore.droneLaunchRefusedAbove
+                }
+
         -- Only settled readings count as a look. The selected container
         -- renders empty for one reading while it is being switched (40 -> 0 ->
         -- 40 rendered rows, watched live), so a gauge read on the reading after
@@ -19537,6 +19852,8 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     , maxTargetsStatedByClient = maxTargetsLearning.statedByClient
     , maxTargetsHeldAtOnce = maxTargetsLearning.heldAtOnce
     , maxTargetsLastChange = maxTargetsLearning.change
+    , droneLaunchRefusedAbove = droneLaunchLearning.statedByClient
+    , droneLaunchLastChange = droneLaunchLearning.change
     , targetToUnlockRegion = currentTargetToUnlockRegion
     , targetToUnlockUnchangedTicks =
         if currentTargetToUnlockRegion == Nothing then
