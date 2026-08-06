@@ -14,6 +14,14 @@ is the trap #92 documents -- a rule keyed on a word list the client's vocabulary
 outgrew twice with nobody noticing. What the change buys is that the next run
 puts the vocabulary into the corpus; the matcher comes after there is one.
 
+**The corpus arrived and #146 wrote the first matcher against it**, on one
+message -- the drone-launch refusal, in `test_drone_launch_refusal.py`. What that
+changes here is narrow and the two cases at the bottom of this file now hold the
+line where it moved. That rule reads `quickMessageOnScreen`, this reading's
+sighting, and never `memory.quickMessage`, the aged one; and it is the *only*
+matcher on the message, which is what keeps "one message wired deliberately"
+from becoming "a quick message means something went wrong".
+
 Two design questions the cases pin, because both can be got wrong quietly:
 
 - **Persistence.** A popup is transient and a reading is seconds apart, so the
@@ -476,14 +484,19 @@ class QuickMessageCases:
         self.assertIn(AWKWARD_TEXT, clause)
         self.assertIn("on screen now", clause)
 
-    def test_nothing_decides_anything_on_the_quick_message(self):
-        """The scope of #123, asserted rather than intended.
+    def test_nothing_decides_anything_on_the_carried_forward_message(self):
+        """The scope of #123, and since #146 the line between two fields.
 
-        Logging first and matching later is the whole argument: no wording has
-        ever been captured, so any rule keyed on one would rest on guessed
-        strings. The memory field is therefore read in exactly two places -- the
-        update that writes it, and the status line that prints it -- and a third
-        reader is a decision this change deliberately does not make.
+        Logging first and matching later was the whole argument, and the corpus
+        it produced is what #146's drone-launch rule is written against. What
+        survives unchanged is which *field* a decision may read. The memory
+        field is the sighting carried forward with an age, and it is read in
+        exactly two places -- the update that writes it and the status line that
+        prints it. A rule reading it would learn from a popup shown before the
+        last dock, which is why #146 reads `quickMessageOnScreen` instead and
+        refuses an aged sighting inside its own matcher. Both fields type-check
+        at that call site, so a third reader appearing here is the mistake this
+        case exists to catch.
         """
         declarations = top_level_declarations(source_of(self.BOT_ELM))
         readers = sorted(
@@ -588,23 +601,42 @@ class BothAppsRecordTheSameThing(unittest.TestCase):
         self.assertEqual(mission, saxrat)
         self.assertEqual(mission, EXPECTED_BUDGET)
 
-    def test_neither_app_carries_a_matcher_on_the_message(self):
+    def test_exactly_one_matcher_reads_the_message_and_it_is_named(self):
         """#92's trap, refused in the place it would be introduced.
 
-        A rule keyed on words nobody has read is the failure this change is
-        ordered to avoid, so a comparison of the message text against a literal
-        is what a later change must not add without first having a corpus.
+        A rule keyed on words nobody has read was the failure #123 was ordered
+        to avoid, and #146 lifted that only for the one message it measured
+        against the whole recorded vocabulary. What must not happen next is a
+        second matcher appearing without that work being repeated -- the
+        vocabulary grows, and this corpus already contains a message meaning
+        success in progress (`automatic approach`) and a dozen that are pure
+        narration.
+
+        So the boundary is counted rather than described: exactly one
+        declaration per app takes a `QuickMessageSighting` and compares its
+        text, and its name is stated here. A second one fails this case, which
+        is the point at which somebody has to argue for it.
         """
         for path in (MISSION_RUNNER_BOT_ELM, SAXRAT_BOT_ELM):
             with self.subTest(app=os.path.basename(os.path.dirname(path))):
-                source = collapsed(source_of(path))
-                offenders = re.findall(
-                    r'stringContainsIgnoringCase "[^"]*"[^;]{0,40}quickMessage',
-                    source)
-                offenders += re.findall(
-                    r'quickMessage[a-zA-Z]*[^;]{0,60}'
-                    r'stringContainsIgnoringCase "', source)
+                declarations = top_level_declarations(source_of(path))
+                matchers = sorted(
+                    name for name, body in declarations.items()
+                    if "QuickMessageSighting" in body
+                    and "stringContainsIgnoringCase" in body)
                 self.assertEqual(
-                    offenders, [],
-                    "a matcher on the quick message's wording has appeared, "
-                    "and no wording has been recorded yet -- see #123")
+                    matchers, ["droneLaunchRefusalStatedInQuickMessage"],
+                    "the set of rules matching on the quick message's wording "
+                    "is %r rather than the one #146 argued for" % matchers)
+
+                # And that one compares against named constants rather than a
+                # literal written where it is used, so the corpus check in
+                # `test_drone_launch_refusal.py` can read the strings the bot
+                # actually ships and run them against the client's own lines.
+                body = collapsed(
+                    declarations["droneLaunchRefusalStatedInQuickMessage"])
+                self.assertEqual(
+                    re.findall(r'stringContainsIgnoringCase "', body), [],
+                    "the drone-launch matcher compares against a literal "
+                    "written in place, so nothing can check it against the "
+                    "recorded wordings")
