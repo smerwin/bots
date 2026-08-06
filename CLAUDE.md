@@ -4794,7 +4794,7 @@ shipped configuration rather than edge cases:
 | the lock range (#121) | `targeting-range` asserted and never revised — `lockProvenAtMeters` appeared 0 times | the setting clamped into `[proven, refused)`, learned from the client's own answers, with the row-identity discipline unchanged |
 | the lock-slot ceiling (#110, #150) | `maxTargetCount = 4` hardcoded with no setting able to reach it, against a real maximum of 6 — 2,149 readings of `Enough locked targets.` across runs 2-5, and a `List.take 4` candidate window that would have capped it there anyway | `max-targets`, clamped by the maximum the client states on the game log and by what the target bar has held, and asking for one row more than that until the client states the number |
 | the ammo swap (#122) | absent, not unconfigured — `ammoSwap`, `Charge`, `chargeName` and `optimalRange` all appeared 0 times, and there was no setting to turn on | ported without its tooltip half, with `ammo-swap-range` **required** rather than optional — see "saxrat swaps ammo at a distance it is told" below |
-| an in-range acceleration gate (#145) | a context-menu cascade, and a give-up counting readings *near* a gate rather than readings spent asking one — `selectedItem` appeared 0 times in `Bot.elm`, so it had never pressed a panel button for anything | `selectThenPanelAction`'s shape over `selectedItemActivateGate`, inside `unlessAlreadyClosingIn`; the counter counts the ask — see "An in-range acceleration gate is opened from the panel here too" below |
+| an in-range acceleration gate (#145, #147) | a context-menu cascade, and a give-up counting readings *near* a gate rather than readings spent asking one — `selectedItem` appeared 0 times in `Bot.elm`, so it had never pressed a panel button for anything. And the branch was **unreachable inside a site at all**: a "Warp to Site" button anywhere in the tree outranked it, and the panel goes on drawing one after arrival | `selectThenPanelAction`'s shape over `selectedItemActivateGate`, inside `unlessAlreadyClosingIn`; the counter counts the ask; and `siteProgressStep` asks the gate first and declines a site offered while a gate is in reach — see the two sections below |
 
 Two things about the port are worth keeping in view.
 
@@ -5780,11 +5780,11 @@ last one 20 lines before it, against 10,485 in the run as a whole. Run 4 is the
 control — one block too, and 12 opportunity lines in the entire run, none near
 it. So a low give-up count in a saxrat run is not evidence a gate opened; it can
 equally be the branch never being asked, and any before-and-after comparison on
-this bot has to say which. **Fixing that ordering is #147's and is deliberately
-not part of this change**, but the counter here is what stops the shadowing being
-*paid for*: counting the ask, run 5's shadowed readings hold at 0 and its
-reachable window is about 36 readings, short of the bound, so that give-up would
-not have fired at all.
+this bot has to say which. **Fixing that ordering was deliberately not part of
+this change and is #147, the section below**, but the counter here is what stops
+the shadowing being *paid for*: counting the ask, run 5's shadowed readings hold
+at 0 and its reachable window is about 36 readings, short of the bound, so that
+give-up would not have fired at all.
 
 So the counter now counts the **ask** — `askingAnAccelerationGateToOpen`, the
 Selected Item panel showing an acceleration gate that is already in reach — holds
@@ -5810,6 +5810,14 @@ recorded episodes leave nothing in the middle: every one peaks at 1 to 18
 readings or at 282 and 3,504. 40 sits in that gap with an order of magnitude
 either side, and no version of this mechanism moves an episode across it. What
 was wrong was the counter, not the number.
+
+**That last paragraph is this section's own reasoning and #147 overturned it.**
+The number survived; the argument did not. Every one of those peaks was counted
+while the opportunity branch held the tree, so they are readings spent *near* a
+gate — the quantity this very change argues is the wrong one — and a distribution
+of those cannot size a budget for readings spent *asking*. What sizes it is the
+mission runner's corpus, where the branch is reached: see "The gate is worked
+before the site is warped to again" below.
 
 **The give-up no longer names a cause.** It said the gate "most likely will not
 admit this ship", which is an inference, and run 4's is the case where it is
@@ -5878,6 +5886,147 @@ mechanism, and is the first evidence anyone will have of that. A count that
 climbs while the clause reads `(a gate is in reach, not being asked)` means
 something above this branch is holding the tree, which is run 5's shape and is
 now visible rather than being spent as budget.
+
+### The gate is worked before the site is warped to again
+
+Issue #147, and the branch above is what it makes reachable.
+`pickAnotherAnomalyOrLeave` asked `warpToOpportunitySiteIfAvailable` first and
+`activateAccelerationGateIfPresent` only where that answered `Nothing`, while the
+comment over both said they "take priority over the normal probe-scan hunt loop"
+— which is a claim about the pair against the third option and says nothing about
+which of the two wins. The code answered "the first one, always", because its
+condition is a whole-tree text search for a "Warp to Site" button and the
+Opportunities panel goes on drawing that after the ship has arrived. So inside a
+multi-pocket site the gate branch was unreachable and the site was re-warped
+instead of followed.
+
+**The crux is whether a reading can tell "an opportunity exists" from "the ship
+still needs to go there". It can — off the grid rather than off the panel.**
+
+Run 5's shadowed stretch is the measurement, and it is worse than the issue's
+count of decision lines suggests. It runs **3,458 readings**, about 75 minutes of
+a three-hour session, with:
+
+| | |
+|---|---:|
+| opportunity-warp decision lines | 10,469 |
+| clicks dispatched, all at one screen position | 3,460 |
+| distinct screen positions clicked | **1** |
+| in-warp readings after the two the arrival ends on | **0** |
+| readings with an acceleration gate in reach | **every one** |
+| **on-screen quick messages** | **0** |
+
+The counter runs 2 → 3,463 unbroken, so the ship never left the gate; the combat
+feed and the overview are unchanged throughout; and it ended only when a person
+warped the ship by hand. **The client never answered one of those 3,460 clicks**,
+which is what rules out reading the client instead — there is no sentence to
+match on, in a run that carries dozens of distinct quick-message wordings
+elsewhere.
+
+The grid does answer. Gates exist only inside sites, so a gate on the overview
+means the ship has already arrived somewhere, and every recorded episode agrees:
+
+- **three stretches began with a gate in reach** (run 3 line 124489, run 4 line
+  23016, run 5 line 101277) and **none ever produced a warp** — two ended within
+  a handful of readings when the button went away and the gate branch finally got
+  its turn;
+- **the two that began with no gate in reach** (run 4 line 21172, run 5 line
+  99710) were in warp within three readings.
+
+**So the fix is two halves, and the second is what keeps it from swapping one
+shadow for another.** `siteProgressStep` is the ordering as a pure rule over a
+record — the gate branch first, then a "Warp to Site" **only where no gate is in
+reach**, then the hunt loop. Ordering alone would not do: the gate branch answers
+`Nothing` once it has given up, so the very next reading would fall straight back
+into the dead click with nothing left to bound it. Declining sends it to the
+scanner instead, which is the recovery run 4 eventually made on its own after 238
+wasted readings.
+
+**The give-up hands the reading back**, where it used to answer
+`askForHelpToGetUnstuck` — a leaf that dispatches nothing and waits. Asked first,
+that would have shadowed the warp branch permanently rather than being shadowed
+by it, which is the reverse of the failure being fixed. It is the mission
+runner's answer for the mission runner's reason, and it costs the decision line:
+a `Nothing` cannot carry one, so `describeGateActivationAsk` carries the give-up
+in the status line on every reading afterwards instead. Run 10 on the other bot
+is what an unreported decline costs — 1,325 readings of "nothing is happening"
+beside a gate 32 m away.
+
+**A far gate now outranks an offered site, and that is a delay rather than a
+loss.** The panel is persistent, so the site is still offered after the gate is
+taken, and the recorded far-gate episodes close on their own: run 5's ran 23,000
+m → 2,405 m and run 4's 10,000 m → 2,508 m, both handing off to something else
+when they arrived. The reverse shadow — a gate present while a genuinely
+un-warped site waits — costs those readings. The shadow being removed cost 40% of
+run 5's session and, on the issue's own figures, 38% of its income.
+
+**`gateRefusesThisShipTicks` stays at 40 and its argument is replaced.** #145
+placed it against saxrat's peaks of 1 to 18 versus 282 and 3,504 and called that
+an order of magnitude of clearance. Those are readings spent *near* a gate under
+this very shadowing, so they cannot size a budget for readings spent *asking*.
+The mission runner's corpus can, because its gate branch is reached and takes
+gates: across every episode in its 37 runs where the nearest gate came inside
+2,000 m, **89 of 93 ended in a warp and 88 of those had spent 0 to 4 readings in
+reach** — usually 0, since the client takes the gate on the approach — with the
+longest that still opened spending **15**. The largest count that corpus records
+on a gate its branch gave up on is **335**. So the gap is real and its edges are
+15 and 335 rather than 18 and 282; 40 sits inside it at 2.7 times the largest
+success and an eighth of the failure. Being early also costs less than it did,
+now that the give-up hands back rather than parking the session.
+
+**Run 6 is the newest run and says nothing about any of this.** It flew #149's
+merge for ten hours, 1.4 million log lines, and met **no acceleration gate and no
+opportunity at all** — zero gate decisions of any kind, zero "Warp to Site" lines,
+the status clause reading `0 of 40` throughout. Worth recording so it is not
+mistaken for a run that exercised the path.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_opportunity_shadow.py` (32 cases). The
+ordering rule is executed through the real `Bot.elm` in `elm repl` at every
+combination of its three inputs, asked as three equalities per case so a rule
+answering two things at once or none would fail; the search's *inability* is
+asserted over readings the real `EveOnline.ParseUserInterface` produced, with the
+grid answering differently on the same two trees; the give-up's comparison is
+asked at both sides of the bound and at a fixed value past it; and the status
+clause is rendered. The corpus is recounted as relations rather than as the
+numbers above — a stretch beside a gate in reach in which the ship never warped,
+no client answer inside it, and every stretch that *did* end in a warp taken with
+no gate in reach — and the bound's two edges are recomputed from the mission runs.
+
+Confirmed by mutation, **thirteen** of them, each failing a named case: the
+ordering restored to warp-first; a plain gate-first nesting that skips the rule
+(and so drops the guard that matters after the give-up); the rule moved into a
+second binding with the old nesting left under the real name; the two arms
+swapped; the in-reach clause dropped from the rule; the rule's own ifs reordered;
+the reach input neutralised to `False`; the give-up answering
+`askForHelpToGetUnstuck` again; a second comparison of the bound inside the
+branch; the status clause dropping the give-up; the bound cut to 10, which slices
+the mission corpus's successes; the bound raised to 400, past the recorded
+failure; and the comparison moved one reading early.
+
+**One mutation survived the first pass and the hole was real.** The reader for
+`pickAnotherAnomalyOrLeave` — which is a `let` binding rather than a top-level
+declaration — read from the binding's name to the next `in`, so a mutation that
+left the old nesting under that name and moved the real ordering into a second
+binding beside it passed every case: the text asserted on still held both. It
+ends at the next line indented no further than the binding's own name now, and
+that mutation is kept as one of the thirteen.
+
+**Unverified: any of it running.** No run has been flown since, and run 6 met
+neither a gate nor an opportunity, so nothing here has been watched. What to
+watch on the first saxrat run that enters a multi-pocket site: `I see a 'Warp to
+Site' opportunity -- warp there` falling from five figures to roughly the number
+of sites actually entered, with gate decisions rising to meet it. Two failures to
+watch for, in opposite directions. A run that never warps to a site at all would
+mean the gate branch is answering `Just` where it should not, and the tell is
+gate decisions climbing while `Found matching anomaly` and the warp line both go
+quiet. And a gate that will not open now ends in the status line's give-up
+followed by ordinary hunting rather than by the session parking — if instead the
+log shows the bot warping back to the same site and standing at the same gate
+again, that is the oscillation this does not bound: the opportunity is still
+offered once the ship leaves reach, and nothing remembers that its gate was given
+up on. **Income is the outcome measure and there is a clean control**: run 38 did
+1,536,545 ISK/hr on these settings before this path started dominating.
 
 ## Elm toolchain
 
@@ -6427,6 +6576,22 @@ exists.
   where the client said nothing. **Untested against a live client**; watch
   `Readings spent asking an acceleration gate to open: N of 40` with
   `(asking now)` beside it and N staying in single figures.
+
+  And since #147 it **works that gate before warping to a site again**, which is
+  what makes the branch above reachable at all: the "Warp to Site" search
+  outranked it and answers `Just` while the button is drawn, which the panel goes
+  on doing after arrival, so run 5 spent 3,458 readings — 75 minutes — clicking
+  one screen position beside a gate it never asked, and was freed by a person.
+  The grid is what separates "an opportunity exists" from "we are not there yet",
+  since the client never answered one of those clicks; so the gate is asked first
+  **and** a site offered while a gate is in reach is declined. The give-up now
+  hands the reading back rather than parking the session, which is what stops the
+  new ordering shadowing the warp branch in turn. See "The gate is worked before
+  the site is warped to again" above, including the bound's replaced argument —
+  40 survives, on the mission runner's corpus rather than on saxrat's shadowed
+  peaks. **Untested against a live client**, and run 6 met neither a gate nor an
+  opportunity in ten hours; watch the opportunity-warp line falling to roughly
+  the number of sites entered with gate decisions rising to meet it.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
@@ -6698,6 +6863,23 @@ load-bearing — see "The home station".
   view invisible rather than mis-clicked — the loot path pairs the filter with
   `scrollOverviewToReveal` and the gate path has no such pairing. Both halves
   together, on a run that can be watched.
+- **Nothing remembers that a gate was given up on, so saxrat can go back for
+  it.** #147 makes the gate branch hand the reading back and the warp branch
+  decline while that gate is in reach, so the bot leaves through the hunt loop —
+  but the opportunity is still offered, and once the ship is out of reach the
+  warp branch is available again and may take it straight back to the same site.
+  Each cycle costs `gateRefusesThisShipTicks` readings rather than the session,
+  which is why it is a gap rather than a blocker, and the corpus holds one gate
+  that never opened in five saxrat runs. The fix would be memory — a site or a
+  gate whose verdict outlives leaving reach — and it wants a run that shows the
+  oscillation before anyone designs one.
+- **The out-of-range gate branch has no bound of its own.** Its counter resets
+  whenever no gate is in reach, so a gate the client will not close on is
+  answered by "activate it from here" every reading forever. It has never
+  happened — every recorded far-gate episode closed the distance and handed off
+  (23,000 m → 2,405 m in run 5, 10,000 m → 2,508 m in run 4) — but #147 makes
+  that branch outrank the opportunity warp, so the state it would fail in is now
+  reachable where the warp branch used to mask it.
 - **The gate key is fetched but the fetch has never run.** #44 wired the item
   the client names into the existing loot path, so a locked gate now sends the
   bot looking for its key rather than straight to asking for help. Nothing has

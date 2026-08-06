@@ -518,11 +518,21 @@ class TheBranchPressesThePanelTest(unittest.TestCase):
         self.assertIn("clickUiElement accelerationGateEntry.uiNode", self.branch)
 
     def test_the_bound_is_read_through_the_rule_and_not_a_second_time(self):
-        """One comparison, so two places cannot disagree about the give-up."""
+        """One comparison, so no two readers can disagree about the give-up.
+
+        There are three of them since #147: the step rule, the branch that hands
+        the reading back, and the status clause that reports the give-up every
+        reading afterwards -- because a `Nothing` cannot carry a decision line.
+        So the comparison moved down into `gateHasBeenGivenUpOn` and this follows
+        it there rather than asserting where it used to be.
+        """
         self.assertNotIn("gateRefusesThisShipTicks", self.branch)
         self.assertIn(
-            "gateRefusesThisShipTicks < gateCase.askedReadings",
+            "gateHasBeenGivenUpOn gateCase.askedReadings",
             collapsed(body_of(self.source, "gateActivationStep")))
+        self.assertIn(
+            "gateRefusesThisShipTicks < askedReadings",
+            collapsed(body_of(self.source, "gateHasBeenGivenUpOn")))
 
     def test_the_counter_is_written_through_the_rule(self):
         update = collapsed(
@@ -604,9 +614,20 @@ class TheRecordedSaxratRunsTest(unittest.TestCase):
     def test_the_bound_sits_in_a_gap_in_the_recorded_episodes(self):
         """Every episode is far below 40 or far above it, and none is near.
 
-        That separation is what makes 40 a threshold rather than a cut through a
-        distribution, and it is why the number did not have to move when the
-        mechanism did.
+        **What that separation is evidence for is narrower than this case
+        originally claimed**, and #147 is where the correction is. Every peak
+        here was counted while `warpToOpportunitySiteIfAvailable` held the tree,
+        so they are readings spent *near* a gate -- the quantity this very
+        change argues is the wrong one -- and a distribution of those cannot
+        size a budget for readings spent asking. What sizes it is the mission
+        runner's corpus, where the branch is reached; see
+        `gateRefusesThisShipTicks` and
+        `test_saxrat_opportunity_shadow.TheMissionCorpusIsWhatSizesTheBoundTest`.
+
+        The relation is still worth holding: a saxrat corpus whose in-reach
+        episodes started landing beside 40 would mean the shadowed and the asked
+        readings had stopped being distinguishable, which is a finding either
+        way.
         """
         peaks = []
         for path in saxrat_runs(1, 2, 3, 4, 5):

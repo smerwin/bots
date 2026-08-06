@@ -2726,12 +2726,36 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                     -- falling through to this), so an opportunity
                                     -- appearing mid-combat doesn't pull the ship away
                                     -- from a fight already in progress.
-                                    pickAnotherAnomalyOrLeave =
+                                    --
+                                    -- Which of the two comes first is `siteProgressStep`,
+                                    -- which carries the measurement: the gate is the work
+                                    -- in front of the ship, and a "Warp to Site" offered
+                                    -- while a gate is in reach is the panel still showing
+                                    -- the site the ship is standing in.
+                                    accelerationGateStep =
+                                        activateAccelerationGateIfPresent context
+
+                                    opportunityWarpStep =
                                         warpToOpportunitySiteIfAvailable context.readingFromGameClient
-                                            |> Maybe.withDefault
-                                                (activateAccelerationGateIfPresent context
+
+                                    pickAnotherAnomalyOrLeave =
+                                        case
+                                            siteProgressStep
+                                                { gateBranchOffersAStep = accelerationGateStep /= Nothing
+                                                , warpToSiteIsOffered = opportunityWarpStep /= Nothing
+                                                , gateWithinReach = accelerationGateIsWithinReach context.readingFromGameClient
+                                                }
+                                        of
+                                            WorkTheAccelerationGate ->
+                                                accelerationGateStep
                                                     |> Maybe.withDefault pickAnotherAnomalyOrLeaveViaScanResults
-                                                )
+
+                                            WarpToTheOpportunitySite ->
+                                                opportunityWarpStep
+                                                    |> Maybe.withDefault pickAnotherAnomalyOrLeaveViaScanResults
+
+                                            HuntWithTheProbeScanner ->
+                                                pickAnotherAnomalyOrLeaveViaScanResults
                                 in
                                 -- The anomaly's own signature can drop off the probe
                                 -- scanner (site "resolved"/expired) while rats are
@@ -7837,23 +7861,27 @@ runner's `gateWithinReachTicks` carries the same correction for the same reason
 (#42), and what saxrat needs on top of it is that a missing button counts too --
 see `gateAskedReadingsAfterReading`.
 
-**Why the branch was not reached is #147 and is deliberately not fixed here**,
-but the recordings confirm its claim rather than contradicting it, and that is
-worth writing down beside the counter that pays for it.
+**Why the branch was not reached was #147, and it is fixed in
+`siteProgressStep`** -- the gate is asked before the opportunity warp now, and a
+"Warp to Site" offered while a gate is in reach is declined as the panel still
+showing the site the ship is standing in. The reading of the corpus that made
+this counter necessary is unchanged and is what that fix rests on:
 `warpToOpportunitySiteIfAvailable` answers `Just` whenever a "Warp to Site"
-button is anywhere in the tree, and `pickAnotherAnomalyOrLeave` puts it ahead of
-this branch, so the gate is unreachable while that button is drawn. Run 5's
-give-ups are one contiguous block of 108 lines with **zero** opportunity-warp
-lines inside it and the last one 20 lines before it -- the window where the
-button went away and the branch became reachable, arriving with a counter
-already past the bound because proximity had been spending it for thousands of
-readings. Run 4 is the control: one contiguous block too, and **12** opportunity
-lines in the whole run, none of them anywhere near it.
+button is anywhere in the tree, so while the old ordering held, the gate was
+unreachable for as long as one was drawn. Run 5's give-ups are one contiguous
+block of 108 lines with **zero** opportunity-warp lines inside it and the last
+one 20 lines before it -- the window where the button went away and the branch
+became reachable, arriving with a counter already past the bound because
+proximity had been spending it for thousands of readings. Run 4 is the control:
+one contiguous block too, and **12** opportunity lines in the whole run, none of
+them anywhere near it.
 
-So counting the ask changes run 5's outcome outright rather than merely tidying
-it. Shadowed readings hold the count at 0, and the reachable window is about 36
-readings -- short of 40 -- so that give-up does not fire at all, which is the
-correct answer for a gate the bot asked three times.
+So counting the ask changed run 5's outcome outright rather than merely tidying
+it. Shadowed readings held the count at 0, and the reachable window is about 36
+readings -- short of 40 -- so that give-up would not have fired at all, which is
+the correct answer for a gate the bot asked three times. What the ordering fix
+adds is that the branch is now asked on those readings rather than shadowed
+through them, so the count is spent on a gate the bot is really working.
 
 -}
 askingAnAccelerationGateToOpen : ReadingFromGameClient -> Bool
@@ -7918,9 +7946,22 @@ type GateActivationStep
     | GiveUpOnThisGate
 
 
+{-| Whether the budget for asking one gate to open has been spent.
+
+One comparison with three readers -- the step rule, the branch that hands the
+turn back, and the status clause that says so on every reading afterwards --
+because a give-up that is decided in one place and reported in another is two
+places that can disagree about whether the gate was given up on.
+
+-}
+gateHasBeenGivenUpOn : Int -> Bool
+gateHasBeenGivenUpOn askedReadings =
+    gateRefusesThisShipTicks < askedReadings
+
+
 gateActivationStep : GateActivationCase -> GateActivationStep
 gateActivationStep gateCase =
-    if gateRefusesThisShipTicks < gateCase.askedReadings then
+    if gateHasBeenGivenUpOn gateCase.askedReadings then
         GiveUpOnThisGate
 
     else if not gateCase.panelShowsTheGate then
@@ -7949,12 +7990,20 @@ The client does have a sentence for a gate that wants an item -- the mission
 runner reads `This gate is locked! ... in your cargo hold` off the `info`
 channel -- and its absence here is why nothing stronger can be claimed.
 
+**It is a status clause rather than a decision line, because the branch now hands
+the turn back** -- see `activateAccelerationGateIfPresent`, which answers
+`Nothing` here so the caller's own fallbacks run. A `Nothing` cannot carry a
+decision line, and the mission runner records what that costs unreported: its own
+gate branch gave up on a gate 32 m away and the log said only that nothing was
+happening, 1,325 times. So this goes out in the status line on every reading
+instead, where it is visible while it is happening.
+
 -}
 describeGateGaveUp : Int -> String
 describeGateGaveUp askedReadings =
     "I have been asking this acceleration gate to open for "
         ++ String.fromInt askedReadings
-        ++ " readings -- selecting it and pressing the panel's Activate Gate where it offers one -- and it has not taken me anywhere. The client has said nothing at all, so I cannot tell a gate that will not admit this ship from one whose button is not landing. Stopping rather than asking it any longer."
+        ++ " readings -- selecting it and pressing the panel's Activate Gate where it offers one -- and it has not taken me anywhere. The client has said nothing at all, so I cannot tell a gate that will not admit this ship from one whose button is not landing. Stopping rather than asking it any longer, and letting the rest of the decision tree have the reading."
 
 
 {-| The gate clause in the status line.
@@ -7963,6 +8012,10 @@ describeGateGaveUp askedReadings =
 operator watching a run, who could previously see only a count of readings spent
 near a gate and had no way to tell that from readings spent asking one.
 
+Past the bound it carries the give-up itself, for the reason `describeGateGaveUp`
+gives: the branch declines rather than deciding there, so this line is the only
+thing on the reading that says a gate has been given up on.
+
 -}
 describeGateActivationAsk : { asked : Bool, gateWithinReach : Bool, askedReadings : Int } -> String
 describeGateActivationAsk gateCase =
@@ -7970,7 +8023,10 @@ describeGateActivationAsk gateCase =
         ++ String.fromInt gateCase.askedReadings
         ++ " of "
         ++ String.fromInt gateRefusesThisShipTicks
-        ++ (if gateCase.asked then
+        ++ (if gateHasBeenGivenUpOn gateCase.askedReadings then
+                " -- " ++ describeGateGaveUp gateCase.askedReadings
+
+            else if gateCase.asked then
                 " (asking now)"
 
             else if gateCase.gateWithinReach then
@@ -8066,15 +8122,15 @@ activateAccelerationGateIfPresent context =
                         "The acceleration gate is selected but the panel offers no 'selectedItemActivateGate' yet."
                         waitForProgressInGame
             in
-            Just
-                (if interactionRangeInMeters < distanceInMeters then
-                    -- "Activate Gate" from out here does the whole thing: the
-                    -- client flies the ship over and takes the gate on arrival,
-                    -- with no tick spent noticing it has arrived. The drones
-                    -- come home first, since the gate fires with whatever is
-                    -- still in space; the prop mod stays on, so the ship covers
-                    -- the distance fast.
-                    ensureDronesRecalledBeforeWarping context
+            if interactionRangeInMeters < distanceInMeters then
+                -- "Activate Gate" from out here does the whole thing: the
+                -- client flies the ship over and takes the gate on arrival,
+                -- with no tick spent noticing it has arrived. The drones
+                -- come home first, since the gate fires with whatever is
+                -- still in space; the prop mod stays on, so the ship covers
+                -- the distance fast.
+                Just
+                    (ensureDronesRecalledBeforeWarping context
                         (closeInOnOverviewEntry context
                             { description =
                                 "The acceleration gate is "
@@ -8084,31 +8140,52 @@ activateAccelerationGateIfPresent context =
                             }
                             accelerationGateEntry
                         )
+                    )
 
-                 else
-                    case
-                        gateActivationStep
-                            { panelShowsTheGate =
-                                selectedItemIsOverviewEntry context.readingFromGameClient accelerationGateEntry
-                            , panelOffersActivateGate = activateGateButton /= Nothing
-                            , askedReadings = context.memory.gateWithinReachTicks
-                            }
-                    of
-                        GiveUpOnThisGate ->
-                            describeBranch
-                                (describeGateGaveUp context.memory.gateWithinReachTicks)
-                                askForHelpToGetUnstuck
+            else
+                case
+                    gateActivationStep
+                        { panelShowsTheGate =
+                            selectedItemIsOverviewEntry context.readingFromGameClient accelerationGateEntry
+                        , panelOffersActivateGate = activateGateButton /= Nothing
+                        , askedReadings = context.memory.gateWithinReachTicks
+                        }
+                of
+                    GiveUpOnThisGate ->
+                        -- Hand the turn back rather than park the session. This
+                        -- used to answer `askForHelpToGetUnstuck`, which
+                        -- dispatches nothing and waits, so run 4 spent 238
+                        -- readings and the rest of its session standing at a
+                        -- gate that was never going to open. The mission
+                        -- runner's copy of this branch already answers `Nothing`
+                        -- for the same reason, and the fallbacks it hands the
+                        -- reading to are what this bot needs too: the hunt loop,
+                        -- which is the recovery run 4 eventually made anyway.
+                        --
+                        -- `siteProgressStep` is what keeps that from becoming
+                        -- run 5's dead click -- a "Warp to Site" offered while
+                        -- this gate is still in reach is the panel showing the
+                        -- site the ship is standing in, so the reading goes to
+                        -- the scanner rather than to the button.
+                        --
+                        -- Silent by construction, which is the one thing this may
+                        -- not be: `describeGateActivationAsk` carries the give-up
+                        -- in the status line on every reading instead.
+                        Nothing
 
-                        SelectTheGate ->
-                            describeBranch
+                    SelectTheGate ->
+                        Just
+                            (describeBranch
                                 "I see an acceleration gate -- select it, so the panel's own Activate Gate acts on it."
                                 (clickUiElement accelerationGateEntry.uiNode)
+                            )
 
-                        WaitForTheActivateButton ->
-                            waitForTheActivateButton
+                    WaitForTheActivateButton ->
+                        Just waitForTheActivateButton
 
-                        PressActivateGate ->
-                            activateGateButton
+                    PressActivateGate ->
+                        Just
+                            (activateGateButton
                                 |> Maybe.map
                                     (\button ->
                                         -- Wrapped in `unlessAlreadyClosingIn`
@@ -8124,7 +8201,7 @@ activateAccelerationGateIfPresent context =
                                             )
                                     )
                                 |> Maybe.withDefault waitForTheActivateButton
-                )
+                            )
 
 
 {-| How many readings to keep asking a gate that is already in range before
@@ -8132,27 +8209,113 @@ giving up on it. A working gate goes through in a few; the mission bot hit one
 that would not open and clicked it 741 times over half an hour, with no error
 dialog and nothing to notice.
 
-**Left at 40 when the mechanism changed under it, and the corpus is why.** The
-obvious worry is that a number placed against a failing cascade is wrong for a
-working panel press, and it would be if the number were a patience budget for
-one mechanism. It is not: what it bounds is how long the ship stands at a gate
-that is not opening, and that cost is the same whichever way the bot is asking.
-What the recorded runs put beside it is a distribution with nothing in the
-middle. Every in-reach episode saxrat has ever had peaks at 1, 5, 6, 8, 10, 15
-or 18 readings -- gates the ship left within a few of arriving -- or at 282 and
-3,504, the two that never opened at all. 40 sits in that gap with an order of
-magnitude of clearance on both sides, and no version of this mechanism moves an
-episode across it.
+**Still 40 now that the branch is genuinely reachable, and the argument for it
+has changed.** #148 kept the number on saxrat's own peaks -- 1, 5, 6, 8, 10, 15
+and 18 against 282 and 3,504 -- and called that "an order of magnitude of
+clearance on both sides". Those peaks do not support it: every one of them was
+counted on _proximity_ under #147's shadowing, which is the quantity that PR's
+own change argued was the wrong one, and the two large ones are a ship standing
+beside a gate it never asked. A distribution of readings-spent-near cannot size a
+budget for readings-spent-asking.
 
-What _was_ wrong was the counter rather than the bound, and that is fixed --
-see `gateAskedReadingsAfterReading`. Raising the number would have been the
-wrong repair for run 5 and would have bought run 4 nothing but more of the same
-30 clicks.
+**The mission runner's corpus can, because its gate branch is the one that gets
+asked.** Taking every episode across its 37 runs where the nearest gate came
+inside `interactionRangeInMeters`, and counting the readings spent there before
+the ship went into warp: **89 of 93 episodes ended in a warp, and 88 of those had
+spent 0 to 4 readings in reach**, the great majority of them 0 -- the client
+takes the gate on the approach, so the ship is usually already warping by the
+reading the overview reads 2,000 m. The longest that still opened spent **15**.
+At the other end, the largest count that corpus records on a gate its own branch
+gave up on is **335** -- of readings the panel offered and the gate did not open,
+which is a wider condition than this counter's and so if anything an
+underestimate of how far a genuine failure runs.
+
+So the gap is real and its edges are 15 and 335 rather than 18 and 282. 40 sits
+inside it at 2.7 times the largest recorded success and an eighth of the recorded
+failure, which is the clearance that was claimed -- on the other bot's evidence,
+and only on the near side of it.
+
+**Being early costs less than it used to, which is the other half.** The give-up
+no longer parks the session: it answers `Nothing` and the hunt loop takes the
+reading, so a gate abandoned one reading too soon costs a pocket rather than the
+rest of the run. Being late costs idle readings at a dead gate. Neither argues
+for moving a number that no recorded episode of either kind comes near.
 
 -}
 gateRefusesThisShipTicks : Int
 gateRefusesThisShipTicks =
     40
+
+
+{-| What to do with a grid the probe scanner no longer names an anomaly on:
+take the acceleration gate, warp to an offered site, or go back to hunting.
+
+A pure function over a record so a case can execute it, because the ordering is
+what was wrong. `pickAnotherAnomalyOrLeave` asked
+`warpToOpportunitySiteIfAvailable` first and `activateAccelerationGateIfPresent`
+only where that answered `Nothing` -- and the first answers `Just` whenever a
+"Warp to Site" button is anywhere in the tree, which stays true after the ship
+has arrived, so the gate branch was unreachable inside the very sites it exists
+to follow.
+
+**The whole-tree search cannot tell "an opportunity exists" from "we are not
+there yet", and the grid can.** The button is drawn identically before and after
+arrival and the client says nothing when it is clicked in the stale state, so
+there is no reading of the panel that separates them. An acceleration gate is a
+different question with the same answer: gates exist only inside sites, so one on
+the overview means the ship has already arrived somewhere, and every recorded
+opportunity episode agrees --
+
+  - **Three began with a gate already in reach** (run 3 line 124489, run 4 line
+    23016, run 5 line 101277) and **not one of them ever produced a warp**. Two
+    ended within a handful of readings when the button went away and the gate
+    branch finally got its turn. Run 5's ran **3,458 readings**, about 75 minutes
+    of a three-hour session, clicking one screen position 3,460 times with the
+    overview, the combat feed and the counter's own in-reach run all unbroken
+    throughout -- and it ended only when a person warped the ship by hand.
+  - **The two that began with no gate in reach** (run 4 line 21172, run 5 line
+    1.  were in warp within three readings.
+
+**The client never answered the stale click**, which is what rules out asking it
+instead: not one on-screen quick message in the whole of run 5's episode, against
+dozens of distinct wordings elsewhere in that run. There is nothing to match on.
+
+So the gate is asked first, **and** the warp branch declines while a gate is in
+reach. That second half is not redundant with the ordering: once
+`activateAccelerationGateIfPresent` gives up on a gate it answers `Nothing`, and
+without the clause the very next reading would fall into run 5's dead click with
+nothing left to bound it. Declining sends it to the hunt loop instead, which is
+the recovery run 4 eventually made on its own after 238 wasted readings.
+
+**Both still outrank the probe-scan hunt loop**, which is all the comment at the
+call site ever claimed and is compatible with either order -- what it never said
+is which of the pair wins, and the code answered "the first one, always" because
+its condition is almost always true. `HuntWithTheProbeScanner` is reached only
+where the gate branch has nothing to do and the button is either absent or being
+offered to a ship that is standing on a gate.
+
+-}
+type SiteProgressStep
+    = WorkTheAccelerationGate
+    | WarpToTheOpportunitySite
+    | HuntWithTheProbeScanner
+
+
+siteProgressStep :
+    { gateBranchOffersAStep : Bool
+    , warpToSiteIsOffered : Bool
+    , gateWithinReach : Bool
+    }
+    -> SiteProgressStep
+siteProgressStep progressCase =
+    if progressCase.gateBranchOffersAStep then
+        WorkTheAccelerationGate
+
+    else if progressCase.warpToSiteIsOffered && not progressCase.gateWithinReach then
+        WarpToTheOpportunitySite
+
+    else
+        HuntWithTheProbeScanner
 
 
 {-| The "Opportunities" panel (e.g. "Sansha's Command Relay Outpost") is a
@@ -8162,6 +8325,15 @@ codebase. Rather than adding a dedicated parser for that whole panel, this
 just looks for a clickable "Warp to Site" button anywhere on screen (the
 same generic whole-tree text search already proven for the "Loot All" and
 message-box-close buttons) and clicks it directly.
+
+**What that search answers is "an opportunity exists", never "the ship still
+needs to go there"**, because the panel goes on offering the button after
+arrival. Narrowing the search is not the repair -- the button legitimately stays
+drawn, and a search trying to tell "offered" from "already taken" would be
+guessing at panel state this bot deliberately does not parse. `siteProgressStep`
+is what separates them, off the grid rather than off the panel, and carries the
+measurement.
+
 -}
 warpToOpportunitySiteIfAvailable : ReadingFromGameClient -> Maybe DecisionPathNode
 warpToOpportunitySiteIfAvailable readingFromGameClient =
