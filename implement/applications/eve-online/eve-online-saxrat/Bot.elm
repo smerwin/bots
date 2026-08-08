@@ -9027,17 +9027,78 @@ clearStrayContextMenu context =
             }
     then
         Just
-            (describeBranch
-                "A context menu has sat at the same depth for several ticks in a row without advancing to a deeper submenu -- likely a stray menu from a misclick or a cascade stuck on a menu with no entry it recognizes. Clear it (Escape)."
-                (decideActionForCurrentStep
-                    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_ESCAPE
-                    , EffectOnWindow.KeyUp EffectOnWindow.vkey_ESCAPE
-                    ]
-                )
+            (case emptyPointBesideTheInfoPanel context.readingFromGameClient of
+                Just location ->
+                    describeBranch
+                        "A context menu has sat at the same depth for several ticks in a row without advancing to a deeper submenu -- likely a stray menu from a misclick or a cascade stuck on a menu with no entry it recognizes. Clear it (right-click beside the info panel)."
+                        (decideActionForCurrentStep
+                            (EffectOnWindow.effectsMouseClickAtLocation
+                                EffectOnWindow.MouseButtonRight
+                                location
+                            )
+                        )
+
+                Nothing ->
+                    describeBranch
+                        "A context menu has sat at the same depth for several ticks in a row without advancing to a deeper submenu, and this reading has no info panel to measure an empty point beside -- press Escape instead, which can open the client's own settings menu and is why it is the fallback rather than the rule."
+                        (decideActionForCurrentStep
+                            [ EffectOnWindow.KeyDown EffectOnWindow.vkey_ESCAPE
+                            , EffectOnWindow.KeyUp EffectOnWindow.vkey_ESCAPE
+                            ]
+                        )
             )
 
     else
         Nothing
+
+
+{-| How far right of the info panel's own edge to click, in the client's
+coordinates. Wide enough to clear the panel's border and any hover affordance,
+narrow enough that it stays in the gap rather than reaching whatever is laid out
+further right.
+-}
+strayMenuClearGapFromInfoPanel : Int
+strayMenuClearGapFromInfoPanel =
+    80
+
+
+{-| A point beside the info panel, for dismissing a stray context menu.
+
+**Escape does not do this job**, which is what this replaces. Measured live on
+saxrat's run 45 against a stray drone menu: the bot pressed Escape at it 48
+times and a hand-sent Escape into a frontmost client did nothing at all, while a
+left click elsewhere dismissed it immediately. Meanwhile a naked Escape can open
+the client's own settings menu -- `closeSystemSettingsMenu` exists because that
+happened live -- so the old rule could both fail to clear the menu and add a
+second window to clear.
+
+**Why a computed point is acceptable here when `beginCascade` refuses one.**
+That fallback rejects "empty space" because a remembered coordinate is not
+reliably empty and once opened *Clear All Waypoints* on a real route. This point
+is not remembered: it is derived from the info panel's own parsed region every
+reading, so it moves with the layout the way the UI scale and every other
+self-calibrated number here do. The panel is anchored top-left under the Neocom,
+and the gap immediately right of it carries no widget -- verified against a live
+tree, where the point this returns was covered by zero nodes.
+
+`Nothing` when the info panel is not in the reading, because then there is no
+anchor and no point known to be empty. The caller falls back to Escape there,
+which is the weaker rescue rather than a guess at a location.
+
+-}
+emptyPointBesideTheInfoPanel : ReadingFromGameClient -> Maybe EffectOnWindow.Location2d
+emptyPointBesideTheInfoPanel readingFromGameClient =
+    readingFromGameClient.infoPanelContainer
+        |> Maybe.map
+            (\infoPanelContainer ->
+                let
+                    region =
+                        infoPanelContainer.uiNode.totalDisplayRegion
+                in
+                { x = region.x + region.width + strayMenuClearGapFromInfoPanel
+                , y = region.y + (region.height // 2)
+                }
+            )
 
 
 iconSpriteHasColorOfRat : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
