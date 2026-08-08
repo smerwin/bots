@@ -2504,11 +2504,45 @@ parseStationWindowFromUITreeRoot uiTreeRoot =
                     findButtonInDescendantsByDisplayTextsPredicate
                         (List.any (String.toLower >> textMatches))
                         windowNode
+
+                {- The undock button becomes "Abort Undock" for the several seconds
+                   an undock takes. `buttonFromDisplayText` matches a whole label,
+                   so that phrase matches neither "undock" nor "undocking" and both
+                   fields came back `Nothing` -- which every caller reads as "I do
+                   not see the undock button".
+
+                   saxrat's run 43 spent 10,310 readings there, asking for help
+                   while docked, against only 12 that reached the already-undocking
+                   branch the bot already had. It clicked undock 20,486 times in
+                   between: a click aimed from a reading that still said "Undock"
+                   lands after the label has flipped, and cancels the undock that is
+                   under way.
+
+                   Matched on a substring, because the label is a phrase rather than
+                   a word, and on "abort" because that is the wording the mission
+                   runner's `labelUndoesStepInProgress` has flown without looping.
+                -}
+                buttonUndoingTheUndock =
+                    findButtonInDescendantsByDisplayTextsPredicate
+                        (List.any (String.toLower >> String.contains "abort"))
+                        windowNode
             in
             Just
                 { uiNode = windowNode
-                , undockButton = buttonFromDisplayText "undock"
-                , abortUndockButton = buttonFromDisplayText "undocking"
+                , undockButton =
+                    case buttonUndoingTheUndock of
+                        Just _ ->
+                            Nothing
+
+                        Nothing ->
+                            buttonFromDisplayText "undock"
+                , abortUndockButton =
+                    case buttonUndoingTheUndock of
+                        Just abortButton ->
+                            Just abortButton
+
+                        Nothing ->
+                            buttonFromDisplayText "undocking"
                 }
 
 
