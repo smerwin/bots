@@ -1,14 +1,24 @@
-"""The station window's undock button becomes "Abort Undock" mid-undock.
+"""One button, three labels, and only the first is one to press.
 
-`buttonFromDisplayText` matches a whole label -- equality, or the label wrapped
+The station window's undock slot reads "Undock" while docked, then "Abort
+Undock", then "Undocking...". Pressing either of the last two cancels the undock
+already under way.
+
+`buttonFromDisplayText` matches a *whole* label -- equality, or the label wrapped
 in tags -- so "Abort Undock" matched neither `"undock"` nor `"undocking"`, and
-both fields came back `Nothing`. Every caller reads that as "I do not see the
-undock button", which is where saxrat's run 43 spent 10,310 readings asking for
-help while docked, having clicked undock 20,486 times in between.
+"Undocking..." misses the `"undocking"` matcher written for it because the
+ellipsis is part of the label. Both states left `undockButton` and
+`abortUndockButton` empty, which every caller reads as "I do not see the undock
+button".
 
-These cases pin the parse, the consistency of the six vendored copies, and the
-one property that makes the fix safe: nothing changes when no abort button is on
-screen.
+saxrat's run 43 spent 10,310 readings there, asking for help while docked and
+clicking undock 20,486 times in between. Matching "abort" alone cut that to 3
+readings in three minutes and still did not free the ship -- 256 clicks met 132
+waits -- because the third label was still invisible.
+
+These cases pin both matches, the consistency of the six vendored copies, the
+suppression that stops the loop, and the property that makes it safe: nothing
+changes when no in-progress label is on screen.
 """
 import os
 import re
@@ -45,7 +55,7 @@ def station_window_block(path):
     """
     text = open(path).read()
     start = text.index("buttonUndoingTheUndock =")
-    marker = 'buttonFromDisplayText "undocking"'
+    marker = ", abortUndockButton = buttonUndoingTheUndock"
     end = text.index(marker, start) + len(marker)
     return collapse(text[start:end])
 
@@ -57,6 +67,22 @@ class AbortUndockIsRecognised(unittest.TestCase):
                 block = station_window_block(path)
                 self.assertIn('String.contains "abort"', block,
                               "the abort label is matched on a substring")
+
+    def test_every_copy_also_looks_for_the_undocking_label(self):
+        """The slot carries three labels, not two.
+
+        "Undock" -> "Abort Undock" -> "Undocking...". The third was reported
+        live after the abort match shipped: matching "abort" alone cut "I do not
+        see the undock button" from 852 readings to 3, but the ship still did not
+        get out, because 256 clicks were still meeting 132 waits. The ellipsis is
+        part of the label, so the `"undocking"` matcher already written for this
+        state could never match it on equality.
+        """
+        for path in PARSER_COPIES:
+            with self.subTest(path=os.path.basename(os.path.dirname(os.path.dirname(path)))):
+                block = station_window_block(path)
+                self.assertIn('String.contains "undocking"', block,
+                              "the in-progress label is matched on a substring too")
 
     def test_the_six_copies_agree(self):
         blocks = {station_window_block(p) for p in PARSER_COPIES}
@@ -78,13 +104,12 @@ class AbortUndockIsRecognised(unittest.TestCase):
                     r"undockButton = case buttonUndoingTheUndock of Just _ -> Nothing",
                     "an abort label must leave undockButton empty")
 
-    def test_absent_abort_leaves_the_old_behaviour(self):
-        """No abort button on screen must parse exactly as before the fix."""
+    def test_absent_in_progress_label_leaves_the_old_behaviour(self):
+        """Nothing on screen undoing an undock must parse exactly as before."""
         for path in PARSER_COPIES:
             with self.subTest(path=os.path.basename(os.path.dirname(os.path.dirname(path)))):
                 block = station_window_block(path)
                 self.assertIn('Nothing -> buttonFromDisplayText "undock"', block)
-                self.assertIn('Nothing -> buttonFromDisplayText "undocking"', block)
 
     def test_wording_agrees_with_the_mission_runner(self):
         """"abort" is the mission runner's own tested wording, not a new guess."""

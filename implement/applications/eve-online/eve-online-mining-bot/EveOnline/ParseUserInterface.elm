@@ -2368,26 +2368,43 @@ parseStationWindowFromUITreeRoot uiTreeRoot =
                         (List.any (String.toLower >> textMatches))
                         windowNode
 
-                {- The undock button becomes "Abort Undock" for the several seconds
-                   an undock takes. `buttonFromDisplayText` matches a whole label,
-                   so that phrase matches neither "undock" nor "undocking" and both
-                   fields came back `Nothing` -- which every caller reads as "I do
-                   not see the undock button".
+                {- One button occupies this slot and it carries three labels in
+                   turn: "Undock" while docked, then "Abort Undock", then
+                   "Undocking...". Only the first is a button to press. Pressing
+                   either of the others cancels the undock that is already under
+                   way, which is the loop.
+
+                   `buttonFromDisplayText` matches a *whole* label -- equality, or
+                   the label wrapped in tags -- so "Abort Undock" matched neither
+                   "undock" nor "undocking", and "Undocking..." misses the
+                   `"undocking"` matcher that was plainly written for it, because
+                   the ellipsis is part of the label. Both states therefore left
+                   `undockButton` and `abortUndockButton` empty, which every caller
+                   reads as "I do not see the undock button".
 
                    saxrat's run 43 spent 10,310 readings there, asking for help
                    while docked, against only 12 that reached the already-undocking
-                   branch the bot already had. It clicked undock 20,486 times in
-                   between: a click aimed from a reading that still said "Undock"
-                   lands after the label has flipped, and cancels the undock that is
-                   under way.
+                   branch the bot already had, and clicked undock 20,486 times in
+                   between. Matching "abort" alone cut that to 3 in three minutes
+                   but did not free the ship: 256 clicks still met 132 waits,
+                   because the third label was still invisible.
 
-                   Matched on a substring, because the label is a phrase rather than
-                   a word, and on "abort" because that is the wording the mission
-                   runner's `labelUndoesStepInProgress` has flown without looping.
+                   Matched on substrings, because these are phrases rather than
+                   words and the client decorates them. "abort" is the wording the
+                   mission runner's `labelUndoesStepInProgress` has flown without
+                   looping; "undocking" is the word this parser already chose for
+                   the same state.
                 -}
                 buttonUndoingTheUndock =
                     findButtonInDescendantsByDisplayTextsPredicate
-                        (List.any (String.toLower >> String.contains "abort"))
+                        (List.any
+                            (String.toLower
+                                >> (\text ->
+                                        String.contains "abort" text
+                                            || String.contains "undocking" text
+                                   )
+                            )
+                        )
                         windowNode
             in
             Just
@@ -2399,13 +2416,7 @@ parseStationWindowFromUITreeRoot uiTreeRoot =
 
                         Nothing ->
                             buttonFromDisplayText "undock"
-                , abortUndockButton =
-                    case buttonUndoingTheUndock of
-                        Just abortButton ->
-                            Just abortButton
-
-                        Nothing ->
-                            buttonFromDisplayText "undocking"
+                , abortUndockButton = buttonUndoingTheUndock
                 }
 
 
