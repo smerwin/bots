@@ -433,6 +433,26 @@ useContextMenuCascade ( targetUIElementName, targetUIElement ) =
         { targetUIElement = targetUIElement, targetUIElementName = targetUIElementName }
 
 
+{-| How many steps back a right-click of our own still counts as "the menu may
+still be rendering", so the cascade waits instead of clicking again.
+
+Sized on the client, not on taste. A freshly opened menu's widget exists and is
+visibly on screen before its display-region entries are populated, and the
+parser drops nodes without a region -- so a real, open menu reads back as zero
+menus for the length of that gap, measured live at 10+ readings. Clicking again
+in that window does not merely fail to help: a second right-click on an
+already-open menu dismisses it, which converts rendering lag into an endless
+open/close loop.
+
+The effects history holds 10 steps, so this is bounded by construction however
+large it is written.
+
+-}
+readingsToWaitForAFirstContextMenu : Int
+readingsToWaitForAFirstContextMenu =
+    10
+
+
 useContextMenuCascadeWithCustomConfig :
     FilterToDiscardContextMenu a b
     -> { targetUIElement : UIElement, targetUIElementName : String }
@@ -590,14 +610,27 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                     -- finish populating the new menu's layout before
                     -- concluding it isn't there and clicking again.
                     --
-                    -- The `List.take` is what makes "a step or two" literal.
-                    -- It used to be implicit in the effects history only ever
-                    -- holding two steps; now that the history is longer (see
-                    -- `lastStepsEffects`), an unbounded search here would keep
-                    -- waiting for ten steps instead of one.
+                    -- The `List.take` is what makes the wait literal, and how
+                    -- far it looks back is the whole of this fix. It was 2 --
+                    -- while the paragraph above, from the session that
+                    -- root-caused the rendering gap, records that gap lasting
+                    -- "as long as 10+ real ticks in one observed case". A cap
+                    -- set below the phenomenon it caps is the loop rather than
+                    -- the guard against it: saxrat's run 46 right-clicked a
+                    -- scan result 385 times, spent 1,340 readings waiting, and
+                    -- read the menu back **zero** times, because every third
+                    -- reading it clicked again and dismissed the menu it was
+                    -- waiting for.
+                    --
+                    -- Bounded by the history itself, which holds 10 steps, so
+                    -- this cannot become the unbounded search the original was
+                    -- guarding against. And it costs a healthy cascade nothing:
+                    -- the arm below runs the moment *any* menu is in the
+                    -- reading, so waiting longer only ever delays the case that
+                    -- would otherwise have destroyed its own menu.
                     if
                         context.previousStepsEffects
-                            |> List.take 2
+                            |> List.take readingsToWaitForAFirstContextMenu
                             |> List.any
                                 (List.member
                                     (Common.EffectOnWindow.ButtonDown Common.EffectOnWindow.MouseButtonRight)
