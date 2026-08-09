@@ -1279,7 +1279,10 @@ a target climbing towards the threshold and one that never climbs are
 distinguishable while watching a run.
 
 **No `never-attack` setting was added.** `attack-object` is a positive list and
-there is still no negative one — but a name list is exactly what failed here:
+this bot still has no negative one — the scope matters, because read as a claim
+about the repo this sentence is false and #125 was filed on that misreading;
+`eve-online-saxrat` and `eve-online-combat-anomaly-bot` both implement one. But a
+name list is exactly what failed here:
 nobody had predicted `Infested Asteroid`, and the object was never selected by
 name in the first place. What the operator gets instead is a threshold to tune
 and a run that learns the name itself. The lever an operator actually lacked
@@ -1949,7 +1952,9 @@ reported by `--help`, and read by no decision anywhere — a setting that does
 nothing. It is guarded anyway, because "no filter is armed" is a fact about a
 dead setting rather than a property to leave a hole under, and
 `AvoidRatIsParsedAndNeverRead` pins the three uses so a fourth has to be
-noticed.
+noticed. **That setting has since been removed from this bot** — see "A setting
+this bot documented, parsed and never read" below — so the guard now covers the
+three that remain, and the case that counted the uses is retired.
 
 **The second half is that a decline said why.** The branch printed
 `Skip this mission (<name>) using '<label>'.` and nothing else, which reads
@@ -1982,9 +1987,11 @@ cases are all deliberate, and the decision line now names the entry on the
 **first** offer it refuses, which is the evidence a later threshold would need.
 
 **Verified without a live client**, in
-`tools/macos-host/tests/test_decline_mission_entries.py` (35 cases). Both rules
-are executed through the real `Bot.elm` in `elm repl` rather than restated: the
-parser is asked what it does with an empty value for each of the four settings,
+`tools/macos-host/tests/test_decline_mission_entries.py` (34 cases; 35 until #125
+retired `AvoidRatIsParsedAndNeverRead` along with the setting it counted). Both
+rules are executed through the real `Bot.elm` in `elm repl` rather than restated:
+the parser is asked what it does with an empty value for each of the four
+settings,
 with the three that mean *unset* by being empty and the three comma-separated
 lists asserted unchanged beside them; and `declineMatchFromLists` is asked which
 list refuses a name, on which entry, which of the two wins a tie, and what it
@@ -2028,6 +2035,80 @@ change deliberately does not touch `closeMessageBoxByDeclining` or
 them. What to watch on the next run that declines anything is the new clause
 naming a list and an entry an operator recognises — a decline whose clause names
 an entry nobody wrote is the case this was built for.
+
+## A setting this bot documented, parsed and never read
+
+`avoid-rat` named a rat to leave alone. The mission runner listed it in its own
+header, `--help` reported it (that text is generated from the header by
+`bot_help.py`), and `parseBotSettings` filled `BotSettings.avoidRats` from it —
+and **no decision anywhere in this bot ever read that field**. Three occurrences
+and no fourth: the default, the parser handler, the field in the record type.
+Elm has no dynamic field access, so three is a proof rather than a search that
+came up empty. An operator who set it got exactly the bot they would have got
+without it, while `--help` told them otherwise. It is **removed** rather than
+implemented, and can be brought back if it is ever wanted.
+
+**The argument is about this app, not about the repo.** #125 as first written
+said the repo had declined to grow a negative name list beside `attack-object`'s
+positive one, and that is false. `eve-online-saxrat` (`Bot.elm:772`) and
+`eve-online-combat-anomaly-bot` (`:442`) both implement `avoid-rat`, wired from
+the overview's rows through `getRatsToAvoidSeenInAnomaly` and `FoundRatToAvoid`
+to three decision sites that skip a scan result or leave the anomaly. saxrat's
+was proved to *execute* in `elm repl`: with `avoid-rat = Infested Carrier`,
+`shouldAvoidRatAccordingToSettings` answers `True` for `Infested Carrier`, `True`
+for `infested carrier` and `False` for `Sunder Alvi`. Both implementations stay
+untouched. What is true is narrower and is enough on its own — this app
+documented and parsed a setting two sibling apps honour, so its copy was a
+promise it could not keep.
+
+**A future implementation here would not be a port.** saxrat's rule is
+*anomaly*-granularity: it abandons the whole anomaly a named rat was seen in.
+The mission runner has no anomalies, and what run 27's operator wanted was to
+decline a single *target*. That is a different rule in a different place, so
+starting from saxrat's would be starting from the wrong shape.
+
+**The one cost of removing a setting rather than ignoring it.**
+`Common.AppSettings` answers an unrecognised key with `Unknown setting name
+'avoid-rat'`, so a settings file still carrying the line now ends the session at
+startup instead of doing nothing. Nothing carries it: not `run_mission.sh`, not
+`run_saxrat.sh`, not `bot_help.py`, and none of the 49 recorded runs in
+`~/eve-bot-logs`. The header says what happened to the setting and that the line
+has to be deleted, beside the same note `activate-module-always`' removal left,
+because that paragraph is what `--help` prints.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_avoid_rat_removed.py` (14 cases). The removal is
+executed rather than restated: the real parser is asked what it does with
+`avoid-rat=Infested Carrier` (rejects it, naming the key), what one such line
+does to a whole settings string (rejects that too), whether `run_mission.sh`'s
+own string still parses, and whether the three named settings beside it still
+take a value and still refuse an empty one. The source half asserts zero
+occurrences of the field and no bullet for it in the section `--help` prints,
+through a block reader sliced by **indentation** — `parseBotSettings` is one long
+list literal, and the readers that stop at a blank line or a record's opening
+brace have already cost PRs #147, #156 and #159 an assertion that passed having
+read nothing.
+
+**The general rule is asserted over every EVE app**: one whose `parseBotSettings`
+accepts `avoid-rat` must read `avoidRats` somewhere outside the default, the
+handler and the record type. That is what goes red if saxrat's read is ever
+deleted — the mistake #125 as written would have caused — and what goes red if
+another app grows the parser half without the decision half. The converse shape,
+**documented but never parsed**, is `eve-online-wingus`' today and is #161's: it
+ends a session at startup rather than doing nothing, and fixing it is not this
+change, so it is deliberately not asserted here.
+
+Confirmed by mutation, seven of them, each failing a named case: putting the
+setting back whole — field, default and parser entry, with no read — which is the
+silent reintroduction and fails eight cases including the cross-app rule; putting
+the field and its default back *without* the parser entry, which no repl case can
+see and which the source half catches; restoring the `+ avoid-rat` bullet to the
+header; gutting the paragraph that tells an operator to delete the line;
+deleting saxrat's `shouldAvoidRatAccordingToSettings` read; deleting the combat
+anomaly bot's; and narrowing the key reader to `AppSettings.valueType`, which is
+what `bot_help.py` matches on — the combat anomaly bot is on `PromptParser` and
+its thirteen keys then read as none, so the cross-app rule would pass by seeing
+nothing.
 
 ## A message box the answer does not close is bounded, and the bot stops answering it
 
@@ -4603,7 +4684,8 @@ and the search that concluded no distinguishable slot-limit refusal exists looke
 in the *game log*, where the channels are `combat`, `notify`, `bounty`,
 `question`, `info` and `hint`. A quick message is a UI-tree widget, not a log
 line, so it was never going to appear there. This is the same shape as
-`avoidRats` (parsed, documented, advertised by `--help`, read by no decision) and
+`avoidRats` (parsed, documented, advertised by `--help`, read by no decision —
+removed from the mission runner by #125, and still working in saxrat) and
 as the game log's `(question)` continuation (`Do you wish to proceed?` parses to
 `None` and is dropped), and it is the worse one: evidence that arrived, was
 decoded, and was thrown away.
@@ -6847,8 +6929,9 @@ exists.
   filter with it**, and says which list refused a mission and on what entry.
   That setting is matched as a substring, so `decline-mission=` put `""` in the
   list and would have handed back every mission the agent ever offered, each one
-  a standing hit logged as an ordinary skip; `agent-name`, `drone-type` and
-  `avoid-rat` had the same unguarded shape and are guarded with it. Why an
+  a standing hit logged as an ordinary skip; `agent-name`, `drone-type` and —
+  until #125 removed it — `avoid-rat` had the same unguarded shape and are
+  guarded with it. Why an
   `Err` rather than a silent drop, what the empty value did in each of the four,
   that `avoidRats` turns out to be read nowhere at all, and why no warning for a
   short entry are in "A decline costs standing, so the entry that armed it has
@@ -6858,6 +6941,15 @@ exists.
   decline branch firing on anything but the two configured missions, and this
   does not claim to fix it. Watch the new clause on the next run that declines:
   it should name an entry an operator recognises.
+
+  And it no longer **advertises `avoid-rat`**, a setting it documented, reported
+  through `--help` and parsed into a field no decision ever read. Removed rather
+  than implemented; `eve-online-saxrat` and `eve-online-combat-anomaly-bot`
+  implement the same setting for real and keep theirs. The one operator-visible
+  consequence is that a settings file still carrying the line is now refused with
+  `Unknown setting name 'avoid-rat'` instead of ignored — nothing sets it
+  anywhere, so no run should meet that. See "A setting this bot documented,
+  parsed and never read" above.
 
   And it now **says when it leaves drones behind** — how many and where, once in
   the decision log and then in the status line for the rest of the session. This

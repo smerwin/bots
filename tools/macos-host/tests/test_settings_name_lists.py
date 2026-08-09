@@ -244,17 +244,16 @@ class TheParserIsExecutedRatherThanMirrored(unittest.TestCase):
         self.assertEqual(in_one_line, in_lines)
 
     def test_other_settings_are_untouched_by_this(self):
-        # `decline-mission` and `avoid-rat` are deliberately still single-value:
-        # a mission name is prose from the agent's own text rather than an
-        # overview label, and neither was asked for here. This pins that they
-        # were left alone rather than half-converted.
+        # `decline-mission` is deliberately still single-value: a mission name is
+        # prose from the agent's own text rather than an overview label, and it
+        # was not asked for here. This pins that it was left alone rather than
+        # half-converted. `avoid-rat` was checked beside it until #125, which
+        # removed that setting from this bot -- it was parsed into a field no
+        # decision ever read; see `test_avoid_rat_removed.py`.
         self.assertEqual(
             self.repl.names("missionNamesToDecline",
                             ["decline-mission=Worlds Collide, Recon"]),
             [["Worlds Collide, Recon"]])
-        self.assertEqual(
-            self.repl.names("avoidRats", ["avoid-rat=Centii Butcher, Centum Fiend"]),
-            [["Centii Butcher, Centum Fiend"]])
 
 
 class TheLauncherDefaultsStillMeanWhatTheyMeant(unittest.TestCase):
