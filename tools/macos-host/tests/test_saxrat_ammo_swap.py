@@ -40,7 +40,18 @@ presses Escape at a context menu that has sat at the same cascade depth for thre
 readings, from above every other decision -- and the swap holds a weapon's menu
 open across a settle of exactly that length. `TheStrayMenuGuardTest` covers both
 directions: the guard still clears a genuinely stray menu, and it no longer
-closes the one the load is about to be clicked out of.
+closes the one the load is about to be clicked out of. Run 10 is the observation
+that rule was written for, and it says the rule is right: the guard suppressed
+itself through every swap in that run.
+
+**Two classes here are issue #154**, which the same run found. Run 10 latched the
+whole feature off 21 readings in, on a sentence saying the guns were still off,
+with its own status clause reading `a gun has been switched back on ... the guns
+are firing` on the same reading and the seventeen before it.
+`TheDisarmLatchAsksWhetherTheGunsCameBackTest` covers the narrowed verdict and
+`TheGiveUpIsRetriedAfterAWarpTest` the unlatch. `TheRecordedSaxratRunsTest` is
+what those rest on, and it no longer says the corpus is silent about ammo --
+that was true when the port shipped and expired the moment it flew.
 
 The rules are executed through the real `Bot.elm` in `elm repl` rather than
 restated in Python, for the reason CLAUDE.md's "How a change is verified here"
@@ -49,12 +60,14 @@ placement and the counters' arithmetic -- which are not expressions and cannot b
 evaluated -- are read out of the source through a whitespace-collapsing reader,
 so an `elm-format` pass cannot break them.
 
-Nothing here reads a live game client or drives a bot. Two cases read the
+Nothing here reads a live game client or drives a bot. The corpus cases read the
 recorded saxrat runs and only read them; they skip with a stated reason on a
-machine that has none.
+machine that has none, and they glob the runs rather than numbering them, so a
+new one is read without an edit.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
+import glob
 import os
 import re
 import unittest
@@ -90,6 +103,18 @@ OTHER_REFUSALS = [
 # `TheRecordedSaxratRunsTest`, because the issue's premise about this bot's warp
 # behaviour is the one thing in it the corpus can answer.
 SAXRAT_IN_WARP = "HOOOOONK in warp"
+
+# The two ammo status clauses that separate a ship that is disarmed from one
+# that is not. The bot prints one or the other on every reading an attempt is
+# live, and issue #154 is that the give-up beside them read neither.
+GUNS_OFF_CLAUSE = "GUNS OFF for "
+GUNS_BACK_ON_CLAUSE = "a gun has been switched back on "
+DISARM_GIVE_UP = "the guns were switched off to load"
+
+# An `AmmoSwapConfig` for the two rules that render a sentence from one.
+_CONFIG = ('{ shortRangeAmmoName = "Multifrequency M"'
+           ', longRangeAmmoName = "Radio M"'
+           ', threshold = { crossoverInMeters = 29000, deadbandInMeters = 3000 } }')
 
 
 def without_comments(text):
@@ -145,6 +170,35 @@ def let_binding(body, name):
     rest = body[starts[0]:]
     end = re.search(r" [a-z][A-Za-z]* = ", rest)
     return rest if end is None else rest[:end.start()]
+
+
+def indented_let_binding(declaration_name, name, path=SAXRAT_BOT_ELM):
+    """One `let` binding, sliced by indentation rather than by the next `=`.
+
+    `let_binding` above ends at the next ` <name> = `, which a *record literal*
+    inside the binding satisfies -- so a binding whose body builds a record is
+    truncated at its first field, and an assertion about anything past that
+    field passes vacuously. That is what bit here: the give-up hands
+    `ammoSwapDisarmEndsTheSession` a two-field record, and a case asserting
+    which value reaches the second field read text that stopped at the brace.
+
+    So this reads the raw source, takes the line the binding opens on, and ends
+    at the next non-blank line indented no further -- the same correction #147
+    made for a `let` binding it was reading with a regex.
+    """
+    lines = body_of(source_of(path), declaration_name).splitlines()
+    opens = [index for index, line in enumerate(lines)
+             if re.match(r"^(\s*)%s =(\s|$)" % re.escape(name), line)]
+    assert opens, "no let binding named %r" % name
+    start = opens[0]
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            end = index
+            break
+    return collapsed(without_comments("\n".join(lines[start:end])))
 
 
 def int_constant(name, path=SAXRAT_BOT_ELM):
@@ -843,6 +897,268 @@ class TheSilenceDeadlineIsUnstallableTest(unittest.TestCase):
         self.assertNotIn("askForHelpToGetUnstuck", acting)
 
 
+class TheDisarmLatchAsksWhetherTheGunsCameBackTest(unittest.TestCase):
+    """`ammoSwapDisarmEndsTheSession`, which is issue #154.
+
+    saxrat's run 10 latched the whole feature off 21 readings into a three-hour
+    run with:
+
+        Ammo swap: given up -- the guns were switched off to load and were still
+        not back 21 readings later.
+
+    and on that same reading its own status line read `a gun has been switched
+    back on 20 of 20 readings in -- the guns are firing`, as it had for the
+    previous seventeen consecutive readings. `GUNS OFF` printed for readings 1
+    to 3 of that attempt and never again: the ship was disarmed for three
+    readings and the sentence claimed twenty-one.
+
+    `gunsSilencedTicks` is right to consult nothing the module says (#34), and
+    that is exactly why it cannot be read as a statement about the guns. So the
+    *session* consequence asks the client's own latched answer instead, while
+    the attempt bound is untouched -- PR #151's shape on `lockAttempt`,
+    discharging an outcome on the rule's own terms rather than retuning a bound.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(SaxratRepl, prefix="saxrat-disarm-latch-")
+        cls.bound = int_constant("ammoSwapSilencedGiveUpTicks")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def _ends(self, ticks, undone):
+        return ("ammoSwapDisarmEndsTheSession { gunsSilencedTicks = %d"
+                ", switchOffUndoneByClient = %s }" % (ticks, undone))
+
+    def test_the_budget_still_ends_the_session_on_a_ship_left_disarmed(self):
+        self.assertEqual(
+            self.repl.evaluate([
+                self._ends(self.bound + 1, "False"),
+                self._ends(self.bound + 40, "False"),
+                # A fixed value far past any plausible bound, so a constant that
+                # simply admits everything above it is not what is being tested.
+                self._ends(200, "False"),
+            ]),
+            [True] * 3,
+            "run 6's shape: the guns went off, the client never reported one "
+            "back on, and the budget expired. That is what this latch is for")
+
+    def test_a_ship_whose_guns_the_client_gave_back_does_not_latch(self):
+        self.assertEqual(
+            self.repl.evaluate([
+                "not (%s)" % self._ends(self.bound + 1, "True"),
+                "not (%s)" % self._ends(self.bound + 40, "True"),
+                "not (%s)" % self._ends(200, "True"),
+            ]),
+            [True] * 3,
+            "run 10's shape: the budget expired on a firing ship, so the "
+            "attempt is abandoned and the feature is not")
+
+    def test_it_answers_at_both_sides_of_the_bound(self):
+        self.assertEqual(
+            self.repl.evaluate([
+                "not (%s)" % self._ends(self.bound - 1, "False"),
+                "not (%s)" % self._ends(self.bound, "False"),
+                self._ends(self.bound + 1, "False"),
+                # Fixed values either side, so a bound moved to something that
+                # admits or refuses everything still fails here.
+                "not (%s)" % self._ends(3, "False"),
+                self._ends(60, "False"),
+            ]),
+            [True] * 5)
+        self.assertGreater(
+            self.bound, 3,
+            "the fixed low value above has to sit under the shipped bound")
+        self.assertLess(
+            self.bound, 60,
+            "and the fixed high value above has to sit over it")
+
+    def test_the_attempt_is_still_abandoned_at_exactly_the_same_reading(self):
+        # Nothing is loosened. The budget ends the attempt where it always did;
+        # only what that costs afterwards is narrowed. A version that also
+        # deferred the abandonment would hold the fight longer on no evidence.
+        abandoned = indented_let_binding(
+            "updateAmmoSwapMemoryWithConfig", "verdictAbandoned")
+        self.assertIn(
+            "ammoSwapSilencedGiveUpTicks < gunsSilencedTicks", abandoned)
+        self.assertNotIn("switchOffUndoneByClient", abandoned)
+        self.assertNotIn("ammoSwapDisarmEndsTheSession", abandoned)
+
+    def test_the_session_verdict_asks_the_rule_and_compares_nothing_itself(self):
+        reached = indented_let_binding(
+            "updateAmmoSwapMemoryWithConfig", "giveUpReachedThisReading")
+        self.assertIn("ammoSwapDisarmEndsTheSession", reached)
+        self.assertNotIn(
+            "ammoSwapSilencedGiveUpTicks <", reached,
+            "one comparison, so the latch and the rule cannot disagree about "
+            "when the budget expired")
+        self.assertIn(
+            "switchOffUndoneByClient = switchOffUndoneByClient", reached,
+            "the rule has to be handed the client's own report that the guns "
+            "came back -- `gunsConfirmedOff` is the same type and the opposite "
+            "question, and would type-check here")
+
+    def test_the_rule_reads_a_latch_rather_than_the_module(self):
+        # #34's property has to survive this. `switchOffUndoneByClient` is
+        # monotone within an attempt and cleared exactly where the counter is,
+        # so unlike a live module read it cannot flicker -- and it is only ever
+        # consulted to make the outcome milder.
+        undone = indented_let_binding(
+            "updateAmmoSwapMemoryWithConfig", "switchOffUndoneByClient")
+        self.assertIn("memoryBefore.switchOffUndoneByClient then True", undone)
+        for clearing in ("rangeVerdict == Nothing", "verdictSatisfied",
+                         "memoryBefore.verdictAbandoned"):
+            self.assertIn(
+                clearing, undone,
+                "cleared exactly where gunsSilencedTicks is, so it belongs to "
+                "one attempt and cannot be inherited")
+        rule = declaration("ammoSwapDisarmEndsTheSession")
+        for reading in ("isActive", "moduleReadsSwitchedOff", "stateFromDictEntries",
+                        "readingFromGameClient", "gunsConfirmedOff"):
+            self.assertNotIn(
+                reading, rule,
+                "%s would make the rule a function of this reading's module "
+                "state, which is the thing #34 refused" % reading)
+
+    def test_the_sentence_no_longer_claims_readings_the_ship_was_not_disarmed(self):
+        [charge, guns] = self.repl.strings([
+            'describeAmmoSwapGiveUp %s ShipCarriesNeitherCharge' % _CONFIG,
+            'describeAmmoSwapGiveUp %s (GunsDidNotComeBack 21)' % _CONFIG,
+        ])
+        self.assertIn("Multifrequency M", charge)
+        self.assertIn("Radio M", charge)
+        self.assertIn("21", guns)
+        self.assertIn("that attempt", guns)
+        self.assertNotIn(
+            "still not back", guns,
+            "run 10's wording said the guns were still off after a count that "
+            "measures the attempt, not the silence")
+
+
+class TheGiveUpIsRetriedAfterAWarpTest(unittest.TestCase):
+    """`ammoSwapGiveUpAfterReading`: a single failure no longer ends a
+    three-hour session.
+
+    Run 10 spent 3,832 status lines reporting the swap `off for this session`
+    after a single 21-reading attempt in its first minutes. A warp means a new
+    pocket and a fresh fight, and it is a signal both bots already read.
+
+    The two verdicts end differently on purpose, and that is the whole of this
+    class: `ShipCarriesNeitherCharge` is a fact about the ship's hold that a
+    warp cannot change, so retrying it buys a menu cascade per pocket and the
+    same answer each time.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(SaxratRepl, prefix="saxrat-giveup-warp-")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    @staticmethod
+    def _after(before, reached="Nothing", warping="False"):
+        return ("ammoSwapGiveUpAfterReading { before = %s"
+                ", reachedThisReading = %s, justFinishedWarping = %s }"
+                % (before, reached, warping))
+
+    def test_only_the_disarm_verdict_is_retryable(self):
+        self.assertEqual(
+            self.repl.evaluate([
+                "ammoSwapGiveUpSurvivesAWarp ShipCarriesNeitherCharge",
+                "not (ammoSwapGiveUpSurvivesAWarp (GunsDidNotComeBack 21))",
+                "not (ammoSwapGiveUpSurvivesAWarp (GunsDidNotComeBack 200))",
+            ]),
+            [True] * 3,
+            "a hold carrying neither charge is not something a warp changes")
+
+    def test_the_disarm_verdict_is_cleared_by_a_warp_and_by_nothing_else(self):
+        self.assertEqual(
+            self.repl.evaluate([
+                "%s == Nothing" % self._after(
+                    "Just (GunsDidNotComeBack 21)", warping="True"),
+                "%s == Just (GunsDidNotComeBack 21)" % self._after(
+                    "Just (GunsDidNotComeBack 21)", warping="False"),
+            ]),
+            [True, True],
+            "the latch stands on every reading that is not the end of a warp, "
+            "so it is not simply absent")
+
+    def test_the_charge_verdict_survives_a_warp(self):
+        self.assertEqual(
+            self.repl.evaluate([
+                "%s == Just ShipCarriesNeitherCharge" % self._after(
+                    "Just ShipCarriesNeitherCharge", warping="True"),
+            ]),
+            [True])
+
+    def test_a_verdict_reached_on_a_warp_reading_is_not_cleared_by_it(self):
+        # The reading a swap is given up on can itself be the reading a warp
+        # ends. Clearing there would drop a verdict formed after the warp, and
+        # the attempt would have been spent for nothing.
+        self.assertEqual(
+            self.repl.evaluate([
+                "%s == Just (GunsDidNotComeBack 21)" % self._after(
+                    "Nothing", reached="Just (GunsDidNotComeBack 21)",
+                    warping="True"),
+                "%s == Nothing" % self._after("Nothing", warping="True"),
+            ]),
+            [True, True])
+
+    def test_folded_over_a_session_the_latch_returns_once_per_warp(self):
+        # A run's shape rather than one reading: give up, hold it across a
+        # pocket's worth of readings, come back on the warp, and do it again.
+        readings = (["False"] * 8 + ["True"] + ["False"] * 8
+                    + ["True"] + ["False"])
+        fold = (
+            "List.foldl (\\warping before -> ammoSwapGiveUpAfterReading "
+            "{ before = before, reachedThisReading = "
+            "(if before == Nothing then Just (GunsDidNotComeBack 21) "
+            "else Nothing), justFinishedWarping = warping }) "
+            "(Just (GunsDidNotComeBack 21)) [ %s ]" % ", ".join(readings))
+        self.assertEqual(
+            self.repl.evaluate(["%s == Just (GunsDidNotComeBack 21)" % fold]),
+            [True],
+            "each warp clears it and the very next reading latches it again, "
+            "so the session ends holding one -- retried, not abandoned")
+
+    def test_the_status_line_says_which_of_the_two_it_is(self):
+        # Run 10's operator read `off for this session` 3,832 times about a
+        # verdict a warp would have cleared, with no way to know which it was.
+        clause = declaration("describeAmmoSwapState")
+        self.assertIn("ammoSwapGiveUpSurvivesAWarp giveUp", clause)
+        self.assertIn('"off for this session"', clause)
+        self.assertIn('"off until the next warp"', clause)
+
+    def test_the_decision_line_and_the_status_line_share_one_sentence(self):
+        for reader in ("describeAmmoSwapState", "ensureAmmoSuitsTargetRange"):
+            self.assertIn(
+                "describeAmmoSwapGiveUp config giveUp", declaration(reader),
+                "%s has to render the case rather than carry its own wording, "
+                "or the two can describe one verdict differently" % reader)
+        source = code_only(source_of(SAXRAT_BOT_ELM))
+        self.assertEqual(
+            source.count("describeAmmoSwapGiveUp config giveUp"), 3,
+            "the two readers above and the one definition, and nothing else")
+
+    def test_nothing_stores_the_sentence_beside_the_case(self):
+        # A `Maybe String` was the old shape and it is what let the give-up go
+        # on claiming for 3,832 status lines something the memory beside it
+        # already contradicted. The sentence is derived, every time.
+        # `type alias` has no annotation for `body_of` to key on.
+        self.assertIn("givenUp : Maybe AmmoSwapGiveUp",
+                      collapsed(source_of(SAXRAT_BOT_ELM)))
+        reached = indented_let_binding(
+            "updateAmmoSwapMemoryWithConfig", "giveUpReachedThisReading")
+        self.assertNotIn(
+            '"', reached,
+            "a string literal here is a sentence stored in memory, which is "
+            "the shape this change exists to leave")
+
+
 class ThePlacementTest(unittest.TestCase):
     """Where the swap is wired in, read out of the source.
 
@@ -875,7 +1191,23 @@ class ThePlacementTest(unittest.TestCase):
             body_of(self.source, "updateMemoryForNewReadingFromGame")))
         self.assertIn(
             "ammoSwap = updateAmmoSwapMemory context incomingDamageNow "
+            "{ justFinishedWarping = weJustFinishedWarping } "
             "botMemoryBefore.ammoSwap", update)
+
+    def test_the_warp_the_swap_is_retried_across_is_the_one_already_defined(self):
+        # One definition of "a pocket ended", shared with the anomaly
+        # bookkeeping, so the two cannot come to disagree about it -- and so a
+        # second, subtly different warp test cannot be introduced here without
+        # somebody noticing.
+        update = collapsed(without_comments(
+            body_of(self.source, "updateMemoryForNewReadingFromGame")))
+        self.assertIn(
+            "weJustFinishedWarping = "
+            "(botMemoryBefore.shipWarpingInLastReading == Just True) "
+            "&& (shipIsWarping == Just False)", update)
+        self.assertEqual(
+            code_only(self.source).count("weJustFinishedWarping ="), 1,
+            "one definition, read by both the anomaly bookkeeping and the swap")
 
     def test_the_disarm_reads_this_reading_s_damage_window(self):
         # Not `botMemoryBefore.incomingDamage`: the trade is re-asked on every
@@ -929,17 +1261,21 @@ class ThePlacementTest(unittest.TestCase):
 
 
 class TheRecordedSaxratRunsTest(unittest.TestCase):
-    """The recorded saxrat runs, asked the two questions they bear on.
+    """The recorded saxrat runs, asked what they actually did.
 
-    Asserted as *relations* rather than as counts, so a corpus that grows cannot
-    turn a true claim red.
+    This class used to assert that no recorded run had ever swapped ammo, which
+    was true when the port shipped and expired the moment it flew. Its premise
+    is gone; what replaces it is the evidence issue #154 rests on, keyed as
+    *relations* between runs so that a corpus which grows -- or a later run that
+    behaves differently -- cannot turn a true claim red.
+
+    Runs are globbed rather than numbered, so run 11 is read without an edit.
     """
 
     @classmethod
     def setUpClass(cls):
-        logs = [os.path.join(EVE_BOT_LOGS, "saxrat_run%d.log" % number)
-                for number in range(1, 10)]
-        logs = [path for path in logs if os.path.exists(path)]
+        logs = sorted(glob.glob(
+            os.path.join(EVE_BOT_LOGS, "saxrat_run*.log")))
         if not logs:
             raise unittest.SkipTest(
                 "no recorded saxrat runs in ~/eve-bot-logs, so what those runs "
@@ -949,7 +1285,13 @@ class TheRecordedSaxratRunsTest(unittest.TestCase):
         cls.warp_readings = 0
         cls.warp_episodes = 0
         cls.ammo_clauses = 0
+        # Per run, so the claims below are relations between runs and not one
+        # pooled number that a single odd run could carry on its own.
+        cls.runs = []
         for path in logs:
+            run = {"ammo_clauses": 0, "guns_off": 0, "guns_back_on": 0,
+                   "disarm_give_ups": 0, "warp_episodes": 0,
+                   "worst_guns_off": 0}
             in_warp = False
             was_in_warp = False
             started = False
@@ -962,22 +1304,103 @@ class TheRecordedSaxratRunsTest(unittest.TestCase):
                                 cls.warp_readings += 1
                                 if not was_in_warp:
                                     cls.warp_episodes += 1
+                                    run["warp_episodes"] += 1
                             was_in_warp = in_warp
                         started = True
                         in_warp = False
-                    elif SAXRAT_IN_WARP in line:
+                        continue
+                    if SAXRAT_IN_WARP in line:
                         in_warp = True
-                    elif "Ammo swap:" in line:
-                        cls.ammo_clauses += 1
+                    if "Ammo swap:" not in line:
+                        continue
+                    cls.ammo_clauses += 1
+                    run["ammo_clauses"] += 1
+                    if GUNS_OFF_CLAUSE in line:
+                        run["guns_off"] += 1
+                        count = re.search(
+                            re.escape(GUNS_OFF_CLAUSE) + r"(\d+) of", line)
+                        if count:
+                            run["worst_guns_off"] = max(
+                                run["worst_guns_off"], int(count.group(1)))
+                    if GUNS_BACK_ON_CLAUSE in line:
+                        run["guns_back_on"] += 1
+                    if DISARM_GIVE_UP in line:
+                        run["disarm_give_ups"] += 1
+            cls.runs.append((os.path.basename(path), run))
 
-    def test_no_recorded_run_has_ever_swapped_ammo(self):
-        """So nothing here is contradicted by the corpus, and nothing is
-        confirmed by it either. The capability did not exist when these were
-        flown."""
-        self.assertEqual(
-            self.ammo_clauses, 0,
-            "a recorded run carrying an ammo clause would be evidence this "
-            "port could be measured against, which is what it does not have")
+        cls.swapping = [(name, run) for name, run in cls.runs
+                        if run["ammo_clauses"]]
+
+    def test_the_port_is_flying_and_the_swap_reaches_its_disarm(self):
+        """The claim the expired case denied, stated as the corpus now has it.
+
+        A run carrying an ammo clause is a run flown since the port; one
+        carrying `GUNS OFF` is a run whose swap got past the disarm gate and
+        actually switched a gun off. Both are lower bounds, so more runs can
+        only make them truer.
+        """
+        self.assertTrue(
+            self.swapping,
+            "no recorded run carries an ammo clause at all, so this bot's own "
+            "corpus cannot say anything about the swap")
+        self.assertTrue(
+            [name for name, run in self.swapping if run["guns_off"]],
+            "a swap that never reaches GUNS OFF is one the disarm gate stops, "
+            "and none of the claims below would be about anything")
+
+    def test_a_run_gave_up_on_a_ship_whose_guns_the_client_had_given_back(self):
+        """Issue #154's finding, and the one the fix rests on.
+
+        In such a run the swap's own status clause had gone over to reporting
+        the guns back on, and the deepest `GUNS OFF` count it ever printed is
+        far below the budget the give-up then claimed. That is a bound counting
+        readings that belong to a different outcome.
+        """
+        bound = int_constant("ammoSwapSilencedGiveUpTicks")
+        misread = [name for name, run in self.swapping
+                   if run["disarm_give_ups"] and run["guns_back_on"]
+                   and run["worst_guns_off"] * 2 < bound]
+        self.assertTrue(
+            misread,
+            "no recorded run reached the disarm give-up having recorded the "
+            "client re-arming the guns, which is the observation #154 is "
+            "filed on -- runs 9 and 10 are the ones that did")
+
+    def test_and_a_run_gave_up_with_the_guns_genuinely_off_throughout(self):
+        """The counterexample that keeps the latch worth having.
+
+        Not every give-up is a misreading. A run whose swap never once recorded
+        a gun coming back, and whose `GUNS OFF` count ran all the way to the
+        budget, is a ship that really was left disarmed -- so the fix narrows
+        the latch rather than removing it.
+        """
+        bound = int_constant("ammoSwapSilencedGiveUpTicks")
+        genuine = [name for name, run in self.swapping
+                   if run["disarm_give_ups"] and not run["guns_back_on"]
+                   and run["worst_guns_off"] >= bound]
+        self.assertTrue(
+            genuine,
+            "no recorded run reached the give-up with the guns demonstrably "
+            "still off, which is the case this latch exists for -- run 6 is "
+            "the one that did")
+
+    def test_a_warp_offers_far_more_retries_than_a_session_does(self):
+        """The cost of unlatching on a warp, measured rather than asserted.
+
+        A swap failing for a persistent reason retries once per warp instead of
+        once per session. Stated as the relation that makes it bounded and
+        plural: every run that gave up warped many times more often than it gave
+        up, so the retry is tens of attempts over a long session and not one,
+        and not thousands either.
+        """
+        gave_up = [(name, run) for name, run in self.swapping
+                   if run["disarm_give_ups"]]
+        self.assertTrue(gave_up, "no give-up recorded to size this against")
+        for name, run in gave_up:
+            self.assertGreater(
+                run["warp_episodes"], 2,
+                "%s gave up on the swap and warped almost never, so a per-warp "
+                "retry would not be a retry at all" % name)
 
     def test_this_bot_does_commute_between_sites(self):
         """The issue's premise, and the corpus disagrees with it.

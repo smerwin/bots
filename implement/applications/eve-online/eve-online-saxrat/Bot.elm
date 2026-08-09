@@ -5208,6 +5208,120 @@ type alias AmmoSwapConfig =
     }
 
 
+{-| Why the swap switched itself off for the session, as a case rather than a
+sentence.
+
+It was a `Maybe String`, and a string is the wrong shape for it now that
+something other than the status line has to ask _which_ verdict this is. Run 10
+is why: a give-up whose sentence was written once and then read back by nobody
+went on claiming for three thousand status lines that the ship's guns were off,
+on a ship whose guns the bot itself had recorded coming back on. A case can be
+asked; a sentence can only be printed.
+
+`GunsDidNotComeBack` carries the count it was reached at, so the sentence is a
+function of the case and the two cannot drift apart.
+
+-}
+type AmmoSwapGiveUp
+    = ShipCarriesNeitherCharge
+    | GunsDidNotComeBack Int
+
+
+{-| Whether a session-wide give-up is a fact a warp cannot change.
+
+**Only one of the two survives**, and the difference is what the verdict is about.
+`ShipCarriesNeitherCharge` is a fact about what is in the ship's hold, which
+nothing short of docking alters -- retrying it every pocket buys a menu cascade
+per pocket and the same answer each time, forever, on a reading that already
+knows. `GunsDidNotComeBack` is a fact about how one attempt went in one fight,
+and a warp means a new pocket and a fresh fight.
+
+The cost of that is stated rather than hidden: a swap failing for a _persistent_
+reason now retries once per warp instead of once per session. saxrat's run 10
+carries about ten warp episodes and eight anomalies visited, so that is tens of
+retries over a three-hour session rather than one -- bounded, and visible in the
+status line on every reading, where the present behaviour is one line at tick 21
+and silence for the rest of the run.
+
+-}
+ammoSwapGiveUpSurvivesAWarp : AmmoSwapGiveUp -> Bool
+ammoSwapGiveUpSurvivesAWarp giveUp =
+    case giveUp of
+        ShipCarriesNeitherCharge ->
+            True
+
+        GunsDidNotComeBack _ ->
+            False
+
+
+{-| What an operator is told, derived from the case rather than stored beside it.
+
+The disarm sentence is careful about a distinction run 10 shows the old one was
+not: it says how many readings the _attempt_ ran, not how many the ship spent
+disarmed, because on that run those were 21 and 3. `ammoSwapDisarmEndsTheSession`
+is what guarantees the sentence is true when it is printed at all -- the case can
+only be reached where the client never took the guns back.
+
+-}
+describeAmmoSwapGiveUp : AmmoSwapConfig -> AmmoSwapGiveUp -> String
+describeAmmoSwapGiveUp config giveUp =
+    case giveUp of
+        ShipCarriesNeitherCharge ->
+            "the weapon's own menu offers neither '"
+                ++ config.shortRangeAmmoName
+                ++ "' nor '"
+                ++ config.longRangeAmmoName
+                ++ "', so the ship is carrying neither and there is nothing to swap between"
+
+        GunsDidNotComeBack readings ->
+            "the guns were switched off to load and the client never reported one switched back on across the "
+                ++ String.fromInt readings
+                ++ " readings of that attempt -- a disarmed ship is worse than the wrong charge, so this will not be attempted again until the next warp"
+
+
+{-| The give-up as it stands after this reading.
+
+A pure rule over a record so the unlatch can be executed rather than read. The
+warp is the boundary, and the two obvious alternatives were weighed against it
+rather than assumed:
+
+  - **A new target** is not a boundary at all. Rats die and are replaced every few
+    readings, so unlatching there is the same as having no latch -- a swap that
+    genuinely cannot finish would re-disarm the ship every few readings for the
+    whole session, which is exactly the runaway the latch exists to stop.
+  - **A new anomaly** is the tightest reading of "a fresh fight", and it is the
+    one this bot cannot always answer. The anomaly's identity comes from
+    `getCurrentAnomalyIDAsSeenInProbeScanner`, which is `Nothing` whenever the
+    scanner holds nothing on grid -- `visitedAnomalies` already discards those
+    readings. A boundary that some readings cannot answer is a boundary that
+    silently never arrives.
+  - **A warp** needs no read this bot does not already take, and it is a superset
+    of the anomaly boundary: every pocket is reached by a warp, so this gives at
+    least one retry per pocket and occasionally one more (a warp inside a site, a
+    warp to a structure to tether). Each extra one costs a single attempt. Run
+    10's counts say the two boundaries are nearly the same in practice -- ten warp
+    episodes against eight anomalies -- and only one of them is always readable.
+
+-}
+ammoSwapGiveUpAfterReading :
+    { before : Maybe AmmoSwapGiveUp
+    , reachedThisReading : Maybe AmmoSwapGiveUp
+    , justFinishedWarping : Bool
+    }
+    -> Maybe AmmoSwapGiveUp
+ammoSwapGiveUpAfterReading giveUpCase =
+    case giveUpCase.before of
+        Just before ->
+            if giveUpCase.justFinishedWarping && not (ammoSwapGiveUpSurvivesAWarp before) then
+                Nothing
+
+            else
+                Just before
+
+        Nothing ->
+            giveUpCase.reachedThisReading
+
+
 {-| The one place that says what "the ammo swap is on" means.
 
 `Err` carries the settings that are missing, which is the whole reason this is a
@@ -5315,21 +5429,23 @@ answer.** saxrat's fight activates weapons by hotkey
 (`activateWeaponModuleButWaitIfActivatedInPreviousStep`) while the swap switches
 one off by clicking its button, so the two do not share a settling window and
 `decideActionInAnomaly` can press F1 on the very next reading. Nothing about the
-bounds changes: the guns firing again is the state in which this attempt has
+_bounds_ changes: the guns firing again is the state in which this attempt has
 stopped costing anything, and the two deadlines that end it consult no module at
-all.
+all. What it does decide, since run 10, is what an expired disarm budget costs
+afterwards -- see `ammoSwapDisarmEndsTheSession`.
 
 `verdictAbandoned` is the ordinary per-attempt give-up: the guns go back to
 firing whatever is in them and the next change of range tries again. Failing to a
 firing gun with the wrong ammo is always better than failing to a silent gun. The
-one exception is the silence deadline, which switches the swap off for the
-session -- having disarmed the ship once and been unable to finish, doing it
-again is not worth the ammo it might save.
+silence deadline abandons the attempt like everything else and, where the ship
+really was left disarmed, additionally stops the swap until the next warp.
 
-`givenUpReadingsAgo` exists only so the latch is _said_ once. The give-up is a
-permanent state, and printing its sentence on every reading for the rest of the
-session -- 763 times in the mission runner's run 11 -- buries the readings that
-carry news.
+`givenUp` names which of the two verdicts was reached rather than carrying the
+sentence, because one of them is retryable and the other is not; the sentence is
+derived from it by `describeAmmoSwapGiveUp`. `givenUpReadingsAgo` exists only so
+the latch is _said_ once -- printing its sentence on every reading buries the
+readings that carry news, 763 times in the mission runner's run 11 and 3,832
+times in saxrat's run 10.
 
 `loadRefusedByClient` holds the client's own sentence when it says it discarded
 the load, and it is kept because the entries it came from are not: a reading's
@@ -5361,7 +5477,7 @@ type alias AmmoSwapMemory =
     , gunsCommandedThisVerdictAtX : List Int
     , menuOpenOnGunAtX : Maybe Int
     , loadCascadeReachedTheMenu : Bool
-    , givenUp : Maybe String
+    , givenUp : Maybe AmmoSwapGiveUp
     , givenUpReadingsAgo : Int
     }
 
@@ -5445,10 +5561,11 @@ count, and no reading of the module's own state can stall it -- which matters
 because those readings are exactly what turned out to be untrustworthy.
 
 **A weapon that will not go quiet keeps shooting the wrong charge.** Reaching
-this deadline means the ship was disarmed and the bot could not get it back on
-its own schedule, so it is the one failure here that switches the whole swap off
-for the session rather than just abandoning the attempt -- see
-`ammoSwapVerdictGiveUpTicks` for why every other failure does the opposite.
+this deadline always abandons the attempt, and -- where the ship really was still
+disarmed -- switches the swap off until the next warp; see
+`ammoSwapDisarmEndsTheSession` for the half of that this counter cannot answer
+and `ammoSwapVerdictGiveUpTicks` for why every other failure only ever costs one
+attempt.
 
 Comfortably longer than the sequence needs and comfortably shorter than
 `ammoSwapVerdictGiveUpTicks`, so the dangerous state is always the first to time
@@ -5458,6 +5575,59 @@ out.
 ammoSwapSilencedGiveUpTicks : Int
 ammoSwapSilencedGiveUpTicks =
     20
+
+
+{-| Whether an expired disarm budget is evidence of a ship that was left
+disarmed.
+
+**It is not, on its own, and saxrat's run 10 is where that stopped being a
+theory.** The budget above counts readings from the first switch-off command and
+consults nothing the module says, deliberately (#34: a counter that reads the
+duty cycle can be stalled by it). What that buys is a bound nothing can stop. What
+it does not buy is a statement about the guns, and the give-up beside it was
+written as though it did:
+
+    Ammo swap: given up -- the guns were switched off to load and were still not
+    back 21 readings later.
+
+On the reading that printed, run 10's own status line had been reading
+`a gun has been switched back on 20 of 20 readings in -- the guns are firing` for
+seventeen consecutive readings, the client having re-armed the gun at reading 4
+of the 21. `GUNS OFF` printed for readings 1 to 3 and never again. The ship was
+disarmed for three readings; the sentence claimed twenty-one; and on that
+sentence the whole feature switched itself off for a three-hour session, which is
+the harshest outcome this design has.
+
+**The distinction already existed one function away.** `describeAmmoSwapState`
+declines to print `GUNS OFF` the moment `switchOffUndoneByClient` latches, and
+says why in its own comment -- "saying GUNS OFF here would be a lie". The status
+line had it right and the verdict did not.
+
+So the _session_ consequence asks the same question the status line asks, and the
+attempt bound is untouched: the budget still ends the attempt at exactly the
+reading it always did, and only what that costs afterwards changes. This is PR
+#151's shape on `lockAttempt` -- a bound counting readings that belong to a
+different outcome, discharged on the rule's own terms rather than retuned.
+
+**Reading `switchOffUndoneByClient` here cannot stall anything**, which is what
+keeps #34 intact. It is a _latch_, monotone within one attempt and cleared only
+where `gunsSilencedTicks` is cleared, so unlike a live module read it cannot
+flicker; and it is only ever consulted to make the outcome _milder_, never to
+hold the guns longer or to postpone the abandonment by one reading.
+
+Nothing here claims the attempt was going to succeed. It says only that a ship
+whose guns the client has demonstrably given back is not the ship this latch was
+built to protect.
+
+-}
+ammoSwapDisarmEndsTheSession :
+    { gunsSilencedTicks : Int
+    , switchOffUndoneByClient : Bool
+    }
+    -> Bool
+ammoSwapDisarmEndsTheSession disarmOutcome =
+    (ammoSwapSilencedGiveUpTicks < disarmOutcome.gunsSilencedTicks)
+        && not disarmOutcome.switchOffUndoneByClient
 
 
 {-| How many readings to let a switch-off settle before loading anyway.
@@ -6091,11 +6261,16 @@ ammoSwapLoadIsTrusted trustCase =
         && not trustCase.menuContradictsTheLoad
 
 
-updateAmmoSwapMemory : UpdateMemoryContext BotSettings -> IncomingDamageMemory -> AmmoSwapMemory -> AmmoSwapMemory
-updateAmmoSwapMemory context incomingDamage memoryBefore =
+updateAmmoSwapMemory :
+    UpdateMemoryContext BotSettings
+    -> IncomingDamageMemory
+    -> { justFinishedWarping : Bool }
+    -> AmmoSwapMemory
+    -> AmmoSwapMemory
+updateAmmoSwapMemory context incomingDamage warp memoryBefore =
     case ammoSwapConfigFromSettings context.botSettings of
         Ok config ->
-            updateAmmoSwapMemoryWithConfig context incomingDamage config memoryBefore
+            updateAmmoSwapMemoryWithConfig context incomingDamage warp config memoryBefore
 
         Err _ ->
             -- The swap is off, so nothing here means anything. Reset rather than
@@ -6108,10 +6283,11 @@ updateAmmoSwapMemory context incomingDamage memoryBefore =
 updateAmmoSwapMemoryWithConfig :
     UpdateMemoryContext BotSettings
     -> IncomingDamageMemory
+    -> { justFinishedWarping : Bool }
     -> AmmoSwapConfig
     -> AmmoSwapMemory
     -> AmmoSwapMemory
-updateAmmoSwapMemoryWithConfig context incomingDamage config memoryBefore =
+updateAmmoSwapMemoryWithConfig context incomingDamage warp config memoryBefore =
     let
         guns =
             weaponModuleButtonsFromReading context.readingFromGameClient
@@ -6540,38 +6716,40 @@ updateAmmoSwapMemoryWithConfig context incomingDamage config memoryBefore =
                 memoryBefore.givenUpReadingsAgo + 1
 
         givenUp =
+            ammoSwapGiveUpAfterReading
+                { before = memoryBefore.givenUp
+                , reachedThisReading = giveUpReachedThisReading
+                , justFinishedWarping = warp.justFinishedWarping
+                }
+
+        giveUpReachedThisReading =
             case memoryBefore.givenUp of
-                Just reason ->
-                    Just reason
+                Just _ ->
+                    Nothing
 
                 Nothing ->
                     if neitherChargeCarried then
-                        Just
-                            ("the weapon's own menu offers neither '"
-                                ++ config.shortRangeAmmoName
-                                ++ "' nor '"
-                                ++ config.longRangeAmmoName
-                                ++ "', so the ship is carrying neither and there is nothing to swap between"
-                            )
+                        Just ShipCarriesNeitherCharge
 
-                    else if ammoSwapSilencedGiveUpTicks < gunsSilencedTicks then
-                        Just
-                            ("the guns were switched off to load and were still not back "
-                                ++ String.fromInt gunsSilencedTicks
-                                ++ " readings later -- a disarmed ship is worse than the wrong charge, so this will not be attempted again this session"
-                            )
+                    else if
+                        ammoSwapDisarmEndsTheSession
+                            { gunsSilencedTicks = gunsSilencedTicks
+                            , switchOffUndoneByClient = switchOffUndoneByClient
+                            }
+                    then
+                        Just (GunsDidNotComeBack gunsSilencedTicks)
 
                     else
-                        -- Two latches rather than the mission runner's three.
+                        -- Two verdicts rather than the mission runner's three.
                         -- Its third is "no crossover distance", which cannot
                         -- happen here: `ammo-swap-range` is required, so a swap
                         -- that is running has a crossover by construction and a
                         -- swap without one never starts.
                         --
-                        -- A load that does not land is *not* here either. It
-                        -- abandons the one verdict and the guns go back to
-                        -- shooting; only the two above are permanent enough to
-                        -- switch the feature off for the session.
+                        -- A load that does not land is *not* here either, and
+                        -- neither is an expired disarm budget on a ship the
+                        -- client gave its guns back to. Both abandon the one
+                        -- verdict and the guns go back to shooting.
                         Nothing
     in
     { chargeLoaded = chargeLoadedOrAssumed
@@ -6622,15 +6800,14 @@ ensureAmmoSuitsTargetRange context nextStep =
 
         Ok config ->
             case ammoSwap.givenUp of
-                Just reason ->
+                Just giveUp ->
                     -- The reason in full on the reading it latched, and a line
-                    -- an operator can skip for the rest of the session. This is
-                    -- a permanent state and it repeats about a dozen times per
-                    -- reading; the mission runner's run 11 carries 763 copies of
-                    -- the long form.
+                    -- an operator can skip while it stands. It repeats about a
+                    -- dozen times per reading; the mission runner's run 11
+                    -- carries 763 copies of the long form.
                     if ammoSwap.givenUpReadingsAgo <= 1 then
                         describeBranch
-                            ("Not swapping ammo any more: " ++ reason ++ " -- keep shooting with what is loaded.")
+                            ("Not swapping ammo any more: " ++ describeAmmoSwapGiveUp config giveUp ++ " -- keep shooting with what is loaded.")
                             nextStep
 
                     else
@@ -7103,14 +7280,26 @@ describeAmmoSwapState context =
 
         Ok config ->
             case ammoSwap.givenUp of
-                Just reason ->
-                    -- Said in full on the reading it happened, and as a flag for
-                    -- the rest of the session.
+                Just giveUp ->
+                    -- Said in full on the reading it happened, and as a flag
+                    -- while it stands.
                     if ammoSwap.givenUpReadingsAgo <= 1 then
-                        "Ammo swap: given up -- " ++ reason ++ "."
+                        "Ammo swap: given up -- " ++ describeAmmoSwapGiveUp config giveUp ++ "."
 
                     else
-                        "Ammo swap: off for this session (given up "
+                        -- The flag says which of the two this is, because they
+                        -- now end differently: run 10 printed "off for this
+                        -- session" 3,832 times about a verdict that a warp
+                        -- would have cleared, and an operator reading that had
+                        -- no way to know whether to expect the swap back.
+                        "Ammo swap: "
+                            ++ (if ammoSwapGiveUpSurvivesAWarp giveUp then
+                                    "off for this session"
+
+                                else
+                                    "off until the next warp"
+                               )
+                            ++ " (given up "
                             ++ String.fromInt ammoSwap.givenUpReadingsAgo
                             ++ " readings ago)."
 
@@ -9074,7 +9263,7 @@ second window to clear.
 
 **Why a computed point is acceptable here when `beginCascade` refuses one.**
 That fallback rejects "empty space" because a remembered coordinate is not
-reliably empty and once opened *Clear All Waypoints* on a real route. This point
+reliably empty and once opened _Clear All Waypoints_ on a real route. This point
 is not remembered: it is derived from the info panel's own parsed region every
 reading, so it moves with the layout the way the UI scale and every other
 self-calibrated number here do. The panel is anchored top-left under the Neocom,
@@ -9533,7 +9722,15 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- re-asked on every reading the swap holds the guns, and asking it
         -- about a window one reading stale would let the swap sit through the
         -- first reading of a fight arriving.
-        updateAmmoSwapMemory context incomingDamageNow botMemoryBefore.ammoSwap
+        --
+        -- The warp is the boundary a give-up is retried across, and it is the
+        -- same `weJustFinishedWarping` the anomaly bookkeeping reads -- one
+        -- definition, so the two cannot come to disagree about when a pocket
+        -- ended. See `ammoSwapGiveUpAfterReading`.
+        updateAmmoSwapMemory context
+            incomingDamageNow
+            { justFinishedWarping = weJustFinishedWarping }
+            botMemoryBefore.ammoSwap
     }
 
 

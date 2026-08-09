@@ -4931,7 +4931,7 @@ shipped configuration rather than edge cases:
 | the client's transient popup (#123) | parsed on every reading and read by nothing — the same five references and the same zero readers | printed in the status line, carried forward with an age, and since #146 read by exactly one decision (the drone-launch cap) |
 | the lock range (#121) | `targeting-range` asserted and never revised — `lockProvenAtMeters` appeared 0 times | the setting clamped into `[proven, refused)`, learned from the client's own answers, with the row-identity discipline unchanged |
 | the lock-slot ceiling (#110, #150) | `maxTargetCount = 4` hardcoded with no setting able to reach it, against a real maximum of 6 — 2,149 readings of `Enough locked targets.` across runs 2-5, and a `List.take 4` candidate window that would have capped it there anyway | `max-targets`, clamped by the maximum the client states on the game log and by what the target bar has held, and asking for one row more than that until the client states the number |
-| the ammo swap (#122) | absent, not unconfigured — `ammoSwap`, `Charge`, `chargeName` and `optimalRange` all appeared 0 times, and there was no setting to turn on | ported without its tooltip half, with `ammo-swap-range` **required** rather than optional — see "saxrat swaps ammo at a distance it is told" below |
+| the ammo swap (#122, #154) | absent, not unconfigured — `ammoSwap`, `Charge`, `chargeName` and `optimalRange` all appeared 0 times, and there was no setting to turn on | ported without its tooltip half, with `ammo-swap-range` **required** rather than optional; and since run 10, a disarm give-up that asks whether the guns came back and is retried after a warp — see the two sections below |
 | an in-range acceleration gate (#145, #147) | a context-menu cascade, and a give-up counting readings *near* a gate rather than readings spent asking one — `selectedItem` appeared 0 times in `Bot.elm`, so it had never pressed a panel button for anything. And the branch was **unreachable inside a site at all**: a "Warp to Site" button anywhere in the tree outranked it, and the panel goes on drawing one after arrival | `selectThenPanelAction`'s shape over `selectedItemActivateGate`, inside `unlessAlreadyClosingIn`; the counter counts the ask; and `siteProgressStep` asks the gate first and declines a site offered while a gate is in reach — see the two sections below |
 
 Two things about the port are worth keeping in view.
@@ -5208,19 +5208,179 @@ written to catch it. Both the slice and a second case asserting none of the five
 inputs is a literal are what catch it now, which is the "mutate the code and
 watch a test fail" convention doing the thing it is for.
 
-**Unverified: any of it running, and whether saxrat's ships have two ammo types
-worth switching between.** The three recorded saxrat runs carry no ammo clause at
-all, so the corpus cannot say what a swap would have gained — that is the issue's
-own assumption from the operator's request and it is not measured. What to watch
-on the first run with all three settings: `Ammo swap: loaded charge reads …,
-crossover N m (+/-3000, from the ammo-swap-range setting)` in the status line at
-all, then `GUNS OFF for N of 20` with N small and the client confirming the
-switch-off by reading 2, then `(satisfied)` and `loaded charge reads` *changing*
-with each swap. `cannot load or unload` appearing in the game log means the load
-is going into a running gun. A run where the swap opens a menu and the next
-reading reads `A context menu has sat at the same depth` means the stray-menu
-guard is still firing on the swap's own menu, which is the one new rule here and
-the thing most likely to be wrong.
+**It has flown since, and what that settled is in the section below.** The
+paragraph that stood here said no recorded saxrat run carried an ammo clause at
+all; runs 5 and later do, the stray-menu guard this section names as the thing
+most likely to be wrong turns out to be right, and the thing that was wrong is
+the give-up beside it.
+
+### The disarm budget bounds an attempt, and it was read as a statement about the guns
+
+Issue #154. saxrat's run 10 switched the whole ammo swap off **21 readings into a
+three-hour session** and spent the remaining 3,832 status lines reporting it
+`off for this session`. (That run was still being written while this was
+measured — the issue counts 2,578 of those lines and 66,744 in the log against
+3,832 and 96,834 here — so every claim below is a relation the cases recount from
+the corpus rather than one of these numbers.)
+
+```
+Ammo swap: given up -- the guns were switched off to load and were still not
+back 21 readings later -- a disarmed ship is worse than the wrong charge, so
+this will not be attempted again this session.
+```
+
+**The guns were not off, and the bot's own status line said so on the same
+reading.** Its ammo clause had read
+
+```
+(a gun has been switched back on 20 of 20 readings in -- the guns are firing,
+and this attempt is going on to its load anyway)
+```
+
+for the previous **seventeen consecutive readings**. `GUNS OFF` printed for
+readings 1, 2 and 3 of that attempt and never again: the transition is clean and
+in the log, `GUNS OFF for 3 of 20` followed on the very next reading by
+`a gun has been switched back on 4 of 20 readings in`. **The ship was disarmed
+for three readings and the sentence claimed twenty-one**, and on that sentence
+the harshest outcome this feature has — the per-session latch — fired.
+
+**The issue's own diagnosis is not what the log says either, and it matters that
+it is not.** #154 reads the episode as menu *latency*: the swap waiting for a
+weapon's context menu to render, the budget spent on the wait, and the menu
+arriving on the very next reading. The waiting is real, but the menu was **open
+throughout** — `Context menus open: 1 (cascade level 1)` — and did not offer the
+charge: `Could not find menu entry with text containing 'Multifrequency M'` on
+every reading of the wait. The two readings the issue quotes as "no context menu
+in this reading yet" are the last two, after the cascade's own lookback discarded
+the stale menu at reading 19. So the readings were not spent on a menu that was
+slow to come; they were spent on a menu that was there and said nothing the swap
+could use, while the guns fired the whole time.
+
+**`gunsSilencedTicks` is right, and that is exactly why it cannot be read as a
+statement about the guns.** #34's correction made it consult nothing the module
+says, because a counter that reads the duty cycle can be stalled by it. What that
+buys is a bound nothing can stop. What it does not buy is an account of the ship's
+state, and the give-up was written as though it did.
+
+**The distinction already existed one function away.** `describeAmmoSwapState`
+stops printing `GUNS OFF` the moment `switchOffUndoneByClient` latches, and its
+own comment says why — *"saying `GUNS OFF` here would be a lie"*. The status line
+had it right and the verdict did not. #72 established the underlying fact on the
+mission runner: **the client re-arms the gun by itself on every swap**, which is
+why that field exists and why it is a report rather than a verdict.
+
+**So the session consequence asks the client's own answer and the attempt bound
+is untouched.** `ammoSwapDisarmEndsTheSession` is the rule: the budget expired
+**and** the client never reported a gun back on. The budget still ends the attempt
+at exactly the reading it always did — nothing is loosened, nothing holds the
+fight one reading longer — and only what that costs afterwards changes. That is
+PR #151's shape on `lockAttempt`, an outcome discharged on the rule's own terms
+rather than a bound retuned.
+
+**Reading `switchOffUndoneByClient` here cannot stall anything**, which is what
+keeps #34 intact. It is a *latch*, monotone within an attempt and cleared exactly
+where `gunsSilencedTicks` is cleared, so unlike a live module read it cannot
+flicker between cycles; and it is only ever consulted to make the outcome milder.
+
+**And a single failure no longer ends a three-hour session.** The disarm verdict
+is retried after a warp. The two verdicts end differently on purpose:
+`ShipCarriesNeitherCharge` is a fact about the ship's hold that nothing short of
+docking alters, so retrying it buys a menu cascade per pocket and the same answer
+each time — it still latches for the session. Three boundaries were weighed:
+
+- **A new target** is not a boundary. Rats die and are replaced every few
+  readings, so unlatching there is the same as having no latch at all.
+- **A new anomaly** is the tightest reading of "a fresh fight" and the one this
+  bot cannot always answer: the identity comes from
+  `getCurrentAnomalyIDAsSeenInProbeScanner`, which is `Nothing` whenever the
+  scanner holds nothing on grid, and `visitedAnomalies` already discards those
+  readings. A boundary some readings cannot answer never arrives.
+- **A warp** needs no read this bot does not already take — it is the same
+  `weJustFinishedWarping` the anomaly bookkeeping uses, one definition — and it is
+  a superset of the anomaly boundary, since every pocket is reached by a warp.
+  Run 10's own counts say the two are nearly the same in practice, about ten warp
+  episodes against eight anomalies visited, and only one of them is always
+  readable.
+
+**The cost is stated rather than hidden**: a swap failing for a persistent reason
+now retries once per warp rather than once per session. That is tens of attempts
+over a long session instead of one — bounded, and named on every reading, where
+the present behaviour is one line at tick 21 and silence for hours. The status
+line says which of the two it is (`off until the next warp` against `off for this
+session`), because run 10's operator read `off for this session` 3,832 times about
+a verdict a warp would have cleared.
+
+**`givenUp` is a case rather than a sentence now**, and that is the shape change
+under both halves. A `Maybe String` is what let the verdict go on claiming
+something the memory beside it already contradicted: a string can be printed and
+cannot be asked. `describeAmmoSwapGiveUp` derives the wording from the case, so
+the two cannot drift, and the disarm sentence now says how many readings the
+*attempt* ran rather than how many the ship spent disarmed — on run 10 those were
+21 and 3.
+
+**How often this shape occurs.** Across saxrat runs 6 to 10: run 7 never swapped;
+run 8 reached `GUNS OFF` 181 times, had the client re-arm the guns 51 times, and
+never gave up at all — the control above; runs 6, 9 and 10 each latched the swap
+off once. **Two of those three are the misreading** — run 9 held `GUNS OFF` to 6
+and run 10 to 3 before the client took the guns back — and **run 6 is genuine**,
+with the count running 1 to 20 and not one switched-back-on clause anywhere in
+the run. So the latch keeps a case it is right about, which is why this narrows
+it rather than removing it.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_ammo_swap.py` (78 cases, up from 58). The two
+new rules are executed through the real `Bot.elm` in `elm repl` — the latch at
+both sides of its bound *and* against fixed values either side, with the guns
+back and not back at each; the unlatch folded over a whole session of readings
+rather than asked once; and both sentences rendered. The corpus is recounted as
+*relations* rather than as the numbers above and the runs are globbed rather than
+numbered, so a run 11 is read without an edit: a run gave up having recorded the
+client re-arming the guns and never reaching half the budget in `GUNS OFF`, a run
+gave up with the guns demonstrably still off all the way to the budget, and every
+run that gave up warped many times more often than it gave up.
+
+Confirmed by mutation, **thirteen** of them, each failing a named case: the
+`switchOffUndoneByClient` clause dropped, so an attempt spent entirely on a firing
+ship latches the session off (run 10 restored); the disarm verdict made to survive
+a warp; the neither-charge verdict made to be retried every pocket; a verdict
+reached *on* the warp reading cleared by it; the bound's comparison moved by one;
+the abandonment conditioned on the same clause, so the attempt is held longer; the
+session verdict comparing the bound itself instead of asking the rule; the call
+site handing the rule `gunsConfirmedOff`, which is the same type and the opposite
+question; the status line no longer saying which give-up it is; the memory update
+never seeing a warp; the latch re-derived each reading instead of persisting; the
+sentence dropping the count; and the sentence claiming the guns were still off.
+
+**One case was passing vacuously and the extractor was why.** `let_binding` ends
+at the next ` <name> = `, which a *record literal* inside the binding satisfies —
+so the assertion that the rule is handed `switchOffUndoneByClient` was reading
+text that stopped at the record's opening brace. `indented_let_binding` slices by
+indentation instead, which is the same correction #147 made to its own reader.
+
+**The swap does complete on this bot, and run 8 is the control this change is
+measured against.** That run reached `GUNS OFF` 181 times, had the client re-arm
+the guns 51 times, printed `(satisfied)` **2,712** times, tracked
+`loaded charge reads` through `unknown`, `short-range` and `long-range`, and
+**never gave up at all**. So the feature works when the sequence finishes, which
+is what makes ending it on one bad reading expensive rather than academic. Run 8
+also carries **422** `cannot load or unload` refusals, so a good share of its
+loads were still going into running guns — #76's territory, untouched here.
+
+**Unverified: any of it running, and why run 10's swap could not finish.** No run
+has been flown since. Run 10 printed `(satisfied)` zero times and its
+`loaded charge reads` never left `unknown` across all 150 of its ammo clauses,
+with the weapon menu open and not offering the wanted charge on every reading of
+the wait. Whether that is the gun *already carrying* `Multifrequency M` — in which
+case the menu is correct and the verdict was asking for a load it did not need —
+or the menu being attributed to the wrong module, is **not established**, and
+nothing here claims that attempt would have succeeded. It is the next thing to
+look at. What to watch on the first run: the give-up, when it comes, saying `off until
+the next warp` and then *going away* on the next warp with a fresh `wants
+short-range for N reading(s)` after it — that retry is the whole of the second
+half and it has never happened. A run whose give-up still says `off for this
+session` on a disarm verdict means the case is not being carried; a run that
+latches and never comes back across many warps means `weJustFinishedWarping` is
+not reaching the swap.
 
 **One rule is deliberately not identical, and it is the first reading.**
 `updateHitpointsGaugeMemory` believes a reading that has no previous reading to
@@ -6647,11 +6807,27 @@ exists.
   for the argument, for the one rule that is new rather than moved (the
   stray-menu guard, which would otherwise close the menu the load is clicked out
   of), and for issue #122's own premise about this bot's warps, which the
-  recordings contradict without changing the answer. **Untested against a live
-  client**, and no recorded saxrat run carries an ammo clause at all, so the
-  corpus cannot say what a swap would have gained here. Watch for `Ammo swap:`
-  in the status line naming a crossover, then `GUNS OFF for N of 20` with the
-  client confirming the switch-off, then `(satisfied)`.
+  recordings contradict without changing the answer. **It has flown**, and the
+  stray-menu guard that section names as the thing most likely to be wrong is
+  right — it suppressed itself correctly through every swap in run 10.
+
+  And since #154 it **stops reading the disarm budget as a statement about the
+  guns, and retries after a warp.** Run 10 latched the whole feature off 21
+  readings into a three-hour session on the sentence "the guns were switched off
+  to load and were still not back 21 readings later" — while its own status line
+  had read `a gun has been switched back on ... the guns are firing` for the
+  previous seventeen readings, the client having taken the guns back at reading
+  4. The ship was disarmed for three readings. The budget is right to consult
+  nothing the module says (#34) and that is exactly why it cannot say what the
+  guns were doing; the *session* consequence now asks the client's own latched
+  answer, the attempt is still abandoned at the same reading, and the disarm
+  verdict is retried on the next warp rather than ending the run. See "The
+  disarm budget bounds an attempt, and it was read as a statement about the
+  guns" above, including which of the three recorded give-ups was genuine and
+  why run 8 — 2,712 `(satisfied)` prints and no give-up at all — is the control
+  that makes ending the feature on one bad reading expensive. **Untested against
+  a live client.** Watch for the give-up saying `off until the next warp` and
+  then going away on the next warp.
 
   And it now **learns its lock range from the client** rather than carrying
   `targeting-range=66000` and never revising it — the setting clamped into
@@ -7021,6 +7197,20 @@ load-bearing — see "The home station".
   view invisible rather than mis-clicked — the loot path pairs the filter with
   `scrollOverviewToReveal` and the gate path has no such pairing. Both halves
   together, on a run that can be watched.
+- **The mission runner's ammo swap carries #154's defect unchanged**, and it is
+  the same code to the byte: `else if ammoSwapSilencedGiveUpTicks <
+  gunsSilencedTicks then Just ("the guns were switched off to load and were still
+  not back " ++ ...)`, with no reference to `switchOffUndoneByClient`. It is if
+  anything more reachable there — #72's own measurement is that on that bot the
+  client takes the guns back on *every* swap, and its run 11 held the counter to
+  21 with the gun reading switched on since reading 3. Not fixed here because
+  #154 is saxrat's issue and moving a latch in a second bot is a second behaviour
+  change, and because another change was in flight in that file. The saxrat
+  version is the worked example: `ammoSwapDisarmEndsTheSession`,
+  `AmmoSwapGiveUp`, and the warp unlatch. The mission runner's third latch (no
+  crossover distance, #106) is a third case there and wants its own answer to
+  "does a warp change this" — probably yes, since a hover asked in a new pocket
+  is a different moment, which is #111's whole argument.
 - **Nothing remembers that a gate was given up on, so saxrat can go back for
   it.** #147 makes the gate branch hand the reading back and the warp branch
   decline while that gate is in reach, so the bot leaves through the hunt loop —
