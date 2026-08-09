@@ -17112,11 +17112,31 @@ warpToOpportunitySiteIfAvailable readingFromGameClient =
             )
 
 
-{-| A "commander"- or "overseer"-type rat's wreck, worth sticking around to
-loot before leaving the pocket. Checks both name and type since which one
-carries "Commander"/"Overseer" seems to vary; requires "wreck" in the type
-so we don't also match the (still-living) commander/overseer rat itself
-while it's on the overview.
+{-| The rank words that mark a rat whose wreck is worth looting. See
+`isNotableWreck` for why this is a list and why "leader" is safe as a substring.
+-}
+notableRatRankWords : List String
+notableRatRankWords =
+    [ "commander", "overseer", "leader" ]
+
+
+{-| A rank-bearing rat's wreck, worth sticking around to loot before leaving
+the pocket. Checks both name and type since which one carries the rank seems to
+vary; requires "wreck" in the type so we don't also match the (still-living) rat
+itself while it's on the overview.
+
+**The rank words are a list because EVE does not use one word.** "commander"
+and "overseer" alone silently skipped `Sansha Black Ops Squad Leader`, whose
+wreck is worth exactly as much as the `Centus Black Ops Commander` beside it --
+reported live on saxrat, and the recorded runs bear it out: those are the only
+two rank-bearing rats in the whole corpus, at 17,542 and 1,619 mentions, and
+only the first was ever looted.
+
+"leader" rather than "squad leader" covers the *Wing Leader* rank in the same
+family for one word, as "commander" already covers *Fleet Commander*. That half
+is inference from EVE's rank naming -- only Squad Leader is observed. It is safe
+as a substring: every occurrence of "leader" anywhere in the recorded logs is
+this rat.
 -}
 isNotableWreck : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isNotableWreck overviewEntry =
@@ -17124,7 +17144,7 @@ isNotableWreck overviewEntry =
         containsNotableRatName =
             [ overviewEntry.objectName, overviewEntry.objectType ]
                 |> List.filterMap identity
-                |> (\texts -> [ "commander", "overseer" ] |> List.any (\pattern -> texts |> List.any (stringContainsIgnoringCase pattern)))
+                |> (\texts -> notableRatRankWords |> List.any (\pattern -> texts |> List.any (stringContainsIgnoringCase pattern)))
 
         isWreck =
             overviewEntry.objectType
