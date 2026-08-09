@@ -262,6 +262,47 @@ def vk_to_cgkeycode(vk):
     return _VK_TO_CGKEYCODE.get(vk)
 
 
+def keys_left_held(items):
+    """The macOS key codes a WindowsInputSequenceItem list leaves pressed.
+
+    An unbalanced sequence is not hypothetical. `Common.EffectOnWindow`'s
+    `effectsToEnterString` folds the string it is given while tracking whether
+    Shift is down, and emits a `KeyUp vkey_SHIFT` only when the *next* character
+    does not want Shift -- so a string ending in a capital reaches the end of
+    the fold with Shift down and nothing after it, and the host is handed a
+    press with no release. `getKeyboardKeyToEnterChar` could reach the same
+    state with `[`, which it mapped to `vkey_LWIN` and which this host maps on
+    to Command.
+
+    What a key left down costs is at the far end and is already recorded:
+    `Bot.elm` notes that Command "does not select, and it leaves the field
+    swallowing every keystroke that follows", which run 116 paid for by typing
+    128 times and changing the box by not one character. A modifier held
+    underneath ordinary typing loses characters without any layer reporting a
+    failure -- every KeyDown is posted, every KeyUp is posted, and the client
+    reads a shortcut rather than text.
+
+    Pure, and separate from `_keys_down`, because the two answer different
+    questions: this one says the *bot's sequence* was unbalanced, where
+    `_keys_down` says what this host actually posted and therefore also covers
+    a sequence cut short by an abort or by a `cg_input` that died mid-run.
+    """
+    held = []
+    for item in items:
+        (tag, payload), = item.items()
+        if tag not in ("KeyDown", "KeyUp"):
+            continue
+        mac_code = vk_to_cgkeycode(payload[0])
+        if mac_code is None:
+            continue
+        if tag == "KeyDown":
+            if mac_code not in held:
+                held.append(mac_code)
+        elif mac_code in held:
+            held.remove(mac_code)
+    return held
+
+
 def vk_to_mouse_button(vk):
     """VK_LBUTTON=0x01, VK_RBUTTON=0x02, VK_MBUTTON=0x04 -> cg_input's
     0=left/1=right/2=other."""
@@ -1387,9 +1428,11 @@ class TaskDispatcher:
         # Mouse buttons currently held, so cursor motion between a ButtonDown
         # and its ButtonUp is emitted as a drag rather than a plain move.
         self._buttons_down = set()
-        # Keys currently held, so the framework's inter-effect wait is not taken
-        # while one is down and macOS never starts auto-repeating it.
-        self._keys_down = set()
+        # Keys this host has posted a KeyDown for and not yet a KeyUp, in press
+        # order, so `_windows_input` can take back whatever a sequence leaves
+        # held. A list rather than a set because the undo is the presses in
+        # reverse: a modifier pressed first is released last.
+        self._keys_down = []
         self._last_mouse_pos = None
         # Monotonic time of our own last posted event, so a stand-down check can
         # tell a person's input apart from the bot's own.
@@ -1975,7 +2018,8 @@ class TaskDispatcher:
                             errors.append(f"no macOS key mapping for VK code {code}")
                             continue
                         self._cg(f"keydown {mac_code}")
-                        self._keys_down.add(mac_code)
+                        if mac_code not in self._keys_down:
+                            self._keys_down.append(mac_code)
                     elif tag == "KeyUp":
                         code, extended = payload
                         mac_code = vk_to_cgkeycode(code)
@@ -1983,7 +2027,8 @@ class TaskDispatcher:
                             errors.append(f"no macOS key mapping for VK code {code}")
                             continue
                         self._cg(f"keyup {mac_code}")
-                        self._keys_down.discard(mac_code)
+                        if mac_code in self._keys_down:
+                            self._keys_down.remove(mac_code)
                     elif tag in ("CharacterDown", "CharacterUp"):
                         errors.append(f"{tag} (raw unicode character input) not implemented")
                         continue
@@ -1993,6 +2038,39 @@ class TaskDispatcher:
                 completed += 1
             except Exception as exc:
                 errors.append(f"{tag}: {exc}")
+
+        # Take back anything still held. Nothing else in this host ever did:
+        # `_keys_down` was written on every KeyDown and read nowhere, so a key
+        # this sequence pressed and did not release stayed down for the rest of
+        # the session, underneath every keystroke and click after it. Driven by
+        # what was actually *posted* rather than by `keys_left_held(items)`, so
+        # that it also covers a sequence cut short -- the `break` above, or a
+        # `cg_input` that died between a press and its release.
+        #
+        # Said out loud rather than fixed silently, because the release is a
+        # repair and the sequence that needed one is a bug somewhere above:
+        # `keys_left_held` names the half the *bot* asked for, which an operator
+        # can take to the bot, and the count released names what this host had
+        # to undo.
+        #
+        # Wrapped, because the most likely reason a key was left held is a
+        # `cg_input` that has just died -- so the repair runs in exactly the
+        # state where posting can fail again, and an exception escaping here
+        # would take the whole task with it. `_keys_down` is cleared either way:
+        # a release that could not be posted is not one this host can retry, and
+        # carrying the code forward would make every later sequence report it.
+        asked_unbalanced = keys_left_held(items)
+        if self._keys_down:
+            for mac_code in reversed(self._keys_down):
+                try:
+                    self._cg(f"keyup {mac_code}")
+                except Exception as exc:
+                    errors.append(f"could not release held key {mac_code}: {exc}")
+            print(f"#   KEYS LEFT HELD: released {self._keys_down} at the end of "
+                  f"this sequence -- a key held past a sequence stays down under "
+                  f"everything after it. The sequence itself asked for "
+                  f"{asked_unbalanced} without a release.", file=sys.stderr)
+            self._keys_down = []
 
         return {
             "WindowsInputResponse": {

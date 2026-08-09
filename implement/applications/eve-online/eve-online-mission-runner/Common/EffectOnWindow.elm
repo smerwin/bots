@@ -108,6 +108,22 @@ virtualKeyCodeFromMouseButton mouseButton =
             vkey_RBUTTON
 
 
+{-| The key presses that type `string`, with Shift raised for the capitals.
+
+The fold below presses Shift when a character wants it and releases it when the
+_next_ character does not -- so the last character decides whether Shift is
+still down when the string runs out. `releaseShiftAtTheEnd` is what closes it:
+without that, every string ending in a capital hands the host a `KeyDown
+vkey_SHIFT` with no matching `KeyUp`, and nothing downstream takes it back.
+
+A modifier left down is the failure that reports nothing. Every effect is still
+dispatched, the host still posts every event, and the client reads what follows
+as shortcuts instead of text -- `Bot.elm` records the far end of that for
+Command, which "leaves the field swallowing every keystroke that follows" and
+cost run 116 its whole attempt. `botlab_host.py`'s `keys_left_held` is the
+host-side half of this and covers the sequences this module does not build.
+
+-}
 effectsToEnterString : String -> Result String (List EffectOnWindowStruct)
 effectsToEnterString =
     getSequenceOfKeyboardKeysToEnterString
@@ -142,7 +158,16 @@ effectsToEnterString =
                 )
                 ( { shiftKeyIsDown = False }, [] )
             )
-        >> Result.map Tuple.second
+        >> Result.map releaseShiftAtTheEnd
+
+
+releaseShiftAtTheEnd : ( { shiftKeyIsDown : Bool }, List EffectOnWindowStruct ) -> List EffectOnWindowStruct
+releaseShiftAtTheEnd ( state, effects ) =
+    if state.shiftKeyIsDown then
+        effects ++ [ KeyUp vkey_SHIFT ]
+
+    else
+        effects
 
 
 getSequenceOfKeyboardKeysToEnterString : String -> Result String (List { keyCode : VirtualKeyCode, useShiftKey : Bool })
@@ -168,6 +193,21 @@ getSequenceOfKeyboardKeysToEnterString =
             (Ok [])
 
 
+{-| Which key types `char`, or `Nothing` where no plain key does.
+
+The alphabet is 26 letters at offsets 0 to 25, and both letter bounds admitted
+offset **26** -- one character past the end of each range. `{` is 26 past `a`
+and `[` is 26 past `A`, so both answered `VirtualKeyCodeFromInt (vkey_A + 26)`,
+which is `vkey_LWIN` and which `botlab_host.py` maps on to **Command**. Typing a
+`[` therefore pressed Command rather than reporting a character it cannot type,
+and the uppercase branch pressed it with Shift held.
+
+That is the worst available shape for this function: `Nothing` is handled --
+`getSequenceOfKeyboardKeysToEnterString` turns it into an `Err` naming the
+character and its index -- while a wrong `Just` is indistinguishable from a
+right one all the way to the client.
+
+-}
 getKeyboardKeyToEnterChar : Char -> Maybe { keyCode : VirtualKeyCode, useShiftKey : Bool }
 getKeyboardKeyToEnterChar char =
     let
@@ -188,10 +228,10 @@ getKeyboardKeyToEnterChar char =
             if 0 <= relativeToDigitZero && relativeToDigitZero < 10 then
                 Just { keyCode = VirtualKeyCodeFromInt charCode, useShiftKey = False }
 
-            else if 0 <= relativeToLetterLower && relativeToLetterLower <= 26 then
+            else if 0 <= relativeToLetterLower && relativeToLetterLower < 26 then
                 Just { keyCode = VirtualKeyCodeFromInt (letterAKeyCode + relativeToLetterLower), useShiftKey = False }
 
-            else if 0 <= relativeToLetterUpper && relativeToLetterUpper <= 26 then
+            else if 0 <= relativeToLetterUpper && relativeToLetterUpper < 26 then
                 Just { keyCode = VirtualKeyCodeFromInt (letterAKeyCode + relativeToLetterUpper), useShiftKey = True }
 
             else
