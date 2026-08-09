@@ -2059,7 +2059,7 @@ second window to clear.
 
 **Why a computed point is acceptable here when `beginCascade` refuses one.**
 That fallback rejects "empty space" because a remembered coordinate is not
-reliably empty and once opened *Clear All Waypoints* on a real route. This point
+reliably empty and once opened _Clear All Waypoints_ on a real route. This point
 is not remembered: it is derived from the info panel's own parsed region every
 reading, so it moves with the layout the way the UI scale and every other
 self-calibrated number here do. The panel is anchored top-left under the Neocom,

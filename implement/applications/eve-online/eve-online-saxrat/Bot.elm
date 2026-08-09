@@ -7585,7 +7585,19 @@ statusTextFromState context =
                             "Rats in overview: " ++ (namesOfRatsInOverview |> List.length |> String.fromInt) ++ "."
 
                         describeCurrentTarget =
-                            "Current target: " ++ (currentTargetName |> Maybe.withDefault "None") ++ "."
+                            case currentTargetName of
+                                Nothing ->
+                                    -- No condition clause here: there is
+                                    -- nothing whose condition it would be.
+                                    "Current target: None."
+
+                                Just name ->
+                                    "Current target: "
+                                        ++ name
+                                        ++ " "
+                                        ++ describeTargetHitpoints
+                                            (activeTargetHitpointsPercent readingFromGameClient)
+                                        ++ "."
                     in
                     [ [ describeShip ]
                     , [ describeDrones ]
@@ -7878,6 +7890,61 @@ activateOneOfTheLockedTargets context =
                         )
                         (clickUiElement (target.barAndImageCont |> Maybe.withDefault target.uiNode))
                 )
+
+
+{-| The condition of whatever EVE currently calls the active target.
+
+Read off the target bar rather than off the overview, because the bars are drawn
+in the bar and the overview row carries no health at all. It is the same target
+either way -- `activeTargetOverviewEntryIsStray` and this both mean the one the
+guns and drones go to -- but the two are found by different routes, so a reading
+can name a target from the overview and answer `Nothing` here, which is why the
+clause below has to be able to say so.
+
+-}
+activeTargetHitpointsPercent : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.Hitpoints
+activeTargetHitpointsPercent readingFromGameClient =
+    readingFromGameClient.targets
+        |> List.filter .isActiveTarget
+        |> List.head
+        |> Maybe.andThen .hitpointsPercent
+
+
+{-| The target's three layers, in the ship's own `Shield: 58%  Armor: 100%` form.
+
+**Three numbers, never one.** Issue #90 exists because nothing told the bot its
+shots were doing zero damage, and the fix had to reconstruct that from the
+combat log's outgoing lines because no field said what the target's health was
+doing. Run 27 shot an `Infested Asteroid` for roughly 290 readings with every
+shot landing for zero; a bar that never moved would have said so on the second
+reading. What it looks like is a shield that does not move while armour and hull
+sit at 100%, which any combined figure hides.
+
+**Absent reads as absent.** A target whose bars this reading could not read
+prints `unknown` for all three, never `0%`: a fabricated zero is a hull about to
+explode as far as any later rule is concerned. `loadRefusalFromGameLog`'s
+register, and the same rule `Nothing` versus `Just []` carries for the game log.
+
+This is an instrument and nothing decides on it -- see
+`test_target_hitpoints.py`, which pins that this and
+`activeTargetHitpointsPercent` are read by the status line and by nothing else,
+the way PR #130 pinned `quickMessage` until a run had shown what it records.
+
+-}
+describeTargetHitpoints : Maybe EveOnline.ParseUserInterface.Hitpoints -> String
+describeTargetHitpoints hitpoints =
+    case hitpoints of
+        Nothing ->
+            "(Shield/Armor/Hull unknown)"
+
+        Just percent ->
+            "(Shield: "
+                ++ (percent.shield |> String.fromInt)
+                ++ "%  Armor: "
+                ++ (percent.armor |> String.fromInt)
+                ++ "%  Hull: "
+                ++ (percent.structure |> String.fromInt)
+                ++ "%)"
 
 
 {-| Safety net for the weapon/drone-activation branches, independent of the

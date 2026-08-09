@@ -260,6 +260,7 @@ type alias InfoPanelAgentMissionsEntry =
 type alias Target =
     { uiNode : UITreeNodeWithDisplayRegion
     , barAndImageCont : Maybe UITreeNodeWithDisplayRegion
+    , hitpointsPercent : Maybe Hitpoints
     , textsTopToBottom : List String
     , isActiveTarget : Bool
     , assignedContainerNode : Maybe UITreeNodeWithDisplayRegion
@@ -1882,11 +1883,65 @@ parseTarget targetNode =
     in
     { uiNode = targetNode
     , barAndImageCont = barAndImageCont
+    , hitpointsPercent = parseTargetHitpointsPercent targetNode
     , textsTopToBottom = textsTopToBottom
     , isActiveTarget = isActiveTarget
     , assignedContainerNode = assignedContainerNode
     , assignedIcons = assignedIcons
     }
+
+
+{-| What the target bar's three rings say about the thing being shot at.
+
+**The rings carry no width to take a ratio of**, which is what makes this
+unlike `DronesWindowEntryDroneStructure.hitpointsPercent` next door. Read live
+with targets locked, every node under a `TargetInBar`'s `TargetHealthBars` --
+the `shieldBar`, `armorBar` and `hullBar` containers, each one's `_Left` and
+`_Right` sprite, and `healthBarBackground` -- reports the identical 141x141
+region, the bounding box of the whole ring. The two sprites per bar are the two
+halves of a circle (`shieldLeft.png` and `shieldRight.png`, with `baseRotation`
+0 and -3pi/4), so the fraction is drawn by rotating an arc and never appears in
+a display region at all. A ratio of widths here answers 0% for a full shield.
+
+The client stores the fraction itself, as `lastState` on the named container,
+which makes this `ShipUI`'s `_lastValue` read rather than the drone's geometry.
+Watched changing under fire on one `Centii Plague`: `shieldBar` went 1 ->
+0.8089 -> 4.39e-06 as the shield collapsed and then climbed back through
+1.88e-05, 4.29e-05 and 1.24e-04 as it regenerated, with `armorBar` going 1 ->
+0.2484 in the same window and `hullBar` still at 1. So the three layers move
+independently and separately, which is the whole point of reading all three: a
+shot doing nothing is a shield that does not move while armour and hull sit at
+100%, and one combined figure hides exactly that.
+
+**All three or none.** `Nothing` is a target whose bars this reading could not
+read, and it must not be rendered as `0%` anywhere -- a fabricated zero is a
+hull about to explode as far as any later rule is concerned, which is
+`loadRefusalFromGameLog`'s rule about absent evidence applied to a gauge.
+
+The value is **not** clamped or filtered. `ShipUI.hitpointsPercent` is the same
+kind of read and CLAUDE.md records it producing -1021821% and 2132822% for
+single readings; a garbage value silently clamped to 0 or 100 reads exactly like
+a real one, and nothing acts on this field yet, so an operator seeing the raw
+number is the only way a run can show whether it reads sanely.
+
+-}
+parseTargetHitpointsPercent : UITreeNodeWithDisplayRegion -> Maybe Hitpoints
+parseTargetHitpointsPercent targetNode =
+    let
+        barPercentFromContainerName containerName =
+            targetNode
+                |> listDescendantsWithDisplayRegion
+                |> List.filter (.uiNode >> getNameFromDictEntries >> (==) (Just containerName))
+                |> List.head
+                |> Maybe.andThen (.uiNode >> .dictEntriesOfInterest >> Dict.get "lastState")
+                |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.float >> Result.toMaybe)
+                |> Maybe.map ((*) 100 >> round)
+    in
+    Maybe.map3
+        (\shield armor structure -> { shield = shield, armor = armor, structure = structure })
+        (barPercentFromContainerName "shieldBar")
+        (barPercentFromContainerName "armorBar")
+        (barPercentFromContainerName "hullBar")
 
 
 parseOverviewWindowsFromUITreeRoot : UITreeNodeWithDisplayRegion -> List OverviewWindow
