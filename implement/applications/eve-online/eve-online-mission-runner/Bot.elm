@@ -1165,6 +1165,140 @@ type AmmoRange
     | LongRangeAmmo
 
 
+{-| Why the swap switched itself off, as a case rather than a sentence.
+
+It was a `Maybe String`, and a string is the wrong shape for it now that
+something other than the status line has to ask _which_ verdict this is. Run 11
+is why: a give-up whose sentence was written once and then read back by nobody
+went on claiming for 763 decision lines that the ship's guns were off, on a ship
+whose own module column had read `isInActiveState` `T` since reading 3 of the
+attempt. A case can be asked; a sentence can only be printed.
+
+Three of them rather than saxrat's two, because this bot can also run out of
+crossover distance -- `ammo-swap-range` is optional here and the hover that would
+derive one may never be answered (#106).
+
+`GunsDidNotComeBack` carries the count it was reached at, so the sentence is a
+function of the case and the two cannot drift apart.
+
+-}
+type AmmoSwapGiveUp
+    = ShipCarriesNeitherCharge
+    | GunsDidNotComeBack Int
+    | NoCrossoverDistance
+
+
+{-| Whether a session-wide give-up is a fact a warp cannot change.
+
+**Only the disarm verdict is retried**, and the difference is what each verdict
+is about.
+
+`ShipCarriesNeitherCharge` is a fact about what is in the ship's hold, which
+nothing short of docking alters -- retrying it every pocket buys a menu cascade
+per pocket and the same answer each time, forever, on a reading that already
+knows.
+
+`NoCrossoverDistance` is the one this bot has and saxrat does not, and it is
+**already a per-warp conclusion**: #106 spends the tooltip ask one hover per
+warp, so `weaponTooltipAttemptsBeforeGivingUp` moments are six different warps
+by construction, and `optimalRangeGivenUp` latches only once all six are gone.
+Retrying the _verdict_ on a warp would therefore change nothing at all --
+`weaponTooltipAskIsGivenUp` is still true, so no new hover is asked, no optimal
+range arrives, `threshold` is still `Nothing`, and the verdict re-latches on the
+very reading it was cleared on. What it would buy is the long sentence reprinted
+once per warp. The warp boundary is spent at the evidence, which is where #106
+put it.
+
+`GunsDidNotComeBack` is a fact about how one attempt went in one fight, and a
+warp means a new grid and a fresh fight.
+
+-}
+ammoSwapGiveUpSurvivesAWarp : AmmoSwapGiveUp -> Bool
+ammoSwapGiveUpSurvivesAWarp giveUp =
+    case giveUp of
+        ShipCarriesNeitherCharge ->
+            True
+
+        NoCrossoverDistance ->
+            True
+
+        GunsDidNotComeBack _ ->
+            False
+
+
+{-| What an operator is told, derived from the case rather than stored beside it.
+
+The disarm sentence is careful about a distinction run 11 shows the old one was
+not: it says how many readings the _attempt_ ran, not how many the ship spent
+disarmed, because on that run those were 21 and 2.
+`ammoSwapDisarmEndsTheSession` is what guarantees the sentence is true when it is
+printed at all -- the case can only be reached where the client never took the
+guns back.
+
+-}
+describeAmmoSwapGiveUp : { a | shortRangeAmmoName : String, longRangeAmmoName : String } -> AmmoSwapGiveUp -> String
+describeAmmoSwapGiveUp chargeNames giveUp =
+    case giveUp of
+        ShipCarriesNeitherCharge ->
+            "the weapon's own menu offers neither '"
+                ++ chargeNames.shortRangeAmmoName
+                ++ "' nor '"
+                ++ chargeNames.longRangeAmmoName
+                ++ "', so the ship is carrying neither and there is nothing to swap between"
+
+        GunsDidNotComeBack readings ->
+            "the guns were switched off to load and the client never reported one switched back on across the "
+                ++ String.fromInt readings
+                ++ " readings of that attempt -- a disarmed ship is worse than the wrong charge, so this will not be attempted again until the next warp"
+
+        NoCrossoverDistance ->
+            "no crossover distance: 'ammo-swap-range' is not set and the weapon's tooltip did not appear across "
+                ++ String.fromInt weaponTooltipAttemptsBeforeGivingUp
+                ++ " separate hovers asked at different moments, so there is no distance to swap at even though the menu says which charge is loaded"
+
+
+{-| The give-up as it stands after this reading.
+
+A pure rule over a record so the unlatch can be executed rather than read. The
+warp is the boundary, and the alternatives were weighed against it rather than
+assumed:
+
+  - **A new target** is not a boundary at all. Rats die and are replaced every few
+    readings, so unlatching there is the same as having no latch -- a swap that
+    genuinely cannot finish would re-disarm the ship every few readings for the
+    whole session, which is exactly the runaway the latch exists to stop.
+  - **A new mission pocket** is the tightest reading of "a fresh fight" and this
+    bot cannot always answer it: a pocket is entered by warp _or_ by an
+    acceleration gate, and the gate leaves no reading that says so -- the drone
+    bookkeeping already records that as the second silent route out of a site.
+    A boundary some arrivals cannot answer never arrives on them.
+  - **A warp** needs no read this bot does not already take: it is the same
+    `weJustFinishedWarping` the drone abandonment reads, one definition, and a
+    case pins that. Unlike saxrat's, it is a _subset_ of "a new pocket" here
+    rather than a superset, because of the gate above -- so this gives at most
+    one retry per pocket and sometimes none, which is the conservative side of
+    the trade and the side to be on for a latch about a disarmed ship.
+
+-}
+ammoSwapGiveUpAfterReading :
+    { before : Maybe AmmoSwapGiveUp
+    , reachedThisReading : Maybe AmmoSwapGiveUp
+    , justFinishedWarping : Bool
+    }
+    -> Maybe AmmoSwapGiveUp
+ammoSwapGiveUpAfterReading giveUpCase =
+    case giveUpCase.before of
+        Just before ->
+            if giveUpCase.justFinishedWarping && not (ammoSwapGiveUpSurvivesAWarp before) then
+                Nothing
+
+            else
+                Just before
+
+        Nothing ->
+            giveUpCase.reachedThisReading
+
+
 {-| Everything the ammo swap knows, kept in one field so the rest of `BotMemory`
 is untouched.
 
@@ -1239,15 +1373,16 @@ holding silent guns and a swap whose guns the client took back.
 `verdictAbandoned` is the ordinary per-attempt give-up: the guns go back to
 firing whatever is in them and the next change of range tries again. Failing to a
 firing gun with the wrong ammo is always better than failing to a silent gun. The
-one exception is that same silence deadline, which switches the swap off for the
-session -- having disarmed the ship once and been unable to finish, doing it
-again is not worth the ammo it might save.
+silence deadline abandons the attempt like everything else and, where the ship
+really was left disarmed, additionally stops the swap until the next warp.
 
-`givenUpReadingsAgo` exists only so the latch is _said_ once. The give-up is a
-permanent state, and printing its two-hundred-character sentence on every reading
-for the rest of the session -- 763 times in run 11 -- buries the readings that
-carry news. The full sentence goes out on the reading it latches and a short flag
-afterwards.
+`givenUp` names which of the three verdicts was reached rather than carrying the
+sentence, because one of them is retryable and the other two are not; the
+sentence is derived from it by `describeAmmoSwapGiveUp`. `givenUpReadingsAgo`
+exists only so the latch is _said_ once: printing a two-hundred-character
+sentence on every reading it stands -- 763 times in run 11 -- buries the readings
+that carry news. The full sentence goes out on the reading it latches and a short
+flag afterwards.
 
 `loadRefusedByClient` holds the client's own sentence when it says it discarded
 the load, and it is kept because the entries it came from are not: a reading's
@@ -1299,7 +1434,7 @@ type alias AmmoSwapMemory =
     , hoverAttemptsSpent : Int
     , hoverAttemptSpentThisWarp : Bool
     , optimalRangeGivenUp : Bool
-    , givenUp : Maybe String
+    , givenUp : Maybe AmmoSwapGiveUp
     , givenUpReadingsAgo : Int
     }
 
@@ -9752,12 +9887,11 @@ because those readings are exactly what turned out to be untrustworthy (#35).
 
 **A weapon that will not go quiet keeps shooting the wrong charge.** Failing to a
 firing gun with the wrong ammo is always better than failing to a silent gun.
-Reaching this deadline means the ship was disarmed and the bot could not get it
-back on its own schedule, so it is the one failure here that switches the whole
-swap off for the session rather than just abandoning the attempt -- see
-`ammoSwapVerdictGiveUpTicks` for why every other failure does the opposite.
-Repeating a manoeuvre that disarms the ship, once it has demonstrably not worked,
-is not an optimisation worth retrying.
+Reaching this deadline always abandons the attempt, and -- where the ship really
+was still disarmed -- switches the swap off until the next warp; see
+`ammoSwapDisarmEndsTheSession` for the half this counter cannot answer and
+`ammoSwapVerdictGiveUpTicks` for why every other failure only ever costs one
+attempt.
 
 Comfortably longer than the sequence needs -- a settle plus a cascade or two --
 and comfortably shorter than `ammoSwapVerdictGiveUpTicks`, so that the dangerous
@@ -9767,6 +9901,63 @@ state is always the first one to time out.
 ammoSwapSilencedGiveUpTicks : Int
 ammoSwapSilencedGiveUpTicks =
     20
+
+
+{-| Whether an expired disarm budget is evidence of a ship that was left
+disarmed.
+
+**It is not, on its own, and this bot's run 11 is the worked example.** The
+budget above counts readings from the first switch-off command and consults
+nothing the module says, deliberately (#34: a counter that reads the duty cycle
+can be stalled by it). What that buys is a bound nothing can stop. What it does
+not buy is a statement about the guns, and the give-up beside it was written as
+though it did:
+
+    Ammo swap: given up -- the guns were switched off to load and were still not
+    back 21 readings later.
+
+Run 11's own module column reads `F/T/F` on that reading -- `isInActiveState`
+`True`, the gun switched **on** -- and had done since reading 3 of the 21, the
+client having taken the guns back two readings after confirming the switch-off.
+The ship was disarmed for two readings; the sentence claimed twenty-one; and on
+that sentence the whole feature switched itself off for the rest of the session,
+which is the harshest outcome this design has. Run 27 is the same shape with the
+bot saying so in words: its status clause read `the client switched a gun back on
+by itself 3 of 20 readings in` and went on climbing to 18 before the give-up.
+
+**The distinction already existed one function away.** `describeAmmoSwapState`
+declines to print `GUNS OFF` the moment `switchOffUndoneByClient` latches, and
+says why in its own comment -- saying it there would be a lie (#72). The status
+line had it right and the verdict did not. #72's underlying measurement is that
+on this bot **the client re-arms the gun by itself on every swap**, which is why
+that field exists, why it is a report rather than a verdict, and why this latch
+is the more reachable of the two bots'.
+
+So the _session_ consequence asks the same question the status line asks, and the
+attempt bound is untouched: the budget still ends the attempt at exactly the
+reading it always did, and only what that costs afterwards changes. This is PR
+#151's shape on `lockAttempt` -- a bound counting readings that belong to a
+different outcome, discharged on the rule's own terms rather than retuned.
+
+**Reading `switchOffUndoneByClient` here cannot stall anything**, which is what
+keeps #34 intact. It is a _latch_, monotone within one attempt and cleared only
+where `gunsSilencedTicks` is cleared, so unlike a live module read it cannot
+flicker; and it is only ever consulted to make the outcome _milder_, never to
+hold the guns longer or to postpone the abandonment by one reading.
+
+Nothing here claims the attempt was going to succeed. It says only that a ship
+whose guns the client has demonstrably given back is not the ship this latch was
+built to protect.
+
+-}
+ammoSwapDisarmEndsTheSession :
+    { gunsSilencedTicks : Int
+    , switchOffUndoneByClient : Bool
+    }
+    -> Bool
+ammoSwapDisarmEndsTheSession disarmOutcome =
+    (ammoSwapSilencedGiveUpTicks < disarmOutcome.gunsSilencedTicks)
+        && not disarmOutcome.switchOffUndoneByClient
 
 
 {-| Everything the disarm decision weighs, on the reading it is asked.
@@ -10834,12 +11025,18 @@ weaponOptimalRangeFromHover previousStepsEffects readingFromGameClient hoverWasP
             |> Maybe.andThen (.inMeters >> Result.toMaybe)
 
 
-updateAmmoSwapMemory : UpdateMemoryContext BotSettings -> IncomingDamageMemory -> AmmoSwapMemory -> AmmoSwapMemory
-updateAmmoSwapMemory context incomingDamage memoryBefore =
+updateAmmoSwapMemory :
+    UpdateMemoryContext BotSettings
+    -> IncomingDamageMemory
+    -> { justFinishedWarping : Bool }
+    -> AmmoSwapMemory
+    -> AmmoSwapMemory
+updateAmmoSwapMemory context incomingDamage warp memoryBefore =
     case ( context.botSettings.shortRangeAmmoName, context.botSettings.longRangeAmmoName ) of
         ( Just shortRangeAmmoName, Just longRangeAmmoName ) ->
             updateAmmoSwapMemoryWithChargeNames context
                 incomingDamage
+                warp
                 { shortRangeAmmoName = shortRangeAmmoName, longRangeAmmoName = longRangeAmmoName }
                 memoryBefore
 
@@ -10854,10 +11051,11 @@ updateAmmoSwapMemory context incomingDamage memoryBefore =
 updateAmmoSwapMemoryWithChargeNames :
     UpdateMemoryContext BotSettings
     -> IncomingDamageMemory
+    -> { justFinishedWarping : Bool }
     -> { shortRangeAmmoName : String, longRangeAmmoName : String }
     -> AmmoSwapMemory
     -> AmmoSwapMemory
-updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBefore =
+updateAmmoSwapMemoryWithChargeNames context incomingDamage warp chargeNames memoryBefore =
     let
         guns =
             weaponModuleButtonsLeftToRight context.readingFromGameClient
@@ -11472,43 +11670,41 @@ updateAmmoSwapMemoryWithChargeNames context incomingDamage chargeNames memoryBef
                 memoryBefore.givenUpReadingsAgo + 1
 
         givenUp =
+            ammoSwapGiveUpAfterReading
+                { before = memoryBefore.givenUp
+                , reachedThisReading = giveUpReachedThisReading
+                , justFinishedWarping = warp.justFinishedWarping
+                }
+
+        giveUpReachedThisReading =
             case memoryBefore.givenUp of
-                Just reason ->
-                    Just reason
+                Just _ ->
+                    Nothing
 
                 Nothing ->
                     if neitherChargeCarried then
-                        Just
-                            ("the weapon's own menu offers neither '"
-                                ++ chargeNames.shortRangeAmmoName
-                                ++ "' nor '"
-                                ++ chargeNames.longRangeAmmoName
-                                ++ "', so the ship is carrying neither and there is nothing to swap between"
-                            )
+                        Just ShipCarriesNeitherCharge
 
-                    else if ammoSwapSilencedGiveUpTicks < gunsSilencedTicks then
-                        Just
-                            ("the guns were switched off to load and were still not back "
-                                ++ String.fromInt gunsSilencedTicks
-                                ++ " readings later -- a disarmed ship is worse than the wrong charge, so this will not be attempted again this session"
-                            )
+                    else if
+                        ammoSwapDisarmEndsTheSession
+                            { gunsSilencedTicks = gunsSilencedTicks
+                            , switchOffUndoneByClient = switchOffUndoneByClient
+                            }
+                    then
+                        Just (GunsDidNotComeBack gunsSilencedTicks)
 
                     else if optimalRangeGivenUp && (threshold == Nothing) then
-                        Just
-                            ("no crossover distance: 'ammo-swap-range' is not set and the weapon's tooltip did not appear across "
-                                ++ String.fromInt weaponTooltipAttemptsBeforeGivingUp
-                                ++ " separate hovers asked at different moments, so there is no distance to swap at even though the menu says which charge is loaded"
-                            )
+                        Just NoCrossoverDistance
 
                     else
-                        -- A load that does not land is *not* here. It abandons
-                        -- the one verdict (`verdictAbandoned`) and the guns go
-                        -- back to shooting; only the two impossibilities above
-                        -- are permanent enough to switch the feature off for the
-                        -- session. Issue #27 is why: the old latch fired on a
-                        -- client that was refusing every load because the guns
-                        -- were active, which is a condition the bot can fix
-                        -- rather than a client that cannot do this at all.
+                        -- A load that does not land is *not* here, and neither
+                        -- is an expired disarm budget on a ship the client gave
+                        -- its guns back to. Both abandon the one verdict
+                        -- (`verdictAbandoned`) and the guns go back to shooting.
+                        -- Issue #27 is why: the old latch fired on a client that
+                        -- was refusing every load because the guns were active,
+                        -- which is a condition the bot can fix rather than a
+                        -- client that cannot do this at all.
                         Nothing
     in
     { chargeLoaded = chargeLoadedOrAssumed
@@ -11565,14 +11761,21 @@ ensureAmmoSuitsTargetRange context nextStep =
     case ( context.eventContext.botSettings.shortRangeAmmoName, context.eventContext.botSettings.longRangeAmmoName ) of
         ( Just shortRangeAmmoName, Just longRangeAmmoName ) ->
             case ammoSwap.givenUp of
-                Just reason ->
+                Just giveUp ->
                     -- The reason in full on the reading it latched, and a line
-                    -- an operator can skip for the rest of the session. This is
-                    -- a permanent state and it repeats about a dozen times per
-                    -- reading; run 11 carries 763 copies of the long form.
+                    -- an operator can skip while it stands. It repeats about a
+                    -- dozen times per reading; run 11 carries 763 copies of the
+                    -- long form.
                     if ammoSwap.givenUpReadingsAgo <= 1 then
                         describeBranch
-                            ("Not swapping ammo any more: " ++ reason ++ " -- keep shooting with what is loaded.")
+                            ("Not swapping ammo any more: "
+                                ++ describeAmmoSwapGiveUp
+                                    { shortRangeAmmoName = shortRangeAmmoName
+                                    , longRangeAmmoName = longRangeAmmoName
+                                    }
+                                    giveUp
+                                ++ " -- keep shooting with what is loaded."
+                            )
                             nextStep
 
                     else
@@ -12193,17 +12396,34 @@ describeAmmoSwapState context =
                     "long-range"
     in
     case ( context.eventContext.botSettings.shortRangeAmmoName, context.eventContext.botSettings.longRangeAmmoName ) of
-        ( Just _, Just _ ) ->
+        ( Just shortRangeAmmoName, Just longRangeAmmoName ) ->
             case ammoSwap.givenUp of
-                Just reason ->
-                    -- Said in full on the reading it happened, and as a flag for
-                    -- the rest of the session. It is a permanent state, and run
-                    -- 11 printed this sentence 763 times.
+                Just giveUp ->
+                    -- Said in full on the reading it happened, and as a flag
+                    -- while it stands. Run 11 printed the long form 763 times.
                     if ammoSwap.givenUpReadingsAgo <= 1 then
-                        "Ammo swap: given up -- " ++ reason ++ "."
+                        "Ammo swap: given up -- "
+                            ++ describeAmmoSwapGiveUp
+                                { shortRangeAmmoName = shortRangeAmmoName
+                                , longRangeAmmoName = longRangeAmmoName
+                                }
+                                giveUp
+                            ++ "."
 
                     else
-                        "Ammo swap: off for this session (given up "
+                        -- The flag says which of the three this is, because they
+                        -- no longer end the same way: run 11 printed
+                        -- `off for this session` about a verdict a warp would
+                        -- have cleared, and an operator reading that had no way
+                        -- to know whether to expect the swap back.
+                        "Ammo swap: "
+                            ++ (if ammoSwapGiveUpSurvivesAWarp giveUp then
+                                    "off for this session"
+
+                                else
+                                    "off until the next warp"
+                               )
+                            ++ " (given up "
                             ++ String.fromInt ammoSwap.givenUpReadingsAgo
                             ++ " readings ago)."
 
@@ -19484,7 +19704,15 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             { withoutModulesReadings = shipUIWithoutModuleButtonsReadings
             , verdictBefore = botMemoryBefore.shipLoss
             }
-    , ammoSwap = updateAmmoSwapMemory context incomingDamageNow botMemoryBefore.ammoSwap
+    , ammoSwap =
+        -- The warp is the boundary a disarm give-up is retried across, and it is
+        -- the same `weJustFinishedWarping` the drone abandonment reads -- one
+        -- definition, so the two cannot come to disagree about when a site
+        -- ended. See `ammoSwapGiveUpAfterReading`.
+        updateAmmoSwapMemory context
+            incomingDamageNow
+            { justFinishedWarping = weJustFinishedWarping }
+            botMemoryBefore.ammoSwap
     , droneBayWillTakeNoMore =
         -- The restock's "already done", in the two forms a docked reading can
         -- supply it: the bay's own capacity gauge reading full at a moment the

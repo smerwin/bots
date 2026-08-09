@@ -738,7 +738,7 @@ class TheSwapDoesNotDisarmUnlessItIsWorthIt(unittest.TestCase):
         body = collapse(let_binding(
             self.source[self.source.index(
                 "updateAmmoSwapMemoryWithChargeNames context incomingDamage "
-                "chargeNames memoryBefore ="):],
+                "warp chargeNames memoryBefore ="):],
             "disarmCase"))
         self.assertIn(
             "{ runAwayIncomingDamageThreshold = "
@@ -821,9 +821,12 @@ class TheSwapDoesNotDisarmUnlessItIsWorthIt(unittest.TestCase):
     def test_the_window_the_rule_reads_is_this_reading_s(self):
         # The reading fire first arrives on is exactly the reading a swap must
         # not begin, so a one-reading-stale window would give it away.
-        self.assertIn(
-            "updateAmmoSwapMemory context incomingDamageNow botMemoryBefore.ammoSwap",
-            self.source)
+        # Matched across the warp argument #157 added, and strictly on the two
+        # ends that decide which reading's window the swap is handed.
+        self.assertRegex(
+            self.source,
+            r"updateAmmoSwapMemory context\s+incomingDamageNow"
+            r"[^\n]*(?:\n[^\n]*)*?botMemoryBefore\.ammoSwap")
         # Matched loosely across the arguments -- #56 added `hitpointsNow` --
         # and strictly on the two ends that decide whether the window the swap
         # reads is this reading's: the binding, and the memory it folds into.
@@ -867,7 +870,10 @@ class TheLatchedGiveUpIsSaidOnce(unittest.TestCase):
         status = self.source[self.source.index("describeAmmoSwapState context ="):]
         status = status[:status.index("\n\n\n")]
         self.assertIn("if ammoSwap.givenUpReadingsAgo <= 1 then", status)
-        self.assertIn("Ammo swap: off for this session (given up ", status)
+        # Since #157 the short form names which of the three verdicts it is,
+        # because they no longer all end the same way -- so what is asserted
+        # here is that the reading count is still what the flag carries.
+        self.assertIn('++ " (given up "', status)
 
         decision = self.source[self.source.index(
             "ensureAmmoSuitsTargetRange context nextStep ="):]
