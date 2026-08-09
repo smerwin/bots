@@ -1297,6 +1297,135 @@ oscillation: the row shift that produced run 27's asteroid can produce it again,
 and the verdict then costs one reading each time instead of 290, which is a fix
 rather than a cure.
 
+## The status line named the target and said nothing about its condition
+
+`target Render Alvi` told an operator what the guns were pointed at and nothing
+whatever about it, while the ship's own line beside it has always carried
+`Shield: 58%  Armor: 100%`. It is not a rare line: run 27 names a target on
+7,917 readings, run 29 on 5,065, run 30 on 1,812 and run 34 on 1,329.
+
+**#90 is what the gap costs.** Nothing told the bot its shots were doing zero
+damage, and the fix had to reconstruct that from the combat log's outgoing lines
+because no field in any reading said what the target's health was doing. Run 27
+shot an `Infested Asteroid` for roughly 290 consecutive readings, every shot
+landing for zero — and a health bar that never moved would have said so on the
+second reading.
+
+**It is a parse and not a hover**, which is the question #112 left open and a
+read of the live client answered. Under every `TargetInBar` the client draws
+
+```
+Container  _name=barAndImageCont
+  Container  _name=iconPar
+    TargetHealthBars
+      Container  _name=shieldBar   Sprite _name=shieldBar_Left  Sprite _name=shieldBar_Right
+      Container  _name=armorBar    Sprite _name=armorBar_Left   Sprite _name=armorBar_Right
+      Container  _name=hullBar     Sprite _name=hullBar_Left    Sprite _name=hullBar_Right
+      Sprite     _name=healthBarBackground
+```
+
+so there is an answer on every reading, no mouse involved, no tooltip to go
+unanswered, and no competition with the ammo swap's own weapon hover — the risk
+#112 was chiefly worried about, and #106 is the open issue about it.
+
+### The bars are a ring, so there is no width to take a ratio of
+
+This is the part that had to be measured rather than assumed, and the obvious
+reading of it is wrong. `DronesWindowEntryDroneStructure.hitpointsPercent` next
+door derives a drone's bar from the width of `droneGaugeBarDmg` against its
+gauge bar, and that technique answers nothing here: **every node under
+`TargetHealthBars` — all three containers, all six sprites and the background —
+reports the identical 141x141 region**, which is the bounding box of the whole
+ring. The paired `_Left`/`_Right` sprites are two half-circle textures
+(`res:/UI/Texture/classes/Target/shieldLeft.png` and `shieldRight.png`, carrying
+`baseRotation` 0 and -3pi/4), so the fraction is drawn by rotating an arc and
+never appears in a display region at all. A width ratio here answers one
+constant for a full shield and a dead one alike.
+
+**The client stores the fraction itself**, as `lastState` on the named
+container, which makes this `ShipUI`'s `_lastValue` read rather than the drone's
+geometry. Watched changing under fire on one `Centii Plague`: `shieldBar` went
+1 → 0.8089 → 4.39e-06 as the shield collapsed and then climbed back through
+1.88e-05, 4.29e-05 and 1.24e-04 as it regenerated, while `armorBar` went
+1 → 0.2484 in the same window and `hullBar` stayed at 1. A layer that has taken
+nothing carries the JSON integer `1` rather than `1.0`, which is the ordinary
+reading and is why the decoder has to accept both.
+
+### Three values, and absent is not zero
+
+**The three stay distinct.** The zero-damage case is a shield that does not move
+while armour and hull sit at 100%, which any combined figure hides, so
+`Target.hitpointsPercent : Maybe Hitpoints` answers the record and the clause
+prints three numbers:
+
+```
+rats 8 | target Render Alvi (Shield: 58%  Armor: 100%  Hull: 100%) | Lock range: ...
+rats 8 | target Render Alvi (Shield/Armor/Hull unknown) | Lock range: ...
+rats 0 | no target | Lock range: ...
+```
+
+**Absent reads as absent.** A target whose bars cannot be read prints `unknown`,
+never `0%` — a fabricated zero is a hull about to explode as far as any later
+rule is concerned, and `loadRefusalFromGameLog`'s doc comment is the register.
+It is all three layers or none, like the ship's gauge and the drone's. The
+condition is printed only where there is a target to have one: run 27 has 10,372
+readings naming none, and `unknown` on every one of them would be noise rather
+than a reading.
+
+**The value is not clamped or filtered.** `ShipUI.hitpointsPercent` is the same
+kind of read and this file records it producing -1021821% and 2132822% for single
+readings; a garbage value silently clamped into [0, 100] reads exactly like a
+real one, and this field's whole job on its first run is to show whether it reads
+sanely, which a clamp would make impossible to tell.
+
+**Nothing decides anything on it.** It is an instrument and it earns the right to
+drive a rule once a run has shown it reads sanely — PR #130's posture for
+`quickMessage`, which PR #153 later relaxed deliberately once there was a corpus.
+`TheFieldIsAnInstrumentAndNothingActsOnIt` holds that line: the field is reached
+through one named lookup, that lookup and the rendering are read by the status
+line and by nothing else, and no decision branch names either.
+
+**Both maintained apps, and only those two.** `parseTarget` and the `Target`
+alias were byte-identical in the mission runner and saxrat before this and are
+again after it, so the change is the same declarations under the same names in
+both and a case compares them byte for byte. The other four vendored copies are
+left alone: their `parseTarget` already diverges (they recognise only
+`ActiveTargetOnBracket`, where this fork added `ActiveTargetIndicator`), so the
+maintained pair is the unit this repo already keeps in step.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_target_hitpoints.py` (31 cases, run against **both**
+apps). The parse and the two rules are executed through the real `Bot.elm` in
+`elm repl` and the readings are built by running UI trees through the **real**
+`EveOnline.ParseUserInterface`, so what the cases assert on is what the bot would
+have been handed. The fixtures give every ring node one region, exactly as the
+live client does, which is what makes `TheRingCarriesNoWidthToTakeARatioOf` a
+measurement rather than a comment: three trees whose nodes are all the same size
+answer three different things only if the value came from somewhere other than a
+width. The corpus is recounted as relations — a target is named on a large share
+of readings and its hull was never printed on any of them — rather than as the
+counts above.
+
+Confirmed by mutation, nine of them, each failing a named case: **an unreadable
+bar reporting `0%` instead of unknown**, which is the failure this whole design
+refuses; the drone's width ratio used where there is no width; one bar read three
+times so the three layers collapse; a decoder that rejects the integer a full
+layer carries; the percentages clamped in the parse; the hull dropped from the
+clause; the condition printed on the no-target branch; **a decision starting to
+consult the field**; and saxrat's copy drifting from the mission runner's.
+
+**Unverified: any of it running.** No run has been flown since. The geometry and
+the values above were read off the live client, so what a run has to show is the
+clause itself: `target <name> (Shield: N%  Armor: M%  Hull: K%)` on the readings
+that name a target, with the numbers *moving* while the guns fire. A run that
+names targets and prints `(Shield/Armor/Hull unknown)` on every one of them means
+the containers are not where this reading found them — which is the direction
+this would fail silently in, and is why the clause says `unknown` in words rather
+than answering a number. **How often the bars are readable while a target is
+locked is still not measured**, so the unknown branch is a design requirement
+rather than a frequency; and whether the ring can produce a garbage percentage
+the way the ship's gauge does is unknown, which is the second thing to watch.
+
 ## When the objective is done and the tracker offers a trip, the fight is over
 
 The mission runner's on-grid priority is the fight, then the looting, and only
@@ -6418,6 +6547,22 @@ exists.
   never does means the outgoing summary is not reaching the bot, which is the
   direction this whole change would fail silently in.
 
+  And its status line now **says what condition the active target is in** —
+  `target Render Alvi (Shield: 58%  Armor: 100%  Hull: 100%)` — where it named
+  the target and said nothing else, on the 7,917 readings of run 27 that name
+  one. It is a parse rather than the hover #112 was framed around: the client
+  draws `shieldBar`, `armorBar` and `hullBar` as named containers under every
+  `TargetInBar`, so there is an answer on every reading and no competition with
+  the ammo swap's own weapon hover. The bars are a *ring* and carry no width to
+  take a ratio of — the value is the client's own `lastState` — which is the one
+  thing here that had to be measured rather than assumed; see "The status line
+  named the target and said nothing about its condition" above, including why an
+  unreadable bar prints `unknown` and never `0%`, and why nothing decides
+  anything on it yet. **Untested against a live client**, though the geometry and
+  the values were read off one. Watch for the three numbers *moving* while the
+  guns fire; a run that names targets and prints `(Shield/Armor/Hull unknown)` on
+  every one of them means the containers are not where this reading found them.
+
   And it now **acts on a hitpoint reading only once a second reading agrees**,
   rather than on whatever the gauge said this reading. Run 11 retreated forty
   printed decisions on `Armor reached 0%` with the armour at 82-96%, which is a
@@ -6652,6 +6797,17 @@ exists.
   corpus cannot say what a swap would have gained here. Watch for `Ammo swap:`
   in the status line naming a crossover, then `GUNS OFF for N of 20` with the
   client confirming the switch-off, then `(satisfied)`.
+
+  Its status line now **says what condition the active target is in** too —
+  `Current target: Render Alvi (Shield: 58%  Armor: 100%  Hull: 100%).` — and
+  this is the one place where the port needed no thought at all: `parseTarget`
+  and the `Target` alias were byte-identical in the two apps before this and are
+  again after it, so the parse and both rules are the same declarations under the
+  same names and a case compares them byte for byte. Only the sentence each is
+  placed in differs. See "The status line named the target and said nothing about
+  its condition" above. **Untested against a live client**, and no recorded
+  saxrat run has ever printed a target's condition; watch for the three numbers
+  moving while the guns fire.
 
   And it now **learns its lock range from the client** rather than carrying
   `targeting-range=66000` and never revising it — the setting clamped into
