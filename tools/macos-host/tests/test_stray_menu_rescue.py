@@ -67,6 +67,28 @@ class StrayMenuIsClearedWithAClick(unittest.TestCase):
                 self.assertIn("effectsMouseClickAtLocation EffectOnWindow.MouseButtonRight",
                               branch, "the stray menu is cleared with a click")
 
+    def test_the_rescue_dismisses_the_menu_it_opens(self):
+        """A right-click on empty canvas opens a menu of its own.
+
+        Without a follow-up the next reading judges that menu stray and clears
+        it the same way: saxrat's run 47 fired this rescue 16,791 times with
+        three menus standing open on 16,720 readings -- a rescue reproducing
+        what it was rescuing from. A left click dismisses a menu without opening
+        one, and both travel in a single step so no reading can fall between
+        them and see the intermediate state as a new stray menu.
+        """
+        for path in BOTS:
+            with self.subTest(bot=os.path.basename(os.path.dirname(path))):
+                branch = rescue_branch(path)
+                self.assertIn("EffectOnWindow.MouseButtonLeft", branch,
+                              "the rescue ends with a left click")
+                right_at = branch.index("MouseButtonRight")
+                left_at = branch.index("MouseButtonLeft")
+                self.assertLess(right_at, left_at,
+                                "the left click follows the right click")
+                self.assertIn("++ EffectOnWindow.effectsMouseClickAtLocation", branch,
+                              "both clicks are one step, not two decisions")
+
     def test_escape_is_only_the_fallback(self):
         """Escape survives for the case with no panel to measure against.
 

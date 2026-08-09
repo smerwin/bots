@@ -2017,9 +2017,28 @@ clearStrayContextMenu context =
                     describeBranch
                         "A context menu has sat at the same depth for several ticks in a row without advancing to a deeper submenu -- likely a stray menu from a misclick or a cascade stuck on a menu with no entry it recognizes. Clear it (right-click beside the info panel)."
                         (decideActionForCurrentStep
+                            -- Right-click, then left-click the same point. The
+                            -- right-click is what dismisses the stray menu --
+                            -- Escape does not, measured against a real one --
+                            -- but on empty canvas it opens a menu of its own,
+                            -- and the next reading judges *that* stray and
+                            -- clears it the same way. saxrat's run 47 did this
+                            -- 16,791 times with three menus standing open on
+                            -- 16,720 readings: a rescue that reproduced what it
+                            -- was rescuing from.
+                            --
+                            -- The left click is the half that ends it. A left
+                            -- click dismisses a context menu without opening
+                            -- one, which is how this menu was cleared by hand
+                            -- before either was in the bot. Both travel in one
+                            -- step so no reading can fall between them and see
+                            -- the intermediate state as a new stray menu.
                             (EffectOnWindow.effectsMouseClickAtLocation
                                 EffectOnWindow.MouseButtonRight
                                 location
+                                ++ EffectOnWindow.effectsMouseClickAtLocation
+                                    EffectOnWindow.MouseButtonLeft
+                                    location
                             )
                         )
 
