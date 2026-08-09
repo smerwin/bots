@@ -3750,11 +3750,13 @@ fails there.
 Every other failure abandons the *attempt* and not the feature —
 `ammoSwapVerdictGiveUpTicks` if a verdict drags on, the client's refusal if a
 load is discarded — so the guns resume and the next change of range tries again.
-Three things latch the swap off for the session, because only they should not be
-retried: the menu offering neither charge, there being no crossover distance, and
-reaching the silence deadline. That last one is the newcomer and deliberately so.
-Having disarmed the ship once and been unable to finish, doing it again is not an
-optimisation worth the risk.
+Three things switch the swap off beyond the one attempt, because only they should
+not be retried straight away: the menu offering neither charge, there being no
+crossover distance, and reaching the silence deadline on a ship the client left
+disarmed. **Only the first two last the session.** The third is retried on the
+next warp since #157, and it now asks whether the guns actually stayed off — see
+"The disarm budget bounds an attempt, and it was read as a statement about the
+guns" below, which is where the whole of that argument lives.
 
 The middle one is the weakest of the three and #106 is why: it is the only one
 that is not a permanent fact about the ship or the client, so it now rests on six
@@ -4250,6 +4252,181 @@ really does not answer here and the give-up is doing its job, while a run that
 never prints a second hover at all means the warp branch is not reached — the
 tell for that would be `I am in warp` beside `hovers spent 1 of 6` and no
 `Holding still`.
+
+### The disarm budget bounds an attempt, and it was read as a statement about the guns
+
+Issue #157, which is PR #156's fix for saxrat ported to the bot that reaches the
+defect more often. Run 11 switched the whole ammo swap off 21 readings into its
+attempt and printed the give-up 763 times afterwards:
+
+```
+Ammo swap: given up -- the guns were switched off to load and were still not
+back 21 readings later -- a disarmed ship is worse than the wrong charge, so
+this will not be attempted again this session.
+```
+
+**The guns were not off, and this bot's own module column says so on the same
+reading.** `Top-row modules (ramp_active/isInActiveState/...): F/T/F.` —
+`isInActiveState` `True`, the gun switched **on** — and it had read that way
+since reading 3 of the 21, the client having taken the guns back two readings
+after confirming the switch-off. **The ship was disarmed for two readings and
+the sentence claimed twenty-one.** Run 27 is the same shape said in words rather
+than read off a column, because it postdates #72's status clause: its ammo clause
+read `the client switched a gun back on by itself 3 of 20 readings in` and went
+on climbing to 18 before the give-up.
+
+**`gunsSilencedTicks` is right, and that is exactly why it cannot be read as a
+statement about the guns.** #34's correction made it consult nothing the module
+says, because a counter that reads the duty cycle can be stalled by it. What that
+buys is a bound nothing can stop. What it does not buy is an account of the ship's
+state, and the give-up was written as though it did. The distinction already
+existed one function away: `describeAmmoSwapState` stops printing `GUNS OFF` the
+moment `switchOffUndoneByClient` latches, and #72's comment there says why. The
+status line had it right and the verdict did not.
+
+**It is more reachable here than in saxrat, and #72 is why.** On this bot the
+client re-arms the gun by itself on *every* swap, so the condition that made
+saxrat's verdict a misreading two times in three is the normal case.
+
+#### The census over `mission_run*.log`
+
+Thirty-two of the 37 recorded runs carry an ammo clause. Two ever reached the
+disarm give-up, and **both are the misreading**:
+
+| run | ammo clauses | `GUNS OFF` prints | deepest `GUNS OFF` | re-arm clause | `GUNS OFF` taken with the module reading **on** | disarm give-up | warps | verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 11 | 3,802 | 141 | 20 | — (predates #72) | **115** | **1** | 20 | **misread** — the module column reads the gun on from reading 3 of the attempt that gave up |
+| 27 | 18,289 | 90 | 14 | 99 | 61 | **1** | 78 | **misread** — its own clause says the client took the guns back at reading 3 |
+| 34 | 6,383 | 196 | **20** | 41 | 169 | 0 | 28 | the shape the latch is for, one reading short of firing |
+| 35 | 23,913 | 305 | **20** | 19 | 288 | 0 | 74 | the same, twice |
+| 26 | 4,508 | 131 | 19 | 192 | 105 | 0 | 14 | the control — swaps complete, no give-up |
+| 29 | 10,741 | 148 | 7 | 39 | 106 | 0 | 46 | ditto |
+| 36 | 5,110 | 48 | 13 | — | 48 | 0 | 21 | ditto (its own give-up is the neither-charge one) |
+| 32 | 2,806 | 0 | 0 | — | 0 | 0 | 2 | the *no-crossover* give-up, #106's |
+
+(The other 24 swapping runs never reached the give-up either; runs 4-9, 13, 17,
+19-21, 23, 25 and 33 never printed `GUNS OFF` at all.)
+
+**So the split is 2 misreads to 0 genuine**, where saxrat's was 2 to 1. That is
+the census sizing the change: on this bot the narrowed latch is close to
+unreachable, which is the *correct* outcome rather than an argument for deleting
+it.
+
+**It narrows rather than removes, and runs 34 and 35 are why.** `GUNS OFF for N`
+is printed only while `switchOffUndoneByClient` is unset, so a deep count is an
+attempt the narrowed rule would still latch on — and both those runs took it to
+**20 of 20**, one reading short of the give-up. Removing the latch would leave a
+swap that genuinely cannot finish re-disarming the ship at every change of range
+for a whole session, which is the runaway #34 is about.
+
+**There is a limit to what the latch can see, and it is worth stating.**
+`switchOffUndoneByClient` requires the client to have *confirmed* the switch-off
+before it can report it undone, so an attempt whose click never landed cannot set
+it. Split by that confirmation across the corpus, every `GUNS OFF` print where
+the client confirmed has the module reading the gun **off** and none reaches past
+4; every print where it did not is a gun the module reads **on**, and those are
+the ones that run to 20. Runs 34 and 35 are that second kind. So the shape the
+narrowed latch would still fire on is a ship the module says is firing — the bot
+simply has no *latched* evidence of it, and reading the module live here is the
+thing #34 refused. That is a real limit and not a regression: today's code latches
+on both.
+
+**So the session consequence asks the client's own answer and the attempt bound
+is untouched.** `ammoSwapDisarmEndsTheSession` is the rule: the budget expired
+**and** the client never reported a gun back on. The budget still ends the attempt
+at exactly the reading it always did — nothing is loosened, nothing holds the
+fight one reading longer — and only what that costs afterwards changes. That is
+PR #151's shape on `lockAttempt`. Reading `switchOffUndoneByClient` here cannot
+stall anything, which keeps #34 intact: it is a *latch*, monotone within one
+attempt and cleared exactly where `gunsSilencedTicks` is cleared, and it is only
+ever consulted to make the outcome milder.
+
+**And the disarm verdict is retried after a warp — the other two are not.**
+`ShipCarriesNeitherCharge` is a fact about the ship's hold that nothing short of
+docking alters. **`NoCrossoverDistance` is this bot's third latch, which saxrat
+does not have, and it gets its own answer rather than inheriting one: it is not
+retried, because #106 already spent the warp boundary at the evidence.** That ask
+is one hover per warp by construction, so `weaponTooltipAttemptsBeforeGivingUp`
+moments are six different warps and `optimalRangeGivenUp` latches only once all
+six are gone — and it never clears. Retrying the *verdict* on a warp would change
+nothing at all: `weaponTooltipAskIsGivenUp` is still true, so no hover is asked,
+no optimal range arrives, `threshold` is still `Nothing`, and the verdict
+re-latches on the very reading it was cleared on. What it would buy is the long
+sentence reprinted once a warp. (The Open gaps entry PR #156 left here guessed
+the opposite, from #111's argument that a hover asked in a new pocket is a
+different moment. That argument is right and is already implemented one level
+down.)
+
+**A warp is a *subset* of "a new pocket" here, where in saxrat it is a superset.**
+This bot enters pockets by acceleration gate as well as by warp, and a gate
+leaves no reading that says a site changed — the drone bookkeeping already
+records that as the second silent route out. So the retry is at most one per
+pocket and sometimes none, which is the conservative side of the trade and the
+side to be on for a latch about a disarmed ship. It is the same
+`weJustFinishedWarping` the drone abandonment reads, one definition, and a case
+pins that.
+
+**The cost is stated rather than hidden**: a swap failing for a persistent reason
+now retries once per warp rather than once per session. The runs that gave up
+warped 20 and 78 times, so that is tens of attempts over a long session instead
+of one — bounded, and named on every reading, where the present behaviour is one
+line and silence for hours. The status line says which of the three it is
+(`off until the next warp` against `off for this session`).
+
+**`givenUp` is a case rather than a sentence now**, and that is the shape change
+under both halves. A `Maybe String` is what let the verdict go on claiming
+something the memory beside it already contradicted: a string can be printed and
+cannot be asked. `describeAmmoSwapGiveUp` derives the wording from the case, so
+the two cannot drift, and the disarm sentence now says how many readings the
+*attempt* ran rather than how many the ship spent disarmed — on run 11 those were
+21 and 2.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_ammo_silenced_bound.py` (33 cases, up from 21). The
+two new rules are executed through the real `Bot.elm` in `elm repl` — the latch at
+both sides of its bound *and* against fixed values either side, with the guns back
+and not back at each; the unlatch asked of all three verdicts and folded over a
+whole session of readings rather than asked once; and all three sentences
+rendered. The corpus is recounted as *relations* and the runs are globbed rather
+than numbered, so a run 38 is read without an edit: a run gave up while the bot's
+own readings said the guns were firing, a run held the counter to at least half
+the budget with no re-arm recorded, and every run that gave up warped many times
+more often than it gave up.
+
+Confirmed by mutation, **eighteen** of them, each failing a named case: the
+`switchOffUndoneByClient` clause dropped, so an attempt spent entirely on a firing
+ship latches the session off (run 11 restored); the disarm verdict made to survive
+a warp; the no-crossover verdict retried every warp; the neither-charge verdict
+retried every warp; a verdict reached *on* the warp reading cleared by it; the
+bound's comparison moved by one; the abandonment conditioned on the same clause,
+so the attempt is held longer; the session verdict comparing the bound itself
+instead of asking the rule; the call site handing the rule `gunsConfirmedOff`,
+which is the same type and the opposite question; the status line no longer saying
+which give-up it is; the memory update never seeing a warp; the shared warp
+definition weakened to "is not warping"; the latch re-derived each reading instead
+of persisting; the sentence dropping the count; the sentence claiming the guns
+were still off; the give-up storing its sentence beside the case; the bound raised
+past everything the corpus reached; and the two readers each carrying their own
+wording.
+
+**The extractor trap PRs #147 and #156 both hit is avoided by construction here.**
+A `let` reader that ends at the next ` <name> = ` stops at a *record literal*, so
+an assertion about a rule's later fields passes vacuously — and the give-up hands
+`ammoSwapDisarmEndsTheSession` a two-field record. `indented_let_binding` slices
+by indentation instead, and the case asserting the rule is handed
+`switchOffUndoneByClient` reads through the brace.
+
+**Unverified: any of it running.** No run has been flown since. What to watch on
+the first one: the give-up, when it comes, saying `off until the next warp` and
+then **going away** on the next warp with a fresh `wants short-range for N
+reading(s)` after it — that retry is the whole of the second half and it has never
+happened. A give-up still saying `off for this session` on a disarm verdict means
+the case is not being carried; a latch that never comes back across many warps
+means `weJustFinishedWarping` is not reaching the swap. Also unverified, and
+inherited from #156: **why an attempt that has been given back its guns still
+cannot finish**. Runs 34 and 35 reached the budget with the client never
+confirming the switch-off at all, which is the "click that does not land" case run
+22 recorded and #76's territory, and nothing here addresses it.
 
 ### Not oscillating
 
@@ -6723,6 +6900,27 @@ exists.
   guns fire; a run that names targets and prints `(Shield/Armor/Hull unknown)` on
   every one of them means the containers are not where this reading found them.
 
+  And since #157 its ammo swap **stops reading the disarm budget as a statement
+  about the guns, and retries after a warp.** Run 11 latched the whole feature
+  off 21 readings into an attempt on the sentence "the guns were switched off to
+  load and were still not back 21 readings later", while its own module column
+  read `isInActiveState` `T` — the gun switched on — from reading 3 of that
+  attempt; the ship was disarmed for two readings. Run 27 is the same shape with
+  the bot saying so in words. Those are the only two disarm give-ups in 37 runs
+  and **both are the misreading**, where saxrat's split was two in three. The
+  budget is right to consult nothing the module says (#34) and that is exactly
+  why it cannot say what the guns were doing; the *session* consequence now asks
+  the client's own latched answer, the attempt is still abandoned at the same
+  reading, and the disarm verdict is retried on the next warp. The third latch,
+  #106's "no crossover", is deliberately **not** retried — that ask already
+  spends one hover per warp, so clearing the verdict would re-latch on the same
+  reading. See "The disarm budget bounds an attempt, and it was read as a
+  statement about the guns" above for the census, including why runs 34 and 35
+  reaching the budget one reading short of the give-up is what makes this narrow
+  the latch rather than remove it. **Untested against a live client.** Watch for
+  the give-up saying `off until the next warp` and then going away on the next
+  warp.
+
   And it now **acts on a hitpoint reading only once a second reading agrees**,
   rather than on whatever the gauge said this reading. Run 11 retreated forty
   printed decisions on `Armor reached 0%` with the armour at 82-96%, which is a
@@ -7353,20 +7551,18 @@ load-bearing — see "The home station".
   view invisible rather than mis-clicked — the loot path pairs the filter with
   `scrollOverviewToReveal` and the gate path has no such pairing. Both halves
   together, on a run that can be watched.
-- **The mission runner's ammo swap carries #154's defect unchanged**, and it is
-  the same code to the byte: `else if ammoSwapSilencedGiveUpTicks <
-  gunsSilencedTicks then Just ("the guns were switched off to load and were still
-  not back " ++ ...)`, with no reference to `switchOffUndoneByClient`. It is if
-  anything more reachable there — #72's own measurement is that on that bot the
-  client takes the guns back on *every* swap, and its run 11 held the counter to
-  21 with the gun reading switched on since reading 3. Not fixed here because
-  #154 is saxrat's issue and moving a latch in a second bot is a second behaviour
-  change, and because another change was in flight in that file. The saxrat
-  version is the worked example: `ammoSwapDisarmEndsTheSession`,
-  `AmmoSwapGiveUp`, and the warp unlatch. The mission runner's third latch (no
-  crossover distance, #106) is a third case there and wants its own answer to
-  "does a warp change this" — probably yes, since a hover asked in a new pocket
-  is a different moment, which is #111's whole argument.
+- **A swap that reaches the disarm budget with the client having never confirmed
+  the switch-off is still latched off, and the module says it should not be.**
+  #157 closed the case where the client *took the guns back*, which needs
+  `switchOffUndoneByClient` — and that latch can only report an undoing it saw
+  land in the first place. Across the mission runner's corpus every `GUNS OFF`
+  print where the client confirmed the switch-off has the module reading the gun
+  off and none exceeds 4, while every print where it did not is a gun the module
+  reads **on**, and those are the ones that reach 20. Runs 34 and 35 are that
+  second kind and stopped one reading short of the give-up. The obvious fix —
+  asking the module directly — is what #34 refused, and the honest one is
+  probably #76's: work out why a switch-off click sometimes does not land at all,
+  which run 22 recorded and nothing has explained.
 - **Nothing remembers that a gate was given up on, so saxrat can go back for
   it.** #147 makes the gate branch hand the reading back and the warp branch
   decline while that gate is in reach, so the bot leaves through the hunt loop —
