@@ -2204,8 +2204,9 @@ shape, and any window on that widget the declining answer does not close
 reproduces run 30 exactly.
 
 **Verified without a live client**, in
-`tools/macos-host/tests/test_message_box_standoff.py` (35 cases). The four pure
-rules are executed through the real `Bot.elm` in `elm repl` rather than restated
+`tools/macos-host/tests/test_message_box_standoff.py` (42 cases, up from 35).
+The four pure rules are executed through the real `Bot.elm` in `elm repl` rather
+than restated
 in Python — the standoff folded over the states a run passes through, the ladder
 at both of its boundaries and either side of each, the identity over boxes built
 out of real UI-tree nodes, and the give-up line — and the corpus is recounted as
@@ -2225,22 +2226,23 @@ clicking the box instead of pressing Escape, the give-up line dropping the box's
 name or its truncation, the status line dropping the clause, and the branch not
 consulting the verdict at all.
 
-**Unverified: any of it running.** No run has been flown since, and the box that
-caused this had been closed by hand long before it was investigated — so which
-node an emoji picker presents as, and whether it carried a `no_dialog_button` at
-all, is still inferred from `Dismiss it using No.` being printed on the path
-that requires one. Whether **Escape** closes such a window is the open question
-this fix cannot answer off-line; if it does not, the ladder costs 60 extra
-readings and ends in the same place, which is why the give-up rather than the
-escalation is the half that matters. What to watch on the first run that meets
-one: `message box N/120` in the status line climbing at all — on a healthy run
-it should appear briefly and vanish, since the recorded dialogs close in 6
-readings — then the Escape line, then the give-up naming the box, and then
-ordinary decisions resuming while `(GIVEN UP ON, still open)` stays in the
-status line. A give-up on a run where boxes are being answered normally means
-the identity is churning less than it should; a `message box` clause that never
-appears at all on a run that dismisses one means the standoff is not being
-written.
+**Unverified: any of it running on this bot.** No mission run has been flown
+since, and the box that caused this had been closed by hand long before it was
+investigated — so which node an emoji picker presents as, and whether it carried
+a `no_dialog_button` at all, is still inferred from `Dismiss it using No.` being
+printed on the path that requires one. The identical ladder **has** now run, in
+saxrat's run 11, and what that settles and what it does not is in "The ladder is
+not what froze; the readings stopped coming back" below: the counter advances
+once per reading exactly as documented, Escape's whole live outing is one press,
+and the give-up rung has still never been reached by either bot. What to watch
+on the first mission run that meets one: `message box N/120` in the status line
+climbing at all — on a healthy run it should appear briefly and vanish, since
+the recorded dialogs close in 6 readings — with the dialog **named** in the same
+clause, then the Escape line, then the give-up, and then ordinary decisions
+resuming while `(GIVEN UP ON, still open)` stays in the status line. A give-up on
+a run where boxes are being answered normally means the identity is churning less
+than it should; a `message box` clause that never appears at all on a run that
+dismisses one means the standoff is not being written.
 
 ## Context-menu cascade robustness
 
@@ -6369,13 +6371,14 @@ box is still there once the decision line has gone, and the give-up names the
 box and both rungs once at the root through `lockRangeLastChange`'s mechanism.
 
 **Verified without a live client**, in
-`tools/macos-host/tests/test_saxrat_message_box_standoff.py` (46 cases). The
-four pure rules are executed through the real `Bot.elm` in `elm repl` rather
-than restated in Python -- the standoff folded over a whole session of readings
-as well as asked at single numbers, the ladder at both boundaries and either
-side of each, the identity over boxes the real parser produced, and the give-up
-line -- and the wiring, the placement, the ordering and the parser's deliberate
-unchangedness are read out of the source through a whitespace-collapsing reader.
+`tools/macos-host/tests/test_saxrat_message_box_standoff.py` (56 cases, up from
+46). The four pure rules are executed through the real `Bot.elm` in `elm repl`
+rather than restated in Python -- the standoff folded over a whole session of
+readings as well as asked at single numbers, the ladder at both boundaries and
+either side of each, the identity over boxes the real parser produced, and the
+give-up line -- and the wiring, the placement, the ordering and the parser's
+deliberate unchangedness are read out of the source through a
+whitespace-collapsing reader.
 
 Confirmed by mutation, **fifteen** of them, each failing a named case: the
 escalation cut to 44 so it slices the recorded distribution; either boundary
@@ -6397,19 +6400,119 @@ version that still named `context.memory.messageBoxStandoff` while answering
 clause's *form*: a `case` directly on the memory field, the verdict consulted,
 and both numbers printed.
 
-**Unverified: any of it running, and more thoroughly than in the mission
-runner.** No recorded saxrat run has ever met a message box, so the starvation
-this bounds is reasoned from saxrat's source and from run 30 rather than from
-anything saxrat has been watched doing -- the argument is that saxrat had
-nothing that would end one, not that one has happened. Whether Escape closes
-such a window is the same open question it is over there; if it does not, the
-ladder costs 60 extra readings and ends in the same place, which is why the
-give-up rather than the escalation is the half that matters. What to watch on
-the first saxrat run that meets a box: `Message box: N/120` appearing briefly
-and vanishing, since the recorded dialogs close in 6 readings. A give-up on a
-run where boxes are being answered normally means the identity is churning; a
-`Message box:` clause that never appears on a run that dismisses one means the
-standoff is not being written.
+**It has met one since, and the run refutes the issue filed on it.** See "The
+ladder is not what froze; the readings stopped coming back" below.
+
+### The ladder is not what froze; the readings stopped coming back
+
+saxrat run 11 met the first message box either bot has met since #138 shipped,
+and issue #164 reads it as the ladder's third rung being unreachable: the
+standoff counter climbs to 60, escalates to Escape, and holds at 60 for **2,439
+readings** while `pressing Escape at it` fires 2,439 times and
+`GIVEN UP ON, still open` fires none. **Neither of the two causes that issue
+names is what happened, and neither is the counter.**
+
+Recounted from the log, grouping every line by the count the status clause was
+carrying:
+
+| count | clause printed | effect sequences dispatched | read requests issued |
+|---:|---:|---:|---:|
+| 1 to 59 | 3 or 4 each | **1 each** | 1 or 2 each |
+| **60** | **2,439** | **1** | **608** |
+
+**The counter is advanced correctly, once per reading, on the Escape rung as on
+the one below it.** What stopped is the reading pipeline. The client's own quick
+message on every one of those readings is
+`<center>Cluster Shutdown in Less than one second` -- EVE's daily downtime -- and
+from the reading the count reached 60 the framework issued 608 further
+`RequestToVolatileProcess` reads and completed none of them. No
+`ReadingFromGameClientCompleted` means no `updateMemoryForNewReadingFromGame`,
+so **every** counter written there froze at the same instant: the ammo swap's
+`given up 2578 readings ago`, the damage window's `(45s, 33rd)`,
+`Visited anomalies: 65`, `Route marker unchanged ticks: 2428`. The run ended
+when its own session duration elapsed, with the whole memory line byte-identical
+on all 2,439.
+
+**So the 2,439 lines are one decision.** The host prints the last status text on
+every log line it writes, and this file's own first orientation note --
+*a decision in the log is not an action* -- is what the issue's headline count
+falls to. It has now cost a threshold calibration twice (`stall_watch.py`), a
+retreat measurement once (#141), and an issue's whole diagnosis here.
+
+**Two of that incident's claims flip, and one is about the design.** Escape's
+entire live outing is **one press**, not 2,439, so #109's open question --
+whether Escape closes a window the answer does not -- is exactly as open as it
+was. The rung stays: deleting it would be answering that question from a sample
+of one, and what the give-up needs is readings spent, which the rung supplies
+whether or not the key works. And the third rung is *unobserved* rather than
+unreachable -- the fold in `test_saxrat_message_box_standoff` runs a standoff to
+120 through the real `Bot.elm` and reaches `LeaveTheMessageBoxAlone` on exactly
+the reading its own name says.
+
+**The mission runner does not share the defect, because there is no defect.**
+Its `messageBoxStandoffAfterReading`, `messageBoxStandoffVerdict` and memory
+update are the same declarations under the same names; mission run 35 never took
+the counter past 2, which is absence of evidence and now also unnecessary.
+
+**What the run genuinely could not say is what the window was**, which is #164's
+own first Unverified item and the one thing that shipped as a change.
+`describeMessageBoxGivenUpOn` is the only thing in either bot that ever printed a
+box's identity, and it is written on the one reading the count crosses 120 -- so
+a standoff that ends any other way, as this one did, leaves a 125 MB log that
+cannot name the dialog. The status clause now carries it on every counted
+reading, cut by `messageBoxIdentityForOperator`, the same cut the give-up
+sentence takes so the two cannot drift:
+
+```
+Message box: 60/120 (pressing Escape at it), message box saying '<the dialog's own words>' with buttons [...].
+```
+
+The clause is a rule over the record in both apps rather than inline in the
+status line, so a case executes what an operator reads instead of asserting a
+substring -- which is the trap that let a clause printing nothing at all pass
+#109's own file once.
+
+**What the run does say about the box**: its decision line is
+`Dismiss it using the window's close button`, 186 times over the 59 readings it
+was answered. That is the *third* and last of `closeMessageBoxByDeclining`'s
+options, the one a dialog whose buttons this file does not recognise at all falls
+through to -- so this window offered neither a Close/OK nor a `no_dialog_button`,
+unlike the emoji picker #101 was filed on, and the X did not close it in 59
+tries. saxrat run 5's box, by contrast, was answered with `OK` and closed in 2
+readings, which is the positive control that the branch works.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_message_box_standoff.py` (56 cases, up from
+46) and `test_message_box_standoff.py` (42, up from 35). The clause is executed
+through the real `Bot.elm` at all three rungs and against a paragraph-length
+dialog, the two
+apps' renderings are compared, and the run is recounted as *relations* over every
+`saxrat_run*.log` on the machine rather than as the numbers above: the counter
+advanced once per reading with one dispatch each below the escalation, the
+escalation dispatched at most one against thousands of printed clauses, and the
+reads issued at the escalation outnumber the whole answering rung's by orders of
+magnitude while the count never moved.
+
+Confirmed by mutation, **eleven** of them, each failing a named case: the counter
+pinned at the escalation, which is run 11's shape as the issue reads it; the
+give-up rung answering `PressEscapeAtTheMessageBox` so it is never reached; the
+Escape rung deleted, which is the change this PR considered and declined; the
+identity dropped from the clause; the clause given a second cut length; the
+clause re-inlined in the status line; the clause speaking on a reading with no
+box; the truncation removed; the rung wordings dropped; a decision consulting the
+clause; the identity dropped from the mission runner's copy only; and the
+escalation retuned to 44, which no longer matches the answering rung the run
+recorded.
+
+**Unverified.** Whether Escape closes such a window -- one press, no
+observation. What that window was, since the identity was added after the run
+that needed it. And the give-up rung itself, which no run of either bot has
+reached. What to watch on the next saxrat run that meets a box:
+`Message box: N/120` appearing briefly and vanishing with the dialog **named** in
+it, since the recorded dialogs close in 2 to 44 readings. A count that stops
+moving while the rest of the status line also stops moving is the client having
+gone away, not this branch; the tell is every other counter in the same line
+frozen with it.
 
 ### An in-range acceleration gate is opened from the panel here too
 
@@ -6921,9 +7024,11 @@ exists.
   throughout and could not be reached. The ladder, why the count is per box, why
   Escape rather than Ctrl+W, and why narrowing the message-box parser is not the
   fix are in "A message box the answer does not close is bounded" above.
-  **Untested against a live client**, and whether Escape closes such a window is
-  the open question — watch the status line's `message box N/120`, which should
-  appear briefly and vanish on a healthy run.
+  **Untested against a live client on this bot**, and whether Escape closes such
+  a window is still the open question after saxrat run 11 pressed it once (#164)
+  — watch the status line's `message box N/120`, which should appear briefly and
+  vanish on a healthy run, and which now **names the dialog** so that a standoff
+  ending any way other than the give-up still says what the window was.
 
   And it now **refuses an empty `decline-mission` value instead of arming a
   filter with it**, and says which list refused a mission and on what entry.
@@ -7336,9 +7441,16 @@ exists.
   — it already exposes the button `_name`s and labels the identity needs — and
   Escape is safe here for the same placement reason, `closeSystemSettingsMenu`
   being the entry before this one in a list resolved by `List.head`. See "The
-  message box that will not close is bounded here too" above. **Untested against
-  a live client**; watch the status line's `Message box: N/120`, which should
-  appear briefly and vanish on a healthy run.
+  message box that will not close is bounded here too" above.
+
+  **It has flown, and run 11 is the first box either bot has met since.** The
+  counter advanced once per reading up the answering rung and the escalation
+  pressed Escape once; what looked like a frozen counter is the client going away
+  at EVE's downtime, taking every other counter in the same status line with it.
+  Since #164 the clause **names the dialog** on every counted reading, because
+  that run's 125 MB log cannot say what the window was. See "The ladder is not
+  what froze; the readings stopped coming back". Watch `Message box: N/120` with
+  the dialog named beside it, appearing briefly and vanishing on a healthy run.
 
   And it now **presses the Selected Item panel's own `selectedItemActivateGate`**
   on a gate the ship is already sitting on, rather than driving a context-menu
