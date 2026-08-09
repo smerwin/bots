@@ -7519,6 +7519,139 @@ rather than the mechanism since #69, but it is still the only one that works wit
 no credentials and from a cold start, so the substring workaround stays
 load-bearing — see "The home station".
 
+### The query is not mangled where it looked like it was
+
+Issue #75 read run 19's search-results window off the live client while it was
+still open — `ListWindow noContentHint 'No results returned for "eueu"'` against
+a decision log reading `Search for 'Emperor Family Bureau'` — and named three
+places the characters could be lost: `effectsToEnterString`, `_VK_TO_CGKEYCODE`,
+and `cg_input`. **Two of the three do not lose anything, and the first is not in
+the path at all.**
+
+**`effectsToEnterString` is called by no bot.** It appears in all nine vendored
+copies of `Common/EffectOnWindow.elm` and in zero `Bot.elm`s. The search bar is
+typed by the mission runner's own `typeTextEffects`, which emits one
+`KeyDown`/`KeyUp` pair per character and **presses no modifier at all** — so the
+shift-state tracking the issue points at never runs, and neither does
+`getKeyboardKeyToEnterChar`.
+
+**The table is right and the host posts every character.** Driving the real
+`_windows_input` over the real sequence shape — click, 21 characters, Return —
+posts 44 key events in order, every one decoding back to the query, with no
+errors and nothing aborted; and the table agrees with the standard US-layout
+`kVK_ANSI_*` constants character by character.
+
+**Pacing is not implicated either, and the timings say so from the runs
+themselves.** A 22-character query costs 6.7s in run 35 and 11.1s in run 17 —
+but the same runs' *glides* separate the same way, and a glide is ten posted
+`move` commands plus nine fixed 25ms sleeps, so its duration measures what one
+posted event costs. Across the corpus that separation is total and has no
+overlap:
+
+| runs | every logged glide |
+|---|---|
+| **17 and 19** — the two that lost the query | 0.759 – 1.222 s |
+| 27, 29, 30, 31, 34, 35, 36, 37 | 0.232 – 0.401 s |
+
+A glide's own sleeps are 0.225s of that, so a posted event cost **53–100 ms in
+runs 17 and 19 and under 18 ms in every other recorded run**. Both runs were
+therefore flying the shipped 30ms hold and 210ms gap — the arithmetic only
+reconciles under that pacing once the per-event cost is put in — and what was
+different about them is that every `CGEventPost` was going into a saturated
+window server. **That is below every layer #75 names**, and nothing in the log
+said it: it had to be reconstructed from glide durations.
+
+**No occurrence since.** `The search results do not offer` appears in runs 17 and
+19 and in no later run, and no run since PR #74 has printed a `noContentHint` at
+all. That is weaker than it looks — since #69 the bot prefers ESI and reaches the
+search bar much less often — so it is recorded as a relation rather than as a
+cure. What *is* positive evidence is the quick filter, the one typed field the
+bot reads back: runs 30, 34 and 37 each typed a 15- to 29-character name **with
+spaces** and moved on without retyping or clearing the box.
+
+### A key the sequence does not release stays down for the session
+
+What the investigation did turn up is a real defect, in the direction this repo
+keeps a section on. `_keys_down` was written on every `KeyDown` and **read
+nowhere**, so a key pressed by a sequence that never released it stayed pressed
+underneath every keystroke and click that followed — for the rest of the run,
+since nothing else in the host takes one back.
+
+**`effectsToEnterString` builds exactly that sequence.** Its fold emits `KeyUp
+vkey_SHIFT` only when the *next* character does not want Shift, so a string
+ending in a capital reaches the end with Shift down and nothing after it.
+`releaseShiftAtTheEnd` closes it.
+
+**And `getKeyboardKeyToEnterChar` could put Command underneath the typing.** Both
+letter bounds read `<= 26` where the alphabet is 26 letters at offsets 0 to 25,
+so offset 26 — `{` past `a`, `[` past `A` — answered `VirtualKeyCodeFromInt
+(vkey_A + 26)`, which is `vkey_LWIN`, which this host maps to **Command**. A
+character that cannot be typed became a modifier press rather than the `Err`
+`getSequenceOfKeyboardKeysToEnterString` exists to raise. Both bounds are `< 26`
+now.
+
+**This is the failure mode #75 describes, arriving from a direction the issue
+did not consider**: every effect dispatched, every event posted, every layer
+reporting success, and the characters gone because the client was reading
+shortcuts. `Bot.elm` already records the far end of it — Command "leaves the
+field swallowing every keystroke that follows", which cost run 116 its whole
+attempt, 128 typings that changed the box by not one character.
+
+**The host now takes back whatever a sequence leaves held**, and says so.
+Driven by what was actually *posted* rather than by `keys_left_held(items)`, so
+that it also covers a sequence cut short — the foreground-check `break`, or a
+`cg_input` that died between a press and its release, which the item list reads
+as perfectly balanced. `keys_left_held` is the pure half and names what the
+*bot* asked for, which is the half an operator can take to the bot. The release
+is wrapped, because the likeliest reason a key is held is a `cg_input` that has
+just died, so the repair runs in exactly the state where posting can fail again.
+
+**Verified without driving input**, in
+`tools/macos-host/tests/test_typed_text_key_sequence.py` (30 cases). The real
+`_windows_input` is executed over the real sequence shapes with `cg_input`
+replaced by a recorder, so what is asserted is what would have been posted; the
+key table is checked against an independently written `kVK_ANSI_*` list, so a
+typo in either is a disagreement rather than a shared mistake; and the Elm half
+is read out of `Common/EffectOnWindow.elm` through a whitespace-collapsing
+reader, since no bot calls it and there is nothing to execute it through. The
+corpus is recounted as the relations above rather than as the numbers.
+
+Confirmed by mutation, **fourteen** of them, each failing a named case: the
+release removed entirely; the release in press order rather than reverse; the
+release driven by the item list instead of by what was posted (which is the half
+a dead `cg_input` produces); `keys_left_held` counting an unmapped key; it
+ignoring the releases; the key hold put back at the framework's own 210ms and
+removed altogether; the wait skip scoped to any held key again, which is #71's
+own shape; one letter mapped to the wrong `CGKeyCode`; space dropped from the
+table; the Elm fold no longer releasing Shift; the Elm release pressing Shift
+instead of raising it; and each letter bound put back to `<= 26`.
+
+**Two things were found while writing the cases and are worth keeping.** The
+release, as first written, was outside the loop's `try` — so a `cg_input` that
+had died would have taken the whole task down at exactly the moment the repair
+was needed. And `_keys_down` was a `set`, which cannot say what order the presses
+came in; it is a list, because the undo of two modifiers is the presses in
+reverse.
+
+**Unverified, and it is the half that matters: none of this explains `eueu`.**
+The host posted all 21 characters of run 19's query with the right key codes and
+the shipped pacing, and no sequence in that run's search path presses a modifier
+at all, so neither fix here would have changed what that run typed. **Where those
+characters went cannot be established without driving input into the client**,
+which is the one thing this investigation was not allowed to do — the remaining
+suspects are `cg_input`'s `CGEventPost` (which creates every event from a `NULL`
+event source, and was measured costing 53–100 ms a call in exactly those two
+runs) and the client itself. What to watch on the next run that types anything:
+`KEYS LEFT HELD` should **never** appear — if it does, some sequence is
+unbalanced and the message names the codes — and a run whose glides climb past
+0.4s is a run posting into a saturated window server, which is the one measurable
+thing runs 17 and 19 had in common.
+
+**Eight other copies of `Common/EffectOnWindow.elm` carry both defects**, saxrat's
+among them. They are deliberately not touched here: this change is scoped to the
+app #75 is about, and `effectsToEnterString` is dead code in all nine, so the
+divergence costs nothing until something calls it.
+
 ## Open gaps
 
 - `dictEntriesOfInterest` doesn't recursively encode non-primitive "interesting"
