@@ -445,6 +445,113 @@ class TheGiveUpNamesTheBoxAndWhatItTried(unittest.TestCase):
         self.assertIn("by hand", said)
 
 
+class TheStatusClauseNamesTheBox(unittest.TestCase):
+    """`describeMessageBoxStandoff`, executed rather than read.
+
+    Issue #164's first Unverified item is *what the box was*. saxrat run 11 --
+    this ladder, in the other app -- spent 60 readings on one and its 125 MB log
+    cannot say what it was, because the only thing that ever prints a box's
+    identity is the give-up sentence and that run never reached the give-up. So
+    the clause an operator reads on every counted reading now carries the
+    identity, and it is a function of the record so a case can execute it: the
+    version it replaces was inline in `statusTextFromState` and could only be
+    checked by substring, which is the trap that let a clause printing nothing
+    at all pass PR #109's own file once.
+    """
+
+    IDENTITY = ("message box saying 'Quit Mission?' with buttons "
+                "[no_dialog_button=No]")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(ElmRepl, prefix="test-msgbox-clause-")
+        escalate_at = threshold_from_source("messageBoxAnswersBeforeEscape")
+        give_up_at = escalate_at * 2
+        cls.quiet, cls.answering, cls.escaping, cls.given_up = cls.repl.strings([
+            "describeMessageBoxStandoff Nothing",
+            "describeMessageBoxStandoff %s" % standoff(cls.IDENTITY, 1),
+            "describeMessageBoxStandoff %s" % standoff(cls.IDENTITY,
+                                                       escalate_at),
+            "describeMessageBoxStandoff %s" % standoff(cls.IDENTITY,
+                                                       give_up_at),
+        ])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_a_reading_with_no_box_says_nothing(self):
+        # The clause sits in a group of settling counters that disappears when
+        # nothing is waiting on anything, so it has to be empty on the ordinary
+        # reading or it is noise on every line of every run.
+        self.assertEqual(self.quiet, "")
+
+    def test_every_rung_names_the_box(self):
+        # Including the first, which is the one saxrat run 11 spent 59 of its 60
+        # readings on and the one an operator would have been reading while the
+        # window was still on the screen to be looked at.
+        for rung in (self.answering, self.escaping, self.given_up):
+            self.assertIn("Quit Mission?", rung)
+            self.assertIn("no_dialog_button", rung)
+
+    def test_every_rung_carries_the_count_against_the_bound(self):
+        escalate_at = threshold_from_source("messageBoxAnswersBeforeEscape")
+        give_up_at = escalate_at * 2
+        self.assertIn("1/%d" % give_up_at, self.answering)
+        self.assertIn("%d/%d" % (escalate_at, give_up_at), self.escaping)
+        self.assertIn("%d/%d" % (give_up_at, give_up_at), self.given_up)
+
+    def test_it_says_which_rung_the_bot_is_on(self):
+        self.assertIn("pressing Escape at it", self.escaping)
+        self.assertIn("GIVEN UP ON, still open", self.given_up)
+        for wording in ("pressing Escape at it", "GIVEN UP ON"):
+            self.assertNotIn(
+                wording, self.answering,
+                "the ordinary rung claims to be doing something it is not")
+
+    def test_a_long_dialog_does_not_run_away_with_the_status_line(self):
+        # The identity carries the box's whole rendered text, and this clause
+        # goes out on every reading rather than once, so a dialog with a
+        # paragraph in it would push the rest of the status line along.
+        long_identity = "message box saying '" + ("blah " * 200) + "'"
+        said, = self.repl.strings(
+            ["describeMessageBoxStandoff %s" % standoff(long_identity, 1)])
+        self.assertLess(len(said), len(long_identity))
+        self.assertIn("...", said)
+
+    def test_the_two_lines_cut_a_box_the_same_way(self):
+        # One cut for both readers. Two would drift, and an operator comparing
+        # the status line against the give-up sentence would be comparing two
+        # different prefixes of the same dialog.
+        long_identity = "message box saying '" + ("blah " * 200) + "'"
+        clause, sentence, cut = self.repl.strings([
+            "describeMessageBoxStandoff %s" % standoff(long_identity, 1),
+            "describeMessageBoxGivenUpOn %s" % elm_string(long_identity),
+            "messageBoxIdentityForOperator %s" % elm_string(long_identity),
+        ])
+        self.assertIn(cut, clause)
+        self.assertIn(cut, sentence)
+
+    def test_the_two_apps_render_the_box_the_same_way(self):
+        # The wording differs -- each app's status line has its own shape -- but
+        # both have to name the box, and a port that named it in one is a port
+        # that leaves the other's next incident as unrecoverable as run 11's.
+        saxrat = os.path.join(
+            os.path.dirname(os.path.dirname(MISSION_RUNNER_BOT_ELM)),
+            "eve-online-saxrat", "Bot.elm")
+        with open(saxrat, encoding="utf-8") as source:
+            theirs = collapsed(declaration(source.read(),
+                                           "describeMessageBoxStandoff"))
+        for both in ("messageBoxIdentityForOperator present.identity",
+                     "messageBoxStandoffVerdict (Just present)",
+                     "String.fromInt messageBoxStandoffGiveUpReadings"):
+            self.assertIn(both, theirs)
+            self.assertIn(
+                both,
+                collapsed(declaration(bot_source(),
+                                      "describeMessageBoxStandoff")))
+
+
 class TheRecordedRunsAreWhatCalibratesTheBound(unittest.TestCase):
     """The corpus, recounted, as the relations the threshold rests on.
 
@@ -583,9 +690,22 @@ class TheRuleIsWiredIntoTheTree(unittest.TestCase):
         # Once the give-up is reached `closeMessageBox` prints no decision line
         # at all, so the status line is the only place a reading says a box is
         # still sitting in front of the bot.
+        #
+        # The clause is a rule since #164 and is executed by
+        # `TheStatusClauseNamesTheBox` below. What is read here is only that the
+        # status line asks it and carries no second copy of it: two renderings
+        # of one clause is how the give-up sentence and the status line would
+        # come to disagree about a box.
         body = collapsed(declaration(self.source, "statusTextFromState"))
-        self.assertIn("context.memory.messageBoxStandoff", body)
-        self.assertIn("GIVEN UP ON", body)
+        self.assertIn(
+            "describeMessageBoxStandoff context.memory.messageBoxStandoff",
+            body)
+        for reimplemented in ("standoff.readings", "GIVEN UP ON",
+                              "messageBoxStandoffVerdict"):
+            self.assertNotIn(
+                reimplemented, body,
+                "the status line renders the clause itself again, so a case "
+                "that executes the rule no longer tests what an operator reads")
 
     def test_the_parser_still_matches_every_message_box(self):
         # Explicitly *not* the fix. Narrowing this treats the emoji picker and

@@ -811,6 +811,20 @@ as strings and do not drift that way. The side effect is that a dialog whose
 wording changes starts a fresh count, which is the wanted direction: a box that
 is saying something new is one the next answer has not been tried on.
 
+**`readings` counts readings the framework completed, and saxrat run 11 is why
+that is worth writing down.** It is advanced in
+`updateMemoryForNewReadingFromGame`, which runs once per
+`ReadingFromGameClientCompleted` and not once per log line or per framework
+step. In that run the count reached 60, the client stopped answering
+`ReadFromWindow` on the same reading -- its own quick message read
+`Cluster Shutdown in Less than one second` -- and the framework then issued 608
+further pairs of read tasks and completed none of them. Every counter written
+there froze together at that instant, this one and the ammo swap's and the
+damage window's alike, while the host went on reprinting the last status text
+2,439 times. A count that has stopped moving is therefore evidence about the
+reading pipeline and not about this branch, and the log cannot tell the two
+apart by repetition alone.
+
 -}
 type alias MessageBoxStandoff =
     { identity : String
@@ -7515,6 +7529,18 @@ covered rather than risked: `closeSystemSettingsMenu` is the entry _before_ this
 one in `generalSetupInUserInterface`, so a pause menu opened here is closed on
 the next reading by the branch that exists for it.
 
+**Escape's one live outing is one press, and it settles nothing.** saxrat run 11
+reached this rung on the identical ladder and the client stopped answering reads
+on the same reading, so that bot processed exactly one reading here and
+dispatched exactly one effect sequence -- against 59 dispatched on the rung
+below it, one per reading. The 2,439 `pressing Escape at it` lines in that log
+are one status text reprinted, which is this file's own "a decision in the log is
+not an action" arriving in the place it is least expected. So whether Escape
+closes a window the answer does not is still the open question #101 left, and the
+rung stays: deleting it would be answering that question from a sample of one
+press, and what the give-up needs is readings spent, which this rung supplies
+whether or not the key works.
+
 -}
 messageBoxStandoffVerdict : Maybe MessageBoxStandoff -> MessageBoxStandoffVerdict
 messageBoxStandoffVerdict standoff =
@@ -7584,7 +7610,7 @@ says which box it was and everything that was tried on it, once, at the root --
 in the memory update, which runs whatever the bot is doing, and the branch that
 would otherwise say so is precisely the branch that has just stopped running.
 
-The identity is cut to `messageBoxGiveUpIdentityLength` because it carries the
+The identity is cut by `messageBoxIdentityForOperator` because it carries the
 box's whole rendered text, and a dialog with a paragraph in it would otherwise
 push the rest of the sentence off whatever the operator is reading.
 
@@ -7592,12 +7618,7 @@ push the rest of the sentence off whatever the operator is reading.
 describeMessageBoxGivenUpOn : String -> String
 describeMessageBoxGivenUpOn identity =
     "Nothing closes this "
-        ++ (if messageBoxGiveUpIdentityLength < String.length identity then
-                String.left messageBoxGiveUpIdentityLength identity ++ "..."
-
-            else
-                identity
-           )
+        ++ messageBoxIdentityForOperator identity
         ++ " -- answered it "
         ++ String.fromInt messageBoxAnswersBeforeEscape
         ++ " readings running and then pressed Escape at it for another "
@@ -7605,11 +7626,73 @@ describeMessageBoxGivenUpOn identity =
         ++ ", and it is still there. Leaving it open and getting on with the rest of the bot rather than answering it forever -- it needs closing by hand."
 
 
-{-| How much of a box's identity the give-up line prints.
+{-| How much of a box's identity a line prints.
 -}
 messageBoxGiveUpIdentityLength : Int
 messageBoxGiveUpIdentityLength =
     200
+
+
+{-| A box's identity, cut to what one line can carry.
+
+One function for both readers rather than the cut written out twice, so the
+give-up sentence and the status clause cannot come to disagree about how much of
+a dialog an operator is shown.
+
+-}
+messageBoxIdentityForOperator : String -> String
+messageBoxIdentityForOperator identity =
+    if messageBoxGiveUpIdentityLength < String.length identity then
+        String.left messageBoxGiveUpIdentityLength identity ++ "..."
+
+    else
+        identity
+
+
+{-| The one clause on a reading that says a box is in front of the bot, and now
+the only thing that says which box.
+
+Two things make it the only one. Once the give-up is reached `closeMessageBox`
+answers `Nothing` and prints no decision line at all, so nothing else on the
+reading mentions the box; and `describeMessageBoxGivenUpOn`, which does name it,
+is written on the one reading the count crosses
+`messageBoxStandoffGiveUpReadings` and on no other.
+
+**saxrat run 11 is what that cost**, on this same ladder. One box held that bot
+for the 59 readings its answer was clicked and the one reading Escape was
+pressed, and the run ended there -- so the give-up was never reached, the
+identity was never printed, and what the window was cannot be recovered from a
+125 MB log. The only thing the run says about it is
+`Dismiss it using the window's close button`, which is the third and last of
+`closeMessageBoxByDeclining`'s options and the one a dialog whose buttons this
+file does not recognise at all falls through to. Naming the box on every reading
+it is counted is the cheapest thing that would have answered it, and it costs a
+clause on the readings a box is up and nothing on any other.
+
+-}
+describeMessageBoxStandoff : Maybe MessageBoxStandoff -> String
+describeMessageBoxStandoff standoff =
+    case standoff of
+        Nothing ->
+            ""
+
+        Just present ->
+            "message box "
+                ++ String.fromInt present.readings
+                ++ "/"
+                ++ String.fromInt messageBoxStandoffGiveUpReadings
+                ++ (case messageBoxStandoffVerdict (Just present) of
+                        AnswerTheMessageBox ->
+                            ""
+
+                        PressEscapeAtTheMessageBox ->
+                            " (pressing Escape at it)"
+
+                        LeaveTheMessageBoxAlone ->
+                            " (GIVEN UP ON, still open)"
+                   )
+                ++ ", "
+                ++ messageBoxIdentityForOperator present.identity
 
 
 {-| The standoff as it stands after this reading.
@@ -14863,30 +14946,10 @@ statusTextFromState context =
                     ++ (context.contextMenuCascadeLevel |> String.fromInt)
                     ++ ")"
             , counter "menu-stuck" context.memory.contextMenuStuckTicks
-            , -- #101's counter, and the one clause here that keeps speaking
-              -- after its branch has stopped: once the give-up is reached
-              -- `closeMessageBox` answers `Nothing` and prints no decision line
-              -- at all, so this is the only thing on a reading that says a box
-              -- is still sitting in front of the bot.
-              context.memory.messageBoxStandoff
-                |> Maybe.map
-                    (\standoff ->
-                        "message box "
-                            ++ String.fromInt standoff.readings
-                            ++ "/"
-                            ++ String.fromInt messageBoxStandoffGiveUpReadings
-                            ++ (case messageBoxStandoffVerdict (Just standoff) of
-                                    AnswerTheMessageBox ->
-                                        ""
-
-                                    PressEscapeAtTheMessageBox ->
-                                        " (pressing Escape at it)"
-
-                                    LeaveTheMessageBoxAlone ->
-                                        " (GIVEN UP ON, still open)"
-                               )
-                    )
-                |> Maybe.withDefault ""
+            , -- #101's counter and #164's naming of the box, rendered by
+              -- `describeMessageBoxStandoff` rather than here so a case can
+              -- execute what an operator reads.
+              describeMessageBoxStandoff context.memory.messageBoxStandoff
             , counter "route-unchanged" context.memory.routeFirstMarkerUnchangedTicks
             , counter "unlock-unchanged" context.memory.targetToUnlockUnchangedTicks
             , counter "loot-open" context.memory.lootWindowOpenTicks

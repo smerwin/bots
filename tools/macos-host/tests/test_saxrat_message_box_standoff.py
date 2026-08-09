@@ -15,12 +15,19 @@ the same parse breadth (`parseMessageBoxesFromUITreeRoot` matches
 none of the counter -- and it rats unattended, so nobody is at the console.
 
 **The bound's size rests on the mission runner's corpus, and that is checked
-rather than asserted.** `TheRecordedSaxratRunsCannotSizeThisBoundTest` reads the
-three recorded saxrat runs and finds no message box on any of their ~49,000
-readings, so there is nothing here to place a threshold against;
-`TheMissionRunnersCorpusIsWhatSizesThisBoundTest` recounts the runs that do have
-one and asserts the separation 60 sits in. The two bots' constants are compared
-so a retune in one is visible in the other.
+rather than asserted.** `TheMissionRunnersCorpusIsWhatSizesThisBoundTest`
+recounts the runs that have a box and asserts the separation 60 sits in. The two
+bots' constants are compared so a retune in one is visible in the other.
+
+**saxrat has since met one, and it is issue #164.**
+`RunElevenIsWhatTheStandoffFreezingLooksLikeTest` recounts it. That issue reads
+the run as the ladder's third rung being unreachable; the recount says the
+counter advanced once per reading all the way up the answering rung, and then
+the client stopped answering reads -- 608 further read requests went out while
+the count stood at 60 and none came back, so nothing in memory moved again and
+the host reprinted one status text 2,439 times. Escape's whole live outing is
+**one** dispatched effect sequence. `TheStatusClauseNamesTheBoxTest` covers what
+that run genuinely could not say, which is what the window was.
 
 **What must not change** is the default. The declining answer stays the first
 rung (#54's standing lesson in the mission runner, and these dialogs guard
@@ -44,6 +51,7 @@ rather than the one an absent toolchain does.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
+import glob
 import os
 import re
 import unittest
@@ -125,6 +133,21 @@ def elm_string(value):
 def standoff(identity, readings):
     return "(Just { identity = %s, readings = %d })" % (
         elm_string(identity), readings)
+
+
+def readers_of(name, path=SAXRAT_BOT_ELM):
+    """Every top-level declaration whose body names `name`, bar its own.
+
+    One pass over the source, because the natural shape -- `declaration(other)`
+    for every other declaration in the file -- re-reads a 10,000-line file once
+    per declaration.
+    """
+    source = source_of(path)
+    declared = re.findall(r"^([a-z]\w*) :", source, re.MULTILINE)
+    return [other for other in declared
+            if other != name
+            and re.search(r"\b%s\b" % re.escape(name),
+                          without_comments(body_of(source, other)))]
 
 
 def message_box_tree(texts, buttons, origin=(300, 200)):
@@ -487,6 +510,97 @@ class TheGiveUpNamesTheBoxAndWhatItTriedTest(unittest.TestCase):
         self.assertIn("by hand", said)
 
 
+class TheStatusClauseNamesTheBoxTest(unittest.TestCase):
+    """`describeMessageBoxStandoff`, executed rather than read.
+
+    Issue #164's own first Unverified item is *what the box was*. saxrat run 11
+    spent 60 readings on one and the log cannot say what it was, because the
+    only thing that ever prints a box's identity is the give-up sentence and
+    that run never reached the give-up. So the clause an operator reads on
+    every counted reading now carries the identity, and it is a function of the
+    record so a case can execute it -- the version it replaces was inline in
+    `statusTextFromState` and could only be checked by substring, which is the
+    trap that let a clause printing nothing at all pass this file once.
+    """
+
+    IDENTITY = ("message box saying 'Really jettison this?' with buttons "
+                "[no_dialog_button=No]")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(SaxratRepl, prefix="saxrat-msgbox-clause-")
+        escalate_at = int_constant("messageBoxAnswersBeforeEscape")
+        give_up_at = escalate_at * 2
+        cls.quiet, cls.answering, cls.escaping, cls.given_up = cls.repl.strings([
+            "describeMessageBoxStandoff Nothing",
+            "describeMessageBoxStandoff %s" % standoff(cls.IDENTITY, 1),
+            "describeMessageBoxStandoff %s" % standoff(cls.IDENTITY,
+                                                       escalate_at),
+            "describeMessageBoxStandoff %s" % standoff(cls.IDENTITY,
+                                                       give_up_at),
+        ])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_a_reading_with_no_box_says_nothing(self):
+        # The clause has to be silent on the ordinary reading, or it is noise on
+        # every line of a run that never meets a dialog.
+        self.assertEqual(self.quiet, "")
+
+    def test_every_rung_names_the_box(self):
+        # Including the first, which is the one run 11 spent 59 of its 60
+        # readings on and the one an operator would have been reading while it
+        # was still recoverable.
+        for rung in (self.answering, self.escaping, self.given_up):
+            self.assertIn("Really jettison this?", rung)
+            self.assertIn("no_dialog_button", rung)
+
+    def test_every_rung_carries_the_count_against_the_bound(self):
+        escalate_at = int_constant("messageBoxAnswersBeforeEscape")
+        give_up_at = escalate_at * 2
+        self.assertIn("1/%d" % give_up_at, self.answering)
+        self.assertIn("%d/%d" % (escalate_at, give_up_at), self.escaping)
+        self.assertIn("%d/%d" % (give_up_at, give_up_at), self.given_up)
+
+    def test_it_says_which_rung_the_bot_is_on(self):
+        self.assertIn("answering it", self.answering)
+        self.assertIn("pressing Escape at it", self.escaping)
+        self.assertIn("GIVEN UP ON, still open", self.given_up)
+
+    def test_a_long_dialog_does_not_run_away_with_the_status_line(self):
+        # The identity carries the box's whole rendered text, and this clause
+        # goes out on every reading rather than once, so a dialog with a
+        # paragraph in it would push the rest of the status line along.
+        long_identity = "message box saying '" + ("blah " * 200) + "'"
+        said, = self.repl.strings(
+            ["describeMessageBoxStandoff %s" % standoff(long_identity, 1)])
+        self.assertLess(len(said), len(long_identity))
+        self.assertIn("...", said)
+
+    def test_the_two_lines_cut_a_box_the_same_way(self):
+        # One cut for both readers. Two would drift, and an operator comparing
+        # the status line against the give-up sentence would be comparing two
+        # different prefixes of the same dialog.
+        long_identity = "message box saying '" + ("blah " * 200) + "'"
+        clause, sentence, cut = self.repl.strings([
+            "describeMessageBoxStandoff %s" % standoff(long_identity, 1),
+            "describeMessageBoxGivenUpOn %s" % elm_string(long_identity),
+            "messageBoxIdentityForOperator %s" % elm_string(long_identity),
+        ])
+        self.assertIn(cut, clause)
+        self.assertIn(cut, sentence)
+
+    def test_nothing_decides_anything_on_the_clause(self):
+        # It is a report. A branch that started reading it would be deciding on
+        # a rendered string where the verdict it is derived from is one function
+        # away, which is `TheFieldIsAnInstrumentAndNothingActsOnIt`'s line.
+        self.assertEqual(
+            readers_of("describeMessageBoxStandoff"), ["statusTextFromState"],
+            "the status clause is read somewhere other than the status line")
+
+
 class TheRuleIsWiredIntoTheTreeTest(unittest.TestCase):
     """That the bound above is what saxrat consults, and where.
 
@@ -582,17 +696,23 @@ class TheRuleIsWiredIntoTheTreeTest(unittest.TestCase):
         # at all, so the status line is the only place a reading says a box is
         # still sitting in front of the bot.
         #
-        # The *form* is read, not just the names. A clause that still mentions
-        # the memory field while answering `Nothing` for every standoff prints
-        # nothing and satisfies any substring test -- that mutation survived the
-        # first run of this file, and it is the same one PR #109 found on the
-        # mission runner's equivalent.
+        # The clause itself is a rule now (#164), executed by
+        # `TheStatusClauseNamesTheBoxTest` below rather than read as text --
+        # which is what the substring version of this case could not do. What is
+        # read here is only that the status line asks the rule and does not
+        # carry a second copy of it: two renderings of one clause is how the
+        # give-up sentence and the status line would come to disagree about a
+        # box.
         body = declaration("statusTextFromState")
-        self.assertIn("case context.memory.messageBoxStandoff of", body)
-        self.assertIn("messageBoxStandoffVerdict (Just standoff)", body)
-        self.assertIn("String.fromInt standoff.readings", body)
-        self.assertIn("String.fromInt messageBoxStandoffGiveUpReadings", body)
-        self.assertIn("GIVEN UP ON", body)
+        self.assertIn(
+            "describeMessageBoxStandoff context.memory.messageBoxStandoff",
+            body)
+        for reimplemented in ("standoff.readings", "GIVEN UP ON",
+                              "messageBoxStandoffVerdict"):
+            self.assertNotIn(
+                reimplemented, body,
+                "the status line renders the clause itself again, so a case "
+                "that executes the rule no longer tests what an operator reads")
 
     def test_the_parser_still_matches_every_message_box(self):
         # Explicitly *not* the fix. Narrowing this treats one window and leaves
@@ -678,53 +798,153 @@ class TheTwoBotsAgreeOnTheNumberTest(unittest.TestCase):
         self.assertIn("messageBoxStandoffGiveUpReadings", argument)
 
 
-class TheRecordedSaxratRunsCannotSizeThisBoundTest(unittest.TestCase):
-    """The three recorded saxrat runs, asked to size the threshold -- which they
-    cannot, and the silence is what is checked.
+def standoff_by_count(log_path):
+    """What one saxrat log says about the standoff, grouped by the count.
 
-    Asserted as *relations* rather than counts, so a corpus that grows cannot
-    turn a true claim red.
+    Every line is attributed to the last count the status clause carried, which
+    is what makes "how many effect sequences went out while the counter read
+    60" answerable at all: the count is printed on the memory clause and the
+    dispatch is a task line several lines further down the same block.
+
+    Three things are counted beside the clause itself, and the *reads* are the
+    ones that matter. The framework issues one `RequestToVolatileProcess` read
+    per reading it wants, so reads far outnumbering counts is a bot asking the
+    client for readings that are not coming back -- which is a fact about the
+    client and not about anything in this file.
+    """
+    counts = {}
+    current = None
+    with open(log_path, encoding="utf-8", errors="ignore") as log:
+        for line in log:
+            printed = re.search(r"Message box: (\d+)/", line)
+            if printed:
+                current = int(printed.group(1))
+                counts.setdefault(
+                    current, {"clauses": 0, "dispatches": 0, "reads": 0})
+                counts[current]["clauses"] += 1
+            elif current is not None:
+                if "task send-effects" in line:
+                    counts[current]["dispatches"] += 1
+                elif ("task read-from-game" in line
+                        and "RequestToVolatileProcess" in line):
+                    counts[current]["reads"] += 1
+    return counts
+
+
+class RunElevenIsWhatTheStandoffFreezingLooksLikeTest(unittest.TestCase):
+    """saxrat's own corpus, which now holds one message box -- run 11's.
+
+    **Issue #164 reads that run as the ladder's third rung being unreachable**,
+    on the strength of `pressing Escape at it` appearing 2,439 times with the
+    counter never leaving 60. The recount says otherwise and this class is where
+    it is pinned, as relations rather than as those numbers.
+
+    The counter is advanced correctly: over the answering rung it rose once per
+    reading, with exactly one read request and one dispatched effect sequence
+    per step. What stopped was the reading pipeline -- 608 further read requests
+    were issued while the count read 60 and none came back, so
+    `updateMemoryForNewReadingFromGame` never ran again and the host reprinted
+    one status text until the session's own duration ended the run. The 2,439
+    lines are one decision, which is this repo's oldest unit trap arriving in an
+    issue.
+
+    It also settles the *other* claim in the wrong direction: Escape's whole
+    live outing is **one press**.
     """
 
     @classmethod
     def setUpClass(cls):
-        logs = [os.path.join(EVE_BOT_LOGS, "saxrat_run%d.log" % number)
-                for number in (1, 2, 3)]
-        logs = [path for path in logs if os.path.exists(path)]
+        logs = sorted(glob.glob(os.path.join(EVE_BOT_LOGS, "saxrat_run*.log")))
         if not logs:
             raise unittest.SkipTest(
                 "no recorded saxrat runs in ~/eve-bot-logs, so what those runs "
                 "can say about this bound cannot be consulted here")
 
-        cls.status_lines = cls.boxes = 0
-        for path in logs:
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                for line in handle:
-                    if "Approaching ticks:" in line:
-                        cls.status_lines += 1
-                    if line.startswith(DECLINE_LINE) or "Dismiss it using" in line:
-                        cls.boxes += 1
+        cls.by_run = {os.path.basename(path): standoff_by_count(path)
+                      for path in logs}
+        cls.escalate_at = int_constant("messageBoxAnswersBeforeEscape")
+        cls.give_up_at = cls.escalate_at * 2
+        cls.incident_name, cls.incident = max(
+            cls.by_run.items(), key=lambda run: max(run[1], default=0))
+        if max(cls.incident, default=0) < cls.escalate_at:
+            raise unittest.SkipTest(
+                "no recorded saxrat runs in ~/eve-bot-logs hold a message-box "
+                "standoff that reached the escalation, so the freeze #164 was "
+                "filed on cannot be recounted here")
 
-    def test_the_memory_update_printed_throughout(self):
-        # The positive control the silence below needs: the status line is
-        # written from the memory update on every reading, so a corpus with
-        # plenty of them is a corpus in which a message box would have shown.
-        self.assertGreater(
-            self.status_lines,
-            int_constant("messageBoxAnswersBeforeEscape") * 100,
-            "the recorded saxrat runs are too short to say anything about a "
-            "bound of this size")
+    def test_saxrats_own_corpus_is_no_longer_silent_about_message_boxes(self):
+        # #138 shipped with saxrat having met none in 49,235 readings and said
+        # so. It has met one now, which is why every claim below is about this
+        # bot rather than imported from the mission runner's corpus.
+        met_one = [name for name, by_count in self.by_run.items() if by_count]
+        self.assertIn(self.incident_name, met_one)
 
-    def test_no_recorded_saxrat_run_has_ever_met_a_message_box(self):
-        # So the escalation cannot be placed against anything saxrat has been
-        # watched doing, and 60 rests on the mission runner's corpus instead.
-        # Stated as a checked claim so it cannot quietly become false: the day
-        # a saxrat run dismisses one, this file should be measuring it.
+    def test_the_answering_rung_advanced_once_per_reading(self):
+        # The issue's first candidate cause is "the count is simply not
+        # advanced". Below the escalation it advances exactly once per reading,
+        # and one read request and one dispatched effect sequence sit under each
+        # step -- so the counter tracks readings, which is what it is documented
+        # to count.
+        answering = {count: seen for count, seen in self.incident.items()
+                     if count < self.escalate_at}
         self.assertEqual(
-            self.boxes, 0,
-            "a recorded saxrat run dismissed a message box, so the corpus can "
-            "now say something about how long one holds this tree and the "
-            "threshold should be placed against it rather than imported")
+            sorted(answering), list(range(1, self.escalate_at)),
+            "the counter skipped or repeated a value below the escalation")
+        for count, seen in sorted(answering.items()):
+            self.assertEqual(
+                seen["dispatches"], 1,
+                "count %d carries %d dispatched effect sequences, so the rung "
+                "did not act once per reading" % (count, seen["dispatches"]))
+        # And the reads it took to get them: of the same order as the readings
+        # themselves, since a reading occasionally needs a second attempt. That
+        # is the number the escalation's own is measured against.
+        self.assertLess(
+            sum(seen["reads"] for seen in answering.values()),
+            self.escalate_at * 2,
+            "the answering rung was already asking for readings that were not "
+            "coming back, so it is not the control the escalation needs")
+
+    def test_the_escalation_pressed_escape_once_and_not_thousands_of_times(self):
+        # `pressing Escape at it` is a *status clause*, reprinted by the host on
+        # every log line it writes. What went to the client is the dispatched
+        # effect sequence, and there is one.
+        at_escalation = self.incident[self.escalate_at]
+        self.assertLessEqual(at_escalation["dispatches"], 1)
+        self.assertGreater(
+            at_escalation["clauses"], at_escalation["dispatches"] * 100,
+            "the clause was not reprinted, so this run does not show the unit "
+            "trap the issue fell into")
+
+    def test_the_readings_stopped_coming_back_and_that_is_what_froze_it(self):
+        # The cause, stated as the relation that separates it from a counter
+        # that is not advanced: the bot went on *asking* for readings, by orders
+        # of magnitude more than it had asked for over the whole answering rung,
+        # and the count did not move. Nothing in `Bot.elm` can advance a counter
+        # on a reading that never arrives.
+        at_escalation = self.incident[self.escalate_at]
+        asked_while_answering = sum(
+            seen["reads"] for count, seen in self.incident.items()
+            if count < self.escalate_at)
+        self.assertGreater(
+            at_escalation["reads"], asked_while_answering * 5,
+            "the run does not show reads going unanswered at the escalation, "
+            "so this is not the shape #164 recorded")
+        self.assertEqual(
+            max(self.incident), self.escalate_at,
+            "the count moved past the escalation, so this run no longer shows "
+            "the freeze being recounted here")
+
+    def test_no_recorded_saxrat_run_has_reached_the_give_up(self):
+        # So the third rung is still unobserved -- which is a different claim
+        # from unreachable, and the one the corpus supports. The day a run
+        # reaches it, this file should be measuring what the give-up did.
+        for name, by_count in self.by_run.items():
+            if by_count:
+                self.assertLess(
+                    max(by_count), self.give_up_at,
+                    "%s reached the give-up, so the corpus can now say what "
+                    "standing aside costs and should be measured rather than "
+                    "asserted silent" % name)
 
 
 class TheMissionRunnersCorpusIsWhatSizesThisBoundTest(unittest.TestCase):
