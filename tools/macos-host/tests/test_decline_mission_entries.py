@@ -25,13 +25,17 @@ use is an `Err` naming the setting.
 helper: `agent-name` (empty means `stringContainsIgnoringCase ""`, which matches
 every agent in the station rather than the documented default of the first
 *available* one), `drone-type` (empty makes `droneNameNeedle` empty, so the
-restock drags whatever item is first in the hangar view), and `avoid-rat`. The
-last is the odd one: `avoidRats` is written by the parser and **read nowhere in
-the bot**, so no filter is armed by an empty entry there today. It is guarded
-anyway, because "nothing reads this list" is a fact about a setting that does
-nothing rather than a property to build a guard's absence on --
-`AvoidRatIsParsedAndNeverRead` pins the finding so it is not mistaken for
-coverage.
+restock drags whatever item is first in the hangar view), and `avoid-rat`.
+
+`avoid-rat` was the odd one of the four: `avoidRats` was written by the parser
+and **read nowhere in the bot**, so no filter was armed by an empty entry there.
+It was guarded anyway, and `AvoidRatIsParsedAndNeverRead` pinned the finding --
+three uses of the field and no fourth -- so the guard was not mistaken for
+coverage of a live filter. #125 removed the setting from this bot instead, so
+that case had nothing left to count and is retired; what replaces it, including
+the rule that an app parsing `avoid-rat` must also read it, is in
+`test_avoid_rat_removed.py`. The guard below now covers the **three** settings
+that remain.
 
 **The second half is legibility.** The decline branch printed
 `Skip this mission (<name>) using '<label>'.`, which reads identically whether
@@ -67,12 +71,12 @@ PARSE_USER_INTERFACE_ELM = os.path.join(
     MISSION_RUNNER_DIR, "EveOnline", "ParseUserInterface.elm")
 RUN_MISSION = os.path.join(MACOS_HOST_DIR, "run_mission.sh")
 
-# Every setting whose value is one name, with the field it fills. All four took
-# whatever they were given before #113.
+# Every setting whose value is one name, with the field it fills. All of them
+# took whatever they were given before #113. `avoid-rat` was a fourth until #125
+# removed it from this bot -- see `test_avoid_rat_removed.py`.
 NAME_SETTINGS = {
     "agent-name": "agentName",
     "decline-mission": "missionNamesToDecline",
-    "avoid-rat": "avoidRats",
     "drone-type": "droneTypeName",
 }
 
@@ -513,33 +517,6 @@ class TheWiringIsReadOutOfTheSource(unittest.TestCase):
             start:self.source.index("\n\n\n", start)])
         self.assertIn("no_dialog_button", declining)
         self.assertNotIn("yes_dialog_button", declining)
-
-
-class AvoidRatIsParsedAndNeverRead(unittest.TestCase):
-    """The finding, recorded so it is not mistaken for a working setting.
-
-    `avoid-rat` has the same shape `decline-mission` had and is guarded the same
-    way, but an empty entry there arms nothing -- because *no* entry there arms
-    anything. The list is written by the parser and read by no decision, so the
-    setting is documented in the bot's own header, reported by `--help`, and
-    does nothing at all. That is its own issue, and this case is what keeps the
-    guard above from reading as coverage of a live filter.
-    """
-
-    def setUp(self):
-        self.source = bot_source()
-
-    def test_the_field_is_written_by_the_parser_and_read_nowhere(self):
-        uses = [line.strip() for line in self.source.splitlines()
-                if "avoidRats" in line]
-        # The default, the handler, and the field in the record type. Nothing
-        # else: a fourth use would mean some decision has started reading it,
-        # at which point the empty entry becomes a live filter and this case
-        # should be replaced by one that tests the filter.
-        self.assertEqual(len(uses), 3, uses)
-        self.assertIn("avoidRats = []", uses[0])
-        self.assertIn("avoidRats = ratToAvoid :: settings.avoidRats", uses[1])
-        self.assertIn("avoidRats : List String", uses[2])
 
 
 class TheLauncherWasNeverArmedWithOne(unittest.TestCase):

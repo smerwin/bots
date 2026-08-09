@@ -88,6 +88,18 @@
       nothing at all -- removed rather than left as a setting that looks like it
       works.)
 
+      An `avoid-rat` setting used to be listed here too, and went the same way. It
+      filled a list of names that no decision in this bot ever read: nothing here
+      declines a target, or a pocket, for being one of them. Elm has no dynamic
+      field access, so the field's three occurrences -- the default, the parser
+      handler, and the record type -- were the whole of it, which makes that a
+      proof rather than a failed search. `eve-online-saxrat` and
+      `eve-online-combat-anomaly-bot` do implement the setting, at *anomaly*
+      granularity: they leave the whole anomaly a named rat is in. This bot flies
+      mission pockets and has no anomalies, so there was nowhere to put that rule
+      and no port to make from it. A settings file still carrying the line is now
+      **rejected** with `Unknown setting name 'avoid-rat'`; delete the line.
+
       + `agent-name` : Name of the agent to run missions for, as it appears in the
         station's Agents tab. Defaults to the first agent listed as available.
       + `decline-mission` : Name of a mission to skip rather than run, matched as a
@@ -97,10 +109,8 @@
         once every four hours costs standing. Repeatable. An empty value is
         **rejected** rather than ignored: the empty string is a substring of every
         mission name, so `decline-mission=` would hand back every mission the agent
-        ever offers. Delete the line instead. `agent-name`, `avoid-rat` and
-        `drone-type` name one thing each and reject an empty value for the same
-        reason.
-      + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. Repeatable.
+        ever offers. Delete the line instead. `agent-name` and `drone-type` name
+        one thing each and reject an empty value for the same reason.
       + `approach-object` : Names (or types) of objects to fly up to, as a
         comma-separated list -- `approach-object=Abandoned Mining Station, Amarr
         Chapel`. The key may also be repeated; both accumulate, and surrounding
@@ -355,7 +365,6 @@ defaultBotSettings =
     , runAwayArmorHitpointsThresholdPercent = -1
     , runAwayIncomingDamageThreshold = defaultRunAwayIncomingDamageThreshold
     , zeroDamageHitsBeforeGivingUp = defaultZeroDamageHitsBeforeGivingUp
-    , avoidRats = []
     , attackObjectNames = []
     , approachObjectNames = []
     , preferWreckNames = []
@@ -430,12 +439,6 @@ parseBotSettings =
            )
          , ( "give-up-after-zero-damage-hits"
            , AppSettings.valueTypeInteger (\hits settings -> { settings | zeroDamageHitsBeforeGivingUp = hits })
-           )
-         , ( "avoid-rat"
-           , valueTypeNonEmptyString
-                (\ratToAvoid settings ->
-                    { settings | avoidRats = ratToAvoid :: settings.avoidRats }
-                )
            )
          , ( "attack-object"
            , AppSettings.valueTypeString
@@ -528,7 +531,6 @@ type alias BotSettings =
     , runAwayArmorHitpointsThresholdPercent : Int
     , runAwayIncomingDamageThreshold : Int
     , zeroDamageHitsBeforeGivingUp : Int
-    , avoidRats : List String
     , attackObjectNames : List String
     , approachObjectNames : List String
     , preferWreckNames : List String
