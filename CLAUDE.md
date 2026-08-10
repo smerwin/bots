@@ -4939,6 +4939,162 @@ reaching the rule. The failure to watch for is the opposite: a ceiling learned
 from a *stale* popup, whose tell is `client stated N` appearing on a reading whose
 quick-message clause reads `NOT on screen now`.
 
+## The route panel names the next system, so the panel can jump the right gate
+
+Ordinary gate-to-gate travel goes through `routeMarkerCascade`: right-click the
+route panel's first marker, take the menu's `Jump Through Stargate`. It is the
+worst-behaved cascade in the codebase and its own comment says why — it carries a
+distance tolerance of 200 rather than the shared 70 because *"'Jump Through
+Stargate' took 3-4 menu opens before being recognized"* against an 8x8 icon in a
+strip that shifts as the route updates. `selectedItemJump` is the one-click
+alternative and is now **read** rather than inferred, off a live client with a
+**stargate** selected:
+
+```
+selectedItemApproach    selectedItemJump       selectedItemKeepAtRange
+selectedItemLockTarget  selectedItemOrbit      selectedItemResetCamera
+selectedItemSetInterest selectedItemShowInfo   selectedItemWarpTo
+```
+
+**The panel's button set is object-specific, and that is what made #167 look
+unbuildable twice.** An acceleration gate in a mission pocket draws
+`selectedItemActivateGate` and `selectedItemLookAt` and **no jump**; a stargate
+draws `selectedItemJump` and `selectedItemResetCamera` and no `LookAt`. Two
+readings taken with a gate selected concluded the button does not exist, and both
+were reading the wrong kind of gate. A capture of one gate says nothing about the
+other.
+
+### The marker cannot name the gate; two other renderings can
+
+`InfoPanelRouteRouteElementMarker` carries a `uiNode` and **no name**, which is
+what blocked the original approach and is still true — the parser lifts every
+`AutopilotDestinationIcon` and nothing else. What answers instead is two things
+the client renders and nobody had read, both taken off the live client:
+
+```
+route panel   <a href="showinfo:5//30005001" alt="Next System in Route">Arnon</a>
+overview row  Name "Adirain"   Type "Stargate (Gallente System)"
+```
+
+So the identity is a name match between the system the route says is next and the
+system a gate's own row says it leads to. `routeIsSet` already reads that
+`NextWaypointPanel` for its *visibility* and had never read its text; the label
+has the same two quote styles `parseCurrentSolarSystemFromUINodeText` handles,
+this client writing `alt="…"` and the 2019 recording in `explore/` writing
+`alt='…'`.
+
+**Only the row's Name is matched, never its Type**, and the column order was read
+off the live client's headers (`Icon | Distance | Name | Type | Size | Velocity |
+Angular Velocity`) rather than assumed. A type reads `Stargate (Amarr Border)` and
+**Amarr is a real system**, so a rule looking at both columns would match a gate
+leading somewhere else entirely on the strength of the region it borders. The
+"is this a stargate at all" question still reads both, because which column
+carries the word is a matter of overview preset.
+
+**Matched on word boundaries with punctuation read as a separator.** A plain
+substring rule takes `Ami` out of `Amir`; `containsWords` alone cannot match
+`Adirain` inside `Stargate (Adirain)`, which is what a different preset renders;
+and both sides get the same normalisation so a hyphenated system name like
+`1DQ1-A` is compared as the same sequence of words on each side.
+
+### Every clause is a way it could act on the wrong object
+
+**A jump to the wrong gate is a wrong system, not a wasted tick**, so
+`routeStargateJump` refuses on anything it cannot identify and the fall-back is
+`routeMarkerCascade` — which right-clicks the route's own marker and cannot pick
+the wrong gate at all. Five refusals: no next system named, no gate named for it,
+**more than one** gate named for it, the panel showing something else, and the
+panel not offering the button.
+
+**Where the panel is showing something else this falls back rather than selecting
+the row first**, which is the one place it departs from `selectThenPanelAction`.
+Selecting spends the very reading this exists to save, and the cascade travels
+the route regardless.
+
+### The saving is one to two readings, and that is the finding
+
+Recounted from `~/eve-bot-logs` in **readings** rather than decision lines — this
+file's own first orientation note, and the unit that has cost a threshold
+calibration twice — the cascade costs:
+
+| run | readings in the cascade | jump legs | median | mean | worst leg |
+|---|---:|---:|---:|---:|---:|
+| 35 | 123 | 31 | 3 | 4.0 | 11 |
+| 37 | 64 | 20 | 2 | 3.2 | 9 |
+
+So *"3-4 menu opens"* describes the tail rather than the normal case, and **the
+saving is one to two readings on the median leg**. That is stated small
+deliberately and is a legitimate answer to the issue's own first question: this
+is a cheaper way to issue a command that mostly works, not a rescue of one that
+does not, and what it is weighed against is a wrong system. It is worth having
+only because the identity condition makes the risk unreachable rather than small.
+`test_route_stargate_panel_jump` reads those counts back out of the doc comment
+and recomputes them, so a claim the corpus stops supporting goes red.
+
+### A finding this turned up and did not act on
+
+**`dockAtDestinationStation`'s "exactly one route marker means the destination is
+in this system" is not what the panel draws.** Read live: the header said `Route
+1 Jump`, the panel held **one** `AutopilotDestinationIcon`, and that marker
+carried `solarSystemID 30005001`, `destinationID 60012607` (a station) and
+`numJumps 1` — a destination one jump away, not in this system. The 2019
+recording agrees from the other end: `Route <fontsize=12></b>3 Jumps` with
+**three** markers. So the count is jumps remaining, and `destinationIsInThisSystem`
+is true one system early. Run 37 shows it live, reaching the dock branch mid-route
+and being saved only by #98's undocked-from guard.
+
+**Not fixed here.** It is #98's area, changing it is a behaviour change on the
+dock path with its own evidence to gather, and the markers turn out to carry
+`numJumps` — so the reading that would settle it outright exists and the parser
+does not lift it. Nothing in this change depends on the marker count.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_route_stargate_panel_jump.py` (44 cases). The rule is
+executed through the real `Bot.elm` in `elm repl` at each of its six answers,
+asked as six equalities per case so a rule answering two things at once — or none
+— fails rather than passing on whichever constructor a case named; the label parse
+is run against the client's own markup in both quote styles and against the
+panel's *other* system-naming label; and the wording is rendered rather than
+asserted by substring over the branch, which is how a case written to catch a
+press aimed at the wrong button once passed on the branch's own log text. The
+wiring is read out of the source through a reader sliced by **indentation**, since
+the binding under test builds a record and the `let_binding` shape stops at its
+opening brace — PRs #147, #156, #159 and #162 each paid for that once. The corpus
+is recounted as relations as well as as the quoted numbers: the cascade costs more
+than one reading a leg, the median leg is small, and some leg is far larger.
+
+Confirmed by mutation, **fifteen** of them, each failing a named case: **the
+panel-identity clause dropped, so it jumps while the panel is showing a different
+gate** — the failure this whole design refuses; two gates named for one system no
+longer declining; the identity match reading the row's type as well as its name;
+the name match weakened to a substring; the punctuation normalisation dropped; the
+jump button no longer required; the label marker loosened so the route's
+*destination* reads as its next hop; the empty-name filter dropped, so a nameless
+system matches every gate; the panel path dropped from the travel leg; the panel
+identity computed once rather than per row; the virtualised-row filter dropped;
+the fall-back waiting instead of handing the caller's step back; the retreat given
+its own second copy of the stargate predicate; a fall-back sentence no longer
+naming the route marker; and the measured saving in the doc comment changed.
+
+**Unverified: any of it running, and one premise about the panel.** No run has
+been flown since. `selectedItemIsOverviewEntry` compares the overview row's Name
+against the Selected Item panel's display texts, and **no capture of that panel
+with a stargate selected has ever recorded its texts** — only its buttons. If the
+panel names a gate some other way the branch simply never fires and the bot
+behaves exactly as it does today, which is the safe direction and the reason this
+ships without it. Also unread: whether `selectedItemJump` is drawn on a gate that
+is *out* of jump range. Either answer is safe — drawn, the press is the client's
+own warp-and-jump at the right gate; absent, this falls back to the cascade, which
+is what flies the ship there.
+
+What to watch on the first run that travels a route: `Jump through '<system>' from
+the selected-item panel, which is already showing it.` appearing at all. A run
+that jumps gates and never prints it — printing
+`The selected-item panel is not showing the stargate to '<system>'` instead on
+every leg — means the panel is never found to be showing the gate, which is the
+direction this fails silently in and costs nothing. The one to escalate on is the
+opposite: a jump followed by the route panel naming a system nobody asked for.
+
 ## Acceleration gates: a gate that will not open says why, on a channel nobody read
 
 Run 10 raised `askForHelpToGetUnstuck` — the first time in eleven runs — while
@@ -7309,6 +7465,24 @@ exists.
   a live client**; watch for `No agent here to take a mission from -- set the
   route to '<station>' before undocking.` followed by an undock, and note that
   whether those stations really had no agent is still unknown.
+
+  And it now **jumps the route's next stargate from the Selected Item panel**
+  where that panel is already showing that gate, instead of right-clicking the
+  route panel's 8x8 marker — the cascade whose own comment records "3-4 menu
+  opens before being recognized" and which carries a widened tolerance because of
+  it. `selectedItemJump` is read off a live client with a **stargate** selected;
+  two earlier readings concluded the button does not exist and both were taken
+  with an *acceleration* gate selected, which draws a different button set. The
+  identity — which is the whole safety of it, since a jump to the wrong gate is a
+  wrong system — is a name match between the route panel's own `Next System in
+  Route` label and the overview row's Name column, neither of which anything had
+  read; the marker itself still carries no name. See "The route panel names the
+  next system, so the panel can jump the right gate" above for why only the Name
+  column is matched, for the **one to two readings** this actually saves, and for
+  the finding it turned up about `dockAtDestinationStation`'s marker count that is
+  deliberately not fixed here. **Untested against a live client**, and the panel's
+  texts with a stargate selected have never been recorded; watch for `Jump through
+  '<system>' from the selected-item panel` appearing at all.
 - **`eve-online-saxrat`** now carries the general guards the mission runner
   learned — the confirmed hitpoint readings behind a low-water mark, the
   damage-rate retreat, ship-loss detection and pod recovery, a bounded drone
