@@ -17132,11 +17132,12 @@ reported live on saxrat, and the recorded runs bear it out: those are the only
 two rank-bearing rats in the whole corpus, at 17,542 and 1,619 mentions, and
 only the first was ever looted.
 
-"leader" rather than "squad leader" covers the *Wing Leader* rank in the same
-family for one word, as "commander" already covers *Fleet Commander*. That half
+"leader" rather than "squad leader" covers the _Wing Leader_ rank in the same
+family for one word, as "commander" already covers _Fleet Commander_. That half
 is inference from EVE's rank naming -- only Squad Leader is observed. It is safe
 as a substring: every occurrence of "leader" anywhere in the recorded logs is
 this rat.
+
 -}
 isNotableWreck : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 isNotableWreck overviewEntry =
