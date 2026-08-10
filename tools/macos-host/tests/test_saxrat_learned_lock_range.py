@@ -474,12 +474,12 @@ class LockClickAttributionTest(unittest.TestCase):
                     ", EffectOnWindow.ButtonUp EffectOnWindow.MouseButtonLeft"
                     ", EffectOnWindow.KeyUp EffectOnWindow.vkey_E ]")
         answers = self.repl.evaluate(
-            ["lockClickLocationFromStepEffects (lockClickAt 300 40)"
-             " == Just { x = 300, y = 40 }",
-             "lockClickLocationFromStepEffects %s == Nothing" % unlock,
-             "lockClickLocationFromStepEffects %s == Nothing" % close_loot,
-             "lockClickLocationFromStepEffects %s == Nothing" % approach,
-             "lockClickLocationFromStepEffects [] == Nothing"],
+            ["lockClickLocationsFromStepEffects (lockClickAt 300 40)"
+             " == [ { x = 300, y = 40 } ]",
+             "lockClickLocationsFromStepEffects %s == []" % unlock,
+             "lockClickLocationsFromStepEffects %s == []" % close_loot,
+             "lockClickLocationsFromStepEffects %s == []" % approach,
+             "lockClickLocationsFromStepEffects [] == []"],
             definitions=self.repl.with_helpers([]))
         self.assertEqual(
             answers, [True] * 5,
