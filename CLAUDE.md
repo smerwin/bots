@@ -5479,6 +5479,7 @@ shipped configuration rather than edge cases:
 | the lock-slot ceiling (#110, #150) | `maxTargetCount = 4` hardcoded with no setting able to reach it, against a real maximum of 6 — 2,149 readings of `Enough locked targets.` across runs 2-5, and a `List.take 4` candidate window that would have capped it there anyway | `max-targets`, clamped by the maximum the client states on the game log and by what the target bar has held, and asking for one row more than that until the client states the number |
 | the ammo swap (#122, #154) | absent, not unconfigured — `ammoSwap`, `Charge`, `chargeName` and `optimalRange` all appeared 0 times, and there was no setting to turn on | ported without its tooltip half, with `ammo-swap-range` **required** rather than optional; and since run 10, a disarm give-up that asks whether the guns came back and is retried after a warp — see the two sections below |
 | an in-range acceleration gate (#145, #147) | a context-menu cascade, and a give-up counting readings *near* a gate rather than readings spent asking one — `selectedItem` appeared 0 times in `Bot.elm`, so it had never pressed a panel button for anything. And the branch was **unreachable inside a site at all**: a "Warp to Site" button anywhere in the tree outranked it, and the panel goes on drawing one after arrival | `selectThenPanelAction`'s shape over `selectedItemActivateGate`, inside `unlessAlreadyClosingIn`; the counter counts the ask; and `siteProgressStep` asks the gate first and declines a site offered while a gate is in reach — see the two sections below |
+| the route's next stargate (#169) | the route-marker cascade on every leg, at a median of **12 and 13 readings a leg** and 23% and 38% of every reading in runs 13 and 14 — against the mission runner's 3 and 2 and its 2% and 3% | #170's rule ported whole: the route panel's own `Next System in Route` label matched against the overview row's Name, and `selectedItemJump` pressed only where the panel is already showing that gate — see the section below |
 
 Two things about the port are worth keeping in view.
 
@@ -6973,6 +6974,183 @@ offered once the ship leaves reach, and nothing remembers that its gate was give
 up on. **Income is the outcome measure and there is a clean control**: run 38 did
 1,536,545 ISK/hr on these settings before this path started dominating.
 
+### The route's next stargate is jumped from the panel here too, and the share is why
+
+Issue #169 is PR #170 ported. The rule is that one whole -- the route panel's own
+`Next System in Route` label matched against the overview row's Name, exactly one
+match, the panel already showing that gate, the button present, and every other
+answer falling back to the route-marker cascade. See "The route panel names the
+next system, so the panel can jump the right gate" for the argument, the
+`Stargate (Amarr Border)` trap that keeps the Type column out of the match, and
+the word-boundary rule. What follows is only what saxrat changes about it.
+
+**The per-leg cost is the finding, and it is not the mission runner's.** #170
+measured that bot at a median of 3 and 2 readings a jump leg and argued the
+saving down to "one to two readings". Recounted the same way -- the same three
+rung wordings, grouped into legs, in *readings* rather than decision lines --
+saxrat's runs answer:
+
+| run | readings in the cascade | jump legs | median | worst leg | share of the run |
+|---|---:|---:|---:|---:|---:|
+| saxrat 13 | **400** | 27 | **12** | 84 | 400 of 1,706 = **23%** |
+| saxrat 14 | **348** | 26 | **13** | 17 | 348 of 910 = **38%** |
+| mission 35 | 123 | 31 | 3 | 11 | 123 of 6,573 = 1.9% |
+| mission 37 | 64 | 20 | 2 | 9 | 64 of 2,393 = 2.7% |
+
+So saxrat's legs are **four to six times** the mission runner's and the cascade
+holds roughly a quarter and a third of every reading in the run against that
+bot's two and three per cent. **Almost none of it is the jump completing**:
+counting only up to the reading carrying the last `Jump Through Stargate` click,
+run 13's 400 becomes 371 and run 14's 348 becomes 345, so the readings are spent
+getting the command out rather than waiting for the ship afterwards. Robust to
+the grouping: at a gap of 3 readings rather than 10 the medians are 11 and 13.
+
+**The issue's own reading counts recount slightly lower and the direction is
+unchanged.** #169 quotes 204 cascades in 1,959 readings and 169 in 1,092; the
+cascade counts are exact, and PR #170's reading definition -- the integer part of
+`# [tick.substep]`, several framework steps to a reading -- gives 1,706 and 910
+for the same runs. The share moves from 10% and 15% to 12% and 19% counted that
+way, or to 23% and 38% counted as *readings the cascade occupied* rather than
+lines it printed, which is what the table above uses and what the doc comment
+argues on.
+
+**The panel's texts with a stargate selected are no longer unverified.** That was
+#170's first open item -- every capture of that panel with a gate selected had
+recorded its buttons and never its text, so `selectedItemIsOverviewEntry` was
+matching something nobody had seen. Read off this account's live client while
+this was written, with a stargate selected:
+
+```
+panel     nameLabel  'Tar (<color=#ff4ecef8>0.8</color>)'
+          buttons    selectedItemApproach selectedItemWarpTo selectedItemJump
+                     selectedItemOrbit selectedItemKeepAtRange selectedItemLockTarget
+                     selectedItemResetCamera selectedItemSetInterest selectedItemShowInfo
+overview  Distance '8,998 m'  Name 'Tar'  Type 'Stargate (CONCORD System)'
+```
+
+So the panel names the gate by the *system* it leads to, which is the same string
+the overview row's Name carries, and `containsWords` matches it through the
+security-status markup. `ThePanelNamesTheGateTest` runs that pair through the
+real parser and the shipped predicate rather than asserting it in prose.
+
+**Behind the settling guard rather than beside it.** saxrat's `jumpToNextSystem`
+waits for the route panel's first marker to hold still for a tick before
+right-clicking it, against a window in which the strip is "empty, partial, or
+still shifting". The panel press touches no marker, so that guard is not
+protecting it from a click landing nowhere -- what it protects is the **label**.
+While the route recomputes, `Next System in Route` can still name the *previous*
+route's next hop, and jumping the gate an old route wanted is exactly the wrong
+system this refuses everywhere else. So the panel path sits inside the `else`,
+and inside `returnDronesToBay` with the cascade, since a jump abandons whatever
+is in space whichever way it is commanded.
+
+**saxrat's decision root needed no new shape, unlike #133's.** That hoist needed
+an always-evaluated head because the thing being placed was a *bound*, and
+`anomalyBotDecisionRootBeforeApplyingSettings` is a `Maybe.withDefault` chain
+with no head to put one in. This is not a bound: it is a wrapper around one step
+of one branch, so it is placed where the cascade already was. Three shape
+differences did have to be read rather than assumed, and none of them is
+structural: saxrat has no `routeMarkerCascade` function (the cascade is a literal
+inside `jumpToNextSystem`, so the fall-back is that expression rather than a
+named one), no `dockAtDestinationStation` to sit between them (the no-marker case
+is `setRouteToNextHuntingGround`), and `selectedItemButtonNamed` /
+`selectedItemIsOverviewEntry` take a `ReadingFromGameClient` rather than a
+`BotDecisionContext` -- the divergence `selectedItemIsOverviewEntry`'s own
+comment records, because `updateMemoryForNewReadingFromGame` has to ask the same
+question and never sees a decision.
+
+**The anomaly warp is not ported, and that is established rather than assumed.**
+#170's rule replaces a cascade aimed at an *overview row*; saxrat's `enterAnomaly`
+cascades on `anomalyScanResult.uiNode`, a row in the probe scanner window. Two
+independent reasons, and either alone settles it. The Selected Item panel acts on
+the object selected **in space**, and a scan result is not one -- a cosmic anomaly
+has no overview row at all until the ship is in it, which is why the scanner has
+its own window with its own Signal/Distance/ID/Name/Group columns (read live: the
+overview beside it carried gates, wrecks, rats and a beacon and no anomaly).
+`selectedItemIsOverviewEntry` takes an `OverviewWindowEntry`, so a scan result
+cannot even be handed to it. And the warp **chooses a distance** -- `to within`
+then `Within N km` from the `warp-at` setting -- where the panel offers one
+`selectedItemWarpTo` carrying no argument, so pressing it would warp to whatever
+default the client holds and silently ignore the setting. `TheWarpHalfIsNot
+ServableTest` pins both halves so a later port has to argue against them.
+
+**#171 has no analogue here, which was checked rather than assumed.** saxrat
+reads `infoPanelRouteFirstMarkerFromReadingFromGameClient` in three places and
+counts the markers in none: the travel leg asks whether one exists, the docked
+branch asks whether one exists (`noProbeScanResultsAndNoRouteLastTimeInSpace`),
+and the memory update takes the first one's display region for the settling
+guard. `routeElementMarker` appears nowhere in `Bot.elm`, so there is no
+`destinationIsInThisSystem` here and nothing that could be true a system early.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_route_stargate_panel_jump.py` (60 cases). The
+rule is executed through the real `Bot.elm` in `elm repl` at each of its six
+answers, asked as six equalities per case so a rule answering two things at once
+-- or none -- fails rather than passing on whichever constructor a case named.
+The label parse and the panel identity go through the real
+`EveOnline.ParseUserInterface` off UI trees, which is also what makes the live
+capture above evidence rather than a note. The wordings are **rendered** rather
+than asserted by substring over the branch, which is how a case written to catch
+a press aimed at the wrong button once passed on the branch's own log text in
+`test_saxrat_gate_panel_button`. The wiring is read through a reader sliced by
+**indentation**, since `verdict` builds a record and the `let_binding` shape stops
+at its opening brace. The corpus is recounted as relations -- the median leg is
+large, the cascade holds a large share of the run, and saxrat's legs and share
+both dwarf the mission runner's on the same measurement -- plus the doc comment's
+own two counts, read back out and recomputed.
+
+**One harness defect had to be fixed to test the live label at all.**
+`SaxratRepl.reading_binding` drops `json.dumps`' output into an Elm `"""…"""`
+literal, and Elm processes backslash escapes inside one -- so `\"` becomes a bare
+`"`, the JSON is malformed, and the reading decodes to `Nothing`. Every case over
+such a fixture then reports the *parser* answering nothing rather than the
+fixture never having arrived. This client's label is `alt="Next System in Route"`
+in double quotes against the 2019 recording's single ones, so it is exactly that
+fixture. `JumpRepl` doubles the backslashes; the shared helper is left alone,
+since changing it reaches eleven other files.
+
+Confirmed by mutation, **eighteen** of them, each failing a named case: **the
+panel-identity clause dropped, so it jumps while the panel is showing a different
+gate** -- the failure this whole design refuses; two gates named for one system no
+longer declining; the identity match reading the row's type as well as its name;
+the name match weakened to a plain substring; the punctuation normalisation
+dropped; the jump button no longer required; the label marker loosened so the
+route's *destination* reads as its next hop; the empty-name filter dropped, so a
+nameless system matches every gate; the panel path dropped from the travel leg;
+the panel identity computed once rather than per row; the virtualised-row filter
+dropped; the fall-back waiting instead of handing the caller's own step back; the
+press aimed at `selectedItemWarpTo`; a fall-back sentence no longer naming the
+route marker; the measured saving in the doc comment changed; a second inline copy
+of the stargate predicate; the warp's distance level dropped, which is the shape
+that would make it look panel-servable; and `selectedItemIsOverviewEntry`
+narrowed to exact equality, which is the mutation the live panel capture catches.
+
+**One mutation survived the first pass and the hole was real.** Telling the rule
+`panelOffersJump = True` rather than handing it the lookup left every case
+passing: `test_no_jump_button_declines` asks the *rule* directly, so it cannot
+see the wiring, and the tuple match below still declines to press without a
+button. What it produces is a decision log claiming `Jump through '<system>'
+from the selected-item panel` on every reading the panel offers nothing --
+exactly the two-places-disagreeing failure `describeRouteStargateJump` is derived
+from the verdict to avoid. `test_the_rule_is_told_whether_the_button_is_really_
+there` reads that field out of the binding now.
+
+**Unverified: any of it running, and the same two premises #170 shipped open.**
+No saxrat run has been flown since. Whether `selectedItemJump` is drawn on a gate
+that is *out* of jump range is still unread -- either answer is safe, since drawn
+it is the client's own warp-and-jump at the right gate and absent it falls back to
+the cascade, which is what flies the ship there. And **whether a multi-jump
+route's first marker names the next system** is still unread; nothing in this
+change reads the markers, so it matters to #171 rather than to the jump. What is
+no longer unverified is the panel's text, read above. What to watch on the first
+run that travels a route: `Jump through '<system>' from the selected-item panel,
+which is already showing it.` appearing at all, and the route cascade's share of
+the run falling from a quarter. A run that jumps gates and prints
+`The selected-item panel is not showing the stargate to '<system>'` on every leg
+instead means the panel is never found to be showing the gate -- the direction
+this fails silently in, and it costs nothing. The one to escalate on is the
+opposite: a jump followed by the route panel naming a system nobody asked for.
+
 ## Elm toolchain
 
 `brew install elm` (arm64-native bottle) — **not** `npm install -g elm`, which
@@ -7658,6 +7836,25 @@ exists.
   peaks. **Untested against a live client**, and run 6 met neither a gate nor an
   opportunity in ten hours; watch the opportunity-warp line falling to roughly
   the number of sites entered with gate decisions rising to meet it.
+
+  And since #169 it **jumps the route's next stargate from the Selected Item
+  panel** where that panel is already showing that gate, instead of right-clicking
+  the route panel's 8x8 marker. This is PR #170's rule ported whole, and what
+  makes it worth more here than there is the **share**: counted in readings, the
+  route cascade holds 400 of run 13's 1,706 and 348 of run 14's 910 across 27 and
+  26 jump legs — a median of 12 and 13 readings a leg and roughly a quarter and a
+  third of the whole run, against the mission runner's 3 and 2 and its 2% and 3%.
+  The identity that makes it safe is unchanged and is the whole of it, since a
+  jump to the wrong gate is a wrong system. Two things this port settles that
+  #170 could not: the Selected Item panel's *text* with a stargate selected, read
+  live (`nameLabel 'Tar (…0.8…)'` beside an overview row named `Tar`), and that
+  the anomaly warp is **not** servable by the panel — it acts on a probe-scanner
+  scan result rather than an object in space, and picks a distance the panel's
+  single `selectedItemWarpTo` cannot express. See "The route's next stargate is
+  jumped from the panel here too, and the share is why" above, including why the
+  panel path sits *behind* the route-settling guard. **Untested against a live
+  client**; watch for `Jump through '<system>' from the selected-item panel`
+  appearing at all, and the cascade's share of the run falling from a quarter.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
