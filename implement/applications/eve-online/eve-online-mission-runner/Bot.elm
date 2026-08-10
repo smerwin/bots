@@ -7882,7 +7882,9 @@ jumpToNextSystem context =
 
                         Nothing ->
                             dockAtDestinationStation context
-                                (routeMarkerCascade context infoPanelRouteFirstMarker)
+                                (jumpThroughRouteStargate context
+                                    (routeMarkerCascade context infoPanelRouteFirstMarker)
+                                )
                     )
 
 
@@ -8116,14 +8118,279 @@ stationNameIsTheOneUndockedFrom undockedFrom overviewName =
             False
 
 
+{-| What the panel may be asked to do about the route's next stargate.
+
+A verdict rather than a sentence, so a case can execute the rule and compare the
+answer whole -- `AmmoSwapGiveUp`'s shape, and for its reason: a rule that only
+produced log text could be asserted on by substring, and a branch's own wording
+quotes the same names the assertion would look for.
+
+Each fall-back carries the system it was reasoning about where it has one, so
+`describeRouteStargateJump` can say which system rather than only what went
+wrong.
+
+-}
+type RouteStargateJump
+    = PressTheJumpButton String
+    | NoNextSystemOnRoute
+    | NoStargateNamedForTheNextSystem String
+    | SeveralStargatesNamedForTheNextSystem String
+    | ThePanelIsShowingSomethingElse String
+    | ThePanelOffersNoJump String
+
+
+{-| Whether to press the Selected Item panel's Jump, and which gate it would be.
+
+**A jump to the wrong gate is a wrong system, not a wasted tick**, so every
+clause below is a way this could act on the wrong object and the answer to each
+is to fall back to `routeMarkerCascade` -- which right-clicks the route's own
+marker and cannot pick the wrong gate at all. `dockAtDestinationStation` shipped
+assuming one route marker meant the nearest station was the destination, #98 was
+the regression, and nothing had checked identity.
+
+**The identity, and what makes it possible.**
+`InfoPanelRouteRouteElementMarker` carries a `uiNode` and no name -- that is what
+blocked #110's original approach, and it is still true. What answers instead is
+the route panel's _own label_, read live from this client:
+
+    <a href="showinfo:5//30005001" alt="Next System in Route">Arnon</a>
+
+and the overview's stargate rows, read live from the same client, which carry the
+system a gate leads to in the Name column and the word in the Type column:
+
+    Name "Adirain" Type "Stargate (Gallente System)"
+
+    Name "Emsar" Type "Stargate (Gallente Border)"
+
+So "the gate to the next system in the route" is a name match between two
+readings the client itself renders, and needs nothing from the marker.
+
+**Only the row's own name is matched, never its type.** A type reads
+`Stargate (Amarr Border)` and Amarr is a real system, so a rule that looked at
+both would match a gate leading somewhere else entirely on the strength of the
+region it borders.
+
+**Exactly one match, or fall back.** Two rows naming one system is not something
+this reading can choose between, and a system's name is unique, so more than one
+means the match is not the one this rule thinks it is.
+
+**The panel is already showing that gate.** Where it is showing something else
+this falls back rather than selecting the row first: selecting spends the very
+reading this exists to save, and the cascade is what the fall-back does anyway.
+That is the one place this departs from `selectThenPanelAction`.
+
+**The panel offers the button.** Whether `selectedItemJump` is drawn on a gate
+out of jump range is unread; if it is, pressing it is still the right gate and
+the client's own warp-and-jump, and if it is not this falls back to the cascade,
+which is what flies the ship there. Either way the gate is the route's.
+
+-}
+routeStargateJump :
+    { nextSystemOnRoute : Maybe String
+    , stargatesOnOverview : List { name : String, panelIsShowingIt : Bool }
+    , panelOffersJump : Bool
+    }
+    -> RouteStargateJump
+routeStargateJump input =
+    case input.nextSystemOnRoute of
+        Nothing ->
+            NoNextSystemOnRoute
+
+        Just nextSystem ->
+            case input.stargatesOnOverview |> List.filter (.name >> stargateNameLeadsToSystem nextSystem) of
+                [] ->
+                    NoStargateNamedForTheNextSystem nextSystem
+
+                [ gate ] ->
+                    if not gate.panelIsShowingIt then
+                        ThePanelIsShowingSomethingElse nextSystem
+
+                    else if not input.panelOffersJump then
+                        ThePanelOffersNoJump nextSystem
+
+                    else
+                        PressTheJumpButton gate.name
+
+                _ ->
+                    SeveralStargatesNamedForTheNextSystem nextSystem
+
+
+{-| What the decision log says about `routeStargateJump`'s answer.
+
+Derived from the verdict rather than stored beside it, for
+`describeAmmoSwapGiveUp`'s reason: two places that can disagree about why a
+branch did something eventually do.
+
+Every fall-back names the route marker, because that is what runs next and an
+operator reading a stretch of these needs to see the cascade is still travelling
+the route rather than that the jump has stopped happening.
+
+-}
+describeRouteStargateJump : RouteStargateJump -> String
+describeRouteStargateJump jump =
+    case jump of
+        PressTheJumpButton gateName ->
+            "Jump through '" ++ gateName ++ "' from the selected-item panel, which is already showing it."
+
+        NoNextSystemOnRoute ->
+            "The route panel does not name a next system, so nothing here says which stargate is the route's -- right-click the route marker instead."
+
+        NoStargateNamedForTheNextSystem nextSystem ->
+            "No stargate on the overview is named for '" ++ nextSystem ++ "' -- right-click the route marker instead."
+
+        SeveralStargatesNamedForTheNextSystem nextSystem ->
+            "More than one stargate on the overview is named for '" ++ nextSystem ++ "', so which one the route means is not readable here -- right-click the route marker instead."
+
+        ThePanelIsShowingSomethingElse nextSystem ->
+            "The selected-item panel is not showing the stargate to '" ++ nextSystem ++ "' -- selecting it would spend the reading this saves, so right-click the route marker instead."
+
+        ThePanelOffersNoJump nextSystem ->
+            "The selected-item panel is showing the stargate to '" ++ nextSystem ++ "' and offers no 'selectedItemJump' -- right-click the route marker instead, which is what closes the distance."
+
+
+{-| Whether an overview row's name says this stargate leads to `systemName`.
+
+`containsWords`' whole-word rule, with punctuation read as a separator first.
+The rows this client draws name the system alone -- `Adirain` -- and an overview
+preset that renders `Stargate (Adirain)` in the Name column has to match too;
+without the normalisation the parentheses make that a different word and the
+match is lost, and with a plain substring rule `Ami` would match `Amir`.
+
+Both sides get the same treatment, so a system whose own name carries punctuation
+-- `1DQ1-A` -- is compared as the same sequence of words on each side.
+
+-}
+stargateNameLeadsToSystem : String -> String -> Bool
+stargateNameLeadsToSystem systemName gateName =
+    containsWords (punctuationAsSeparators systemName) (punctuationAsSeparators gateName)
+
+
+punctuationAsSeparators : String -> String
+punctuationAsSeparators =
+    String.map
+        (\character ->
+            if Char.isAlphaNum character then
+                character
+
+            else
+                ' '
+        )
+
+
+{-| The system the route panel says this ship jumps to next, if it says.
+
+`NextWaypointPanel`'s label, which `routeIsSet` already reads for its visibility
+and nothing had ever read for its text. Both quote styles, exactly as
+`parseCurrentSolarSystemFromUINodeText` takes them: this client writes
+`alt="Next System in Route"` and the 2019 recording in `explore/` writes
+`alt='Next System in Route'`.
+
+-}
+nextSystemOnRouteFromReading : ReadingFromGameClient -> Maybe String
+nextSystemOnRouteFromReading readingFromGameClient =
+    readingFromGameClient.infoPanelContainer
+        |> Maybe.andThen .infoPanelRoute
+        |> Maybe.map (.uiNode >> .uiNode >> EveOnline.ParseUserInterface.getAllContainedDisplayTexts)
+        |> Maybe.withDefault []
+        |> List.filterMap parseNextSystemInRouteFromLabelText
+        |> List.head
+
+
+parseNextSystemInRouteFromLabelText : String -> Maybe String
+parseNextSystemInRouteFromLabelText labelText =
+    [ "alt='Next System in Route'", "alt=\"Next System in Route\"" ]
+        |> List.filterMap
+            (\marker ->
+                labelText |> EveOnline.ParseUserInterface.getSubstringBetweenXmlTagsAfterMarker marker
+            )
+        |> List.map String.trim
+        |> List.filter (String.isEmpty >> not)
+        |> List.head
+
+
+{-| Whether an overview row's own words say it is a stargate.
+
+One definition, read by the retreat's escape target and by the jump leg of the
+travel path, for `overviewEntryIsAStation`'s reason: two copies of "is this a
+stargate" would drift silently in both directions, and the second one now decides
+which object a jump command acts on.
+
+Name _and_ type, because the two columns carry the word differently depending on
+the overview preset -- this client puts `Stargate (Gallente System)` in Type and
+the destination system alone in Name.
+
+-}
+overviewEntryIsAStargate : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsAStargate entry =
+    [ entry.objectName, entry.objectType ]
+        |> List.filterMap identity
+        |> List.any (containsWords "stargate")
+
+
+{-| Take the route's next stargate by pressing the Selected Item panel's own
+Jump button, where the panel is already showing that gate.
+
+**What this replaces on the readings it can**, and how much: `routeMarkerCascade`
+below is the worst-behaved cascade in the codebase, carrying a tolerance of its
+own widened to 200 because "'Jump Through Stargate' took 3-4 menu opens before
+being recognized" against an 8x8 icon in a strip that shifts as the route
+updates. Counted over the recorded runs in _readings_ rather than decision lines,
+that cascade cost run 35 **123 readings across 31 jump legs** and run 37 **64
+across 20** -- a median of 3 and 2 readings a leg, a mean of 4.0 and 3.2, and a
+worst leg of 11. So **the saving is one to two readings on the median leg**, and
+that is stated small deliberately: this is a cheaper way to issue a command that
+mostly works, not a rescue of one that does not. Against that sits a wrong
+system, which is why `routeStargateJump` refuses on every reading it cannot
+identify the gate from the client's own two renderings of the system's name.
+
+Two branches rather than `selectThenPanelAction`'s three, and the missing one is
+the point: there is no select-first step here. Selecting spends the reading this
+exists to save, and the cascade below travels the route regardless.
+
+-}
+jumpThroughRouteStargate : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+jumpThroughRouteStargate context ifThePanelCannotDoIt =
+    let
+        jumpButton : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        jumpButton =
+            selectedItemButtonNamed context "selectedItemJump"
+
+        verdict : RouteStargateJump
+        verdict =
+            routeStargateJump
+                { nextSystemOnRoute = nextSystemOnRouteFromReading context.readingFromGameClient
+                , stargatesOnOverview =
+                    context.readingFromGameClient.overviewWindows
+                        |> List.concatMap .entries
+                        |> List.filter overviewEntryIsDisplayed
+                        |> List.filter overviewEntryIsAStargate
+                        |> List.map
+                            (\gate ->
+                                { name = gate.objectName |> Maybe.withDefault ""
+                                , panelIsShowingIt = selectedItemIsOverviewEntry context gate
+                                }
+                            )
+                , panelOffersJump = jumpButton /= Nothing
+                }
+    in
+    case ( verdict, jumpButton ) of
+        ( PressTheJumpButton _, Just buttonToPress ) ->
+            describeBranch (describeRouteStargateJump verdict) (clickUiElement buttonToPress)
+
+        _ ->
+            describeBranch (describeRouteStargateJump verdict) ifThePanelCannotDoIt
+
+
 {-| Right-click the route panel's first marker and take whichever of "dock" or
 "jump" the client offers.
 
-Unchanged, and still the whole of the jump leg. What has moved out from under it
-is the dock at the far end -- see `dockAtDestinationStation` for why, and
-`courseSetToDockingPerimeterFromGameLog` for why keeping "dock" in this list
-costs nothing: an out-of-range dock is exactly the case the panel cannot serve,
-and this is what flies the ship there.
+Unchanged, and still what travels every leg the panel cannot identify a gate for
+-- which `jumpThroughRouteStargate` above says is most of them, since it presses
+only where the panel is _already_ showing the route's own stargate. What has
+moved out from under it is the dock at the far end -- see
+`dockAtDestinationStation` for why, and `courseSetToDockingPerimeterFromGameLog`
+for why keeping "dock" in this list costs nothing: an out-of-range dock is
+exactly the case the panel cannot serve, and this is what flies the ship there.
 
 -}
 routeMarkerCascade :
@@ -13527,23 +13794,15 @@ escapeTargetOnOverview context =
                 |> List.concatMap .entries
                 |> List.filter overviewEntryIsDisplayed
                 |> List.sortBy overviewEntryDistanceOrFarInMeters
-
-        matching predicate =
-            onGrid
-                |> List.filter
-                    (\entry ->
-                        [ entry.objectName, entry.objectType ]
-                            |> List.filterMap identity
-                            |> List.any predicate
-                    )
-                |> List.head
     in
     case onGrid |> List.filter overviewEntryIsAStation |> List.head of
         Just station ->
             Just ( station, "selectedItemDock", "dock at it" )
 
         Nothing ->
-            matching (containsWords "stargate")
+            onGrid
+                |> List.filter overviewEntryIsAStargate
+                |> List.head
                 |> Maybe.map (\gate -> ( gate, "selectedItemWarpTo", "warp to it" ))
 
 
