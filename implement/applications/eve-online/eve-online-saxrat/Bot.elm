@@ -859,8 +859,8 @@ anomalyBotDecisionRoot context =
     -- "already reported" flag to get wrong.
     ([ context.memory.messageBoxLastChange
      , context.memory.lockRangeLastChange
-     , context.memory.lockBatchLastChange
      , context.memory.maxTargetsLastChange
+     , context.memory.lockBatchLastChange
      , context.memory.droneLaunchLastChange
      ]
         |> List.filterMap identity
