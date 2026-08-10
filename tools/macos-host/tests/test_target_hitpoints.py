@@ -59,13 +59,12 @@ Nothing here reads a live game client, a bot, or the game log directory.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
-import json
 import os
 import re
 import unittest
 
-from prerequisites import (ElmRepl, MISSION_RUNNER_DIR, REPO_DIR, open_repl,
-                           recorded_runs)
+from prerequisites import (ElmRepl, MISSION_RUNNER_DIR, REPO_DIR,
+                           elm_json_literal, open_repl, recorded_runs)
 
 SAXRAT_DIR = os.path.join(
     REPO_DIR, "implement", "applications", "eve-online", "eve-online-saxrat")
@@ -239,6 +238,11 @@ def reading_binding(name, children):
     Goes through `decodeMemoryReadingFromString` and the real
     `parseUserInterfaceFromUITree`, so what the cases assert on is what the bot
     would have been handed rather than a record written out by hand.
+
+    The literal comes from `elm_json_literal` rather than being written out
+    here, because getting that wrong is not a broken fixture -- it is a case
+    that passes having asserted against a reading that never arrived. See its
+    doc comment.
     """
     return "%s = EveOnline.MemoryReading.decodeMemoryReadingFromString %s" \
            " |> Result.toMaybe" \
@@ -246,7 +250,7 @@ def reading_binding(name, children):
            ".parseUITreeWithDisplayRegionFromUITree" \
            " |> Maybe.map EveOnline.ParseUserInterface" \
            ".parseUserInterfaceFromUITree" % (
-               name, '"""%s"""' % json.dumps(tree_with(children)))
+               name, elm_json_literal(tree_with(children)))
 
 
 def hitpoints(shield, armor, structure):

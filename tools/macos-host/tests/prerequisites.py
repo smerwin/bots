@@ -41,6 +41,7 @@ by name. Nothing in the checked-in source can change its answer, and it still
 proves what it has to prove: it lives in `Bot.elm`, so a `Bot.elm` that does not
 compile cannot answer it.
 """
+import json
 import os
 import re
 import shutil
@@ -122,6 +123,44 @@ def recorded_runs(*names):
             "none of mission_run{%s}.log is on this machine, so the recorded "
             "runs cannot be consulted here" % ",".join(names))
     return found
+
+
+def elm_json_literal(value):
+    """`value`'s JSON, as an Elm literal the decoder gets back byte for byte.
+
+    **Elm processes backslash escapes inside a triple-quoted string too**, so
+    the obvious `'\"\"\"%s\"\"\"' % json.dumps(value)` does not round-trip: a
+    fixture whose JSON carries `\\"` -- which is every fixture holding a double
+    quote, and this client's own route label is `alt="Next System in Route"` --
+    reached the decoder as a bare `"`, the JSON was malformed, and the reading
+    decoded to `Nothing`.
+
+    That failure is the expensive kind rather than a broken fixture. A case over
+    such a reading reports *the parser answering nothing* where the truth is
+    *the fixture never arrived*, and the two are indistinguishable from outside:
+    a rule that correctly answers `Nothing` for absent input passes, and so does
+    a rule that would have answered something for input it never received.
+    Issue #174 is the sweep of what that had been quietly costing.
+
+    Encoding twice is what closes it, and the two escape vocabularies agree on
+    everything the inner call can emit. `json.dumps` of an ASCII string produces
+    only `\\"` and `\\\\`, which Elm reads exactly as JSON does. The one form
+    they spell differently is `\\uXXXX` (Elm wants `\\u{XXXX}`), and the inner
+    call has already turned every non-ASCII character into one, so the outer
+    call escapes its backslash and Elm never meets the form it cannot read.
+    """
+    return json.dumps(json.dumps(value))
+
+
+def elm_triple_quoted_json_literal(value):
+    """The construction `elm_json_literal` replaced, kept so a case can run it.
+
+    It is here rather than in the case that needs it because that case is the
+    only thing in the suite allowed to build one, and
+    `NoFileCarriesItsOwnHarness` refuses the shape everywhere else. Nothing may
+    use this to build a fixture.
+    """
+    return '"""%s"""' % json.dumps(value)
 
 
 class ElmRepl:

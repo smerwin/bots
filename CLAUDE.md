@@ -7099,15 +7099,18 @@ large, the cascade holds a large share of the run, and saxrat's legs and share
 both dwarf the mission runner's on the same measurement -- plus the doc comment's
 own two counts, read back out and recomputed.
 
-**One harness defect had to be fixed to test the live label at all.**
-`SaxratRepl.reading_binding` drops `json.dumps`' output into an Elm `"""…"""`
-literal, and Elm processes backslash escapes inside one -- so `\"` becomes a bare
-`"`, the JSON is malformed, and the reading decodes to `Nothing`. Every case over
-such a fixture then reports the *parser* answering nothing rather than the
-fixture never having arrived. This client's label is `alt="Next System in Route"`
-in double quotes against the 2019 recording's single ones, so it is exactly that
-fixture. `JumpRepl` doubles the backslashes; the shared helper is left alone,
-since changing it reaches eleven other files.
+**One harness defect had to be fixed to test the live label at all**, and this
+file's own fixture is what found it: the shared `reading_binding` dropped
+`json.dumps`' output into an Elm `"""…"""` literal, Elm processes backslash
+escapes inside one, and a fixture carrying a double quote therefore decoded to
+`Nothing`. This client's label is `alt="Next System in Route"` in double quotes
+against the 2019 recording's single ones, so it is exactly that fixture. PR #173
+worked around it in a local `JumpRepl` and deliberately left the shared helper
+alone, since changing it reached eleven other files. **#174 is that sweep and
+the real fix**, and the workaround here is gone -- see "A fixture that never
+arrived reads exactly like a rule that answered nothing" for what the audit of
+the other callers found, which is that no other fixture in the suite was
+affected.
 
 Confirmed by mutation, **eighteen** of them, each failing a named case: **the
 panel-identity clause dropped, so it jumps while the panel is showing a different
@@ -8467,6 +8470,59 @@ because the repl recompiles the module per line (#84: twenty expressions, 36.5s
 against 5.8s). Ask for `Bool`s with `evaluate`, `String`s with `strings`, and
 anything else with `values`, which is the one caller still asking line by line —
 inside a list the printed form is the list's rather than each answer's.
+
+### A fixture that never arrived reads exactly like a rule that answered nothing
+
+A reading is handed to the repl as JSON inside an Elm string literal, and the
+obvious way to write that literal is `"""..."""`. **Elm processes backslash
+escapes inside a triple-quoted string**, so `\"` -- which `json.dumps` writes
+for every double quote in the data -- reached the decoder as a bare `"`, the
+JSON was malformed, and the whole reading decoded to `Nothing`.
+
+That is worse than a broken fixture, and it is why #174 was a sweep rather than
+a one-line fix. A case over such a reading reports *the parser answering
+nothing* where the truth is *the fixture never arrived*, and from outside those
+are one answer: a rule that correctly answers `Nothing` for absent input passes,
+and so does a rule that would have answered something for input it never
+received. It is this file's signature failure sitting in the shared harness
+rather than in one file's assertions, so it could weaken any case in any file
+whose fixture happened to carry a quote.
+
+`elm_json_literal` encodes twice instead. `json.dumps` of an ASCII string emits
+only `\"` and `\\`, which Elm reads exactly as JSON does; the one form the two
+spell differently is `\uXXXX` (Elm wants `\u{XXXX}`), and the inner call has
+already turned every non-ASCII character into one, so the outer call escapes its
+backslash and Elm never meets it. Every reading in the suite goes through that
+one function -- the three copies of `reading_binding`, and
+`test_objective_chain_travel_step.py`, which builds a reading without ever using
+that name and which nobody had counted as a caller.
+
+**The claim about the language is executed rather than asserted in a doc
+comment.** `AFixtureRoundTripsWhateverJsonItIsHandedTest` builds a fixture
+carrying `alt="Next System in Route"`, requires it to reach the parser and to
+come back byte for byte, and runs the *old* construction beside it and requires
+that one to answer `Nothing`. `NoFileCarriesItsOwnHarness` refuses the
+triple-quoted shape in every test module, because a fourteenth builder written
+by hand is how this comes back.
+
+**The sweep of the callers is the point, and the answer is that it had cost
+nothing yet.** Instrumenting the shared builder and running the whole suite, 191
+fixtures are built across thirteen files, and **four carry a double quote**: two
+in the case above, and two in `test_saxrat_route_stargate_panel_jump.py`, which
+PR #173 had already worked around locally on the day it found the defect. No
+fixture in any other file carries a double quote, a backslash, or a non-ASCII
+character, so every one of them decoded correctly and every result those cases
+have reported stands. **No shipped rule rested on a case that was passing
+vacuously.**
+
+The one affected file also shows what the shape looks like from either side,
+which is worth keeping. Restoring the old escaping fails
+`test_the_live_client_s_label_names_the_next_system`, because it wanted a value
+and got nothing -- that is the half PR #173 noticed. It leaves
+`test_an_empty_name_answers_nothing` **passing**, because a fixture that never
+arrived and a label with no name in it are the same answer. A file whose cases
+all happened to be of the second kind would have reported `OK` and checked
+nothing.
 
 **A missing prerequisite is not one kind of thing.** #71 is the failure that
 makes this worth stating. Eleven files each carried their own copy of the
