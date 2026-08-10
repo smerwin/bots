@@ -52,7 +52,8 @@ import os
 import re
 import unittest
 
-from prerequisites import ElmRepl, REPO_DIR, open_repl
+from prerequisites import (ElmRepl, REPO_DIR, elm_json_literal,
+                           elm_triple_quoted_json_literal, open_repl)
 
 SAXRAT_DIR = os.path.join(
     REPO_DIR, "implement", "applications", "eve-online", "eve-online-saxrat")
@@ -225,6 +226,11 @@ class SaxratRepl(ElmRepl):
         what the bot would have been handed rather than a record shaped by hand.
         `Maybe.withDefault` is not available for a `ParsedUserInterface`, so the
         binding stays a `Maybe` and every expression maps over it.
+
+        The literal comes from `elm_json_literal` rather than being written out
+        here, because getting that wrong is not a broken fixture -- it is a case
+        that passes having asserted against a reading that never arrived. See
+        its doc comment.
         """
         return "%s = EveOnline.MemoryReading.decodeMemoryReadingFromString %s" \
                " |> Result.toMaybe" \
@@ -232,7 +238,7 @@ class SaxratRepl(ElmRepl):
                ".parseUITreeWithDisplayRegionFromUITree" \
                " |> Maybe.map EveOnline.ParseUserInterface" \
                ".parseUserInterfaceFromUITree" % (
-                   name, '"""%s"""' % json.dumps(tree_with(children)))
+                   name, elm_json_literal(tree_with(children)))
 
 
 class ReadingFixturesAreRealTest(unittest.TestCase):
@@ -277,6 +283,81 @@ class ReadingFixturesAreRealTest(unittest.TestCase):
             answers, [True] * 6,
             "the parser does not make of these trees what the cases below "
             "assume it does, so nothing they conclude would mean anything")
+
+
+class AFixtureRoundTripsWhateverJsonItIsHandedTest(unittest.TestCase):
+    """Issue #174, and the case the eleven callers had no equivalent of.
+
+    Every one of them checks what the parser made of a fixture. None checked
+    that the fixture *arrived*, and those are different questions with the same
+    answer: a reading that failed to decode is `Nothing`, which is also what a
+    rule correctly answering nothing looks like. So a fixture the harness
+    mangled produced passes rather than failures, in the direction this repo's
+    cases exist to prevent.
+
+    The text is this client's own route label, which is the fixture that made
+    the defect visible: `alt="Next System in Route"`, in double quotes, against
+    the 2019 recording's single ones.
+
+    The control is the construction that was wrong, executed rather than
+    described. `elm_json_literal`'s whole argument is that Elm processes
+    backslash escapes inside a triple-quoted string, and a claim about the
+    language that only a doc comment makes is one nobody notices going stale.
+    """
+
+    QUOTED_NAME = '<a href="showinfo:5//30005001" alt="Next System in Route">'
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(SaxratRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def quoted_rows(self):
+        return [("5,000 m", self.QUOTED_NAME, "Stargate (CONCORD System)")]
+
+    def test_a_fixture_carrying_a_double_quote_reaches_the_parser(self):
+        answers = self.repl.evaluate(
+            ["(quoted |> Maybe.map (always True)) == Just True",
+             "(quoted |> Maybe.map (.overviewWindows"
+             " >> List.concatMap .entries >> List.length)) == Just 1"],
+            definitions=[self.repl.reading_binding(
+                "quoted", [overview(self.quoted_rows())])])
+        self.assertEqual(
+            answers, [True, True],
+            "a fixture holding a double quote decoded to nothing, so every "
+            "case built on one is asserting against a reading that never "
+            "arrived")
+
+    def test_the_text_comes_back_the_way_it_went_in(self):
+        # Compared inside Elm against a plain `"..."` literal, which is a
+        # different escaping path from the one under test, so the two cannot be
+        # wrong together.
+        answers = self.repl.evaluate(
+            ["(quoted |> Maybe.map (.overviewWindows"
+             " >> List.concatMap .entries >> List.filterMap .objectName"
+             " >> (==) [ %s ])) == Just True" % json.dumps(self.QUOTED_NAME)],
+            definitions=[self.repl.reading_binding(
+                "quoted", [overview(self.quoted_rows())])])
+        self.assertEqual(
+            answers, [True],
+            "the row's name did not survive the trip through the Elm literal")
+
+    def test_the_triple_quoted_form_really_does_not_round_trip(self):
+        mangled = (
+            "mangled = EveOnline.MemoryReading.decodeMemoryReadingFromString"
+            " %s |> Result.toMaybe" % elm_triple_quoted_json_literal(
+                tree_with([overview(self.quoted_rows())])))
+        answers = self.repl.evaluate(
+            ["(mangled |> Maybe.map (always True)) == Nothing"],
+            definitions=[mangled])
+        self.assertEqual(
+            answers, [True],
+            "Elm no longer eats the backslashes inside a triple-quoted string, "
+            "so `elm_json_literal`'s reason for encoding twice needs rewriting "
+            "rather than deleting")
 
 
 class HitpointConfirmationTest(unittest.TestCase):

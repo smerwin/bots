@@ -197,6 +197,34 @@ class NoFileCarriesItsOwnHarness(unittest.TestCase):
             offenders, [],
             "these answer the toolchain question themselves; open_repl owns it")
 
+    def test_no_test_module_wraps_json_in_an_elm_literal_of_its_own(self):
+        # Issue #174. Three files each dropped `json.dumps` output straight into
+        # an Elm `"""..."""` string, and Elm eats the backslash escapes inside
+        # one -- so every fixture holding a double quote decoded to `Nothing`
+        # and the cases over it reported the parser answering nothing.
+        offenders = []
+        for path in suite_sources():
+            with open(path, encoding="utf-8") as source:
+                if re.search(r'"""\s*%s\s*"""', source.read()):
+                    offenders.append(os.path.basename(path))
+        self.assertEqual(
+            offenders, [],
+            "these build an Elm string literal by hand rather than through "
+            "elm_json_literal, which is how a fixture comes to decode to "
+            "nothing while its case still passes")
+
+    def test_every_module_that_builds_a_reading_uses_the_shared_literal(self):
+        offenders = []
+        for path in suite_sources():
+            with open(path, encoding="utf-8") as source:
+                text = source.read()
+            if ("decodeMemoryReadingFromString" in text
+                    and "elm_json_literal" not in text):
+                offenders.append(os.path.basename(path))
+        self.assertEqual(
+            offenders, [],
+            "these hand the decoder a literal they escaped themselves")
+
 
 if __name__ == "__main__":
     unittest.main()

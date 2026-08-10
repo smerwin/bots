@@ -215,30 +215,6 @@ class JumpRepl(SaxratRepl):
         kwargs.setdefault("preamble", PREAMBLE)
         super().__init__(**kwargs)
 
-    @staticmethod
-    def reading_binding(name, children):
-        """The shared binding, with the JSON escaped for the Elm literal it sits in.
-
-        `SaxratRepl.reading_binding` drops `json.dumps`' output straight into an
-        Elm `\"\"\"…\"\"\"` string, and **Elm processes backslash escapes inside
-        one**. So a fixture carrying a double quote is written by `json.dumps` as
-        `\\"`, Elm turns that back into a bare `"`, and the JSON the parser is
-        handed is malformed -- the reading decodes to `Nothing` and every case
-        over it reports the parser answering nothing rather than the fixture
-        never having arrived.
-
-        This client's own route label is exactly that fixture:
-        `alt="Next System in Route"`, in double quotes, against the 2019
-        recording's single ones. Doubling the backslashes makes Elm hand the
-        decoder what `json.dumps` wrote.
-        """
-        binding = SaxratRepl.reading_binding(name, children)
-        opened = binding.index('"""') + 3
-        closed = binding.rindex('"""')
-        return (binding[:opened]
-                + binding[opened:closed].replace("\\", "\\\\")
-                + binding[closed:])
-
 
 def readings_with_decisions(path):
     """Every reading in a run log, as the decision lines printed inside it.

@@ -52,7 +52,8 @@ import os
 import re
 import unittest
 
-from prerequisites import ElmRepl, MISSION_RUNNER_DIR, REPO_DIR, open_repl
+from prerequisites import (ElmRepl, MISSION_RUNNER_DIR, REPO_DIR,
+                           elm_json_literal, open_repl)
 
 SAXRAT_DIR = os.path.join(
     REPO_DIR, "implement", "applications", "eve-online", "eve-online-saxrat")
@@ -209,6 +210,11 @@ def reading_binding(name, children):
     would have been handed. `Maybe.withDefault` is not available for a
     `ParsedUserInterface`, so the binding stays a `Maybe` and every expression
     maps over it.
+
+    The literal comes from `elm_json_literal` rather than being written out
+    here, because getting that wrong is not a broken fixture -- it is a case
+    that passes having asserted against a reading that never arrived. See its
+    doc comment.
     """
     return "%s = EveOnline.MemoryReading.decodeMemoryReadingFromString %s" \
            " |> Result.toMaybe" \
@@ -216,7 +222,7 @@ def reading_binding(name, children):
            ".parseUITreeWithDisplayRegionFromUITree" \
            " |> Maybe.map EveOnline.ParseUserInterface" \
            ".parseUserInterfaceFromUITree" % (
-               name, '"""%s"""' % json.dumps(tree_with(children)))
+               name, elm_json_literal(tree_with(children)))
 
 
 def sighting(text, readings_since=0, messages=1, display_texts=1):

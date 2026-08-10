@@ -58,12 +58,11 @@ reached by a longer road.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
-import json
 import os
 import re
 import unittest
 
-from prerequisites import ElmRepl, open_repl
+from prerequisites import ElmRepl, elm_json_literal, open_repl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
@@ -162,14 +161,14 @@ class ParserRepl(ElmRepl):
     def travel_label_of(self, tree):
         """What the parser makes of this tree's travel step, as an assertion."""
         return (
-            '(EveOnline.MemoryReading.decodeMemoryReadingFromString """%s"""'
+            '(EveOnline.MemoryReading.decodeMemoryReadingFromString %s'
             ' |> Result.toMaybe'
             ' |> Maybe.map EveOnline.ParseUserInterface.parseUITreeWithDisplayRegionFromUITree'
             ' |> Maybe.map EveOnline.ParseUserInterface.parseUserInterfaceFromUITree'
             ' |> Maybe.andThen (.agentMissionInfoPanelEntries >> List.head)'
             ' |> Maybe.andThen .locationButton'
             ' |> Maybe.andThen .label)'
-        ) % json.dumps(tree)
+        ) % elm_json_literal(tree)
 
 
 class TheRealParserReadsBothLayouts(unittest.TestCase):
