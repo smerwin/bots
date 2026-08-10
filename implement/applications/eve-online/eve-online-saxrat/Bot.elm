@@ -860,8 +860,8 @@ anomalyBotDecisionRoot context =
     ([ context.memory.messageBoxLastChange
      , context.memory.lockRangeLastChange
      , context.memory.maxTargetsLastChange
-     , context.memory.lockBatchLastChange
      , context.memory.droneLaunchLastChange
+     , context.memory.lockBatchLastChange
      ]
         |> List.filterMap identity
         |> List.foldr describeBranch (anomalyBotDecisionRootBeforeApplyingSettings context)
