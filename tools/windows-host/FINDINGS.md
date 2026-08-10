@@ -525,7 +525,26 @@ not a working bot**, and the distance between the two is most of this repo.
   consecutive ones. The retreat fired on it: 229 `get out get out get out` lines
   on a hull that was never below full armour, ending that run's usefulness.
   A longer walk means more of the tree is reallocated mid-walk, so this should
-  fall with read time; that it *does* is not yet measured.
+  fall with read time. **It does, and the effect is total.** Same bot, same
+  settings, same client, the only change being which walker read the tree:
+
+  | | walk | gauge readings | implausible | false retreats |
+  |---|---:|---:|---:|---:|
+  | Python walker | 2405 ms | 893 | **143 (16%)** | 229 |
+  | C walker | 143 ms | 671 | **0 (0%)** | **0** |
+
+  In-host the read went from 2.4–2.5s to **0.25–0.36s**, and the corruption that
+  ended a three-hour run did not occur once. That settles the mechanism CLAUDE.md
+  named — a garbage gauge value really is a read landing on a reallocated object
+  — and it is the clearest argument this port has for the native walker: not
+  throughput, but the difference between a retreat that fires on nothing and one
+  that does not.
+
+  **It does not explain the ship-UI parse misses**, which is worth stating
+  because it would be easy to assume one fix covered both. Those ran at
+  **10.4% (78 of 749)** on the C walker against 4.6–6.7% on the Python one — no
+  better, and possibly worse. They are a separate phenomenon and remain
+  unexplained.
 - **One reading, one client, one machine, one patch level.** Every number here
   comes from a single session against a single account's client. The layout in
   section 2 is a measurement of *this build*, and `probe.py` exists so the next
