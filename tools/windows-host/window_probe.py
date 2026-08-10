@@ -33,6 +33,56 @@ from typing import Optional
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
 
+
+# Every window rectangle and every input coordinate in this host is in physical
+# pixels, and getting that requires saying so before asking anything.
+#
+# A DPI-unaware process is lied to by Windows, consistently and silently: on this
+# machine, at 150% scaling, `GetClientRect` on the EVE window answers 1518x994
+# while the client's own `UIRoot` reports a 2276x1491 canvas -- a ratio of exactly
+# 1.4993 and 1.5000. Nothing errors; the numbers are simply in a virtualised
+# coordinate space, and a click computed from them lands a third of the way up
+# the screen from where it was aimed.
+#
+# That is the same hazard macOS's `scale_x`/`scale_y` self-calibration exists for
+# ("don't assume 2.0"), arriving from the other direction: there the client's
+# canvas differs from the window and the host measures the ratio, here the ratio
+# is an artefact of not having declared awareness and the right answer is to make
+# it 1.0. The calibration stays either way -- `input.py` measures the ratio rather
+# than assuming this call worked -- but it should be measuring a real difference
+# rather than a self-inflicted one.
+#
+# PER_MONITOR_AWARE_V2 rather than SYSTEM_AWARE: the client can be dragged to a
+# monitor with a different scale factor, and a system-aware process is virtualised
+# again the moment that happens.
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+
+
+def declare_dpi_awareness() -> str:
+    """Opt this process out of DPI virtualisation.  Idempotent and never fatal.
+
+    Returns what happened, because a silent failure here is a silent 1.5x error
+    in every coordinate downstream.  It fails benignly if awareness was already
+    set (by a manifest, or by a second call), which is why the failure is
+    reported rather than raised.
+    """
+    try:
+        if _user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
+            return "per-monitor-aware-v2"
+        err = ctypes.get_last_error()
+        # ERROR_ACCESS_DENIED means it was already set, which is fine.
+        return "already set" if err == 5 else f"failed (Win32 {err})"
+    except AttributeError:
+        # Windows 8.1 .. 10 1607 have the older API and no V2 context.
+        try:
+            ctypes.WinDLL("shcore").SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            return "per-monitor-aware (legacy)"
+        except Exception:
+            return "unavailable"
+
+
+declare_dpi_awareness()
+
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 _user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]

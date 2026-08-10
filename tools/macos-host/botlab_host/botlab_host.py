@@ -27,12 +27,30 @@ import tempfile
 import threading
 import time
 
-from PIL import Image
+# Both of these are needed only by paths that do not run on Windows -- PIL by
+# the screenshot capture, re_helper by the dump-and-repr-scan root search -- and
+# both are macOS-side dependencies. Failing to import them must not stop a
+# Windows host that never reaches either. Left as a hard import on macOS, where
+# an absent PIL or re_helper is a broken install and should say so at startup
+# rather than thousands of readings later.
+if sys.platform == "win32":
+    try:
+        from PIL import Image
+    except ImportError:
+        Image = None
+else:
+    from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(MACOS_HOST_DIR, "re_helper"))
-import re_helper as rh  # noqa: E402
+if sys.platform == "win32":
+    try:
+        import re_helper as rh  # noqa: E402
+    except Exception:
+        rh = None
+else:
+    import re_helper as rh  # noqa: E402
 
 sys.path.insert(0, MACOS_HOST_DIR)
 import web_console  # noqa: E402
@@ -129,6 +147,20 @@ MEMORY_SAMPLE_BIN = os.path.join(MACOS_HOST_DIR, "memory_sample", "memory_sample
 WINDOW_PROBE_BIN = os.path.join(MACOS_HOST_DIR, "window_probe", "window_probe")
 CG_INPUT_BIN = os.path.join(MACOS_HOST_DIR, "cg_input", "cg_input")
 TREE_WALKER_BIN = os.path.join(MACOS_HOST_DIR, "tree_walker", "tree_walker")
+
+# Windows as a secondary target (issue #176). macOS stays primary: every
+# platform-bound function below keeps its existing body untouched and gains one
+# guarded early return in front of it, so on macOS this file is the code it was
+# with one boolean test added. Nothing is refactored into a shared layer -- see
+# the issue, which asks for the boundary to be drawn cleanly and for the merge
+# not to be attempted now.
+IS_WINDOWS = sys.platform == "win32"
+win_platform = None
+if IS_WINDOWS:
+    _WINDOWS_HOST_DIR = os.path.join(os.path.dirname(MACOS_HOST_DIR), "windows-host")
+    if _WINDOWS_HOST_DIR not in sys.path:
+        sys.path.insert(0, _WINDOWS_HOST_DIR)
+    import win_platform  # noqa: E402
 
 # Live-verified via the new per-decision logging (2026-07-28 saxrat run): a
 # context-menu entry click dispatched immediately after the mouse glide that
@@ -259,6 +291,10 @@ _VK_TO_CGKEYCODE = {
 
 
 def vk_to_cgkeycode(vk):
+    # On Windows the bot's own vkey_* values are already the target's key codes,
+    # so there is no table and nothing to be missing from one.
+    if IS_WINDOWS:
+        return win_platform.vk_to_keycode(vk)
     return _VK_TO_CGKEYCODE.get(vk)
 
 
@@ -626,6 +662,8 @@ def find_eve_processes():
     owners. Picks the largest layer>=0 window by area (a fullscreen game
     window can have smaller overlay windows -- e.g. the reveal-on-hover
     menu bar strip -- that would otherwise be picked by accident)."""
+    if IS_WINDOWS:
+        return win_platform.find_eve_processes()
     out = subprocess.run(["lsappinfo", "list"], capture_output=True, text=True, check=True)
     text = out.stdout
     game_pid = None
@@ -657,6 +695,8 @@ def get_window_rect(window_number):
     """{"left","top","right","bottom","backing_scale"}, rect in points,
     for a window number already known (from find_eve_processes'
     mainWindowId), regardless of active Space."""
+    if IS_WINDOWS:
+        return win_platform.get_window_rect(window_number)
     r = subprocess.run([WINDOW_PROBE_BIN, "--all"], capture_output=True, text=True)
     for line in r.stdout.splitlines():
         m = WINDOW_LINE_RE.match(line)
@@ -817,6 +857,11 @@ def capture_image_data(window_number, scaled_rect, scale_x, scale_y, canvas_inse
     exactly the kind of per-cycle latency the earlier click-timing fix
     just removed. If a bot that genuinely needs full-resolution pixels
     shows up, this is the place to add it back."""
+    if IS_WINDOWS:
+        # Issue #176 step 5: the screenshot path is deliberately not ported --
+        # it is diagnostic on macOS and it is the cost this whole port exists to
+        # escape. The empty crop lists are what the framework is satisfied with.
+        return win_platform.capture_image_data()
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         path = f.name
     try:
@@ -863,6 +908,8 @@ def _window_is_onscreen(window_number):
     the thing --all deliberately ignores. Used to verify a foreground
     switch actually worked, and to gate every input action so nothing
     gets sent to whatever app happens to be active if focus drifted."""
+    if IS_WINDOWS:
+        return win_platform.window_is_onscreen(window_number)
     r = subprocess.run([WINDOW_PROBE_BIN], capture_output=True, text=True)
     return re.search(rf"^window={window_number}\b", r.stdout, re.MULTILINE) is not None
 
@@ -890,6 +937,8 @@ def bring_window_to_foreground(pid, window_number, retries=4, delay=0.35):
     hundreds of ms of pure latency per action for no benefit, found by
     the user noticing real-world sluggishness between opening a menu and
     clicking it."""
+    if IS_WINDOWS:
+        return win_platform.bring_window_to_foreground(pid, window_number, retries, delay)
     if _window_is_onscreen(window_number):
         return True
     for _ in range(retries):
@@ -1092,7 +1141,8 @@ class VolatileHost:
     def _get_tree_walker(self, process_id):
         client = self.tree_walkers.get(process_id)
         if client is None:
-            client = TreeWalkerClient(process_id)
+            client = (win_platform.TreeWalkerClient(process_id) if IS_WINDOWS
+                      else TreeWalkerClient(process_id))
             self.tree_walkers[process_id] = client
         return client
 
@@ -1206,6 +1256,22 @@ class VolatileHost:
             self.metatype[process_id] = cached["metatype"]
             self.str_type[process_id] = cached["str_type"]
             state["result"] = cached["root"]
+            return
+        if IS_WINDOWS:
+            # No dump and no repr scan: the text macOS seeds from is not in this
+            # client's memory at all (FINDINGS.md section 3), and the type
+            # objects are reachable directly through python27.dll's exports.
+            try:
+                root, metatype, str_type = win_platform.search_ui_root(process_id)
+                if metatype is not None:
+                    self.metatype[process_id] = metatype
+                    self.str_type[process_id] = str_type
+                if root is not None:
+                    self._store_ui_root_cache(process_id, root, metatype, str_type)
+                state["result"] = root
+            except Exception as exc:
+                print(f"# SearchUIRootAddress failed: {exc}", file=sys.stderr)
+                state["result"] = None
             return
         try:
             with tempfile.TemporaryDirectory() as d:
@@ -1612,6 +1678,14 @@ class TaskDispatcher:
         return {"InvokeMethodOnWindowResponse": [window_id, {"Err": {"MethodNotAvailableError": True}}]}
 
     def _get_cg_input(self):
+        if IS_WINDOWS:
+            # In-process rather than a persistent helper. cg_input has to be one
+            # because it keeps the click position as process-local state; on
+            # Windows a button event is delivered wherever the cursor actually
+            # is, which the OS owns, so there is no state and no process.
+            if self._cg_input is None:
+                self._cg_input = win_platform.CgInput(execute=self.execute_input)
+            return self._cg_input
         if self._cg_input is None or self._cg_input.poll() is not None:
             self._cg_input = subprocess.Popen(
                 [CG_INPUT_BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
@@ -1619,6 +1693,11 @@ class TaskDispatcher:
         return self._cg_input
 
     def _cg(self, cmd):
+        if IS_WINDOWS:
+            reply = self._get_cg_input().command(cmd)
+            if not cmd.startswith("idle"):
+                self._last_input_post_at = time.monotonic()
+            return reply
         proc = self._get_cg_input()
         proc.stdin.write(cmd + "\n")
         proc.stdin.flush()
@@ -2769,7 +2848,9 @@ def main():
                      help="actually send mouse/keyboard input via CGEventPost (off by default: logs what would be sent instead)")
     ap.add_argument("--capture-screenshots", action="store_true",
                      help="capture real screenshot pixel data for ReadFromWindowMethod (off by default: ~1.6s/cycle cost most bots don't need; see CLAUDE.md)")
-    ap.add_argument("--game-log-dir", default="~/Documents/EVE/logs/Gamelogs",
+    ap.add_argument("--game-log-dir",
+                    default=(win_platform.game_log_directory() if IS_WINDOWS
+                             else "~/Documents/EVE/logs/Gamelogs"),
                     help="EVE's own game log directory; its newest file is followed, echoed "
                          "under each decision (it is the only timestamped record here) and "
                          "carried into each reading for the bot to parse")

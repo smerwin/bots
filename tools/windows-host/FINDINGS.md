@@ -242,6 +242,51 @@ discovered.**
   walker does a comparable tree in 390 ms. This one is Python, and the gap is
   implementation rather than platform — see "What is not built".
 
+## 5a. Input: the port, and the bug it turned up before sending anything
+
+`cg_input.c` → `SendInput` is the API swap the issue's table asks for, and it is
+about forty lines of the file. What carries the weight is the behaviour the macOS
+host tuned against this client over many runs, which lives in `botlab_host.py`
+rather than in `cg_input.c` — the glide, the dwell-preserving skip, the
+`force_movement` nudge before a click, the drag that must not pause after the
+press, the 30 ms key hold, the five-second human stand-down. **None of that is
+reimplemented.** `win_platform.CgInput` speaks `cg_input`'s own line protocol, so
+`_windows_input`'s two hundred lines are shared between the platforms and there
+is one copy of each finding rather than two.
+
+**Two things get simpler.** The key mapping disappears entirely:
+`Common/EffectOnWindow.elm`'s `vkey_*` values *are* Windows virtual key codes
+(`vkey_RETURN` is `0x0D`, `vkey_A` is `0x41`), because the framework was written
+for Windows. macOS needs `_VK_TO_CGKEYCODE` and that table has cost this repo two
+real bugs — `vkey_SUBTRACT` missing from it, and a letter bound of `<= 26`
+turning an untypable character into `vkey_LWIN`, putting Command down underneath
+the typing. Here there is nothing to be wrong. And the double click needs no
+special event field: macOS requires `kCGMouseEventClickState` to say 2, Windows
+does the detection in the receiving application.
+
+**And one thing is much harder, which is where a real bug was found.** A process
+that has not declared DPI awareness is handed *virtualised* coordinates, silently
+and consistently. On this machine at 150% scaling:
+
+| | before declaring awareness | after |
+|---|---:|---:|
+| `GetClientRect` on the EVE window | 1518 x 994 | **2277 x 1492** |
+| the client's own `UIRoot` canvas | 2276 x 1491 | 2276 x 1491 |
+| implied scale | 1.4993 / 1.5000 | **1.0 / 1.0** |
+
+Nothing errors either way. `SendInput` consumes the same virtualised space, so
+the two errors do not cancel — a click computed from the unaware numbers lands a
+third of the way across the window from where it was aimed. This is the hazard
+macOS's `scale_x`/`scale_y` self-calibration exists for ("don't assume 2.0")
+arriving from the other direction: there the ratio is real and must be measured,
+here it is an artefact and the right answer is to make it 1.0.
+`window_probe.declare_dpi_awareness` is called at import by everything that
+touches a coordinate, and the calibration still measures the ratio afterwards
+rather than trusting that the call worked.
+
+**Not sent to the client yet at the time of writing.** The self-test reports what
+it would do and sends nothing without `--execute`.
+
 ## 6. What is here
 
 | file | what it is |
@@ -249,9 +294,17 @@ discovered.**
 | `eve_mem.py` | the reader: `ReadProcessMemory`, region enumeration, PE export parsing, and the CPython 2.7 decoders. The counterpart of `re_helper.py`. |
 | `probe.py` | the feasibility probe and the layout derivation — everything in sections 2–4 |
 | `tree_walker.py` | the UI-tree walk, ported from `tree_walker.c` step for step |
-| `window_probe.py` | `EnumWindows`/`GetWindowRect`, with the largest-by-area rule carried over |
+| `window_probe.py` | `EnumWindows`/`GetWindowRect`, with the largest-by-area rule carried over, and the DPI declaration everything else depends on |
+| `input.py` | the `cg_input` port: `SendInput`, the glide, the foreground lock workaround |
+| `win_platform.py` | the Windows side of `botlab_host.py`'s dispatch — issue step 4 |
 | `measure_cost.py` | section 5 |
 | `verify/VerifyTree.elm`, `verify/verify_tree.py` | runs a captured tree through the **real** `EveOnline.ParseUserInterface` |
+
+`botlab_host.py` itself gains one guarded early return per platform-bound
+function and nothing else. On macOS it is the code it was, reached the same way,
+with one boolean test in front of it — which is the most this port can offer
+towards "macOS stays primary and must not be destabilised" given that nothing
+here can run a macOS test.
 
 ### The tree the bot would have been handed
 
@@ -287,13 +340,6 @@ is where `quickMessage` lives, and the raw tree carries `l_abovemain`, `l_main`,
 The issue's order of work is 1–5. **Steps 1 and 2 are done and step 3 is a third
 done.** Steps 4 and 5 are not started.
 
-- **`cg_input` → `SendInput` is not ported.** No input has been sent to the client
-  by any of this. That means the issue's fourth unverified item — whether
-  `SendInput` reproduces the pacing the macOS host tuned, the 30 ms hold and
-  210 ms gap — is exactly as open as it was, and so is everything about
-  `BringWindowToForeground`, the double-click click-state, and the drag that must
-  not pause after the press. **Driving a live account's client is an outward
-  action and it is the operator's call, not this port's.**
 - **`memory_sample`, `live_reader` and `probe` (the C ones) are not ported and
   probably should not be.** All three exist to work around
   `mach_vm_read_overwrite` being priced per call: `live_reader` is a persistent
