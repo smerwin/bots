@@ -10,3 +10,7 @@ __pycache__/
 /tools/macos-host/live_reader/live_reader
 /tools/macos-host/window_probe/window_probe
 /tools/macos-host/cg_input/cg_input
+
+# Windows host build output
+tools/windows-host/tree_walker/tree_walker.exe
+tools/windows-host/tree_walker/*.obj

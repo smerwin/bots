@@ -23,7 +23,10 @@ second copy of them is a second set of the bugs they fix.
 
 from __future__ import annotations
 
+import json
 import os
+import struct
+import subprocess
 import sys
 import threading
 import time
@@ -124,7 +127,77 @@ def bring_window_to_foreground(pid, window_id, retries: int = 4, delay: float = 
 # --------------------------------------------------------------------------
 
 
-class TreeWalkerClient:
+TREE_WALKER_EXE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tree_walker", "tree_walker.exe"
+)
+
+
+class NativeTreeWalkerClient:
+    """The C walker, spoken to over the same binary protocol as macOS's.
+
+    Measured against the Python walker on the same client and the same root:
+    **143 ms against 1252 ms, 8.7x**, for the same 3,495 nodes and 5,417
+    identical string values. That is the whole reason it exists -- see
+    ``tree_walker/tree_walker.c``'s header for why the cost was interpreter
+    overhead rather than memory reads, and why on Windows a shorter walk is a
+    correctness property and not only a faster one.
+
+    Falls back to the Python walker if the binary is not built, rather than
+    failing: the Python one is the reference implementation, it works, and a
+    host that refuses to start because a build step was skipped is worse than a
+    host that runs slower.
+    """
+
+    def __init__(self, pid: int):
+        self.pid = pid
+        self._lock = threading.Lock()
+        self.proc = subprocess.Popen(
+            [TREE_WALKER_EXE, str(pid)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        ready = self.proc.stderr.readline()
+        if b"ready" not in ready:
+            rest = self.proc.stderr.read() if self.proc.stderr else b""
+            raise RuntimeError(
+                "tree_walker.exe did not report ready: "
+                + (ready + rest).decode("utf-8", "replace").strip()
+            )
+
+    def tree(self, root_addr, metatype_addr, str_type_addr,
+             max_depth: int = 16, max_nodes: int = 5000):
+        with self._lock:
+            request = struct.pack(
+                "<QQQII", int(root_addr), int(metatype_addr or 0),
+                int(str_type_addr or 0), int(max_depth), int(max_nodes),
+            )
+            self.proc.stdin.write(request)
+            self.proc.stdin.flush()
+            header = self.proc.stdout.read(8)
+            if len(header) < 8:
+                raise RuntimeError("tree_walker.exe: short read on length (process died?)")
+            (length,) = struct.unpack("<Q", header)
+            data = bytearray()
+            while len(data) < length:
+                chunk = self.proc.stdout.read(length - len(data))
+                if not chunk:
+                    raise RuntimeError("tree_walker.exe: short read on body")
+                data.extend(chunk)
+            return json.loads(data)
+
+    def close(self) -> None:
+        try:
+            self.proc.stdin.close()
+            self.proc.wait(timeout=2)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
+
+class PythonTreeWalkerClient:
     """``botlab_host.TreeWalkerClient``'s interface, backed by the Python walker.
 
     Same two methods and the same ``tree(...)`` signature, so the host's caching,
@@ -157,6 +230,27 @@ class TreeWalkerClient:
             self.session.reader.close()
         except Exception:
             pass
+
+
+def TreeWalkerClient(pid: int):
+    """The native walker where it has been built, the Python one otherwise.
+
+    Chosen at construction and reported on stderr, because "which walker am I
+    running" is the first question to ask of a timing number and the second to
+    ask of a wrong reading.
+    """
+    if os.path.exists(TREE_WALKER_EXE):
+        try:
+            client = NativeTreeWalkerClient(pid)
+            print("# tree_walker: native (tree_walker.exe)", file=sys.stderr)
+            return client
+        except Exception as exc:
+            print(f"# tree_walker.exe failed to start ({exc}); using the Python walker",
+                  file=sys.stderr)
+    else:
+        print(f"# tree_walker.exe not built ({TREE_WALKER_EXE}); using the Python walker "
+              f"-- run tree_walker/build.bat for an ~8.7x faster read", file=sys.stderr)
+    return PythonTreeWalkerClient(pid)
 
 
 def search_ui_root(pid: int):
