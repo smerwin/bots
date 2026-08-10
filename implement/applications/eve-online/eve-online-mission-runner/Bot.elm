@@ -691,6 +691,23 @@ type alias BotMemory =
     , lockRefusedAtMeters : Maybe Int
     , lockRangeLastChange : Maybe String
 
+    -- The batch of lock clicks the last batched step asked for, and what the
+    -- target bar has done about it since. The totals are for the session and
+    -- only ever rise; `lockBatchLastChange` holds a sentence only on the
+    -- reading a batch was judged short, `lockRangeLastChange`'s mechanism for
+    -- its reason. See `updateLockBatchAccounting`.
+    , lockBatch : Maybe LockBatchDispatch
+    , lockBatchClicksAsked : Int
+    , lockBatchClicksAnswered : Int
+    , lockBatchLastChange : Maybe String
+
+    -- The size of the target bar on the previous reading, which is the reading
+    -- a step's effects were decided on. Written down rather than re-derived
+    -- because the batch accounting has to compare the bar against what it was
+    -- *before* the clicks it is judging, and the memory update only ever sees
+    -- the reading after them.
+    , targetsCountLastReading : Int
+
     -- What the client has answered about how many targets this ship can hold at
     -- once: the maximum it stated in its own game log, and the most the target
     -- bar has actually carried. `maxTargetsLastChange` holds a sentence only on
@@ -1172,6 +1189,24 @@ type alias LockAttempt =
     }
 
 
+{-| A step's worth of lock clicks, waiting to be counted.
+
+`clicksAsked` is counted out of the **effects that were actually dispatched**
+rather than out of the rows the decision picked, so the two cannot come to
+disagree: a row whose click point could not be computed contributes no chord and
+is therefore never asked for. `targetsCountBefore` is the bar on the reading the
+step was decided from, which is the only number the answer can be measured
+against -- the bar on the reading that _observes_ the click may already carry
+some of the batch.
+
+-}
+type alias LockBatchDispatch =
+    { clicksAsked : Int
+    , targetsCountBefore : Int
+    , readingsWaited : Int
+    }
+
+
 {-| Which end of the ammo pair a charge sits at. Never derived from a name --
 only from the optimal range the charge produces, which is the one thing about it
 the client actually reports.
@@ -1505,6 +1540,7 @@ missionBotDecisionRoot context =
      , context.memory.maxTargetsLastChange
      , context.memory.droneLaunchLastChange
      , context.memory.messageBoxLastChange
+     , context.memory.lockBatchLastChange
      ]
         |> List.filterMap identity
         |> List.foldr describeBranch (missionBotDecisionRootBeforeApplyingSettings context)
@@ -9584,6 +9620,26 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                 _ ->
                     overviewEntriesToLock |> List.head
 
+        -- The rows one step asks the client to lock, when it asks for more than
+        -- one. Taken as the in-range **prefix** of the candidate list rather
+        -- than by filtering it, because `everythingWorthAttacking` sorts a
+        -- warp-disrupting entry to the front ahead of the distance order -- see
+        -- `lockBatchRowsInReach`, which is where that argument lives.
+        overviewEntriesToLockInOneStep : List OverviewWindowEntry
+        overviewEntriesToLockInOneStep =
+            overviewEntriesToLock
+                |> List.take
+                    (lockBatchSize
+                        (lockBatchSituationFrom context
+                            { rowsLockableNow =
+                                overviewEntriesToLock
+                                    |> List.map (overviewEntryIsWithinLockRange context)
+                                    |> lockBatchRowsInReach
+                            , probe = maxTargetsProbeNow
+                            }
+                        )
+                    )
+
         -- Something to attack, but not one row of it rendered. The overview
         -- virtualises, so a mission structure sitting further down the list --
         -- a Habitation Module among a screen full of rats, say -- is simply not
@@ -9889,8 +9945,19 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                                                                             )
 
                                                                 Just nextOverviewEntryToLock ->
-                                                                    describeBranch (describeMaxTargetsProbe maxTargetsProbeNow)
-                                                                        (lockTargetFromOverviewEntry context nextOverviewEntryToLock)
+                                                                    if lockBatchIsSettling context.memory.lockBatch then
+                                                                        describeBranch
+                                                                            (describeLockBatchSettling context.memory.lockBatch)
+                                                                            waitForProgressInGame
+
+                                                                    else if 1 < (overviewEntriesToLockInOneStep |> List.length) then
+                                                                        describeBranch
+                                                                            (describeLockBatchAsked overviewEntriesToLockInOneStep)
+                                                                            (lockTargetsFromOverviewEntries overviewEntriesToLockInOneStep)
+
+                                                                    else
+                                                                        describeBranch (describeMaxTargetsProbe maxTargetsProbeNow)
+                                                                            (lockTargetFromOverviewEntry context nextOverviewEntryToLock)
                                                             )
                                                         )
                                                 )
@@ -13996,14 +14063,7 @@ lockTargetFromOverviewEntry context overviewEntry =
 
                 else
                     describeBranch ("Lock target from overview entry '" ++ (overviewEntry.objectName |> Maybe.withDefault "") ++ "'")
-                        (decideActionForCurrentStep
-                            ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL ]
-                             , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-                             , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]
-                             ]
-                                |> List.concat
-                            )
-                        )
+                        (decideActionForCurrentStep (lockChordForOverviewEntry overviewEntry))
 
             else
                 approachTheObject
@@ -14011,6 +14071,202 @@ lockTargetFromOverviewEntry context overviewEntry =
 
         Err error ->
             describeBranch ("Failed to read the distance: " ++ error) askForHelpToGetUnstuck
+
+
+{-| The lock chord for one row: Ctrl held over a plain left click.
+
+Written once because a batch is literally N copies of it, so the shape
+`lockClickLocationsFromStepEffects` recognises and the shape the bot dispatches
+cannot come apart. `Result.withDefault []` on a row whose click point cannot be
+computed leaves a bare Ctrl press, which is what this branch has always
+dispatched there -- and it carries no `MouseMoveTo`, so the accounting below
+counts it as the nothing it is rather than as a lock that was asked for.
+
+-}
+lockChordForOverviewEntry : OverviewWindowEntry -> List EffectOnWindow.EffectOnWindowStruct
+lockChordForOverviewEntry overviewEntry =
+    [ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL ]
+    , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
+    , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]
+    ]
+        |> List.concat
+
+
+{-| Ask the client for several locks in one step.
+
+Each row gets the whole chord rather than Ctrl being held across the run, so the
+batch is N repetitions of the single lock this bot has always dispatched and no
+new key timing is introduced. It also keeps the host's double-click collapsing
+away from it: that recogniser skips only `WaitMilliseconds` between a
+press/release pair and the next press, and every chord here puts a `KeyUp`, a
+`KeyDown` and a `MouseMoveTo` in between.
+
+-}
+lockTargetsFromOverviewEntries : List OverviewWindowEntry -> DecisionPathNode
+lockTargetsFromOverviewEntries overviewEntries =
+    decideActionForCurrentStep (overviewEntries |> List.concatMap lockChordForOverviewEntry)
+
+
+{-| How many rows from the **front** of the candidate list the ship can reach.
+
+**A prefix, not a count, and that is where this bot differs from saxrat's copy
+of the same rule.** There the candidate list is sorted by distance alone, so the
+rows in range are always a prefix of it and filtering could not reorder
+anything. Here `everythingWorthAttacking` puts a warp-disrupting entry at the
+**front, ahead of the distance order** -- so a scrambler out of reach can sit in
+front of rats that are in reach, and a batch built by _filtering_ would silently
+skip the one row the bot most wants, lock the rats behind it, and never approach
+the scrambler at all.
+
+Counting the prefix instead makes that impossible: a head the ship cannot reach
+answers 0, which drops the batch to one row and hands the reading back to
+`lockTargetFromOverviewEntry`, whose out-of-range branch approaches it exactly
+as before. A batch therefore always begins with the row the single lock would
+have clicked and never reaches past a row it skipped.
+
+Takes the reachability of each row rather than the rows themselves, so a case
+can execute it on plain booleans.
+
+-}
+lockBatchRowsInReach : List Bool -> Int
+lockBatchRowsInReach rowsAreInReach =
+    case rowsAreInReach of
+        True :: rest ->
+            1 + lockBatchRowsInReach rest
+
+        _ ->
+            0
+
+
+{-| Everything the batch size is a function of.
+
+`rowsToTake` is `maxTargetsRowsToTake`'s answer rather than the ceiling, so the
+batch and `Enough locked targets.` cannot come to disagree about whether there
+is room; `rowsLockableNow` is `lockBatchRowsInReach`'s prefix rather than a
+count of everything in range, since a row out of range is answered by
+approaching and an approach cannot be batched with anything.
+
+-}
+type alias LockBatchSituation =
+    { targetsHeld : Int
+    , rowsToTake : Int
+    , rowsLockableNow : Int
+    , probeIsDue : Bool
+    }
+
+
+lockBatchSituationFrom : BotDecisionContext -> { rowsLockableNow : Int, probe : MaxTargetsProbe } -> LockBatchSituation
+lockBatchSituationFrom context { rowsLockableNow, probe } =
+    { targetsHeld = context.readingFromGameClient.targets |> List.length
+    , rowsToTake = maxTargetsRowsToTake (maxTargetsStateFrom context)
+    , rowsLockableNow = rowsLockableNow
+    , probeIsDue =
+        case probe of
+            MaxTargetsProbeOneMore _ ->
+                True
+
+            _ ->
+                False
+    }
+
+
+{-| How many rows one step asks the client to lock.
+
+**The first lock of an engagement is always asked alone, and that is what keeps
+the lock-range rule whole rather than a hope that batching and learning do not
+collide.** `lockAttemptCanTeachRange` is `targetsCount == 0`: an attempt begun
+with the bar occupied is discharged rather than judged, because the refusal
+bound needs the bar empty at both ends and no later reading can undo the count
+it started with. So a lock issued with a target already held could never have
+taught a refusal, and batching exactly those costs the learning nothing. The one
+lock that could -- the bar empty -- is still issued on its own, still attributed
+by `overviewEntryLockHandle`, and still judged exactly as before. Today's caller
+cannot reach this rule with an empty bar at all, since it sits under the branch
+that has already found a locked target; the clause is written out anyway,
+because it is this condition rather than that placement that makes the claim
+true, and a later version that batches from the other lock site must not
+silently start batching the one lock a refusal can be learned from.
+
+**It matters more here than it does in saxrat.** An anomaly is a pocket of
+identically named rats, so `overviewEntryLockHandle` usually declines to
+attribute anything there and the range rule is quiet whatever this does. A
+mission pocket is mixed -- named structures, distinct rat types -- so the handle
+resolves far more often and there is real evidence to protect.
+
+The probe is asked alone for the same discipline one level up: #150's probe is a
+_measurement_, deliberately one row beyond the ceiling, and an answer arriving
+alongside several other locks is an answer to none of them in particular.
+
+The bound is `lockBatchMaximumClicks` and the free slots, whichever is smaller.
+`max 1` because every caller of this is a branch that is about to click
+something -- a batch of zero is not an answer, it is a different branch.
+
+-}
+lockBatchSize : LockBatchSituation -> Int
+lockBatchSize situation =
+    if situation.probeIsDue || (situation.targetsHeld < 1) then
+        1
+
+    else
+        max 1
+            (min lockBatchMaximumClicks
+                (min situation.rowsLockableNow (situation.rowsToTake - situation.targetsHeld))
+            )
+
+
+{-| The most lock clicks one step will ask for.
+
+**A batch is a step with no reading in it**, so its whole length is time the
+retreat, the ship-loss verdict and every other guard cannot act on. This bot's
+own corpus sizes the number rather than saxrat's: over 39 recorded mission runs
+and their **40,903** `send-effects` steps the median step is 1.02 s and the 99th
+percentile 4.53 s, while a **lock** step's own median is **1.30 s** -- half
+saxrat's 2.56 s, because the rows a mission pocket locks sit close together and
+the host's eased glide between them is short. Three clicks is therefore about
+3.9 s here and stays inside the 4.53 s an ordinary step already reaches, where
+on saxrat the same three ran past everything it had ever dispatched.
+
+The corpus also says three is where the curve flattens. Of the 486 recorded
+runs of consecutive locks, 419 -- **86%** -- are three locks or fewer, so a cap
+of three collapses the whole of them into one step; raising it to four buys 7
+more percentage points and to five 10, while the blind interval grows from
+3.9 s to 5.2 s and 6.5 s. That is a poor trade for a bot whose retreat is
+measured in readings.
+
+Unlike saxrat this bot has precedent for a long step -- its longest recorded is
+**12.9 s**, a typed station name in one `WindowsInputRequest` -- so the bound
+here is not about what the host can carry. It is about how long the guards go
+unasked.
+
+The second reason is #163's: posted input is dropped silently under load in this
+environment, at 53-100 ms per event in the two runs that lost a typed query
+against under 18 ms everywhere else, and a burst is exactly the shape that fails
+that way. A bound caps how many locks one such episode can take with it, which is
+worth having even though `updateLockBatchAccounting` counts what went missing.
+
+-}
+lockBatchMaximumClicks : Int
+lockBatchMaximumClicks =
+    3
+
+
+{-| Whether a batch already dispatched is still waiting for the target bar.
+
+The bar lags the clicks -- a lock takes a moment to register -- and
+`overviewEntriesToLock` filters on the rows' own indicators, so without this the
+next reading would find the same rows still unlocked and click every one of them
+a second time. That is `moduleButtonClickSettlingSteps`' problem in the lock
+site, and it costs more here: a whole batch re-issued is several seconds of the
+pocket spent asking for locks already granted.
+
+Only batches settle. A single lock is left exactly as it was, repeated clicks
+and all, because that is the behaviour every recorded run was flown on and
+narrowing it is not this change.
+
+-}
+lockBatchIsSettling : Maybe LockBatchDispatch -> Bool
+lockBatchIsSettling dispatch =
+    dispatch /= Nothing
 
 
 {-| How many readings a lock the bot asked for gets to land before the outcome
@@ -14184,13 +14440,22 @@ overviewEntryLockHandle allEntries entry =
                         Nothing
 
 
-{-| The screen point a lock click went to, from the effects of one step.
+{-| The screen points the lock clicks of one step went to, in dispatch order.
 
 The lock chord is Ctrl held over a plain left click
-(`lockTargetFromOverviewEntry`), and it is the only place in this bot that
+(`lockChordForOverviewEntry`), and it is the only place in this bot that
 presses Ctrl without Shift -- `ctrlShiftClickUiElement`, the unlock, holds
 both. So the modifiers alone identify the gesture, and the `MouseMoveTo` that
 travels with every click carries where it went.
+
+**Every point rather than the first**, which is what makes a batched step
+distinguishable from a single lock at all. A reader answering `Maybe` cannot
+tell "one lock" from "three locks, of which this is the one I happened to take",
+so it would have gone on attributing the next reading's outcome to the first row
+of a batch -- the feature working while the measurement behind it quietly
+stopped, which is what this repo keeps finding. The count is also what the batch
+accounting is asked for, so what was _asked for_ is counted out of the effects
+themselves and can never disagree with what was dispatched.
 
 Reading the attempt out of the effects rather than out of the decision is not a
 detour: `updateMemoryForNewReadingFromGame` is the only place that can write
@@ -14198,8 +14463,8 @@ memory, and it sees the previous steps' effects but not the decision that
 produced them.
 
 -}
-lockClickLocationFromStepEffects : List EffectOnWindow.EffectOnWindowStruct -> Maybe EffectOnWindow.Location2d
-lockClickLocationFromStepEffects effects =
+lockClickLocationsFromStepEffects : List EffectOnWindow.EffectOnWindowStruct -> List EffectOnWindow.Location2d
+lockClickLocationsFromStepEffects effects =
     if
         (effects |> List.member (EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL))
             && not (effects |> List.member (EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT))
@@ -14214,10 +14479,9 @@ lockClickLocationFromStepEffects effects =
                         _ ->
                             Nothing
                 )
-            |> List.head
 
     else
-        Nothing
+        []
 
 
 locationIsInDisplayRegion : EffectOnWindow.Location2d -> EveOnline.ParseUserInterface.DisplayRegion -> Bool
@@ -14283,6 +14547,17 @@ the candidate selection in `decideActionInCombat` grows into.
 The bounds are not reset within a session: `BotMemory` starts fresh with each
 one, and the ship does not change mid-session in the way this bot flies.
 
+**A step that asked for more than one lock teaches this rule nothing, and
+discharges whatever was pending.** Attribution is the whole safety of the rule
+and a batch breaks it in both directions at once: the next reading's outcome
+belongs to no one click in particular, and the bar the batch itself filled is
+the very thing the refusal test reads to decide whether a slot was free. So a
+batched reading is treated as the absence of evidence it is, which is
+`overviewEntryLockHandle`'s posture applied to the step rather than to the row.
+`lockBatchSize` is what makes that cost nothing: it issues a batch only where
+the bar is already occupied, and such a lock could never have moved either bound
+anyway -- see `lockAttemptCanTeachRange`.
+
 -}
 updateLockRangeLearning : UpdateMemoryContext BotSettings -> BotMemory -> LockRangeLearning
 updateLockRangeLearning context botMemoryBefore =
@@ -14327,11 +14602,24 @@ updateLockRangeLearning context botMemoryBefore =
         -- are considered, for the reason the whole overview section of CLAUDE.md
         -- exists: a hidden row's region belongs to whatever was recycled into
         -- it.
-        entryJustClicked : Maybe OverviewWindowEntry
-        entryJustClicked =
+        lockClickLocations : List EffectOnWindow.Location2d
+        lockClickLocations =
             context.previousStepsEffects
                 |> List.head
-                |> Maybe.andThen lockClickLocationFromStepEffects
+                |> Maybe.withDefault []
+                |> lockClickLocationsFromStepEffects
+
+        -- The step asked for several locks at once, so nothing this reading
+        -- shows can be attributed to any one of them. See the doc comment on
+        -- the rule below.
+        stepWasBatched : Bool
+        stepWasBatched =
+            1 < (lockClickLocations |> List.length)
+
+        entryJustClicked : Maybe OverviewWindowEntry
+        entryJustClicked =
+            lockClickLocations
+                |> List.head
                 |> Maybe.andThen
                     (\location ->
                         entries
@@ -14378,154 +14666,162 @@ updateLockRangeLearning context botMemoryBefore =
                         _ ->
                             botMemoryBefore.lockAttempt
     in
-    case attemptAfterClick of
-        Nothing ->
-            unchanged
+    if stepWasBatched then
+        -- Nothing is learned and nothing is carried. Discharging rather than
+        -- merely declining to open one, because an attempt still pending when a
+        -- batch goes out is an attempt whose verdict would be read against a bar
+        -- the batch itself is filling.
+        { unchanged | attempt = Nothing }
 
-        Just attempt ->
-            let
-                entryNow : Maybe OverviewWindowEntry
-                entryNow =
-                    if shipCannotLock then
-                        Nothing
+    else
+        case attemptAfterClick of
+            Nothing ->
+                unchanged
 
-                    else
-                        entries
-                            |> List.filter overviewEntryIsDisplayed
-                            |> List.filter (\entry -> overviewEntryLockHandle entries entry == Just attempt.handle)
-                            |> List.head
-            in
-            case entryNow of
-                Nothing ->
-                    -- The row is gone or is no longer rendered, or the ship
-                    -- cannot lock anything just now. It may have died, or
-                    -- scrolled out of view, or the overview may have re-sorted
-                    -- -- none of which says anything about range.
-                    { unchanged | attempt = Nothing }
-
-                Just entry ->
-                    let
-                        -- Held at the bound rather than allowed to run on, for
-                        -- the same reason the drone give-up latches: the number
-                        -- is shown to an operator, and one that climbs forever
-                        -- while nothing is waiting on it reads as a fault.
-                        attemptCarried : Maybe LockAttempt
-                        attemptCarried =
-                            Just
-                                { attempt
-                                    | readingsWaited =
-                                        min lockAttemptReadingsBeforeVerdict (attempt.readingsWaited + 1)
-                                }
-
-                        -- The distance a bound moves to lies somewhere between
-                        -- the reading the attempt started on and this one. Each
-                        -- bound takes the end that makes the weaker claim -- the
-                        -- smaller distance for the one that only rises, the
-                        -- larger for the one that only falls -- so neither is
-                        -- ever moved further than the evidence reaches.
-                        distanceNow : Int
-                        distanceNow =
-                            entry.objectDistanceInMeters |> Result.withDefault attempt.distanceInMeters
-                    in
-                    if overviewEntryIsTargetedOrTargeting entry then
-                        let
-                            provenAt : Int
-                            provenAt =
-                                min attempt.distanceInMeters distanceNow
-
-                            -- A completed lock ends the attempt. One still
-                            -- spooling up does not: `targeting` is the client
-                            -- having accepted the request, not having finished
-                            -- it, and a lock that is accepted and never finishes
-                            -- is exactly the wait this bound exists to end.
-                            attemptAfter : Maybe LockAttempt
-                            attemptAfter =
-                                if entry.commonIndications.targetedByMe then
-                                    Nothing
-
-                                else
-                                    attemptCarried
-                        in
-                        if provenAt > (botMemoryBefore.lockProvenAtMeters |> Maybe.withDefault 0) then
-                            { attempt = attemptAfter
-                            , provenAtMeters = Just provenAt
-                            , refusedAtMeters = botMemoryBefore.lockRefusedAtMeters
-                            , change =
-                                Just
-                                    ("Learned lock range: the client accepted a lock at "
-                                        ++ (provenAt |> String.fromInt)
-                                        ++ " m, further than anything locked before -- lock-proven-at rises from "
-                                        ++ (botMemoryBefore.lockProvenAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "unset")
-                                        ++ " to "
-                                        ++ (provenAt |> String.fromInt)
-                                        ++ " m."
-                                    )
-                            }
+            Just attempt ->
+                let
+                    entryNow : Maybe OverviewWindowEntry
+                    entryNow =
+                        if shipCannotLock then
+                            Nothing
 
                         else
-                            { unchanged | attempt = attemptAfter }
-
-                    else if not (lockAttemptCanTeachRange attempt) then
-                        -- The client did not take this lock and the bar was not
-                        -- empty when it was asked, so there is nothing here for
-                        -- either bound and nothing to wait for. See
-                        -- `lockAttemptCanTeachRange`.
+                            entries
+                                |> List.filter overviewEntryIsDisplayed
+                                |> List.filter (\entry -> overviewEntryLockHandle entries entry == Just attempt.handle)
+                                |> List.head
+                in
+                case entryNow of
+                    Nothing ->
+                        -- The row is gone or is no longer rendered, or the ship
+                        -- cannot lock anything just now. It may have died, or
+                        -- scrolled out of view, or the overview may have re-sorted
+                        -- -- none of which says anything about range.
                         { unchanged | attempt = Nothing }
 
-                    else if attempt.readingsWaited < lockAttemptReadingsBeforeVerdict then
-                        { unchanged | attempt = attemptCarried }
-
-                    else if (attempt.targetsCount /= 0) || (targetsCount /= 0) then
-                        -- The ship held a locked target at one end of the
-                        -- attempt or the other, so it may simply have had no free
-                        -- slot -- and it may equally have locked something else
-                        -- while this one was waiting. An empty target bar at both
-                        -- ends is the one reading that rules out both at once,
-                        -- and only then is a lock that never landed evidence
-                        -- about range rather than about capacity.
-                        --
-                        -- The first of the two is unreachable now, since
-                        -- `lockAttemptCanTeachRange` discharges such an attempt
-                        -- several branches above. It is written out anyway
-                        -- because it is this condition rather than that
-                        -- placement that makes the claim true, and a later
-                        -- version that moves the discharge must not silently
-                        -- start learning a range from a full bar.
-                        { unchanged | attempt = attemptCarried }
-
-                    else
+                    Just entry ->
                         let
-                            refusedAt : Int
-                            refusedAt =
-                                max attempt.distanceInMeters distanceNow
-                        in
-                        if refusedAt < (botMemoryBefore.lockRefusedAtMeters |> Maybe.withDefault (refusedAt + 1)) then
-                            { attempt = attemptCarried
-                            , provenAtMeters = botMemoryBefore.lockProvenAtMeters
-                            , refusedAtMeters = Just refusedAt
-                            , change =
+                            -- Held at the bound rather than allowed to run on, for
+                            -- the same reason the drone give-up latches: the number
+                            -- is shown to an operator, and one that climbs forever
+                            -- while nothing is waiting on it reads as a fault.
+                            attemptCarried : Maybe LockAttempt
+                            attemptCarried =
                                 Just
-                                    ("Learned lock range: '"
-                                        ++ (entry.objectName |> Maybe.withDefault "a target")
-                                        ++ "' at "
-                                        ++ (refusedAt |> String.fromInt)
-                                        ++ " m did not lock in "
-                                        ++ (lockAttemptReadingsBeforeVerdict |> String.fromInt)
-                                        ++ " readings with the target bar empty throughout -- lock-refused-at falls from "
-                                        ++ (botMemoryBefore.lockRefusedAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "unset")
-                                        ++ " to "
-                                        ++ (refusedAt |> String.fromInt)
-                                        ++ " m."
-                                    )
-                            }
+                                    { attempt
+                                        | readingsWaited =
+                                            min lockAttemptReadingsBeforeVerdict (attempt.readingsWaited + 1)
+                                    }
+
+                            -- The distance a bound moves to lies somewhere between
+                            -- the reading the attempt started on and this one. Each
+                            -- bound takes the end that makes the weaker claim -- the
+                            -- smaller distance for the one that only rises, the
+                            -- larger for the one that only falls -- so neither is
+                            -- ever moved further than the evidence reaches.
+                            distanceNow : Int
+                            distanceNow =
+                                entry.objectDistanceInMeters |> Result.withDefault attempt.distanceInMeters
+                        in
+                        if overviewEntryIsTargetedOrTargeting entry then
+                            let
+                                provenAt : Int
+                                provenAt =
+                                    min attempt.distanceInMeters distanceNow
+
+                                -- A completed lock ends the attempt. One still
+                                -- spooling up does not: `targeting` is the client
+                                -- having accepted the request, not having finished
+                                -- it, and a lock that is accepted and never finishes
+                                -- is exactly the wait this bound exists to end.
+                                attemptAfter : Maybe LockAttempt
+                                attemptAfter =
+                                    if entry.commonIndications.targetedByMe then
+                                        Nothing
+
+                                    else
+                                        attemptCarried
+                            in
+                            if provenAt > (botMemoryBefore.lockProvenAtMeters |> Maybe.withDefault 0) then
+                                { attempt = attemptAfter
+                                , provenAtMeters = Just provenAt
+                                , refusedAtMeters = botMemoryBefore.lockRefusedAtMeters
+                                , change =
+                                    Just
+                                        ("Learned lock range: the client accepted a lock at "
+                                            ++ (provenAt |> String.fromInt)
+                                            ++ " m, further than anything locked before -- lock-proven-at rises from "
+                                            ++ (botMemoryBefore.lockProvenAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "unset")
+                                            ++ " to "
+                                            ++ (provenAt |> String.fromInt)
+                                            ++ " m."
+                                        )
+                                }
+
+                            else
+                                { unchanged | attempt = attemptAfter }
+
+                        else if not (lockAttemptCanTeachRange attempt) then
+                            -- The client did not take this lock and the bar was not
+                            -- empty when it was asked, so there is nothing here for
+                            -- either bound and nothing to wait for. See
+                            -- `lockAttemptCanTeachRange`.
+                            { unchanged | attempt = Nothing }
+
+                        else if attempt.readingsWaited < lockAttemptReadingsBeforeVerdict then
+                            { unchanged | attempt = attemptCarried }
+
+                        else if (attempt.targetsCount /= 0) || (targetsCount /= 0) then
+                            -- The ship held a locked target at one end of the
+                            -- attempt or the other, so it may simply have had no free
+                            -- slot -- and it may equally have locked something else
+                            -- while this one was waiting. An empty target bar at both
+                            -- ends is the one reading that rules out both at once,
+                            -- and only then is a lock that never landed evidence
+                            -- about range rather than about capacity.
+                            --
+                            -- The first of the two is unreachable now, since
+                            -- `lockAttemptCanTeachRange` discharges such an attempt
+                            -- several branches above. It is written out anyway
+                            -- because it is this condition rather than that
+                            -- placement that makes the claim true, and a later
+                            -- version that moves the discharge must not silently
+                            -- start learning a range from a full bar.
+                            { unchanged | attempt = attemptCarried }
 
                         else
-                            -- The verdict stands, but the bound is already at
-                            -- least this tight, so nothing moves and nothing is
-                            -- said. That is what keeps the log line one per
-                            -- change rather than one per reading, with no
-                            -- separate "already reported" flag to get wrong.
-                            { unchanged | attempt = attemptCarried }
+                            let
+                                refusedAt : Int
+                                refusedAt =
+                                    max attempt.distanceInMeters distanceNow
+                            in
+                            if refusedAt < (botMemoryBefore.lockRefusedAtMeters |> Maybe.withDefault (refusedAt + 1)) then
+                                { attempt = attemptCarried
+                                , provenAtMeters = botMemoryBefore.lockProvenAtMeters
+                                , refusedAtMeters = Just refusedAt
+                                , change =
+                                    Just
+                                        ("Learned lock range: '"
+                                            ++ (entry.objectName |> Maybe.withDefault "a target")
+                                            ++ "' at "
+                                            ++ (refusedAt |> String.fromInt)
+                                            ++ " m did not lock in "
+                                            ++ (lockAttemptReadingsBeforeVerdict |> String.fromInt)
+                                            ++ " readings with the target bar empty throughout -- lock-refused-at falls from "
+                                            ++ (botMemoryBefore.lockRefusedAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "unset")
+                                            ++ " to "
+                                            ++ (refusedAt |> String.fromInt)
+                                            ++ " m."
+                                        )
+                                }
+
+                            else
+                                -- The verdict stands, but the bound is already at
+                                -- least this tight, so nothing moves and nothing is
+                                -- said. That is what keeps the log line one per
+                                -- change rather than one per reading, with no
+                                -- separate "already reported" flag to get wrong.
+                                { unchanged | attempt = attemptCarried }
 
 
 {-| The lock-range bounds, for the status line.
@@ -14553,6 +14849,280 @@ describeLockRange context =
                 |> Maybe.withDefault "none"
            )
         ++ ")."
+
+
+{-| Everything the batch accounting looks at on one reading.
+
+`targetsCountBefore` is the bar on the _previous_ reading, which is the reading a
+step's effects were decided from -- so it is what the batch expected to add to,
+and the only number the client's answer can be measured against. `targetsCount`
+is this reading's.
+
+`clicksAsked` is counted out of the effects that were dispatched rather than out
+of the rows the decision picked, so a row whose click point could not be computed
+contributes no `MouseMoveTo` and is never counted as a lock that was asked for.
+
+-}
+type alias LockBatchReading =
+    { clicksAsked : Int
+    , targetsCount : Int
+    , targetsCountBefore : Int
+    }
+
+
+lockBatchReadingFrom : UpdateMemoryContext BotSettings -> Int -> LockBatchReading
+lockBatchReadingFrom context targetsCountBefore =
+    { clicksAsked =
+        context.previousStepsEffects
+            |> List.head
+            |> Maybe.withDefault []
+            |> lockClickLocationsFromStepEffects
+            |> List.length
+    , targetsCount = context.readingFromGameClient.targets |> List.length
+    , targetsCountBefore = targetsCountBefore
+    }
+
+
+{-| What the batch bookkeeping looks like after this reading.
+
+The two totals are for the session and only ever rise. `change` holds a sentence
+only on the reading a batch was judged short, `lockRangeLastChange`'s mechanism
+for its reason: one line per shortfall, with no separate "already reported" flag.
+
+-}
+type alias LockBatchAccounting =
+    { dispatch : Maybe LockBatchDispatch
+    , clicksAsked : Int
+    , clicksAnswered : Int
+    , change : Maybe String
+    }
+
+
+{-| The state the accounting carries between readings.
+-}
+type alias LockBatchState =
+    { dispatch : Maybe LockBatchDispatch
+    , clicksAsked : Int
+    , clicksAnswered : Int
+    }
+
+
+lockBatchStateFrom : BotDecisionContext -> LockBatchState
+lockBatchStateFrom context =
+    { dispatch = context.memory.lockBatch
+    , clicksAsked = context.memory.lockBatchClicksAsked
+    , clicksAnswered = context.memory.lockBatchClicksAnswered
+    }
+
+
+{-| Count what a batch asked the client for against what the target bar did.
+
+**This exists because a dropped lock click is silent.** #163 established that in
+this environment posted input is dropped under load -- in the two runs that lost
+a typed query every posted event cost 53-100 ms against under 18 ms everywhere
+else, and characters vanished with nothing noticing -- and #75's
+`Emperor Family Bureau` arriving as `eueu` is the same mechanism. A burst of
+clicks is exactly that shape, and the failure it produces is a bar with fewer
+targets in it, which reads identically to a bar that was only ever asked for
+fewer. So the number asked for is written down, and the bar is read back.
+
+The bar is measured from `targetsCountBefore`, the reading the step was decided
+from, rather than from the reading that observes the click: some of the batch may
+already have landed by then, which would understate what the client answered.
+
+**Two confounds, and both are stated rather than designed around, because this
+only ever reports.** A rat dying inside the window lowers the bar and reads as a
+click that went missing; a lock the ship took by itself raises it and reads as
+one that landed. Neither can be told apart from a drop by anything in a reading,
+which is exactly why nothing decides on this number -- it is an instrument for an
+operator, and in particular it never reaches the lock-range rule, which declines
+to learn from a batched reading at all.
+
+The verdict also ends the settling window `lockBatchIsSettling` holds the lock
+site in, so this is what bounds that wait: the bar catching up ends it early, and
+`lockBatchReadingsBeforeVerdict` ends it whatever the client does.
+
+-}
+updateLockBatchAccounting : LockBatchReading -> LockBatchState -> LockBatchAccounting
+updateLockBatchAccounting reading stateBefore =
+    let
+        unchanged : LockBatchAccounting
+        unchanged =
+            { dispatch = stateBefore.dispatch
+            , clicksAsked = stateBefore.clicksAsked
+            , clicksAnswered = stateBefore.clicksAnswered
+            , change = Nothing
+            }
+
+        judged : LockBatchDispatch -> Int -> LockBatchAccounting
+        judged dispatch answered =
+            { dispatch = Nothing
+            , clicksAsked = stateBefore.clicksAsked + dispatch.clicksAsked
+            , clicksAnswered = stateBefore.clicksAnswered + answered
+            , change =
+                if answered < dispatch.clicksAsked then
+                    Just
+                        ("Lock batch came up short: asked the client for "
+                            ++ (dispatch.clicksAsked |> String.fromInt)
+                            ++ " locks in one step with the target bar at "
+                            ++ (dispatch.targetsCountBefore |> String.fromInt)
+                            ++ ", and "
+                            ++ (lockBatchReadingsBeforeVerdict |> String.fromInt)
+                            ++ " readings later it holds "
+                            ++ (reading.targetsCount |> String.fromInt)
+                            ++ " -- "
+                            ++ (dispatch.clicksAsked - answered |> String.fromInt)
+                            ++ " unaccounted for. A rat dying inside that window reads the same way, so this is a count to watch rather than a verdict."
+                        )
+
+                else
+                    Nothing
+            }
+
+        answeredFor : LockBatchDispatch -> Int
+        answeredFor dispatch =
+            max 0 (reading.targetsCount - dispatch.targetsCountBefore)
+    in
+    if 1 < reading.clicksAsked then
+        let
+            -- A batch was just dispatched. Any dispatch still open is
+            -- unreachable here, since the lock site waits out the settling
+            -- window that only a verdict ends -- this replaces it anyway,
+            -- because it is that rather than the placement which keeps one
+            -- batch from being credited with another's locks.
+            dispatched : LockBatchDispatch
+            dispatched =
+                { clicksAsked = reading.clicksAsked
+                , targetsCountBefore = reading.targetsCountBefore
+                , readingsWaited = 0
+                }
+        in
+        if dispatched.clicksAsked <= answeredFor dispatched then
+            -- The bar already holds every lock the batch asked for, on the very
+            -- reading the clicks are seen. Judged now rather than opened, so a
+            -- client that answers at once costs no settling reading at all --
+            -- which would otherwise be a third of what batching three clicks
+            -- saves.
+            judged dispatched (answeredFor dispatched)
+
+        else
+            { unchanged | dispatch = Just dispatched }
+
+    else
+        case stateBefore.dispatch of
+            Nothing ->
+                unchanged
+
+            Just dispatch ->
+                if dispatch.clicksAsked <= answeredFor dispatch then
+                    judged dispatch (answeredFor dispatch)
+
+                else if dispatch.readingsWaited < lockBatchReadingsBeforeVerdict then
+                    { unchanged | dispatch = Just { dispatch | readingsWaited = dispatch.readingsWaited + 1 } }
+
+                else
+                    judged dispatch (answeredFor dispatch)
+
+
+{-| How many readings a batch gets before its locks are counted.
+
+Shorter than `lockAttemptReadingsBeforeVerdict`, and for the opposite reason:
+that one bounds a _verdict about the client_ and is generous because calling a
+slow lock a refusal would teach a wrong range, where this one bounds a **wait**
+-- the lock site holds still while it runs -- and nothing is concluded from it
+beyond a number in the status line. Four readings is roughly the six to ten
+seconds a lock takes to register at this bot's cadence, and being wrong costs one
+line of an operator's status text rather than any decision at all.
+
+-}
+lockBatchReadingsBeforeVerdict : Int
+lockBatchReadingsBeforeVerdict =
+    4
+
+
+{-| The batch bookkeeping, for the status line.
+
+The session totals are the point: one batch coming up short is a rat that died,
+and a run whose answered count trails its asked count all evening is input being
+dropped -- which is the distinction #163 says a reading cannot make on its own and
+an operator can make across a session.
+
+-}
+describeLockBatch : LockBatchState -> String
+describeLockBatch state =
+    "Lock batch: up to "
+        ++ (lockBatchMaximumClicks |> String.fromInt)
+        ++ " clicks a step, asked "
+        ++ (state.clicksAsked |> String.fromInt)
+        ++ " and the bar answered "
+        ++ (state.clicksAnswered |> String.fromInt)
+        ++ " this session"
+        ++ (case state.dispatch of
+                Nothing ->
+                    ", none waiting"
+
+                Just dispatch ->
+                    ", waiting on "
+                        ++ (dispatch.clicksAsked |> String.fromInt)
+                        ++ " asked with the bar at "
+                        ++ (dispatch.targetsCountBefore |> String.fromInt)
+                        ++ " for "
+                        ++ (dispatch.readingsWaited |> String.fromInt)
+                        ++ "/"
+                        ++ (lockBatchReadingsBeforeVerdict |> String.fromInt)
+                        ++ " readings"
+           )
+        ++ "."
+
+
+{-| What the lock site says on the reading it asks for a batch.
+
+Opens with `Lock more targets.` because that is the line an operator has been
+grepping for since before any of this, and a reading where the bot asked for
+three locks is still a reading where it asked for more targets -- see
+`describeMaxTargetsProbe`, whose wording this keeps rather than replaces. The
+rows are named because the batch is the one decision here that acts on more than
+one object, and a log line saying only how many were clicked cannot be checked
+against the bar afterwards.
+
+-}
+describeLockBatchAsked : List OverviewWindowEntry -> String
+describeLockBatchAsked overviewEntries =
+    "Lock more targets. Asking for "
+        ++ (overviewEntries |> List.length |> String.fromInt)
+        ++ " locks in this one step, at "
+        ++ (overviewEntries
+                |> List.map (\entry -> "'" ++ (entry.objectName |> Maybe.withDefault "") ++ "'")
+                |> String.join ", "
+           )
+        ++ " -- the bar already holds a target, so no lock in this step could have taught the lock range anything and none of them is asked to."
+
+
+{-| What the lock site says while a batch it already asked for is settling.
+
+The bar lags the clicks, so without this wait the next reading finds the same
+rows unlocked and clicks every one of them again -- a whole batch re-issued,
+which is several seconds of a pocket spent asking for locks the client has
+already granted. `updateLockBatchAccounting` is what ends it, either because the
+bar caught up or because `lockBatchReadingsBeforeVerdict` ran out, so the wait
+cannot outlive the count that is watching it.
+
+-}
+describeLockBatchSettling : Maybe LockBatchDispatch -> String
+describeLockBatchSettling dispatch =
+    case dispatch of
+        Nothing ->
+            -- Unreachable from a branch that only runs while one is open. Said
+            -- the ordinary way rather than invented, so a caller that reaches it
+            -- anyway reports the wait it is in rather than a batch it has not made.
+            "Waiting for the target bar to catch up with the last batch of locks."
+
+        Just open ->
+            "Asked for "
+                ++ (open.clicksAsked |> String.fromInt)
+                ++ " locks in one step "
+                ++ (open.readingsWaited |> String.fromInt)
+                ++ " reading(s) ago and the target bar has not caught up -- wait rather than click those rows again, which would ask for locks the client has already granted."
 
 
 {-| The setting, and everything the client has said about this ship's lock slots.
@@ -15140,6 +15710,11 @@ initBotMemory =
     , lockProvenAtMeters = Nothing
     , lockRefusedAtMeters = Nothing
     , lockRangeLastChange = Nothing
+    , lockBatch = Nothing
+    , lockBatchClicksAsked = 0
+    , lockBatchClicksAnswered = 0
+    , lockBatchLastChange = Nothing
+    , targetsCountLastReading = 0
     , maxTargetsStatedByClient = Nothing
     , maxTargetsHeldAtOnce = Nothing
     , maxTargetsLastChange = Nothing
@@ -15409,7 +15984,7 @@ statusTextFromState context =
                     -- folding them into a shared line would make that line jump
                     -- between short and unwieldy.
                     [ [ describeShip, describeDrones, describeDroneLaunchCeiling (droneLaunchStateFrom context) ]
-                    , [ describeRatsInOverview, describeCurrentTarget, describeOverview, describeLockRange context, describeMaxTargets (maxTargetsStateFrom context) ]
+                    , [ describeRatsInOverview, describeCurrentTarget, describeOverview, describeLockRange context, describeLockBatch (lockBatchStateFrom context), describeMaxTargets (maxTargetsStateFrom context) ]
                     , [ describeZeroDamage context ]
                     , [ describeClearing context ]
                     , describeAccelerationGate context
@@ -19877,6 +20452,14 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         lockRangeLearning =
             updateLockRangeLearning context botMemoryBefore
 
+        lockBatchAccounting =
+            updateLockBatchAccounting
+                (lockBatchReadingFrom context botMemoryBefore.targetsCountLastReading)
+                { dispatch = botMemoryBefore.lockBatch
+                , clicksAsked = botMemoryBefore.lockBatchClicksAsked
+                , clicksAnswered = botMemoryBefore.lockBatchClicksAnswered
+                }
+
         maxTargetsLearning =
             updateMaxTargetsLearning (maxTargetsReadingFrom context)
                 (maxTargetsStateBefore context botMemoryBefore)
@@ -20561,6 +21144,11 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         else
             0
     , dockingRunIn = dockingRunIn
+    , lockBatch = lockBatchAccounting.dispatch
+    , lockBatchClicksAsked = lockBatchAccounting.clicksAsked
+    , lockBatchClicksAnswered = lockBatchAccounting.clicksAnswered
+    , lockBatchLastChange = lockBatchAccounting.change
+    , targetsCountLastReading = context.readingFromGameClient.targets |> List.length
     , lockAttempt = lockRangeLearning.attempt
     , lockProvenAtMeters = lockRangeLearning.provenAtMeters
     , lockRefusedAtMeters = lockRangeLearning.refusedAtMeters
