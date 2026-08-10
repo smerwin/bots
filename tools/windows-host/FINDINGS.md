@@ -104,6 +104,7 @@ same as macOS that is a finding too, and the evidence is given.
 | `tp_name` | +0x18 | +0x18 | all ten exported type objects name themselves correctly |
 | **`str` characters** | **+0x24** | **+0x20** | **differs — see below** |
 | **`int` value width** | **8** | **4** | **differs — same cause** |
+| **`unicode` char width** | **4 (UCS-4)** | **2 (UCS-2)** | **differs — see 2a** |
 | widget wrapper size | 32 | 32 | the type object's own `tp_basicsize` |
 | widget instance dict | +0x10 | +0x10 | the type object's own `tp_dictoffset` |
 | widget weakref slot | +0x18 | +0x18 | the type object's own `tp_weaklistoffset` |
@@ -142,6 +143,52 @@ against six accidentally-printable fragments the other way.
 3,172 of 4,000 strings still "decode": the length is right, a NUL turns up, and
 the result is garbage. Nothing raises an error. A host built by carrying the
 macOS constants across would have produced a UI tree full of plausible rubbish.
+
+## 2a. The one that hid: `unicode` is UCS-2 here, and reading it wrong drops it
+
+This is the third difference, it is not an LLP64 consequence, and it is the one
+worth reading if only one of these is read. `Py_UNICODE` is `wchar_t`, so its
+width is a **build option** rather than a platform constant: a CPython 2.7
+configured `--enable-unicode=ucs4` stores 4 bytes per character and the stock
+Windows build stores 2. macOS reads UCS-4. This client is UCS-2.
+
+**Getting it wrong does not garble a string, it deletes one.** UTF-16 bytes
+decoded as UTF-32 land on unassigned planes and raise, so the decoder answered
+`None` and the walker omitted the key. Nothing errored, nothing looked wrong, and
+`str` values — which are most of what a casual look at the tree shows — decoded
+perfectly throughout. What went missing was only the values EVE happens to store
+as `unicode`.
+
+**What those turned out to be:**
+
+| | before | after |
+|---|---:|---:|
+| display texts the real Elm parser can see | **57** | **269** |
+| nodes with a display region | 2548 | 2670 |
+
+Roughly **80% of the client's readable text** was invisible to the bot. And the
+two things it hid were each blocking a bot outright:
+
+- **Every context-menu entry's text.** The menu opened, the bot saw it, and it
+  had no entries it could read — so `Could not find menu entry with text
+  containing … 'jump'` on every attempt. That is why the mission runner never
+  jumped a gate across a whole 60-tick run. Fixed, the same right-click reads
+  `['Jump Through Stargate', 'Show Info', 'Set Destination', 'Add Waypoint', …]`.
+- **Every probe-scanner anomaly name.** saxrat reported `I see 4 scan results,
+  and no matching anomaly` for its whole first run, because the names it matches
+  `anomaly-name` against were among the dropped values. Fixed, it finds anomalies
+  and warps to them.
+
+**Two symptoms, one bug, and neither pointed at it.** Both looked like a cascade
+problem or a settings problem — which is exactly the shape issue #176 warns
+about, arriving as *absence* rather than as wrong data. It was found by chasing a
+menu that opened and had nothing in it, and dumping one node's every field with
+its value's type beside it. `probe.py` now measures the width the same way it
+measures the other two, so the next build is asked rather than assumed.
+
+**It fails safe, and that is the only reason it was survivable.** A width guess
+that produced *plausible* text instead of nothing would have put fabricated menu
+entries in front of a cascade.
 
 ### One thing Windows offers that macOS does not
 

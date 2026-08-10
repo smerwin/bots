@@ -46,7 +46,9 @@ from eve_mem import (
 # Everything else -- the object header, PyTypeObject, the stock list, and the
 # whole of Blue's custom dict -- is byte-identical to macOS.  See probe.py for
 # how each was decided and MEASUREMENTS.md for the evidence.
-WINDOWS_X64 = replace(Layout(), str_chars=0x20, str_shash=0x18, int_value_size=4)
+WINDOWS_X64 = replace(
+    Layout(), str_chars=0x20, str_shash=0x18, int_value_size=4, unicode_char_size=2
+)
 
 # PyTypeObject fields the walk reads directly.  tp_dictoffset is the authority
 # for where an instance keeps its __dict__: the macOS walker hardcodes +0x10

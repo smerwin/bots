@@ -145,9 +145,22 @@ class Layout:
     int_value_size: int = 8
     # PyLongObject: ob_size is the digit count and sign; digits follow
     long_digits: int = 0x18
-    # PyUnicodeObject (Python 2 unicode): length, then a pointer to a UCS-4 buffer
+    # PyUnicodeObject (Python 2 unicode): length, then a pointer to a character
+    # buffer whose element width is a *build option* rather than a platform
+    # constant. `Py_UNICODE` is `wchar_t`, so a CPython 2.7 configured
+    # `--enable-unicode=ucs4` stores 4 bytes per character and the stock Windows
+    # build stores 2. macOS reads UCS-4; this client is UCS-2.
+    #
+    # Getting it wrong is not a garbled string, which is why it went unnoticed
+    # for a while: decoding UTF-16 bytes as UTF-32 lands on unassigned planes and
+    # raises, so every `unicode` value in the tree was dropped rather than
+    # mangled. Failing safe made it invisible -- the tree looked complete because
+    # `str` values decoded fine, and only the values EVE happens to store as
+    # `unicode` went missing. Those include every context-menu entry's text,
+    # which is what a cascade matches `'jump'` against.
     unicode_length: int = 0x10
     unicode_buffer: int = 0x18
+    unicode_char_size: int = 4
     # PyFloatObject
     float_value: int = 0x10
     # PyListObject
@@ -610,12 +623,18 @@ class PyReader:
             return None
         if length == 0:
             return ""
-        raw = self.r.read_cached(buffer, 4 * length)
+        width = self.L.unicode_char_size
+        raw = self.r.read_cached(buffer, width * length)
         if raw is None:
             return None
         try:
-            return raw.decode("utf-32-le")
-        except UnicodeDecodeError:
+            # Surrogates are legal in a Python 2 UCS-2 buffer and Python 3 will
+            # not decode a lone one, so they are preserved rather than refused --
+            # dropping the whole string because one character is a surrogate half
+            # would be the same silent loss this width bug already caused.
+            return raw.decode("utf-16-le" if width == 2 else "utf-32-le",
+                              errors="surrogatepass")
+        except (UnicodeDecodeError, ValueError):
             return None
 
     def read_list(self, address: int) -> Optional[list[int]]:

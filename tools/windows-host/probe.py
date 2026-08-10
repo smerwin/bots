@@ -331,6 +331,58 @@ def main() -> int:
             f"{small} inside 32 bits, range {min(values)}..{max(values)}",
         )
 
+    # ------------------------------------------------------- unicode width
+    section("5b. How wide a Python 2 unicode character is")
+
+    print("  `Py_UNICODE` is `wchar_t`, so this is a *build option* rather than a")
+    print("  platform constant: a CPython 2.7 configured --enable-unicode=ucs4")
+    print("  stores 4 bytes per character and the stock Windows build stores 2.")
+    print("  Reading it wrong drops every unicode value rather than garbling it,")
+    print("  because UTF-16 bytes read as UTF-32 land on unassigned planes and")
+    print("  raise -- which is why this hid for a while: `str` decoded fine and")
+    print("  only the values EVE stores as `unicode` went missing, among them")
+    print("  every context-menu entry's text.")
+    print()
+
+    uni_hits = scan_for_pointer(reader, types.by_name["unicode"], SAMPLE_TARGET)
+    uni_candidates = [h - OB_TYPE_OFFSET for h in uni_hits]
+    note("unicode candidates", str(len(uni_candidates)))
+
+    def score_width(width: int) -> tuple[int, list[str]]:
+        good, samples = 0, []
+        probe_layout = replace(L, unicode_char_size=width)
+        probe_py = PyReader(reader, probe_layout, types)
+        for address in uni_candidates:
+            refcount = reader.i64(address)
+            if refcount is None or not (0 < refcount < 10_000_000):
+                continue
+            value = probe_py.read_unicode(address)
+            if not value:
+                continue
+            if all(32 <= ord(c) < 127 or c in "\t\n" for c in value):
+                good += 1
+                if 4 <= len(value) <= 40 and len(samples) < 5:
+                    samples.append(value)
+        return good, samples
+
+    widths = {w: score_width(w) for w in (2, 4)}
+    for width, (good, _) in widths.items():
+        note(f"{width} bytes per character", f"{good} decode to readable text")
+    best = max(widths, key=lambda w: widths[w][0])
+    worst = 2 if best == 4 else 4
+    if widths[best][0] > 4 * max(1, widths[worst][0]):
+        ok(
+            f"unicode is UCS-{best} ({best} bytes per character)",
+            "same as macOS" if best == 4 else "DIFFERENT from macOS's UCS-4",
+        )
+        L = replace(L, unicode_char_size=best)
+        py = PyReader(reader, L, types)
+        if widths[best][1]:
+            ok("unicode values decode", ", ".join(repr(s) for s in widths[best][1]))
+    else:
+        bad("the two character widths are not separated by the evidence")
+        failures += 1
+
     # ------------------------------------------------------------- Blue's dict
     section("6. Blue's custom dict")
 
