@@ -284,8 +284,80 @@ here it is an artefact and the right answer is to make it 1.0.
 touches a coordinate, and the calibration still measures the ratio afterwards
 rather than trusting that the call worked.
 
-**Not sent to the client yet at the time of writing.** The self-test reports what
-it would do and sends nothing without `--execute`.
+### Input reaches the client, and that is now observed rather than assumed
+
+One right-click on an overview row, sent by `SendInput`, then a memory read:
+
+```
+before: 3974 nodes, 0 ContextMenu
+target OverviewScrollEntry canvas region (1444,1151 431x24) -> centre (1659,1163)
+scale 0.99956/0.99933 -> screen (3182,1354)
+bring to foreground: True
+right-click sent
+  after 0.4s cumulative: 1 ContextMenu
+```
+
+So the chain closes: a coordinate computed from the client's own canvas, through
+the scale calibration and the window origin, into `SendInput`, into EVE, and back
+out through the memory read as a menu that was not there before. The `Escape`
+that follows closes it again.
+
+Issue #176's fourth unverified item is therefore **partly** answered. Input
+lands. Whether `SendInput` reproduces the *pacing* the macOS host tuned — the
+30 ms hold and the 210 ms gap, and the per-event cost #163 measured — is still
+open, and one click is not evidence about pacing.
+
+## 5b. The first Windows bot run
+
+`eve-online-mission-runner`, unmodified, from its own directory.
+
+**What worked.** `elm make` compiled 15 modules (0.19.1 is what Windows installs
+and what the app's `elm.json` pins, so the `elm-version` patch macOS needs is not
+needed here). The host attached, listed the client, searched the root, and read.
+92 readings across 45 ticks at a steady **2.4–2.5s** each. The status line came
+out whole — `rats 0 | no target | Lock range: 66000 m (setting 66000, proven -,
+refused -, attempt none). | Max targets: 4 …` — and so did the quick-message
+clause. With `--execute-input` the glide and the nudge both fired, and both look
+exactly like their macOS descriptions:
+
+```
+move: glided (1637.7, 485.3) -> (2032.9, 419.3) distance=400.7px in 0.235s
+move: already at (2032.9, 419.3) but this is a click -- nudged off and
+      glided back for a real movement gesture
+```
+
+**The calibration is right to a pixel and says so.** The host reported
+`window canvas 2276x1491 does not fit a 2277x1492 pt window at any single scale
+(backing 1); falling back to per-axis`, giving 0.99956 / 0.99933. A one-pixel
+disagreement between the client's canvas and its own client area, which costs
+sub-pixel accuracy. Worth knowing it is there rather than wondering later.
+
+**What the run did not do is complete a gate jump**, and this is the honest state
+of it rather than a fix. Every reading decided `A route is set -- travel towards
+the mission's system`, then declined the panel path with `The route panel does
+not name a next system`, then fell back to right-clicking the route marker, and
+that cascade never came back with a menu.
+
+Two things are established about that and a third is not:
+
+- **The panel path declining is consistent with a question CLAUDE.md already has
+  open.** PR #170's rule needs the route panel's `Next System in Route` label,
+  and a search of the whole captured tree finds no such label and no
+  `showinfo:5//` text at all. CLAUDE.md lists "whether a multi-jump route's first
+  marker names the next system" as unread.
+- **It is not the decoder dropping text.** That was checked rather than assumed:
+  of 341 label nodes, 62 carry `_setText`, and the ones that do not have no text
+  key in their dict at all. Everything the decoder omits from a label is
+  `NoneType`, `tuple`, `dict`, `weakref`, `instancemethod` or a trinity render
+  object — which is exactly what `describe_primitive_json` omits on macOS.
+- **Whether the route-marker cascade fails here for a Windows reason is not
+  established.** It is the cascade CLAUDE.md calls "the worst-behaved in the
+  codebase", whose own comment records "'Jump Through Stargate' took 3-4 menu
+  opens before being recognized" against an 8x8 icon, and which carries a widened
+  200px tolerance because of it. A right-click on an ordinary-sized target opens
+  a menu first time, as above. So the mechanism works and this particular target
+  is the known-hard one; that is a reason to suspect the cascade rather than
+  evidence about it.
 
 ## 6. What is here
 
@@ -337,8 +409,16 @@ is where `quickMessage` lives, and the raw tree carries `l_abovemain`, `l_main`,
 
 ## 7. What is not built, and what nobody should assume about it
 
-The issue's order of work is 1–5. **Steps 1 and 2 are done and step 3 is a third
-done.** Steps 4 and 5 are not started.
+The issue's order of work is 1–5. **All five are done**, in the sense that each
+has been attempted and the result recorded — which is not the same as the host
+being finished. A bot runs, reads, decides and drives the mouse; it has not yet
+been watched completing a mission, or a gate jump, or anything else end to end.
+
+**No run has been flown to any outcome.** The longest was 60 ticks, bounded on
+purpose, and it spent all of them in one branch. Nothing here has exercised
+combat, looting, docking, an agent conversation, the ammo swap, the retreat, or
+any of the guards CLAUDE.md spends most of its length on. **A green reading is
+not a working bot**, and the distance between the two is most of this repo.
 
 - **`memory_sample`, `live_reader` and `probe` (the C ones) are not ported and
   probably should not be.** All three exist to work around
@@ -385,7 +465,20 @@ python probe.py                          # is it readable, and what is the layou
 python tree_walker.py --out tree.json    # capture a tree
 python verify/verify_tree.py tree.json   # through the real Elm parser
 python measure_cost.py                   # section 5
+python window_probe.py                   # the client's window, in physical pixels
+python input.py                          # input self-test; sends nothing without --execute
 ```
+
+And the host itself, which is the macOS one with the dispatch in it:
+
+```bash
+cd tools/macos-host/botlab_host
+python botlab_host.py <bot source> --max-ticks 45
+```
+
+Add `--execute-input` to make it drive the real mouse and keyboard. Without it
+the host logs what it would have sent, which is how every reading in this
+document was taken.
 
 Needs 64-bit Python 3 and, for the verifier, `elm` and `node`. The client's
 `elm.json` pins 0.19.1, which is what Windows installs, so the `elm-version`
