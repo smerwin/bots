@@ -231,6 +231,7 @@ class ProcessReader:
             )
         self._handle = handle
         self._page_cache: dict[int, bytes] = {}
+        self._region_memo: list[tuple[int, int]] = []
         self._cache_enabled = False
         self.reads = 0
         self.bytes_read = 0
@@ -320,9 +321,41 @@ class ProcessReader:
         self._cache_enabled = False
 
     def read_cached(self, address: int, size: int) -> Optional[bytes]:
+        """Serve from a per-request 4 KiB page cache.
+
+        Two things were tried to beat this and both lost, so they are recorded
+        rather than left for the next person to retry:
+
+        - **Bigger fixed blocks.** Call count *rose* (10,721 -> 111,737 at 64 KiB)
+          because `ReadProcessMemory` is all-or-nothing and a block crossing the
+          end of a mapped region fails entirely, falling back to an uncached read.
+        - **Bigger blocks clipped to the containing region**, which removes that
+          failure. It removes the straddling and still loses: the cost of a read
+          scales with bytes copied, so 256 KiB blocks moved 1.6 GB per walk and
+          took 5.8s against 2.0s. Clipped and swept, 4 KiB is still the floor
+          (3.0s at 4 KiB, 4.1s at 128 KiB), and the region lookup itself costs
+          more than it saves.
+
+        What is left is not a caching problem. See `ProcessReader.call_overhead`.
+        """
         if not self._cache_enabled:
             return self.try_read(address, size)
-        first = address & ~(self.PAGE - 1)
+        # Fast path: the read lies inside one page, which is nearly every read a
+        # walk makes -- 8 bytes of a pointer field. Worth separating because this
+        # function is called ~372,000 times per tree and the general path below
+        # builds a bytearray and concatenates into it for no reason when there is
+        # only one page to take a slice of.
+        page = address & ~(self.PAGE - 1)
+        offset = address - page
+        if offset + size <= self.PAGE:
+            data = self._page_cache.get(page)
+            if data is None:
+                data = self.try_read(page, self.PAGE)
+                if data is None:
+                    return self.try_read(address, size)
+                self._page_cache[page] = data
+            return data[offset : offset + size]
+        first = page
         last = (address + size - 1) & ~(self.PAGE - 1)
         out = bytearray()
         page = first
@@ -340,6 +373,34 @@ class ProcessReader:
             page += self.PAGE
         start = address - first
         return bytes(out[start : start + size])
+
+    def call_overhead(self, samples: int = 2000) -> tuple[float, float]:
+        """(seconds per 8-byte read, seconds per 4 KiB read), measured.
+
+        The number that decides whether this host wants a native helper. A walk
+        makes ~10,000 reads and spends ~1.9s doing it; if that is the *syscall*
+        it is a platform floor, and if it is `ctypes` marshalling it is an
+        implementation one that C removes.
+        """
+        import time as _t
+
+        address = self.pid and 0
+        base = None
+        for region in self.regions():
+            if region.size >= (1 << 20):
+                base = region.base
+                break
+        if base is None:
+            return (0.0, 0.0)
+        started = _t.perf_counter()
+        for i in range(samples):
+            self.try_read(base + (i % 64) * 8, 8)
+        small = (_t.perf_counter() - started) / samples
+        started = _t.perf_counter()
+        for i in range(samples // 10):
+            self.try_read(base + (i % 16) * 0x1000, 0x1000)
+        big = (_t.perf_counter() - started) / max(1, samples // 10)
+        return (small, big)
 
     # -- typed reads -------------------------------------------------------
 
@@ -533,11 +594,33 @@ class PyReader:
         self.r = reader
         self.L = layout
         self.types = types
+        # Per-request memos. Profiling one real tree found 1,163,675 reads for
+        # 3,617 nodes -- a 15.5x repeat factor, with one address read 60,824
+        # times -- because `primitive` tries decoders in turn and each one
+        # re-reads `ob_type` to check whether it applies. Memoizing the two
+        # hottest answers collapses that without changing any of them.
+        #
+        # Scoped to a request for the same reason the page cache is: holding
+        # them across reads would hand the bot a tree blended from moments
+        # seconds apart. Within one walk they are a consistency *gain*.
+        self._type_memo: dict[int, Optional[int]] = {}
+        self._str_memo: dict[int, Optional[bytes]] = {}
+
+    def begin_request(self) -> None:
+        self._type_memo.clear()
+        self._str_memo.clear()
+
+    end_request = begin_request
 
     # -- header ------------------------------------------------------------
 
     def type_of(self, address: int) -> Optional[int]:
-        return self.r.u64(address + self.L.ob_type)
+        memo = self._type_memo
+        if address in memo:
+            return memo[address]
+        value = self.r.u64(address + self.L.ob_type)
+        memo[address] = value
+        return value
 
     def type_name(self, address: int) -> Optional[str]:
         """The ``tp_name`` of the object's type, i.e. its class name."""
@@ -562,7 +645,20 @@ class PyReader:
     # -- scalars -----------------------------------------------------------
 
     def read_str(self, address: int) -> Optional[bytes]:
-        """Python 2 ``str``: PyObject_VAR_HEAD, ob_shash, ob_sstate, then chars."""
+        """Python 2 ``str``: PyObject_VAR_HEAD, ob_shash, ob_sstate, then chars.
+
+        Memoized per request: a UI tree's dict keys are interned, so the same few
+        dozen strings (``_name``, ``_displayX``, ``children`` …) are decoded once
+        per node otherwise -- 229,466 calls on one real tree.
+        """
+        memo = self._str_memo
+        if address in memo:
+            return memo[address]
+        value = self._read_str_uncached(address)
+        memo[address] = value
+        return value
+
+    def _read_str_uncached(self, address: int) -> Optional[bytes]:
         if self.type_of(address) != self.types.by_name.get("str"):
             return None
         size = self.r.i64(address + self.L.ob_size)

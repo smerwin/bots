@@ -477,28 +477,55 @@ not a working bot**, and the distance between the two is most of this repo.
   and it is worth someone disagreeing with.
 - **`botlab_host.py` is untouched.** Nothing is wired into the host's dispatch,
   no bot has been run, and the Elm side has never been driven by this.
-- **The 2.4s read wants work before it drives anything**, and the obvious lever
-  is already spent. 4,059 nodes take about 10,900 `ReadProcessMemory` calls, and
-  the macOS host got 8.6x out of a 4K page cache. Reading in bigger blocks --
-  which `ReadProcessMemory` allows and `mach_vm_read_overwrite` does not -- looked
-  like the free win and is not:
+- **The read is 1.37s and it is not memory reading.** This was measured rather
+  than assumed, and the answer overturns the obvious framing.
 
-  | block | median | RPM calls | MiB read |
-  |---:|---:|---:|---:|
-  | **4 KiB** | **2418 ms** | **10,721** | 41.9 |
-  | 8 KiB | 2561 ms | 8,204 | 56.8 |
-  | 32 KiB | 4043 ms | 15,463 | 98.0 |
-  | 64 KiB | 6606 ms | 111,737 | 127.2 |
-  | 128 KiB | 10991 ms | 240,548 | 161.8 |
+  A 4 KiB `ReadProcessMemory` costs **9.6 µs** and an 8-byte one **5.2 µs**
+  (`ProcessReader.call_overhead`). A walk makes ~10,000 of them, so **the reads
+  are 0.10s of it**. Everything else is CPython interpreter overhead — which is
+  exactly where the macOS project was before it wrote `tree_walker.c`: "profiling
+  showed the Python implementation had become genuinely CPU-bound on CPython
+  interpreter overhead (millions of small operations for one tree read) once
+  round-trip count and data volume were no longer the bottleneck."
 
-  Past 8 KiB the *call count* rises, which is the opposite of what a cache is
-  for. `ReadProcessMemory` is all-or-nothing: a block straddling the end of a
-  mapped region fails entirely rather than returning its readable prefix, and
-  falls back to an uncached read. The client's object heap is many modest regions
-  rather than a few large ones, so a bigger block straddles one more often and
-  each straddle costs a wasted read plus an uncached one. **The remaining cost is
-  Python, not the read strategy** — which is the argument for a native helper
-  here, and the only argument for one this port has found.
+  Profiling one tree found **1,163,675 reads for 3,617 nodes** — a 15.5x repeat
+  factor, one address read 60,824 times — because `primitive` tries decoders in
+  turn and each re-read `ob_type` to see whether it applied. Three changes, each
+  measured:
+
+  | | median |
+  |---|---:|
+  | as first written | 2405 ms |
+  | + per-request memo on `type_of` and `read_str` | 2046 ms |
+  | + single-page fast path in `read_cached` | 1486 ms |
+  | + `iter_unpack` over dict entries | **1370 ms** |
+
+  **43% off, and the floor is still ~13x the read cost.** Two things were tried
+  to beat it and both lost, recorded in `read_cached` so they are not retried:
+  bigger fixed blocks (call count *rose* to 111,737 at 64 KiB, because a block
+  straddling the end of a mapped region fails whole), and bigger blocks clipped
+  to the containing region, which removes the straddling and still loses because
+  read cost scales with bytes copied — 256 KiB blocks moved 1.6 GB per walk and
+  took 5.8s.
+
+  So the case for a native helper is the same one macOS made, and it is now
+  quantified: **the work is interpreter overhead, and there is no caching
+  strategy that removes it.** No C compiler is installed here, so it is not
+  attempted.
+
+- **Read time is a correctness property here, not only a throughput one**, which
+  is the part that was not expected. `ShipUI.hitpointsPercent` is read out of a
+  widget the client is mutating, and CLAUDE.md names the mechanism for a garbage
+  value: "a read landing on a reallocated object". Over one saxrat run, **143 of
+  893 ship-gauge readings (16%) were implausible** (>100%), against a macOS
+  record of corruption that is "always for exactly one reading and always
+  surrounded by sane values". Worse, they arrive in *runs* — `2991600, 2991600,
+  44, 44, 44, 44, 44, 0, 0, 0, 0, 0` — and `believed`, the healthier of the last
+  two readings, is built to absorb a single bad reading and cannot absorb
+  consecutive ones. The retreat fired on it: 229 `get out get out get out` lines
+  on a hull that was never below full armour, ending that run's usefulness.
+  A longer walk means more of the tree is reallocated mid-walk, so this should
+  fall with read time; that it *does* is not yet measured.
 - **One reading, one client, one machine, one patch level.** Every number here
   comes from a single session against a single account's client. The layout in
   section 2 is a measurement of *this build*, and `probe.py` exists so the next

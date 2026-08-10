@@ -126,8 +126,9 @@ class Walker:
             dict_address + L.dict_header, L.dict_inline_entries * L.dict_entry_size
         )
         if inline:
-            for i in range(L.dict_inline_entries):
-                h, k, v = struct.unpack_from("<QQQ", inline, i * L.dict_entry_size)
+            # iter_unpack rather than a per-entry unpack_from: this runs once per
+            # dict and there are ~7,000 dicts in a tree.
+            for h, k, v in struct.iter_unpack("<QQQ", inline):
                 if k:
                     out.append((h, k, v))
                     if len(out) >= limit:
@@ -142,8 +143,7 @@ class Walker:
             capacity = min(capacity, MAX_DICT_ENTRIES)
             raw = self.r.read_cached(overflow, capacity * L.dict_entry_size)
             if raw:
-                for i in range(capacity):
-                    h, k, v = struct.unpack_from("<QQQ", raw, i * L.dict_entry_size)
+                for h, k, v in struct.iter_unpack("<QQQ", raw):
                     if k:
                         out.append((h, k, v))
                         if len(out) >= limit:
@@ -332,10 +332,12 @@ class Walker:
     ) -> dict:
         self.nodes = 0
         self.r.begin_request()
+        self.py.begin_request()
         try:
             return self.walk(root, 0, max_depth, [node_budget])
         finally:
             self.r.end_request()
+            self.py.end_request()
 
 
 class _Omit:
