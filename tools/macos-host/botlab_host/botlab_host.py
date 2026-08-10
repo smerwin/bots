@@ -162,6 +162,19 @@ if IS_WINDOWS:
         sys.path.insert(0, _WINDOWS_HOST_DIR)
     import win_platform  # noqa: E402
 
+    # The other half of the same problem as the driver pipe below. This host
+    # prints the bot's own status text -- mission names, chat, context-menu
+    # entries -- to stderr on every reading, and a Windows console defaults to
+    # cp1252, which raises on any character it has no place for. Left as
+    # `errors="replace"` rather than strict: a log line is diagnostic, and losing
+    # a run three hours in because a rat's name had an accent in it would be a
+    # far worse trade than one mangled character in a log.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
 # Live-verified via the new per-decision logging (2026-07-28 saxrat run): a
 # context-menu entry click dispatched immediately after the mouse glide that
 # arrived on it can fail to register with the game at all -- the menu just
@@ -2171,6 +2184,13 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         ["node", DRIVER_JS, bot_js_path],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
         text=True, bufsize=1,
+        # The driver writes JSON, and JSON is UTF-8. `text=True` alone takes the
+        # *locale* encoding, which on macOS is already UTF-8 and on Windows is
+        # cp1252 -- so this line is a no-op there and load-bearing here. Without
+        # it the loop dies with `'charmap' codec can't decode byte 0x90` the
+        # moment a reading carries a character cp1252 has no place for, which is
+        # any real EVE UI string.
+        encoding="utf-8",
     )
     game_log = GameLogTail(game_log_dir) if game_log_dir else None
     dispatcher = TaskDispatcher(execute_input=execute_input, capture_screenshots=capture_screenshots,
