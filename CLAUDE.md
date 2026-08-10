@@ -5610,6 +5610,144 @@ which is the expected outcome here and not a fault. What *would* be a fault is a
 bound moving on a grid of identically named rats, since that is the rule
 attributing something it should have refused.
 
+### Several locks in one step, and the first one still asked alone
+
+Issue #177. `lockTargetFromOverviewEntry` issued one Ctrl+click and handed the
+step back, so the next lock waited for the next reading. Measured on
+`saxrat_run16.log`: **490 lock commands dispatched, and the median gap between
+two of them is 2 readings** — one lock per decision cycle, not a client that was
+slow to answer. With the learned ceiling now 6 (#110/#149/#151), filling the bar
+is most of the opening of every engagement, and a wingman who locks several rats
+in quick succession has six dying from the start where this bot ramps.
+
+**The framework permits it, and that had to be settled before anything else.**
+`ContinueSession.effectsOnGameClient` is an unbounded `List`;
+`EveOnline.BotFramework` maps the whole of it into **one** `WindowsInputRequest`
+with a `WaitMilliseconds 210` interspersed between every pair; and
+`botlab_host.py`'s `_windows_input` walks the list item by item, deciding
+`force_movement` and the click settle from the *next real tag* rather than from
+position, so a click late in a sequence is treated exactly like the first. The
+corpus shows a long one already: mission run 38's `send-effects-816` dispatched
+a click plus a whole typed station name in one request over 12.9 s. So the
+median gap of a reading was a **cost**, not a floor.
+
+**Attribution is what makes it safe, and the answer is that a batched step
+teaches the lock-range rule nothing.** #121/#134 built
+`lockRangeThresholdInMeters` on evidence keyed to a *specific row*, and a batch
+breaks that in both directions at once: the next reading's outcome belongs to no
+one click in particular, and the target bar the refusal test reads to prove a
+slot was free is the bar the batch itself is filling. So a reading whose previous
+step carried more than one lock click moves neither bound and **discharges any
+pending attempt**, which is `overviewEntryLockHandle`'s posture applied to the
+step rather than to the row.
+
+**That costs nothing, and `lockAttemptCanTeachRange` is why.** PR #151
+established that an attempt begun with the bar occupied can never move either
+bound — it fails the empty-bar condition rather than the wait — and discharges it
+at once. So `lockBatchSize` batches **exactly the locks that could never have
+taught anything**: the first lock of an engagement, taken with the bar empty, is
+still issued alone, still attributed, and still judged as before. The two rules
+are made disjoint by construction rather than by hoping they do not collide.
+#150's probe is asked alone for the same reason one level up: it is a
+measurement, deliberately one row beyond the ceiling, and an answer arriving
+beside five other locks is an answer to none of them.
+
+**A dropped click is silent, so it is counted.** #163 found posted input being
+dropped under load here — 53-100 ms per event in the two runs that lost a typed
+query against under 18 ms everywhere else — and #75's `Emperor Family Bureau`
+arriving as `eueu` is the same mechanism. A burst of clicks is exactly that
+shape and a lost lock leaves nothing behind but a bar with fewer targets in it.
+`updateLockBatchAccounting` writes down how many clicks went out and reads the
+bar back `lockBatchReadingsBeforeVerdict` (4) readings later, against the count
+on the reading the step was **decided from** rather than the one that observes
+it — some of a batch may already have landed by then. The number asked for is
+counted out of the dispatched effects themselves
+(`lockClickLocationsFromStepEffects` now returns every point rather than the
+first), so what was asked for and what was dispatched cannot disagree.
+
+**It reports and never decides**, and the two confounds are stated rather than
+designed around: a rat dying inside the window lowers the bar and reads as a
+dropped click, and a lock the ship took by itself raises it and reads as one that
+landed. Neither is separable inside one reading, which is why the session totals
+are the instrument — `asked N and the bar answered M` trailing all evening is
+input being dropped, where one short batch is a rat that died. A case asserts the
+accounting names nothing the range rule owns.
+
+**Three clicks a step, and the bound is measured.** A batch is a step with no
+reading in it, so its whole length is time the retreat and every other guard
+cannot act on. Over all 16 recorded saxrat runs and their **50,043**
+`send-effects` steps this bot's longest input step ever dispatched is **4.68 s**,
+the median is 1.03 s, and a lock step's own median is **2.56 s** — mostly the
+host's eased glide and its click settle. So `lockBatchMaximumClicks = 3` is about
+seven seconds and is deliberately the first thing this bot does that runs past
+its own recorded longest step; the bound is what keeps "past it" to roughly one
+reading's worth. It also caps how many locks one dropped-input episode can take.
+
+**A batch is not re-issued while the bar catches up.** The bar lags the clicks
+and `overviewEntriesToLock` filters on the rows' own indicators, so without
+`lockBatchIsSettling` the next reading would find the same rows unlocked and
+click every one of them again — `moduleButtonClickSettlingSteps`' problem at the
+lock site, and here it costs a whole batch. The wait is ended by the accounting's
+own verdict, either because the bar caught up or because the bound ran out, so it
+cannot outlive the count watching it. Only batches settle; a single lock is left
+exactly as it was, repeated clicks and all, because that is the behaviour every
+recorded run was flown on.
+
+The batch keeps `Lock more targets.` at the head of its decision line — the
+string an operator has been grepping for since before any of this — and names the
+rows it clicked, since it is the one decision here that acts on more than one
+object. The status line carries `Lock batch: up to 3 clicks a step, asked N and
+the bar answered M this session`.
+
+**The mission runner shares the defect and is deliberately untouched.** Its
+`lockTargetFromOverviewEntry` has the identical shape — one Ctrl+click, then the
+step is handed back — and
+`TheMissionRunnerStillLocksOnePerStepTest` records that rather than leaving it as
+a claim, so a later port has to notice it is taking on the attribution problem
+this one solves. It also has the harder version of it: an anomaly is a pocket of
+identically named rats, so saxrat's range rule is usually silent anyway and the
+mission runner's is not.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_batched_lock_clicks.py` (32 cases). The rules
+are executed through the real `Bot.elm` in `elm repl` and the overview rows they
+are asked about come from the real `EveOnline.ParseUserInterface`: the chord the
+bot builds for three rows is read back as three points in order (the round trip
+that makes the count trustworthy), the batch size is asked at every clause and at
+fixed values either side of its bound, the range rule is folded over batched and
+single readings **with the single-click control beside each** so the case is
+about batching rather than about the fixture, and the accounting is folded over
+whole sessions. The wiring is read out of the source through a reader sliced by
+**indentation**, since the bindings under test build record literals and the
+`let_binding` shape stops at the opening brace. The corpus is recounted as
+relations rather than as the numbers above.
+
+Confirmed by mutation, fifteen of them, each failing a named case: the effects
+reader taking only the first click again; **a batched reading teaching the range
+rule from an outcome it cannot attribute**, which is the failure this whole
+design refuses; a pending attempt carried across a batch rather than discharged;
+the first lock of an engagement batched; the probe batched; the click cap raised
+past everything this bot has ever dispatched in one step, and lowered so nothing
+batches; the free-slot bound dropped; the lockable-row bound dropped; the
+settling window removed so a whole batch is re-issued; the batch judged against
+the reading that observes it rather than the one it was decided from; the
+shortfall never reported; the session totals not accumulating; the accounting
+reaching into the range rule; and the batch built from rows the ship cannot
+reach.
+
+**Unverified: any of it running, and one thing about the client.** No run has
+been flown since. **Whether EVE accepts several Ctrl+clicks inside one input
+burst is not established** — the framework and the host will dispatch them, which
+is what was checked, but the client's own answer needs a run and this change was
+written with saxrat live and input driving forbidden. Both failure directions are
+visible rather than silent: clicks the client ignores show up as
+`Lock batch came up short`, and the settling window bounds the retry. What to
+watch on the first run is `Lock more targets. Asking for 3 locks in this one
+step` in the decision log, then `Lock batch: ... asked N and the bar answered N`
+with the two numbers tracking each other. Answered trailing asked all run is
+either #163's dropped input or a client that takes one lock per burst, and the
+tell between them is whether the shortfall is always exactly the batch minus one.
+
 ### saxrat swaps ammo at a distance it is told, not one it works out
 
 Issue #122. The capability was **absent rather than unconfigured**: `ammoSwap`
@@ -7770,6 +7908,26 @@ exists.
   "Neither half could move on its own, so the bot asks for one more" above.
   **Untested against a live client**; watch `probing for 5` in the status line
   and the number climbing before `client stated` fills in.
+
+  And since #177 it **asks the client for up to three locks in one step**
+  instead of one per decision cycle — run 16 dispatched 490 lock commands a
+  median of two readings apart, which with a six-slot bar is most of the opening
+  of every engagement. The framework was never the constraint:
+  `effectsOnGameClient` is an unbounded list that becomes one
+  `WindowsInputRequest`, and the corpus already holds a 12.9 s step carrying a
+  click and a whole typed name. What had to be arranged is the attribution, and
+  the arrangement is that the two rules are disjoint by construction: the first
+  lock of an engagement is still asked **alone**, because
+  `lockAttemptCanTeachRange` means a lock asked with the bar occupied could never
+  have taught either bound anyway — so a batched reading teaches the range rule
+  nothing and gives up nothing. A dropped click is silent (#163), so
+  `updateLockBatchAccounting` writes down what was asked for and reads the bar
+  back. See "Several locks in one step, and the first one still asked alone"
+  above for the 4.68 s longest recorded input step that sizes the cap, and for
+  why the mission runner shares the defect and is untouched. **Untested against a
+  live client, and whether EVE takes several Ctrl+clicks in one burst is not
+  established**; watch `Lock batch: ... asked N and the bar answered N` with the
+  two numbers tracking each other.
 
   And it now **asks the pod recovery's deadline where nothing can decline to ask
   it**, which is #126 in this second bot: the comparison over
