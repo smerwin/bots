@@ -3719,15 +3719,90 @@ undockUsingStationWindow context =
                 Just undockButton ->
                     case stationWindow.abortUndockButton of
                         Nothing ->
-                            describeBranch "Click on the button to undock."
-                                (decideActionForCurrentStep
-                                    (mouseClickOnUIElement MouseButtonLeft undockButton
-                                        |> Result.withDefault []
-                                    )
-                                )
+                            case undockClickedStepsAgo context.previousStepsEffects undockButton.totalDisplayRegion of
+                                Just stepsAgo ->
+                                    describeBranch
+                                        ("I clicked undock "
+                                            ++ String.fromInt stepsAgo
+                                            ++ " step(s) ago and the client is still showing the undock button -- wait rather than click it again, which would abort the undock."
+                                        )
+                                        waitForProgressInGame
+
+                                Nothing ->
+                                    describeBranch "Click on the button to undock."
+                                        (decideActionForCurrentStep
+                                            (mouseClickOnUIElement MouseButtonLeft undockButton
+                                                |> Result.withDefault []
+                                            )
+                                        )
 
                         Just _ ->
                             describeBranch "I see we are already undocking." waitForProgressInGame
+
+
+{-| One button occupies the undock slot and it changes what it does under the
+cursor: "Undock" while docked, then "Abort Undock" and "Undocking..." once the
+undock is under way. `parseStationWindowFromUITreeRoot` reads all three, so a
+_decision_ can never choose to abort -- `undockButton` is `Nothing` for the
+whole of the second state.
+
+That is not enough, because the decision and the click are not the same moment.
+The bot re-derives its decision on every framework event and dispatches at most
+once per cycle, and run 20 dispatched the undock click **twice inside one tick**
+-- at substeps `.2` and `.5`, three steps apart -- on every tick, 214 times. The
+first click starts the undock; a second or two later the second lands on the same
+screen point, which by then reads "Abort Undock", and the ship goes back into the
+station. The client says so in its own log:
+
+    05:39:27 (None)   Undocking from Amarr VIII (Oris) ... to Amarr solar system.
+    05:39:36 (notify) Can't do that while undocking. You should be squeezed out in 2 seconds.
+    05:39:41 (notify) Docking operation already in progress. Estimated time left: 10 seconds.
+
+An undock leaves no line when it is _clicked_, only when it _starts_, so those
+three lines are the whole of what the client will say about a loop that ran for
+289 readings.
+
+This is `moduleButtonClickSettlingSteps`' failure exactly -- "a second click,
+which turned it _off_" -- on a button whose second click is much more expensive,
+since it puts the ship back in the station rather than switching a module off.
+
+**Eight steps rather than the framework's five**, because the two costs are not
+symmetric. Steps here run about 3.4 to a reading, so eight is roughly two
+readings: comfortably past the observed three-step gap between the two
+dispatches, and short of the ten steps `lastStepsEffects` actually stores, so the
+bound is a real bound rather than "as long as we can see" -- the margin the
+framework's own comment records the original version lacking.
+
+It bounds the _re-click_ and nothing else. A click that genuinely never landed is
+retried on the next tick, and the cross-tick case is left to the abort button
+above, which is the client's own evidence rather than a count -- it fired 71
+times in run 20, so it works and was simply being outrun.
+
+-}
+undockClickSettlingSteps : Int
+undockClickSettlingSteps =
+    8
+
+
+undockClickedStepsAgo :
+    List (List EffectOnWindow.EffectOnWindowStruct)
+    -> EveOnline.ParseUserInterface.DisplayRegion
+    -> Maybe Int
+undockClickedStepsAgo previousStepsEffects undockButtonRegion =
+    previousStepsEffects
+        |> List.take undockClickSettlingSteps
+        |> List.indexedMap Tuple.pair
+        |> List.filter
+            (\( _, stepEffects ) ->
+                stepEffects
+                    |> EveOnline.BotFramework.findMouseButtonClickLocationsInListOfEffects MouseButtonLeft
+                    |> List.any
+                        (EveOnline.BotFramework.isPointInRectangle
+                            (EveOnline.BotFramework.growRegionOnAllSides 1 undockButtonRegion)
+                        )
+            )
+        |> List.head
+        |> Maybe.map (Tuple.first >> (+) 1)
 
 
 decideActionInAnomaly :
