@@ -14220,18 +14220,29 @@ lockBatchSize situation =
 retreat, the ship-loss verdict and every other guard cannot act on. This bot's
 own corpus sizes the number rather than saxrat's: over 39 recorded mission runs
 and their **40,903** `send-effects` steps the median step is 1.02 s and the 99th
-percentile 4.53 s, while a **lock** step's own median is **1.30 s** -- half
-saxrat's 2.56 s, because the rows a mission pocket locks sit close together and
-the host's eased glide between them is short. Three clicks is therefore about
-3.9 s here and stays inside the 4.53 s an ordinary step already reaches, where
-on saxrat the same three ran past everything it had ever dispatched.
+percentile 4.53 s, while a **lock** step's own median is **1.30 s**. Three
+clicks is therefore about 3.9 s here, which stays inside the 4.53 s an ordinary
+step of this bot already reaches -- where on saxrat the same three ran past
+everything it had ever dispatched.
 
-The corpus also says three is where the curve flattens. Of the 486 recorded
-runs of consecutive locks, 419 -- **86%** -- are three locks or fewer, so a cap
-of three collapses the whole of them into one step; raising it to four buys 7
-more percentage points and to five 10, while the blind interval grows from
-3.9 s to 5.2 s and 6.5 s. That is a poor trade for a bot whose retreat is
-measured in readings.
+The corpus also says three is where the curve flattens, and the flattening is
+measured in the readings a cap actually removes rather than in a percentile.
+Grouping the 2,833 recorded lock commands into runs of consecutive locks -- two
+or more of them no further apart than `lockBatchReadingsBeforeVerdict` -- gives
+631 such runs, of which 493 (**78%**) are three locks or fewer, so a cap of
+three collapses the whole of most of them into one step. Replayed over every
+run, a cap of three turns those 2,833 lock steps into **1,475**; a cap of four
+turns them into 1,361 and a cap of five into 1,290. So batching at all removes
+1,358 readings, the third click accounts for 322 of those, and the fourth buys
+114 more while the blind interval grows from 3.9 s to 5.2 s. That is a poor
+trade for a bot whose retreat is measured in readings.
+
+**Counted in readings rather than in framework steps**, which is not a detail:
+a `# [tick.substep]` is not a reading here -- one recorded run carries 6,573
+ticks against 8,191 memory reads -- and counting the gap in ticks reports 38% of
+consecutive locks as landing in the same reading, which would understate the
+ramp this exists to remove. See `stall_watch.py`, which has paid for that unit
+twice.
 
 Unlike saxrat this bot has precedent for a long step -- its longest recorded is
 **12.9 s**, a typed station name in one `WindowsInputRequest` -- so the bound

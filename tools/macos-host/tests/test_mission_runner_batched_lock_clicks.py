@@ -22,10 +22,22 @@ out-of-range branch approaches it exactly as before —
 different reason: see `lockBatchMaximumClicks`' doc comment, and
 `TheClickCapIsSizedOnThisBotsOwnSteps`.
 
-**The gain is smaller and is stated as such.** saxrat locked a median of 2
-readings apart; here the median gap between lock commands is 5 readings and
-**76% of lock bursts are a single lock**, so batching applies to under half of
-this bot's locks — `TheRecordedRunsShowASmallerRampThanSaxrats`.
+**The gain is this bot's own measurement and it is the same shape as saxrat's.**
+Across the 39 recorded mission runs the bot dispatched **2,833 lock commands**
+and consecutive ones are a **median of 2 readings** apart — the same median
+saxrat recorded, and one lock per decision cycle rather than a client that is
+slow to answer. 81% of those commands sit inside a run of consecutive locks, so
+batching applies to most of them; a cap of three replays over the corpus as
+2,833 lock steps becoming 1,475. What is genuinely smaller here is how *often*
+this bot locks at all: 2,833 commands over 83,225 readings against saxrat's
+6,802 over 109,086. See `TheRecordedRunsShowTheRampThisChangeIsAbout`.
+
+**The unit is the reading, and it had to be, because the two disagree.** A
+reading is one `RequestToVolatileProcess` memory read; a `# [tick.substep]` is
+not one, and run 35 alone carries 6,573 ticks against 8,191 reads. Counted in
+ticks the same corpus reports a median gap of 2 with **38% of consecutive locks
+in the same tick** and 76% of runs a single lock — which reads as a much smaller
+ramp than there is, and is `stall_watch.py`'s own mistake in a third place.
 
 **The range rule cannot be executed here.** The mission runner's
 `updateLockRangeLearning` takes a whole `UpdateMemoryContext` where saxrat's
@@ -47,21 +59,32 @@ The wiring is read out of the source through a reader sliced by **indentation**,
 since the bindings under test build record literals and the `let_binding` shape
 stops at the opening brace.
 
-Confirmed by mutation, fifteen of them, each failing a named case: the in-range
-prefix replaced by a filter, which is the scrambler-skipping failure this port
-exists to refuse; the prefix rule made to count past a row out of reach; the
-effects reader taking only the first click again; **the batched-reading guard
-dropped from the range rule**; the pending attempt carried across a batch rather
-than discharged; the first lock of an engagement batched; the probe batched; the
-click cap raised past this bot's 99th-percentile step and lowered so nothing
-batches; the free-slot bound dropped; the settling window removed; the batch
-judged against the reading that observes it rather than the one it was decided
-from; the shortfall never reported; the session totals not accumulating; the
-accounting reaching into the range rule; and the batch's line no longer opening
-with the string operators grep for.
+Confirmed by mutation, **eighteen** of them, each failing a named case: the
+in-range prefix replaced by a filter, which is the scrambler-skipping failure
+this port exists to refuse; the prefix rule made to count past a row out of
+reach; the effects reader taking only the first click again; **the
+batched-reading guard dropped from the range rule**, which is a range learned
+from an outcome that belongs to no one click; **the pending attempt carried
+across a batch rather than discharged**; the first lock of an engagement
+batched; the probe batched; the click cap raised past this bot's
+99th-percentile step and lowered so nothing batches; the free-slot bound
+dropped; the settling window removed; the batch judged against the reading that
+observes it rather than the one it was decided from; the shortfall never
+reported; the session totals not accumulating; the accounting reaching into the
+range rule; the batch's line no longer opening with the string operators grep
+for; and -- on this file's own premises -- the corpus reader counting ticks
+instead of memory reads, and the lock decision no longer scoped to its own step.
 
-Nothing here reads a live game client or a running bot. One case reads the
-recorded mission runs, and only reads them; it skips with a stated reason on a
+**One of those survived the first pass and the hole was real**, which is why the
+batched branch is now *sliced* rather than searched. `{ unchanged | attempt =
+Nothing }` is what three branches of `updateLockRangeLearning` answer, so
+asserting it over the whole rule passed with the batched branch reverted to
+`unchanged` -- a pending attempt carried across a batch and then judged against
+the bar the batch itself filled, which is the one thing the guard exists to
+stop. See `ABatchedReadingTeachesTheRangeRuleNothingTest.batched_branch`.
+
+Nothing here reads a live game client or a running bot. Two classes read the
+recorded mission runs, and only read them; they skip with a stated reason on a
 machine that has none.
 
     python3 -m unittest discover -s tools/macos-host/tests
@@ -85,10 +108,9 @@ PREAMBLE = (
 
 # Measured over all 39 recorded mission runs and their 40,903 `send-effects`
 # steps: the median step is 1.02 s and the 99th percentile 4.53 s, while a lock
-# step's own median is 1.30 s -- half saxrat's 2.56 s. Three clicks is about
-# 3.9 s, inside what an ordinary step already reaches. This bot's longest step
-# ever is 12.9 s (a typed station name), so unlike saxrat the cap is not about
-# what the host can carry.
+# step's own median is 1.30 s. Three clicks is about 3.9 s, inside what an
+# ordinary step already reaches. This bot's longest step ever is 12.9 s (a typed
+# station name), so unlike saxrat the cap is not about what the host can carry.
 LOCK_STEP_MEDIAN_SECONDS = 1.30
 ORDINARY_STEP_P99_SECONDS = 4.53
 LONGEST_RECORDED_STEP_SECONDS = 12.90
@@ -402,6 +424,34 @@ class ABatchedReadingTeachesTheRangeRuleNothingTest(unittest.TestCase):
         self.rule = collapsed(top_level_block(
             source_of(MISSION_RUNNER_BOT_ELM), "updateLockRangeLearning"))
 
+    def batched_branch(self):
+        """Only what the rule does on a batched reading.
+
+        Sliced rather than searched for, because `{ unchanged | attempt =
+        Nothing }` is what *three* branches of this rule answer -- the row that
+        is gone, the lock the client declined with the bar occupied, and this
+        one. Asserting that string over the whole rule passes with the batched
+        branch reverted to `unchanged`, which is a pending attempt carried
+        across a batch and judged against the bar the batch filled. That
+        mutation survived the first pass, so the slice is what catches it.
+        """
+        guard = "if stepWasBatched then"
+        end = "else case attemptAfterClick of"
+        self.assertIn(guard, self.rule,
+                      "the batched-reading guard is gone from the lock-range "
+                      "rule, which is a range learned from an outcome that "
+                      "belongs to no one click -- sticky for the session")
+        self.assertIn(end, self.rule,
+                      "the rule no longer falls through to the single-lock "
+                      "judgement, so this slice cannot say what the batched "
+                      "branch alone does")
+        start = self.rule.index(guard) + len(guard)
+        self.assertLess(
+            self.rule.index(guard), self.rule.index(end),
+            "the batch guard is asked after the attempt has been judged, "
+            "which is no guard at all")
+        return self.rule[start:self.rule.index(end)]
+
     def test_a_batched_step_is_recognised_from_the_effects(self):
         self.assertIn("stepWasBatched = 1 < (lockClickLocations |> List.length)",
                       self.rule,
@@ -410,19 +460,19 @@ class ABatchedReadingTeachesTheRangeRuleNothingTest(unittest.TestCase):
                       "attributed to whichever row happened to come first")
 
     def test_a_batched_reading_discharges_the_attempt_and_learns_nothing(self):
-        self.assertIn("if stepWasBatched then", self.rule,
-                      "the batched-reading guard is gone from the lock-range "
-                      "rule, which is a range learned from an outcome that "
-                      "belongs to no one click -- sticky for the session")
-        self.assertIn("{ unchanged | attempt = Nothing }", self.rule,
-                      "a batched reading no longer discharges the pending "
-                      "attempt, so its verdict can be read against a bar the "
-                      "batch itself filled -- the hole PR #151 closed")
-        self.assertLess(
-            self.rule.index("if stepWasBatched then"),
-            self.rule.index("case attemptAfterClick of"),
-            "the batch guard is asked after the attempt has been judged, "
-            "which is no guard at all")
+        branch = self.batched_branch()
+        self.assertIn(
+            "{ unchanged | attempt = Nothing }", branch,
+            "a batched reading no longer discharges the pending attempt, so "
+            "its verdict can be read against a bar the batch itself filled -- "
+            "the hole PR #151 closed")
+        for forbidden in ("provenAtMeters = Just", "refusedAtMeters = Just",
+                          "attemptCarried"):
+            self.assertNotIn(
+                forbidden, branch,
+                "the batched branch reaches for %r, so a reading whose outcome "
+                "belongs to no one click is moving a bound or carrying an "
+                "attempt towards one" % forbidden)
 
     def test_the_discharge_pr_151_added_is_still_there(self):
         """Batching must not re-open the hole it depends on."""
@@ -672,19 +722,78 @@ class TheWiringIsWhatMakesAnyOfThisReachableTest(unittest.TestCase):
                       "the batch builds its own chord again")
 
 
-class TheRecordedRunsShowASmallerRampThanSaxrats(unittest.TestCase):
+class TheRecordedRunsShowTheRampThisChangeIsAbout(unittest.TestCase):
     """The premise, recounted from this bot's own corpus.
 
     Stated as relations rather than as the counts in the doc comment, so a
-    corpus that grows cannot turn a true claim red. The point of the case is
-    that the mission runner's ramp is *smaller* than saxrat's -- most of its
-    lock commands stand alone -- which is what makes the cap's sizing this bot's
-    own question rather than an inherited one.
+    corpus that grows cannot turn a true claim red.
+
+    **A reading is one memory read, and a `# [tick.substep]` is not one.** The
+    framework issues exactly one `RequestToVolatileProcess` per reading, so
+    every decision printed between two of them belongs to one reading -- while a
+    tick holds a varying number of them. Counting the gap in ticks answers
+    something else and answers it smaller, which
+    `TheUnitIsTheReadingAndNotTheTick` is the case for.
     """
 
+    READ = re.compile(r"^#   task read-from-game-\d+: RequestToVolatileProcess")
     STEP = re.compile(r"^# \[(\d+)\.(\d+)\] ")
     LOCK = re.compile(r"Lock target from overview entry")
     SEND = re.compile(r"^#   task send-effects-\d+: WindowsInputRequest")
+
+    @classmethod
+    def lock_commands(cls, paths, count_ticks=False):
+        """Every lock command, as (run, reading) pairs.
+
+        A lock command is a `send-effects` dispatched in the same framework step
+        whose decision block carried the lock line -- so `pending` is dropped at
+        every step boundary, and a lock decision followed by some other step's
+        dispatch is not counted as one.
+        """
+        commands = []
+        readings_total = 0
+        for path in paths:
+            reading = 0
+            pending = False
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if not count_ticks and cls.READ.match(line):
+                        reading += 1
+                        continue
+                    match = cls.STEP.match(line)
+                    if match:
+                        if count_ticks:
+                            reading = int(match.group(1))
+                        pending = False
+                        continue
+                    if cls.LOCK.search(line):
+                        pending = True
+                        continue
+                    if cls.SEND.match(line):
+                        if pending:
+                            commands.append((path, reading))
+                        pending = False
+            readings_total += reading
+        return commands, readings_total
+
+    @classmethod
+    def runs_of_consecutive_locks(cls, commands):
+        """Lock commands no further apart than the batch's own settling bound."""
+        runs = []
+        current = 0
+        previous = None
+        for path, reading in commands:
+            if previous is not None and previous[0] == path \
+                    and 0 < reading - previous[1] <= 4:
+                current += 1
+            else:
+                if current:
+                    runs.append(current)
+                current = 1
+            previous = (path, reading)
+        if current:
+            runs.append(current)
+        return runs
 
     @classmethod
     def setUpClass(cls):
@@ -695,69 +804,134 @@ class TheRecordedRunsShowASmallerRampThanSaxrats(unittest.TestCase):
                 "no recorded runs in ~/eve-bot-logs, so what those runs can "
                 "say about the lock ramp cannot be consulted here")
 
-        cls.gaps = []
-        cls.dispatches = 0
-        cls.bursts = []
-        for path in paths:
-            reading = None
-            pending = False
-            previous = None
-            current = 0
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                for line in handle:
-                    match = cls.STEP.match(line)
-                    if match:
-                        reading = int(match.group(1))
-                        pending = False
-                    elif cls.LOCK.search(line):
-                        pending = True
-                    elif cls.SEND.match(line) and pending and reading is not None:
-                        cls.dispatches += 1
-                        if previous is not None:
-                            gap = reading - previous
-                            cls.gaps.append(gap)
-                            if 0 < gap <= 4:
-                                current += 1
-                            else:
-                                if current:
-                                    cls.bursts.append(current)
-                                current = 1
-                        else:
-                            current = 1
-                        previous = reading
-                        pending = False
-            if current:
-                cls.bursts.append(current)
+        cls.paths = paths
+        cls.commands, cls.readings = cls.lock_commands(paths)
+        cls.gaps = [
+            after[1] - before[1]
+            for before, after in zip(cls.commands, cls.commands[1:])
+            if before[0] == after[0]]
+        cls.runs = cls.runs_of_consecutive_locks(cls.commands)
 
-    def test_locks_were_dispatched_one_at_a_time(self):
+    def test_the_bot_locks_one_per_reading_and_often(self):
         self.assertGreater(
-            self.dispatches, 100,
+            len(self.commands), 100,
             "the recorded runs carry almost no lock commands, so they cannot "
             "say anything about the ramp this change is about")
         self.assertEqual(
             [gap for gap in self.gaps if gap < 0], [],
-            "the reading numbers do not increase, so the gap measurement is "
-            "not measuring what it claims to")
+            "the reading count does not increase between two lock commands, so "
+            "the gap measurement is not measuring what it claims to")
+        self.assertEqual(
+            [gap for gap in self.gaps if gap == 0], [],
+            "two lock commands were dispatched inside one reading, which the "
+            "single lock site cannot do -- so the reading boundary is being "
+            "counted wrong")
 
-    def test_most_bursts_are_a_single_lock_unlike_saxrats(self):
-        """76% of them when this was written. Batching therefore applies to a
-        minority of this bot's locks, which is why the gain is stated small."""
-        self.assertGreater(len(self.bursts), 50)
-        alone = [burst for burst in self.bursts if burst == 1]
+    def test_consecutive_locks_are_a_reading_or_two_apart(self):
+        """A median of 2 when this was written -- the same median saxrat
+        recorded, which is what makes this a ramp rather than a slow client."""
+        close = [gap for gap in self.gaps if gap <= 2]
         self.assertGreater(
-            len(alone), len(self.bursts) // 2,
-            "most lock commands in this bot's corpus are no longer solitary, "
-            "which would mean the ramp is bigger than the doc comment claims "
-            "and the cap wants re-sizing")
+            len(close), len(self.gaps) // 2,
+            "consecutive lock commands are no longer mostly a reading or two "
+            "apart, so the one-lock-per-decision-cycle ramp this change was "
+            "built for is not what the corpus holds")
 
-    def test_but_multi_lock_bursts_carry_a_large_share_of_the_locks(self):
-        """46% when this was written -- enough that batching is worth doing at
-        all, which is the other half of the same measurement."""
-        multi = [burst for burst in self.bursts if burst > 1]
+    def test_most_lock_commands_sit_inside_a_run_of_them(self):
+        """81% of them when this was written, in 631 runs of two or more.
+
+        This is what a batch can collapse, and it is the half of the
+        measurement that says batching is worth the blind interval at all.
+        """
+        self.assertGreater(len(self.runs), 50)
+        inside = sum(run for run in self.runs if run > 1)
         self.assertGreater(
-            sum(multi), self.dispatches // 5,
-            "runs of consecutive locks carry too small a share of this bot's "
-            "lock commands for batching to be worth the blind interval")
+            inside, len(self.commands) // 2,
+            "most of this bot's lock commands now stand alone, so batching "
+            "would apply to a minority of them and the cap wants re-sizing")
+
+    def test_the_cap_is_where_the_corpus_flattens(self):
+        """Replayed over the corpus: a cap of three collapses 2,833 lock steps
+        into 1,475, four into 1,361, five into 1,290.
+
+        So batching at all removes 1,358 readings, the third click accounts for
+        322 of them, and the fourth buys 114 more while the blind interval grows
+        by another 1.3 s. That diminishing return is the argument for stopping
+        at three, and it is a stronger one than a percentile because it is
+        counted in the thing the cap costs.
+        """
+        def steps_at(cap):
+            return sum(-(-run // cap) for run in self.runs)
+
+        unbatched = sum(self.runs)
+        third = steps_at(2) - steps_at(3)
+        fourth = steps_at(3) - steps_at(4)
+        self.assertLess(
+            steps_at(3), unbatched * 3 // 4,
+            "a cap of three no longer removes a large share of this bot's lock "
+            "steps, so the change is not worth the blind interval")
+        self.assertGreater(
+            third, fourth * 2,
+            "the fourth click now buys a comparable share of what the third "
+            "does, so the curve does not flatten at three and the cap wants "
+            "re-sizing against this corpus")
+
+
+class TheUnitIsTheReadingAndNotTheTick(unittest.TestCase):
+    """Everything above is a reading only if these two really differ.
+
+    `stall_watch.py` has a section of CLAUDE.md about counting the wrong unit,
+    #141 recounted a whole retreat measurement for it, and the first draft of
+    this file measured the lock ramp in ticks and reported a gain a third of the
+    real one. So the disagreement is executed rather than remembered.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import glob
+        paths = sorted(glob.glob(os.path.join(EVE_BOT_LOGS, "mission_run*.log")))
+        if not paths:
+            raise unittest.SkipTest(
+                "no recorded runs in ~/eve-bot-logs, so the two units cannot "
+                "be compared here")
+        cls.paths = paths
+
+    def test_a_tick_is_not_a_reading(self):
+        corpus = TheRecordedRunsShowTheRampThisChangeIsAbout
+        ticks = 0
+        reads = 0
+        for path in self.paths:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                seen = set()
+                for line in handle:
+                    match = corpus.STEP.match(line)
+                    if match:
+                        seen.add(int(match.group(1)))
+                    elif corpus.READ.match(line):
+                        reads += 1
+            ticks += len(seen)
+        self.assertNotEqual(
+            ticks, reads,
+            "ticks and memory reads agree exactly, which would mean the unit "
+            "this file counts in does not matter after all -- check the log "
+            "format before trusting either number")
+        self.assertGreater(
+            reads, ticks,
+            "the corpus now holds fewer readings than ticks, which inverts the "
+            "relation every count in this file rests on")
+
+    def test_counting_in_ticks_understates_the_ramp(self):
+        corpus = TheRecordedRunsShowTheRampThisChangeIsAbout
+        by_tick, _ = corpus.lock_commands(self.paths, count_ticks=True)
+        same_tick = [
+            after[1] - before[1]
+            for before, after in zip(by_tick, by_tick[1:])
+            if before[0] == after[0]]
+        self.assertGreater(
+            len([gap for gap in same_tick if gap == 0]), len(same_tick) // 10,
+            "counting in ticks no longer collapses consecutive lock commands "
+            "into one, so the reason this file counts memory reads instead has "
+            "gone away and the doc comment saying so is stale")
 
 
 if __name__ == "__main__":
