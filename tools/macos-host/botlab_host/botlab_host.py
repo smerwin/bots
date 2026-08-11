@@ -1142,6 +1142,10 @@ class VolatileHost:
         self.tree_walkers = {}   # processId -> TreeWalkerClient (the fast, native ReadFromWindow path)
         self.root_display_size = {}  # processId -> (width, height) in "game pixel" units, from UIRoot's own _displayWidth/_displayHeight
         self.game_pid = None
+        # The client's own window title, which names the character it is flying.
+        # Kept so `_set_autopilot_destination` can refuse to route a *different*
+        # character than the bot is flying -- see `esi_waypoint.set_destination`.
+        self.game_window_title = None
         self.game_log = game_log  # GameLogTail, or None when there is no channel to give
 
     def _get_live(self, process_id):
@@ -1165,6 +1169,7 @@ class VolatileHost:
             procs = find_eve_processes()
             if procs:
                 self.game_pid = procs[0]["processId"]
+                self.game_window_title = procs[0].get("mainWindowTitle")
             return json.dumps({"ListGameClientProcessesResponse": procs})
 
         if "SearchUIRootAddress" in req:
@@ -1474,6 +1479,13 @@ class VolatileHost:
                 clear_other=body.get("clearOtherWaypoints", True),
                 add_to_beginning=body.get("addToBeginning", False),
                 budget_seconds=budget,
+                # Whose autopilot this endpoint drives is decided by the token,
+                # not by the client the bot is attached to, so a token for the
+                # wrong character reports success and routes somebody else. The
+                # window title is what this host knows the character by; `None`
+                # means it could not tell and the call proceeds as before.
+                expected_character=esi_waypoint.character_from_window_title(
+                    self.game_window_title),
             )
         except esi_waypoint.EsiError as failure:
             print(f"# ESI: destination {target!r} not set: {failure}", file=sys.stderr)

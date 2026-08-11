@@ -528,17 +528,93 @@ def set_waypoint(destination_id, clear_other=True, add_to_beginning=False, deadl
                    "for this character.")
 
 
+_token_character = None
+
+
+def token_character(deadline=None):
+    """The character this refresh token authorises, as `(name, id)`.
+
+    Memoised for the life of the process: a token's character cannot change, and
+    `authorize` is what replaces the token.
+
+    Nothing token-shaped is returned or logged -- the access token goes straight
+    to the verify endpoint and only the character comes back out.
+    """
+    global _token_character
+    if _token_character is None:
+        deadline = deadline or Deadline()
+        request = urllib.request.Request(f"{LOGIN_HOST}/oauth/verify")
+        request.add_header("User-Agent", USER_AGENT)
+        request.add_header("Authorization",
+                           "Bearer " + access_token(deadline=deadline))
+        try:
+            with urllib.request.urlopen(
+                    request, timeout=deadline.timeout_for("verify")) as response:
+                payload = json.loads(response.read())
+        except (urllib.error.URLError, ValueError) as failure:
+            raise EsiError("could not read the token's character: %s" % failure)
+        _token_character = (payload.get("CharacterName"), payload.get("CharacterID"))
+    return _token_character
+
+
+def character_from_window_title(title):
+    """The character a client window title names, or `None`.
+
+    The client titles its window `EVE - <character>`, so the name is whatever
+    follows the first separator. Anything else answers `None`, which callers
+    read as "cannot check" rather than as a mismatch -- see `set_destination`.
+    """
+    if not title:
+        return None
+    for separator in (" - ", " – "):
+        if separator in title:
+            candidate = title.split(separator, 1)[1].strip()
+            return candidate or None
+    return None
+
+
 def set_destination(name=None, destination_id=None, clear_other=True,
-                    add_to_beginning=False, budget_seconds=DEFAULT_BUDGET_SECONDS):
+                    add_to_beginning=False, budget_seconds=DEFAULT_BUDGET_SECONDS,
+                    expected_character=None):
     """Resolve a name if needed and set the destination, under one budget.
 
     The single entry point for callers outside this file. Returns the id that
     was set; raises `EsiError` with a loggable reason for every other outcome,
     expiry included.
+
+    **`expected_character` is the guard, and it exists because this endpoint
+    fails silently in the worst available direction.** `/ui/autopilot/waypoint/`
+    acts on whichever character the *token* belongs to, not on the client the
+    bot is flying, so a token authorised for the wrong character reports success
+    and sets a route the bot will never see.
+
+    That is not hypothetical. saxrat run 14 was parked for its whole session:
+    the host logged `# ESI: destination 'Hamse' set (30003547)` while the token
+    belonged to `Gal Bistot` and the bot flew `Joan d'Arkonor`, whose route panel
+    read `No Destination` throughout. The bot then spent 3,932 readings latched
+    on `ROUTE SETTING GIVEN UP -- this host does not set destinations`, which
+    was the one conclusion the evidence beside it ruled out.
+
+    **`None` means "cannot check" and does not block.** A caller that cannot
+    name the client's character -- an unreadable window title, a host that does
+    not track one -- gets exactly today's behaviour, because a hard refusal on an
+    unreadable title would break a working setup to guard against an unproven
+    one. A *mismatch*, which is positive evidence, refuses.
     """
     if (name is None) == (destination_id is None):
         raise EsiError("set_destination needs exactly one of name, destination_id")
     deadline = Deadline(budget_seconds)
+
+    if expected_character:
+        authorised, _ = token_character(deadline=deadline)
+        if authorised and authorised.strip().lower() != expected_character.strip().lower():
+            raise EsiError(
+                "the stored ESI token authorises %r and the client is flying %r, "
+                "so setting a destination here would route the wrong character "
+                "and this one would never see it. Re-run 'esi_waypoint.py auth' "
+                "and pick %r at the character step."
+                % (authorised, expected_character, expected_character))
+
     if destination_id is None:
         destination_id, _ = resolve_name(name, deadline=deadline)
     return set_waypoint(destination_id, clear_other=clear_other,
