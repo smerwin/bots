@@ -249,8 +249,9 @@ def saxrat_runs():
     found = sorted(glob.glob(os.path.join(EVE_BOT_LOGS, "saxrat_run*.log")))
     if not found:
         raise unittest.SkipTest(
-            "no saxrat_run*.log in %s -- this machine has no corpus to report "
-            "on" % EVE_BOT_LOGS)
+            "no recorded saxrat runs in ~/eve-bot-logs, so what those runs "
+            "can say about the Connection Lost incident cannot be consulted "
+            "here")
     return found
 
 
