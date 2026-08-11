@@ -4,12 +4,11 @@ Transient state: what is in flight, what is unproven, and what to do next.
 Durable facts about the client and the host live in `CLAUDE.md` — this file is
 the part that goes stale, and it should be rewritten rather than appended to.
 
-Last updated at `1a8bc7a` (PR #180 merged) **plus one uncommitted fix**, with
-**saxrat run 21 in flight**.
+Last updated at `1a8bc7a` (PR #180 merged), with the undock fix on
+`saxrat-undock-settling-run20` and **saxrat run 21 in flight**.
 
 The previous edition of this file stopped at `caa7f49` (PR #74) and run 22 of the
-mission runner. **64 merges have landed since**, and the working checkout is
-currently dirty. Read "Uncommitted right now" before doing anything with git.
+mission runner. **64 merges have landed since.**
 
 ## The one thing to know first
 
@@ -36,8 +35,7 @@ than to count decisions.
 
 The fix is `undockClickedStepsAgo`, a settling window over the button's own
 region — the same shape as `clickModuleButtonButWaitIfClickedInPreviousStep`,
-whose doc comment describes this exact failure for module buttons. See
-"Uncommitted right now".
+whose doc comment describes this exact failure for module buttons. See "The fix".
 
 Three habits paid for themselves again, and one cost time:
 
@@ -52,11 +50,10 @@ Three habits paid for themselves again, and one cost time:
   subtree with its own absolute position as the base double-counts. That produced
   a confident, wrong "the click is 100 px off target" before it was caught.
 
-## Uncommitted right now
+## The fix
 
-`implement/applications/eve-online/eve-online-saxrat/Bot.elm` carries the undock
-fix and **is not committed**. Run 21 compiled from it, which is why its stamp
-reads `1a8bc7a (DIRTY, ...)`.
+On `saxrat-undock-settling-run20`, in
+`implement/applications/eve-online/eve-online-saxrat/Bot.elm`:
 
 ```elm
 undockClickSettlingSteps = 8
@@ -74,12 +71,45 @@ It bounds the *re-click only*. A click that never landed is retried next tick,
 and the cross-tick case stays with the abort-button parse, which is the client's
 own evidence rather than a count.
 
-**What it still owes.** It is a function of plain values specifically so it can
-be executed in `elm repl` — and it has not been, because the run was launched
-first by request. There are no cases for it. `compile_bot.sh` passes; the live
-run is the only evidence. Writing `test_saxrat_undock_settling.py` and committing
-is the next task, and the mutation that must fail is the settling window removed
-entirely, which restores run 20.
+**Verified**, in `tools/macos-host/tests/test_saxrat_undock_settling.py` (19
+cases). The rule is *executed* through the real `Bot.elm` in `elm repl` — which
+is why it takes a list of effects and a region rather than a
+`BotDecisionContext` — at both sides of its bound and against fixed values
+either side, since a case that asks only about `constant - 1` and `constant`
+passes for any constant at all. The region and the click point are the ones the
+live client rendered while run 20 was looping, not invented ones. The corpus
+half is asserted as relations over whatever `saxrat_run*.log` the machine has:
+some run dispatches twice in a tick while deciding to undock (the defect), and
+any run carrying the suppression wording never does (the fix).
+
+Confirmed by mutation, **eight** of them, each failing a named case: the
+settling window removed entirely, which restores run 20; the window cut to the
+observed three-step gap, and raised to the whole stored history; the region
+ignored, so any click anywhere suppresses; the rule keyed on the right mouse
+button; the count made 0-based, so the line reads "0 step(s) ago"; the farthest
+click winning rather than the nearest; and the decision ignoring the rule and
+clicking anyway.
+
+A ninth mutation — the region test replaced with a lambda — **did not compile**,
+so it proved nothing and was redone as a value change. Worth stating: a mutation
+run whose case count drops (7 tests instead of 19) is a build that failed, not a
+suite that held.
+
+**Still owed: a second undock.** Run 21 undocked once, and two things about that
+one undock are unexplained. Both need another dock/undock cycle to characterise,
+and neither is claimed to be fixed:
+
+- **The client logged two `Undocking from` lines**, `05:47:44` and `05:48:12`.
+  One extra undock 28 s later, so something still re-entered the station once —
+  possibly a re-dock the eight-step window did not cover. The ship is out and
+  hunting, so whatever it was did not repeat.
+- **`I do not see the station window` raised `askForHelpToGetUnstuck` 13 times**
+  during the undock transient, when the station window has closed and the ship UI
+  has not rendered yet. It resolved on its own, but raising the stuck alarm on a
+  normal transient is wrong on its own terms: `stall_watch.py` answers that
+  sentence with a screenshot, so this manufactures noise on every undock. That
+  branch is in `undockUsingStationWindow`'s `Nothing` case and is untouched by
+  this fix.
 
 ## Running right now
 
