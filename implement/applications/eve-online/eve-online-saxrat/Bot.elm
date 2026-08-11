@@ -3385,11 +3385,11 @@ the effect) -- so a message is its child's texts joined, not any single label.
 
 This is a display buffer, not a log: messages age off the screen and disappear
 from the tree with them. It answers "what just happened to whom, for how much"
-over the last few seconds, which is the question the status text wants; anything
-needing history should read the gamelog file instead.
+over the last few seconds; anything needing history should read the gamelog file
+instead.
 
-The markup is EVE's own colour and font tagging, stripped here because the
-status text is read by a human in a terminal.
+The markup is EVE's own colour and font tagging, stripped here because whatever
+reads this is a human in a terminal.
 
 -}
 visibleCombatMessages : ReadingFromGameClient -> List String
@@ -3410,32 +3410,36 @@ visibleCombatMessages readingFromGameClient =
         |> List.filter (String.isEmpty >> not)
 
 
-{-| The combat feed for the status text, newest last, capped so a busy fight
-does not push everything else out of view.
+{-| The on-screen combat feed used to be printed with every status line, and it
+was the largest thing in the log while being almost none of its information.
+
+Issue #190. `describeVisibleCombatMessages` rendered up to six lines of the
+widget on every reading: 9,639 of run 20's 25,762 lines and 98,700 of run 21's
+296,465, a third of each log. The widget is a rolling on-screen window, so
+consecutive readings mostly re-render the same six lines -- 1,376 of run 20's
+1,377 blocks were byte-identical to the one before, and 99.5% of run 21's. It
+also outlives the fight it describes, because messages age off the screen rather
+than off the grid: 1,344 of run 20's 1,377 blocks were printed on readings whose
+own decision line says the ship is docked.
+
+Nothing a decision uses is lost, because no decision ever read it. Nothing an
+operator uses is lost either: the host reads EVE's `(combat)` channel directly
+and sums the incoming half into `incomingDamageSinceLastReading`, which
+`describeIncomingDamage` already prints on every reading -- scoped to the
+reading, with the attackers named, and unable to go stale the way a display
+buffer does. The client's own lines are in the same log a second time besides,
+echoed by the host as `game log: ... (combat) ...`.
+
+`visibleCombatMessages` above is now unused, kept deliberately rather than
+deleted, for the reason the mission runner kept its copy when it dropped the same
+clause: it encodes which UI nodes carry combat text and how to read them, which
+is the expensive part to rediscover, and any future in-decision use of combat
+state wants exactly that.
+
 -}
-describeVisibleCombatMessages : ReadingFromGameClient -> String
-describeVisibleCombatMessages readingFromGameClient =
-    case visibleCombatMessages readingFromGameClient of
-        [] ->
-            "Combat feed: quiet."
-
-        messages ->
-            let
-                shown =
-                    messages |> List.reverse |> List.take 6 |> List.reverse
-
-                omitted =
-                    List.length messages - List.length shown
-            in
-            "Combat feed"
-                ++ (if 0 < omitted then
-                        " (" ++ String.fromInt omitted ++ " older not shown)"
-
-                    else
-                        ""
-                   )
-                ++ ":\n  "
-                ++ String.join "\n  " shown
+combatFeedIsReportedByTheHostGameLog : ()
+combatFeedIsReportedByTheHostGameLog =
+    ()
 
 
 {-| The quick message this reading carries, with what the parser dropped to get it.
@@ -3543,11 +3547,10 @@ quickMessageTextForStatusLine text =
 
 {-| The quick message clause, which says what the client wrote and how old it is.
 
-Printed on every reading, including the ones with nothing to report, for
-`describeVisibleCombatMessages`' reason: a clause that appears only when there is
-something to say leaves "the client said nothing" and "nothing is reading the
-client" grepping identically, and telling those apart is the first thing #123
-wants from a run.
+Printed on every reading, including the ones with nothing to report: a clause
+that appears only when there is something to say leaves "the client said nothing"
+and "nothing is reading the client" grepping identically, and telling those apart
+is the first thing #123 wants from a run.
 
 Whether the message is on the screen _now_ is the first thing in the clause and
 is never implied. A stale message printed as if it were current would be worse
@@ -9028,8 +9031,6 @@ statusTextFromState context =
                             ++ String.fromInt context.memory.hitpointsLowWaterMark.armor
                             ++ "%)."
                    )
-                ++ "\n"
-                ++ describeVisibleCombatMessages readingFromGameClient
 
         describeCurrentReading =
             case readingFromGameClient.shipUI of
