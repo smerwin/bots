@@ -1496,7 +1496,7 @@ Captured from this account's client on 2026-08-10, the whole dialog:
 
 Two things that dialog settles beyond this rule. **It is a `MessageBox`**, so
 before this change `closeMessageBoxByDeclining` answered it with
-`no_dialog_button` and the bot actively *rejected* every invitation -- observed,
+`no_dialog_button` and the bot actively _rejected_ every invitation -- observed,
 nine `Dismiss it using No.` decisions in saxrat run 13 with the operator
 confirming the rejection at the other end. And **`yes_dialog_button` is now read
 out of a live UI tree**, which the mission runner's abandonment has wanted since
