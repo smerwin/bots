@@ -41,7 +41,7 @@
       nothing at all -- removed rather than left as a setting that looks like it
       works.)
 
-      + `anomaly-name` : Choose the name of anomalies to take. You can use this setting multiple times to select multiple names.
+      + `anomaly-name` : Choose the name of anomalies to take. You can use this setting multiple times to select multiple names. Matched whole and ignoring case, so the name must be written as the probe scanner's own Name column shows it -- except that an entry ending in `*` matches any name starting with the rest of it, so `anomaly-name=Sansha*` takes every Sansha site. Note a wildcard cannot tell an easy site from one that will kill this ship: it matches Havens and Sanctums as readily as Burrows.
       + `hide-when-neutral-in-local` : Set this to 'yes' to make the bot dock in a station or structure when a neutral or hostile appears in the 'local' chat.
       + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. You can use this setting multiple times to select multiple names.
       + `anomaly-wait-time`: Minimum time to wait after arriving in an anomaly before considering it finished. Use this if you see anomalies in which rats arrive later than you arrive on grid.
@@ -878,14 +878,14 @@ findReasonToIgnoreProbeScanResult context probeScanResult =
 
                 matchesAnomalyNameFromSettings =
                     (context.eventContext.botSettings.anomalyNames |> List.isEmpty)
-                        || (context.eventContext.botSettings.anomalyNames
-                                |> List.any
-                                    (\anomalyName ->
-                                        probeScanResult.cellsTexts
-                                            |> Dict.get "Name"
-                                            |> Maybe.map (String.toLower >> (==) (anomalyName |> String.toLower |> String.trim))
-                                            |> Maybe.withDefault False
+                        || (probeScanResult.cellsTexts
+                                |> Dict.get "Name"
+                                |> Maybe.map
+                                    (\name ->
+                                        context.eventContext.botSettings.anomalyNames
+                                            |> List.any (anomalyNameMatches name)
                                     )
+                                |> Maybe.withDefault False
                            )
             in
             if not isCombatAnomaly then
@@ -929,6 +929,44 @@ findReasonToAvoidAnomalyFromMemory context { anomalyID } =
 getRatsToAvoidSeenInAnomaly : BotSettings -> MemoryOfAnomaly -> Set.Set String
 getRatsToAvoidSeenInAnomaly settings =
     .ratsSeen >> Set.filter (shouldAvoidRatAccordingToSettings settings)
+
+
+{-| Whether one `anomaly-name` entry matches the name the scanner shows.
+
+**Exact by default, prefix only where the operator asked for it.** An entry
+ending in `*` matches any name that starts with the rest of it, so
+`anomaly-name=Sansha*` takes every Sansha site; every other entry is compared
+whole, exactly as before. Opt-in rather than a switch to substring matching
+everywhere, because widening a filter silently is how a bot ends up in a site
+that kills it, and `attack-object` already records what an accidental substring
+costs -- a wreck's Type is its owner's name with " Wreck" appended, so a
+substring rule had the bot firing on the corpse of what it had just killed.
+
+Only a _trailing_ `*`, not a general glob. Site names read
+`Sansha <adjective> <noun>`, so the prefix is the case the client's own naming
+produces; anything more would be surface with no evidence behind it.
+
+**What `Sansha*` costs is worth knowing before setting it.** It matches the
+whole family, including the Havens and Sanctums that will kill a destroyer as
+readily as a Burrow will not. The filter cannot tell them apart, and neither can
+the bot -- what keeps a lowsec run safe is that those do not spawn there, which
+is a fact about where the ship is rather than about this setting.
+
+-}
+anomalyNameMatches : String -> String -> Bool
+anomalyNameMatches scannerName entry =
+    let
+        wanted =
+            entry |> String.trim |> String.toLower
+
+        found =
+            scannerName |> String.trim |> String.toLower
+    in
+    if String.endsWith "*" wanted then
+        found |> String.startsWith (wanted |> String.dropRight 1 |> String.trimRight)
+
+    else
+        found == wanted
 
 
 shouldAvoidRatAccordingToSettings : BotSettings -> String -> Bool
