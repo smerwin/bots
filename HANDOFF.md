@@ -4,178 +4,216 @@ Transient state: what is in flight, what is unproven, and what to do next.
 Durable facts about the client and the host live in `CLAUDE.md` — this file is
 the part that goes stale, and it should be rewritten rather than appended to.
 
-Last updated at `caa7f49` (PR #74 merged), with **run 22 in flight**.
+Last updated at `1a8bc7a` (PR #180 merged) **plus one uncommitted fix**, with
+**saxrat run 21 in flight**.
+
+The previous edition of this file stopped at `caa7f49` (PR #74) and run 22 of the
+mission runner. **64 merges have landed since**, and the working checkout is
+currently dirty. Read "Uncommitted right now" before doing anything with git.
 
 ## The one thing to know first
 
-The previous handoff opened with "almost nothing merged in this batch has faced
-the live client." That is no longer true, and the change is the point: **this
-session ran the code, and running it found things inspection had not.**
+**A decision in the log is not an action — and this session found the corollary:
+one reading is not one dispatch either.**
 
-Five features went from compiled-and-unit-tested to observed working. Three
-separate bugs were found only by *reading the live client while it was still
-stuck* — a mission panel layout no rule had heard of, a corrupt gauge reading
-that was a transposition rather than noise, and a search that was never going to
-match because the query never arrived. None of the three was visible in the
-source, and two of them had already survived a green test suite.
+saxrat run 20 spent 405 readings alternating `Undock` and `Abort Undock` and
+never left the station. Every guard involved was already correct.
+`parseStationWindowFromUITreeRoot` reads all three labels the undock slot carries
+("Undock", "Abort Undock", "Undocking..."), and blanks `undockButton` for the
+last two, so a *decision* could never choose to abort. It fired 71 times.
 
-The habit that produced all of it: when the log is ambiguous, attach to the
-client and look. `eve_read.py` drives no input and is safe alongside a running
-bot.
+The bot was dispatching the undock click **twice inside one tick** — substeps
+`.2` and `.5`, three steps apart, on essentially every tick, for 298 dispatched
+clicks against 405 readings. The first click started the undock;
+the second landed a second or two later on the same screen point, which by then
+read "Abort Undock", and put the ship back in the station.
+
+This is CLAUDE.md's own orientation note biting one level lower than it is
+written. The file warns that repeated identical decision lines usually mean one
+action. Here repeated decision lines meant *two* actions per tick, and the only
+way to see it was to correlate `send-effects` against `# [tick.substep]` rather
+than to count decisions.
+
+The fix is `undockClickedStepsAgo`, a settling window over the button's own
+region — the same shape as `clickModuleButtonButWaitIfClickedInPreviousStep`,
+whose doc comment describes this exact failure for module buttons. See
+"Uncommitted right now".
+
+Three habits paid for themselves again, and one cost time:
+
+- **Attach to the live client and look.** `eve_read.py` drives no input and is
+  safe alongside a running bot.
+- **Ask the client's own log what it thinks happened.** The loop is in it
+  verbatim: `Can't do that while undocking` followed by `Docking operation
+  already in progress`.
+- **Correlate dispatches with steps, not decisions with readings.**
+- **The coordinate trap in CLAUDE.md is real and I walked into it.**
+  `eve_read.walk` accumulates offsets from wherever it starts, so re-walking a
+  subtree with its own absolute position as the base double-counts. That produced
+  a confident, wrong "the click is 100 px off target" before it was caught.
+
+## Uncommitted right now
+
+`implement/applications/eve-online/eve-online-saxrat/Bot.elm` carries the undock
+fix and **is not committed**. Run 21 compiled from it, which is why its stamp
+reads `1a8bc7a (DIRTY, ...)`.
+
+```elm
+undockClickSettlingSteps = 8
+undockClickedStepsAgo : List (List EffectOnWindow.EffectOnWindowStruct)
+    -> EveOnline.ParseUserInterface.DisplayRegion -> Maybe Int
+```
+
+Eight rather than the framework's five because steps run about 3.4 to a reading
+here, so eight clears the observed three-step gap between the two dispatches
+while staying under the ten `lastStepsEffects` actually stores — a real bound
+rather than "as long as we can see", which is the margin the framework's own
+comment records the original version lacking.
+
+It bounds the *re-click only*. A click that never landed is retried next tick,
+and the cross-tick case stays with the abort-button parse, which is the client's
+own evidence rather than a count.
+
+**What it still owes.** It is a function of plain values specifically so it can
+be executed in `elm repl` — and it has not been, because the run was launched
+first by request. There are no cases for it. `compile_bot.sh` passes; the live
+run is the only evidence. Writing `test_saxrat_undock_settling.py` and committing
+is the next task, and the mutation that must fail is the settling window removed
+entirely, which restores run 20.
 
 ## Running right now
 
-**Run 22**, three hours, started 17:31 **docked at Amarr VI (Zorast) - Moon 2 -
-Theology Council Tribunal**. Client pid `74515` — the UI-root cache is keyed to
-it, so relaunching the client invalidates `eve_read`/`eve_repl` until a bot run
-repopulates it. Console on the tailnet at `:8787`.
+**saxrat run 21**, started 01:47, from the dirty checkout above. Hunting the
+`hunt-system` circuit out of Amarr; anomaly settings are the launcher defaults.
 
-Settings are the launcher defaults **plus** `decline-mission=Illegal Activity`,
-`home-station=Amarr VIII (Oris) - Emperor Family Academy`, `drone-type` and the
-ammo pair. It compiled after `caa7f49`, so it carries everything below.
+Undocked successfully at `05:47:44` client time and is travelling. The undock
+counters are frozen at **6 clicks / 6 suppressed re-clicks**, against run 20's
+**298 dispatched clicks and zero readings ever in warp**.
 
-Two monitors are armed: `stall_watch.py --keep-going`, and a signature watcher
-that wakes the session if the bot dies and records the first sighting of
-`stuck here`, `Traceback`, `EsiError`, `search results do not offer`,
-`SHIP LOST`, `Abandoning the mission`, `get out get out`, plus the four that
-mark the untested wind-down chain — `drone bay last seen empty`,
-`@host set-destination`, `@host extend-session`, `Maintenance:`.
+`cycle_run.sh` defaults to the *mission runner*. This run was started with
+`BOT_LAUNCHER=$PWD/run_saxrat.sh BOT_LOG_PREFIX=saxrat_run ./cycle_run.sh`, and
+`--status` without that prefix reports the wrong log — it currently claims
+`mission_run39.log`, which is stale and not what is running.
 
-**The ship was repositioned by hand before this run started, and that is now a
-routine step rather than an incident** — see PILOT.md, "Repositioning between
-sessions".
+## What landed since PR #74
 
-## Proven live this session
+64 merges. Grouped by what they are, because the individual rows are in
+`git log --merges` and the arguments are in `CLAUDE.md`.
 
-Each of these had a "what to watch on the first live run" note. These are the
-ones that can be closed out.
+**Bounding runaways — the dominant theme, and every one was found by a run.**
+The message-box standoff (#101/#109, ported to saxrat as #138/#140, revised by
+#164/#165) after one window held the mission runner's whole decision tree for
+three hours and forty-four minutes. Both deadline-reachability fixes — the
+mission abandonment (#102/#115) and the pod recovery (#126/#132, saxrat
+#133/#137) — where the counter advanced on every reading and the comparison sat
+in a branch the tree reached on 0.7% of them. Retreat latency measured and then
+bounded (#136/#139, #141/#142). The ammo disarm latch, which was reading a
+budget as a statement about the guns (#154/#156, #157/#159). The acceleration
+gate worked before the site is re-warped (#147/#152).
 
-| what | evidence |
-|---|---|
-| #62 objective-chain travel step | full chain: `Set Destination → Undock → Undocking → Jump → Jumping → Warping → Destination Set → Warp to Location → Dock → Docking → Start Conversation`. The hand-in leg, flagged in the PR as inferred rather than observed, is observed |
-| #73 ESI route from a bot decision | directive → host → `ESI: destination ... set (60008500)` → travel. **8 directive emissions, 1 ESI call**, so the host de-duplicates |
-| #49 dock outranks the fight | 5 missions, 19–23 readings from the `Dock` label to hand-in, against run 11's 77 readings and 603 s |
-| #31 game-log load refusal | fired for the first time, quoting the client: `You cannot load or unload ... while it is active` |
-| #66 corrupt-armour withholding | `Readings withheld from the retreat this session: 2`, and **zero** false retreats where run 14 had three |
+**Learning from the client instead of asserting.** The lock range (saxrat
+#121/#134), the lock-slot ceiling and its probe (#110/#149, #150/#151), the drone
+launch ceiling (#146/#153), and the ship's own scale derived from gauge movement
+against logged damage (#119/#120).
 
-## Still unproven, and what each needs
+**Reading channels that already existed and nothing read.** The transient quick
+message (#123/#130) — parsed on every reading since the app was added and read by
+no decision, and #146 is now its one consumer. Multi-line game-log entries
+(#124/#131), which had been losing half of every wrapped message. Outgoing combat
+damage (#90/#95), which is what lets the bot give up on a target its shots do
+nothing to.
 
-- **#68, the bot-requested deadline extension.** Needs an empty drone bay: the
-  extension is only asked for while a wind-down has somewhere to go, and every
-  run so far has ended with the bay stocked. `@host extend-session` has never
-  appeared in a log.
-- **#25's home-station trip, end to end, and the drone restock.** Same trigger.
-  Run 17 reached the route-setting step and failed there; nothing has yet
-  travelled home and restocked.
-- **#60's mission abandonment.** Never fired. Its verdict requires
-  `shipUI /= Nothing` — a ship stuck *in space* — so the docked stall that
-  wasted runs 16 and 17 could not have armed it, and did not.
-- **#44's gate-key fetch.** Still needs a mission that locks its gate.
+**Panel buttons replacing context-menu cascades.** Docking (#89/#94), the route's
+next stargate (#167/#170, saxrat #169/#173), the acceleration gate (#145/#148).
+Each replaces a cascade that had a measured failure rate with one click.
 
-## The Windows host is owed one thing, and only a person can do it
+**Test integrity.** The shared `elm repl` harness (#71/#88), which was skipping
+silently so a mutation could pass unnoticed; batched repl calls (#84); and
+fixture escaping (#174/#175), where `json.dumps` output inside an Elm `"""`
+literal made a reading decode to `Nothing` — a fixture that never arrived reads
+exactly like a rule that answered nothing. The audit found four affected
+fixtures and **no shipped rule resting on a vacuous pass**.
 
-**The ESI auth dance has never been performed on the Windows machine**, so
-`hunt-system` cannot route there and saxrat travels whatever route it already
-has, finding nothing once the local anomalies are cleared. Observed: a run that
-cleared two anomalies and then spent 61 gate jumps and 516 readings of
-`no matching anomaly` getting nowhere in particular.
+**Batched lock clicks** (#177/#178, mission runner #179), which found that a tick
+is not a reading — the first draft measured the gain in `# [tick.substep]`
+integers and reported a third of the real number.
 
-The code side is done. `esi_waypoint.py`'s four Keychain functions dispatch to
-`tools/windows-host/credential_store.py`, which is the Windows Credential
-Manager (`CredReadW`/`CredWriteW`/`CredDeleteW`) — round-tripped with a
-non-ASCII secret, absent reads answer `None`, delete is idempotent. What is
-missing is not code, it is a login:
+**The Windows port** (#176/#180). Findings live in
+`tools/windows-host/FINDINGS.md`, not here.
 
-```
-python tools/windows-host/credential_store.py status
-  eve-esi-refresh:   not stored
-  eve-esi-client-id: not stored
-```
+## Still unproven
 
-Three steps, and the third is why an agent must not do it:
+Most of the above has never been observed running. That is the honest state and
+it is the single most useful thing to know before planning work: **the backlog of
+"what to watch on the first live run" notes in `CLAUDE.md` is now much larger
+than the backlog of unwritten features.** Each feature section carries its own
+"Unverified" paragraph naming the exact log line to watch for.
 
-1. developers.eveonline.com → Create New Application, type *Authentication &
-   API Access*, scope `esi-ui.write_waypoint.v1`, callback exactly
-   `http://localhost:8635/callback`
-2. `python esi_waypoint.py client-id <the client id>`
-3. `python esi_waypoint.py auth` — **opens a browser and logs in to the EVE
-   account**. That is an account credential being entered, so it belongs to the
-   operator and to nobody automating on their behalf.
+Worth flying deliberately, in rough order of consequence:
 
-Confirm with `credential_store.py status` reading `stored (N chars)` for both.
-It reports presence and length only and never echoes a value, deliberately —
-this runs in terminals whose scrollback ends up in bug reports.
+- **The undock settling window.** No cases, one run. Above.
+- **The ship-loss verdict and pod recovery**, in either bot. Never latched in any
+  recorded run — the machinery has never executed, only its bound.
+- **Mission abandonment end to end.** Run 30 flew every piece except the bound;
+  the quit itself has never completed.
+- **The retreat's own execution.** #141 reports when a retreat is not executing
+  and deliberately does not make a warp take. Run 36 replayed today would go
+  exactly as it did.
+- **The gate-key fetch** (#44), which still needs a mission that locks its gate.
 
-Until then, a Windows saxrat run wants a system with anomalies picked for it by
-hand, and `hunt-system` should be left unset rather than set and silently inert.
+## Open and worth doing next
 
-**The rest of this file predates the Windows port** (it stops at run 22 and PR
-#74; the port is on `windows-host-176` off #178). What was measured there —
-including two decoder bugs that were silently dropping data, and a native
-`tree_walker` — is in `tools/windows-host/FINDINGS.md`, not here.
+- **#163 — a saturated window server drops posted keystrokes and nothing says
+  so.** This is the real cause behind **#75**, which the old edition of this file
+  called the highest-risk item and which is still open. PR #160 fixed two real
+  defects found while investigating it (a key left held for the session, and a
+  letter-bound off-by-one that pressed Command) but **did not explain `eueu`**.
+  The measurement that matters: posted events cost 53–100 ms in the two runs that
+  lost a query and under 18 ms in every other recorded run.
+- **#166 — the client stopped answering reads and nothing noticed.** Every
+  counter froze together and the log read like thousands of readings. saxrat run
+  11 is the instance. This is the failure mode most likely to waste a whole
+  session unattended.
+- **#182 — saxrat's `hunt-system`, `anomaly-name` and `avoid-rat` do not
+  comma-split**, so a comma-joined entry fails silently.
+- **#171 — route markers count jumps remaining, not waypoints**, so
+  `destinationIsInThisSystem` is true one system early. The markers carry
+  `numJumps` and the parser does not lift it, so the reading that settles it
+  exists.
+- **#168 — ignore an acceleration gate more than 300 km away.** Run 51 chased one
+  at 1,395 km for four hours.
+- **#172 — the host suite takes 20–25 minutes** because 131 classes each compile
+  their own scratch app.
+- **#158 — #90's threshold premise no longer holds**: a target both took damage
+  and read zero.
 
-## In flight
-
-| issue | what | risk |
-|---|---|---|
-| #75 | the search bar receives a mangled query — `Emperor Family Bureau` arrived as `eueu` | **high** — the root cause of #64 and #67, and it means every typed string is suspect |
-| #72 | the ammo switch-off lands and the gun comes back on by itself | medium — the swap spends its budget on a gun that is already firing again |
-| #71 | the `elm repl` test harness skips silently, so a mutation can pass unnoticed | medium — this is a test-integrity bug, and several suites use that harness |
-
-#75 is the one worth doing first. Two runs and 1,538 `askForHelpToGetUnstuck`
-came from it, and its blast radius is larger than the search bar:
-`effectsToEnterString` is how the bot types *anything*.
-
-## What landed today
-
-Each row is one merge commit; `git revert -m 1 <sha>` backs out exactly that
-feature.
-
-| sha | PR | what |
-|---|---|---|
-| `caa7f49` | #74 | give the search-results branch patience before it gives up (#67) |
-| `f92d5d7` | #73 | set the route through ESI, over the channel #68 opened (#69) |
-| `d129b78` | #70 | let the ammo swap disarm when the gain is worth the risk (#63) |
-| `10d3fdf` | #66 | stop the retreat firing on a corrupt armour reading (#56) |
-| `c171317` | #68 | let a winding-down bot ask for time past the planned session end |
-| `4b30e19` | #65 | drone abandonment |
-| `714365f` | #62 | read the travel step from an objective-chain mission panel |
-| `8ac5030` | #61 | give the home-station trip deadlines that fit the trip |
-| `1a82fb7` | #60 | give back a mission that cannot be progressed (#54) |
+**Bookkeeping:** #125 is still open on GitHub but was resolved by PR #162, which
+removed the dead setting from the mission runner. #113 is open and remains
+unexplained rather than unfixed — see the correction below.
 
 ## Corrections worth carrying forward
 
-Five diagnoses were confidently wrong before they were right. The *mistake* is
-the reusable part.
+The *mistake* is the reusable part. These are additions; the five in the previous
+edition are still true and now live in `CLAUDE.md`'s own sections.
 
-- **The hull is armour-tanked, and "armour untouched" is the tank working.** I
-  read armour pinned at 100% while the shield swung as evidence the ship was
-  shield-tanked. It is the opposite: in EVE damage always lands shield → armour
-  → hull regardless of tank type, so a shield that swings while armour holds is
-  the armour repairer keeping up. Armour below 70 means the repper is losing.
-  `run-away-shield-hitpoints-threshold-percent=-1` is correct — the shield rests
-  low by design, and 11% of readings sit under 25%.
-- **The corrupt hitpoint reading is a transposition, not noise.** Run 14 read
-  `Shield 3% / Armor 100%`, then `Shield 22% / Armor 3%`, then back. The armour
-  gauge returned the value the *shield* gauge held one reading earlier — which
-  is why it lands inside `[0, 100]` and no plausibility filter can catch it.
-  Armour read below 70 on exactly 3 status prints in that run, and all three were
-  this. Every firing of the armour retreat to date has been a false positive.
-- **The host owns the deadline, and the bot's allowances were unreachable.**
-  Four constants — 420 s, 120 s, 120 s, 60 s — were all measured *past* the
-  planned end, and `run_bot` stopped the run the instant the end passed. Run 17
-  was killed mid-trip with its own clock reading 420 s of headroom. #68 makes
-  them reachable; #61 fixed a mismatch *between* them that was real but sat
-  entirely inside time that could not happen.
-- **Mission level follows the station you are docked at, not `home-station`.**
-  The wind-down parks the ship at Oris, so the next session starts there and
-  takes whatever that chain offers. Measured: 1,531,629 bounty ISK on a run
-  working from Zorast against 81,750 on one working the Mabnen agent — about 9×.
-  `home-station` is about *where the drones are* and nothing else.
-- **The search was not failing on semantics, it was failing on delivery.** The
-  live results window held `Characters (9)` and `Corporations (1)` and no
-  `Stations` group, which reads as "this query matches no station". It was not
-  the query the bot meant to send — see #75.
+- **The undock guard was right and the cadence was wrong.** Every instinct said
+  "the parser is missing a label" — that had been the bug twice before on this
+  same button (`92ed41a` parsing "Abort Undock" as the abort button rather than
+  as nothing, then `44582ea` for the third label "Undocking..."), and the long
+  doc comment describing both is sitting right there in
+  `parseStationWindowFromUITreeRoot`. It was neither. When a guard that provably
+  fires is being outrun, measure the dispatches, not the decisions.
+- **A click logs nothing; the thing it starts does.** There is no game-log line
+  for *pressing* undock, so the loop looked invisible in the client's own log.
+  What dates it is the `Undocking from ... to ... solar system.` line the undock
+  writes when it *begins*, and the refusals that follow a second press.
+- **`grep -c` exits 1 when it counts zero**, so a monitoring command ending in
+  one reports failure on a healthy run. That produced a spurious "background task
+  failed" notification here. Do not read a wrapper's exit code as a statement
+  about the bot.
+- **#75's headline symptom is still unexplained after a merged fix.** Two real
+  defects were found and fixed on the way, which is exactly the shape that makes
+  an issue look closed. It is not.
 
 ## Working agreements
 
@@ -186,25 +224,37 @@ the reusable part.
   out exactly one thing. A test-data update forced by new recordings is a
   separate commit inside that PR, not a separate PR.
 - **Commit before mutation-testing.** Undoing mutations with `git checkout`
-  reverts uncommitted work — that cost a full reimplementation this session.
+  reverts uncommitted work.
 - **Work in a git worktree**, not the shared checkout — several sessions run
   against `/Users/smerwin/code/bots` at once, and a broad `git add` in one sweeps
-  up another's work. The shared checkout is what a run compiles from, so
-  fast-forward it before starting a run that is meant to carry a new fix.
+  up another's work. **This session deliberately broke that rule**, because the
+  shared checkout is what a run compiles from and the fix had to fly immediately;
+  that is why the tree is dirty. Fast-forward before starting a run meant to
+  carry a new fix.
 - **Never run the bot, launch the client, or drive input without being asked.**
   Reading is always safe: `eve_read.py` and `eve_repl.py`'s read-only methods
-  touch no input, and were used live three times this session to settle
-  questions the logs could not.
+  touch no input.
+- **Execute Elm rather than mirroring it in Python**, and prefer rules that are
+  functions of plain records so they *can* be executed — a rule reachable only
+  through a whole `BotDecisionContext` can only be checked by reading it.
 
 ## Where the evidence lives
 
-`~/eve-bot-logs/mission_run*.log` — twenty-two runs, **not in the repo** and not
-reproducible. They carry the decision log, the status line every reading, and
-EVE's own game-log lines echoed as `#   game log:`.
+`~/eve-bot-logs/` — **39 `mission_run*.log` and 21 `saxrat_run*.log`**, not in
+the repo and not reproducible. They carry the decision log, the status line every
+reading, and EVE's own game-log lines echoed as `#   game log:`.
 
-Two facts about reading them that cost time to learn. The four travel labels
-`Docking`, `Jump`, `Jumping ` (trailing space is the client's) and `Undocking`
-appear only from run 17 onward, because #62 is what made that panel readable at
-all. And run 15 is degenerate — started and cycled away seconds later, 256 lines,
-never undocked — so any assertion that expects in-space readings from every run
-has to skip it.
+The client's own logs are the second source and are not the same thing:
+`~/Documents/EVE/logs/Gamelogs/*.txt`. Use them whenever the question is "what
+did the client think happened" — the undock diagnosis above came out of them, not
+out of the bot's log.
+
+Three facts about reading the bot logs that cost time to learn. **A `# [N.M]`
+step is not a reading and a reading is not a tick** — the framework issues one
+memory read per reading, several steps run per tick, and counting in the wrong
+unit has now cost three separate measurements (`stall_watch.py`'s threshold,
+#141's retreat recount, #179's ramp). The four travel labels `Docking`, `Jump`,
+`Jumping ` (trailing space is the client's) and `Undocking` appear only from
+mission run 17 onward, because #62 is what made that panel readable at all. And
+mission run 15 is degenerate — 256 lines, never undocked — so any assertion
+expecting in-space readings from every run has to skip it.
