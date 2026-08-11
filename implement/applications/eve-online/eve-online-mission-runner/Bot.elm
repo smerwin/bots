@@ -16248,6 +16248,11 @@ The gate count is carried for its own reason. Two gates on one grid at very
 different ranges is a real configuration, and the decision log alone could not
 distinguish it from one gate.
 
+**The distant-gate clause rides here for the same reason as the give-up**, and
+the nearest gate it speaks about is the one the branch itself acts on -- both
+take the head of `accelerationGatesOnOverview`, so the line and the decision
+cannot disagree about which gate was ignored.
+
 -}
 describeAccelerationGate : BotDecisionContext -> List String
 describeAccelerationGate context =
@@ -16288,6 +16293,11 @@ describeAccelerationGate context =
 
                         Nothing ->
                             ""
+                   )
+                ++ (gates
+                        |> List.head
+                        |> Maybe.map (.objectDistanceInMeters >> distantGateVerdict >> describeDistantGate)
+                        |> Maybe.withDefault ""
                    )
             ]
 
@@ -17838,9 +17848,132 @@ accelerationGateIsWithinReach readingFromGameClient =
             )
 
 
+{-| Past how many metres an acceleration gate stops being somewhere to fly to.
+
+A gate this far away is not a gate to fly to; it is evidence that something else
+went wrong -- the grid was not cleared, the wrong object was picked, or the bot
+is looking at a gate on someone else's grid -- and flying at it converts one
+mistake into a whole session. Run 51 spent four hours closing on one at
+1,395,000 m, returning about 122,500 ISK an hour against the 1.36M saxrat was
+measured at. Nothing bounded the approach, because nothing thought a distance
+could be absurd, and `gateWithinReachTicks` could not: that counter is for a gate
+_in reach_ that will not open and only advances inside `interactionRangeInMeters`,
+which a gate 1,395 km away never enters.
+
+**The separation is between what a real gate has ever measured and everything
+above it.** These counts are issue #168's, over every
+`acceleration gate is N m away` line in `~/eve-bot-logs` with the AU placeholder
+excluded, and are cited rather than re-derived here:
+
+    source                  readings   furthest gate
+    ---------------------   --------   -------------
+    24 mission runs            1,385        77,000 m
+    saxrat run 49              3,503       314,000 m
+    mission run 51            11,200     1,395,000 m
+
+So across twenty-four mission runs the furthest gate ever seen is 77,000 m, and
+run 51's is eighteen times that. 150,000 sits in that gap at roughly twice
+anything ever observed working.
+
+**300,000 was the number the issue was filed at, and its own measurement argues
+lower.** saxrat's run 49 reached 314,000 m with 1,629 readings above 150 km and
+only 196 above 300 km, so a 300 km rule catches a tenth of that run's long-gate
+readings and leaves the rest -- and run 49 is not a healthy control either, at
+770k ISK/hr against run 48's 1,357k on identical code, with 28
+`askForHelpToGetUnstuck` alarms. The issue files 300 km as "the safe choice; it
+is not necessarily the effective one" and puts the real gap at 100-150 km.
+150,000 is the top of that range, which is its conservative end.
+
+**It is a number about how these sites are laid out, not about the game**, the
+same warning `defaultRunAwayIncomingDamageThreshold` carries about a hull. A site
+type whose gates are genuinely further out than this would need it re-derived,
+and until it is the bot would ignore a gate it ought to fly to. What makes that
+recoverable rather than silent is that the status line names the gate, its range
+and this number on every reading it declines one, so the evidence for a retune is
+in the log and the retune is one edit.
+
+-}
+distantAccelerationGateMeters : Int
+distantAccelerationGateMeters =
+    150000
+
+
+{-| Whether the nearest acceleration gate is somewhere to fly to at all.
+
+A pure function over the overview row's own `objectDistanceInMeters` so a case
+can execute it, and over the `Result` rather than over the `999999` fallback
+every other consumer of an overview distance takes, so that the two ways of not
+being a gate to fly to stay apart.
+
+That fallback stands in for a distance the client wrote in AU, and it is past any
+threshold this could carry -- so a rule reading it would decline such a row for
+the right reason under the wrong sentence, and an operator reading "past 150000
+m" would go looking for a gate that is far away rather than for one whose range
+did not parse. "Reading the overview" is why an AU distance is excluded on its
+own terms: it is the unparsed-distance placeholder rather than a distance, and
+nothing the ship might act on may be chosen on it.
+
+-}
+type DistantGateVerdict
+    = GateIsCloseEnoughToFlyTo Int
+    | GateIsTooFarToBeSomewhereToFlyTo Int
+    | GateDistanceDoesNotReadAsARange
+
+
+distantGateVerdict : Result String Int -> DistantGateVerdict
+distantGateVerdict distanceRead =
+    case distanceRead of
+        Err _ ->
+            GateDistanceDoesNotReadAsARange
+
+        Ok distanceInMeters ->
+            if distantAccelerationGateMeters < distanceInMeters then
+                GateIsTooFarToBeSomewhereToFlyTo distanceInMeters
+
+            else
+                GateIsCloseEnoughToFlyTo distanceInMeters
+
+
+{-| The ignored-gate clause in the status line.
+
+Empty on the ordinary reading, where the gate is one to fly to and the status
+line's own gate clause already covers it.
+
+**A decline this branch does not say out loud is this repo's signature failure**,
+and the gate branch has already paid for it once: run 10's give-up answered
+`Nothing` about a gate 32 m away and the log said only that nothing was
+happening, 1,325 readings running. A gate plainly on the overview that the bot
+stops acting on reads to the next operator as a bot that has gone blind to gates,
+so this says which of the two verdicts it is, at what range, and against what
+number -- which is also the evidence a retune of that number would rest on.
+
+-}
+describeDistantGate : DistantGateVerdict -> String
+describeDistantGate verdict =
+    case verdict of
+        GateIsCloseEnoughToFlyTo _ ->
+            ""
+
+        GateIsTooFarToBeSomewhereToFlyTo distanceInMeters ->
+            " IGNORING the nearest one: "
+                ++ String.fromInt distanceInMeters
+                ++ " m is past the "
+                ++ String.fromInt distantAccelerationGateMeters
+                ++ " m this bot will fly at a gate, so it is evidence something else went wrong rather than somewhere to go. Leaving it alone and letting the rest of the decision tree have the reading."
+
+        GateDistanceDoesNotReadAsARange ->
+            " IGNORING the nearest one: its distance does not read as a range in m or km, which is the unparsed-distance placeholder rather than a distance, so there is nothing here to fly to. Leaving it alone and letting the rest of the decision tree have the reading."
+
+
 {-| Right-clicks the nearest acceleration gate and activates it to move on to
 the next pocket (EVE's own menu text for these is "Activate Gate", mirrored on
 `jumpToNextSystem`'s "dock"/"jump" cascade for regular stargates).
+
+**A gate far enough away is ignored before any of that**, which is
+`distantGateVerdict` and is asked first. It is not a give-up on the grid: the
+answer is `Nothing`, so the caller's own fallbacks run and the bot goes back to
+fighting, looting or leaving, and the status line says which gate was ignored and
+why.
 
 From further out the same "Activate Gate" command is what gets issued: the
 client flies the ship in and takes the gate on arrival, so the bot never spends
@@ -17863,127 +17996,152 @@ activateAccelerationGateIfPresent context =
         |> List.head
         |> Maybe.andThen
             (\accelerationGateEntry ->
-                let
-                    distanceInMeters =
-                        overviewEntryDistanceOrFarInMeters accelerationGateEntry
-                in
-                if context.memory.gateLockedForWantOfAnItem /= Nothing then
-                    Just <|
-                        -- The client has said, in answer to this bot's own press,
-                        -- that it will not open this gate without an item in the
-                        -- hold. Pressing again is the press/refuse/dismiss loop run
-                        -- 10 spent two minutes in.
+                case distantGateVerdict accelerationGateEntry.objectDistanceInMeters of
+                    GateIsTooFarToBeSomewhereToFlyTo _ ->
+                        -- A gate this far out is not a gate to fly to; it is
+                        -- evidence something else went wrong, and run 51 spent
+                        -- four hours converting that into a whole session. See
+                        -- `distantAccelerationGateMeters` for where the number
+                        -- comes from and what it is a number about.
                         --
-                        -- **Reaching this branch means the search is already over.**
-                        -- `lootMissionItemFromContainerIfPresent` is checked ahead
-                        -- of the whole gate path in `decideActionInMissionPocket`,
-                        -- and since #44 it is driven by the key the client named as
-                        -- well as by the objective's own cargo -- so if anything on
-                        -- the overview could still be holding it, that branch won
-                        -- this reading and this one was never called. Arriving here
-                        -- is the loot path answering "nothing left to open".
+                        -- Ignoring the gate rather than giving up on the grid:
+                        -- the same `Nothing` the give-up below answers, so the
+                        -- caller's own fallbacks run and the bot goes back to
+                        -- fighting, looting or leaving. Answering
+                        -- `askForHelpToGetUnstuck` here would swap a four-hour
+                        -- chase for a four-hour alarm.
                         --
-                        -- Checked before the range test rather than after it, so
-                        -- the ship does not fly at a gate it has been told is shut.
-                        -- Nothing is lost by that: only the nearest gate is ever
-                        -- considered, and the verdict is cleared the moment the ship
-                        -- leaves reach or empties a container.
-                        --
-                        -- Asking for help on one line from the client rather than
-                        -- waiting for the bottom of the tree to notice. That give-up
-                        -- did fire in run 10 and did its job -- but 20 minutes and
-                        -- 1,325 readings later, and saying only that nothing was
-                        -- happening. The client had said why on the first attempt.
-                        describeBranch
-                            ("This acceleration gate will not open for this ship, and the client said why: \""
-                                ++ (context.memory.gateLockedForWantOfAnItem |> Maybe.withDefault "")
-                                ++ "\" -- "
-                                ++ (case gateKeyWanted context of
-                                        Just itemName ->
-                                            "and nothing left on the overview looks like it might hold '"
-                                                ++ itemName
-                                                ++ "'."
+                        -- Silent by construction, which is the one thing this
+                        -- may not be: `describeDistantGate` carries it in the
+                        -- status line on every reading instead.
+                        Nothing
 
-                                        Nothing ->
-                                            -- The sentence matched but named nothing
-                                            -- extractable, so there is no errand to
-                                            -- run. Said differently from the case
-                                            -- above, because "we looked and found
-                                            -- nothing" and "we never had anything to
-                                            -- look for" are different problems.
-                                            "and it named no item this bot could pick out of that sentence."
-                                   )
-                            )
-                            askForHelpToGetUnstuck
+                    GateDistanceDoesNotReadAsARange ->
+                        -- An AU distance is the unparsed-distance placeholder
+                        -- rather than a distance, so this row says nothing about
+                        -- where the gate is. Declined on its own terms rather
+                        -- than as a large number, since the two want different
+                        -- sentences in the status line.
+                        Nothing
 
-                else if not (gateCanBeActivatedNow context accelerationGateEntry) then
-                    Just <|
-                        -- Approach until the client says we can take the gate, and
-                        -- let *it* decide when that is. The panel only carries
-                        -- `selectedItemActivateGate` while the gate is genuinely in
-                        -- range, so the button's presence is the range test -- and
-                        -- unlike a distance of our own it cannot be stale.
-                        --
-                        -- A distance threshold was the obvious alternative and it
-                        -- does not work. The overview distance lags the ship's true
-                        -- position: run 128 read "in reach" and shut the prop mod
-                        -- down, and the panel still offered no button. It is the
-                        -- same lag that had the loot window refusing "Loot All" with
-                        -- "you must be within 2500 meters" while the reading said
-                        -- 1,602 m. Tightening interactionRangeInMeters would only
-                        -- move the guess; asking the client removes it.
-                        --
-                        -- Drones come home first: the gate fires with whatever is
-                        -- still in space.
-                        ensureDronesRecalledBeforeWarping context
-                            (approachOverviewEntry context
-                                ("The acceleration gate is "
-                                    ++ String.fromInt distanceInMeters
-                                    ++ " m away and the panel offers no Activate yet -- keep closing."
-                                )
-                                accelerationGateEntry
-                            )
+                    GateIsCloseEnoughToFlyTo distanceInMeters ->
+                        if context.memory.gateLockedForWantOfAnItem /= Nothing then
+                            Just <|
+                                -- The client has said, in answer to this bot's own press,
+                                -- that it will not open this gate without an item in the
+                                -- hold. Pressing again is the press/refuse/dismiss loop run
+                                -- 10 spent two minutes in.
+                                --
+                                -- **Reaching this branch means the search is already over.**
+                                -- `lootMissionItemFromContainerIfPresent` is checked ahead
+                                -- of the whole gate path in `decideActionInMissionPocket`,
+                                -- and since #44 it is driven by the key the client named as
+                                -- well as by the objective's own cargo -- so if anything on
+                                -- the overview could still be holding it, that branch won
+                                -- this reading and this one was never called. Arriving here
+                                -- is the loot path answering "nothing left to open".
+                                --
+                                -- Checked before the range test rather than after it, so
+                                -- the ship does not fly at a gate it has been told is shut.
+                                -- Nothing is lost by that: only the nearest gate is ever
+                                -- considered, and the verdict is cleared the moment the ship
+                                -- leaves reach or empties a container.
+                                --
+                                -- Asking for help on one line from the client rather than
+                                -- waiting for the bottom of the tree to notice. That give-up
+                                -- did fire in run 10 and did its job -- but 20 minutes and
+                                -- 1,325 readings later, and saying only that nothing was
+                                -- happening. The client had said why on the first attempt.
+                                describeBranch
+                                    ("This acceleration gate will not open for this ship, and the client said why: \""
+                                        ++ (context.memory.gateLockedForWantOfAnItem |> Maybe.withDefault "")
+                                        ++ "\" -- "
+                                        ++ (case gateKeyWanted context of
+                                                Just itemName ->
+                                                    "and nothing left on the overview looks like it might hold '"
+                                                        ++ itemName
+                                                        ++ "'."
 
-                else if gateRefusesThisShipTicks < context.memory.gateWithinReachTicks then
-                    -- Hand the turn back rather than end the session. This used to
-                    -- askForHelpToGetUnstuck, stopping everything on the strength
-                    -- of a guess -- and the guess is often wrong: the message
-                    -- blames "special ship restrictions", but it fired live on
-                    -- Athran Exigency, whose terms say nothing of the sort and
-                    -- whose objective is satisfied by approaching an object
-                    -- elsewhere on the grid (see approach-object in
-                    -- run_mission.sh). Returning Nothing lets the caller's own
-                    -- fallbacks run -- travelling a set route, then
-                    -- approachConfiguredObjectIfPresent -- which is the move that
-                    -- mission actually needs.
-                    --
-                    -- Declining without a decision line is the one thing this
-                    -- may not do silently, and it did: run 10 landed here and
-                    -- the log went on saying "nothing to fight and no travel
-                    -- step" for 1,325 readings with no hint that a gate had been
-                    -- given up on. `describeAccelerationGate` carries it in the
-                    -- status line every reading instead, since saying it here
-                    -- would mean returning a step and losing the fallbacks.
-                    Nothing
+                                                Nothing ->
+                                                    -- The sentence matched but named nothing
+                                                    -- extractable, so there is no errand to
+                                                    -- run. Said differently from the case
+                                                    -- above, because "we looked and found
+                                                    -- nothing" and "we never had anything to
+                                                    -- look for" are different problems.
+                                                    "and it named no item this bot could pick out of that sentence."
+                                           )
+                                    )
+                                    askForHelpToGetUnstuck
 
-                else
-                    Just <|
-                        ensureDronesRecalledBeforeWarping context
-                            (activateGateOnOverviewEntry context
-                                -- Says which gate. The bare version of this line was
-                                -- printed 135 times in run 10 without ever revealing
-                                -- that the overview held two acceleration gates at
-                                -- very different ranges, which is what made the
-                                -- diagnosis take a manual read of the client. The
-                                -- distance deliberately does not read "N m away":
-                                -- stall_watch treats that wording as an approach in
-                                -- progress and a falling number as progress, and
-                                -- nothing is approaching here.
-                                (describeAccelerationGateChosen context accelerationGateEntry
-                                    ++ " -- D-click it to move to the next pocket."
-                                )
-                                accelerationGateEntry
-                            )
+                        else if not (gateCanBeActivatedNow context accelerationGateEntry) then
+                            Just <|
+                                -- Approach until the client says we can take the gate, and
+                                -- let *it* decide when that is. The panel only carries
+                                -- `selectedItemActivateGate` while the gate is genuinely in
+                                -- range, so the button's presence is the range test -- and
+                                -- unlike a distance of our own it cannot be stale.
+                                --
+                                -- A distance threshold was the obvious alternative and it
+                                -- does not work. The overview distance lags the ship's true
+                                -- position: run 128 read "in reach" and shut the prop mod
+                                -- down, and the panel still offered no button. It is the
+                                -- same lag that had the loot window refusing "Loot All" with
+                                -- "you must be within 2500 meters" while the reading said
+                                -- 1,602 m. Tightening interactionRangeInMeters would only
+                                -- move the guess; asking the client removes it.
+                                --
+                                -- Drones come home first: the gate fires with whatever is
+                                -- still in space.
+                                ensureDronesRecalledBeforeWarping context
+                                    (approachOverviewEntry context
+                                        ("The acceleration gate is "
+                                            ++ String.fromInt distanceInMeters
+                                            ++ " m away and the panel offers no Activate yet -- keep closing."
+                                        )
+                                        accelerationGateEntry
+                                    )
+
+                        else if gateRefusesThisShipTicks < context.memory.gateWithinReachTicks then
+                            -- Hand the turn back rather than end the session. This used to
+                            -- askForHelpToGetUnstuck, stopping everything on the strength
+                            -- of a guess -- and the guess is often wrong: the message
+                            -- blames "special ship restrictions", but it fired live on
+                            -- Athran Exigency, whose terms say nothing of the sort and
+                            -- whose objective is satisfied by approaching an object
+                            -- elsewhere on the grid (see approach-object in
+                            -- run_mission.sh). Returning Nothing lets the caller's own
+                            -- fallbacks run -- travelling a set route, then
+                            -- approachConfiguredObjectIfPresent -- which is the move that
+                            -- mission actually needs.
+                            --
+                            -- Declining without a decision line is the one thing this
+                            -- may not do silently, and it did: run 10 landed here and
+                            -- the log went on saying "nothing to fight and no travel
+                            -- step" for 1,325 readings with no hint that a gate had been
+                            -- given up on. `describeAccelerationGate` carries it in the
+                            -- status line every reading instead, since saying it here
+                            -- would mean returning a step and losing the fallbacks.
+                            Nothing
+
+                        else
+                            Just <|
+                                ensureDronesRecalledBeforeWarping context
+                                    (activateGateOnOverviewEntry context
+                                        -- Says which gate. The bare version of this line was
+                                        -- printed 135 times in run 10 without ever revealing
+                                        -- that the overview held two acceleration gates at
+                                        -- very different ranges, which is what made the
+                                        -- diagnosis take a manual read of the client. The
+                                        -- distance deliberately does not read "N m away":
+                                        -- stall_watch treats that wording as an approach in
+                                        -- progress and a falling number as progress, and
+                                        -- nothing is approaching here.
+                                        (describeAccelerationGateChosen context accelerationGateEntry
+                                            ++ " -- D-click it to move to the next pocket."
+                                        )
+                                        accelerationGateEntry
+                                    )
             )
 
 
