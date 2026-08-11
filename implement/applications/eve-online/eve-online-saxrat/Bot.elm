@@ -212,6 +212,10 @@ defaultBotSettings =
     -- default that accepted anyone would hand the ship's position to whoever
     -- asked first.
     , acceptFleetInviteFrom = []
+
+    -- Empty for the same reason, and the cost of a wrong entry is larger: a
+    -- pilot on this list can send this ship anywhere in New Eden.
+    , followFleetBroadcastFrom = []
     }
 
 
@@ -246,8 +250,23 @@ parseBotSettings =
              -- mission runner's `decline-mission` lesson pointed at something
              -- that costs a ship rather than standing.
              valueTypeNonEmptyString
-                (\pilotName settings ->
-                    { settings | acceptFleetInviteFrom = settings.acceptFleetInviteFrom ++ [ pilotName ] }
+                (\pilotNames settings ->
+                    { settings
+                        | acceptFleetInviteFrom =
+                            settings.acceptFleetInviteFrom ++ splitSettingIntoNames pilotNames
+                    }
+                )
+           )
+         , ( "follow-fleet-broadcast-from"
+           , -- Same guard and the same reason, one step further: an empty entry
+             -- would follow a "Travel to" from anybody in the fleet, and this
+             -- setting does not merely join a fleet, it hands over navigation.
+             valueTypeNonEmptyString
+                (\pilotNames settings ->
+                    { settings
+                        | followFleetBroadcastFrom =
+                            settings.followFleetBroadcastFrom ++ splitSettingIntoNames pilotNames
+                    }
                 )
            )
          , ( "run-away-incoming-damage-threshold"
@@ -349,6 +368,29 @@ nonEmptySettingValue value =
             Just trimmed
 
 
+{-| One setting line holding several names, split on commas.
+
+**A comma cannot occur in an EVE character name** -- the client's own naming
+rules allow letters, digits, spaces, hyphens and apostrophes and nothing else --
+so the separator cannot eat part of a name. That claim is not load-bearing all
+the same: every setting that uses this is *also* repeatable, so a name this
+splitter would cut can still be given a line of its own. The design does not
+rest on the naming rules being remembered correctly.
+
+An empty entry is dropped rather than kept, because a trailing comma is how one
+gets written by accident and the other names on the line still carry what was
+meant. That is the opposite of what `valueTypeNonEmptyString` does to a wholly
+empty *value*, and deliberately so: there, nothing is left to read the intent
+from.
+
+-}
+splitSettingIntoNames : String -> List String
+splitSettingIntoNames =
+    String.split ","
+        >> List.map String.trim
+        >> List.filter (String.isEmpty >> not)
+
+
 {-| A setting that names one thing and is useless -- or dangerous -- empty.
 
 The mission runner's PR #116 is the argument, and it applies here in a sharper
@@ -412,6 +454,7 @@ type alias BotSettings =
     , longRangeAmmoName : Maybe String
     , ammoSwapRangeMeters : Maybe Int
     , acceptFleetInviteFrom : List String
+    , followFleetBroadcastFrom : List String
     }
 
 
@@ -488,6 +531,20 @@ type alias BotMemory =
     -- but it has to be bounded, or a name that never resolves is a bot that
     -- asks forever and never hunts again.
     , destinationAskedFor : Maybe String
+
+    -- The fleet travel broadcast this session has already routed to, as the
+    -- banner's own text. The client's banner does not go away, so without this
+    -- the ask would repeat on every reading for the rest of the session. See
+    -- `fleetBroadcastToFollow`.
+    , fleetBroadcastFollowed : Maybe String
+
+    -- The banner as the *previous* reading saw it. `decideNextStep` is handed
+    -- the memory this update produces, so latching `fleetBroadcastFollowed` on
+    -- the reading the banner first appears would stop the branch ever firing --
+    -- `loadCascadeReachedTheMenu`'s trap, in a place with no dispatched effect
+    -- to read it out of. Latching on the second sighting instead makes the ask
+    -- go out exactly once.
+    , fleetBroadcastSeen : Maybe String
     , destinationAskReadings : Int
     , routeSettingGivenUp : Bool
 
@@ -945,7 +1002,9 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                 |> Maybe.withDefault
                     (recoverPodAfterShipLoss context
                         |> Maybe.withDefault
-                            (branchDependingOnDockedOrInSpace
+                            (followFleetBroadcast context
+                                |> Maybe.withDefault
+                                    (branchDependingOnDockedOrInSpace
                                 { ifDocked =
                                     continueIfShouldHide
                                         { ifShouldHide =
@@ -1001,7 +1060,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                                 context.readingFromGameClient
                             )
                     )
-            )
+            ))
 
 
 {-| The bounds whose expiry ends the session, asked where nothing can decline to
@@ -1769,6 +1828,157 @@ hostDirectivePrefix =
 hostDirectiveSetDestination : String -> String
 hostDirectiveSetDestination systemName =
     hostDirectivePrefix ++ "set-destination " ++ systemName
+
+
+{-| The client's own wording for a fleet travel broadcast, read off a live one.
+
+Captured from this account's client on 2026-08-11, three separate broadcasts,
+all of this shape:
+
+    FleetBroadcastCont          _name='broadcastCont'
+      ContainerAutoSize         _name='mainCont'
+        Container               _name='lastBroadcastCont'
+          Container             _name='lastBroadcastBanner'
+            EveLabelMedium      _name='bannerLabel'
+                                _setText='Gal Bistot: Travel to Riramia'
+
+One marker constant, shared by the test and the slice, so the extraction can
+never succeed on a banner the matcher would have rejected.
+
+-}
+fleetTravelBroadcastMarker : String
+fleetTravelBroadcastMarker =
+    ": Travel to "
+
+
+{-| The banner naming the client's most recent fleet broadcast.
+
+Found by the `_name` the client gives it rather than by position, because the
+banner sits four containers deep and every one of those is a `Container` that
+carries no other identity.
+
+-}
+fleetBroadcastBannerText : ReadingFromGameClient -> Maybe String
+fleetBroadcastBannerText readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter
+            (.uiNode
+                >> EveOnline.ParseUserInterface.getNameFromDictEntries
+                >> (==) (Just "bannerLabel")
+            )
+        |> List.filterMap (.uiNode >> EveOnline.ParseUserInterface.getDisplayText)
+        |> List.head
+
+
+{-| Who broadcast a travel destination, and where to.
+
+**The banner persists**, which is the whole difficulty and is observed rather
+than assumed: it was still reading `Gal Bistot: Travel to Riramia` when the tree
+was read again long after that broadcast. It is a *last broadcast* display, not
+a transient. So this answers what the banner currently says and nothing about
+when it was said, and the caller is what makes it fire once -- see
+`fleetBroadcastToFollow`.
+
+**Matched exactly against the permitted list, never as a substring**, for
+`fleetInvitationToAccept`'s reason: this hands a pilot the ship's destination.
+
+-}
+fleetTravelBroadcast : List String -> ReadingFromGameClient -> Maybe { pilot : String, system : String, banner : String }
+fleetTravelBroadcast permittedPilots readingFromGameClient =
+    fleetBroadcastBannerText readingFromGameClient
+        |> Maybe.andThen
+            (\banner ->
+                case String.indexes fleetTravelBroadcastMarker banner of
+                    [] ->
+                        Nothing
+
+                    index :: _ ->
+                        let
+                            pilot =
+                                banner |> String.left index |> String.trim
+
+                            system =
+                                banner
+                                    |> String.dropLeft
+                                        (index + String.length fleetTravelBroadcastMarker)
+                                    |> String.trim
+                        in
+                        if String.isEmpty pilot || String.isEmpty system then
+                            Nothing
+
+                        else if
+                            permittedPilots
+                                |> List.any
+                                    (\permitted ->
+                                        String.toLower (String.trim permitted) == String.toLower pilot
+                                    )
+                        then
+                            Just { pilot = pilot, system = system, banner = banner }
+
+                        else
+                            Nothing
+            )
+
+
+{-| The broadcast this reading should act on, if any.
+
+**The latch is the whole of it.** The banner does not go away, so a rule that
+merely read it would re-ask for the same destination on every reading for the
+rest of the session and fight `setRouteToNextHuntingGround` for the ship. The
+verdict is recorded in `BotMemory.fleetBroadcastFollowed` -- the banner's own
+text -- and a banner that has already been acted on answers `Nothing`.
+
+Keying on the text rather than on a counter means a *repeated* broadcast to the
+same system is correctly ignored, since it renders identically and the ship is
+already going there, while a broadcast to somewhere else is a different string
+and fires. That is `messageBoxIdentity`'s choice for `messageBoxIdentity`'s
+reason.
+
+-}
+fleetBroadcastToFollow : BotDecisionContext -> Maybe { pilot : String, system : String, banner : String }
+fleetBroadcastToFollow context =
+    fleetTravelBroadcast
+        context.eventContext.botSettings.followFleetBroadcastFrom
+        context.readingFromGameClient
+        |> Maybe.andThen
+            (\broadcast ->
+                if context.memory.fleetBroadcastFollowed == Just broadcast.banner then
+                    Nothing
+
+                else
+                    Just broadcast
+            )
+
+
+{-| Ask the host to route to a destination a fleet-mate broadcast.
+
+Placed above the hunt circuit and below the retreats and the setup list, so a
+person's broadcast outranks the bot's own idea of where to go while a lost ship,
+a message box and a pod recovery all still outrank the broadcast.
+
+It asks once per distinct broadcast and hands the reading back, because the
+route it produces is travelled by `jumpToNextSystem`, which already exists. It
+owns no clock, no counter and no second travel path.
+
+-}
+followFleetBroadcast : BotDecisionContext -> Maybe DecisionPathNode
+followFleetBroadcast context =
+    fleetBroadcastToFollow context
+        |> Maybe.map
+            (\broadcast ->
+                describeBranch
+                    ("'"
+                        ++ broadcast.pilot
+                        ++ "' broadcast a travel destination and is named in "
+                        ++ "'follow-fleet-broadcast-from' -- asking the host to set "
+                        ++ "the route to '"
+                        ++ broadcast.system
+                        ++ "'. "
+                        ++ hostDirectiveSetDestination broadcast.system
+                    )
+                    waitForProgressInGame
+            )
 
 
 {-| How long to keep asking before concluding nobody is listening.
@@ -6254,6 +6464,8 @@ initBotMemory =
     , dronesInSpaceTicks = 0
     , huntSystemIndex = 0
     , destinationAskedFor = Nothing
+    , fleetBroadcastFollowed = Nothing
+    , fleetBroadcastSeen = Nothing
     , destinationAskReadings = 0
     , routeSettingGivenUp = False
     , lockAttempt = Nothing
@@ -10897,6 +11109,28 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
                 else
                     botMemoryBefore.huntSystemIndex
+    , fleetBroadcastSeen =
+        fleetTravelBroadcast context.botSettings.followFleetBroadcastFrom
+            context.readingFromGameClient
+            |> Maybe.map .banner
+    , fleetBroadcastFollowed =
+        -- Latched on the *second* consecutive sighting of the same banner, so
+        -- the reading the branch fires on still sees an unlatched verdict. The
+        -- banner persists, so the second sighting always arrives.
+        case
+            fleetTravelBroadcast context.botSettings.followFleetBroadcastFrom
+                context.readingFromGameClient
+                |> Maybe.map .banner
+        of
+            Nothing ->
+                botMemoryBefore.fleetBroadcastFollowed
+
+            Just banner ->
+                if botMemoryBefore.fleetBroadcastSeen == Just banner then
+                    Just banner
+
+                else
+                    botMemoryBefore.fleetBroadcastFollowed
     , destinationAskedFor =
         -- What the decision branch is asking for, named by the *same* picker it
         -- uses. Forgotten the moment a route exists, so arriving and going dry
