@@ -464,5 +464,160 @@ class TheWholeBranchIsExecutedTest(unittest.TestCase):
         self.assertNotIn("fleet invitation from", answer)
 
 
+BANNER = "Gal Bistot: Travel to Riramia"
+
+
+def broadcast_tree(banner_text):
+    """The captured banner, at the depth and under the names the client uses."""
+    return tree_with([
+        node("FleetBroadcastCont", {"_name": "broadcastCont"}, [
+            node("ContainerAutoSize", {"_name": "mainCont"}, [
+                node("Container", {"_name": "lastBroadcastCont"}, [
+                    node("Container", {"_name": "lastBroadcastBanner"}, [
+                        node("EveLabelMedium",
+                             {"_name": "bannerLabel", "_setText": banner_text},
+                             region=(33, 1, 183, 21)),
+                    ], region=(0, 0, 673, 23)),
+                ], region=(0, 0, 673, 23)),
+            ], region=(10, 10, 673, 68)),
+        ], region=(-10, 326, 693, 87)),
+    ])
+
+
+def broadcast_reading(name, banner_text):
+    return ("%s = EveOnline.MemoryReading.decodeMemoryReadingFromString %s"
+            " |> Result.toMaybe"
+            " |> Maybe.map EveOnline.ParseUserInterface"
+            ".parseUITreeWithDisplayRegionFromUITree"
+            " |> Maybe.map EveOnline.ParseUserInterface"
+            ".parseUserInterfaceFromUITree"
+            % (name, elm_json_literal(broadcast_tree(banner_text))))
+
+
+class TheTravelBroadcastIsReadTest(unittest.TestCase):
+    """The banner captured live, and the ways it could route the wrong ship.
+
+    The banner **persists** -- read again long after the broadcast it still said
+    `Gal Bistot: Travel to Riramia` -- so it is a last-broadcast display rather
+    than a transient. Everything about the latch follows from that.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(SaxratRepl)
+        cls.definitions = [
+            broadcast_reading("bcast", BANNER),
+            broadcast_reading("otherPilot", "Someone Else: Travel to Riramia"),
+            broadcast_reading("notTravel", "Gal Bistot: Hold position"),
+            'sysOf p r = r |> Maybe.andThen (fleetTravelBroadcast p)'
+            ' |> Maybe.map .system |> Maybe.withDefault "NONE"',
+        ]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_the_fixture_arrived(self):
+        self.assertEqual(
+            self.repl.evaluate(["bcast /= Nothing"],
+                               definitions=self.definitions),
+            [True])
+
+    def test_the_destination_is_read_from_the_banner(self):
+        self.assertEqual(
+            self.repl.strings(['sysOf ["Gal Bistot"] bcast'],
+                              definitions=self.definitions),
+            ["Riramia"])
+
+    def test_the_pilot_is_read_from_the_banner(self):
+        self.assertEqual(
+            self.repl.strings(
+                ['(bcast |> Maybe.andThen (fleetTravelBroadcast ["Gal Bistot"])'
+                 ' |> Maybe.map .pilot) |> Maybe.withDefault "NONE"'],
+                definitions=self.definitions),
+            ["Gal Bistot"])
+
+    def test_an_unnamed_pilot_is_refused(self):
+        self.assertEqual(
+            self.repl.strings(['sysOf ["Gal Bistot"] otherPilot'],
+                              definitions=self.definitions),
+            ["NONE"])
+
+    def test_absent_evidence_follows_nobody(self):
+        self.assertEqual(
+            self.repl.strings(["sysOf [] bcast"], definitions=self.definitions),
+            ["NONE"])
+
+    def test_a_substring_of_the_name_is_refused(self):
+        self.assertEqual(
+            self.repl.strings(['sysOf ["Gal"] bcast'],
+                              definitions=self.definitions),
+            ["NONE"])
+
+    def test_a_broadcast_that_is_not_a_travel_ping_is_ignored(self):
+        self.assertEqual(
+            self.repl.strings(['sysOf ["Gal Bistot"] notTravel'],
+                              definitions=self.definitions),
+            ["NONE"])
+
+
+class TheCommaSeparatedListTest(unittest.TestCase):
+    """The setting takes a list, and is repeatable as well."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(SaxratRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_commas_split_one_line_into_names(self):
+        self.assertEqual(
+            self.repl.evaluate(
+                ['(parseBotSettings "follow-fleet-broadcast-from=A, B ,C"'
+                 ' |> Result.map .followFleetBroadcastFrom)'
+                 ' == Ok ["A","B","C"]']),
+            [True])
+
+    def test_the_setting_is_still_repeatable(self):
+        """So a name a comma would cut is still expressible on its own line."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ['(parseBotSettings ("follow-fleet-broadcast-from=A" '
+                 '++ String.fromChar (Char.fromCode 10) '
+                 '++ "follow-fleet-broadcast-from=B")'
+                 ' |> Result.map .followFleetBroadcastFrom) == Ok ["A","B"]']),
+            [True])
+
+    def test_a_trailing_comma_is_dropped_rather_than_kept(self):
+        self.assertEqual(
+            self.repl.evaluate(
+                ['(parseBotSettings "follow-fleet-broadcast-from=A,"'
+                 ' |> Result.map .followFleetBroadcastFrom) == Ok ["A"]']),
+            [True])
+
+    def test_a_wholly_empty_value_is_still_rejected(self):
+        self.assertEqual(
+            self.repl.evaluate(
+                ['(parseBotSettings "follow-fleet-broadcast-from=" '
+                 '|> Result.toMaybe) == Nothing']),
+            [True])
+
+    def test_the_invite_setting_splits_the_same_way(self):
+        self.assertEqual(
+            self.repl.evaluate(
+                ['(parseBotSettings "accept-fleet-invite-from=A, B"'
+                 ' |> Result.map .acceptFleetInviteFrom) == Ok ["A","B"]']),
+            [True])
+
+    def test_following_nobody_is_the_default(self):
+        self.assertEqual(
+            self.repl.evaluate(
+                ['(parseBotSettings "" |> Result.map .followFleetBroadcastFrom)'
+                 ' == Ok []']),
+            [True])
+
+
 if __name__ == "__main__":
     unittest.main()
