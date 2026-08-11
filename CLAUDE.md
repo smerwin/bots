@@ -5480,6 +5480,7 @@ shipped configuration rather than edge cases:
 | the ammo swap (#122, #154) | absent, not unconfigured — `ammoSwap`, `Charge`, `chargeName` and `optimalRange` all appeared 0 times, and there was no setting to turn on | ported without its tooltip half, with `ammo-swap-range` **required** rather than optional; and since run 10, a disarm give-up that asks whether the guns came back and is retried after a warp — see the two sections below |
 | an in-range acceleration gate (#145, #147) | a context-menu cascade, and a give-up counting readings *near* a gate rather than readings spent asking one — `selectedItem` appeared 0 times in `Bot.elm`, so it had never pressed a panel button for anything. And the branch was **unreachable inside a site at all**: a "Warp to Site" button anywhere in the tree outranked it, and the panel goes on drawing one after arrival | `selectThenPanelAction`'s shape over `selectedItemActivateGate`, inside `unlessAlreadyClosingIn`; the counter counts the ask; and `siteProgressStep` asks the gate first and declines a site offered while a gate is in reach — see the two sections below |
 | the route's next stargate (#169) | the route-marker cascade on every leg, at a median of **12 and 13 readings a leg** and 23% and 38% of every reading in runs 13 and 14 — against the mission runner's 3 and 2 and its 2% and 3% | #170's rule ported whole: the route panel's own `Next System in Route` label matched against the overview row's Name, and `selectedItemJump` pressed only where the panel is already showing that gate — see the section below |
+| the combat feed (#190) | six lines of the client's `CombatMessage` widget in the status text on every reading — a third of runs 20 and 21, 99.5% of it repeating the block before it, and in run 20 mostly printed while docked | removed, as the mission runner removed it; the incoming half of that channel is `describeIncomingDamage`, already on every reading — see the section below |
 
 Two things about the port are worth keeping in view.
 
@@ -6934,6 +6935,93 @@ moving while the rest of the status line also stops moving is the client having
 gone away, not this branch; the tell is every other counter in the same line
 frozen with it.
 
+### The combat feed was a third of the log and none of it was new
+
+Issue #190. `describeVisibleCombatMessages` printed up to six lines of the
+client's `CombatMessage` widget into saxrat's status text on **every reading**,
+and it was the single largest thing in the log: 9,639 of run 20's 25,762 lines,
+98,700 of run 21's 296,465, a third of each. It is removed. Nothing replaces it.
+
+**It was almost entirely repetition.** The widget is a rolling on-screen window,
+so consecutive readings mostly re-render the same six lines — **1,376 of run
+20's 1,377 feed blocks were byte-identical to the block before them**, and 99.5%
+of run 21's. That is not a property of a quiet grid: the same measurement over
+run 23, which fought, gives 93%.
+
+**And it outlived the fight, because messages age off the *screen* rather than
+off the grid.** In run 20, **1,344 of those 1,377 blocks were printed on readings
+whose own decision line says the ship is docked** — combat that could not be
+happening, reprinted at the operator for the whole run. Run 21 shows almost none
+of that, so it depends on the run's shape, and **nothing in the feed
+distinguished the two**. A summary line would not have fixed that half; only
+reading a channel that is scoped to the reading does.
+
+**Nothing replaces it, and the reason is that the replacement is already there.**
+The obvious alternative is a short clause derived from the channel the host
+already sums — hits and damage this reading, in and out. The incoming half of
+exactly that is `describeIncomingDamage`, in the status line on every reading
+since the port: the 45-second window, the threshold, whether the host carries the
+channel at all, whether the reading is frozen, and the attackers named. A second
+clause off the same channel would say what that one already says, on a reading
+whose whole problem is the log's size. `test_the_channel_is_still_reported` is what
+goes red if that clause is ever dropped, since dropping it is what would turn
+this removal into a loss.
+
+**The outgoing half is genuinely unreported here**, and adding it is a separate
+change with its own evidence: saxrat reads `outgoingDamageSinceLastReading`
+nowhere, so a clause for it is a new instrument rather than a replacement for a
+removed one.
+
+**`visibleCombatMessages` is kept, unused**, which is the mission runner's own
+answer to the same question — its `combatFeedIsReportedByTheHostGameLog` marker
+has recorded that decision since it dropped this clause. The scraper encodes
+which UI nodes carry combat text and how to read them, which is the expensive
+part to rediscover, and any future in-decision use of combat state wants exactly
+that. saxrat now carries the same marker under the same name, so the two bots
+read alike here.
+
+**This changes no behaviour.** The clause was read by the status line at one site
+and by **no decision**, which is what makes it a removal rather than a retuning.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_combat_feed_removed.py` (14 cases). The scraper is
+*executed* through the real `Bot.elm` in `elm repl` against a `CombatMessage`
+tree run through the real `EveOnline.ParseUserInterface` — a message split across
+four labels with EVE's own colour tagging on it comes back joined and stripped —
+because a declaration kept but broken teaches nobody which nodes carry combat
+text. The removal is read out of the source through the declaration reader that
+strips doc comments, so the marker may go on naming what it replaced while no
+declaration reads the scraper and none prints `Combat feed`. The corpus is
+recounted as *relations* rather than as the numbers above — the feed was a large
+share of the log, nearly every block repeated the one before it, some run printed
+most of its blocks while docked, and the client's own `(combat)` lines are echoed
+into the same log — so a growing corpus cannot turn a true claim red. Run 23 was
+still being written while this was measured, which is why.
+
+Confirmed by mutation, ten of them, each failing a named case: the clause and its
+call site restored; the clause restored but left uncalled, which is the half a
+wiring case cannot see; the feed rebuilt under another name; the scraper deleted;
+the scraper pointed at a node type the client does not draw; the marker renamed
+so the argument is unfindable; the marker's doc no longer naming what reports
+this channel instead; **`describeIncomingDamage` dropped from the status line**,
+which is the mutation that turns this removal into a loss; the mission runner's
+marker renamed, so the two bots stop reading alike; and — on the cases' own
+premise — quiet blocks counted among the repeats, which would let a run of
+`Combat feed: quiet.` satisfy the repetition measurement.
+
+**One mutation survived the first pass and the hole was in this file's own
+premise.** The repetition case was satisfied whether or not quiet blocks were
+excluded, so the doc comment's reason for excluding them was a claim nothing
+held. `test_the_quiet_blocks_are_not_what_is_being_counted` asserts the corpus
+really holds them and that no counted block is one.
+
+**Unverified: nothing, and that is unusual for a section here.** The removal
+needs no run to confirm — there is no new branch, no new bound and no new
+matcher, and the status line simply stops carrying a clause. What a run would
+show is negative: `Combat feed` no longer appearing, and `dmg N/T (45s, Nrd)`
+appearing exactly as before. A run whose log still carries the feed is one flying
+an older tree, which is what `# bot version:` is for.
+
 ### An in-range acceleration gate is opened from the panel here too
 
 Issue #145 is `activateGateOnOverviewEntry` in `eve-online-saxrat`: an in-range
@@ -8163,6 +8251,21 @@ exists.
   panel path sits *behind* the route-settling guard. **Untested against a live
   client**; watch for `Jump through '<system>' from the selected-item panel`
   appearing at all, and the cascade's share of the run falling from a quarter.
+
+  And since #190 it **no longer reprints the client's combat widget into the
+  status text on every reading**, which was the largest single thing in its log
+  and almost none of its information: a third of runs 20 and 21, with 1,376 of
+  run 20's 1,377 feed blocks byte-identical to the block before them and 1,344 of
+  them printed on readings whose own decision line says the ship is docked.
+  **Nothing replaces it** — the incoming half of that channel is already in the
+  status line on every reading as `describeIncomingDamage`, summed host-side and
+  scoped to the reading, where the widget retains messages and outlives the
+  fight. `visibleCombatMessages` is kept unused under the mission runner's own
+  `combatFeedIsReportedByTheHostGameLog` marker, so the two bots read alike here.
+  See "The combat feed was a third of the log and none of it was new" above.
+  **No behaviour changed**: the clause was read by the status line at one site
+  and by no decision. What a run shows is negative — `Combat feed` gone and
+  `dmg N/T (45s, Nrd)` exactly as before.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
