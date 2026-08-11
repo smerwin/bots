@@ -46,6 +46,7 @@
       + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. You can use this setting multiple times to select multiple names.
       + `anomaly-wait-time`: Minimum time to wait after arriving in an anomaly before considering it finished. Use this if you see anomalies in which rats arrive later than you arrive on grid.
       + `warp-at`: Distance in km to warp to when warping to an anomaly, e.g. `warp-at=30`. Must match one of the game client's own preset "Warp to Within" distances offered in that menu (typically 0, 5, 10, 15, 20, 30, 50, 70, 100) -- an arbitrary value will not match any menu entry and will leave the bot stuck. Defaults to 100.
+      + `accept-fleet-invite-from`: Name of a pilot whose fleet invitations this bot should accept, exactly as the client writes it. You can use this setting multiple times to name several pilots. With no such setting the bot accepts no invitation at all and declines every dialog as it always has -- and note the client renders a fleet invitation as an ordinary message box, so before this setting existed the bot actively clicked 'No' on them. Accepting means the fleet commander can warp this ship, so name only pilots you would hand the ship to.
       + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping range or aligning.
       + `keep-at-range`: Set this to 'yes' to keep range from the target instead of orbiting or aligning.
       + `targeting-range`: Maximum distance in meters to lock a target from the overview, e.g. `targeting-range=50000`. Beyond this, the bot approaches instead of locking. Defaults to 66000. This is a starting value, not the last word: the bot narrows it during the session from the client's own answers -- the greatest distance at which a lock was accepted and the smallest at which one was provably refused -- and the setting is clamped between the two. Set it to pin the starting point; it still gives way to what the client has actually granted. See `lockRangeThresholdInMeters`.
@@ -204,6 +205,13 @@ defaultBotSettings =
     , shortRangeAmmoName = Nothing
     , longRangeAmmoName = Nothing
     , ammoSwapRangeMeters = Nothing
+
+    -- Empty, so with no setting the bot accepts nothing and every dialog is
+    -- still declined exactly as it was. Absent evidence never accepts: this is
+    -- the one place the standing "always decline" rule is departed from, and a
+    -- default that accepted anyone would hand the ship's position to whoever
+    -- asked first.
+    , acceptFleetInviteFrom = []
     }
 
 
@@ -229,6 +237,18 @@ parseBotSettings =
          , ( "home-system"
            , AppSettings.valueTypeString
                 (\systemName settings -> { settings | homeSystemName = Just (String.trim systemName) })
+           )
+         , ( "accept-fleet-invite-from"
+           , -- Non-empty, and this is the setting where that guard earns the
+             -- most. The name is matched against the inviter the dialog names,
+             -- so an empty entry would match every invitation there is and turn
+             -- "accept from this pilot" into "accept from anyone" -- the
+             -- mission runner's `decline-mission` lesson pointed at something
+             -- that costs a ship rather than standing.
+             valueTypeNonEmptyString
+                (\pilotName settings ->
+                    { settings | acceptFleetInviteFrom = settings.acceptFleetInviteFrom ++ [ pilotName ] }
+                )
            )
          , ( "run-away-incoming-damage-threshold"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayIncomingDamageThreshold = threshold })
@@ -329,6 +349,44 @@ nonEmptySettingValue value =
             Just trimmed
 
 
+{-| A setting that names one thing and is useless -- or dangerous -- empty.
+
+The mission runner's PR #116 is the argument, and it applies here in a sharper
+form. An empty value has two established meanings in this codebase and neither
+covers a name list: `nonEmptySettingValue` reads it as _unset_, which is how the
+ammo swap is switched off from the console, and `splitSettingIntoNames` drops it
+because a trailing comma is how one gets written by accident. Where the whole
+assigned value is empty there is nothing left to read the intent from, so
+dropping it silently picks one meaning without saying so.
+
+**`AppSettings`' own answer to a value it cannot use is an `Err` naming the
+setting**, which `valueTypeInteger` already gives. The price is stated rather
+than hidden: `BotFramework` answers a settings parse error with
+`InternalFinishSession`, and that is also the event the web console's live
+settings change sends, so a bad value typed mid-run ends the session. That is
+what every other unusable value here already costs, and on
+`accept-fleet-invite-from` it is paid on a string one keystroke away from
+accepting a fleet invitation from anybody who sends one.
+
+-}
+valueTypeNonEmptyString : (String -> BotSettings -> BotSettings) -> AppSettings.SettingValueType BotSettings
+valueTypeNonEmptyString integrateSettingValue settingValueAsString =
+    case String.trim settingValueAsString of
+        "" ->
+            Err emptySettingValueRejected
+
+        trimmed ->
+            Ok (integrateSettingValue trimmed)
+
+
+{-| What an operator is told when a name setting is left empty. The framework
+prepends the setting's own name, so this carries the reason and the fix.
+-}
+emptySettingValueRejected : String
+emptySettingValueRejected =
+    "this setting names one thing and was given nothing. Delete the line to leave it unset, or write the name after the '='."
+
+
 goodStandingPatterns : List String
 goodStandingPatterns =
     [ "good standing", "excellent standing", "is in your" ]
@@ -353,6 +411,7 @@ type alias BotSettings =
     , shortRangeAmmoName : Maybe String
     , longRangeAmmoName : Maybe String
     , ammoSwapRangeMeters : Maybe Int
+    , acceptFleetInviteFrom : List String
     }
 
 
@@ -881,6 +940,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
     endSessionOnAnExpiredBound context
         |> Maybe.withDefault
             (generalSetupInUserInterface context.memory.messageBoxStandoff
+                context.eventContext.botSettings.acceptFleetInviteFrom
                 context.readingFromGameClient
                 |> Maybe.withDefault
                     (recoverPodAfterShipLoss context
@@ -1013,10 +1073,10 @@ which is why `endSessionOnAnExpiredBound` is asked above this list rather than
 below it.
 
 -}
-generalSetupInUserInterface : Maybe MessageBoxStandoff -> ReadingFromGameClient -> Maybe DecisionPathNode
-generalSetupInUserInterface messageBoxStandoff readingFromGameClient =
+generalSetupInUserInterface : Maybe MessageBoxStandoff -> List String -> ReadingFromGameClient -> Maybe DecisionPathNode
+generalSetupInUserInterface messageBoxStandoff acceptFleetInviteFrom readingFromGameClient =
     [ closeSystemSettingsMenu
-    , closeMessageBox messageBoxStandoff
+    , closeMessageBox messageBoxStandoff acceptFleetInviteFrom
     , ensureInfoPanelLocationInfoIsExpanded
     ]
         |> List.filterMap
@@ -1090,8 +1150,8 @@ closeSystemSettingsMenu readingFromGameClient =
             )
 
 
-closeMessageBox : Maybe MessageBoxStandoff -> ReadingFromGameClient -> Maybe DecisionPathNode
-closeMessageBox standoff readingFromGameClient =
+closeMessageBox : Maybe MessageBoxStandoff -> List String -> ReadingFromGameClient -> Maybe DecisionPathNode
+closeMessageBox standoff acceptFleetInviteFrom readingFromGameClient =
     readingFromGameClient.messageBoxes
         |> List.head
         |> Maybe.andThen
@@ -1125,7 +1185,19 @@ closeMessageBox standoff readingFromGameClient =
                             )
 
                     AnswerTheMessageBox ->
-                        Just (closeMessageBoxByDeclining messageBox)
+                        -- The accept is asked first and answers `Nothing` for
+                        -- everything that is not a permitted invitation, so the
+                        -- declining answer remains what every other box gets.
+                        case
+                            fleetInvitationToAccept acceptFleetInviteFrom messageBox
+                                |> Maybe.andThen
+                                    (\inviter -> acceptFleetInvitationFrom inviter messageBox)
+                        of
+                            Just accept ->
+                                Just accept
+
+                            Nothing ->
+                                Just (closeMessageBoxByDeclining messageBox)
             )
 
 
@@ -1408,6 +1480,178 @@ messageBoxStandoffAfterReading { before, identityNow } =
 
                     Nothing ->
                         { identity = identity, readings = 1 }
+            )
+
+
+{-| The client's own sentence for a fleet invitation, read off a live one.
+
+Captured from this account's client on 2026-08-10, the whole dialog:
+
+    MessageBox  _name='modal'
+      TextHeadline  _setText='Join Fleet?'
+      TextBody      _setText='<a href="showinfo:1385//2120724228">Gal Bistot</a>
+                              wants you to join their fleet, do you accept?<br><br>NOTE: ...'
+      Button _name='yes_dialog_button'  label 'Yes'
+      Button _name='no_dialog_button'   label 'No'
+
+Two things that dialog settles beyond this rule. **It is a `MessageBox`**, so
+before this change `closeMessageBoxByDeclining` answered it with
+`no_dialog_button` and the bot actively _rejected_ every invitation -- observed,
+nine `Dismiss it using No.` decisions in saxrat run 13 with the operator
+confirming the rejection at the other end. And **`yes_dialog_button` is now read
+out of a live UI tree**, which the mission runner's abandonment has wanted since
+#54: its Quit Mission confirmation identifies the affirmative by the dialog's
+_shape_ precisely because that name had never been seen here.
+
+One marker constant, used by both the test and the slice, so the extraction can
+never succeed on a box the matcher would have rejected -- `gateKeyClosingMarker`'s
+arrangement, for its reason.
+
+-}
+fleetInvitationMarker : String
+fleetInvitationMarker =
+    "wants you to join their fleet"
+
+
+{-| The client writes the inviter's name inside a `showinfo` link, so the raw
+text is `<a href="showinfo:1385//2120724228">Gal Bistot</a> wants you to ...`.
+
+Stripping the markup before matching is not a nicety: the route setter's MOTD
+parse already paid for reading a name through a tag, where a malformed
+`Sizamo</loc>d` had to recover as `Sizamod`. A rule reading the raw string would
+look for a pilot called `<a href="...">Gal Bistot</a>` and never match one.
+
+-}
+textWithoutMarkupTags : String -> String
+textWithoutMarkupTags =
+    String.foldl
+        (\char ( depth, acc ) ->
+            if char == '<' then
+                ( depth + 1, acc )
+
+            else if char == '>' then
+                ( max 0 (depth - 1), acc )
+
+            else if 0 < depth then
+                ( depth, acc )
+
+            else
+                ( depth, acc ++ String.fromChar char )
+        )
+        ( 0, "" )
+        >> Tuple.second
+
+
+{-| Who this box says is inviting, if it is a fleet invitation at all.
+
+Each display text is matched on its own rather than the box's texts being joined
+first, because the headline `Join Fleet?` would otherwise land in front of the
+body and the name would be sliced out of the wrong sentence.
+
+-}
+fleetInvitationInviter : EveOnline.ParseUserInterface.MessageBox -> Maybe String
+fleetInvitationInviter messageBox =
+    let
+        inviterFromText text =
+            case String.indexes fleetInvitationMarker text of
+                [] ->
+                    Nothing
+
+                index :: _ ->
+                    text |> String.left index |> String.trim |> nonEmptySettingValue
+    in
+    messageBox.uiNode.uiNode
+        |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+        |> List.map textWithoutMarkupTags
+        |> List.filterMap inviterFromText
+        |> List.head
+
+
+{-| The invitation this bot is permitted to accept, if this box is one.
+
+**Matched exactly, never as a substring**, which `attack-object` learned in both
+directions and which matters more here: a substring rule armed with `Gal` would
+accept an invitation from anyone whose name contains it. Case is ignored because
+an operator types the setting by hand and the client renders the name as the
+character carries it.
+
+-}
+fleetInvitationToAccept : List String -> EveOnline.ParseUserInterface.MessageBox -> Maybe String
+fleetInvitationToAccept permittedInviters messageBox =
+    fleetInvitationInviter messageBox
+        |> Maybe.andThen
+            (\inviter ->
+                if
+                    permittedInviters
+                        |> List.any
+                            (\permitted ->
+                                String.toLower (String.trim permitted) == String.toLower inviter
+                            )
+                then
+                    Just inviter
+
+                else
+                    Nothing
+            )
+
+
+{-| A button of this box by the `_name` the client gives it.
+
+Top-level rather than reused out of `closeMessageBoxByDeclining`, whose own copy
+is deliberately left where it is: that function's standing property is that it
+contains no affirmative at all, and a test pins it.
+
+-}
+messageBoxButtonNamed :
+    String
+    -> EveOnline.ParseUserInterface.MessageBox
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+messageBoxButtonNamed name messageBox =
+    messageBox.buttons
+        |> List.filter
+            (.uiNode
+                >> .uiNode
+                >> EveOnline.ParseUserInterface.getNameFromDictEntries
+                >> (==) (Just name)
+            )
+        |> List.head
+        |> Maybe.map .uiNode
+
+
+{-| The one dialog this bot ever answers yes to.
+
+**The standing rule is unchanged and this is stated as narrowly as it can be.**
+`closeMessageBoxByDeclining`'s comment -- that these dialogs guard destructive
+actions, so the automatic reply must always be the one that declines -- is why
+this is a separate branch above it rather than a fourth entry in its list of
+dismissal options. Three conditions have to hold together: the box carries the
+client's own fleet-invitation sentence, the pilot it names is one an operator
+wrote into `accept-fleet-invite-from`, and the affirmative button is present
+under the name the live dialog gave it. Anything else falls straight through to
+the declining answer, unchanged.
+
+**What accepting costs, since it is a real exception.** A fleet member can be
+fleet-warped by the commander, so this hands a stranger the ship's position if
+it is ever armed with the wrong name -- which is the whole reason the setting
+takes a name rather than a yes, defaults to accepting nobody, and refuses an
+empty value.
+
+-}
+acceptFleetInvitationFrom : String -> EveOnline.ParseUserInterface.MessageBox -> Maybe DecisionPathNode
+acceptFleetInvitationFrom inviter messageBox =
+    messageBoxButtonNamed "yes_dialog_button" messageBox
+        |> Maybe.map
+            (\button ->
+                describeBranch
+                    ("This is a fleet invitation from '"
+                        ++ inviter
+                        ++ "', who is named in 'accept-fleet-invite-from' -- accept it."
+                    )
+                    (decideActionForCurrentStep
+                        (mouseClickOnUIElement MouseButtonLeft button
+                            |> Result.withDefault []
+                        )
+                    )
             )
 
 

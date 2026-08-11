@@ -21,6 +21,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -53,7 +54,10 @@ def tailnet_address():
     for candidate in ("tailscale",
                       "/opt/homebrew/bin/tailscale",
                       "/usr/local/bin/tailscale",
-                      "/Applications/Tailscale.app/Contents/MacOS/Tailscale"):
+                      "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+                      # Windows: the installer does not put tailscale on PATH.
+                      r"C:\Program Files\Tailscale\tailscale.exe",
+                      r"C:\Program Files (x86)\Tailscale\tailscale.exe"):
         try:
             out = subprocess.run([candidate, "ip", "-4"], capture_output=True,
                                  text=True, timeout=5).stdout
@@ -63,13 +67,25 @@ def tailnet_address():
         if found:
             return found.group(0)
 
-    try:
-        out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
-        out = ""
-    found = TAILNET_RE.search(out or "")
-    if found:
-        return found.group(0)
+    # Interface listing, when the CLI is not reachable. `ifconfig` does not exist
+    # on Windows and `ipconfig` does not exist elsewhere, so the command has to
+    # follow the platform -- otherwise this leg always fails there and the
+    # console refuses to bind on a machine that does have a tailnet, which is
+    # exactly what happened the first time it was run on Windows.
+    #
+    # Both are only ever *searched* for a 100.64.0.0/10 address, so neither can
+    # widen what this function is willing to return. The safety property is in
+    # TAILNET_RE and in raising rather than defaulting, not in which command
+    # produced the text.
+    listers = [["ipconfig"]] if sys.platform == "win32" else [["ifconfig"]]
+    for lister in listers:
+        try:
+            out = subprocess.run(lister, capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        found = TAILNET_RE.search(out or "")
+        if found:
+            return found.group(0)
 
     raise NoTailnet(
         "no tailnet (100.64.0.0/10) address found -- is Tailscale up? "

@@ -72,6 +72,48 @@ ones that can be closed out.
   wasted runs 16 and 17 could not have armed it, and did not.
 - **#44's gate-key fetch.** Still needs a mission that locks its gate.
 
+## The Windows host is owed one thing, and only a person can do it
+
+**The ESI auth dance has never been performed on the Windows machine**, so
+`hunt-system` cannot route there and saxrat travels whatever route it already
+has, finding nothing once the local anomalies are cleared. Observed: a run that
+cleared two anomalies and then spent 61 gate jumps and 516 readings of
+`no matching anomaly` getting nowhere in particular.
+
+The code side is done. `esi_waypoint.py`'s four Keychain functions dispatch to
+`tools/windows-host/credential_store.py`, which is the Windows Credential
+Manager (`CredReadW`/`CredWriteW`/`CredDeleteW`) — round-tripped with a
+non-ASCII secret, absent reads answer `None`, delete is idempotent. What is
+missing is not code, it is a login:
+
+```
+python tools/windows-host/credential_store.py status
+  eve-esi-refresh:   not stored
+  eve-esi-client-id: not stored
+```
+
+Three steps, and the third is why an agent must not do it:
+
+1. developers.eveonline.com → Create New Application, type *Authentication &
+   API Access*, scope `esi-ui.write_waypoint.v1`, callback exactly
+   `http://localhost:8635/callback`
+2. `python esi_waypoint.py client-id <the client id>`
+3. `python esi_waypoint.py auth` — **opens a browser and logs in to the EVE
+   account**. That is an account credential being entered, so it belongs to the
+   operator and to nobody automating on their behalf.
+
+Confirm with `credential_store.py status` reading `stored (N chars)` for both.
+It reports presence and length only and never echoes a value, deliberately —
+this runs in terminals whose scrollback ends up in bug reports.
+
+Until then, a Windows saxrat run wants a system with anomalies picked for it by
+hand, and `hunt-system` should be left unset rather than set and silently inert.
+
+**The rest of this file predates the Windows port** (it stops at run 22 and PR
+#74; the port is on `windows-host-176` off #178). What was measured there —
+including two decoder bugs that were silently dropping data, and a native
+`tree_walker` — is in `tools/windows-host/FINDINGS.md`, not here.
+
 ## In flight
 
 | issue | what | risk |

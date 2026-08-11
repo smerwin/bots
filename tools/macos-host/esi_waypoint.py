@@ -62,7 +62,22 @@ CALLBACK_PATH = "/callback"
 REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}"
 
 KEYCHAIN_SERVICE = "eve-esi-refresh"
-KEYCHAIN_ACCOUNT = os.environ.get("USER", "eve")
+KEYCHAIN_ACCOUNT = os.environ.get("USER") or os.environ.get("USERNAME") or "eve"
+
+# Windows keeps these in the Credential Manager instead, which is that
+# platform's Keychain: encrypted at rest under the user's own login, and
+# enumerable and revocable by them (`cmdkey /list`). Same four operations behind
+# the same four function names, so nothing below this point knows which store it
+# is talking to -- see tools/windows-host/credential_store.py.
+IS_WINDOWS = sys.platform == "win32"
+_cred_store = None
+if IS_WINDOWS:
+    _WINDOWS_HOST_DIR = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "windows-host"
+    )
+    if _WINDOWS_HOST_DIR not in sys.path:
+        sys.path.insert(0, _WINDOWS_HOST_DIR)
+    import credential_store as _cred_store  # noqa: E402
 
 # The client id lives beside the refresh token rather than in the repo or a
 # shell profile. It is not a secret -- PKCE issues no client secret, and this
@@ -140,6 +155,8 @@ def client_id():
 
 
 def keychain_store_client_id(value):
+    if IS_WINDOWS:
+        return _cred_store.store(KEYCHAIN_CLIENT_ID_SERVICE, KEYCHAIN_ACCOUNT, value)
     subprocess.run(
         ["security", "add-generic-password", "-U",
          "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_CLIENT_ID_SERVICE, "-w", value],
@@ -148,6 +165,8 @@ def keychain_store_client_id(value):
 
 
 def keychain_load_client_id():
+    if IS_WINDOWS:
+        return _cred_store.load(KEYCHAIN_CLIENT_ID_SERVICE, KEYCHAIN_ACCOUNT)
     result = subprocess.run(
         ["security", "find-generic-password",
          "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_CLIENT_ID_SERVICE, "-w"],
@@ -162,6 +181,8 @@ def keychain_load_client_id():
 # Keychain: the refresh token's only home
 # ---------------------------------------------------------------------------
 def keychain_store(token):
+    if IS_WINDOWS:
+        return _cred_store.store(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, token)
     subprocess.run(
         ["security", "add-generic-password", "-U",
          "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-w", token],
@@ -170,6 +191,8 @@ def keychain_store(token):
 
 
 def keychain_load():
+    if IS_WINDOWS:
+        return _cred_store.load(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
     result = subprocess.run(
         ["security", "find-generic-password",
          "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-w"],
