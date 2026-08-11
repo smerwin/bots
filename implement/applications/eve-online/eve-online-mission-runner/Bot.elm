@@ -7622,7 +7622,7 @@ rungs are what this skips.
 
 **It is not a bound and it does not wait**, because there is nothing to wait
 for: a client with no server connection cannot be recovered by anything the bot
-can press, and quitting takes it away from the operator who *can* reconnect. So
+can press, and quitting takes it away from the operator who _can_ reconnect. So
 the answer is the one #138 already built for a box that will not close --
 `LeaveTheMessageBoxAlone`, so `closeMessageBox` answers `Nothing` and the rest
 of the tree runs -- reached immediately rather than after 120 readings of
