@@ -609,7 +609,12 @@ class TheRuleIsWiredIntoTheTreeTest(unittest.TestCase):
     """
 
     def test_the_box_branch_consults_the_verdict(self):
-        self.assertIn("messageBoxStandoffVerdict standoff",
+        # Since #185 the branch asks `messageBoxStandoffVerdictForBox`, which is
+        # this verdict for every box except the Connection Lost modal -- whose
+        # declining answer quit the client. The property being pinned here is
+        # unchanged: the branch consults the bound rather than deciding for
+        # itself. `test_connection_lost_box` owns the exception.
+        self.assertIn("messageBoxStandoffVerdictForBox standoff messageBox",
                       declaration("closeMessageBox"))
 
     def test_the_setup_list_passes_the_standoff_down(self):
