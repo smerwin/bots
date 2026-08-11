@@ -5481,6 +5481,7 @@ shipped configuration rather than edge cases:
 | an in-range acceleration gate (#145, #147) | a context-menu cascade, and a give-up counting readings *near* a gate rather than readings spent asking one — `selectedItem` appeared 0 times in `Bot.elm`, so it had never pressed a panel button for anything. And the branch was **unreachable inside a site at all**: a "Warp to Site" button anywhere in the tree outranked it, and the panel goes on drawing one after arrival | `selectThenPanelAction`'s shape over `selectedItemActivateGate`, inside `unlessAlreadyClosingIn`; the counter counts the ask; and `siteProgressStep` asks the gate first and declines a site offered while a gate is in reach — see the two sections below |
 | the route's next stargate (#169) | the route-marker cascade on every leg, at a median of **12 and 13 readings a leg** and 23% and 38% of every reading in runs 13 and 14 — against the mission runner's 3 and 2 and its 2% and 3% | #170's rule ported whole: the route panel's own `Next System in Route` label matched against the overview row's Name, and `selectedItemJump` pressed only where the panel is already showing that gate — see the section below |
 | the combat feed (#190) | six lines of the client's `CombatMessage` widget in the status text on every reading — a third of runs 20 and 21, 99.5% of it repeating the block before it, and in run 20 mostly printed while docked | removed, as the mission runner removed it; the incoming half of that channel is `describeIncomingDamage`, already on every reading — see the section below |
+| leaving an anomaly somebody was already sitting in (#194) | reachable code that could not fire: the arrival snapshot needed `weJustFinishedWarping` **and** the probe scanner naming the anomaly on the **same** reading, and the scanner is late — so `FoundOtherPilotOnArrival` has never been constructed in a recorded run | "arrival" is a bounded window after warp ends, 30 **readings**, accumulating rather than overwriting; the window's *closing* is what keeps the mid-fight case behaving as it does today — see the section below |
 
 Two things about the port are worth keeping in view.
 
@@ -7505,6 +7506,168 @@ instead means the panel is never found to be showing the gate -- the direction
 this fails silently in, and it costs nothing. The one to escalate on is the
 opposite: a jump followed by the route panel naming a system nobody asked for.
 
+### The on-arrival pilot check could not fire, so "arrival" is a window now
+
+Issue #194. saxrat is supposed to leave an anomaly it lands in with somebody
+already on the grid, and it never has. `otherPilotsFoundOnArrival` is written in
+one place, and reaching it needed **both** of these on the **same** reading:
+
+- `weJustFinishedWarping`, so exactly the one reading a warp ends;
+- `getCurrentAnomalyIDAsSeenInProbeScanner` answering `Just`, or the enclosing
+  `case` takes `Nothing -> botMemoryBefore.visitedAnomalies` and the whole
+  anomaly-memory update, arrival snapshot included, is skipped.
+
+**On the reading a warp ends the scanner has not yet named the anomaly**, so the
+two are mutually exclusive in practice and `FoundOtherPilotOnArrival` has never
+been constructed in a recorded run. That leaves two things dead rather than one:
+the leave branch, and the do-not-come-back half, since the same reason is what
+makes a scan result be skipped later.
+
+**The distinction the design already had right is what the fix has to keep.** A
+neutral *already there when we land* means leave; a neutral *arriving while we
+are fighting* means tough it out. That is why the memory records pilots seen on
+arrival rather than pilots seen now, and it is why reading
+`getNamesOfOtherPilotsInOverview` on every reading closes this bug and opens the
+opposite one. So "arrival" widens from one reading to a **bounded window after
+warp ends** — `otherPilotArrivalWindowReadings`, 30 — and the window's
+*closing* is the load-bearing half: after it, a pilot who turns up records
+nothing and the bot fights on exactly as it does today.
+
+**The unit is readings, which is what every other bound in these bots is counted
+in.** That makes the number directly comparable to its neighbours rather than
+needing a conversion done in the reader's head:
+`approachIndicationTrustedForTicks` is 10, `dockingRunInPatienceReadings` 20,
+`gateRefusesThisShipTicks` 40 and `droneRecallGiveUpTicks` 60, and 30 sits
+mid-range among them. Confusing this unit with a clock has cost `stall_watch.py`
+a threshold calibration twice, #141 a retreat measurement and #164 an issue's
+whole diagnosis.
+
+**It is also the right unit for this particular question**, which is a stronger
+argument than convention. The window exists to cover the gap between a warp
+ending and the probe scanner naming the anomaly, and the scanner is re-read once
+per reading — so the quantity being bounded is a number of readings by
+construction. A wall-clock bound would drift against it whenever the reading rate
+changed, covering fewer scanner updates on a slow tick and more on a fast one
+while measuring the same seconds. And under a client stall (#164) a reading
+counter simply stops advancing along with every other counter in the memory
+update, where a wall clock would have held the window open across a stall in
+which no anomaly could be named anyway.
+
+**In wall-clock terms this is a widening rather than a translation, and the cost
+is not softened here.** A reading is somewhere between one and eight seconds by
+this file's own two disagreeing figures — "a reading is one to three seconds"
+where the attacker window is argued, against "the eight seconds a reading the
+recorded runs average" where `podRecoveryGiveUpReadings` is — so thirty readings
+is roughly 30 s to 4 minutes against the flat 30 s the first version of this
+carried. **The window a mid-fight arrival can fall inside is therefore larger**,
+which is the direction #194 warns about. What makes it acceptable is that the
+other unit is comparable to no other bound in these files, so nobody reading it
+could say whether it was long or short. The counter itself is advanced in
+`updateMemoryForNewReadingFromGame`, which is #102's and #126's placement rule
+and the only thing that runs on every reading unconditionally.
+
+**The list accumulates rather than being overwritten, and that is the latch.**
+The snapshot this replaces ran on exactly one reading, so what it wrote was
+final. A window whose readings each *replaced* the list would forget a pilot who
+was on the grid when the ship landed and warped off two readings later — and
+forgetting is precisely the half #194 says is dead. Adding only can never unsay
+a reason, so the verdict behaves as the single-reading one did: written during
+arrival, untouched afterwards. Order is first-seen first, because
+`findReasonToAvoidAnomalyFromMemory` reports the head and the pilot who was
+already there is the one an operator wants named.
+
+**Two things #194 offered and this deliberately does not do.** The memory keying
+is untouched, and the snapshot still sits inside the branch that has an anomaly
+ID to file it under — the issue's other option was to make the snapshot
+independent of the scanner, and that is not what shipped. A case asserts both,
+so a later change has to argue against them rather than drift into them.
+
+**The one premise this inherits rather than fixes** is that
+`weJustFinishedWarping` fires at all. It needs the reading straight after a warp
+to carry a maneuver indication that is not `ManeuverWarp`; a reading whose
+`shipUI` cannot answer leaves `shipIsWarping` as `Nothing` and the transition is
+lost. Nothing here widens that, and the same value is what #154's ammo-swap
+per-warp retry reads, so widening it is a change with its own ripple. What makes
+it diagnosable rather than silent is the status clause.
+
+**Nothing about the window was visible on a reading before**, which is most of
+why this took a corpus sweep to find: a snapshot that never ran and a grid with
+nobody on it printed identically. `describeArrivalWindow` separates the three
+ways the feature can still be inert —
+
+```
+Arrival window: OPEN, 4 of 30 readings since the last warp ended; no anomaly named in the probe scanner, so nothing can be recorded.
+Arrival window: closed, 91 of 30 readings since the last warp ended; found on arrival here: Vladimir Barmin.
+Arrival window: no warp has finished this session; nobody recorded on arrival here.
+```
+
+— and it is read by the status line and by no decision.
+
+**Both apps, in separate commits.** `eve-online-combat-anomaly-bot` carries the
+same `otherPilotsFoundOnArrival` and the same gate and takes the same change; the
+four declarations are byte-identical in the two and a case compares them. The
+mission runner has neither and is out of scope.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_arrival_pilot_window.py` (32 cases on saxrat alone,
+more once both apps are in). The two pure rules are executed through the real
+`Bot.elm` in `elm repl` — the window at both sides of its bound *and* against
+fixed values either side, since a case asking only about `constant - 1` and
+`constant` passes for any constant at all; and whole sessions are folded through
+the rules by nesting the real calls, which is the composition the memory update
+performs. What is not an expression — where the snapshot sits, that the counter
+is advanced and stored, that no decision reads the live overview — is read
+out of the source through readers sliced by **indentation**, since every binding
+under test builds a record literal.
+
+**The corpus half could not be run at all**, and is stated rather than
+approximated: #194's counts (1,058 readings beside another pilot in run 23;
+12,717 `Current anomaly: None` against 37,787 that name one) are cited as the
+issue's, and the sweep it asks for — whether the anomaly ID is *ever* available
+on a warp-end reading — was not performed. Nothing in the change rests on either.
+The reading unit also removes the one thing the corpus was chiefly wanted for: a
+bound in seconds had to state what it was worth in readings, and that conversion
+is exactly what `~/eve-bot-logs` would have settled.
+
+Confirmed by mutation, twenty of them, each failing a named case: **the upper
+bound removed so the window never closes**, which is the mid-fight bug this whole
+design refuses; the bound's comparison moved by one **in each direction**; no
+warp this session reading as an open window; **the snapshot gated on the
+warp-end reading again**, which is #194 restored; the snapshot removed from the
+anomaly-memory update; the list overwritten each reading rather than
+accumulated; a closed window clearing what arrival found; the counter not
+carried forward; **the counter never advanced**, which holds the window open for
+the rest of the session; the counter advanced and never stored; the window cut
+below the gap it has to span and widened past a whole engagement; the
+neighbouring bounds dropped from the constant's doc comment; the whole
+widening-trade paragraph deleted, and separately its statement that the window
+is larger; the status clause dropped; a decision reading the live list of other
+pilots; and the clause no longer separating an unnamed anomaly from an empty
+one.
+
+**One mutation of the doc comment survived and it is a weak mutation rather than
+a hole**, which is worth separating from the two that were holes. Replacing only
+the trade's topic sentence leaves the paragraph still saying the window is
+*larger* in wall-clock terms and still giving the range, so the trade is recorded
+and the case is right to pass. What the first version of that case did do wrong
+was assert the word "widening", which the paragraph *above* uses for something
+else entirely — the widening from one reading to a window — so it would have
+passed with the trade's substance gone. It asserts the substance now.
+
+**Unverified: any of it running.** No run has been flown since, and this path has
+never run in any recorded run of either bot — `FoundOtherPilotOnArrival` has
+never been constructed. What to watch on the first run is the `Arrival window:`
+clause: `OPEN` for a stretch after each warp and then `closed`, with the pilots
+half moving from `no anomaly named in the probe scanner` to
+`nobody recorded on arrival here` within a reading or two of landing. Three
+failures, in three different places. `no warp has finished this session` on every
+reading means `weJustFinishedWarping` never fires and the fix is inert for the
+reason above. `no anomaly named` on every reading of every open window means 30
+readings is not long enough and the scanner is later than #194's three samples
+suggest.
+And `found on arrival here:` naming somebody who warped in mid-fight would mean
+the window is not closing, which is the direction this must never fail in.
+
 ## Elm toolchain
 
 `brew install elm` (arm64-native bottle) — **not** `npm install -g elm`, which
@@ -8266,6 +8429,21 @@ exists.
   **No behaviour changed**: the clause was read by the status line at one site
   and by no decision. What a run shows is negative — `Combat feed` gone and
   `dmg N/T (45s, Nrd)` exactly as before.
+
+  And since #194 it **can leave an anomaly somebody was already sitting in**,
+  which it never could: the arrival snapshot needed `weJustFinishedWarping` and
+  the probe scanner naming the anomaly on the *same* reading, and the scanner is
+  late, so `FoundOtherPilotOnArrival` has never been constructed in a recorded
+  run. "Arrival" is a bounded window after warp ends now — 30 readings, the
+  same unit as every other bound in these bots — and the
+  window's *closing* is the half that matters, since a neutral arriving
+  mid-fight must still be fought rather than fled. See "The on-arrival pilot
+  check could not fire, so 'arrival' is a window now" above for why the list
+  accumulates rather than being overwritten, and for the one premise this
+  inherits rather than fixes. **Untested against a live client**, and this path
+  has never run at all; watch the status line's `Arrival window:` clause going
+  `OPEN` after each warp and then `closed`, and escalate on a pilot named there
+  who warped in during a fight.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
