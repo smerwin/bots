@@ -373,14 +373,14 @@ nonEmptySettingValue value =
 **A comma cannot occur in an EVE character name** -- the client's own naming
 rules allow letters, digits, spaces, hyphens and apostrophes and nothing else --
 so the separator cannot eat part of a name. That claim is not load-bearing all
-the same: every setting that uses this is *also* repeatable, so a name this
+the same: every setting that uses this is _also_ repeatable, so a name this
 splitter would cut can still be given a line of its own. The design does not
 rest on the naming rules being remembered correctly.
 
 An empty entry is dropped rather than kept, because a trailing comma is how one
 gets written by accident and the other names on the line still carry what was
 meant. That is the opposite of what `valueTypeNonEmptyString` does to a wholly
-empty *value*, and deliberately so: there, nothing is left to read the intent
+empty _value_, and deliberately so: there, nothing is left to read the intent
 from.
 
 -}
@@ -1005,62 +1005,63 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                             (followFleetBroadcast context
                                 |> Maybe.withDefault
                                     (branchDependingOnDockedOrInSpace
-                                { ifDocked =
-                                    continueIfShouldHide
-                                        { ifShouldHide =
-                                            describeBranch "Stay docked." waitForProgressInGame
-                                        }
-                                        context
-                                        |> Maybe.withDefault
-                                            (if
-                                                context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
-                                                    && (context.readingFromGameClient
-                                                            |> infoPanelRouteFirstMarkerFromReadingFromGameClient
-                                                            |> (==) Nothing
-                                                       )
-                                                    -- A "Warp to Site" opportunity takes
-                                                    -- precedence over staying docked: the
-                                                    -- Opportunities panel this comes from is
-                                                    -- part of the persistent left sidebar
-                                                    -- (like the route panel), so it's
-                                                    -- checkable even while docked. Undocking
-                                                    -- here rather than trying to click it
-                                                    -- directly from dock -- untested whether
-                                                    -- that even works -- lets the very next
-                                                    -- tick's normal in-space priority chain
-                                                    -- (which already puts this ahead of
-                                                    -- tether/dock) pick it up once genuinely
-                                                    -- in space.
-                                                    && (context.readingFromGameClient
-                                                            |> warpToOpportunitySiteIfAvailable
-                                                            |> (==) Nothing
-                                                       )
-                                             then
-                                                describeBranch
-                                                    "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
-                                                    waitForProgressInGame
+                                        { ifDocked =
+                                            continueIfShouldHide
+                                                { ifShouldHide =
+                                                    describeBranch "Stay docked." waitForProgressInGame
+                                                }
+                                                context
+                                                |> Maybe.withDefault
+                                                    (if
+                                                        context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
+                                                            && (context.readingFromGameClient
+                                                                    |> infoPanelRouteFirstMarkerFromReadingFromGameClient
+                                                                    |> (==) Nothing
+                                                               )
+                                                            -- A "Warp to Site" opportunity takes
+                                                            -- precedence over staying docked: the
+                                                            -- Opportunities panel this comes from is
+                                                            -- part of the persistent left sidebar
+                                                            -- (like the route panel), so it's
+                                                            -- checkable even while docked. Undocking
+                                                            -- here rather than trying to click it
+                                                            -- directly from dock -- untested whether
+                                                            -- that even works -- lets the very next
+                                                            -- tick's normal in-space priority chain
+                                                            -- (which already puts this ahead of
+                                                            -- tether/dock) pick it up once genuinely
+                                                            -- in space.
+                                                            && (context.readingFromGameClient
+                                                                    |> warpToOpportunitySiteIfAvailable
+                                                                    |> (==) Nothing
+                                                               )
+                                                     then
+                                                        describeBranch
+                                                            "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
+                                                            waitForProgressInGame
 
-                                             else
-                                                undockUsingStationWindow context
-                                            )
-                                , ifSeeShipUI =
-                                    \shipUI ->
-                                        runAwayIfLowHealth context shipUI
-                                            |> Maybe.withDefault
-                                                (continueIfShouldHide
-                                                    { ifShouldHide =
-                                                        returnDronesToBay context
-                                                            (dockAtRandomStationOrStructure context)
-                                                    }
-                                                    context
+                                                     else
+                                                        undockUsingStationWindow context
+                                                    )
+                                        , ifSeeShipUI =
+                                            \shipUI ->
+                                                runAwayIfLowHealth context shipUI
                                                     |> Maybe.withDefault
-                                                        (decideNextActionWhenInSpace context { shipUI = shipUI })
-                                                )
-                                }
-                                context.readingFromGameClient
+                                                        (continueIfShouldHide
+                                                            { ifShouldHide =
+                                                                returnDronesToBay context
+                                                                    (dockAtRandomStationOrStructure context)
+                                                            }
+                                                            context
+                                                            |> Maybe.withDefault
+                                                                (decideNextActionWhenInSpace context { shipUI = shipUI })
+                                                        )
+                                        }
+                                        context.readingFromGameClient
+                                    )
                             )
                     )
-            ))
+            )
 
 
 {-| The bounds whose expiry ends the session, asked where nothing can decline to
@@ -1875,7 +1876,7 @@ fleetBroadcastBannerText readingFromGameClient =
 
 **The banner persists**, which is the whole difficulty and is observed rather
 than assumed: it was still reading `Gal Bistot: Travel to Riramia` when the tree
-was read again long after that broadcast. It is a *last broadcast* display, not
+was read again long after that broadcast. It is a _last broadcast_ display, not
 a transient. So this answers what the banner currently says and nothing about
 when it was said, and the caller is what makes it fire once -- see
 `fleetBroadcastToFollow`.
@@ -1929,7 +1930,7 @@ rest of the session and fight `setRouteToNextHuntingGround` for the ship. The
 verdict is recorded in `BotMemory.fleetBroadcastFollowed` -- the banner's own
 text -- and a banner that has already been acted on answers `Nothing`.
 
-Keying on the text rather than on a counter means a *repeated* broadcast to the
+Keying on the text rather than on a counter means a _repeated_ broadcast to the
 same system is correctly ignored, since it renders identically and the ship is
 already going there, while a broadcast to somewhere else is a different string
 and fires. That is `messageBoxIdentity`'s choice for `messageBoxIdentity`'s
