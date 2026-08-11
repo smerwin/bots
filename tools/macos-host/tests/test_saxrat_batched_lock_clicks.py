@@ -837,28 +837,52 @@ class TheDecisionSiteIsWiredToTheRuleTest(unittest.TestCase):
                       "the batch builds its own chord again")
 
 
-class TheMissionRunnerStillLocksOnePerStepTest(unittest.TestCase):
+class TheMissionRunnerTookThisOnWithItsDisciplineTest(unittest.TestCase):
     """Scope, recorded rather than remembered.
 
-    The mission runner's `lockTargetFromOverviewEntry` has the same shape --
-    one Ctrl+click, then the step is handed back -- so it shares the defect this
-    change fixes in saxrat. It is deliberately untouched, and this case is what
-    makes that a statement somebody can check rather than a claim in a PR.
+    This class used to be `TheMissionRunnerStillLocksOnePerStepTest`, which held
+    a marker: the mission runner's `lockTargetFromOverviewEntry` had the same
+    one-Ctrl+click-then-hand-the-step-back shape, it was deliberately untouched,
+    and the case existed so that a later port had to *notice* it was taking on
+    the attribution problem this change solves.
+
+    **The port has happened and the marker is spent**, so what is recorded here
+    is the thing the marker was watching for rather than the state it was
+    watching. The mission runner now batches, and it carries the two rules that
+    make batching safe -- so a port that takes the batch without the discipline
+    still fails a case in the file that warned about it.
+
+    Everything else about the mission runner's version is in
+    `test_mission_runner_batched_lock_clicks.py`, which sizes its cap and its
+    gain on that bot's own corpus rather than on this one's.
     """
 
-    def test_it_still_issues_one_ctrl_click_and_hands_the_step_back(self):
-        branch = collapsed(top_level_block(
-            source_of(MISSION_RUNNER_BOT_ELM), "lockTargetFromOverviewEntry"))
-        self.assertEqual(
-            branch.count("EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL"),
-            1,
-            "the mission runner's lock site has changed shape; this case "
-            "records that it shares saxrat's one-lock-per-reading defect and "
-            "was left alone, so it wants revisiting rather than adjusting")
-        self.assertNotIn(
-            "lockBatchSize", branch,
-            "the mission runner has grown a batch without the attribution "
-            "discipline that makes one safe")
+    def test_it_batches_now(self):
+        source = source_of(MISSION_RUNNER_BOT_ELM)
+        single = collapsed(top_level_block(source, "lockTargetFromOverviewEntry"))
+        self.assertIn(
+            "lockChordForOverviewEntry", single,
+            "the mission runner's single lock site no longer shares one chord "
+            "with its batch, so the two can come to dispatch different gestures")
+        self.assertIn(
+            "lockBatchMaximumClicks", source,
+            "the mission runner has lost its batch entirely; if that is "
+            "deliberate this case is what has to be argued with")
+
+    def test_it_did_not_take_the_batch_without_the_attribution_discipline(self):
+        source = source_of(MISSION_RUNNER_BOT_ELM)
+        rule = collapsed(top_level_block(source, "updateLockRangeLearning"))
+        self.assertIn(
+            "if stepWasBatched then", rule,
+            "the mission runner batches lock clicks and its lock-range rule no "
+            "longer refuses to learn from a batched reading, which is a range "
+            "learned from an outcome that belongs to no one click")
+        size = collapsed(top_level_block(source, "lockBatchSize"))
+        self.assertIn(
+            "situation.probeIsDue || (situation.targetsHeld < 1)", size,
+            "the mission runner's batch no longer asks the first lock of an "
+            "engagement alone, so the only lock that could have taught the "
+            "refusal bound is issued in a step the range rule will not read")
 
 
 class TheRecordedRunsShowTheRampThisChangeIsAboutTest(unittest.TestCase):
