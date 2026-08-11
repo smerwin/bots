@@ -8,7 +8,6 @@
 
    + Automatically detects if another pilot is in an anomaly on arrival and switches to another anomaly if necessary.
    + Filtering for specific anomalies using bot settings.
-   + Avoiding dangerous or too-powerful rats using bot settings.
    + Remembers observed properties of anomalies, like other pilots or dangerous rats, to inform the selection of anomalies in the future.
 
    ## Setting up the Game Client
@@ -27,9 +26,21 @@
 
    All settings are optional; you only need them in case the defaults don't fit your use-case.
 
+   An `avoid-rat` setting used to be listed here, and this bot never parsed it. The bullet
+   and the example line below were inherited from the combat anomaly bot this one was
+   adapted from, and the parser was not: `parseBotSettings` has no entry for the key and
+   `BotSettings` has no field for it. So a settings string copied out of this header was
+   **rejected** with `Unknown setting name 'avoid-rat'`, and since a settings parse error
+   ends the session, the bot stopped before it started. Delete the line if a settings file
+   still carries one.
+
+   The documentation is deleted rather than the setting implemented. `eve-online-saxrat`
+   and `eve-online-combat-anomaly-bot` do implement it, at _anomaly_ granularity -- they
+   abandon the whole anomaly a named rat was seen in -- and whether this bot wants that
+   rule has never been established. It can be added if it is ever wanted.
+
    + `anomaly-name` : Choose the name of anomalies to take. You can use this setting multiple times to select multiple names.
    + `hide-when-neutral-in-local` : Set this to 'yes' to make the bot dock in a station or structure when a neutral or hostile appears in the 'local' chat.
-   + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. You can use this setting multiple times to select multiple names.
    + `activate-module-always` : Text found in tooltips of ship modules that should always be active. For example: "shield hardener".
    + `anomaly-wait-time`: Minimum time to wait after arriving in an anomaly before considering it finished. Use this if you see anomalies in which rats arrive later than you arrive on grid.
 
@@ -40,7 +51,6 @@
    anomaly-name = Drone Patrol
    anomaly-name = Drone Horde
    hide-when-neutral-in-local = yes
-   avoid-rat = Infested Carrier
    activate-module-always = shield hardener
    ```
 
