@@ -83,7 +83,7 @@ class DispatchTest(unittest.TestCase):
                       "addToBeginning": True, "budgetSeconds": 3})
         self.assertEqual(seen, {"name": None, "destination_id": 60008494,
                                 "clear_other": False, "add_to_beginning": True,
-                                "budget_seconds": 3})
+                                "budget_seconds": 3, "expected_character": None})
 
     def test_clearing_the_route_is_the_default(self):
         seen = {}
