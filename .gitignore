@@ -14,3 +14,9 @@ __pycache__/
 # Windows host build output
 tools/windows-host/tree_walker/tree_walker.exe
 tools/windows-host/tree_walker/*.obj
+
+# Transient git worktrees for background agents. These are live checkouts of
+# this repository, created per agent and removed when it finishes -- working
+# directories rather than source, and committing one would nest a copy of the
+# repo inside itself.
+/.claude/worktrees/
