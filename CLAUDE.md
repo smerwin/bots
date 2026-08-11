@@ -8768,13 +8768,61 @@ a non-text travel label is declined (#49). A NUL cannot appear in an Elm string
 literal — rebuild such input with `Char.fromCode`.
 
 In the suite that recipe is `tools/macos-host/tests/prerequisites.py` and there
-is exactly one of it. `open_repl` copies the app to scratch, patches
-`elm-version`, opens `Bot.elm`'s exports and returns a repl that has been shown
-to evaluate; expressions go in as one `[ a, b, c ]` rather than a line each,
-because the repl recompiles the module per line (#84: twenty expressions, 36.5s
-against 5.8s). Ask for `Bool`s with `evaluate`, `String`s with `strings`, and
-anything else with `values`, which is the one caller still asking line by line —
-inside a list the printed form is the list's rather than each answer's.
+is exactly one of it. `open_repl` hands a class the app's scratch copy — patched,
+compiled and probed **once per app per process** since #172 — and returns a repl
+that has been shown to evaluate; expressions go in as one `[ a, b, c ]` rather
+than a line each, because the repl recompiles the module for every *entry* it is
+given (#84: twenty expressions, 36.5s against 5.8s). Ask for `Bool`s with
+`evaluate`, `String`s with `strings`, and anything else with `values`, which is
+the one caller still asking one expression per entry — inside a list the printed
+form is the list's rather than each answer's.
+
+### What a question costs is entries, and that is where the suite's time went
+
+Issue #172 was filed on a suite taking 20-25 minutes and led with the per-class
+scratch copy: 131 classes, each copying 1.4 MB and compiling its own
+`elm-stuff`. **Profiled before it was optimised, and the ordering changed.**
+On the container it was measured on, `copytree` is **0.003 s** — the copy the
+issue leads with was never the cost. What an `elm repl` costs is *entries*: an
+empty session is 0.02 s, `import Bot` against the mission runner's 21,705-line
+`Bot.elm` is **1.55 s**, and every entry after it costs about the same again
+whether it holds one expression or ten. That last clause is why #84's batching
+worked, and it is also what nobody had followed through: a preamble of six
+bindings was six compiles charged to one answer, on every question that class
+asked.
+
+So two changes, in the order the numbers put them. `built_app` builds one copy
+of an app per process and hands the same directory to every class — a sixth of
+the time. And `ElmRepl.script` folds every binding a caller wrote (a subclass's
+`BINDINGS`, a case's `definitions`) into the single `let ... in` entry that asks
+the question, leaving only imports as entries of their own, because a `let`
+cannot hold an import. Measured over a six-module subset asking the same 94
+questions: **763 s → 646 s → 343 s**. The folded script has *more lines* than
+the one it replaced, which is the measurement's own evidence that what is paid
+for is entries.
+
+**Sharing one built tree between classes is checked rather than trusted**, since
+a suite whose classes can edit each other's compiler input is this repo's
+signature failure with the tests as its subject. `fingerprint_of_app` hashes the
+whole tree bar `elm-stuff` — build output, which `elm repl` rewrites by design —
+at the moment the build's probe passes, and `check_unchanged` re-asks it on
+every hand-out and in every `close`, so a class that writes into the tree is
+named by its own `tearDownClass` rather than deciding what the next class
+compiles. That is also what makes probing **once** as strong as probing 131
+times: the tree handed over is byte for byte the tree that answered the probe.
+
+Two things this leaves alone. `--dist loadfile` in the workflow was justified by
+the per-file scratch build, and that reason is now spent — one build per worker
+process happens whatever the distribution — but the granularity is not what
+bounds a parallel run either: on four cores the whole suite spends 4,078 s of
+case time and finishes in 1,057 s against a perfect packing of 1,020 s, with the
+longest single file at 310 s. There is nothing for `loadscope` to recover, so
+the flag stays as a default rather than as a constraint.
+
+And **how much of a local run is the corpus-reading cases is still unmeasured**:
+they skip wherever `~/eve-bot-logs` is absent, which is CI and was the machine
+these numbers came from, so a local run that reads a 122 MB log carries a cost
+none of this touches.
 
 ### A fixture that never arrived reads exactly like a rule that answered nothing
 
