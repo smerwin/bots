@@ -60,34 +60,32 @@ def empty_point_helper(path):
 
 
 class StrayMenuIsClearedWithAClick(unittest.TestCase):
-    def test_the_rescue_is_a_right_click(self):
+    def test_the_rescue_is_a_left_click(self):
         for path in BOTS:
             with self.subTest(bot=os.path.basename(os.path.dirname(path))):
                 branch = rescue_branch(path)
-                self.assertIn("effectsMouseClickAtLocation EffectOnWindow.MouseButtonRight",
+                self.assertIn("effectsMouseClickAtLocation EffectOnWindow.MouseButtonLeft",
                               branch, "the stray menu is cleared with a click")
 
-    def test_the_rescue_dismisses_the_menu_it_opens(self):
-        """A right-click on empty canvas opens a menu of its own.
+    def test_the_rescue_opens_no_menu_of_its_own(self):
+        """The pair of clicks this replaced could never have worked.
 
-        Without a follow-up the next reading judges that menu stray and clears
-        it the same way: saxrat's run 47 fired this rescue 16,791 times with
-        three menus standing open on 16,720 readings -- a rescue reproducing
-        what it was rescuing from. A left click dismisses a menu without opening
-        one, and both travel in a single step so no reading can fall between
-        them and see the intermediate state as a new stray menu.
+        The client draws a context menu *at the cursor*, so the right-click that
+        used to lead put a fresh menu exactly where the following left click was
+        aimed, and that click landed on a menu entry rather than on empty canvas
+        -- a rescue reproducing what it was rescuing from. Measured live against
+        the real stuck menu, one left click dismissed it and opened nothing.
+
+        So what is pinned is the absence: no right-click anywhere in the branch,
+        and one click rather than a chained pair.
         """
         for path in BOTS:
             with self.subTest(bot=os.path.basename(os.path.dirname(path))):
                 branch = rescue_branch(path)
-                self.assertIn("EffectOnWindow.MouseButtonLeft", branch,
-                              "the rescue ends with a left click")
-                right_at = branch.index("MouseButtonRight")
-                left_at = branch.index("MouseButtonLeft")
-                self.assertLess(right_at, left_at,
-                                "the left click follows the right click")
-                self.assertIn("++ EffectOnWindow.effectsMouseClickAtLocation", branch,
-                              "both clicks are one step, not two decisions")
+                self.assertNotIn("MouseButtonRight", branch,
+                                 "a right-click opens the menu it is clearing")
+                self.assertNotIn("++ EffectOnWindow.effectsMouseClickAtLocation", branch,
+                                 "the rescue is one click, not a chained pair")
 
     def test_escape_is_only_the_fallback(self):
         """Escape survives for the case with no panel to measure against.
@@ -98,7 +96,7 @@ class StrayMenuIsClearedWithAClick(unittest.TestCase):
         for path in BOTS:
             with self.subTest(bot=os.path.basename(os.path.dirname(path))):
                 branch = rescue_branch(path)
-                click_at = branch.index("MouseButtonRight")
+                click_at = branch.index("MouseButtonLeft")
                 escape_at = branch.index("vkey_ESCAPE")
                 self.assertLess(click_at, escape_at,
                                 "the click is reached before Escape")

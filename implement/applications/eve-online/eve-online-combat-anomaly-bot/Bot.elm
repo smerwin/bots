@@ -2003,6 +2003,29 @@ strayContextMenuStuckTicksThreshold =
     3
 
 
+{-| How long the dismissal gets before the bot works around the menu instead.
+
+**This branch had no bound at all**, and it sits at the head of the in-space
+decision list, so a rescue that does not work owns the whole bot -- the same
+position, and the same failure, as the message box in this repo's run 30. saxrat
+measured the cost: one run spent three quarters of an eight-hour session on this
+one rescue with nothing killed.
+
+`Nothing` rather than an alarm, for `MessageBoxStandoff`'s reason: the menu stays
+on the screen and every branch below now works around it, which is worse than a
+cleared menu and incomparably better than nothing running at all. The status line
+keeps saying it is there.
+
+Written as a multiple of the threshold that arms it so the two cannot drift
+apart. Twenty attempts is far past anything a working dismissal needs -- the
+measured one clears the menu in a single click -- and far short of a session.
+
+-}
+strayContextMenuGiveUpTicks : Int
+strayContextMenuGiveUpTicks =
+    strayContextMenuStuckTicksThreshold * 20
+
+
 {-| `Just` a decision to press Escape if a context menu has sat at the same
 cascade depth (not advancing to a deeper submenu) for at least
 `strayContextMenuStuckTicksThreshold` consecutive ticks; `Nothing` otherwise, so
@@ -2010,35 +2033,39 @@ callers can fall through to their normal decision tree.
 -}
 clearStrayContextMenu : BotDecisionContext -> Maybe DecisionPathNode
 clearStrayContextMenu context =
-    if strayContextMenuStuckTicksThreshold <= context.memory.contextMenuStuckTicks then
+    if
+        (strayContextMenuStuckTicksThreshold <= context.memory.contextMenuStuckTicks)
+            && (context.memory.contextMenuStuckTicks < strayContextMenuGiveUpTicks)
+    then
         Just
             (case emptyPointBesideTheInfoPanel context.readingFromGameClient of
                 Just location ->
                     describeBranch
                         "A context menu has sat at the same depth for several ticks in a row without advancing to a deeper submenu -- likely a stray menu from a misclick or a cascade stuck on a menu with no entry it recognizes. Clear it (right-click beside the info panel)."
                         (decideActionForCurrentStep
-                            -- Right-click, then left-click the same point. The
-                            -- right-click is what dismisses the stray menu --
-                            -- Escape does not, measured against a real one --
-                            -- but on empty canvas it opens a menu of its own,
-                            -- and the next reading judges *that* stray and
-                            -- clears it the same way. saxrat's run 47 did this
-                            -- 16,791 times with three menus standing open on
-                            -- 16,720 readings: a rescue that reproduced what it
-                            -- was rescuing from.
+                            -- **A left click, and only a left click.** The
+                            -- right-click that used to lead this is what
+                            -- created the thing it was clearing: the client
+                            -- opens a context menu *at the cursor*, so the
+                            -- right-click put a fresh menu exactly where the
+                            -- following left click was aimed, and that click
+                            -- then landed on a menu entry rather than on empty
+                            -- canvas. Run 47 did that 16,791 times; run 18 did
+                            -- it 10,845 times in eight hours and killed
+                            -- nothing, with the solar-system menu standing open
+                            -- the whole time and the computed point sitting on
+                            -- its top-left corner.
                             --
-                            -- The left click is the half that ends it. A left
-                            -- click dismisses a context menu without opening
-                            -- one, which is how this menu was cleared by hand
-                            -- before either was in the bot. Both travel in one
-                            -- step so no reading can fall between them and see
-                            -- the intermediate state as a new stray menu.
+                            -- The pair could never have worked, because the two
+                            -- clicks were at the same location and a menu is
+                            -- always drawn at the click. What the comment
+                            -- before this said about the left click is right,
+                            -- and is now the whole action: measured live
+                            -- against the real stuck menu, one left click on
+                            -- empty canvas dismissed it and opened nothing.
                             (EffectOnWindow.effectsMouseClickAtLocation
-                                EffectOnWindow.MouseButtonRight
+                                EffectOnWindow.MouseButtonLeft
                                 location
-                                ++ EffectOnWindow.effectsMouseClickAtLocation
-                                    EffectOnWindow.MouseButtonLeft
-                                    location
                             )
                         )
 
@@ -2093,15 +2120,70 @@ which is the weaker rescue rather than a guess at a location.
 emptyPointBesideTheInfoPanel : ReadingFromGameClient -> Maybe EffectOnWindow.Location2d
 emptyPointBesideTheInfoPanel readingFromGameClient =
     readingFromGameClient.infoPanelContainer
-        |> Maybe.map
+        |> Maybe.andThen
             (\infoPanelContainer ->
                 let
                     region =
                         infoPanelContainer.uiNode.totalDisplayRegion
+
+                    beside =
+                        { x = region.x + region.width + strayMenuClearGapFromInfoPanel
+                        , y = region.y + (region.height // 2)
+                        }
+
+                    canvas =
+                        readingFromGameClient.uiTree.totalDisplayRegion
+
+                    menuCovers point menu =
+                        let
+                            menuRegion =
+                                menu.uiNode.totalDisplayRegion
+                        in
+                        (menuRegion.x <= point.x)
+                            && (point.x <= menuRegion.x + menuRegion.width)
+                            && (menuRegion.y <= point.y)
+                            && (point.y <= menuRegion.y + menuRegion.height)
+
+                    covered point =
+                        readingFromGameClient.contextMenus
+                            |> List.any (menuCovers point)
+
+                    belowEveryMenu =
+                        readingFromGameClient.contextMenus
+                            |> List.map
+                                (\menu ->
+                                    menu.uiNode.totalDisplayRegion.y
+                                        + menu.uiNode.totalDisplayRegion.height
+                                )
+                            |> List.maximum
+                            |> Maybe.map
+                                (\lowest ->
+                                    { beside | y = lowest + strayMenuClearGapFromInfoPanel }
+                                )
                 in
-                { x = region.x + region.width + strayMenuClearGapFromInfoPanel
-                , y = region.y + (region.height // 2)
-                }
+                if not (covered beside) then
+                    Just beside
+
+                else
+                    -- The point beside the panel is where the *last* click was,
+                    -- so on the reading after one the menu is drawn over it --
+                    -- the client opens a context menu at the cursor. Clicking
+                    -- there again does not land on empty canvas, it lands on a
+                    -- menu entry, and this menu carries `Clear All Waypoints`.
+                    -- Stepping below the menu is what keeps the dismissal a
+                    -- dismissal.
+                    belowEveryMenu
+                        |> Maybe.andThen
+                            (\below ->
+                                if
+                                    (below.y < canvas.y + canvas.height)
+                                        && not (covered below)
+                                then
+                                    Just below
+
+                                else
+                                    Nothing
+                            )
             )
 
 
