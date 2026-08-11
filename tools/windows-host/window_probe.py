@@ -142,9 +142,24 @@ def _frame_bounds(hwnd: int) -> tuple[int, int, int, int]:
 
 def windows_of_process(pid: Optional[int] = None) -> list[Window]:
     found: list[Window] = []
-    foreground = _user32.GetForegroundWindow()
+    # NULL when nothing holds focus -- a locked session, or the moment between
+    # one window losing focus and the next taking it. Normalised to 0 here
+    # because the comparison below used to do `int(foreground)` on it.
+    foreground = _user32.GetForegroundWindow() or 0
 
     def callback(hwnd, _lparam):
+        # Everything in here runs inside EnumWindows, and a callback that raises
+        # is *not* propagated -- Python prints "Exception ignored" and returns
+        # None, which EnumWindows reads as "stop". So a single bad window
+        # silently truncates the list rather than failing loudly, and the caller
+        # gets a plausible short answer: the wrong window, or none. Observed
+        # live, from `int(None)` when GetForegroundWindow returned NULL.
+        try:
+            return _describe(hwnd, pid, foreground, found)
+        except Exception:
+            return True  # skip this window, keep enumerating
+
+    def _describe(hwnd, pid, foreground, found):
         owner = wintypes.DWORD()
         _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
         if pid is not None and owner.value != pid:
