@@ -428,7 +428,7 @@ class WhatSaxratHasAgainstAMessageBoxStandoffTest(unittest.TestCase):
         # name being present: the ordinary answer is still the default rung, and
         # the give-up hands the tree back rather than raising an alarm.
         body = declaration("closeMessageBox", self.saxrat)
-        self.assertIn("messageBoxStandoffVerdict standoff", body)
+        self.assertIn("messageBoxStandoffVerdictForBox standoff messageBox", body)
         self.assertIn("LeaveTheMessageBoxAlone -> Nothing", body)
         self.assertIn("closeMessageBoxByDeclining messageBox", body)
 

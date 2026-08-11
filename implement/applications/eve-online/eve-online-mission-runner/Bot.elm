@@ -7422,7 +7422,7 @@ closeMessageBox { confirmQuitMission, confirmDeclineMission, standoff } readingF
         |> List.head
         |> Maybe.andThen
             (\messageBox ->
-                case messageBoxStandoffVerdict standoff of
+                case messageBoxStandoffVerdictForBox standoff messageBox of
                     LeaveTheMessageBoxAlone ->
                         -- The whole of #101: `Nothing` here is what lets the
                         -- rest of the tree run. The box is still on the screen
@@ -7593,6 +7593,91 @@ messageBoxStandoffVerdict standoff =
 
             else
                 AnswerTheMessageBox
+
+
+{-| The standoff's verdict, except that one box is never answered at all.
+
+`closeMessageBoxByDeclining`'s promise is that the automatic reply is always the
+declining one, because these dialogs guard destructive actions. EVE's Connection
+Lost modal inverts that: it carries a single `Quit` button, no `Close`/`OK` and
+no `no_dialog_button`, so both of the recognising options miss and the answer
+falls through to the third -- the window's own close control, the one meant for
+"a dialog whose buttons we do not recognise at all". On this box **the declining
+answer is the destructive one**, and saxrat run 22 lost its client to it six
+minutes into an eight-hour tour:
+
+    12:28:31 (info) Network communication between your computer and the EVE
+                    Online server has been interrupted.
+
+    + I see a message box to close.
+    ++ Dismiss it using the window's close button.
+
+and then the log stops, with no client process and no EVE window left.
+
+**The escape rung had to be covered too, which is why this is here rather than
+in `closeMessageBoxByDeclining`.** #138's ladder answers for
+`messageBoxAnswersBeforeEscape` readings and then presses Escape, and Escape at
+a modal whose only action is Quit is the same keypress by another route. Both
+rungs are what this skips.
+
+**It is not a bound and it does not wait**, because there is nothing to wait
+for: a client with no server connection cannot be recovered by anything the bot
+can press, and quitting takes it away from the operator who _can_ reconnect. So
+the answer is the one #138 already built for a box that will not close --
+`LeaveTheMessageBoxAlone`, so `closeMessageBox` answers `Nothing` and the rest
+of the tree runs -- reached immediately rather than after 120 readings of
+pressing things at it.
+
+The cost is the one that verdict already carries: `Nothing` cannot hold a
+decision line, so the decision log says nothing about this box. What does say so
+is the status clause, which counts every reading a box is up and, since #165,
+names it -- `Message box: N/120 ... 'Quit / Connection Lost / Connection to
+server was lost.'` is what an operator sees on every reading.
+
+Run 21 met the same dialog and sat at it for five hours rather than quitting,
+because the screen was locked and no input could land. That is the same defect
+with the input path removed, not a second one.
+
+-}
+messageBoxStandoffVerdictForBox :
+    Maybe MessageBoxStandoff
+    -> EveOnline.ParseUserInterface.MessageBox
+    -> MessageBoxStandoffVerdict
+messageBoxStandoffVerdictForBox standoff messageBox =
+    if messageBoxSaysTheConnectionIsLost messageBox then
+        LeaveTheMessageBoxAlone
+
+    else
+        messageBoxStandoffVerdict standoff
+
+
+{-| Whether the box is the client saying it has lost the server.
+
+Matched on the client's own words, and on two of them rather than one:
+`Connection Lost` is the title and `connection to server was lost` the body, and
+both were read off the box that took the client down. Two substrings for #31's
+reason -- a single common word would reach dialogs this must not silence, and
+silencing a dialog is exactly how a bot stops answering something it should.
+
+The button is deliberately not what this reads. `Quit` is a plausible label on
+boxes that have a safe answer beside it, and the identity that would settle it
+is not available: `messageBoxIdentityForOperator` truncates before the
+`with buttons [...]` section, so neither recorded instance says what this box's
+buttons were.
+
+-}
+messageBoxSaysTheConnectionIsLost : EveOnline.ParseUserInterface.MessageBox -> Bool
+messageBoxSaysTheConnectionIsLost messageBox =
+    let
+        texts =
+            messageBox.uiNode.uiNode
+                |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+                |> List.map String.toLower
+
+        says needle =
+            texts |> List.any (String.contains needle)
+    in
+    says "connection lost" && says "connection to server was lost"
 
 
 {-| What a message box is, for the purpose of counting how long this one has
