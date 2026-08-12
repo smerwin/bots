@@ -204,17 +204,24 @@ class TheOrderingRuleTest(unittest.TestCase):
 
 
 class TheWiringTest(unittest.TestCase):
-    """What `pickAnotherAnomalyOrLeave` does with the rule's answer.
+    """What `siteProgressStepOrElse` does with the rule's answer.
 
     Not an expression, and the failure most worth pinning is a swap: two arms
     that each run a branch, wired to the wrong one, would satisfy every case
     over the rule itself.
+
+    This read used to be `let_binding_of(source, "pickAnotherAnomalyOrLeave")`,
+    which is where the dispatch lived when it was bound inside the probe-scanner
+    arm. #204 moved it out to a declaration both arms call, because a shut
+    scanner window made the gate and the warp unreachable; the assertions below
+    are the same ones, following the code they pin.
     """
 
     @classmethod
     def setUpClass(cls):
         cls.source = source_of(SAXRAT_BOT_ELM)
-        cls.binding = let_binding_of(cls.source, "pickAnotherAnomalyOrLeave")
+        cls.binding = collapsed(without_line_comments(
+            body_of(cls.source, "siteProgressStepOrElse")))
 
     def test_the_choice_is_made_through_the_rule(self):
         self.assertIn("case siteProgressStep {", self.binding)
@@ -258,9 +265,48 @@ class TheWiringTest(unittest.TestCase):
             self.binding)
 
     def test_the_hunt_loop_is_still_the_last_resort(self):
+        """The floor is the caller's, and the scanner arm still supplies its own.
+
+        Split in two because the answer moved: the rule's last resort is now
+        whatever the caller passed, and it is the probe-scanner call site that
+        makes that the scan results. Asserting only the first half would pass
+        while the scanner arm quietly fell back to something else.
+        """
+        self.assertIn("HuntWithTheProbeScanner -> ifNeither", self.binding)
         self.assertIn(
-            "HuntWithTheProbeScanner -> pickAnotherAnomalyOrLeaveViaScanResults",
-            self.binding)
+            "siteProgressStepOrElse context pickAnotherAnomalyOrLeaveViaScanResults",
+            collapsed(self.source))
+
+    def test_both_arms_of_the_probe_window_split_reach_the_rule(self):
+        """#204: the defect was that only one of them could.
+
+        `decideNextActionWhenInSpace` splits on `probeScannerWindow`, and the
+        dispatch used to be bound inside the `Just` arm -- so a shut window made
+        a gate on grid and a "Warp to Site" on offer both unreachable. Two call
+        sites is the fix; one is the bug restored.
+        """
+        whole = collapsed(self.source)
+        self.assertIn(
+            "siteProgressStepOrElse context pickAnotherAnomalyOrLeaveViaScanResults",
+            whole, "the arm with a scanner must go through the rule")
+        self.assertIn(
+            "siteProgressStepOrElse context (jumpToNextSystem context)", whole,
+            "the arm without a scanner must go through it too, and fall back to"
+            " leaving the system")
+
+    def test_the_arm_without_a_scanner_says_its_clock_rather_than_a_number(self):
+        """The literal `600` matched `anomalyWaitTimeSeconds`' default by luck.
+
+        There is no anomaly memory to age on that arm -- it is filed under the ID
+        the scanner gives -- so what the branch means is "the wait is already
+        over", and it now says that in terms of the setting rather than in a
+        number that stops meaning it the moment an operator changes one.
+        """
+        whole = collapsed(self.source)
+        self.assertIn(
+            "{ arrivalInAnomalyAgeSeconds ="
+            " context.eventContext.botSettings.anomalyWaitTimeSeconds }", whole)
+        self.assertNotIn("{ arrivalInAnomalyAgeSeconds = 600 }", whole)
 
 
 class TheGiveUpHandsTheReadingBackTest(unittest.TestCase):

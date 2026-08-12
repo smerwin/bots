@@ -7325,6 +7325,43 @@ offered once the ship leaves reach, and nothing remembers that its gate was give
 up on. **Income is the outcome measure and there is a clean control**: run 38 did
 1,536,545 ISK/hr on these settings before this path started dominating.
 
+### A shut probe window hid the gate and the opportunity from the whole path
+
+Issue #204. `decideNextActionWhenInSpace` splits on `probeScannerWindow`, and both
+`accelerationGateStep` and `opportunityWarpStep` were `let`-bound inside the
+`Just` arm. So with the scanner window closed, a gate standing on grid and a
+"Warp to Site" on offer were equally invisible: that arm's entire repertoire was
+a middle-row module, whatever was already on the overview, and jumping to the
+next system. #202 found the gate half; the opportunity half is the one that
+matters for running escalations, and the docked branch was already assuming
+otherwise -- it consults `warpToOpportunitySiteIfAvailable` as a predicate and
+undocks so "the next tick's in-space chain" can take it, and that chain was the
+unreachable one.
+
+The dispatch is now `siteProgressStepOrElse`, a declaration both arms call, with
+the caller supplying the floor -- scan results for the arm that has a scanner,
+leaving the system for the arm that does not. `siteProgressStep` is still the
+arbiter and is untouched. What keeps it safe is where it is reached from:
+`decideActionInAnomaly` asks for its continuation only once there is nothing left
+to attack, loot or unlock, so an opportunity appearing mid-fight still cannot
+pull the ship out of one.
+
+**The arrival age on that arm was a literal that matched a default by accident.**
+It passed `600` while `anomalyWaitTimeSeconds` also defaulted to `600`, so
+`waitTimeRemainingSeconds` was exactly `0` -- the wait treated as spent, the
+120-second loot backstop still live. Two constants agreeing, not a decision: an
+operator setting `anomaly-wait-time-seconds = 900` silently turned that arm into
+one that tethers for five minutes. It now passes the setting itself, which
+reproduces today's behaviour on shipped settings and goes on meaning it when the
+setting changes. **Passing the real age would have been a bug**: the anomaly
+memory is filed under the ID the scanner gives, so with no scanner
+`arrivalInAnomalyAgeSecondsFromMemory` answers its `Maybe.withDefault 0` and the
+ship tethers for the full wait at a site it cannot name.
+
+**Unverified:** nothing has been flown, and how often a gate or an opportunity is
+actually on grid while the scanner is shut is not measured -- only that the path
+is entered, which run 25's log shows.
+
 ### The route's next stargate is jumped from the panel here too, and the share is why
 
 Issue #169 is PR #170 ported. The rule is that one whole -- the route panel's own
