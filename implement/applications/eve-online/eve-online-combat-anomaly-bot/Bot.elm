@@ -453,73 +453,116 @@ memoryOfAnomalyWithID anomalyID =
     .visitedAnomalies >> Dict.get anomalyID
 
 
+{-| Whether the ship is warping, as far as this reading can say.
+
+**Three answers rather than two, and the third one is issue #194.** `Just True`
+is the client naming `Warp`; `Just False` is the client naming some other
+maneuver -- `Orbit`, `Approach`, `Aligning`; and `Nothing` is the client naming
+none, which is what a ship that has stopped maneuvering looks like and also what
+a reading with no ship UI at all looks like. Whoever reads this has to decide
+which of the last two they meant, because the type cannot.
+
+Lifted out of `updateMemoryForNewReadingFromGame` so that a case can execute it
+against a real parsed reading. Both apps derived it inline, and in two different
+shapes -- one a pipeline, one a `case` -- which is a drift that compiles.
+
+-}
+shipWarpingFromReading : ReadingFromGameClient -> Maybe Bool
+shipWarpingFromReading readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.andThen .indication
+        |> Maybe.andThen .maneuverType
+        |> Maybe.map ((==) EveOnline.ParseUserInterface.ManeuverWarp)
+
+
+{-| Whether this reading is the one a warp ended on.
+
+**Issue #194: the form this replaces could never answer `True` at the end of a
+warp.** It asked for `shipWarpingInLastReading == Just True` together with
+`shipIsWarping == Just False`, and `shipIsWarping` is a `Maybe` over the
+maneuver the client _names_: `Just True` for `Warp`, `Just False` for some
+**other** named maneuver, and `Nothing` when no maneuver is named at all. So
+`Just False` never meant "the ship is not warping" -- it meant "the ship is
+orbiting, or approaching, or aligning". A ship that has simply stopped answers
+`Nothing`.
+
+Captured off the live client during saxrat run 29, sampling the ship UI's
+indication about once a second across two warps: while warping the container
+holds `Warp Drive Active` and the destination, and on the reading the warp ends
+the container is still present and holds only the location labels -- no maneuver
+word anywhere in it. The parser reads no `maneuverType` from that, so the
+transition a warp really makes is `Just True -> Nothing`, and the condition that
+demanded `Just False` was unreachable in every recorded run.
+`EveOnline.BotFramework.shipUIIndicatesShipIsWarpingOrJumping` already treats an
+absent indication as "not maneuvering", and says so in a comment; this was the
+one place that did not.
+
+So the transition is `Just True` followed by anything that is _not_ `Just True`.
+
+**And the ship UI has to be present to say so.** `Nothing` is equally what a
+reading with no ship UI at all answers -- docked, a client that did not render,
+a reading taken across a session change -- and none of those is an arrival,
+because nothing arrived. The presence of the ship UI is read separately for
+exactly that reason: it is what keeps "the ship stopped maneuvering" apart from
+"we could not see the ship", which the `Maybe Bool` cannot distinguish on its
+own and which `shipWarpingInLastReading` stores in the same shape.
+
+-}
+warpJustEnded :
+    { warpingLastReading : Maybe Bool
+    , readingNow : ReadingFromGameClient
+    }
+    -> Bool
+warpJustEnded { warpingLastReading, readingNow } =
+    (warpingLastReading == Just True)
+        && (readingNow.shipUI /= Nothing)
+        && (shipWarpingFromReading readingNow /= Just True)
+
+
 {-| How many readings after a warp ends a pilot on the overview still counts as
 _found on arrival_.
 
-**Issue #194: the arrival snapshot could not be taken at all.**
-`otherPilotsFoundOnArrival` is written in one place, and reaching it needed
-`weJustFinishedWarping` _and_ `getCurrentAnomalyIDAsSeenInProbeScanner` answering
-`Just` on the **same** reading. On the reading a warp ends the probe scanner has
-not yet named the anomaly, so the enclosing `case` took its `Nothing` branch and
-the whole anomaly-memory update -- the arrival snapshot with it -- was skipped.
-By the time the scanner does name the anomaly, `weJustFinishedWarping` is false
-and the list stays empty for the lifetime of that anomaly's memory. So
-`FoundOtherPilotOnArrival` has never been constructed in a recorded run, and
-**two** things were dead rather than one: the leave branch, and the do-not-come-
-back half, since the same reason is what makes a scan result be skipped later.
+**Zero, so the arrival is the reading the ship lands on and no other.** The
+window this constant bounds was built to cover a lag that has since been
+measured and is not there, and every reading of it past the landing one is
+exposure to the opposite bug.
 
-Issue #194's own counts: saxrat run 23 spent 1,058 readings in an anomaly with
-another pilot named in the overview and printed neither message, and
-`Current anomaly: None` appears 12,717 times there against 37,787 readings that
-name one. **Those are cited rather than recomputed** -- `~/eve-bot-logs` was not
-on the machine this was written on, so neither they nor the sweep #194 asks for
-(whether the anomaly ID is _ever_ available on a warp-end reading) could be run
-here.
+The lag it was meant to cover is the probe scanner not having named the anomaly
+yet, since the snapshot has nowhere to be filed until it has. Measured over
+saxrat runs 16, 21, 23 and 24 -- taking every reading on which `HOOOOONK in
+warp` stops, then reading the `Current anomaly:` line forward from it -- the
+anomaly is named **on** the warp-end reading in 123 of the 123 arrivals that
+ever name one: median 0, p90 0, max 0. The remaining 127 arrivals name no
+anomaly at all before the next warp, and no bound reaches those either. A wider
+window therefore converts no arrival into a recorded one.
 
-**The bound is the whole of the design, not a detail of it.** A neutral _already
-there when we land_ means leave; a neutral _arriving while we are fighting_ means
-tough it out. That is why the memory records pilots seen on arrival rather than
-pilots seen now, and reading `getNamesOfOtherPilotsInOverview` on every reading
-would close #194 while opening the opposite bug. The widening is therefore from
-one reading to a window that **closes**: after it has, a pilot who turns up arms
-nothing at all, and the bot fights on exactly as it does today.
+**The cost is measured on the same corpus.** Of those 250 arrivals, the number
+that would record at least one pilot is 19 at a bound of 0, 19 at 1, 20 at 3,
+25 at 10 and 34 at 30. The fifteen a 30-reading window adds are by construction
+arrivals where nobody was on the overview when the ship landed and somebody
+turned up afterwards -- which is the case this feature must **not** fire on. A
+neutral already there when we land means leave; a neutral arriving while we are
+already fighting means tough it out. At 30 readings, nearly half of everything
+recorded would have been the wrong half.
 
-**Readings, which is what every other bound in these bots is counted in.** That
-makes this number directly comparable to its neighbours rather than needing a
-conversion done in the reader's head: `approachIndicationTrustedForTicks` is 10,
+A bound of 1 records the same 19 arrivals as a bound of 0 across all 250, so on
+this corpus the overview never took an extra reading to draw a pilot who was
+already on the grid. That is the only thing a wider bound could honestly buy
+here, and it did not happen once.
+
+**The unit stays readings**, which is what every other bound in these bots is
+counted in -- `approachIndicationTrustedForTicks` is 10,
 `dockingRunInPatienceReadings` 20, `gateRefusesThisShipTicks` 40 and
-`droneRecallGiveUpTicks` 60, and 30 sits mid-range among them. Confusing this
-unit with a clock has already cost this repo a threshold calibration twice
-(`stall_watch.py`), a retreat measurement (#141) and an issue's entire diagnosis
-(#164).
-
-**And readings is the right unit for this particular question**, which is a
-stronger argument than convention. The window exists to cover the gap between a
-warp ending and the probe scanner naming the anomaly, and the scanner is re-read
-once per reading -- so the quantity being bounded is a number of readings by
-construction. A wall-clock bound would drift against it whenever the reading rate
-changed, covering fewer scanner updates on a slow tick and more on a fast one,
-while measuring the same seconds.
-
-**In wall-clock terms this is a widening rather than a translation, and that is
-the cost.** A reading is somewhere between one and eight seconds by this repo's
-own two figures, so thirty readings is roughly 30 s to 4 minutes against the flat
-30 s the first version of this used. The window a mid-fight arrival can fall
-inside is therefore **larger**, which is the direction #194 warns about. What
-makes it acceptable is that the alternative unit is comparable to no other bound
-in these files, so nobody reading it could say whether it was long or short; the
-trade is recorded here rather than presented as neutral.
-
-One further point in this unit's favour. Under a client stall (#164) the memory
-update stops running, so a reading counter simply stops advancing along with
-every other counter in the status line -- where a wall clock would have gone on
-holding the window open across a stall in which no anomaly could be named
-anyway.
+`droneRecallGiveUpTicks` 60 -- so a later widening is comparable to those
+without a conversion done in the reader's head, and has to argue against the
+counts above rather than merely feel safer. In wall-clock terms a reading is one
+to eight seconds by this repo's own two figures, so the 30 this shipped with was
+30 s to 4 minutes of grid to be wrong about.
 
 -}
 otherPilotArrivalWindowReadings : Int
 otherPilotArrivalWindowReadings =
-    30
+    0
 
 
 {-| Whether this reading is still close enough to the last warp to be arrival.
@@ -528,12 +571,14 @@ otherPilotArrivalWindowReadings =
 session -- the bot started already sitting in an anomaly, or the transition has
 never been seen -- so there is no arrival to be inside of, and nothing is
 recorded. That is both the conservative direction and what the bot does today:
-`weJustFinishedWarping` is false on every one of those readings too.
+`warpJustEnded` is false on every one of those readings too.
 
 The comparison is inclusive, so the reading a warp ends on -- zero readings
-elapsed -- is still arrival, which is what makes this window **subsume** the
-single-reading trigger it replaces rather than sit beside it. One reading past
-the bound is not.
+elapsed -- is arrival. At the bound this shipped with that is the whole of the
+window, which is what the corpus behind `otherPilotArrivalWindowReadings` asks
+for; the comparison is written as a bound rather than as `== Just 0` so that
+widening it is a change to the number and an argument against those counts,
+rather than a change to this rule.
 
 -}
 arrivalWindowIsOpen : { readingsSinceWarpEnded : Maybe Int } -> Bool
@@ -588,11 +633,10 @@ nobody on it print identically. The three things this separates are the three
 ways the feature can still be inert.
 
   - `no warp has finished this session` all run means the window never opens, so
-    nothing below it can fire. That is the one premise this change inherits
-    rather than fixes: `weJustFinishedWarping` needs the reading straight after
-    a warp to carry a maneuver indication that is not `ManeuverWarp`, and a
-    reading whose `shipUI` cannot answer leaves `shipIsWarping` as `Nothing` and
-    loses the transition. Nothing here widens that.
+    nothing below it can fire. That is what #194 actually was: the trigger
+    demanded `shipIsWarping == Just False` where a warp ending answers `Nothing`,
+    so it could not fire at the end of a warp at all. `warpJustEnded` is the
+    fix, and this clause is how a run says whether it stayed fixed.
   - `no anomaly named in the probe scanner` while the window is open is #194's
     own diagnosis happening in front of the operator -- and the window closing
     with that clause on every reading of it would mean 30 readings is not long
@@ -2405,27 +2449,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         shipIsWarping : Maybe Bool
         shipIsWarping =
-            case context.readingFromGameClient.shipUI of
-                Nothing ->
-                    Nothing
-
-                Just shipUI ->
-                    case shipUI.indication of
-                        Nothing ->
-                            Nothing
-
-                        Just indication ->
-                            case indication.maneuverType of
-                                Nothing ->
-                                    Nothing
-
-                                Just maneuverType ->
-                                    case maneuverType of
-                                        EveOnline.ParseUserInterface.ManeuverWarp ->
-                                            Just True
-
-                                        _ ->
-                                            Just False
+            shipWarpingFromReading context.readingFromGameClient
 
         namesOfRatsInOverview : List String
         namesOfRatsInOverview =
@@ -2433,12 +2457,10 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         weJustFinishedWarping : Bool
         weJustFinishedWarping =
-            case botMemoryBefore.shipWarpingInLastReading of
-                Just True ->
-                    shipIsWarping /= botMemoryBefore.shipWarpingInLastReading
-
-                _ ->
-                    False
+            warpJustEnded
+                { warpingLastReading = botMemoryBefore.shipWarpingInLastReading
+                , readingNow = context.readingFromGameClient
+                }
 
         -- Restarted at zero on the one reading a warp ends and advanced on every
         -- other, here in the memory update because that is the only thing that

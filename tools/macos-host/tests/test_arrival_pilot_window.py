@@ -1,30 +1,36 @@
 """Tests for the on-arrival pilot check being reachable, and for its bound.
 
-Issue #194. `otherPilotsFoundOnArrival` is written in one place, and reaching it
-needed `weJustFinishedWarping` **and** `getCurrentAnomalyIDAsSeenInProbeScanner`
-answering `Just` on the **same** reading. The probe scanner has not named the
-anomaly on the reading a warp ends, so the enclosing `case` took its `Nothing`
-branch and the arrival snapshot went with the rest of the anomaly-memory update.
-`FoundOtherPilotOnArrival` has never been constructed in a recorded run, which
-left two things dead rather than one: the leave branch, and the do-not-come-back
-half that reads the same list to skip a scan result later.
+Issue #194. `FoundOtherPilotOnArrival` has never been constructed in a recorded
+run, and the reason is the trigger rather than the scanner. `weJustFinishedWarping`
+demanded `shipIsWarping == Just False`, and `shipIsWarping` answers `Just False`
+only while the client names some **other** maneuver. On the reading a warp ends
+the client names none at all, so the transition is `Just True -> Nothing` and the
+condition was unreachable in every recorded run. That left two things dead rather
+than one: the leave branch, and the do-not-come-back half that reads the same
+list to skip a scan result later.
 
-**The fix is a window, and the window's closing is the part under test.** A
-neutral already there when the ship lands means leave; a neutral arriving while
-the ship is fighting means tough it out, so a rule that read
-`getNamesOfOtherPilotsInOverview` on every reading would close #194 and open the
-opposite bug. Every case below that matters is about one of three things:
+**The transition is the case that was never executed**, which is how a total
+defect survived in reachable code: nothing here or in the code it replaces ever
+built a warp-end reading and asked whether the warp end was seen.
+`TheWarpEndIsSeenOnTheShapeTheClientRenders` builds one, in the shape captured
+off the live client during run 29 -- ship UI present, indication container
+present, display texts holding only the location labels -- and folds two readings
+through the real rules.
 
-  - the window **opens** at all, which is what #194 says never happened;
-  - the window **closes**, after which a pilot who turns up records nothing;
-  - the list **accumulates**, so a pilot seen during arrival is not unsaid by
-    the next reading inside the same window -- the do-not-come-back half.
+**The bound is one reading, and the corpus is why.** A neutral already there when
+the ship lands means leave; a neutral arriving while the ship is fighting means
+tough it out, so a rule that read `getNamesOfOtherPilotsInOverview` on every
+reading would close #194 and open the opposite bug. The window this file was
+first written around was 30 readings, to cover a probe-scanner lag that
+`TheCorpusSaysWhereTheBoundBelongs` measures at zero -- and the same measurement
+prices the 30: it would have recorded fifteen extra arrivals across four runs,
+every one of them a pilot who was **not** on the grid when the ship landed.
 
-The two pure rules are executed through the real `Bot.elm` in `elm repl` rather
-than restated here, and a whole session is folded through them by nesting the
-real calls, which is the same composition the memory update performs. What is
-not an expression -- where the snapshot sits, that the window's counter is
-advanced and stored, that no decision reads the live overview -- is read out of
+The pure rules are executed through the real `Bot.elm` in `elm repl` rather than
+restated here, and a whole session is folded through them by nesting the real
+calls, which is the same composition the memory update performs. What is not an
+expression -- where the snapshot sits, that the window's counter is advanced and
+stored, that no decision reads the live overview -- is read out of
 the source
 through readers sliced by indentation, since the bindings under test build
 record literals and a reader that stops at the opening brace has already cost
@@ -32,15 +38,15 @@ PRs #147, #156, #159 and #162 an assertion that passed having read nothing.
 
 **Both apps, and only those two.** saxrat and the combat anomaly bot carry the
 same `otherPilotsFoundOnArrival` and the same gate, so every rule below is asked
-of both and the four shared declarations are compared byte for byte -- nothing
+of both and the six shared declarations are compared byte for byte -- nothing
 in them is app-specific, and a copy that drifted would still compile and still
-answer. The mission runner has neither, which is asserted rather than assumed.
+answer. The mission runner has neither, which is asserted rather than assumed --
+it does carry the same dead trigger for other purposes, which is #205 and not
+this file.
 
-**What could not be checked here.** `~/eve-bot-logs` is not on this machine, so
-#194's own counts (1,058 readings beside another pilot in run 23; 12,717
-`Current anomaly: None` against 37,787 that name one) are cited rather than
-recomputed, and the sweep the issue asks for -- whether the anomaly ID is *ever*
-available on a warp-end reading -- was not run. Nothing below rests on either.
+**What could not be checked here.** Nothing has run: `FoundOtherPilotOnArrival`
+has still never been constructed by either bot, so every claim below is about
+what the rules answer and not about what a session did with the answer.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
@@ -48,9 +54,9 @@ import os
 import re
 import unittest
 
-from prerequisites import REPO_DIR, open_repl
+from prerequisites import EVE_BOT_LOGS, REPO_DIR, open_repl
 from test_saxrat_ported_guards import (
-    SAXRAT_BOT_ELM, SaxratRepl, collapsed, source_of)
+    SAXRAT_BOT_ELM, SaxratRepl, collapsed, label, node, ship_ui, source_of)
 
 COMBAT_ANOMALY_DIR = os.path.join(
     REPO_DIR, "implement", "applications", "eve-online",
@@ -62,15 +68,52 @@ COMBAT_ANOMALY_BOT_ELM = os.path.join(COMBAT_ANOMALY_DIR, "Bot.elm")
 # pair is self-consistent -- a case asking only about `constant - 1` and
 # `constant` passes for any constant at all, including one that admits
 # everything, which is the hole four of #120's cases had.
-WINDOW_READINGS = 30
+#
+# Zero means the arrival is the landing reading and no other, which is the
+# single-reading snapshot #194 found dead, now on a trigger that fires.
+# `TheCorpusSaysWhereTheBoundBelongs` is the measurement it is set from.
+WINDOW_READINGS = 0
 
-# Fixed values either side, far enough out that no plausible retune reaches
-# them. A window under this floor could not span the gap #194 measures between a
-# warp ending and the scanner naming the anomaly; one over this ceiling is no
+# A fixed value past any plausible retune of the bound. Anything out here is no
 # longer "arrival" by any reading of the word, and is past every reading-counted
 # bound these bots have.
-CLEARLY_INSIDE_READINGS = 5
 CLEARLY_OUTSIDE_READINGS = 300
+
+# The recorded saxrat runs the bound is measured against, and what they say.
+# Recomputed by `TheCorpusSaysWhereTheBoundBelongs` rather than trusted here:
+# these are the numbers the constant's doc comment quotes, and a case that only
+# restated them would let them rot.
+# What each recorded run says, per run rather than as a total, so a machine
+# holding only some of them still checks the ones it has. `arrivals` is every
+# reading on which `HOOOOONK in warp` stops; `named` is how many of those go on
+# to name an anomaly before the next warp; `by_bound` is how many would record
+# at least one pilot at each bound the constant could plausibly take.
+CORPUS = {
+    16: {"arrivals": 72, "named": 33,
+         "by_bound": {0: 7, 1: 7, 3: 7, 10: 8, 30: 8}},
+    21: {"arrivals": 8, "named": 1,
+         "by_bound": {0: 1, 1: 1, 3: 1, 10: 2, 30: 3}},
+    23: {"arrivals": 112, "named": 62,
+         "by_bound": {0: 4, 1: 4, 3: 4, 10: 4, 30: 4}},
+    24: {"arrivals": 58, "named": 27,
+         "by_bound": {0: 7, 1: 7, 3: 8, 10: 11, 30: 19}},
+}
+
+# The measured lag between a warp ending and the probe scanner naming the
+# anomaly, in readings. Zero, in every arrival across every run above that ever
+# names one -- which is the whole of the case for the bound being what it is.
+MEASURED_SCANNER_LAG_READINGS = 0
+
+# The ship UI's indication container, captured off the live client during saxrat
+# run 29 at 13:12:46 and 13:16:36. Two independent warps, identical shape: while
+# warping the container names the manoeuvre, and on the reading the warp ends it
+# is still there and holds only the location labels. That second list is the
+# reading the whole of #194 turns on, and nothing had ever built one.
+WARPING_INDICATION = ("Warp Drive Active",
+                      "Destination: AreraDistance: 416 km",
+                      "Mikhir",
+                      "Sansha Hideaway")
+LANDED_INDICATION = ("Mikhir", "Sansha Hideaway")
 
 # The neighbouring bounds the constant's doc comment has to name, so that the
 # number can be compared with them rather than converted in the reader's head.
@@ -90,9 +133,11 @@ ANOTHER_PILOT = "Someone Else"
 APPS = (("saxrat", SAXRAT_BOT_ELM),
         ("combat anomaly bot", COMBAT_ANOMALY_BOT_ELM))
 
-# The four declarations both apps carry, which are compared byte for byte
+# The six declarations both apps carry, which are compared byte for byte
 # rather than merely both being present.
-SHARED_DECLARATIONS = ("otherPilotArrivalWindowReadings",
+SHARED_DECLARATIONS = ("shipWarpingFromReading",
+                       "warpJustEnded",
+                       "otherPilotArrivalWindowReadings",
                        "arrivalWindowIsOpen",
                        "otherPilotsFoundOnArrivalAfterReading",
                        "describeArrivalWindow")
@@ -113,6 +158,53 @@ def elm_list(names):
 
 def elm_maybe_int(value):
     return "Nothing" if value is None else "Just %d" % value
+
+
+def flying(indication_texts=None):
+    """A ship UI, with an indication container holding `indication_texts`.
+
+    `ship_ui` cannot express an indication, so the container is appended to what
+    it builds. `None` leaves the container off entirely, which is a different
+    reading from one holding no manoeuvre word -- and the captured warp-end
+    reading is the second, not the first.
+    """
+    ui = ship_ui(100, 100, 4)
+    if indication_texts is not None:
+        ui["children"].append(
+            node("IndicationContainer", {"_name": "indicationContainer"},
+                 [label(text, (0, 60 + 18 * index, 200, 16))
+                  for index, text in enumerate(indication_texts)],
+                 region=(0, 60, 200, 100)))
+    return ui
+
+
+# The readings the transition is folded across, and one that carries no ship UI
+# at all -- which answers `Nothing` for exactly the same reason the warp-end
+# reading does, and must not be mistaken for it.
+WARP_READINGS = (
+    SaxratRepl.reading_binding("warping", [flying(WARPING_INDICATION)]),
+    SaxratRepl.reading_binding("landed", [flying(LANDED_INDICATION)]),
+    SaxratRepl.reading_binding("orbiting", [flying(["Orbiting"])]),
+    SaxratRepl.reading_binding("noShipUI", []),
+    # Answers `Maybe Bool`, never `Bool`: a fixture that failed to parse is then
+    # `Nothing` and fails the case, rather than being defaulted into an answer
+    # the reading never gave. #174 is the sweep of what that had cost.
+    "warpEndSeen = \\before after -> Maybe.map2"
+    " (\\b a -> warpJustEnded"
+    " { warpingLastReading = shipWarpingFromReading b, readingNow = a })"
+    " before after",
+    # The condition this replaces, written out so a case can execute it on the
+    # reading it had to answer `True` on.
+    "oldWarpEndSeen = \\before after -> Maybe.map2"
+    " (\\b a -> (shipWarpingFromReading b == Just True)"
+    " && (shipWarpingFromReading a == Just False))"
+    " before after",
+    "shipUIPresentIn = \\reading -> reading"
+    " |> Maybe.map (.shipUI >> (/=) Nothing)",
+    "indicationPresentIn = \\reading -> reading"
+    " |> Maybe.map (.shipUI >> Maybe.andThen .indication >> (/=) Nothing)",
+    "warpingIn = \\reading -> reading |> Maybe.map shipWarpingFromReading",
+)
 
 
 def window_open(readings_since):
@@ -255,8 +347,9 @@ class BothAppsRepl:
 class TheWindowOpensAndCloses(BothAppsRepl, unittest.TestCase):
     """`arrivalWindowIsOpen`, executed at its boundary and either side of it.
 
-    The boundary pair alone would pass for any constant, so each case names a
-    fixed value as well.
+    The boundary pair alone would pass for any constant, so a fixed value well
+    outside is asked too, and `TheBoundIsTheOneThatShipped` pins the constant
+    itself.
     """
 
     def test_the_reading_the_warp_ends_on_is_arrival(self):
@@ -271,14 +364,6 @@ class TheWindowOpensAndCloses(BothAppsRepl, unittest.TestCase):
                 answers, [True],
                 "%s does not count the warp-end reading itself as arrival, so "
                 "the fix refuses what the code it replaces accepted" % app)
-
-    def test_a_reading_inside_the_bound_is_arrival(self):
-        for app, answers in self.each([
-                window_open(WINDOW_READINGS - 1),
-                window_open(CLEARLY_INSIDE_READINGS)]):
-            self.assertEqual(
-                answers, [True] * 2,
-                "%s closes the arrival window early" % app)
 
     def test_a_reading_exactly_on_the_bound_is_still_arrival(self):
         """The comparison moved one reading tighter fails here."""
@@ -303,6 +388,22 @@ class TheWindowOpensAndCloses(BothAppsRepl, unittest.TestCase):
                 "%s's arrival window never closes, so a pilot arriving "
                 "mid-fight would arm the leave branch" % app)
 
+    def test_the_rule_is_a_bound_and_not_an_equality_on_zero(self):
+        """The bound is one reading, and it is still written as a bound.
+
+        A rule spelled `readingsSinceWarpEnded == Just 0` answers identically
+        today and quietly stops being a window: widening it would then mean
+        rewriting the comparison rather than changing the number the doc comment
+        argues for, and the argument would be nowhere near the change.
+        """
+        for app, path in APPS:
+            rule = collapsed(without_block_comments(
+                body_of_declaration(source_of(path), "arrivalWindowIsOpen")))
+            self.assertIn(
+                "readings <= otherPilotArrivalWindowReadings", rule,
+                "%s no longer compares against the bound, so the bound is no "
+                "longer where the window is decided" % app)
+
     def test_no_warp_this_session_is_a_closed_window(self):
         """`Nothing` must not read as "we have always just arrived"."""
         for app, answers in self.each([window_open(None)]):
@@ -322,28 +423,31 @@ class TheBoundIsTheOneThatShipped(BothAppsRepl, unittest.TestCase):
     measurement once, and an issue's whole diagnosis once.
     """
 
-    def test_the_window_is_thirty_readings(self):
+    def test_the_window_is_the_landing_reading_and_no_other(self):
         for app, answers in self.each(
                 ["otherPilotArrivalWindowReadings == %d" % WINDOW_READINGS]):
             self.assertEqual(
                 answers, [True],
-                "%s's arrival window is not the 30 readings this was specified "
-                "with" % app)
+                "%s's arrival window is not the one reading the corpus "
+                "supports" % app)
 
-    def test_the_window_is_wider_than_the_gap_it_has_to_span(self):
-        """#194's whole finding is that the scanner is late naming the anomaly.
+    def test_the_window_is_no_wider_than_the_lag_it_exists_to_cover(self):
+        """The window was built to outlast the scanner naming the anomaly.
 
-        A window that does not outlast that lateness reproduces the bug with
-        more machinery, so the constant is asserted to clear a fixed floor
-        rather than only to be self-consistent.
+        Measured, that lag is zero readings -- the anomaly is named on the
+        warp-end reading in every arrival that ever names one -- so a bound
+        above it buys nothing and costs the mid-fight case. The measurement is
+        recomputed in `TheCorpusSaysWhereTheBoundBelongs`; this is the constant
+        being held to it.
         """
         for app, answers in self.each([
-                "otherPilotArrivalWindowReadings > %d"
-                % CLEARLY_INSIDE_READINGS]):
+                "otherPilotArrivalWindowReadings <= %d"
+                % MEASURED_SCANNER_LAG_READINGS]):
             self.assertEqual(
                 answers, [True],
-                "%s's arrival window is too short to outlast the probe "
-                "scanner naming the anomaly" % app)
+                "%s's arrival window is wider than the probe-scanner lag it "
+                "exists to cover, so the readings it adds can only record "
+                "pilots who were not there when the ship landed" % app)
 
     def test_the_window_is_narrower_than_a_fight(self):
         for app, answers in self.each([
@@ -381,19 +485,18 @@ class TheBoundIsTheOneThatShipped(BothAppsRepl, unittest.TestCase):
                 "should be compared against, so a reader cannot tell whether 30 "
                 "is long or short" % (app, len(named)))
 
-    def test_the_constant_records_the_widening_this_unit_costs(self):
-        """The trade, stated rather than presented as neutral.
+    def test_the_constant_records_what_a_wider_bound_would_cost(self):
+        """The measurement, carried where the number is, not only in a PR.
 
-        Thirty readings is longer in wall-clock terms than the flat 30 s this
-        replaced, so the window a mid-fight arrival can fall inside is larger --
-        which is the direction #194 warns about. A doc comment that dropped that
-        would be selling the change as free.
+        The bound is the whole of this feature's risk, and the case for it is a
+        count off the corpus: widening to 30 readings would record fifteen more
+        arrivals across four runs, all of them pilots who were not on the grid
+        when the ship landed. A doc comment that dropped that leaves the next
+        reader with a bare number and the impression that raising it is free.
 
-        Asserted on the trade's *substance* rather than on the word "widening",
-        which the paragraph above it uses for something else entirely -- the
-        widening from one reading to a window. A case keyed on that word passed
-        with the trade's own topic sentence replaced by "much the same, near
-        enough", which is the mutation this text exists to refuse.
+        Asserted on the measurement's own words rather than on a slogan, because
+        a slogan survives the substance being deleted -- which is exactly what
+        this case's predecessor let through once.
         """
         for app, path in APPS:
             match = re.search(
@@ -401,15 +504,20 @@ class TheBoundIsTheOneThatShipped(BothAppsRepl, unittest.TestCase):
                 source_of(path), re.DOTALL)
             prose = collapsed(match.group(0))
             self.assertIn(
-                "wall-clock", prose,
-                "%s's arrival window does not compare this unit against the "
-                "clock it replaced, so a reader cannot tell the window grew"
+                "median 0", prose,
+                "%s's arrival window does not record the lag it was built to "
+                "cover being measured at zero, which is the reason the bound "
+                "is what it is" % app)
+            self.assertIn(
+                "already fighting", prose,
+                "%s's arrival window does not say what the readings past the "
+                "landing one would record, which is the cost of widening it"
                 % app)
             self.assertIn(
-                "larger", prose,
-                "%s's arrival window does not say the window a mid-fight "
-                "arrival can fall inside is larger, which is the direction "
-                "#194 warns about and the cost of this unit" % app)
+                "wall-clock", prose,
+                "%s's arrival window does not price its unit against the clock,"
+                " so a reader cannot tell what 30 readings had been worth"
+                % app)
 
 
 class ThePilotsAccumulateWhileTheWindowIsOpen(BothAppsRepl, unittest.TestCase):
@@ -473,11 +581,18 @@ class ThePilotsAccumulateWhileTheWindowIsOpen(BothAppsRepl, unittest.TestCase):
         """`findReasonToAvoidAnomalyFromMemory` reports the head of this list.
 
         The pilot who was already there when the ship landed is the one an
-        operator wants named, so order is first-seen first.
+        operator wants named, so order is first-seen first. Asked of the
+        accumulation rule with the window held open across both readings, since
+        at the bound that shipped the second reading is already outside it --
+        the ordering is the rule's own and has to survive a widening that a
+        later corpus could argue for.
         """
         for app, answers in self.each([
-                "%s == %s" % (session([(0, [PILOT]), (1, [ANOTHER_PILOT])]),
-                              elm_list([PILOT, ANOTHER_PILOT]))]):
+                "%s == %s" % (after_reading(
+                    "True",
+                    after_reading("True", "[]", [PILOT]),
+                    [PILOT, ANOTHER_PILOT]),
+                    elm_list([PILOT, ANOTHER_PILOT]))]):
             self.assertEqual(
                 answers, [True],
                 "%s does not keep the pilot found first at the head of the "
@@ -492,17 +607,20 @@ class AWholeSessionFoldedThroughTheRules(BothAppsRepl, unittest.TestCase):
     nothing on any of them.
     """
 
-    def test_a_pilot_found_after_the_scanner_catches_up_is_recorded(self):
-        """The readings the anomaly memory could not be written on are the
-        readings this has to survive: the fold below only starts once the
-        scanner names the anomaly, which is what the enclosing `case` does."""
-        late = [(4, [PILOT]), (5, [PILOT]), (6, [PILOT])]
+    def test_the_pilot_on_the_landing_reading_is_recorded(self):
+        """The arrival as the corpus actually has it.
+
+        The anomaly is named on the warp-end reading, so the fold starts at
+        reading zero -- and the pilot standing there is recorded and then left
+        alone for every reading after, which is the do-not-come-back half.
+        """
+        landing = [(0, [PILOT]), (1, [PILOT]), (2, [PILOT])]
         for app, answers in self.each([
-                "%s == %s" % (session(late), elm_list([PILOT]))]):
+                "%s == %s" % (session(landing), elm_list([PILOT]))]):
             self.assertEqual(
                 answers, [True],
-                "%s records nobody when the probe scanner names the anomaly a "
-                "few readings after the warp, which is exactly #194" % app)
+                "%s records nobody for a pilot standing on the grid when the "
+                "ship landed, which is exactly #194" % app)
 
     def test_a_pilot_arriving_after_the_window_is_not_recorded(self):
         """The fight the bot must stay in."""
@@ -519,8 +637,12 @@ class AWholeSessionFoldedThroughTheRules(BothAppsRepl, unittest.TestCase):
             self):
         """Stated rather than hidden: the window can still be too short.
 
-        If the scanner does not name the anomaly until after the bound, this
-        fix is inert for that arrival and the bot behaves as it does today.
+        If the scanner does not name the anomaly until after the bound, this fix
+        is inert for that arrival and the bot behaves as it does today. Measured,
+        that has never happened -- the anomaly is named on the warp-end reading
+        in all 123 arrivals across four runs that ever name one -- but the rule
+        answers this way if it ever does, and it is a bound the corpus could
+        move.
         """
         for app, answers in self.each([
                 "%s == []" % session([(WINDOW_READINGS + 1, [PILOT])])]):
@@ -554,14 +676,16 @@ class TheStatusLineSaysWhichWayItIsInert(BothAppsRepl, unittest.TestCase):
             self.assertIn(
                 "no warp has finished", clause,
                 "%s does not say when the window has never opened, which is "
-                "the one premise this change inherits rather than fixes" % app)
+                "what #194 looked like from outside for every recorded run"
+                % app)
 
     def test_an_open_window_says_so_with_both_numbers(self):
         for app in self.repls:
-            clause = self.rendered(app, 4, True, [])
+            clause = self.rendered(app, WINDOW_READINGS, True, [])
             self.assertIn("OPEN", clause,
                           "%s does not say the window is open" % app)
-            self.assertIn("4 of 30 readings", clause,
+            self.assertIn("%d of %d readings" % (WINDOW_READINGS,
+                                                 WINDOW_READINGS), clause,
                           "%s does not say how many readings since the warp "
                           "against the bound, so a reader cannot tell how "
                           "close it is -- nor that the unit is readings" % app)
@@ -599,6 +723,284 @@ class TheStatusLineSaysWhichWayItIsInert(BothAppsRepl, unittest.TestCase):
                 PILOT, clause,
                 "%s does not name the pilot the leave branch is about to fire "
                 "on" % app)
+
+
+class TheWarpEndIsSeenOnTheShapeTheClientRenders(
+        BothAppsRepl, unittest.TestCase):
+    """The transition itself, which nothing had ever executed.
+
+    That is how a defect this total survived in reachable code: every case this
+    file shipped with, and the code before it, asked about the window and the
+    accumulation and never about whether a warp ending is noticed. The rule was
+    `shipWarpingInLastReading == Just True` and `shipIsWarping == Just False`,
+    and the client renders no manoeuvre word at all when a warp ends -- so the
+    transition is `Just True -> Nothing`, the condition could not fire, and
+    every case downstream of it passed anyway.
+
+    The readings here go through the real `EveOnline.ParseUserInterface`, in the
+    shape captured off the live client during run 29: the indication container
+    is **present** on the warp-end reading and holds only the location labels.
+    A fixture that left the container off entirely would answer `Nothing` too,
+    for a different reason, and would have let a fix that only handled the
+    missing container pass.
+    """
+
+    def test_the_fixtures_are_the_readings_the_client_rendered(self):
+        """Checked before anything is concluded from them.
+
+        A tree the parser makes nothing of answers `Nothing` for the same rule
+        the warp-end reading does, so the case below it would pass having
+        asserted about an empty fixture rather than about a warp.
+        """
+        for app, answers in self.each([
+                "warpingIn warping == Just (Just True)",
+                "shipUIPresentIn landed == Just True",
+                "indicationPresentIn landed == Just True",
+                "warpingIn landed == Just Nothing",
+                "warpingIn orbiting == Just (Just False)",
+                "shipUIPresentIn noShipUI == Just False",
+        ], WARP_READINGS):
+            self.assertEqual(
+                answers, [True] * 6,
+                "%s's fixtures are not the readings this file says they are: "
+                "the warp-end reading must carry a ship UI and an indication "
+                "container and name no manoeuvre" % app)
+
+    def test_a_warp_ending_into_stillness_is_seen(self):
+        """The case #194 is, and the one nothing had ever run."""
+        for app, answers in self.each(
+                ["warpEndSeen warping landed == Just True"], WARP_READINGS):
+            self.assertEqual(
+                answers, [True],
+                "%s does not notice a warp ending when the client stops naming "
+                "a manoeuvre, which is what the client actually does -- so the "
+                "arrival window never opens and nothing downstream of it can "
+                "fire" % app)
+
+    def test_the_condition_this_replaces_would_have_missed_it(self):
+        """The defect, executed on the reading it had to answer `True` on.
+
+        Kept as its own case rather than left as history: it is the only thing
+        in this file that fails if somebody restores the old shape, and it fails
+        with the reason rather than with an arithmetic mismatch six rules away.
+        """
+        for app, answers in self.each(
+                ["oldWarpEndSeen warping landed == Just False"], WARP_READINGS):
+            self.assertEqual(
+                answers, [True],
+                "%s's `Just False` condition now answers `True` at the end of a "
+                "warp, which the captured client reading says it cannot -- so "
+                "this case is measuring something other than #194" % app)
+
+    def test_a_warp_ending_into_another_manoeuvre_is_still_seen(self):
+        """The one shape the old condition did handle, not lost in the fix."""
+        for app, answers in self.each(
+                ["warpEndSeen warping orbiting == Just True"], WARP_READINGS):
+            self.assertEqual(
+                answers, [True],
+                "%s no longer notices a warp that ends straight into another "
+                "manoeuvre, which is the only end of warp the old condition "
+                "could see" % app)
+
+    def test_a_reading_with_no_ship_ui_is_not_an_arrival(self):
+        """The half of `Nothing` that must not count.
+
+        `shipWarpingFromReading` answers `Nothing` both for a ship that stopped
+        manoeuvring and for a reading that could not see the ship at all --
+        docked, a client that did not render, a reading across a session change.
+        A fix written as `/= Just True` and nothing else would call every one of
+        those an arrival, and the bot would take an arrival snapshot of a grid
+        it never landed on.
+        """
+        for app, answers in self.each(
+                ["warpEndSeen warping noShipUI == Just False"], WARP_READINGS):
+            self.assertEqual(
+                answers, [True],
+                "%s treats a reading with no ship UI as a warp ending, so a "
+                "client that failed to render one arms the arrival snapshot"
+                % app)
+
+    def test_a_reading_still_in_warp_is_not_an_arrival(self):
+        for app, answers in self.each(
+                ["warpEndSeen warping warping == Just False"], WARP_READINGS):
+            self.assertEqual(
+                answers, [True],
+                "%s calls every reading of a warp its end" % app)
+
+    def test_a_session_that_was_not_warping_before_is_not_an_arrival(self):
+        """`Nothing -> Nothing` is not a warp ending either.
+
+        `shipWarpingInLastReading` stores the same three-valued answer, so the
+        first readings of a session -- and any run of readings the client could
+        not be seen through -- are `Nothing` before and `Nothing` after. Nothing
+        ended, and the counter must not restart.
+        """
+        for app, answers in self.each([
+                "warpEndSeen noShipUI landed == Just False",
+                "warpEndSeen noShipUI noShipUI == Just False",
+                "warpEndSeen landed landed == Just False",
+        ], WARP_READINGS):
+            self.assertEqual(
+                answers, [True] * 3,
+                "%s restarts the arrival counter on a session that has not "
+                "warped, which makes every reading an arrival" % app)
+
+
+def saxrat_runs(*numbers):
+    """The recorded saxrat runs this machine has, or the shared skip.
+
+    saxrat's logs are named differently from the mission runner's, so
+    `prerequisites.recorded_runs` does not reach them; this is the wording every
+    other saxrat corpus case already skips with, and `check_expected_skips.py`
+    refuses a second spelling of it.
+    """
+    found = [(number, os.path.join(EVE_BOT_LOGS, "saxrat_run%d.log" % number))
+             for number in numbers]
+    found = [pair for pair in found if os.path.exists(pair[1])]
+    if not found:
+        raise unittest.SkipTest(
+            "no recorded saxrat runs in ~/eve-bot-logs, so what those runs say "
+            "about the arrival window's bound cannot be consulted here")
+    return found
+
+
+def status_blocks(path):
+    """Every status block in a recorded run, as its own list of lines."""
+    block = []
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith("--------"):
+                if block:
+                    yield block
+                block = []
+            else:
+                block.append(line.rstrip("\n"))
+    if block:
+        yield block
+
+
+def arrivals_in(path):
+    """Every warp-end reading in a recorded run, and what followed it.
+
+    `HOOOOONK in warp` is the decision saxrat prints while
+    `shipUIIndicatesShipIsWarpingOrJumping`, so the first block after a run of
+    them is the reading the warp ended on -- the same reading `warpJustEnded`
+    fires on, read off the same manoeuvre indication.
+
+    Each arrival answers `(readings until an anomaly is named, the pilots seen
+    on each reading)`, both truncated at the next warp: the anomaly the ship
+    arrived in is over by then, and reading past it would credit a bound with
+    readings belonging to somewhere else. The gap is `None` when no anomaly is
+    ever named, which no bound reaches.
+    """
+    status = re.compile(
+        r"^Current anomaly: (.*?)\. Seeing \d+ other pilots in the overview"
+        r"(?:: (.*?))?\.\s*$")
+    readings = []
+    for block in status_blocks(path):
+        matched = None
+        for text in block:
+            found = status.match(text)
+            if found:
+                matched = found
+        if matched is None:
+            continue
+        pilots = set()
+        if matched.group(2):
+            pilots = {name.strip() for name in matched.group(2).split(",")
+                      if name.strip()}
+        readings.append((
+            any(text.startswith("+ HOOOOONK in warp") for text in block),
+            matched.group(1),
+            pilots))
+
+    arrivals = []
+    for index in range(1, len(readings)):
+        if not (readings[index - 1][0] and not readings[index][0]):
+            continue
+        gap = None
+        pilots_by_reading = []
+        for ahead in range(index, len(readings)):
+            if readings[ahead][0]:
+                break
+            pilots_by_reading.append(readings[ahead][2])
+            if gap is None and readings[ahead][1] != "None":
+                gap = ahead - index
+        arrivals.append((gap, pilots_by_reading))
+    return arrivals
+
+
+def arrivals_recording_a_pilot(arrivals, bound):
+    """How many of `arrivals` a window of `bound` readings would record."""
+    return sum(1 for _, pilots in arrivals
+               if set().union(*pilots[:bound + 1]))
+
+
+class TheCorpusSaysWhereTheBoundBelongs(unittest.TestCase):
+    """The measurement the bound is set from, recomputed rather than quoted.
+
+    The window was first written at 30 readings to outlast the probe scanner
+    naming the anomaly. Both halves of that are measurable off the recorded runs
+    and neither had been measured: the lag is zero, and the readings a wider
+    bound adds record pilots who were not on the grid when the ship landed --
+    the mid-fight case the feature exists to refuse.
+
+    These read the recorded runs and only read them. On a machine with none they
+    skip with the wording every other saxrat corpus case uses; on CI, which has
+    none, that is what happens.
+    """
+
+    def test_the_scanner_names_the_anomaly_on_the_warp_end_reading(self):
+        """The premise the window was built on, and it is not there.
+
+        Not "usually zero": zero in every arrival that ever names an anomaly, in
+        every run. A single arrival with a gap of one would be an argument for a
+        wider bound, and there is not one.
+        """
+        for number, path in saxrat_runs(*sorted(CORPUS)):
+            arrivals = arrivals_in(path)
+            gaps = [gap for gap, _ in arrivals if gap is not None]
+            self.assertEqual(
+                len(arrivals), CORPUS[number]["arrivals"],
+                "saxrat run %d no longer has the warp endings this bound was "
+                "measured over" % number)
+            self.assertEqual(
+                len(gaps), CORPUS[number]["named"],
+                "saxrat run %d no longer names an anomaly after the arrivals "
+                "this bound was measured over" % number)
+            self.assertEqual(
+                max(gaps), MEASURED_SCANNER_LAG_READINGS,
+                "saxrat run %d has an arrival where the probe scanner named "
+                "the anomaly %d readings after the warp ended, so the bound of "
+                "%d readings is no longer wide enough for the corpus it was "
+                "set from" % (number, max(gaps), WINDOW_READINGS))
+
+    def test_a_wider_bound_would_only_record_pilots_who_were_not_there(self):
+        """The price of the 30 readings this shipped with, in arrivals.
+
+        Every arrival a wider bound adds is one where the overview held nobody
+        on the reading the ship landed and somebody afterwards -- which is a
+        pilot who arrived while the bot was already fighting, and the one thing
+        #194 says must not arm the leave branch.
+        """
+        for number, path in saxrat_runs(*sorted(CORPUS)):
+            arrivals = arrivals_in(path)
+            recorded = {bound: arrivals_recording_a_pilot(arrivals, bound)
+                        for bound in CORPUS[number]["by_bound"]}
+            self.assertEqual(
+                recorded, CORPUS[number]["by_bound"],
+                "saxrat run %d no longer records what the bound was chosen "
+                "against" % number)
+            self.assertEqual(
+                recorded[0], recorded[1],
+                "saxrat run %d has an arrival where a pilot appeared on the "
+                "reading after the ship landed, which is the one thing a bound "
+                "of more than zero could honestly buy" % number)
+            self.assertGreaterEqual(
+                recorded[30], recorded[WINDOW_READINGS],
+                "saxrat run %d records no more at 30 readings than at the "
+                "bound that shipped, so this case is no longer pricing "
+                "anything" % number)
 
 
 class TheSnapshotStillNeedsTheScannerAndTheSameKey(unittest.TestCase):
