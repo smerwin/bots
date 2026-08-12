@@ -5481,6 +5481,7 @@ shipped configuration rather than edge cases:
 | an in-range acceleration gate (#145, #147) | a context-menu cascade, and a give-up counting readings *near* a gate rather than readings spent asking one — `selectedItem` appeared 0 times in `Bot.elm`, so it had never pressed a panel button for anything. And the branch was **unreachable inside a site at all**: a "Warp to Site" button anywhere in the tree outranked it, and the panel goes on drawing one after arrival | `selectThenPanelAction`'s shape over `selectedItemActivateGate`, inside `unlessAlreadyClosingIn`; the counter counts the ask; and `siteProgressStep` asks the gate first and declines a site offered while a gate is in reach — see the two sections below |
 | the route's next stargate (#169) | the route-marker cascade on every leg, at a median of **12 and 13 readings a leg** and 23% and 38% of every reading in runs 13 and 14 — against the mission runner's 3 and 2 and its 2% and 3% | #170's rule ported whole: the route panel's own `Next System in Route` label matched against the overview row's Name, and `selectedItemJump` pressed only where the panel is already showing that gate — see the section below |
 | the combat feed (#190) | six lines of the client's `CombatMessage` widget in the status text on every reading — a third of runs 20 and 21, 99.5% of it repeating the block before it, and in run 20 mostly printed while docked | removed, as the mission runner removed it; the incoming half of that channel is `describeIncomingDamage`, already on every reading — see the section below |
+| leaving an anomaly somebody was already sitting in (#194) | reachable code that could not fire: `weJustFinishedWarping` demanded `shipIsWarping == Just False`, which the client only ever answers while some **other** manoeuvre is named — a warp ending answers `Nothing` — so the trigger was unreachable and `FoundOtherPilotOnArrival` has never been constructed in a recorded run | `warpJustEnded`, on `Just True` followed by anything that is not `Just True`, with the ship UI's presence read separately so a reading that could not see the ship is not an arrival; "arrival" stays the landing reading, which is what the corpus measures — see the section below |
 
 Two things about the port are worth keeping in view.
 
@@ -7542,6 +7543,175 @@ instead means the panel is never found to be showing the gate -- the direction
 this fails silently in, and it costs nothing. The one to escalate on is the
 opposite: a jump followed by the route panel naming a system nobody asked for.
 
+### The on-arrival pilot check could not fire: the warp-end trigger was dead
+
+Issue #194. saxrat is supposed to leave an anomaly it lands in with somebody
+already on the grid, and it never has. The reason is the trigger, and it took
+two wrong diagnoses to get to it — both recorded here, because the shape of the
+mistake is more reusable than the fix.
+
+`weJustFinishedWarping` was
+
+```elm
+(botMemoryBefore.shipWarpingInLastReading == Just True) && (shipIsWarping == Just False)
+```
+
+and `shipIsWarping` is a `Maybe` over the manoeuvre the client **names**:
+`Just True` for `Warp`, `Just False` for some *other* named manoeuvre — `Orbit`,
+`Approach`, `Aligning` — and `Nothing` when the client names none at all. So
+`Just False` never meant "the ship is not warping". It meant "the ship is doing
+something else with a name". A ship that has simply stopped answers `Nothing`.
+
+**Captured off the live client during run 29**, sampling the ship UI's
+indication container about once a second across two warps:
+
+```
+while warping   ['Warp Drive Active', 'Destination: AreraDistance: 416 km', 'Mikhir', 'Sansha Hideaway']
+warp ends       ['Mikhir', 'Sansha Hideaway']
+```
+
+The container is still **present** when the warp ends; it holds only the
+location labels. No manoeuvre word, so `maneuverType` is `Nothing`, so
+`shipIsWarping` is `Nothing`, so the condition that demanded `Just False` could
+not fire at the end of a warp. Two independent warps, identical shape.
+`EveOnline.BotFramework.shipUIIndicatesShipIsWarpingOrJumping` already treated
+an absent indication as "not manoeuvring", with a comment saying so; this was
+the one place that did not.
+
+The rule is now `warpJustEnded`, and it reads three things rather than two:
+the previous reading was `Just True`, **the ship UI is present now**, and the
+current reading is not `Just True`. The middle one is load-bearing.
+`shipWarpingInLastReading` stores the same three-valued answer, and `Nothing` is
+equally what a reading with no ship UI at all gives — docked, a client that did
+not render, a reading across a session change. A fix written as `/= Just True`
+and nothing else calls every one of those an arrival, and the bot takes an
+arrival snapshot of a grid it never landed on.
+
+**Two wrong diagnoses came first, and the correction pattern is the point.** The
+issue was filed blaming the probe scanner: the snapshot needed
+`weJustFinishedWarping` **and** `getCurrentAnomalyIDAsSeenInProbeScanner` on the
+same reading, and the scanner was assumed to be late naming the anomaly. Measured
+over every warp-end reading in runs 16, 21, 23 and 24, that is false — the
+anomaly is named **on** the warp-end reading in 123 of the 123 arrivals that ever
+name one, median 0, p90 0, max 0. The second diagnosis was the trigger, from the
+source, and it was right but still a hypothesis until a tree was read off the
+live client. Neither the code nor the first round of cases had ever executed the
+transition, which is exactly how a total defect survived in reachable code: every
+case downstream of a condition that is always `False` passes.
+
+**"Arrival" is the landing reading, and the corpus is why.** The distinction the
+design already had right is the one the fix has to keep: a neutral *already there
+when we land* means leave; a neutral *arriving while we are fighting* means tough
+it out. That is why the memory records pilots seen on arrival rather than pilots
+seen now, and why reading `getNamesOfOtherPilotsInOverview` on every reading
+closes this bug and opens the opposite one. The first attempt at #194 widened
+"arrival" to a 30-reading window, to cover the scanner lag that turns out not to
+exist. Priced against the same corpus, over 250 arrivals, the number that would
+record at least one pilot is
+
+| bound | 0 | 1 | 3 | 10 | 30 |
+|---|---:|---:|---:|---:|---:|
+| arrivals recording a pilot | 19 | 19 | 20 | 25 | 34 |
+
+Every arrival a wider bound adds is one where the overview held nobody when the
+ship landed and somebody afterwards — a pilot who arrived while the bot was
+already fighting, which is the one thing this feature must not fire on. At 30
+readings nearly half of everything recorded would have been the wrong half. And a
+bound of **1** records the same 19 as a bound of 0 across all 250, so the
+overview never took an extra reading to draw a pilot who was already on the grid
+— the only thing a wider bound could honestly have bought.
+
+So `otherPilotArrivalWindowReadings` is **0**. The window machinery stays: the
+counter, the accumulation and the status clause are what make a later widening a
+change to one number with an argument beside it, rather than a rewrite of the
+rule. `arrivalWindowIsOpen` is still written as `readings <= bound` rather than
+`== Just 0` for the same reason, and a case says so.
+
+**The unit is readings**, which is what every other bound in these bots is
+counted in — `approachIndicationTrustedForTicks` is 10,
+`dockingRunInPatienceReadings` 20, `gateRefusesThisShipTicks` 40 and
+`droneRecallGiveUpTicks` 60 — so any future widening is comparable to those
+without a conversion done in the reader's head. Confusing this unit with a clock
+has cost `stall_watch.py` a threshold calibration twice, #141 a retreat
+measurement and #164 an issue's whole diagnosis. In wall-clock terms a reading is
+one to eight seconds by this file's own two disagreeing figures, so the 30 that
+was first proposed was 30 s to 4 minutes of grid to be wrong about. The counter
+is advanced in `updateMemoryForNewReadingFromGame`, which is #102's and #126's
+placement rule and the only thing that runs on every reading unconditionally.
+
+**The list accumulates rather than being overwritten, and that is the latch.**
+Adding only can never unsay a reason, so the verdict is written during arrival
+and untouched afterwards, which is what the do-not-come-back half reads. Order is
+first-seen first, because `findReasonToAvoidAnomalyFromMemory` reports the head
+and the pilot who was already there is the one an operator wants named. At a
+bound of 0 that rule folds over one reading, and it is still the rule: it is what
+a widening would rest on.
+
+**Two things #194 offered and this deliberately does not do.** The memory keying
+is untouched, and the snapshot still sits inside the branch that has an anomaly
+ID to file it under — the issue's other option was to make the snapshot
+independent of the scanner, and that is not what shipped. Cases assert both, so a
+later change has to argue against them rather than drift into them.
+
+**Nothing about this was visible on a reading before**, which is most of why it
+took a corpus sweep to find: a snapshot that never ran and a grid with nobody on
+it printed identically. `describeArrivalWindow` separates the three ways the
+feature can still be inert —
+
+```
+Arrival window: OPEN, 0 of 0 readings since the last warp ended; no anomaly named in the probe scanner, so nothing can be recorded.
+Arrival window: closed, 91 of 0 readings since the last warp ended; found on arrival here: Vladimir Barmin.
+Arrival window: no warp has finished this session; nobody recorded on arrival here.
+```
+
+— and it is read by the status line and by no decision.
+
+**Both apps.** `eve-online-combat-anomaly-bot` carries the same
+`otherPilotsFoundOnArrival`, and its `weJustFinishedWarping` had already been
+corrected upstream to the `Just True -> not Just True` shape — so its trigger was
+**not** dead, which is worth knowing before assuming two copies share a bug. Both
+now share `shipWarpingFromReading` and `warpJustEnded`, which also gives the
+combat bot the ship-UI-presence guard it lacked and removes a real drift: the two
+apps derived `shipIsWarping` inline in two different shapes, a pipeline and a
+`case`. Six declarations are byte-identical across the two and a case compares
+them rather than merely checking both are present.
+
+**`eve-online-mission-runner` and `eve-online-wingus` still carry the dead
+trigger**, and that is #205 rather than this change. Wingus has #194 verbatim —
+the same single-reading snapshot on the same unreachable condition. The mission
+runner has no arrival snapshot, but the same condition gates its drone
+abandonment (`shipLeftThisReading`, whose other half — undocking — does work) and
+#154's per-warp ammo-swap retry, so the fix is the same three lines with two
+different consequences that each need their own argument and their own cases.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_arrival_pilot_window.py` (43 cases against **both**
+apps, 2 of them reading `~/eve-bot-logs` and skipping where it is absent). The
+transition is executed end to end: readings built in the captured shape go
+through the real `EveOnline.ParseUserInterface`, and the real `warpJustEnded`
+is asked about them in `elm repl`. The condition it replaces is executed on the
+same pair and asserted to answer `False`, so restoring the old shape fails with
+the reason rather than with an arithmetic mismatch six rules away. The corpus
+numbers above are **recomputed** by the cases rather than quoted, per run, so a
+machine holding only some of the runs still checks those.
+
+Confirmed by mutation. Beyond the twenty the window carried already: the
+`Just False` condition restored, which the captured warp-end reading kills; the
+ship-UI-presence guard dropped, which makes an unreadable client an arrival;
+`shipWarpingFromReading` reading `ManeuverJump` instead of `ManeuverWarp`; and
+the bound returned to 30, which fails the constant's case, the corpus case that
+prices it and the boundary either side.
+
+**Unverified: any of it running.** `FoundOtherPilotOnArrival` has still never been
+constructed by either bot. What to watch on the first run is the
+`Arrival window:` clause. `no warp has finished this session` on every reading
+would mean the trigger is still not firing, and is now the one thing that would
+say the capture was not representative. `OPEN` on the landing reading with
+`no anomaly named in the probe scanner` beside it, on every arrival, would mean
+the scanner is later than 123 out of 123 arrivals say and the bound of 0 is
+wrong. And `found on arrival here:` naming somebody who warped in mid-fight would
+mean the window is not closing, which is the direction this must never fail in.
+
 ## Elm toolchain
 
 `brew install elm` (arm64-native bottle) — **not** `npm install -g elm`, which
@@ -8303,6 +8473,21 @@ exists.
   **No behaviour changed**: the clause was read by the status line at one site
   and by no decision. What a run shows is negative — `Combat feed` gone and
   `dmg N/T (45s, Nrd)` exactly as before.
+
+  And since #194 it **can leave an anomaly somebody was already sitting in**,
+  which it never could: the arrival snapshot needed `weJustFinishedWarping` and
+  the probe scanner naming the anomaly on the *same* reading, and the scanner is
+  late, so `FoundOtherPilotOnArrival` has never been constructed in a recorded
+  run. "Arrival" is a bounded window after warp ends now — 30 readings, the
+  same unit as every other bound in these bots — and the
+  window's *closing* is the half that matters, since a neutral arriving
+  mid-fight must still be fought rather than fled. See "The on-arrival pilot
+  check could not fire, so 'arrival' is a window now" above for why the list
+  accumulates rather than being overwritten, and for the one premise this
+  inherits rather than fixes. **Untested against a live client**, and this path
+  has never run at all; watch the status line's `Arrival window:` clause going
+  `OPEN` after each warp and then `closed`, and escalate on a pilot named there
+  who warped in during a fight.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
