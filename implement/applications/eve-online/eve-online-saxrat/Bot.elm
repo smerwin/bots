@@ -3663,10 +3663,27 @@ decideNextActionWhenInSpace context seeUndockingComplete =
 
                                 Nothing ->
                                     decideActionInAnomaly
-                                        { arrivalInAnomalyAgeSeconds = 600 }
+                                        -- The clock, said rather than spelled. This
+                                        -- branch has no anomaly to be in: the memory
+                                        -- is filed under the ID the probe scanner
+                                        -- gives, and there is no scanner here, so
+                                        -- `arrivalInAnomalyAgeSecondsFromMemory` would
+                                        -- answer its `Maybe.withDefault 0` and tether
+                                        -- the ship for the full wait at a site it
+                                        -- cannot name. What this path means is that
+                                        -- the wait is already over, so it passes the
+                                        -- setting itself: `waitTimeRemainingSeconds`
+                                        -- is 0 and the 120-second loot backstop is
+                                        -- still live, which is what the literal `600`
+                                        -- here did while `anomalyWaitTimeSeconds`
+                                        -- happened to also be 600 -- and goes on
+                                        -- meaning it when an operator changes that.
+                                        { arrivalInAnomalyAgeSeconds =
+                                            context.eventContext.botSettings.anomalyWaitTimeSeconds
+                                        }
                                         context
                                         seeUndockingComplete
-                                        (jumpToNextSystem context)
+                                        (siteProgressStepOrElse context (jumpToNextSystem context))
                             )
 
                     Just probeScannerWindow ->
@@ -3716,30 +3733,8 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                     -- in front of the ship, and a "Warp to Site" offered
                                     -- while a gate is in reach is the panel still showing
                                     -- the site the ship is standing in.
-                                    accelerationGateStep =
-                                        activateAccelerationGateIfPresent context
-
-                                    opportunityWarpStep =
-                                        warpToOpportunitySiteIfAvailable context.readingFromGameClient
-
                                     pickAnotherAnomalyOrLeave =
-                                        case
-                                            siteProgressStep
-                                                { gateBranchOffersAStep = accelerationGateStep /= Nothing
-                                                , warpToSiteIsOffered = opportunityWarpStep /= Nothing
-                                                , gateWithinReach = accelerationGateIsWithinReach context.readingFromGameClient
-                                                }
-                                        of
-                                            WorkTheAccelerationGate ->
-                                                accelerationGateStep
-                                                    |> Maybe.withDefault pickAnotherAnomalyOrLeaveViaScanResults
-
-                                            WarpToTheOpportunitySite ->
-                                                opportunityWarpStep
-                                                    |> Maybe.withDefault pickAnotherAnomalyOrLeaveViaScanResults
-
-                                            HuntWithTheProbeScanner ->
-                                                pickAnotherAnomalyOrLeaveViaScanResults
+                                        siteProgressStepOrElse context pickAnotherAnomalyOrLeaveViaScanResults
                                 in
                                 -- The anomaly's own signature can drop off the probe
                                 -- scanner (site "resolved"/expired) while rats are
@@ -10400,6 +10395,52 @@ siteProgressStep progressCase =
 
     else
         HuntWithTheProbeScanner
+
+
+{-| `siteProgressStep`, resolved against the reading, with what to do when it
+answers neither.
+
+**The reason this is a function rather than a `let` in one branch: it used to be
+one, and the probe-scanner branch was that branch.** `decideNextActionWhenInSpace`
+splits on `probeScannerWindow`, and both steps were bound inside the `Just` arm,
+so a shut scanner window made a gate standing on grid and a "Warp to Site" on
+offer equally invisible -- see #204 and #202. The steps were reachable code that
+nothing could reach.
+
+The caller supplies the floor, which is the only thing that legitimately differs:
+the scanner branch falls back to its own scan results, and the branch without a
+scanner falls back to leaving the system. Neither can now grow a repertoire the
+other silently lacks.
+
+**Where this is reached is what keeps it safe.** `decideActionInAnomaly` asks for
+its continuation only once there is nothing left to attack, loot or unlock, so an
+opportunity appearing mid-fight still cannot pull the ship out of one.
+
+-}
+siteProgressStepOrElse : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+siteProgressStepOrElse context ifNeither =
+    let
+        accelerationGateStep =
+            activateAccelerationGateIfPresent context
+
+        opportunityWarpStep =
+            warpToOpportunitySiteIfAvailable context.readingFromGameClient
+    in
+    case
+        siteProgressStep
+            { gateBranchOffersAStep = accelerationGateStep /= Nothing
+            , warpToSiteIsOffered = opportunityWarpStep /= Nothing
+            , gateWithinReach = accelerationGateIsWithinReach context.readingFromGameClient
+            }
+    of
+        WorkTheAccelerationGate ->
+            accelerationGateStep |> Maybe.withDefault ifNeither
+
+        WarpToTheOpportunitySite ->
+            opportunityWarpStep |> Maybe.withDefault ifNeither
+
+        HuntWithTheProbeScanner ->
+            ifNeither
 
 
 {-| The "Opportunities" panel (e.g. "Sansha's Command Relay Outpost") is a
