@@ -7604,13 +7604,19 @@ Arrival window: no warp has finished this session; nobody recorded on arrival he
 — and it is read by the status line and by no decision.
 
 **Both apps, in separate commits.** `eve-online-combat-anomaly-bot` carries the
-same `otherPilotsFoundOnArrival` and the same gate and takes the same change; the
-four declarations are byte-identical in the two and a case compares them. The
-mission runner has neither and is out of scope.
+same `otherPilotsFoundOnArrival` and the same gate, and takes the same change:
+the four declarations are byte-identical in the two — doc comments included,
+since the argument for the unit and its cost is most of what a later reader has
+— and a case compares them rather than merely checking both are present. Nothing
+in them is app-specific; they are arithmetic over a reading count and a list, so
+a copy that drifted would still compile, still answer, and only one of the two
+would be the rule that was argued for. The mission runner has neither and is out
+of scope, which a case asserts rather than leaving assumed: if it ever grows an
+arrival snapshot it takes on #194 with it.
 
 **Verified without a live client**, in
-`tools/macos-host/tests/test_arrival_pilot_window.py` (32 cases on saxrat alone,
-more once both apps are in). The two pure rules are executed through the real
+`tools/macos-host/tests/test_arrival_pilot_window.py` (34 cases, run against
+**both** apps). The two pure rules are executed through the real
 `Bot.elm` in `elm repl` — the window at both sides of its bound *and* against
 fixed values either side, since a case asking only about `constant - 1` and
 `constant` passes for any constant at all; and whole sessions are folded through

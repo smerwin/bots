@@ -30,6 +30,12 @@ through readers sliced by indentation, since the bindings under test build
 record literals and a reader that stops at the opening brace has already cost
 PRs #147, #156, #159 and #162 an assertion that passed having read nothing.
 
+**Both apps, and only those two.** saxrat and the combat anomaly bot carry the
+same `otherPilotsFoundOnArrival` and the same gate, so every rule below is asked
+of both and the four shared declarations are compared byte for byte -- nothing
+in them is app-specific, and a copy that drifted would still compile and still
+answer. The mission runner has neither, which is asserted rather than assumed.
+
 **What could not be checked here.** `~/eve-bot-logs` is not on this machine, so
 #194's own counts (1,058 readings beside another pilot in run 23; 12,717
 `Current anomaly: None` against 37,787 that name one) are cited rather than
@@ -42,9 +48,14 @@ import os
 import re
 import unittest
 
-from prerequisites import open_repl
+from prerequisites import REPO_DIR, open_repl
 from test_saxrat_ported_guards import (
     SAXRAT_BOT_ELM, SaxratRepl, collapsed, source_of)
+
+COMBAT_ANOMALY_DIR = os.path.join(
+    REPO_DIR, "implement", "applications", "eve-online",
+    "eve-online-combat-anomaly-bot")
+COMBAT_ANOMALY_BOT_ELM = os.path.join(COMBAT_ANOMALY_DIR, "Bot.elm")
 
 # The bound as shipped, in readings. Written here as its own number so that a
 # case can say the constant is this rather than merely that its own boundary
@@ -73,10 +84,27 @@ NEIGHBOURING_BOUNDS = ("approachIndicationTrustedForTicks",
 PILOT = "Vladimir Barmin"
 ANOTHER_PILOT = "Someone Else"
 
-# The apps that carry this machinery. saxrat only for now; the combat anomaly
-# bot has the same `otherPilotsFoundOnArrival` and the same `weJustFinishedWarping`
-# gate, and takes the same change in its own commit.
-APPS = (("saxrat", SAXRAT_BOT_ELM),)
+# The apps that carry this machinery. The mission runner has neither
+# `otherPilotsFoundOnArrival` nor anything that would read it -- it flies
+# mission pockets rather than anomalies -- and is out of scope.
+APPS = (("saxrat", SAXRAT_BOT_ELM),
+        ("combat anomaly bot", COMBAT_ANOMALY_BOT_ELM))
+
+# The four declarations both apps carry, which are compared byte for byte
+# rather than merely both being present.
+SHARED_DECLARATIONS = ("otherPilotArrivalWindowReadings",
+                       "arrivalWindowIsOpen",
+                       "otherPilotsFoundOnArrivalAfterReading",
+                       "describeArrivalWindow")
+
+
+class CombatAnomalyRepl(SaxratRepl):
+    """The same harness and preamble, pointed at the combat anomaly bot."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("prefix", "combat-anomaly-repl-")
+        kwargs.setdefault("app_dir", COMBAT_ANOMALY_DIR)
+        super().__init__(**kwargs)
 
 
 def elm_list(names):
@@ -207,7 +235,7 @@ def record_returned_by(source, name):
 class BothAppsRepl:
     """One repl per app carrying this machinery, so a failure names which."""
 
-    REPLS = {"saxrat": SaxratRepl}
+    REPLS = {"saxrat": SaxratRepl, "combat anomaly bot": CombatAnomalyRepl}
 
     @classmethod
     def setUpClass(cls):
@@ -740,6 +768,53 @@ class NoDecisionReadsTheLiveOverview(unittest.TestCase):
                 "%s builds the arrival window clause and prints it nowhere, "
                 "so a run still cannot say which way the feature is inert"
                 % app)
+
+
+class TheTwoAppsCarryTheSameRules(unittest.TestCase):
+    """The four declarations, compared byte for byte across both apps.
+
+    Nothing in these rules is app-specific -- they are arithmetic over a reading
+    count and a list -- so a copy that drifts is a bug in whichever one drifted,
+    and the drift is silent: both still compile, both still answer, and only one
+    is the rule that was argued for. The doc comments are compared with the code
+    for the same reason, since the argument for the unit and its cost is most of
+    what a later reader has.
+
+    The mission runner is deliberately absent from `APPS`: it carries neither
+    `otherPilotsFoundOnArrival` nor a probe scanner to be late naming an
+    anomaly, and a case asserts that rather than leaving it to be assumed.
+    """
+
+    def declaration(self, path, name):
+        match = re.search(
+            r"(\{-\|(?:(?!-\})[\s\S])*?-\}\n)?%s :[\s\S]*?(?=\n\n\n)"
+            % re.escape(name), source_of(path))
+        self.assertTrue(match, "no declaration named %r in %s" % (name, path))
+        return match.group(0)
+
+    def test_every_shared_rule_is_identical_in_both_apps(self):
+        for name in SHARED_DECLARATIONS:
+            copies = {app: self.declaration(path, name) for app, path in APPS}
+            first = sorted(copies)[0]
+            for app, text in copies.items():
+                self.assertEqual(
+                    text, copies[first],
+                    "%s's %s has drifted from %s's -- both compile and both "
+                    "answer, so the drift is silent" % (app, name, first))
+
+    def test_the_mission_runner_carries_none_of_this(self):
+        """Out of scope, asserted rather than assumed.
+
+        If it ever grows an arrival snapshot it takes on this bug with it, and
+        this case is what makes somebody notice.
+        """
+        mission_runner = os.path.join(
+            REPO_DIR, "implement", "applications", "eve-online",
+            "eve-online-mission-runner", "Bot.elm")
+        self.assertNotIn(
+            "otherPilotsFoundOnArrival", source_of(mission_runner),
+            "the mission runner has grown an arrival snapshot, which means it "
+            "has taken on #194 as well and is no longer out of scope")
 
 
 if __name__ == "__main__":

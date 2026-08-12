@@ -305,6 +305,12 @@ type alias BotMemory =
     , shipModules : ShipModulesMemory
     , overviewWindows : OverviewWindowsMemory
     , shipWarpingInLastReading : Maybe Bool
+
+    -- How many readings ago the last warp finished, which is what opens the
+    -- arrival window the other-pilot snapshot is taken inside. `Nothing` means
+    -- no warp has finished this session and is a closed window, never an open
+    -- one. See `otherPilotArrivalWindowReadings`.
+    , readingsSinceWarpEnded : Maybe Int
     , visitedAnomalies : Dict.Dict String MemoryOfAnomaly
     , notEnoughBandwidthToLaunchDrone : Bool
     , droneBandwidthLimitatatinEvents : List { timeMilliseconds : Int, dronesInSpaceCount : Int }
@@ -445,6 +451,193 @@ shouldAvoidRatAccordingToSettings settings ratName =
 memoryOfAnomalyWithID : String -> BotMemory -> Maybe MemoryOfAnomaly
 memoryOfAnomalyWithID anomalyID =
     .visitedAnomalies >> Dict.get anomalyID
+
+
+{-| How many readings after a warp ends a pilot on the overview still counts as
+_found on arrival_.
+
+**Issue #194: the arrival snapshot could not be taken at all.**
+`otherPilotsFoundOnArrival` is written in one place, and reaching it needed
+`weJustFinishedWarping` _and_ `getCurrentAnomalyIDAsSeenInProbeScanner` answering
+`Just` on the **same** reading. On the reading a warp ends the probe scanner has
+not yet named the anomaly, so the enclosing `case` took its `Nothing` branch and
+the whole anomaly-memory update -- the arrival snapshot with it -- was skipped.
+By the time the scanner does name the anomaly, `weJustFinishedWarping` is false
+and the list stays empty for the lifetime of that anomaly's memory. So
+`FoundOtherPilotOnArrival` has never been constructed in a recorded run, and
+**two** things were dead rather than one: the leave branch, and the do-not-come-
+back half, since the same reason is what makes a scan result be skipped later.
+
+Issue #194's own counts: saxrat run 23 spent 1,058 readings in an anomaly with
+another pilot named in the overview and printed neither message, and
+`Current anomaly: None` appears 12,717 times there against 37,787 readings that
+name one. **Those are cited rather than recomputed** -- `~/eve-bot-logs` was not
+on the machine this was written on, so neither they nor the sweep #194 asks for
+(whether the anomaly ID is _ever_ available on a warp-end reading) could be run
+here.
+
+**The bound is the whole of the design, not a detail of it.** A neutral _already
+there when we land_ means leave; a neutral _arriving while we are fighting_ means
+tough it out. That is why the memory records pilots seen on arrival rather than
+pilots seen now, and reading `getNamesOfOtherPilotsInOverview` on every reading
+would close #194 while opening the opposite bug. The widening is therefore from
+one reading to a window that **closes**: after it has, a pilot who turns up arms
+nothing at all, and the bot fights on exactly as it does today.
+
+**Readings, which is what every other bound in these bots is counted in.** That
+makes this number directly comparable to its neighbours rather than needing a
+conversion done in the reader's head: `approachIndicationTrustedForTicks` is 10,
+`dockingRunInPatienceReadings` 20, `gateRefusesThisShipTicks` 40 and
+`droneRecallGiveUpTicks` 60, and 30 sits mid-range among them. Confusing this
+unit with a clock has already cost this repo a threshold calibration twice
+(`stall_watch.py`), a retreat measurement (#141) and an issue's entire diagnosis
+(#164).
+
+**And readings is the right unit for this particular question**, which is a
+stronger argument than convention. The window exists to cover the gap between a
+warp ending and the probe scanner naming the anomaly, and the scanner is re-read
+once per reading -- so the quantity being bounded is a number of readings by
+construction. A wall-clock bound would drift against it whenever the reading rate
+changed, covering fewer scanner updates on a slow tick and more on a fast one,
+while measuring the same seconds.
+
+**In wall-clock terms this is a widening rather than a translation, and that is
+the cost.** A reading is somewhere between one and eight seconds by this repo's
+own two figures, so thirty readings is roughly 30 s to 4 minutes against the flat
+30 s the first version of this used. The window a mid-fight arrival can fall
+inside is therefore **larger**, which is the direction #194 warns about. What
+makes it acceptable is that the alternative unit is comparable to no other bound
+in these files, so nobody reading it could say whether it was long or short; the
+trade is recorded here rather than presented as neutral.
+
+One further point in this unit's favour. Under a client stall (#164) the memory
+update stops running, so a reading counter simply stops advancing along with
+every other counter in the status line -- where a wall clock would have gone on
+holding the window open across a stall in which no anomaly could be named
+anyway.
+
+-}
+otherPilotArrivalWindowReadings : Int
+otherPilotArrivalWindowReadings =
+    30
+
+
+{-| Whether this reading is still close enough to the last warp to be arrival.
+
+**`Nothing` is a closed window, not an open one.** No warp has finished this
+session -- the bot started already sitting in an anomaly, or the transition has
+never been seen -- so there is no arrival to be inside of, and nothing is
+recorded. That is both the conservative direction and what the bot does today:
+`weJustFinishedWarping` is false on every one of those readings too.
+
+The comparison is inclusive, so the reading a warp ends on -- zero readings
+elapsed -- is still arrival, which is what makes this window **subsume** the
+single-reading trigger it replaces rather than sit beside it. One reading past
+the bound is not.
+
+-}
+arrivalWindowIsOpen : { readingsSinceWarpEnded : Maybe Int } -> Bool
+arrivalWindowIsOpen { readingsSinceWarpEnded } =
+    case readingsSinceWarpEnded of
+        Nothing ->
+            False
+
+        Just readings ->
+            readings <= otherPilotArrivalWindowReadings
+
+
+{-| The pilots this anomaly's arrival has found, after one more reading.
+
+**It accumulates rather than overwrites, and that is what keeps the memory
+latched.** The snapshot it replaces ran on exactly one reading, so whatever it
+wrote was final; a window of readings that each _replaced_ the list would forget
+a pilot who was on the grid when the ship landed and warped off two readings
+later -- and forgetting is the half #194 says is dead, since the same list is
+what makes the scan result be skipped later. Adding only can never unsay a
+reason, so the verdict behaves exactly as the single-reading one did: written
+once during arrival, and untouched for the lifetime of that anomaly's memory.
+
+Order is first-seen first, because `findReasonToAvoidAnomalyFromMemory` reports
+the head of this list, and the pilot who was already there when the ship landed
+is the one an operator wants named.
+
+A closed window adds nothing, which is the sentence that stops this becoming the
+mid-fight check the issue exists to refuse.
+
+-}
+otherPilotsFoundOnArrivalAfterReading :
+    { windowIsOpen : Bool
+    , foundBefore : List String
+    , seenNow : List String
+    }
+    -> List String
+otherPilotsFoundOnArrivalAfterReading { windowIsOpen, foundBefore, seenNow } =
+    if not windowIsOpen then
+        foundBefore
+
+    else
+        foundBefore
+            ++ (seenNow |> List.filter (\pilot -> not (List.member pilot foundBefore)))
+
+
+{-| The arrival window, for the status line -- read by no decision.
+
+Nothing about the window was visible on a reading before this, which is most of
+why #194 took a corpus sweep to find: the snapshot's silence and a grid with
+nobody on it print identically. The three things this separates are the three
+ways the feature can still be inert.
+
+  - `no warp has finished this session` all run means the window never opens, so
+    nothing below it can fire. That is the one premise this change inherits
+    rather than fixes: `weJustFinishedWarping` needs the reading straight after
+    a warp to carry a maneuver indication that is not `ManeuverWarp`, and a
+    reading whose `shipUI` cannot answer leaves `shipIsWarping` as `Nothing` and
+    loses the transition. Nothing here widens that.
+  - `no anomaly named in the probe scanner` while the window is open is #194's
+    own diagnosis happening in front of the operator -- and the window closing
+    with that clause on every reading of it would mean 30 readings is not long
+    enough.
+  - a name recorded here is the leave branch about to fire, and the first time
+    `FoundOtherPilotOnArrival` will ever have been constructed.
+
+-}
+describeArrivalWindow :
+    { readingsSinceWarpEnded : Maybe Int
+    , windowIsOpen : Bool
+    , otherPilotsFoundOnArrival : Maybe (List String)
+    }
+    -> String
+describeArrivalWindow { readingsSinceWarpEnded, windowIsOpen, otherPilotsFoundOnArrival } =
+    let
+        describeWindow =
+            case readingsSinceWarpEnded of
+                Nothing ->
+                    "no warp has finished this session"
+
+                Just sinceWarpEnded ->
+                    (if windowIsOpen then
+                        "OPEN, "
+
+                     else
+                        "closed, "
+                    )
+                        ++ String.fromInt sinceWarpEnded
+                        ++ " of "
+                        ++ String.fromInt otherPilotArrivalWindowReadings
+                        ++ " readings since the last warp ended"
+
+        describeFound =
+            case otherPilotsFoundOnArrival of
+                Nothing ->
+                    "no anomaly named in the probe scanner, so nothing can be recorded"
+
+                Just [] ->
+                    "nobody recorded on arrival here"
+
+                Just pilots ->
+                    "found on arrival here: " ++ String.join ", " pilots
+    in
+    "Arrival window: " ++ describeWindow ++ "; " ++ describeFound ++ "."
 
 
 anomalyBotDecisionRoot : BotDecisionContext -> DecisionPathNode
@@ -1875,6 +2068,7 @@ initBotMemory =
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , overviewWindows = EveOnline.BotFramework.initOverviewWindowsMemory
     , shipWarpingInLastReading = Nothing
+    , readingsSinceWarpEnded = Nothing
     , visitedAnomalies = Dict.empty
     , notEnoughBandwidthToLaunchDrone = False
     , droneBandwidthLimitatatinEvents = []
@@ -1930,6 +2124,18 @@ statusTextFromState context =
                                 ++ (getCurrentAnomalyIDAsSeenInProbeScanner readingFromGameClient |> Maybe.withDefault "None")
                                 ++ "."
 
+                        describeArrivalWindowClause =
+                            describeArrivalWindow
+                                { readingsSinceWarpEnded = context.memory.readingsSinceWarpEnded
+                                , windowIsOpen =
+                                    arrivalWindowIsOpen
+                                        { readingsSinceWarpEnded = context.memory.readingsSinceWarpEnded }
+                                , otherPilotsFoundOnArrival =
+                                    getCurrentAnomalyIDAsSeenInProbeScanner readingFromGameClient
+                                        |> Maybe.andThen (\anomalyID -> memoryOfAnomalyWithID anomalyID context.memory)
+                                        |> Maybe.map .otherPilotsFoundOnArrival
+                                }
+
                         describeOverview =
                             ("Seeing "
                                 ++ (namesOfOtherPilotsInOverview |> List.length |> String.fromInt)
@@ -1945,7 +2151,7 @@ statusTextFromState context =
                     in
                     [ [ describeShip ]
                     , [ describeDrones ]
-                    , [ describeAnomaly, describeOverview ]
+                    , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
                     ]
                         |> List.map (String.join " ")
     in
@@ -2234,6 +2440,27 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 _ ->
                     False
 
+        -- Restarted at zero on the one reading a warp ends and advanced on every
+        -- other, here in the memory update because that is the only thing that
+        -- runs on every reading unconditionally -- #102's and #126's placement
+        -- rule, and the reason this can be a reading count at all. It is never
+        -- cleared: it ages out of the bound on its own, and a `Nothing` restored
+        -- here would read as "no warp this session", which is a different fact.
+        readingsSinceWarpEnded : Maybe Int
+        readingsSinceWarpEnded =
+            if weJustFinishedWarping then
+                Just 0
+
+            else
+                botMemoryBefore.readingsSinceWarpEnded |> Maybe.map ((+) 1)
+
+        -- Note this subsumes the single-reading trigger it replaces rather than
+        -- sitting beside it: on the reading a warp just ended the count is zero,
+        -- so the window is open by construction.
+        arrivalWindowIsOpenNow : Bool
+        arrivalWindowIsOpenNow =
+            arrivalWindowIsOpen { readingsSinceWarpEnded = readingsSinceWarpEnded }
+
         visitedAnomalies : Dict.Dict String MemoryOfAnomaly
         visitedAnomalies =
             if shipIsWarping == Just True then
@@ -2256,13 +2483,14 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                                         }
 
                             anomalyMemoryWithOtherPilotsOnArrival =
-                                if weJustFinishedWarping then
-                                    { anomalyMemoryBefore
-                                        | otherPilotsFoundOnArrival = getNamesOfOtherPilotsInOverview context.readingFromGameClient
-                                    }
-
-                                else
-                                    anomalyMemoryBefore
+                                { anomalyMemoryBefore
+                                    | otherPilotsFoundOnArrival =
+                                        otherPilotsFoundOnArrivalAfterReading
+                                            { windowIsOpen = arrivalWindowIsOpenNow
+                                            , foundBefore = anomalyMemoryBefore.otherPilotsFoundOnArrival
+                                            , seenNow = getNamesOfOtherPilotsInOverview context.readingFromGameClient
+                                            }
+                                }
 
                             anomalyMemory =
                                 { anomalyMemoryWithOtherPilotsOnArrival
@@ -2318,6 +2546,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         botMemoryBefore.overviewWindows
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoOverviewWindowsMemory context.readingFromGameClient
     , shipWarpingInLastReading = shipIsWarping
+    , readingsSinceWarpEnded = readingsSinceWarpEnded
     , visitedAnomalies = visitedAnomalies
     , notEnoughBandwidthToLaunchDrone = notEnoughBandwidthToLaunchDrone
     , droneBandwidthLimitatatinEvents = droneBandwidthLimitatatinEvents |> List.take 4
