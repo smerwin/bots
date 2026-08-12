@@ -246,7 +246,7 @@ session-start cost cached exactly as the macOS host caches its own root.
 | **Whether `ReadProcessMemory` is permitted** under current Windows protections and anti-cheat | **Yes.** `OpenProcess(PROCESS_VM_READ \| PROCESS_QUERY_INFORMATION)` succeeds in under a millisecond as the same user, with no elevation and no debug privilege. 9,298 readable regions, 5.24 GiB, enumerable and readable. Nothing rate-limited, blocked or nulled a read across hundreds of thousands of them. **This is one client on one machine at one patch level and is not a general claim.** |
 | **Whether the Windows client is the same Python build** | **Same interpreter, different ABI.** `python27.dll` and `blue.DLL` are both loaded, and it is Stackless (`launchdarkly_stackless_client_sdk.pyd`). Everything structural transfers; the two `long`-width fields in section 2 do not. |
 | **Whether the screenshot is actually the cost** | **Partly answered, and it does not hold as stated** — section 5. |
-| **Whether `SendInput` reproduces the input pacing** | **Not answered.** No input has been sent. See "What is not built". |
+| **Whether `SendInput` reproduces the input pacing** | **Yes, for everything a run needs.** 28 runs have driven the real mouse and keyboard: anomalies entered, rats locked and killed, gates jumped, stations docked, a fleet invitation accepted. One thing is *not* clean — see "Clicks the client does not answer" in section 8, where a batched lock step asked for 372 clicks and the target bar answered 151. |
 
 ## 5. What a reading costs
 
@@ -461,11 +461,26 @@ has been attempted and the result recorded — which is not the same as the host
 being finished. A bot runs, reads, decides and drives the mouse; it has not yet
 been watched completing a mission, or a gate jump, or anything else end to end.
 
-**No run has been flown to any outcome.** The longest was 60 ticks, bounded on
-purpose, and it spent all of them in one branch. Nothing here has exercised
-combat, looting, docking, an agent conversation, the ammo swap, the retreat, or
-any of the guards CLAUDE.md spends most of its length on. **A green reading is
-not a working bot**, and the distance between the two is most of this repo.
+**That paragraph is superseded.** It read "no run has been flown to any
+outcome ... the longest was 60 ticks", which was true when written and stopped
+being true the same week. saxrat has since flown 28 runs on this machine, the
+longest **eight hours to its own planned end** — run 28: 32,559 decisions, 76
+anomalies visited, bounties landing, gate jumps taken from the selected-item
+panel, and a clean dock at session end.
+
+What that leaves genuinely unexercised is narrower and worth keeping separate
+from what has now run:
+
+- **`eve-online-mission-runner` has never been flown here.** Only saxrat has.
+  So agent conversations, missions, briefings, the acceleration-gate path and
+  the abandonment are all untested *on Windows*, whatever their macOS standing.
+- **The 2023-interface bots** are unchanged from CLAUDE.md: unit-checked, never
+  run live, on either platform.
+- **Nothing has lost a ship here**, so the ship-loss verdict and pod recovery
+  have never latched on this machine either.
+
+**A green reading is still not a working bot.** What the runs have moved is
+which half of that sentence applies.
 
 - **`memory_sample`, `live_reader` and `probe` (the C ones) are not ported and
   probably should not be.** All three exist to work around
@@ -475,8 +490,14 @@ not a working bot**, and the distance between the two is most of this repo.
   explore. `ReadProcessMemory` is callable directly from Python at any size, so
   `eve_mem.py` covers what all three were for. That is a claim about the platform
   and it is worth someone disagreeing with.
-- **`botlab_host.py` is untouched.** Nothing is wired into the host's dispatch,
-  no bot has been run, and the Elm side has never been driven by this.
+- **`botlab_host.py` is no longer untouched**, and this bullet is kept only
+  because it was wrong rather than deleted. The Windows reader, the native
+  walker and `input.py` are wired into its dispatch; it has driven the Elm side
+  for 28 runs; and it carries one Windows-motivated change of its own, the ESI
+  character guard — `game_window_title` is stored from
+  `ListGameClientProcessesRequest` and passed as `expected_character`, so a
+  token belonging to a different pilot raises rather than routing somebody
+  else's client. That failure had already cost a whole session here.
 - **The read is 1.37s and it is not memory reading.** This was measured rather
   than assumed, and the answer overturns the obvious framing.
 
@@ -510,8 +531,12 @@ not a working bot**, and the distance between the two is most of this repo.
 
   So the case for a native helper is the same one macOS made, and it is now
   quantified: **the work is interpreter overhead, and there is no caching
-  strategy that removes it.** No C compiler is installed here, so it is not
-  attempted.
+  strategy that removes it.** A C compiler was found and `tree_walker.c` was
+  written, so this *was* attempted — the walk is **143 ms** against the Python
+  path's 2,405, and the table below is what that bought. The sentence that stood
+  here ("not attempted") contradicted the measurement two bullets down for two
+  days, which is the hazard of a findings document that is appended to rather
+  than re-read.
 
 - **Read time is a correctness property here, not only a throughput one**, which
   is the part that was not expected. `ShipUI.hitpointsPercent` is read out of a
@@ -549,6 +574,132 @@ not a working bot**, and the distance between the two is most of this repo.
   comes from a single session against a single account's client. The layout in
   section 2 is a measurement of *this build*, and `probe.py` exists so the next
   build can be measured rather than assumed.
+
+## 8. Operating a long run on Windows
+
+Sections 1–7 are about reading the client. This one is about everything around
+it, and every entry has already cost a wrong diagnosis on this machine. The
+architecture, the struct layouts and the bot logic all transfer from macOS
+unchanged; the *tooling* does not, and that is where the time went.
+
+### Git Bash cannot see native Windows processes, in both directions
+
+`pgrep` answers "not found" for a perfectly healthy bot, and **`pkill -f`
+matches nothing, exits 1, and looks exactly like success.** Both halves have
+cost a session:
+
+- A watchdog used `pgrep`, reported `BOT GONE` falsely, and *broke out of its
+  loop* on that — so nothing watched an eight-hour run.
+- Every "restart" for half a day used `pkill -f botlab_host.py` and killed
+  nothing, silently. **Seven hosts accumulated**, started 13:01 through 15:54,
+  all driving the same mouse. The web console served whichever bound port 8787
+  first, so its numbers described a run three hours stale while reading as
+  current, and the mouse contention is a plausible contributor to the
+  stray-context-menu storm of that afternoon.
+
+Ask Windows instead, and match on the command line rather than the image name —
+`Get-Process python` calls a dead run healthy the moment any other Python is up,
+which during a session of probe scripts is most of the time:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+  Where-Object { $_.CommandLine -like '*botlab_host*' }
+```
+
+**Never let a liveness check terminate the watch**, and have the stop script
+*verify* rather than report — the first version of `stop_bots.ps1` printed
+`all stopped` while its own query was malformed, which is the failure it was
+written to prevent.
+
+### `SetForegroundWindow` is a request, and the documented workaround is not enough
+
+`input.bring_window_to_foreground` does the documented `AttachThreadInput`
+dance and **still returns `False`** against the EVE launcher: Windows keeps a
+foreground *lock* the attach alone does not clear. A synthetic ALT press
+releases it, after which `SetForegroundWindow` takes on the first attempt.
+
+This matters more than a failed focus, because **a screen capture of a window
+that was not raised looks exactly like a capture of one that was.** A grab taken
+at the launcher's coordinates while it sat behind other windows returned those
+other windows, and was read as the launcher. Verify by reading
+`GetForegroundWindow` back; never trust the call. `launch_character.py` does
+this and refuses to click otherwise, on the grounds that the click would
+otherwise land in whatever is really there.
+
+### The UI-root cache is per boot, and a cold scan looks like a hang
+
+After a reboot the cached root address is stale, so the host does a full scan:
+**about four minutes of silence** before the first reading, with the log
+repeating `Search the address of the UI root in process N` and not growing. It
+is working — the tell is the host's CPU time climbing and the log jumping by
+tens of kilobytes when the scan lands. Do not restart it.
+
+### "In game" is not "the process exists", and `ShipUI` does not settle it
+
+A freshly launched client sits on the character-selection screen with a
+perfectly readable UI tree **containing a `ShipUI` node**, so a readiness check
+that counts nodes or trusts `ShipUI` declares victory about a minute early —
+observed at 453 nodes with the window still titled plain `EVE`. The honest
+signals are an `OverviewWindow` (in space) or a `LobbyWnd`/`StationWindow`
+(docked), and the window title becoming `EVE - <character>`.
+
+### The launcher does not expose its character list
+
+Chromium keeps its accessibility tree off, so UI Automation sees one child
+called `Chrome Legacy Window` and nothing else — no character names, no
+buttons. The launcher's own state is no better: `state.json` is a DPAPI-encrypted
+`v10` blob (it holds auth tokens; do not go decrypting it), and
+`launcher-data.json` carries settings but no roster.
+
+What *is* readable and worth reading is `launcher-data.json`'s
+`actionToActivateMethod` and `actionToActivateSpeed`. That answers a question
+CLAUDE.md files under macOS quirks — "PLAY NOW ignores synthetic clicks" is
+neither a quirk nor macOS: **PLAY NOW launches whichever character the launcher
+has selected**, and `autoSelectCharacter` is on, so it is the last one played
+rather than the one you meant. Holding a character's avatar launches that
+character. `launch_character.py` reads the setting rather than assuming the
+gesture, stores avatar positions as fractions of the launcher window so they
+survive a resize, and verifies the character it got from the client's window
+title afterwards.
+
+### Clicks the client does not answer
+
+Run 28 ended with `Lock batch: asked 372 and the bar answered 151` — a **59%
+shortfall**. Two candidates, and they are distinguishable: input dropped under
+load (the macOS side records posted events costing 53–100 ms in exactly the two
+runs that lost a typed query, against under 18 ms elsewhere), or the client
+taking one lock per input burst, in which case the shortfall is consistently
+batch-minus-one. Unresolved, and it matters beyond throughput: the same window
+is where an overview row can shift under a click, which is the likeliest feeder
+of the lock-range ratchet in issue #206.
+
+### Smaller ones, each having cost something
+
+- **The run logs are PowerShell-captured and wrapped.** A status clause
+  continues on the next line, so `grep -o` truncates it and a 16-system circuit
+  can read as `… -> Ana`. Grep with context, not `-o`. The logs also carry NUL
+  bytes, so `grep` calls them binary — pass `-a`.
+- **`/tmp` is not the same path to Git Bash and to Windows Python.** Bash writes
+  `C:\Users\…\AppData\Local\Temp\x`; Python reads `\tmp\x` and fails. That
+  emptied a pull request body once, through a `>` redirect that created an empty
+  file.
+- **Echo inflation makes raw counts wrong.** Every game-log line is reprinted
+  under each decision, so `grep -c` answered 3,435 for a run with 50 distinct
+  bounties. Count distinct `[timestamp] (channel)` entries, and prefer
+  `Quick message (on screen now)` over raw occurrences for anything about
+  popups.
+- **`elm` here is 0.19.1**, which is what every bot's `elm.json` pins, so the
+  `elm-version` patch CLAUDE.md describes for macOS must *not* be applied — it
+  stops the app compiling.
+- **`elm-format` every Elm edit and write LF.** Python's `write_text` produces
+  CRLF, which turns a small change into a whole-file rewrite that conflicts with
+  everything.
+- **Game logs are at `C:\Users\<user>\Documents\EVE\logs\Gamelogs`**, resolved by
+  `win_platform.game_log_directory()`.
+- **`git push --force-with-lease` refuses with "stale info" when no
+  remote-tracking ref exists**, which is the state a fresh branch is in here.
+  Name the expected commit — `--force-with-lease=<branch>:<sha>` — rather than
+  reaching for `--force`.
 
 ## Running it
 
