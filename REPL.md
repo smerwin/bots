@@ -24,6 +24,9 @@ The scale on that line is measured, not assumed — see *Coordinates* below.
   to, and it will say so rather than guess. The addresses are per-launch, so a
   client restart means running a bot again.
 
+**Neither applies on Windows** — see *On Windows* below, where the pid and the
+root are found directly and no bot need ever have run.
+
 ## The model
 
 Read a snapshot, act on it, read again. `eve.read()` refreshes; most helpers
@@ -113,6 +116,52 @@ eve.screenshot()                       # by window id, returns the path
 
 `screenshot()` captures the game window rather than the screen: the client is
 usually on another macOS Space, where a screen grab catches the wrong desktop.
+
+## On Windows
+
+Same commands, same conventions:
+
+```
+cd tools/macos-host
+python -i eve_repl.py
+```
+
+Four call sites dispatch to `tools/windows-host/repl_platform.py` — attach,
+window geometry, tree read, input — and everything above them, which is where
+every convention in this document lives, is the same code.
+
+Three differences are worth knowing before using it:
+
+- **No bot need have run.** There is no UI-root cache to be stale; the pid and
+  the root are found directly, so the repl attaches to a client nobody has
+  pointed a bot at.
+- **The key names are the same and the codes are not.** `keydown` reaches
+  `SendInput` as a Windows virtual key code, and the two encodings collide
+  rather than fail — CGKeyCode 53 is Escape while Windows 53 is the `5` key, so
+  a shared table would type digits and report that it pressed Escape. `KEYS`
+  and `KEYCODE` are swapped wholesale per platform.
+- **`screenshot()` raises the window first.** Windows has no Spaces, but
+  `BitBlt` copies whatever is actually on top, and a capture of the wrong
+  application reads exactly like a capture of the right one.
+
+**Two rules matter more here than the macOS text implies**, because both were
+broken while driving a real ship four jumps home and each cost a wrong action:
+
+- **Match a system on the Name column, never the Type.** A gate's Type reads
+  `Stargate (Amarr System)`, so `eve.find("Amarr")` matches every gate in the
+  constellation. It selected the gate the ship had just come out of and jumped
+  it backwards. `eve.select(row)` with a row you chose yourself is the safe
+  form; a bare needle is not.
+- **Let the route panel settle after a session change.** Read immediately, it
+  still names the *previous* hop — which sent the ship at the gate 13 km behind
+  it, too close to warp, where it sat until the timeout. And the panel names
+  two systems, the destination and the next hop; with markup stripped they are
+  the same shape, so identify the next one by its `alt="Next System in Route"`
+  attribute rather than by position.
+
+`Jump` works at any distance — the client warps in and jumps on arrival.
+`Warp To` lands at the client's preset warp-to distance, which on this account
+is 13 km and outside jump range.
 
 ## Clicking something awkward
 
