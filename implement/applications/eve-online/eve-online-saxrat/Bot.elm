@@ -2791,13 +2791,85 @@ the reading of it.
 -}
 routePanelSaysNoDestination : ReadingFromGameClient -> Bool
 routePanelSaysNoDestination readingFromGameClient =
+    (routePanelTexts readingFromGameClient
+        |> List.any
+            (\text ->
+                text |> String.toLower |> String.contains routePanelNoDestinationMarker
+            )
+    )
+        && not (routePanelShowsARoute readingFromGameClient)
+
+
+{-| Every string the route panel is carrying, markup and all.
+
+One definition because three rules read it and the markup matters to two of
+them: `getAllContainedDisplayTexts` returns `_setText` as the client wrote it,
+so the `alt=` attributes below survive into the answer.
+
+-}
+routePanelTexts : ReadingFromGameClient -> List String
+routePanelTexts readingFromGameClient =
     readingFromGameClient.infoPanelContainer
         |> Maybe.andThen .infoPanelRoute
         |> Maybe.map (.uiNode >> .uiNode >> EveOnline.ParseUserInterface.getAllContainedDisplayTexts)
         |> Maybe.withDefault []
+
+
+{-| What the panel writes when a route really is set.
+
+`No Destination` is not the absence of these -- it is a label the client leaves
+in the tree beside them, under a node whose own `_name` is `noDestinationLabel`,
+and that is the whole of #191's second half. Run 31 sat in Hama for 48 minutes
+and asked the host for a route **2,494 times** while the panel read:
+
+    Route <fontsize=12>5 Jumps
+    No Destination                                     <- _name=noDestinationLabel
+    <a href="showinfo:5//30003525" alt="Next System in Route">Bagodan</a>
+    <a href="showinfo:5//30003547" alt="Current Destination">Hamse</a>
+
+The route was real: five jumps, next hop Bagodan, destination Hamse, set by the
+bot's own ESI call three readings earlier.
+
+-}
+routePanelDestinationMarker : String
+routePanelDestinationMarker =
+    "current destination"
+
+
+routePanelJumpsMarker : String
+routePanelJumpsMarker =
+    "jump"
+
+
+{-| Whether the panel carries positive evidence of a route.
+
+**Positive rather than negative, and that is the point.** The two recorded
+captures are separated by exactly these words and by nothing else:
+
+  - run 23, stuck with no route the client had ever computed: `No Destination`,
+    a `Next System in Route` label, `No Destination` again, and one marker pip.
+    Neither marker below appears.
+  - run 31, stuck with a five-jump route it refused to travel: both markers
+    below, beside the same stale `No Destination`.
+
+So a rule that reads the absence of `No Destination`, or the presence of a
+marker pip, cannot tell them apart -- and each of those is what the two halves
+of this bot were separately doing. `Next System in Route` is deliberately _not_
+one of the markers: it is present in both captures, being the label run 23's
+client left behind.
+
+-}
+routePanelShowsARoute : ReadingFromGameClient -> Bool
+routePanelShowsARoute readingFromGameClient =
+    routePanelTexts readingFromGameClient
         |> List.any
             (\text ->
-                text |> String.toLower |> String.contains routePanelNoDestinationMarker
+                let
+                    lowered =
+                        text |> String.toLower
+                in
+                (lowered |> String.contains routePanelDestinationMarker)
+                    || (lowered |> String.contains routePanelJumpsMarker)
             )
 
 
@@ -11701,8 +11773,17 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             }
 
         standingInADeadEnd =
+            -- Asks the panel the same question the decision asks it. It used to
+            -- test the marker pip while `jumpToNextSystem` tested the panel's
+            -- words, and with a real route beside a stale `No Destination` the
+            -- two disagreed in the worst available direction: the decision asked
+            -- the host for a route on every reading, and this counter -- the
+            -- only thing bounding that asking -- stayed at 0 because the pip was
+            -- there. Run 31 asked 2,494 times in 48 minutes and reported
+            -- `0/20 readings` on every one of them, so `routeAskGiveUpReadings`
+            -- could never fire. One reading of the panel, used by both.
             (context.readingFromGameClient.shipUI /= Nothing)
-                && (currentRouteFirstMarkerRegion == Nothing)
+                && not (routePanelShowsARoute context.readingFromGameClient)
                 && (context.readingFromGameClient.probeScannerWindow
                         |> Maybe.map (.scanResults >> List.isEmpty)
                         |> Maybe.withDefault True
