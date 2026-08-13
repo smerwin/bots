@@ -54,6 +54,20 @@ import eve_read
 
 CG_INPUT = os.path.join(eve_read.HERE, "cg_input", "cg_input")
 
+# Issue #192. Same dispatch `botlab_host.py` took for #176: every seam below has
+# the shape `if IS_WINDOWS: return _win.x(...)` at the top of a function that is
+# otherwise the macOS code it always was. Nothing above the seams is duplicated,
+# which is the point -- what is above them is this module's own list of
+# conventions, and each of those cost a debugging session.
+IS_WINDOWS = sys.platform == "win32"
+repl_platform = None
+_win = None
+if IS_WINDOWS:
+    _WINDOWS_HOST_DIR = os.path.join(os.path.dirname(eve_read.HERE), "windows-host")
+    if _WINDOWS_HOST_DIR not in sys.path:
+        sys.path.insert(0, _WINDOWS_HOST_DIR)
+    import repl_platform  # noqa: E402
+
 # How far into an overview row to click. The row's own region is absent from the
 # tree, so its reported x is the left edge: the icon column, which does not
 # select the row. The name column is reliably past this.
@@ -90,12 +104,34 @@ KEYCODE = {
     "5": 0x17, "6": 0x16, "7": 0x1A, "8": 0x1C, "9": 0x19,
 }
 
+# The one table that must not be shared. `keydown <n>` reaches SendInput as a
+# Windows virtual key code, and the two encodings overlap in the worst possible
+# way rather than failing: CGKeyCode 53 is Escape and Windows 53 is the `5` key,
+# so the macOS table would type digits while reporting that it pressed Escape --
+# `ok` for every one of them. Swapped wholesale rather than translated, because
+# a translation table is the thing that has been wrong twice already (see
+# `vk_to_keycode`).
+if IS_WINDOWS:
+    KEYS = repl_platform.KEYS
+    KEYCODE = repl_platform.KEYCODE
+    KEY_BACKSPACE = repl_platform.KEY_BACKSPACE
+    KEY_FORWARD_DELETE = repl_platform.KEY_FORWARD_DELETE
+    KEY_END = repl_platform.KEY_END
+
 
 class Session:
     """A live handle on the client: tree reads in, clicks out."""
 
     def __init__(self):
-        self.entry = eve_read.ui_root()          # raises if the cache is stale
+        global _win
+        if IS_WINDOWS:
+            # No UI-root cache to be stale: the pid and the root are found
+            # directly, so the Windows repl attaches to a client no bot has
+            # ever been pointed at -- which is when it is most wanted.
+            _win = repl_platform.ReplBackend()
+            self.entry = _win.attach()
+        else:
+            self.entry = eve_read.ui_root()      # raises if the cache is stale
         self.pid = self.entry["pid"]
         self.window, self.origin, self.points = self._window()
         self.tree = None
@@ -112,6 +148,11 @@ class Session:
         """The client's largest window, with its origin and size in points. The
         largest matters: a fullscreen client also has a same-width menu-bar
         strip, and picking that gives a badly wrong y scale."""
+        if IS_WINDOWS:
+            # The client rect, not the window rect: the canvas covers the
+            # drawable area, so counting the border and title bar into the
+            # scale drifts every click down the screen by their height.
+            return _win.window(self.pid)
         out = subprocess.run([eve_read.WINDOW_PROBE, "--all"],
                              capture_output=True, text=True).stdout
         best = None
@@ -145,7 +186,10 @@ class Session:
     def read(self):
         """Refresh the cached tree. Everything below reads from this snapshot,
         so call it again after anything that changes the client."""
-        self.tree = eve_read.read_tree(entry=self.entry, _verify=False)
+        if IS_WINDOWS:
+            self.tree = _win.read_tree(self.pid)
+        else:
+            self.tree = eve_read.read_tree(entry=self.entry, _verify=False)
         return self.tree
 
     def nodes(self):
@@ -205,6 +249,10 @@ class Session:
     # -- input ------------------------------------------------------------
 
     def _cg_send(self, command):
+        if IS_WINDOWS:
+            # Same line protocol, executed with SendInput. The window is raised
+            # once per session inside the backend rather than per command.
+            return _win.command(command, hwnd=self.window)
         if self._cg is None:
             subprocess.run(["osascript", "-e", 'tell application "EVE" to activate'],
                            capture_output=True)
@@ -618,13 +666,20 @@ class Session:
         """Capture the game window by id. Not the screen -- the client is
         usually on another macOS Space, where a screen grab catches the wrong
         desktop entirely."""
-        path = path or os.path.join(os.environ.get("TMPDIR", "/tmp"),
-                                    f"eve_{time.strftime('%H%M%S')}.png")
+        path = path or os.path.join(
+            os.environ.get("TMPDIR") or os.environ.get("TEMP") or "/tmp",
+            f"eve_{time.strftime('%H%M%S')}.png")
+        if IS_WINDOWS:
+            return _win.screenshot(self.window, path)
         subprocess.run(["screencapture", "-x", "-o", "-l", str(self.window), path],
                        check=True)
         return path
 
     def close(self):
+        if IS_WINDOWS:
+            if _win is not None:
+                _win.close()
+            return
         if self._cg is not None:
             self._cg.stdin.close()
             self._cg = None
