@@ -41,7 +41,7 @@
       nothing at all -- removed rather than left as a setting that looks like it
       works.)
 
-      + `anomaly-name` : Choose the name of anomalies to take. You can use this setting multiple times to select multiple names. Matched whole and ignoring case, so the name must be written as the probe scanner's own Name column shows it -- except that an entry ending in `*` matches any name starting with the rest of it, so `anomaly-name=Sansha*` takes every Sansha site. Note a wildcard cannot tell an easy site from one that will kill this ship: it matches Havens and Sanctums as readily as Burrows.
+      + `anomaly-name` : Choose the name of anomalies to take. You can use this setting multiple times to select multiple names. **Naming any replaces the shipped defaults** (`sansha rally point` and `angel rally point`) rather than adding to them, so the list is exactly what you write; with no `anomaly-name` at all those two are what the bot hunts. Matched whole and ignoring case, so the name must be written as the probe scanner's own Name column shows it -- except that an entry ending in `*` matches any name starting with the rest of it, so `anomaly-name=Sansha*` takes every Sansha site and `anomaly-name=*` takes every combat anomaly. Note a wildcard cannot tell an easy site from one that will kill this ship: it matches Havens and Sanctums as readily as Burrows.
       + `hide-when-neutral-in-local` : Set this to 'yes' to make the bot dock in a station or structure when a neutral or hostile appears in the 'local' chat.
       + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. You can use this setting multiple times to select multiple names.
       + `anomaly-wait-time`: Minimum time to wait after arriving in an anomaly before considering it finished. Use this if you see anomalies in which rats arrive later than you arrive on grid.
@@ -176,7 +176,7 @@ defaultBotSettings =
     { hideWhenNeutralInLocal = AppSettings.Yes
     , runAwayShieldHitpointsThresholdPercent = -1
     , runAwayArmorHitpointsThresholdPercent = -1
-    , anomalyNames = [ "sansha rally point", "angel rally point" ]
+    , anomalyNames = []
     , avoidRats = []
     , maxTargetCount = 4
     , botStepDelayMilliseconds = 499
@@ -884,16 +884,14 @@ findReasonToIgnoreProbeScanResult context probeScanResult =
                         |> Maybe.withDefault False
 
                 matchesAnomalyNameFromSettings =
-                    (context.eventContext.botSettings.anomalyNames |> List.isEmpty)
-                        || (probeScanResult.cellsTexts
-                                |> Dict.get "Name"
-                                |> Maybe.map
-                                    (\name ->
-                                        context.eventContext.botSettings.anomalyNames
-                                            |> List.any (anomalyNameMatches name)
-                                    )
-                                |> Maybe.withDefault False
-                           )
+                    probeScanResult.cellsTexts
+                        |> Dict.get "Name"
+                        |> Maybe.map
+                            (\name ->
+                                anomalyNamesInEffect context.eventContext.botSettings
+                                    |> List.any (anomalyNameMatches name)
+                            )
+                        |> Maybe.withDefault False
             in
             if not isCombatAnomaly then
                 Just (AvoidAnomaly IsNoCombatAnomaly)
@@ -936,6 +934,39 @@ findReasonToAvoidAnomalyFromMemory context { anomalyID } =
 getRatsToAvoidSeenInAnomaly : BotSettings -> MemoryOfAnomaly -> Set.Set String
 getRatsToAvoidSeenInAnomaly settings =
     .ratsSeen >> Set.filter (shouldAvoidRatAccordingToSettings settings)
+
+
+{-| What the bot hunts when the operator has named nothing.
+
+These are a **fallback**, not a floor. Before #198 they were the initial value of
+`BotSettings.anomalyNames` and the `anomaly-name` handler prepended to them, so an
+operator naming six hideaways got those six _and_ these two -- and a rally point is
+a considerably harder site than a hideaway, which is not what "choose the name of
+anomalies to take" reads like. Naming one now replaces them.
+
+-}
+shippedAnomalyNames : List String
+shippedAnomalyNames =
+    [ "sansha rally point", "angel rally point" ]
+
+
+{-| The list the scan-result filter actually consults.
+
+Empty means the operator named none, which is the only way the list can be empty
+-- the handler prepends and nothing removes. **"Take anything" is still
+expressible** and is now the operator's to write rather than a shortcut here:
+`anomaly-name=*` is a prefix match on the empty string, which every name starts
+with. The `List.isEmpty` shortcut this replaces meant the same thing and could
+never fire, because the defaults it was defending against were never empty.
+
+-}
+anomalyNamesInEffect : BotSettings -> List String
+anomalyNamesInEffect settings =
+    if settings.anomalyNames |> List.isEmpty then
+        shippedAnomalyNames
+
+    else
+        settings.anomalyNames
 
 
 {-| Whether one `anomaly-name` entry matches the name the scanner shows.

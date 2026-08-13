@@ -7413,6 +7413,31 @@ the first phrase alone is written about warping, approaching and containers.
 ceiling moving is consistent with the corpus but unconfirmed. Only `km` is
 accepted; a sighting in other units would be declined rather than guessed at, and
 none is known to exist.
+### `anomaly-name` replaces the shipped defaults rather than joining them
+
+Issue #198. `BotSettings.anomalyNames` started as `[ "sansha rally point",
+"angel rally point" ]` and the handler prepended, so an operator naming six
+hideaways hunted those six **and** two rally points. The widening runs the wrong
+way -- a rally point is a considerably harder site than a hideaway, so it is the
+operator narrowing the filter who pays, and on an unfamiliar hull that is the
+difference between a long run and a loss. `--help` already read like replacement
+("Choose the name of anomalies to take"), so the code and the documentation were
+answering different questions.
+
+The defaults are kept as a **fallback**: the field starts empty,
+`anomalyNamesInEffect` answers `shippedAnomalyNames` when nothing was named, and
+anything named replaces them. An unconfigured bot is unchanged.
+
+**"Take anything" did not exist before and does now.** The filter carried a
+`List.isEmpty` shortcut meaning exactly that, which could never fire -- the
+handler only prepends, so a list starting with two entries is never empty. It is
+gone, and `anomaly-name=*` says it through #188's prefix rule.
+
+**Unverified:** whether any recorded run ever set `anomaly-name`, so whether this
+has cost anything in practice is not established -- only that the launcher's own
+string names six sites and would have hunted eight. `eve-online-combat-anomaly-bot`
+and `eve-online-wingus` both carry an anomaly-name setting and neither was
+examined.
 
 ### A shut probe window hid the gate and the opportunity from the whole path
 

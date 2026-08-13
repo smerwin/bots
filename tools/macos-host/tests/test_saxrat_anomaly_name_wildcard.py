@@ -18,9 +18,11 @@ ways a wildcard could widen more than was asked for:
 - **Only a trailing `*`.** Site names read `Sansha <adjective> <noun>`, so a
   prefix is the shape the client's own naming produces. A `*` anywhere else is
   not special and stays part of the literal, which a case pins.
-- **An empty list still means everything**, unchanged, and is a different thing
-  from a list whose entries match nothing -- the distinction that made run 19
-  look broken rather than misconfigured.
+- **An empty list means the shipped defaults** since #198, not everything -- the
+  operator writes `anomaly-name=*` for that, which this file's prefix rule is
+  what makes possible. It is still a different thing from a list whose entries
+  match nothing, which is the distinction that made run 19 look broken rather
+  than misconfigured. See `test_saxrat_anomaly_name_replaces_defaults.py`.
 
 The rule is executed through the real `Bot.elm` in `elm repl` rather than
 restated in Python, against the names the live scanner actually showed.
