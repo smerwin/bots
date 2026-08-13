@@ -253,8 +253,10 @@ class TheAskIsBoundedAndCountsTheRightThing(unittest.TestCase):
         predicate = predicate[:predicate.index("dronesInSpaceCountNow =")]
         self.assertIn("context.readingFromGameClient.shipUI /= Nothing",
                       predicate, "a docked reading would count as a dead end")
-        self.assertIn("currentRouteFirstMarkerRegion == Nothing", predicate,
-                      "a ship with a route to follow would count as stuck")
+        self.assertIn(
+            "not (routePanelShowsARoute context.readingFromGameClient)",
+            predicate,
+            "a ship with a route to follow would count as stuck")
         self.assertIn("scanResults >> List.isEmpty", predicate)
 
     def test_the_give_up_latches_for_the_session(self):
