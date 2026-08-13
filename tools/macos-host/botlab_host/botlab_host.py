@@ -1501,6 +1501,91 @@ class VolatileHost:
 # Task dispatch (top-level BotLab.BotInterface_To_Host_2024_10_19.Task)
 # ---------------------------------------------------------------------------
 
+READS_NOT_COMPLETING_THRESHOLD = 3
+READS_NOT_COMPLETING_REPEAT_EVERY = 60
+
+
+def read_failure_reason(task_tag, result):
+    """Why this task's result is a read that did not complete, or `None`.
+
+    Issue #166. In `saxrat_run11.log` the client stopped answering read requests
+    and the bot did not notice: 18,158 issued against 17,263 completed, 895 that
+    never came back. `ReadingFromGameClientCompleted` never fired again, so
+    `updateMemoryForNewReadingFromGame` never ran, so every counter written there
+    froze at the same instant -- and the host reprints the current decision on
+    every line it writes, so the rest of the run reads exactly like thousands of
+    healthy readings.
+
+    **Nothing in `Bot.elm` can fix that.** PR #165 established that the rules
+    which looked frozen were correct as written; nothing can advance a counter on
+    a reading that never arrived. The defect is that the log says nothing, and
+    the host is the only thing positioned to say it.
+
+    Only the volatile-process read is judged. A screenshot or an input task
+    failing is a different fact with its own consequences, and calling those a
+    stalled read would put the wrong word in the log at the moment somebody is
+    reading it carefully.
+    """
+    if task_tag != "RequestToVolatileProcess":
+        return None
+    response = (result or {}).get("RequestToVolatileProcessResponse")
+    if not isinstance(response, dict):
+        return None
+    err = response.get("Err")
+    if err is None:
+        return None
+    if isinstance(err, dict) and err.get("ProcessNotFound"):
+        return "the client did not answer (ProcessNotFound)"
+    return "the read failed: %s" % (err,)
+
+
+class ReadCompletionWatch:
+    """Counts consecutive reads that did not complete, and says so.
+
+    Loud on the way in and on the way out: a run that recovers silently would
+    leave an operator reading the same ambiguity in the other direction.
+
+    The repeat exists because the failure mode is a session that goes on for
+    hours -- one line at the top of an eight-hour stall is a line nobody scrolls
+    back to.
+    """
+
+    def __init__(self, threshold=READS_NOT_COMPLETING_THRESHOLD,
+                 repeat_every=READS_NOT_COMPLETING_REPEAT_EVERY):
+        self.threshold = threshold
+        self.repeat_every = repeat_every
+        self.consecutive = 0
+        self.announced = False
+
+    def note(self, reason):
+        """`reason` from `read_failure_reason`; `None` means the read completed.
+
+        Answers the line to print, or `None`.
+        """
+        if reason is None:
+            if self.announced:
+                recovered = self.consecutive
+                self.consecutive = 0
+                self.announced = False
+                return ("# READS COMPLETING AGAIN after %d that did not -- the"
+                        " decisions above this line were made from a reading"
+                        " that could not change" % recovered)
+            self.consecutive = 0
+            return None
+
+        self.consecutive += 1
+        if self.consecutive == self.threshold:
+            self.announced = True
+            return ("# READS ARE NOT COMPLETING: %d in a row -- %s. Every"
+                    " counter is frozen and the decisions below are made from"
+                    " the last reading that arrived, not from the client"
+                    % (self.consecutive, reason))
+        if self.announced and self.consecutive % self.repeat_every == 0:
+            return ("# READS STILL NOT COMPLETING: %d in a row -- %s"
+                    % (self.consecutive, reason))
+        return None
+
+
 class TaskDispatcher:
     def __init__(self, execute_input=False, capture_screenshots=False, game_log=None):
         self.volatile = VolatileHost(game_log=game_log)
@@ -2236,6 +2321,7 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
             {"SessionDurationPlannedEvent": {"timeInMilliseconds": session_end_at_milliseconds}}
         )
 
+    read_watch = ReadCompletionWatch()
     tick = 0
     tick_start = time.monotonic()
     # Only so the granted-overrun notice is printed when the figure changes
@@ -2353,6 +2439,12 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
             dispatch_start = time.monotonic()
             result = dispatcher.run_task(start_task["task"])
             dispatch_elapsed = time.monotonic() - dispatch_start
+            # #166: a read that does not complete leaves every counter frozen
+            # while the host goes on reprinting the last decision, so the log
+            # reads like thousands of healthy readings. Say it instead.
+            read_note = read_watch.note(read_failure_reason(task_tag, result))
+            if read_note is not None:
+                print(read_note, file=sys.stderr)
             send_start = time.monotonic()
             response = send_event({"TaskCompletedEvent": {"taskId": task_id, "taskResult": result}})
             send_elapsed = time.monotonic() - send_start
