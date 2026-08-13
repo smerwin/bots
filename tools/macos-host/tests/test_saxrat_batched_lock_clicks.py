@@ -461,7 +461,8 @@ class ABatchedReadingTeachesTheRangeRuleNothingTest(unittest.TestCase):
         seen -- and the control shows the same attempt surviving a reading whose
         step issued one click.
         """
-        pending = ("{ fromSetting = 66000, provenAtMeters = Nothing"
+        pending = ("{ fromSetting = 66000, statedMeters = Nothing"
+                   ", provenAtMeters = Nothing"
                    ", refusedAtMeters = Nothing"
                    ", attempt = Just { handle = \"id:111\""
                    ", distanceInMeters = 60000, targetsCount = 0"
