@@ -123,14 +123,26 @@ jobs:
         # broken runner and must fail rather than skip. See
         # tools/macos-host/tests/prerequisites.py.
         #
-        # `--dist loadfile` is load-bearing, not a default worth changing. Ten
-        # of the twenty-five modules build their own scratch copy of the mission
-        # runner and drive `elm repl` in it, and those ten are 99% of the
-        # runtime. Keeping a whole file on one worker means that scratch is
-        # built once; splitting a file across workers would build it per worker
-        # and give most of the gain straight back.
+        # `--dist loadfile` was load-bearing for a reason that #172 has since
+        # spent, and the reason is worth keeping written down rather than
+        # deleting: the modules that drive `elm repl` each built their own
+        # scratch copy of the app, so keeping a whole file on one worker meant
+        # building that scratch once rather than once per worker.
         #
-        # Measured on a 4-core runner: 1266s sequential, 395s this way.
+        # It is no longer what holds that up. `prerequisites.built_app` builds
+        # one copy of an app per **worker process**, shared by every class in
+        # it, so splitting a file across workers costs nothing a worker was not
+        # paying anyway.
+        #
+        # What keeps it is a different measurement, and it says the granularity
+        # is not the constraint either. On a 4-core container the run after #172
+        # spent 4078s of case time and finished in 1057s, against a perfect
+        # packing of 1020s -- and the longest single *file* is 310s, well under
+        # the wall clock. There is nothing for `loadscope` to recover here; what
+        # is left is total work, not how it is dealt out.
+        #
+        # Measured on a 4-core runner, before #172: 1266s sequential, 395s this
+        # way.
         run: |
           python3 -m pytest tools/macos-host/tests -n auto --dist loadfile \
             -p no:cacheprovider --junitxml=test-report.xml
