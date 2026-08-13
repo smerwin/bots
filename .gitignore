@@ -14,3 +14,9 @@ __pycache__/
 # Windows host build output
 tools/windows-host/tree_walker/tree_walker.exe
 tools/windows-host/tree_walker/*.obj
+
+# Transient per-machine session state, rewritten rather than appended to. It
+# describes one machine's client, one set of in-flight runs and one operator's
+# next steps, so tracking it means every machine fighting over the same file.
+# Durable facts belong in CLAUDE.md; measurements belong in tools/*/FINDINGS.md.
+HANDOFF.md

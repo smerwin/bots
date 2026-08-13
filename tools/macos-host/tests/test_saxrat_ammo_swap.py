@@ -1202,9 +1202,9 @@ class ThePlacementTest(unittest.TestCase):
         update = collapsed(without_comments(
             body_of(self.source, "updateMemoryForNewReadingFromGame")))
         self.assertIn(
-            "weJustFinishedWarping = "
-            "(botMemoryBefore.shipWarpingInLastReading == Just True) "
-            "&& (shipIsWarping == Just False)", update)
+            "weJustFinishedWarping = warpJustEnded "
+            "{ warpingLastReading = botMemoryBefore.shipWarpingInLastReading "
+            ", readingNow = context.readingFromGameClient }", update)
         self.assertEqual(
             code_only(self.source).count("weJustFinishedWarping ="), 1,
             "one definition, read by both the anomaly bookkeeping and the swap")

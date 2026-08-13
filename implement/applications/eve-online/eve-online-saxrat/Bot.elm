@@ -176,7 +176,7 @@ defaultBotSettings =
     { hideWhenNeutralInLocal = AppSettings.Yes
     , runAwayShieldHitpointsThresholdPercent = -1
     , runAwayArmorHitpointsThresholdPercent = -1
-    , anomalyNames = [ "sansha rally point", "angel rally point" ]
+    , anomalyNames = []
     , avoidRats = []
     , maxTargetCount = 4
     , botStepDelayMilliseconds = 499
@@ -499,6 +499,12 @@ type alias BotMemory =
     { lastDockedStationNameFromInfoPanel : Maybe String
     , shipModules : ShipModulesMemory
     , shipWarpingInLastReading : Maybe Bool
+
+    -- How many readings ago the last warp finished, which is what opens the
+    -- arrival window the other-pilot snapshot is taken inside. `Nothing` means
+    -- no warp has finished this session and is a closed window, never an open
+    -- one. See `otherPilotArrivalWindowReadings`.
+    , readingsSinceWarpEnded : Maybe Int
     , visitedAnomalies : Dict.Dict String MemoryOfAnomaly
     , contextMenuLastDepth : Int
     , contextMenuStuckTicks : Int
@@ -587,6 +593,7 @@ type alias BotMemory =
     -- the reading a bound moved, which is what makes one line per change need
     -- no "already reported" flag. See `lockRangeThresholdInMeters`.
     , lockAttempt : Maybe LockAttempt
+    , lockRangeStatedMeters : Maybe Int
     , lockProvenAtMeters : Maybe Int
     , lockRefusedAtMeters : Maybe Int
     , lockRangeLastChange : Maybe String
@@ -910,16 +917,14 @@ findReasonToIgnoreProbeScanResult context probeScanResult =
                         |> Maybe.withDefault False
 
                 matchesAnomalyNameFromSettings =
-                    (context.eventContext.botSettings.anomalyNames |> List.isEmpty)
-                        || (probeScanResult.cellsTexts
-                                |> Dict.get "Name"
-                                |> Maybe.map
-                                    (\name ->
-                                        context.eventContext.botSettings.anomalyNames
-                                            |> List.any (anomalyNameMatches name)
-                                    )
-                                |> Maybe.withDefault False
-                           )
+                    probeScanResult.cellsTexts
+                        |> Dict.get "Name"
+                        |> Maybe.map
+                            (\name ->
+                                anomalyNamesInEffect context.eventContext.botSettings
+                                    |> List.any (anomalyNameMatches name)
+                            )
+                        |> Maybe.withDefault False
             in
             if not isCombatAnomaly then
                 Just (AvoidAnomaly IsNoCombatAnomaly)
@@ -962,6 +967,39 @@ findReasonToAvoidAnomalyFromMemory context { anomalyID } =
 getRatsToAvoidSeenInAnomaly : BotSettings -> MemoryOfAnomaly -> Set.Set String
 getRatsToAvoidSeenInAnomaly settings =
     .ratsSeen >> Set.filter (shouldAvoidRatAccordingToSettings settings)
+
+
+{-| What the bot hunts when the operator has named nothing.
+
+These are a **fallback**, not a floor. Before #198 they were the initial value of
+`BotSettings.anomalyNames` and the `anomaly-name` handler prepended to them, so an
+operator naming six hideaways got those six _and_ these two -- and a rally point is
+a considerably harder site than a hideaway, which is not what "choose the name of
+anomalies to take" reads like. Naming one now replaces them.
+
+-}
+shippedAnomalyNames : List String
+shippedAnomalyNames =
+    [ "sansha rally point", "angel rally point" ]
+
+
+{-| The list the scan-result filter actually consults.
+
+Empty means the operator named none, which is the only way the list can be empty
+-- the handler prepends and nothing removes. **"Take anything" is still
+expressible** and is now the operator's to write rather than a shortcut here:
+`anomaly-name=*` is a prefix match on the empty string, which every name starts
+with. The `List.isEmpty` shortcut this replaces meant the same thing and could
+never fire, because the defaults it was defending against were never empty.
+
+-}
+anomalyNamesInEffect : BotSettings -> List String
+anomalyNamesInEffect settings =
+    if settings.anomalyNames |> List.isEmpty then
+        shippedAnomalyNames
+
+    else
+        settings.anomalyNames
 
 
 {-| Whether one `anomaly-name` entry matches the name the scanner shows.
@@ -1010,6 +1048,237 @@ shouldAvoidRatAccordingToSettings settings ratName =
 memoryOfAnomalyWithID : String -> BotMemory -> Maybe MemoryOfAnomaly
 memoryOfAnomalyWithID anomalyID =
     .visitedAnomalies >> Dict.get anomalyID
+
+
+{-| Whether the ship is warping, as far as this reading can say.
+
+**Three answers rather than two, and the third one is issue #194.** `Just True`
+is the client naming `Warp`; `Just False` is the client naming some other
+maneuver -- `Orbit`, `Approach`, `Aligning`; and `Nothing` is the client naming
+none, which is what a ship that has stopped maneuvering looks like and also what
+a reading with no ship UI at all looks like. Whoever reads this has to decide
+which of the last two they meant, because the type cannot.
+
+Lifted out of `updateMemoryForNewReadingFromGame` so that a case can execute it
+against a real parsed reading. Both apps derived it inline, and in two different
+shapes -- one a pipeline, one a `case` -- which is a drift that compiles.
+
+-}
+shipWarpingFromReading : ReadingFromGameClient -> Maybe Bool
+shipWarpingFromReading readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.andThen .indication
+        |> Maybe.andThen .maneuverType
+        |> Maybe.map ((==) EveOnline.ParseUserInterface.ManeuverWarp)
+
+
+{-| Whether this reading is the one a warp ended on.
+
+**Issue #194: the form this replaces could never answer `True` at the end of a
+warp.** It asked for `shipWarpingInLastReading == Just True` together with
+`shipIsWarping == Just False`, and `shipIsWarping` is a `Maybe` over the
+maneuver the client _names_: `Just True` for `Warp`, `Just False` for some
+**other** named maneuver, and `Nothing` when no maneuver is named at all. So
+`Just False` never meant "the ship is not warping" -- it meant "the ship is
+orbiting, or approaching, or aligning". A ship that has simply stopped answers
+`Nothing`.
+
+Captured off the live client during saxrat run 29, sampling the ship UI's
+indication about once a second across two warps: while warping the container
+holds `Warp Drive Active` and the destination, and on the reading the warp ends
+the container is still present and holds only the location labels -- no maneuver
+word anywhere in it. The parser reads no `maneuverType` from that, so the
+transition a warp really makes is `Just True -> Nothing`, and the condition that
+demanded `Just False` was unreachable in every recorded run.
+`EveOnline.BotFramework.shipUIIndicatesShipIsWarpingOrJumping` already treats an
+absent indication as "not maneuvering", and says so in a comment; this was the
+one place that did not.
+
+So the transition is `Just True` followed by anything that is _not_ `Just True`.
+
+**And the ship UI has to be present to say so.** `Nothing` is equally what a
+reading with no ship UI at all answers -- docked, a client that did not render,
+a reading taken across a session change -- and none of those is an arrival,
+because nothing arrived. The presence of the ship UI is read separately for
+exactly that reason: it is what keeps "the ship stopped maneuvering" apart from
+"we could not see the ship", which the `Maybe Bool` cannot distinguish on its
+own and which `shipWarpingInLastReading` stores in the same shape.
+
+-}
+warpJustEnded :
+    { warpingLastReading : Maybe Bool
+    , readingNow : ReadingFromGameClient
+    }
+    -> Bool
+warpJustEnded { warpingLastReading, readingNow } =
+    (warpingLastReading == Just True)
+        && (readingNow.shipUI /= Nothing)
+        && (shipWarpingFromReading readingNow /= Just True)
+
+
+{-| How many readings after a warp ends a pilot on the overview still counts as
+_found on arrival_.
+
+**Zero, so the arrival is the reading the ship lands on and no other.** The
+window this constant bounds was built to cover a lag that has since been
+measured and is not there, and every reading of it past the landing one is
+exposure to the opposite bug.
+
+The lag it was meant to cover is the probe scanner not having named the anomaly
+yet, since the snapshot has nowhere to be filed until it has. Measured over
+saxrat runs 16, 21, 23 and 24 -- taking every reading on which `HOOOOONK in
+warp` stops, then reading the `Current anomaly:` line forward from it -- the
+anomaly is named **on** the warp-end reading in 123 of the 123 arrivals that
+ever name one: median 0, p90 0, max 0. The remaining 127 arrivals name no
+anomaly at all before the next warp, and no bound reaches those either. A wider
+window therefore converts no arrival into a recorded one.
+
+**The cost is measured on the same corpus.** Of those 250 arrivals, the number
+that would record at least one pilot is 19 at a bound of 0, 19 at 1, 20 at 3,
+25 at 10 and 34 at 30. The fifteen a 30-reading window adds are by construction
+arrivals where nobody was on the overview when the ship landed and somebody
+turned up afterwards -- which is the case this feature must **not** fire on. A
+neutral already there when we land means leave; a neutral arriving while we are
+already fighting means tough it out. At 30 readings, nearly half of everything
+recorded would have been the wrong half.
+
+A bound of 1 records the same 19 arrivals as a bound of 0 across all 250, so on
+this corpus the overview never took an extra reading to draw a pilot who was
+already on the grid. That is the only thing a wider bound could honestly buy
+here, and it did not happen once.
+
+**The unit stays readings**, which is what every other bound in these bots is
+counted in -- `approachIndicationTrustedForTicks` is 10,
+`dockingRunInPatienceReadings` 20, `gateRefusesThisShipTicks` 40 and
+`droneRecallGiveUpTicks` 60 -- so a later widening is comparable to those
+without a conversion done in the reader's head, and has to argue against the
+counts above rather than merely feel safer. In wall-clock terms a reading is one
+to eight seconds by this repo's own two figures, so the 30 this shipped with was
+30 s to 4 minutes of grid to be wrong about.
+
+-}
+otherPilotArrivalWindowReadings : Int
+otherPilotArrivalWindowReadings =
+    0
+
+
+{-| Whether this reading is still close enough to the last warp to be arrival.
+
+**`Nothing` is a closed window, not an open one.** No warp has finished this
+session -- the bot started already sitting in an anomaly, or the transition has
+never been seen -- so there is no arrival to be inside of, and nothing is
+recorded. That is both the conservative direction and what the bot does today:
+`warpJustEnded` is false on every one of those readings too.
+
+The comparison is inclusive, so the reading a warp ends on -- zero readings
+elapsed -- is arrival. At the bound this shipped with that is the whole of the
+window, which is what the corpus behind `otherPilotArrivalWindowReadings` asks
+for; the comparison is written as a bound rather than as `== Just 0` so that
+widening it is a change to the number and an argument against those counts,
+rather than a change to this rule.
+
+-}
+arrivalWindowIsOpen : { readingsSinceWarpEnded : Maybe Int } -> Bool
+arrivalWindowIsOpen { readingsSinceWarpEnded } =
+    case readingsSinceWarpEnded of
+        Nothing ->
+            False
+
+        Just readings ->
+            readings <= otherPilotArrivalWindowReadings
+
+
+{-| The pilots this anomaly's arrival has found, after one more reading.
+
+**It accumulates rather than overwrites, and that is what keeps the memory
+latched.** The snapshot it replaces ran on exactly one reading, so whatever it
+wrote was final; a window of readings that each _replaced_ the list would forget
+a pilot who was on the grid when the ship landed and warped off two readings
+later -- and forgetting is the half #194 says is dead, since the same list is
+what makes the scan result be skipped later. Adding only can never unsay a
+reason, so the verdict behaves exactly as the single-reading one did: written
+once during arrival, and untouched for the lifetime of that anomaly's memory.
+
+Order is first-seen first, because `findReasonToAvoidAnomalyFromMemory` reports
+the head of this list, and the pilot who was already there when the ship landed
+is the one an operator wants named.
+
+A closed window adds nothing, which is the sentence that stops this becoming the
+mid-fight check the issue exists to refuse.
+
+-}
+otherPilotsFoundOnArrivalAfterReading :
+    { windowIsOpen : Bool
+    , foundBefore : List String
+    , seenNow : List String
+    }
+    -> List String
+otherPilotsFoundOnArrivalAfterReading { windowIsOpen, foundBefore, seenNow } =
+    if not windowIsOpen then
+        foundBefore
+
+    else
+        foundBefore
+            ++ (seenNow |> List.filter (\pilot -> not (List.member pilot foundBefore)))
+
+
+{-| The arrival window, for the status line -- read by no decision.
+
+Nothing about the window was visible on a reading before this, which is most of
+why #194 took a corpus sweep to find: the snapshot's silence and a grid with
+nobody on it print identically. The three things this separates are the three
+ways the feature can still be inert.
+
+  - `no warp has finished this session` all run means the window never opens, so
+    nothing below it can fire. That is what #194 actually was: the trigger
+    demanded `shipIsWarping == Just False` where a warp ending answers `Nothing`,
+    so it could not fire at the end of a warp at all. `warpJustEnded` is the
+    fix, and this clause is how a run says whether it stayed fixed.
+  - `no anomaly named in the probe scanner` while the window is open is #194's
+    own diagnosis happening in front of the operator -- and the window closing
+    with that clause on every reading of it would mean 30 readings is not long
+    enough.
+  - a name recorded here is the leave branch about to fire, and the first time
+    `FoundOtherPilotOnArrival` will ever have been constructed.
+
+-}
+describeArrivalWindow :
+    { readingsSinceWarpEnded : Maybe Int
+    , windowIsOpen : Bool
+    , otherPilotsFoundOnArrival : Maybe (List String)
+    }
+    -> String
+describeArrivalWindow { readingsSinceWarpEnded, windowIsOpen, otherPilotsFoundOnArrival } =
+    let
+        describeWindow =
+            case readingsSinceWarpEnded of
+                Nothing ->
+                    "no warp has finished this session"
+
+                Just sinceWarpEnded ->
+                    (if windowIsOpen then
+                        "OPEN, "
+
+                     else
+                        "closed, "
+                    )
+                        ++ String.fromInt sinceWarpEnded
+                        ++ " of "
+                        ++ String.fromInt otherPilotArrivalWindowReadings
+                        ++ " readings since the last warp ended"
+
+        describeFound =
+            case otherPilotsFoundOnArrival of
+                Nothing ->
+                    "no anomaly named in the probe scanner, so nothing can be recorded"
+
+                Just [] ->
+                    "nobody recorded on arrival here"
+
+                Just pilots ->
+                    "found on arrival here: " ++ String.join ", " pilots
+    in
+    "Arrival window: " ++ describeWindow ++ "; " ++ describeFound ++ "."
 
 
 {-| The anomaly we most recently arrived in, found by picking the memory
@@ -2253,63 +2522,82 @@ setRouteToNextHuntingGround context =
 
 jumpToNextSystem : BotDecisionContext -> DecisionPathNode
 jumpToNextSystem context =
-    case context.readingFromGameClient |> infoPanelRouteFirstMarkerFromReadingFromGameClient of
-        Nothing ->
-            setRouteToNextHuntingGround context
+    if routePanelSaysNoDestination context.readingFromGameClient then
+        -- #191. The marker strip and the panel's own words disagree, and the
+        -- words are the ones that turned out to be true: run 23 spent 1,200+
+        -- consecutive readings travelling a route the client had never
+        -- computed, because a stale pip reads as a route to
+        -- `infoPanelRouteFirstMarkerFromReadingFromGameClient` and nothing ever
+        -- read the text beside it.
+        --
+        -- Answering it as "no route" is what bounds this. The travel leg itself
+        -- has no limit -- it is a fall-back to a cascade, and a cascade that
+        -- keeps finding its icon never gives up -- where asking for a route is
+        -- bounded by `routeAskGiveUpReadings` and ends in the hunt circuit
+        -- moving on. So the fix is not a counter here; it is letting the
+        -- reading reach the branch that already has one.
+        describeBranch
+            "The route panel says there is no destination while still showing a marker -- the marker is stale, so there is no route to travel here."
+            (setRouteToNextHuntingGround context)
 
-        Just infoPanelRouteFirstMarker ->
-            -- Feedback: right after the route is reset and a new
-            -- destination is set (whether by the bot or manually), EVE's
-            -- own route panel needs a moment to actually compute the new
-            -- multi-jump path -- during that brief window the marker
-            -- strip can be empty, partial, or still shifting. Clicking
-            -- during that window means right-clicking a position that
-            -- has no clickable icon there yet (or not there anymore by
-            -- the time the click lands) -- observed live as hundreds of
-            -- consecutive ticks of "open context menu on route element
-            -- icon" with no menu ever actually appearing, not even a
-            -- wrong one to discard. A live, isolated check (read the
-            -- same marker 5 times, 300ms apart) found its position
-            -- perfectly stable under normal conditions, so this is a
-            -- real but transient settling window, not a persistent
-            -- coordinate bug -- guard against it by requiring the first
-            -- marker's own display region to have stayed the same for
-            -- at least one full tick (tracked in BotMemory --
-            -- previousReadingsFromGameClient only retains contextMenus,
-            -- not route/info-panel data, so this can't be checked
-            -- directly against a prior reading the way the context-menu
-            -- "no progress" check does) before acting on it.
-            if context.memory.routeFirstMarkerUnchangedTicks < 1 then
-                describeBranch
-                    "Route panel's first marker just appeared or moved since the last reading -- wait for the route to finish (re)computing before clicking it."
-                    waitForProgressInGame
+    else
+        case context.readingFromGameClient |> infoPanelRouteFirstMarkerFromReadingFromGameClient of
+            Nothing ->
+                setRouteToNextHuntingGround context
 
-            else
-                returnDronesToBay context
-                    (jumpThroughRouteStargate context
-                        (useContextMenuCascadeWithCustomConfig
-                            -- Feedback: "Jump Through Stargate" took 3-4 menu
-                            -- opens before being recognized. The route icon is
-                            -- small and sits in a strip that can shift as the
-                            -- route updates, so the default distance tolerance
-                            -- (70, already once widened from 40 for this same
-                            -- kind of drift on other elements) was plausibly
-                            -- discarding a menu that had, in fact, opened
-                            -- correctly. Widened just for this one cascade
-                            -- rather than the shared default, since other
-                            -- cascades' tolerance is already tuned from past
-                            -- observations and this is a different UI element.
-                            (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
-                            { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
-                            (useMenuEntryWithTextContainingFirstOf
-                                [ "dock"
-                                , "jump"
-                                ]
-                                menuCascadeCompleted
+            Just infoPanelRouteFirstMarker ->
+                -- Feedback: right after the route is reset and a new
+                -- destination is set (whether by the bot or manually), EVE's
+                -- own route panel needs a moment to actually compute the new
+                -- multi-jump path -- during that brief window the marker
+                -- strip can be empty, partial, or still shifting. Clicking
+                -- during that window means right-clicking a position that
+                -- has no clickable icon there yet (or not there anymore by
+                -- the time the click lands) -- observed live as hundreds of
+                -- consecutive ticks of "open context menu on route element
+                -- icon" with no menu ever actually appearing, not even a
+                -- wrong one to discard. A live, isolated check (read the
+                -- same marker 5 times, 300ms apart) found its position
+                -- perfectly stable under normal conditions, so this is a
+                -- real but transient settling window, not a persistent
+                -- coordinate bug -- guard against it by requiring the first
+                -- marker's own display region to have stayed the same for
+                -- at least one full tick (tracked in BotMemory --
+                -- previousReadingsFromGameClient only retains contextMenus,
+                -- not route/info-panel data, so this can't be checked
+                -- directly against a prior reading the way the context-menu
+                -- "no progress" check does) before acting on it.
+                if context.memory.routeFirstMarkerUnchangedTicks < 1 then
+                    describeBranch
+                        "Route panel's first marker just appeared or moved since the last reading -- wait for the route to finish (re)computing before clicking it."
+                        waitForProgressInGame
+
+                else
+                    returnDronesToBay context
+                        (jumpThroughRouteStargate context
+                            (useContextMenuCascadeWithCustomConfig
+                                -- Feedback: "Jump Through Stargate" took 3-4 menu
+                                -- opens before being recognized. The route icon is
+                                -- small and sits in a strip that can shift as the
+                                -- route updates, so the default distance tolerance
+                                -- (70, already once widened from 40 for this same
+                                -- kind of drift on other elements) was plausibly
+                                -- discarding a menu that had, in fact, opened
+                                -- correctly. Widened just for this one cascade
+                                -- rather than the shared default, since other
+                                -- cascades' tolerance is already tuned from past
+                                -- observations and this is a different UI element.
+                                (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
+                                { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
+                                (useMenuEntryWithTextContainingFirstOf
+                                    [ "dock"
+                                    , "jump"
+                                    ]
+                                    menuCascadeCompleted
+                                )
+                                context
                             )
-                            context
                         )
-                    )
 
 
 {-| What the panel may be asked to do about the route's next stargate.
@@ -2501,6 +2789,121 @@ parseNextSystemInRouteFromLabelText labelText =
         |> List.map String.trim
         |> List.filter (String.isEmpty >> not)
         |> List.head
+
+
+{-| The words the route panel writes when the client has no route at all.
+
+Lower-cased before comparing, because the panel's own casing is not something
+this has evidence about beyond the one capture.
+
+-}
+routePanelNoDestinationMarker : String
+routePanelNoDestinationMarker =
+    "no destination"
+
+
+{-| Whether the route panel says outright that there is no destination.
+
+**A reading can carry this _and_ a next-system label at the same time**, and that
+is #191. Read off the live client while saxrat run 23 was stuck, the panel held
+
+    No Destination
+    <a href="showinfo:5//30002217" alt="Next System in Route">Hutian</a>
+    No Destination
+
+with one marker icon. The bot read the label, looked for an overview row named
+`Hutian`, found none, fell back to the route-marker cascade, and repeated -- 1,200+
+consecutive readings, never moving, because the client had not computed a route to
+that system and the label was left over.
+
+`infoPanelRouteFirstMarkerFromReadingFromGameClient` answers the panel's
+_visibility_ and has never read its text, so a stale pip reads as a route. The
+panel's own sentence is the one piece of evidence that contradicts it, and this is
+the reading of it.
+
+-}
+routePanelSaysNoDestination : ReadingFromGameClient -> Bool
+routePanelSaysNoDestination readingFromGameClient =
+    (routePanelTexts readingFromGameClient
+        |> List.any
+            (\text ->
+                text |> String.toLower |> String.contains routePanelNoDestinationMarker
+            )
+    )
+        && not (routePanelShowsARoute readingFromGameClient)
+
+
+{-| Every string the route panel is carrying, markup and all.
+
+One definition because three rules read it and the markup matters to two of
+them: `getAllContainedDisplayTexts` returns `_setText` as the client wrote it,
+so the `alt=` attributes below survive into the answer.
+
+-}
+routePanelTexts : ReadingFromGameClient -> List String
+routePanelTexts readingFromGameClient =
+    readingFromGameClient.infoPanelContainer
+        |> Maybe.andThen .infoPanelRoute
+        |> Maybe.map (.uiNode >> .uiNode >> EveOnline.ParseUserInterface.getAllContainedDisplayTexts)
+        |> Maybe.withDefault []
+
+
+{-| What the panel writes when a route really is set.
+
+`No Destination` is not the absence of these -- it is a label the client leaves
+in the tree beside them, under a node whose own `_name` is `noDestinationLabel`,
+and that is the whole of #191's second half. Run 31 sat in Hama for 48 minutes
+and asked the host for a route **2,494 times** while the panel read:
+
+    Route <fontsize=12>5 Jumps
+    No Destination                                     <- _name=noDestinationLabel
+    <a href="showinfo:5//30003525" alt="Next System in Route">Bagodan</a>
+    <a href="showinfo:5//30003547" alt="Current Destination">Hamse</a>
+
+The route was real: five jumps, next hop Bagodan, destination Hamse, set by the
+bot's own ESI call three readings earlier.
+
+-}
+routePanelDestinationMarker : String
+routePanelDestinationMarker =
+    "current destination"
+
+
+routePanelJumpsMarker : String
+routePanelJumpsMarker =
+    "jump"
+
+
+{-| Whether the panel carries positive evidence of a route.
+
+**Positive rather than negative, and that is the point.** The two recorded
+captures are separated by exactly these words and by nothing else:
+
+  - run 23, stuck with no route the client had ever computed: `No Destination`,
+    a `Next System in Route` label, `No Destination` again, and one marker pip.
+    Neither marker below appears.
+  - run 31, stuck with a five-jump route it refused to travel: both markers
+    below, beside the same stale `No Destination`.
+
+So a rule that reads the absence of `No Destination`, or the presence of a
+marker pip, cannot tell them apart -- and each of those is what the two halves
+of this bot were separately doing. `Next System in Route` is deliberately _not_
+one of the markers: it is present in both captures, being the label run 23's
+client left behind.
+
+-}
+routePanelShowsARoute : ReadingFromGameClient -> Bool
+routePanelShowsARoute readingFromGameClient =
+    routePanelTexts readingFromGameClient
+        |> List.any
+            (\text ->
+                let
+                    lowered =
+                        text |> String.toLower
+                in
+                (lowered |> String.contains routePanelDestinationMarker)
+                    || (lowered |> String.contains routePanelJumpsMarker)
+            )
 
 
 {-| Whether an overview row's own words say it is a stargate.
@@ -3418,11 +3821,11 @@ the effect) -- so a message is its child's texts joined, not any single label.
 
 This is a display buffer, not a log: messages age off the screen and disappear
 from the tree with them. It answers "what just happened to whom, for how much"
-over the last few seconds, which is the question the status text wants; anything
-needing history should read the gamelog file instead.
+over the last few seconds; anything needing history should read the gamelog file
+instead.
 
-The markup is EVE's own colour and font tagging, stripped here because the
-status text is read by a human in a terminal.
+The markup is EVE's own colour and font tagging, stripped here because whatever
+reads this is a human in a terminal.
 
 -}
 visibleCombatMessages : ReadingFromGameClient -> List String
@@ -3443,32 +3846,36 @@ visibleCombatMessages readingFromGameClient =
         |> List.filter (String.isEmpty >> not)
 
 
-{-| The combat feed for the status text, newest last, capped so a busy fight
-does not push everything else out of view.
+{-| The on-screen combat feed used to be printed with every status line, and it
+was the largest thing in the log while being almost none of its information.
+
+Issue #190. `describeVisibleCombatMessages` rendered up to six lines of the
+widget on every reading: 9,639 of run 20's 25,762 lines and 98,700 of run 21's
+296,465, a third of each log. The widget is a rolling on-screen window, so
+consecutive readings mostly re-render the same six lines -- 1,376 of run 20's
+1,377 blocks were byte-identical to the one before, and 99.5% of run 21's. It
+also outlives the fight it describes, because messages age off the screen rather
+than off the grid: 1,344 of run 20's 1,377 blocks were printed on readings whose
+own decision line says the ship is docked.
+
+Nothing a decision uses is lost, because no decision ever read it. Nothing an
+operator uses is lost either: the host reads EVE's `(combat)` channel directly
+and sums the incoming half into `incomingDamageSinceLastReading`, which
+`describeIncomingDamage` already prints on every reading -- scoped to the
+reading, with the attackers named, and unable to go stale the way a display
+buffer does. The client's own lines are in the same log a second time besides,
+echoed by the host as `game log: ... (combat) ...`.
+
+`visibleCombatMessages` above is now unused, kept deliberately rather than
+deleted, for the reason the mission runner kept its copy when it dropped the same
+clause: it encodes which UI nodes carry combat text and how to read them, which
+is the expensive part to rediscover, and any future in-decision use of combat
+state wants exactly that.
+
 -}
-describeVisibleCombatMessages : ReadingFromGameClient -> String
-describeVisibleCombatMessages readingFromGameClient =
-    case visibleCombatMessages readingFromGameClient of
-        [] ->
-            "Combat feed: quiet."
-
-        messages ->
-            let
-                shown =
-                    messages |> List.reverse |> List.take 6 |> List.reverse
-
-                omitted =
-                    List.length messages - List.length shown
-            in
-            "Combat feed"
-                ++ (if 0 < omitted then
-                        " (" ++ String.fromInt omitted ++ " older not shown)"
-
-                    else
-                        ""
-                   )
-                ++ ":\n  "
-                ++ String.join "\n  " shown
+combatFeedIsReportedByTheHostGameLog : ()
+combatFeedIsReportedByTheHostGameLog =
+    ()
 
 
 {-| The quick message this reading carries, with what the parser dropped to get it.
@@ -3576,11 +3983,10 @@ quickMessageTextForStatusLine text =
 
 {-| The quick message clause, which says what the client wrote and how old it is.
 
-Printed on every reading, including the ones with nothing to report, for
-`describeVisibleCombatMessages`' reason: a clause that appears only when there is
-something to say leaves "the client said nothing" and "nothing is reading the
-client" grepping identically, and telling those apart is the first thing #123
-wants from a run.
+Printed on every reading, including the ones with nothing to report: a clause
+that appears only when there is something to say leaves "the client said nothing"
+and "nothing is reading the client" grepping identically, and telling those apart
+is the first thing #123 wants from a run.
 
 Whether the message is on the screen _now_ is the first thing in the clause and
 is never implied. A stale message printed as if it were current would be worse
@@ -3693,10 +4099,27 @@ decideNextActionWhenInSpace context seeUndockingComplete =
 
                                 Nothing ->
                                     decideActionInAnomaly
-                                        { arrivalInAnomalyAgeSeconds = 600 }
+                                        -- The clock, said rather than spelled. This
+                                        -- branch has no anomaly to be in: the memory
+                                        -- is filed under the ID the probe scanner
+                                        -- gives, and there is no scanner here, so
+                                        -- `arrivalInAnomalyAgeSecondsFromMemory` would
+                                        -- answer its `Maybe.withDefault 0` and tether
+                                        -- the ship for the full wait at a site it
+                                        -- cannot name. What this path means is that
+                                        -- the wait is already over, so it passes the
+                                        -- setting itself: `waitTimeRemainingSeconds`
+                                        -- is 0 and the 120-second loot backstop is
+                                        -- still live, which is what the literal `600`
+                                        -- here did while `anomalyWaitTimeSeconds`
+                                        -- happened to also be 600 -- and goes on
+                                        -- meaning it when an operator changes that.
+                                        { arrivalInAnomalyAgeSeconds =
+                                            context.eventContext.botSettings.anomalyWaitTimeSeconds
+                                        }
                                         context
                                         seeUndockingComplete
-                                        (jumpToNextSystem context)
+                                        (siteProgressStepOrElse context (jumpToNextSystem context))
                             )
 
                     Just probeScannerWindow ->
@@ -3746,30 +4169,8 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                     -- in front of the ship, and a "Warp to Site" offered
                                     -- while a gate is in reach is the panel still showing
                                     -- the site the ship is standing in.
-                                    accelerationGateStep =
-                                        activateAccelerationGateIfPresent context
-
-                                    opportunityWarpStep =
-                                        warpToOpportunitySiteIfAvailable context.readingFromGameClient
-
                                     pickAnotherAnomalyOrLeave =
-                                        case
-                                            siteProgressStep
-                                                { gateBranchOffersAStep = accelerationGateStep /= Nothing
-                                                , warpToSiteIsOffered = opportunityWarpStep /= Nothing
-                                                , gateWithinReach = accelerationGateIsWithinReach context.readingFromGameClient
-                                                }
-                                        of
-                                            WorkTheAccelerationGate ->
-                                                accelerationGateStep
-                                                    |> Maybe.withDefault pickAnotherAnomalyOrLeaveViaScanResults
-
-                                            WarpToTheOpportunitySite ->
-                                                opportunityWarpStep
-                                                    |> Maybe.withDefault pickAnotherAnomalyOrLeaveViaScanResults
-
-                                            HuntWithTheProbeScanner ->
-                                                pickAnotherAnomalyOrLeaveViaScanResults
+                                        siteProgressStepOrElse context pickAnotherAnomalyOrLeaveViaScanResults
                                 in
                                 -- The anomaly's own signature can drop off the probe
                                 -- scanner (site "resolved"/expired) while rats are
@@ -4998,8 +5399,8 @@ droneRecallAskedLookbackSteps =
 Read out of the effects rather than the decision, because
 `updateMemoryForNewReadingFromGame` is the only place that can write memory and
 it never sees the decision. `vkey_R` is used for nothing else in this bot --
-`vkey_E` is the approach chord and `vkey_W` the orbit -- so the chord is
-unambiguous.
+`vkey_Q` is the approach chord, `vkey_E` the keep-at-range and `vkey_W` the
+orbit -- so the chord is unambiguous.
 
 -}
 recentStepAskedForDroneRecall : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
@@ -5104,9 +5505,9 @@ lockTargetFromOverviewEntry context overviewEntry =
             else
                 describeBranch ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Approach.")
                     (decideActionForCurrentStep
-                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_E ]
+                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_Q ]
                          , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-                         , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_E ]
+                         , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_Q ]
                          ]
                             |> List.concat
                         )
@@ -5272,6 +5673,7 @@ rule reachable only through one can be checked by reading it and no other way.
 -}
 type alias LockRangeState =
     { fromSetting : Int
+    , statedMeters : Maybe Int
     , provenAtMeters : Maybe Int
     , refusedAtMeters : Maybe Int
     , attempt : Maybe LockAttempt
@@ -5281,6 +5683,7 @@ type alias LockRangeState =
 lockRangeStateFrom : BotDecisionContext -> LockRangeState
 lockRangeStateFrom context =
     { fromSetting = context.eventContext.botSettings.targetingRangeMeters
+    , statedMeters = context.memory.lockRangeStatedMeters
     , provenAtMeters = context.memory.lockProvenAtMeters
     , refusedAtMeters = context.memory.lockRefusedAtMeters
     , attempt = context.memory.lockAttempt
@@ -5316,13 +5719,34 @@ lockRangeThresholdInMeters state =
 
                 Just refusedAt ->
                     min state.fromSetting (refusedAt - 1)
-    in
-    case state.provenAtMeters of
-        Nothing ->
-            loweredByRefusal
 
-        Just provenAt ->
-            max provenAt loweredByRefusal
+        fromMeasurements : Int
+        fromMeasurements =
+            case state.provenAtMeters of
+                Nothing ->
+                    loweredByRefusal
+
+                Just provenAt ->
+                    max provenAt loweredByRefusal
+    in
+    case state.statedMeters of
+        -- The client naming the number outranks both measurements, and #206 is
+        -- what happens when it does not. `provenAtMeters` only ever rises, so an
+        -- attribution error that credits a lock to a more distant row is
+        -- permanent -- run 28 ratcheted to 77 km on a hull whose real range is
+        -- 49 km, crossing its own refusal at 33 km, while the client had said
+        -- `It must be within 49 km` on 1,277 live sightings of that run. A bound
+        -- inferred from several conditions holding at once cannot outweigh the
+        -- client answering in words.
+        --
+        -- Still `min` with the setting, because an operator asking for a
+        -- narrower range than the ship can manage is asking for something the
+        -- client will grant, and this rule has never overridden that direction.
+        Just stated ->
+            min state.fromSetting stated
+
+        Nothing ->
+            fromMeasurements
 
 
 {-| Whether the ship can lock this row from where it is standing.
@@ -5853,6 +6277,82 @@ lockAttemptCanTeachRange attempt =
     attempt.targetsCount == 0
 
 
+{-| The first of the pair the client's own sentence has to carry.
+
+`#31`'s reason: one common phrase matches sentences this must not read. "too far
+away" alone is written about warping, about approaching, and about interacting
+with a container; only the pairing with a stated ceiling makes it the lock range.
+
+-}
+lockRangeTooFarMarker : String
+lockRangeTooFarMarker =
+    "too far away"
+
+
+{-| The second, and the one carrying the number.
+
+    The target <b>Centii Minion</b> is too far away. It must be within <b>49 km</b>.
+
+-}
+lockRangeCeilingMarker : String
+lockRangeCeilingMarker =
+    "must be within"
+
+
+{-| The ceiling the client stated on this reading, in meters, if it stated one.
+
+**Only `km`.** The corpus writes this sentence one way and every sighting is in
+kilometres; a bare number or a unit this does not know is answered `Nothing`
+rather than guessed at, because the failure of a guess here is a threshold the
+bot then trusts over its own measurements.
+
+Markup is stripped first -- the number arrives inside `<b>` tags -- which is
+`textWithoutMarkupTags`' job and the same thing the fleet-invitation reader does
+with a `showinfo` link.
+
+-}
+lockRangeStatedInText : String -> Maybe Int
+lockRangeStatedInText text =
+    let
+        plain : String
+        plain =
+            text |> textWithoutMarkupTags |> String.toLower
+    in
+    if not (plain |> String.contains lockRangeTooFarMarker) then
+        Nothing
+
+    else
+        case plain |> String.split lockRangeCeilingMarker of
+            _ :: afterMarker :: _ ->
+                case afterMarker |> String.words of
+                    number :: unit :: _ ->
+                        if unit |> String.startsWith "km" then
+                            number |> String.toInt |> Maybe.map ((*) 1000)
+
+                        else
+                            Nothing
+
+                    _ ->
+                        Nothing
+
+            _ ->
+                Nothing
+
+
+{-| What the client said about the lock range on this reading, if anything.
+
+Read from the quick message **on screen now** rather than from the game log's
+echo of it: the same sentence is reprinted under every decision for as long as it
+is remembered, and counting those would make one refusal look like hundreds.
+
+-}
+lockRangeStatedInQuickMessage : ReadingFromGameClient -> Maybe Int
+lockRangeStatedInQuickMessage readingFromGameClient =
+    readingFromGameClient
+        |> quickMessageOnScreen
+        |> Maybe.andThen (.text >> lockRangeStatedInText)
+
+
 {-| The lock-range bounds, for the status line.
 
 Continuous rather than once-per-change, unlike the decision-log line: a number
@@ -5870,6 +6370,8 @@ describeLockRange state =
         ++ (lockRangeThresholdInMeters state |> String.fromInt)
         ++ " m (setting "
         ++ (state.fromSetting |> String.fromInt)
+        ++ ", client stated "
+        ++ (state.statedMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
         ++ ", proven "
         ++ (state.provenAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
         ++ ", refused "
@@ -6662,6 +7164,7 @@ initBotMemory =
     { lastDockedStationNameFromInfoPanel = Nothing
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , shipWarpingInLastReading = Nothing
+    , readingsSinceWarpEnded = Nothing
     , visitedAnomalies = Dict.empty
     , contextMenuLastDepth = 0
     , contextMenuStuckTicks = 0
@@ -6706,6 +7209,7 @@ initBotMemory =
     -- "the client refused at 0 m", and is why these are `Maybe Int` rather
     -- than a defaulted number. With both absent the threshold is exactly the
     -- setting, so a session that learns nothing behaves as it always did.
+    , lockRangeStatedMeters = Nothing
     , lockProvenAtMeters = Nothing
     , lockRefusedAtMeters = Nothing
     , lockRangeLastChange = Nothing
@@ -9003,6 +9507,17 @@ statusTextFromState context =
                     , gateWithinReach = accelerationGateIsWithinReach readingFromGameClient
                     , askedReadings = context.memory.gateWithinReachTicks
                     }
+                -- Appended rather than folded into the record above, so a gate
+                -- ignored for its distance and one asked and not opened stay
+                -- separate sentences: the first is a gate this bot declines to
+                -- fly at, the second a gate it has been flying at all along.
+                -- The gate spoken about is `nearestAccelerationGateOnOverview`,
+                -- which is the one the branch itself decided about.
+                ++ (readingFromGameClient
+                        |> nearestAccelerationGateOnOverview
+                        |> Maybe.map (.objectDistanceInMeters >> distantGateVerdict >> describeDistantGate)
+                        |> Maybe.withDefault ""
+                   )
                 ++ ". Wrecks already opened: "
                 ++ (context.memory.lootedWreckIds |> List.length |> String.fromInt)
                 ++ ". "
@@ -9061,8 +9576,6 @@ statusTextFromState context =
                             ++ String.fromInt context.memory.hitpointsLowWaterMark.armor
                             ++ "%)."
                    )
-                ++ "\n"
-                ++ describeVisibleCombatMessages readingFromGameClient
 
         describeCurrentReading =
             case readingFromGameClient.shipUI of
@@ -9117,6 +9630,18 @@ statusTextFromState context =
                                 ++ (getCurrentAnomalyIDAsSeenInProbeScanner readingFromGameClient |> Maybe.withDefault "None")
                                 ++ "."
 
+                        describeArrivalWindowClause =
+                            describeArrivalWindow
+                                { readingsSinceWarpEnded = context.memory.readingsSinceWarpEnded
+                                , windowIsOpen =
+                                    arrivalWindowIsOpen
+                                        { readingsSinceWarpEnded = context.memory.readingsSinceWarpEnded }
+                                , otherPilotsFoundOnArrival =
+                                    getCurrentAnomalyIDAsSeenInProbeScanner readingFromGameClient
+                                        |> Maybe.andThen (\anomalyID -> memoryOfAnomalyWithID anomalyID context.memory)
+                                        |> Maybe.map .otherPilotsFoundOnArrival
+                                }
+
                         describeOverview =
                             ("Seeing "
                                 ++ (namesOfOtherPilotsInOverview |> List.length |> String.fromInt)
@@ -9150,7 +9675,7 @@ statusTextFromState context =
                     in
                     [ [ describeShip ]
                     , [ describeDrones ]
-                    , [ describeAnomaly, describeOverview ]
+                    , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
                     , [ describeRatsInOverview, describeCurrentTarget ]
                     ]
                         |> List.map (String.join " ")
@@ -10153,7 +10678,153 @@ describeGateActivationAsk gateCase =
            )
 
 
+{-| The acceleration gate this bot acts on, if the overview is showing one.
+
+One definition rather than two, because the status line speaks about the gate the
+branch decided about: `describeDistantGate` reports an ignored one, and a second
+copy of "which gate" here would let the line and the decision disagree about
+which gate that was.
+
+Rows that are not `_display`ed are dropped first. A virtualised row keeps a
+plausible region belonging to whatever was recycled into its place, so it can
+neither be clicked nor believed about its range.
+
+-}
+nearestAccelerationGateOnOverview :
+    ReadingFromGameClient
+    -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+nearestAccelerationGateOnOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter isAccelerationGate
+        |> List.filter overviewEntryIsDisplayed
+        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+        |> List.head
+
+
+{-| Past how many metres an acceleration gate stops being somewhere to fly to.
+
+A gate this far away is not a gate to fly to; it is evidence that something else
+went wrong -- the grid was not cleared, the wrong object was picked, or the bot
+is looking at a gate on someone else's grid -- and flying at it converts one
+mistake into a whole session. Run 51 spent four hours closing on one at
+1,395,000 m, returning about 122,500 ISK an hour against the 1.36M saxrat was
+measured at. Nothing bounded the approach, because nothing thought a distance
+could be absurd, and `gateWithinReachTicks` could not: that counter is for a gate
+_in reach_ that will not open and only advances inside `interactionRangeInMeters`,
+which a gate 1,395 km away never enters.
+
+**The separation is between what a real gate has ever measured and everything
+above it.** These counts are issue #168's, over every
+`acceleration gate is N m away` line in `~/eve-bot-logs` with the AU placeholder
+excluded, and are cited rather than re-derived here:
+
+    source                  readings   furthest gate
+    ---------------------   --------   -------------
+    24 mission runs            1,385        77,000 m
+    saxrat run 49              3,503       314,000 m
+    mission run 51            11,200     1,395,000 m
+
+So across twenty-four mission runs the furthest gate ever seen is 77,000 m, and
+run 51's is eighteen times that. 150,000 sits in that gap at roughly twice
+anything ever observed working.
+
+**300,000 was the number the issue was filed at, and its own measurement argues
+lower.** saxrat's run 49 reached 314,000 m with 1,629 readings above 150 km and
+only 196 above 300 km, so a 300 km rule catches a tenth of that run's long-gate
+readings and leaves the rest -- and run 49 is not a healthy control either, at
+770k ISK/hr against run 48's 1,357k on identical code, with 28
+`askForHelpToGetUnstuck` alarms. The issue files 300 km as "the safe choice; it
+is not necessarily the effective one" and puts the real gap at 100-150 km.
+150,000 is the top of that range, which is its conservative end.
+
+**It is a number about how these sites are laid out, not about the game**, the
+same warning `defaultRunAwayIncomingDamageThreshold` carries about a hull. A site
+type whose gates are genuinely further out than this would need it re-derived,
+and until it is the bot would ignore a gate it ought to fly to. What makes that
+recoverable rather than silent is that the status line names the gate, its range
+and this number on every reading it declines one, so the evidence for a retune is
+in the log and the retune is one edit.
+
+-}
+distantAccelerationGateMeters : Int
+distantAccelerationGateMeters =
+    150000
+
+
+{-| Whether the nearest acceleration gate is somewhere to fly to at all.
+
+A pure function over the overview row's own `objectDistanceInMeters` so a case
+can execute it, and over the `Result` rather than over the `999999` fallback
+every other consumer of an overview distance takes, so that the two ways of not
+being a gate to fly to stay apart.
+
+That fallback stands in for a distance the client wrote in AU, and it is past any
+threshold this could carry -- so a rule reading it would decline such a row for
+the right reason under the wrong sentence, and an operator reading "past 150000
+m" would go looking for a gate that is far away rather than for one whose range
+did not parse. "Reading the overview" is why an AU distance is excluded on its
+own terms: it is the unparsed-distance placeholder rather than a distance, and
+nothing the ship might act on may be chosen on it.
+
+-}
+type DistantGateVerdict
+    = GateIsCloseEnoughToFlyTo Int
+    | GateIsTooFarToBeSomewhereToFlyTo Int
+    | GateDistanceDoesNotReadAsARange
+
+
+distantGateVerdict : Result String Int -> DistantGateVerdict
+distantGateVerdict distanceRead =
+    case distanceRead of
+        Err _ ->
+            GateDistanceDoesNotReadAsARange
+
+        Ok distanceInMeters ->
+            if distantAccelerationGateMeters < distanceInMeters then
+                GateIsTooFarToBeSomewhereToFlyTo distanceInMeters
+
+            else
+                GateIsCloseEnoughToFlyTo distanceInMeters
+
+
+{-| The ignored-gate clause in the status line.
+
+Empty on the ordinary reading, where the gate is one to fly to and the status
+line's own gate clause already covers it.
+
+**A decline this branch does not say out loud is this repo's signature failure**,
+and the gate branch has already paid for it once: run 10's give-up answered
+`Nothing` about a gate 32 m away and the log said only that nothing was
+happening, 1,325 readings running. A gate plainly on the overview that the bot
+stops acting on reads to the next operator as a bot that has gone blind to gates,
+so this says which of the two verdicts it is, at what range, and against what
+number -- which is also the evidence a retune of that number would rest on.
+
+-}
+describeDistantGate : DistantGateVerdict -> String
+describeDistantGate verdict =
+    case verdict of
+        GateIsCloseEnoughToFlyTo _ ->
+            ""
+
+        GateIsTooFarToBeSomewhereToFlyTo distanceInMeters ->
+            " IGNORING the nearest one: "
+                ++ String.fromInt distanceInMeters
+                ++ " m is past the "
+                ++ String.fromInt distantAccelerationGateMeters
+                ++ " m this bot will fly at a gate, so it is evidence something else went wrong rather than somewhere to go. Leaving it alone and letting the rest of the decision tree have the reading."
+
+        GateDistanceDoesNotReadAsARange ->
+            " IGNORING the nearest one: its distance does not read as a range in m or km, which is the unparsed-distance placeholder rather than a distance, so there is nothing here to fly to. Leaving it alone and letting the rest of the decision tree have the reading."
+
+
 {-| Takes the nearest acceleration gate, to move on to the next pocket.
+
+**A gate far enough away is ignored before any of that**, which is
+`distantGateVerdict` and is asked first. It is not a give-up on the grid: the
+answer is `Nothing`, so `siteProgressStep` hands the reading to the hunt loop,
+and the status line says which gate was ignored and why.
 
 **In range this presses the Selected Item panel's own `selectedItemActivateGate`
 rather than driving a context-menu cascade**, which is what it did before and
@@ -10211,14 +10882,7 @@ one the cascade does land.
 -}
 activateAccelerationGateIfPresent : BotDecisionContext -> Maybe DecisionPathNode
 activateAccelerationGateIfPresent context =
-    case
-        context.readingFromGameClient.overviewWindows
-            |> List.concatMap .entries
-            |> List.filter isAccelerationGate
-            |> List.filter overviewEntryIsDisplayed
-            |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
-            |> List.head
-    of
+    case nearestAccelerationGateOnOverview context.readingFromGameClient of
         Nothing ->
             -- Either there is no gate at all, or the only one is scrolled out
             -- of the overview -- where its reported region belongs to whatever
@@ -10226,98 +10890,126 @@ activateAccelerationGateIfPresent context =
             scrollOverviewToReveal context isAccelerationGate
 
         Just accelerationGateEntry ->
-            let
-                distanceInMeters =
-                    accelerationGateEntry.objectDistanceInMeters |> Result.withDefault 999999
+            case distantGateVerdict accelerationGateEntry.objectDistanceInMeters of
+                GateIsTooFarToBeSomewhereToFlyTo _ ->
+                    -- A gate this far out is not a gate to fly to; it is
+                    -- evidence something else went wrong, and the mission
+                    -- runner's run 51 spent four hours converting that into a
+                    -- whole session. See `distantAccelerationGateMeters` for
+                    -- where the number comes from and what it is a number
+                    -- about.
+                    --
+                    -- Ignoring the gate rather than giving up on the grid: the
+                    -- same `Nothing` `GiveUpOnThisGate` answers below, so
+                    -- `siteProgressStep` sends the reading to the hunt loop and
+                    -- the bot goes back to ratting. Answering
+                    -- `askForHelpToGetUnstuck` here would swap a four-hour
+                    -- chase for a four-hour alarm, which is the give-up this
+                    -- branch has already stopped doing once.
+                    --
+                    -- Silent by construction, which is the one thing this may
+                    -- not be: `describeDistantGate` carries it in the status
+                    -- line on every reading instead.
+                    Nothing
 
-                activateGateButton =
-                    selectedItemButtonNamed context.readingFromGameClient "selectedItemActivateGate"
+                GateDistanceDoesNotReadAsARange ->
+                    -- An AU distance is the unparsed-distance placeholder
+                    -- rather than a distance, so this row says nothing about
+                    -- where the gate is. Declined on its own terms rather than
+                    -- as a large number, since the two want different sentences
+                    -- in the status line.
+                    Nothing
 
-                waitForTheActivateButton =
-                    describeBranch
-                        "The acceleration gate is selected but the panel offers no 'selectedItemActivateGate' yet."
-                        waitForProgressInGame
-            in
-            if interactionRangeInMeters < distanceInMeters then
-                -- "Activate Gate" from out here does the whole thing: the
-                -- client flies the ship over and takes the gate on arrival,
-                -- with no tick spent noticing it has arrived. The drones
-                -- come home first, since the gate fires with whatever is
-                -- still in space; the prop mod stays on, so the ship covers
-                -- the distance fast.
-                Just
-                    (ensureDronesRecalledBeforeWarping context
-                        (closeInOnOverviewEntry context
-                            { description =
-                                "The acceleration gate is "
-                                    ++ String.fromInt distanceInMeters
-                                    ++ " m away -- activate it from here and let the client fly me in."
-                            , menuEntries = [ "activate gate", "activate", "approach" ]
-                            }
-                            accelerationGateEntry
-                        )
-                    )
+                GateIsCloseEnoughToFlyTo distanceInMeters ->
+                    let
+                        activateGateButton =
+                            selectedItemButtonNamed context.readingFromGameClient "selectedItemActivateGate"
 
-            else
-                case
-                    gateActivationStep
-                        { panelShowsTheGate =
-                            selectedItemIsOverviewEntry context.readingFromGameClient accelerationGateEntry
-                        , panelOffersActivateGate = activateGateButton /= Nothing
-                        , askedReadings = context.memory.gateWithinReachTicks
-                        }
-                of
-                    GiveUpOnThisGate ->
-                        -- Hand the turn back rather than park the session. This
-                        -- used to answer `askForHelpToGetUnstuck`, which
-                        -- dispatches nothing and waits, so run 4 spent 238
-                        -- readings and the rest of its session standing at a
-                        -- gate that was never going to open. The mission
-                        -- runner's copy of this branch already answers `Nothing`
-                        -- for the same reason, and the fallbacks it hands the
-                        -- reading to are what this bot needs too: the hunt loop,
-                        -- which is the recovery run 4 eventually made anyway.
-                        --
-                        -- `siteProgressStep` is what keeps that from becoming
-                        -- run 5's dead click -- a "Warp to Site" offered while
-                        -- this gate is still in reach is the panel showing the
-                        -- site the ship is standing in, so the reading goes to
-                        -- the scanner rather than to the button.
-                        --
-                        -- Silent by construction, which is the one thing this may
-                        -- not be: `describeGateActivationAsk` carries the give-up
-                        -- in the status line on every reading instead.
-                        Nothing
-
-                    SelectTheGate ->
+                        waitForTheActivateButton =
+                            describeBranch
+                                "The acceleration gate is selected but the panel offers no 'selectedItemActivateGate' yet."
+                                waitForProgressInGame
+                    in
+                    if interactionRangeInMeters < distanceInMeters then
+                        -- "Activate Gate" from out here does the whole thing: the
+                        -- client flies the ship over and takes the gate on arrival,
+                        -- with no tick spent noticing it has arrived. The drones
+                        -- come home first, since the gate fires with whatever is
+                        -- still in space; the prop mod stays on, so the ship covers
+                        -- the distance fast.
                         Just
-                            (describeBranch
-                                "I see an acceleration gate -- select it, so the panel's own Activate Gate acts on it."
-                                (clickUiElement accelerationGateEntry.uiNode)
+                            (ensureDronesRecalledBeforeWarping context
+                                (closeInOnOverviewEntry context
+                                    { description =
+                                        "The acceleration gate is "
+                                            ++ String.fromInt distanceInMeters
+                                            ++ " m away -- activate it from here and let the client fly me in."
+                                    , menuEntries = [ "activate gate", "activate", "approach" ]
+                                    }
+                                    accelerationGateEntry
+                                )
                             )
 
-                    WaitForTheActivateButton ->
-                        Just waitForTheActivateButton
+                    else
+                        case
+                            gateActivationStep
+                                { panelShowsTheGate =
+                                    selectedItemIsOverviewEntry context.readingFromGameClient accelerationGateEntry
+                                , panelOffersActivateGate = activateGateButton /= Nothing
+                                , askedReadings = context.memory.gateWithinReachTicks
+                                }
+                        of
+                            GiveUpOnThisGate ->
+                                -- Hand the turn back rather than park the session. This
+                                -- used to answer `askForHelpToGetUnstuck`, which
+                                -- dispatches nothing and waits, so run 4 spent 238
+                                -- readings and the rest of its session standing at a
+                                -- gate that was never going to open. The mission
+                                -- runner's copy of this branch already answers `Nothing`
+                                -- for the same reason, and the fallbacks it hands the
+                                -- reading to are what this bot needs too: the hunt loop,
+                                -- which is the recovery run 4 eventually made anyway.
+                                --
+                                -- `siteProgressStep` is what keeps that from becoming
+                                -- run 5's dead click -- a "Warp to Site" offered while
+                                -- this gate is still in reach is the panel showing the
+                                -- site the ship is standing in, so the reading goes to
+                                -- the scanner rather than to the button.
+                                --
+                                -- Silent by construction, which is the one thing this may
+                                -- not be: `describeGateActivationAsk` carries the give-up
+                                -- in the status line on every reading instead.
+                                Nothing
 
-                    PressActivateGate ->
-                        Just
-                            (activateGateButton
-                                |> Maybe.map
-                                    (\button ->
-                                        -- Wrapped in `unlessAlreadyClosingIn`
-                                        -- like every other close-in command: EVE
-                                        -- flies the ship the last of the way and
-                                        -- takes the gate on arrival, so
-                                        -- re-issuing this while that is running
-                                        -- restarts the manoeuvre.
-                                        unlessAlreadyClosingIn context
-                                            "I see an acceleration gate -- activate it to move to the next pocket."
-                                            (ensureDronesRecalledBeforeWarping context
-                                                (clickUiElement button)
-                                            )
+                            SelectTheGate ->
+                                Just
+                                    (describeBranch
+                                        "I see an acceleration gate -- select it, so the panel's own Activate Gate acts on it."
+                                        (clickUiElement accelerationGateEntry.uiNode)
                                     )
-                                |> Maybe.withDefault waitForTheActivateButton
-                            )
+
+                            WaitForTheActivateButton ->
+                                Just waitForTheActivateButton
+
+                            PressActivateGate ->
+                                Just
+                                    (activateGateButton
+                                        |> Maybe.map
+                                            (\button ->
+                                                -- Wrapped in `unlessAlreadyClosingIn`
+                                                -- like every other close-in command: EVE
+                                                -- flies the ship the last of the way and
+                                                -- takes the gate on arrival, so
+                                                -- re-issuing this while that is running
+                                                -- restarts the manoeuvre.
+                                                unlessAlreadyClosingIn context
+                                                    "I see an acceleration gate -- activate it to move to the next pocket."
+                                                    (ensureDronesRecalledBeforeWarping context
+                                                        (clickUiElement button)
+                                                    )
+                                            )
+                                        |> Maybe.withDefault waitForTheActivateButton
+                                    )
 
 
 {-| How many readings to keep asking a gate that is already in range before
@@ -10432,6 +11124,52 @@ siteProgressStep progressCase =
 
     else
         HuntWithTheProbeScanner
+
+
+{-| `siteProgressStep`, resolved against the reading, with what to do when it
+answers neither.
+
+**The reason this is a function rather than a `let` in one branch: it used to be
+one, and the probe-scanner branch was that branch.** `decideNextActionWhenInSpace`
+splits on `probeScannerWindow`, and both steps were bound inside the `Just` arm,
+so a shut scanner window made a gate standing on grid and a "Warp to Site" on
+offer equally invisible -- see #204 and #202. The steps were reachable code that
+nothing could reach.
+
+The caller supplies the floor, which is the only thing that legitimately differs:
+the scanner branch falls back to its own scan results, and the branch without a
+scanner falls back to leaving the system. Neither can now grow a repertoire the
+other silently lacks.
+
+**Where this is reached is what keeps it safe.** `decideActionInAnomaly` asks for
+its continuation only once there is nothing left to attack, loot or unlock, so an
+opportunity appearing mid-fight still cannot pull the ship out of one.
+
+-}
+siteProgressStepOrElse : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+siteProgressStepOrElse context ifNeither =
+    let
+        accelerationGateStep =
+            activateAccelerationGateIfPresent context
+
+        opportunityWarpStep =
+            warpToOpportunitySiteIfAvailable context.readingFromGameClient
+    in
+    case
+        siteProgressStep
+            { gateBranchOffersAStep = accelerationGateStep /= Nothing
+            , warpToSiteIsOffered = opportunityWarpStep /= Nothing
+            , gateWithinReach = accelerationGateIsWithinReach context.readingFromGameClient
+            }
+    of
+        WorkTheAccelerationGate ->
+            accelerationGateStep |> Maybe.withDefault ifNeither
+
+        WarpToTheOpportunitySite ->
+            opportunityWarpStep |> Maybe.withDefault ifNeither
+
+        HuntWithTheProbeScanner ->
+            ifNeither
 
 
 {-| The "Opportunities" panel (e.g. "Sansha's Command Relay Outpost") is a
@@ -10837,7 +11575,31 @@ being cleared on the third. That window is the swap's own, so it ends by itself.
 strayContextMenuIsStray : StrayContextMenuCase -> Bool
 strayContextMenuIsStray strayCase =
     (strayContextMenuStuckTicksThreshold <= strayCase.stuckTicks)
+        && (strayCase.stuckTicks < strayContextMenuGiveUpTicks)
         && not strayCase.ammoSwapOwnsTheMenu
+
+
+{-| How long the dismissal gets before the bot works around the menu instead.
+
+**This branch had no bound at all, and run 18 is what that costs**: 10,845 of
+15,153 decisions were this one rescue, three quarters of an eight-hour session,
+with nothing killed. It is reached from the head of `decideNextActionWhenInSpace`,
+so a rescue that does not work owns the whole bot -- the same position, and the
+same failure, as the message box in the mission runner's run 30.
+
+`Nothing` rather than an alarm, for `MessageBoxStandoff`'s reason: the menu stays
+on the screen and every branch below now works around it, which is worse than a
+cleared menu and incomparably better than nothing running at all. The status line
+keeps saying it is there.
+
+Written as a multiple of the threshold that arms it so the two cannot drift
+apart. Twenty attempts is far past anything a working dismissal needs -- the
+measured one clears the menu in a single click -- and far short of a session.
+
+-}
+strayContextMenuGiveUpTicks : Int
+strayContextMenuGiveUpTicks =
+    strayContextMenuStuckTicksThreshold * 20
 
 
 {-| `Just` a decision to press Escape if a context menu has sat at the same
@@ -10860,28 +11622,29 @@ clearStrayContextMenu context =
                     describeBranch
                         "A context menu has sat at the same depth for several ticks in a row without advancing to a deeper submenu -- likely a stray menu from a misclick or a cascade stuck on a menu with no entry it recognizes. Clear it (right-click beside the info panel)."
                         (decideActionForCurrentStep
-                            -- Right-click, then left-click the same point. The
-                            -- right-click is what dismisses the stray menu --
-                            -- Escape does not, measured against a real one --
-                            -- but on empty canvas it opens a menu of its own,
-                            -- and the next reading judges *that* stray and
-                            -- clears it the same way. saxrat's run 47 did this
-                            -- 16,791 times with three menus standing open on
-                            -- 16,720 readings: a rescue that reproduced what it
-                            -- was rescuing from.
+                            -- **A left click, and only a left click.** The
+                            -- right-click that used to lead this is what
+                            -- created the thing it was clearing: the client
+                            -- opens a context menu *at the cursor*, so the
+                            -- right-click put a fresh menu exactly where the
+                            -- following left click was aimed, and that click
+                            -- then landed on a menu entry rather than on empty
+                            -- canvas. Run 47 did that 16,791 times; run 18 did
+                            -- it 10,845 times in eight hours and killed
+                            -- nothing, with the solar-system menu standing open
+                            -- the whole time and the computed point sitting on
+                            -- its top-left corner.
                             --
-                            -- The left click is the half that ends it. A left
-                            -- click dismisses a context menu without opening
-                            -- one, which is how this menu was cleared by hand
-                            -- before either was in the bot. Both travel in one
-                            -- step so no reading can fall between them and see
-                            -- the intermediate state as a new stray menu.
+                            -- The pair could never have worked, because the two
+                            -- clicks were at the same location and a menu is
+                            -- always drawn at the click. What the comment
+                            -- before this said about the left click is right,
+                            -- and is now the whole action: measured live
+                            -- against the real stuck menu, one left click on
+                            -- empty canvas dismissed it and opened nothing.
                             (EffectOnWindow.effectsMouseClickAtLocation
-                                EffectOnWindow.MouseButtonRight
+                                EffectOnWindow.MouseButtonLeft
                                 location
-                                ++ EffectOnWindow.effectsMouseClickAtLocation
-                                    EffectOnWindow.MouseButtonLeft
-                                    location
                             )
                         )
 
@@ -10936,15 +11699,70 @@ which is the weaker rescue rather than a guess at a location.
 emptyPointBesideTheInfoPanel : ReadingFromGameClient -> Maybe EffectOnWindow.Location2d
 emptyPointBesideTheInfoPanel readingFromGameClient =
     readingFromGameClient.infoPanelContainer
-        |> Maybe.map
+        |> Maybe.andThen
             (\infoPanelContainer ->
                 let
                     region =
                         infoPanelContainer.uiNode.totalDisplayRegion
+
+                    beside =
+                        { x = region.x + region.width + strayMenuClearGapFromInfoPanel
+                        , y = region.y + (region.height // 2)
+                        }
+
+                    canvas =
+                        readingFromGameClient.uiTree.totalDisplayRegion
+
+                    menuCovers point menu =
+                        let
+                            menuRegion =
+                                menu.uiNode.totalDisplayRegion
+                        in
+                        (menuRegion.x <= point.x)
+                            && (point.x <= menuRegion.x + menuRegion.width)
+                            && (menuRegion.y <= point.y)
+                            && (point.y <= menuRegion.y + menuRegion.height)
+
+                    covered point =
+                        readingFromGameClient.contextMenus
+                            |> List.any (menuCovers point)
+
+                    belowEveryMenu =
+                        readingFromGameClient.contextMenus
+                            |> List.map
+                                (\menu ->
+                                    menu.uiNode.totalDisplayRegion.y
+                                        + menu.uiNode.totalDisplayRegion.height
+                                )
+                            |> List.maximum
+                            |> Maybe.map
+                                (\lowest ->
+                                    { beside | y = lowest + strayMenuClearGapFromInfoPanel }
+                                )
                 in
-                { x = region.x + region.width + strayMenuClearGapFromInfoPanel
-                , y = region.y + (region.height // 2)
-                }
+                if not (covered beside) then
+                    Just beside
+
+                else
+                    -- The point beside the panel is where the *last* click was,
+                    -- so on the reading after one the menu is drawn over it --
+                    -- the client opens a context menu at the cursor. Clicking
+                    -- there again does not land on empty canvas, it lands on a
+                    -- menu entry, and this menu carries `Clear All Waypoints`.
+                    -- Stepping below the menu is what keeps the dismissal a
+                    -- dismissal.
+                    belowEveryMenu
+                        |> Maybe.andThen
+                            (\below ->
+                                if
+                                    (below.y < canvas.y + canvas.height)
+                                        && not (covered below)
+                                then
+                                    Just below
+
+                                else
+                                    Nothing
+                            )
             )
 
 
@@ -10988,8 +11806,17 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             }
 
         standingInADeadEnd =
+            -- Asks the panel the same question the decision asks it. It used to
+            -- test the marker pip while `jumpToNextSystem` tested the panel's
+            -- words, and with a real route beside a stale `No Destination` the
+            -- two disagreed in the worst available direction: the decision asked
+            -- the host for a route on every reading, and this counter -- the
+            -- only thing bounding that asking -- stayed at 0 because the pip was
+            -- there. Run 31 asked 2,494 times in 48 minutes and reported
+            -- `0/20 readings` on every one of them, so `routeAskGiveUpReadings`
+            -- could never fire. One reading of the panel, used by both.
             (context.readingFromGameClient.shipUI /= Nothing)
-                && (currentRouteFirstMarkerRegion == Nothing)
+                && not (routePanelShowsARoute context.readingFromGameClient)
                 && (context.readingFromGameClient.probeScannerWindow
                         |> Maybe.map (.scanResults >> List.isEmpty)
                         |> Maybe.withDefault True
@@ -11026,10 +11853,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 |> Maybe.andThen .currentStationName
 
         shipIsWarping =
-            context.readingFromGameClient.shipUI
-                |> Maybe.andThen .indication
-                |> Maybe.andThen .maneuverType
-                |> Maybe.map ((==) EveOnline.ParseUserInterface.ManeuverWarp)
+            shipWarpingFromReading context.readingFromGameClient
 
         namesOfRatsInOverview =
             getNamesOfRatsInOverview context.readingFromGameClient
@@ -11040,6 +11864,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         lockRangeLearning =
             updateLockRangeLearning (lockRangeReadingFrom context)
                 { fromSetting = context.botSettings.targetingRangeMeters
+                , statedMeters = botMemoryBefore.lockRangeStatedMeters
                 , provenAtMeters = botMemoryBefore.lockProvenAtMeters
                 , refusedAtMeters = botMemoryBefore.lockRefusedAtMeters
                 , attempt = botMemoryBefore.lockAttempt
@@ -11094,7 +11919,29 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     Nothing
 
         weJustFinishedWarping =
-            (botMemoryBefore.shipWarpingInLastReading == Just True) && (shipIsWarping == Just False)
+            warpJustEnded
+                { warpingLastReading = botMemoryBefore.shipWarpingInLastReading
+                , readingNow = context.readingFromGameClient
+                }
+
+        -- Restarted at zero on the one reading a warp ends and advanced on every
+        -- other, here in the memory update because that is the only thing that
+        -- runs on every reading unconditionally -- #102's and #126's placement
+        -- rule, and the reason this can be a reading count at all. It is never
+        -- cleared: it ages out of the bound on its own, and a `Nothing` restored
+        -- here would read as "no warp this session", which is a different fact.
+        readingsSinceWarpEnded =
+            if weJustFinishedWarping then
+                Just 0
+
+            else
+                botMemoryBefore.readingsSinceWarpEnded |> Maybe.map ((+) 1)
+
+        -- Note this subsumes the single-reading trigger it replaces rather than
+        -- sitting beside it: on the reading a warp just ended the count is zero,
+        -- so the window is open by construction.
+        arrivalWindowIsOpenNow =
+            arrivalWindowIsOpen { readingsSinceWarpEnded = readingsSinceWarpEnded }
 
         visitedAnomalies =
             if shipIsWarping == Just True then
@@ -11117,13 +11964,14 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                                         }
 
                             anomalyMemoryWithOtherPilotsOnArrival =
-                                if weJustFinishedWarping then
-                                    { anomalyMemoryBefore
-                                        | otherPilotsFoundOnArrival = getNamesOfOtherPilotsInOverview context.readingFromGameClient
-                                    }
-
-                                else
-                                    anomalyMemoryBefore
+                                { anomalyMemoryBefore
+                                    | otherPilotsFoundOnArrival =
+                                        otherPilotsFoundOnArrivalAfterReading
+                                            { windowIsOpen = arrivalWindowIsOpenNow
+                                            , foundBefore = anomalyMemoryBefore.otherPilotsFoundOnArrival
+                                            , seenNow = getNamesOfOtherPilotsInOverview context.readingFromGameClient
+                                            }
+                                }
 
                             anomalyMemory =
                                 { anomalyMemoryWithOtherPilotsOnArrival
@@ -11141,6 +11989,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         botMemoryBefore.shipModules
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
     , shipWarpingInLastReading = shipIsWarping
+    , readingsSinceWarpEnded = readingsSinceWarpEnded
     , visitedAnomalies = visitedAnomalies
     , contextMenuLastDepth = currentContextMenuDepth
     , contextMenuStuckTicks =
@@ -11401,6 +12250,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     , lockBatchLastChange = lockBatchAccounting.change
     , targetsCountLastReading = context.readingFromGameClient.targets |> List.length
     , lockAttempt = lockRangeLearning.attempt
+    , lockRangeStatedMeters =
+        -- Overwritten rather than narrowed: the ceiling is not a constant even
+        -- for one hull. Only 49 km and 39 km occur across the corpus and runs 13
+        -- and 14 carry both within one session, so a monotone bound here would
+        -- be #206 again in the other direction. A reading that says nothing
+        -- keeps the last thing the client said.
+        case lockRangeStatedInQuickMessage context.readingFromGameClient of
+            Just stated ->
+                Just stated
+
+            Nothing ->
+                botMemoryBefore.lockRangeStatedMeters
     , lockProvenAtMeters = lockRangeLearning.provenAtMeters
     , lockRefusedAtMeters = lockRangeLearning.refusedAtMeters
     , lockRangeLastChange = lockRangeLearning.change

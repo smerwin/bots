@@ -5480,6 +5480,8 @@ shipped configuration rather than edge cases:
 | the ammo swap (#122, #154) | absent, not unconfigured — `ammoSwap`, `Charge`, `chargeName` and `optimalRange` all appeared 0 times, and there was no setting to turn on | ported without its tooltip half, with `ammo-swap-range` **required** rather than optional; and since run 10, a disarm give-up that asks whether the guns came back and is retried after a warp — see the two sections below |
 | an in-range acceleration gate (#145, #147) | a context-menu cascade, and a give-up counting readings *near* a gate rather than readings spent asking one — `selectedItem` appeared 0 times in `Bot.elm`, so it had never pressed a panel button for anything. And the branch was **unreachable inside a site at all**: a "Warp to Site" button anywhere in the tree outranked it, and the panel goes on drawing one after arrival | `selectThenPanelAction`'s shape over `selectedItemActivateGate`, inside `unlessAlreadyClosingIn`; the counter counts the ask; and `siteProgressStep` asks the gate first and declines a site offered while a gate is in reach — see the two sections below |
 | the route's next stargate (#169) | the route-marker cascade on every leg, at a median of **12 and 13 readings a leg** and 23% and 38% of every reading in runs 13 and 14 — against the mission runner's 3 and 2 and its 2% and 3% | #170's rule ported whole: the route panel's own `Next System in Route` label matched against the overview row's Name, and `selectedItemJump` pressed only where the panel is already showing that gate — see the section below |
+| the combat feed (#190) | six lines of the client's `CombatMessage` widget in the status text on every reading — a third of runs 20 and 21, 99.5% of it repeating the block before it, and in run 20 mostly printed while docked | removed, as the mission runner removed it; the incoming half of that channel is `describeIncomingDamage`, already on every reading — see the section below |
+| leaving an anomaly somebody was already sitting in (#194) | reachable code that could not fire: `weJustFinishedWarping` demanded `shipIsWarping == Just False`, which the client only ever answers while some **other** manoeuvre is named — a warp ending answers `Nothing` — so the trigger was unreachable and `FoundOtherPilotOnArrival` has never been constructed in a recorded run | `warpJustEnded`, on `Just True` followed by anything that is not `Just True`, with the ship UI's presence read separately so a reading that could not see the ship is not an arrival; "arrival" stays the landing reading, which is what the corpus measures — see the section below |
 
 Two things about the port are worth keeping in view.
 
@@ -6934,6 +6936,93 @@ moving while the rest of the status line also stops moving is the client having
 gone away, not this branch; the tell is every other counter in the same line
 frozen with it.
 
+### The combat feed was a third of the log and none of it was new
+
+Issue #190. `describeVisibleCombatMessages` printed up to six lines of the
+client's `CombatMessage` widget into saxrat's status text on **every reading**,
+and it was the single largest thing in the log: 9,639 of run 20's 25,762 lines,
+98,700 of run 21's 296,465, a third of each. It is removed. Nothing replaces it.
+
+**It was almost entirely repetition.** The widget is a rolling on-screen window,
+so consecutive readings mostly re-render the same six lines — **1,376 of run
+20's 1,377 feed blocks were byte-identical to the block before them**, and 99.5%
+of run 21's. That is not a property of a quiet grid: the same measurement over
+run 23, which fought, gives 93%.
+
+**And it outlived the fight, because messages age off the *screen* rather than
+off the grid.** In run 20, **1,344 of those 1,377 blocks were printed on readings
+whose own decision line says the ship is docked** — combat that could not be
+happening, reprinted at the operator for the whole run. Run 21 shows almost none
+of that, so it depends on the run's shape, and **nothing in the feed
+distinguished the two**. A summary line would not have fixed that half; only
+reading a channel that is scoped to the reading does.
+
+**Nothing replaces it, and the reason is that the replacement is already there.**
+The obvious alternative is a short clause derived from the channel the host
+already sums — hits and damage this reading, in and out. The incoming half of
+exactly that is `describeIncomingDamage`, in the status line on every reading
+since the port: the 45-second window, the threshold, whether the host carries the
+channel at all, whether the reading is frozen, and the attackers named. A second
+clause off the same channel would say what that one already says, on a reading
+whose whole problem is the log's size. `test_the_channel_is_still_reported` is what
+goes red if that clause is ever dropped, since dropping it is what would turn
+this removal into a loss.
+
+**The outgoing half is genuinely unreported here**, and adding it is a separate
+change with its own evidence: saxrat reads `outgoingDamageSinceLastReading`
+nowhere, so a clause for it is a new instrument rather than a replacement for a
+removed one.
+
+**`visibleCombatMessages` is kept, unused**, which is the mission runner's own
+answer to the same question — its `combatFeedIsReportedByTheHostGameLog` marker
+has recorded that decision since it dropped this clause. The scraper encodes
+which UI nodes carry combat text and how to read them, which is the expensive
+part to rediscover, and any future in-decision use of combat state wants exactly
+that. saxrat now carries the same marker under the same name, so the two bots
+read alike here.
+
+**This changes no behaviour.** The clause was read by the status line at one site
+and by **no decision**, which is what makes it a removal rather than a retuning.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_combat_feed_removed.py` (14 cases). The scraper is
+*executed* through the real `Bot.elm` in `elm repl` against a `CombatMessage`
+tree run through the real `EveOnline.ParseUserInterface` — a message split across
+four labels with EVE's own colour tagging on it comes back joined and stripped —
+because a declaration kept but broken teaches nobody which nodes carry combat
+text. The removal is read out of the source through the declaration reader that
+strips doc comments, so the marker may go on naming what it replaced while no
+declaration reads the scraper and none prints `Combat feed`. The corpus is
+recounted as *relations* rather than as the numbers above — the feed was a large
+share of the log, nearly every block repeated the one before it, some run printed
+most of its blocks while docked, and the client's own `(combat)` lines are echoed
+into the same log — so a growing corpus cannot turn a true claim red. Run 23 was
+still being written while this was measured, which is why.
+
+Confirmed by mutation, ten of them, each failing a named case: the clause and its
+call site restored; the clause restored but left uncalled, which is the half a
+wiring case cannot see; the feed rebuilt under another name; the scraper deleted;
+the scraper pointed at a node type the client does not draw; the marker renamed
+so the argument is unfindable; the marker's doc no longer naming what reports
+this channel instead; **`describeIncomingDamage` dropped from the status line**,
+which is the mutation that turns this removal into a loss; the mission runner's
+marker renamed, so the two bots stop reading alike; and — on the cases' own
+premise — quiet blocks counted among the repeats, which would let a run of
+`Combat feed: quiet.` satisfy the repetition measurement.
+
+**One mutation survived the first pass and the hole was in this file's own
+premise.** The repetition case was satisfied whether or not quiet blocks were
+excluded, so the doc comment's reason for excluding them was a claim nothing
+held. `test_the_quiet_blocks_are_not_what_is_being_counted` asserts the corpus
+really holds them and that no counted block is one.
+
+**Unverified: nothing, and that is unusual for a section here.** The removal
+needs no run to confirm — there is no new branch, no new bound and no new
+matcher, and the status line simply stops carrying a clause. What a run would
+show is negative: `Combat feed` no longer appearing, and `dmg N/T (45s, Nrd)`
+appearing exactly as before. A run whose log still carries the feed is one flying
+an older tree, which is what `# bot version:` is for.
+
 ### An in-range acceleration gate is opened from the panel here too
 
 Issue #145 is `activateGateOnOverviewEntry` in `eve-online-saxrat`: an in-range
@@ -7237,6 +7326,156 @@ offered once the ship leaves reach, and nothing remembers that its gate was give
 up on. **Income is the outcome measure and there is a clean control**: run 38 did
 1,536,545 ISK/hr on these settings before this path started dominating.
 
+### The host says so when reads stop completing
+
+Issue #166. In run 11 the client stopped answering read requests and the bot did
+not notice -- 18,158 issued, 17,263 completed, 895 that never came back. From that
+moment `ReadingFromGameClientCompleted` never fired again, so
+`updateMemoryForNewReadingFromGame` never ran, so every counter it writes froze at
+the same instant and the whole memory line was byte-identical for the rest of the
+run.
+
+**There is no rule to fix**, which is why this is host-side. PR #165 established
+the message-box ladder was correct as written; nothing in `Bot.elm` can advance a
+counter on a reading that never arrived. The cost is that the log lies: the host
+reprints the current decision on every line, so a stalled pipeline reads exactly
+like thousands of healthy readings -- and by #165's count that has already cost a
+threshold calibration twice, a retreat measurement in #141, and the whole
+diagnosis of #164.
+
+`ReadCompletionWatch` counts consecutive volatile-process reads that came back
+`Err` and prints once at three, again every sixtieth, and once on recovery naming
+how many were missed. **Only the volatile-process read is judged**: the 2023 host
+interface routes input through a volatile-process request, so a read-shaped `Err`
+can arrive from a task that was never a read, and judging by shape would put "the
+client did not answer" in the log for a failed keystroke.
+
+**Unverified:** nothing has been flown, and the threshold of three is a judgement
+rather than a measurement -- run 11 carried 895 consecutive failures, so anything
+in this range catches it early, but no run has shown how often a single read fails
+harmlessly.
+### The route panel can say 'No Destination' beside a marker, and the marker lies
+
+Issue #191. saxrat run 23 spent 1,200+ consecutive readings on `No stargate on
+the overview is named for 'Hutian'` and never moved. It was travelling a route
+the client had never computed. The panel, read live while it was stuck, carried
+`No Destination`, a `Next System in Route` label naming Hutian, and `No
+Destination` again -- with one marker icon.
+
+`infoPanelRouteFirstMarkerFromReadingFromGameClient` answers the panel's
+**visibility** and has never read its text, so a stale pip reads as a route.
+`routePanelSaysNoDestination` reads the words, and `jumpToNextSystem` asks it
+before the marker.
+
+**The answer is `setRouteToNextHuntingGround`, not a counter.** The travel leg is
+a fall-back to a cascade and has no bound; asking for a route is bounded by
+`routeAskGiveUpReadings` and ends in the circuit moving on. Letting the reading
+reach the branch that already has a bound is what ends the loop -- a second
+counter here would only have made the parking quieter.
+
+It is the destination rather than the client: from the same position, `Hamse`
+gave `Route 5 Jumps` and `Amarr` `Route 6 Jumps`, while `Hutian` gave no route.
+So `hunt-system` can hold a system the client will not route to, and the circuit
+rotates onto it eventually.
+
+**Unverified:** whether Hutian is unreachable by gate at all or excluded by an
+autopilot route preference is **not established**, and #191 says so -- that
+distinction decides whether a bot could detect it in advance, and nothing here
+rests on it. Nothing has been flown.
+### The client states its lock range in words, and it now outranks the ratchet
+
+Issue #206. `lockProvenAtMeters` only rises, so an attribution error crediting a
+lock to a more distant row is permanent. Run 28 ratcheted to 77 km on a hull whose
+real range is 49 km while `lockRefusedAtMeters` fell to 33 km -- the two crossed,
+`lockRangeThresholdInMeters` resolved it in favour of proven, and
+`targeting-range=49000` sat inert with only a restart able to clear it.
+
+The client had said the number outright, 1,277 live sightings in that same run:
+`The target <b>Centii Minion</b> is too far away. It must be within <b>49 km</b>.`
+
+`lockRangeStatedInQuickMessage` reads it and the threshold takes it as
+`min fromSetting stated`, so a measurement can no longer raise the bound past what
+the client stated. The setting still wins when it is _narrower_, which is the one
+direction this rule has never overridden.
+
+**Overwritten, never narrowed.** The ceiling is not a constant even for one hull:
+only 49 km and 39 km occur across the corpus and runs 13 and 14 carry both within
+one session, a sensor booster being the obvious candidate. A monotone bound here
+would be #206 again in the other direction, and a case pins the absence of any
+`min` or `max` at the write site.
+
+**Read from the live quick message, not the game log echo**, which reprints the
+sentence under every decision -- counting those would make one refusal look like
+hundreds. And read as a **pair** (`too far away` with `must be within`), because
+the first phrase alone is written about warping, approaching and containers.
+
+**Unverified:** nothing has been flown, and the sensor-booster explanation for the
+ceiling moving is consistent with the corpus but unconfirmed. Only `km` is
+accepted; a sighting in other units would be declined rather than guessed at, and
+none is known to exist.
+### `anomaly-name` replaces the shipped defaults rather than joining them
+
+Issue #198. `BotSettings.anomalyNames` started as `[ "sansha rally point",
+"angel rally point" ]` and the handler prepended, so an operator naming six
+hideaways hunted those six **and** two rally points. The widening runs the wrong
+way -- a rally point is a considerably harder site than a hideaway, so it is the
+operator narrowing the filter who pays, and on an unfamiliar hull that is the
+difference between a long run and a loss. `--help` already read like replacement
+("Choose the name of anomalies to take"), so the code and the documentation were
+answering different questions.
+
+The defaults are kept as a **fallback**: the field starts empty,
+`anomalyNamesInEffect` answers `shippedAnomalyNames` when nothing was named, and
+anything named replaces them. An unconfigured bot is unchanged.
+
+**"Take anything" did not exist before and does now.** The filter carried a
+`List.isEmpty` shortcut meaning exactly that, which could never fire -- the
+handler only prepends, so a list starting with two entries is never empty. It is
+gone, and `anomaly-name=*` says it through #188's prefix rule.
+
+**Unverified:** whether any recorded run ever set `anomaly-name`, so whether this
+has cost anything in practice is not established -- only that the launcher's own
+string names six sites and would have hunted eight. `eve-online-combat-anomaly-bot`
+and `eve-online-wingus` both carry an anomaly-name setting and neither was
+examined.
+
+### A shut probe window hid the gate and the opportunity from the whole path
+
+Issue #204. `decideNextActionWhenInSpace` splits on `probeScannerWindow`, and both
+`accelerationGateStep` and `opportunityWarpStep` were `let`-bound inside the
+`Just` arm. So with the scanner window closed, a gate standing on grid and a
+"Warp to Site" on offer were equally invisible: that arm's entire repertoire was
+a middle-row module, whatever was already on the overview, and jumping to the
+next system. #202 found the gate half; the opportunity half is the one that
+matters for running escalations, and the docked branch was already assuming
+otherwise -- it consults `warpToOpportunitySiteIfAvailable` as a predicate and
+undocks so "the next tick's in-space chain" can take it, and that chain was the
+unreachable one.
+
+The dispatch is now `siteProgressStepOrElse`, a declaration both arms call, with
+the caller supplying the floor -- scan results for the arm that has a scanner,
+leaving the system for the arm that does not. `siteProgressStep` is still the
+arbiter and is untouched. What keeps it safe is where it is reached from:
+`decideActionInAnomaly` asks for its continuation only once there is nothing left
+to attack, loot or unlock, so an opportunity appearing mid-fight still cannot
+pull the ship out of one.
+
+**The arrival age on that arm was a literal that matched a default by accident.**
+It passed `600` while `anomalyWaitTimeSeconds` also defaulted to `600`, so
+`waitTimeRemainingSeconds` was exactly `0` -- the wait treated as spent, the
+120-second loot backstop still live. Two constants agreeing, not a decision: an
+operator setting `anomaly-wait-time-seconds = 900` silently turned that arm into
+one that tethers for five minutes. It now passes the setting itself, which
+reproduces today's behaviour on shipped settings and goes on meaning it when the
+setting changes. **Passing the real age would have been a bug**: the anomaly
+memory is filed under the ID the scanner gives, so with no scanner
+`arrivalInAnomalyAgeSecondsFromMemory` answers its `Maybe.withDefault 0` and the
+ship tethers for the full wait at a site it cannot name.
+
+**Unverified:** nothing has been flown, and how often a gate or an opportunity is
+actually on grid while the scanner is shut is not measured -- only that the path
+is entered, which run 25's log shows.
+
 ### The route's next stargate is jumped from the panel here too, and the share is why
 
 Issue #169 is PR #170 ported. The rule is that one whole -- the route panel's own
@@ -7416,6 +7655,175 @@ the run falling from a quarter. A run that jumps gates and prints
 instead means the panel is never found to be showing the gate -- the direction
 this fails silently in, and it costs nothing. The one to escalate on is the
 opposite: a jump followed by the route panel naming a system nobody asked for.
+
+### The on-arrival pilot check could not fire: the warp-end trigger was dead
+
+Issue #194. saxrat is supposed to leave an anomaly it lands in with somebody
+already on the grid, and it never has. The reason is the trigger, and it took
+two wrong diagnoses to get to it — both recorded here, because the shape of the
+mistake is more reusable than the fix.
+
+`weJustFinishedWarping` was
+
+```elm
+(botMemoryBefore.shipWarpingInLastReading == Just True) && (shipIsWarping == Just False)
+```
+
+and `shipIsWarping` is a `Maybe` over the manoeuvre the client **names**:
+`Just True` for `Warp`, `Just False` for some *other* named manoeuvre — `Orbit`,
+`Approach`, `Aligning` — and `Nothing` when the client names none at all. So
+`Just False` never meant "the ship is not warping". It meant "the ship is doing
+something else with a name". A ship that has simply stopped answers `Nothing`.
+
+**Captured off the live client during run 29**, sampling the ship UI's
+indication container about once a second across two warps:
+
+```
+while warping   ['Warp Drive Active', 'Destination: AreraDistance: 416 km', 'Mikhir', 'Sansha Hideaway']
+warp ends       ['Mikhir', 'Sansha Hideaway']
+```
+
+The container is still **present** when the warp ends; it holds only the
+location labels. No manoeuvre word, so `maneuverType` is `Nothing`, so
+`shipIsWarping` is `Nothing`, so the condition that demanded `Just False` could
+not fire at the end of a warp. Two independent warps, identical shape.
+`EveOnline.BotFramework.shipUIIndicatesShipIsWarpingOrJumping` already treated
+an absent indication as "not manoeuvring", with a comment saying so; this was
+the one place that did not.
+
+The rule is now `warpJustEnded`, and it reads three things rather than two:
+the previous reading was `Just True`, **the ship UI is present now**, and the
+current reading is not `Just True`. The middle one is load-bearing.
+`shipWarpingInLastReading` stores the same three-valued answer, and `Nothing` is
+equally what a reading with no ship UI at all gives — docked, a client that did
+not render, a reading across a session change. A fix written as `/= Just True`
+and nothing else calls every one of those an arrival, and the bot takes an
+arrival snapshot of a grid it never landed on.
+
+**Two wrong diagnoses came first, and the correction pattern is the point.** The
+issue was filed blaming the probe scanner: the snapshot needed
+`weJustFinishedWarping` **and** `getCurrentAnomalyIDAsSeenInProbeScanner` on the
+same reading, and the scanner was assumed to be late naming the anomaly. Measured
+over every warp-end reading in runs 16, 21, 23 and 24, that is false — the
+anomaly is named **on** the warp-end reading in 123 of the 123 arrivals that ever
+name one, median 0, p90 0, max 0. The second diagnosis was the trigger, from the
+source, and it was right but still a hypothesis until a tree was read off the
+live client. Neither the code nor the first round of cases had ever executed the
+transition, which is exactly how a total defect survived in reachable code: every
+case downstream of a condition that is always `False` passes.
+
+**"Arrival" is the landing reading, and the corpus is why.** The distinction the
+design already had right is the one the fix has to keep: a neutral *already there
+when we land* means leave; a neutral *arriving while we are fighting* means tough
+it out. That is why the memory records pilots seen on arrival rather than pilots
+seen now, and why reading `getNamesOfOtherPilotsInOverview` on every reading
+closes this bug and opens the opposite one. The first attempt at #194 widened
+"arrival" to a 30-reading window, to cover the scanner lag that turns out not to
+exist. Priced against the same corpus, over 250 arrivals, the number that would
+record at least one pilot is
+
+| bound | 0 | 1 | 3 | 10 | 30 |
+|---|---:|---:|---:|---:|---:|
+| arrivals recording a pilot | 19 | 19 | 20 | 25 | 34 |
+
+Every arrival a wider bound adds is one where the overview held nobody when the
+ship landed and somebody afterwards — a pilot who arrived while the bot was
+already fighting, which is the one thing this feature must not fire on. At 30
+readings nearly half of everything recorded would have been the wrong half. And a
+bound of **1** records the same 19 as a bound of 0 across all 250, so the
+overview never took an extra reading to draw a pilot who was already on the grid
+— the only thing a wider bound could honestly have bought.
+
+So `otherPilotArrivalWindowReadings` is **0**. The window machinery stays: the
+counter, the accumulation and the status clause are what make a later widening a
+change to one number with an argument beside it, rather than a rewrite of the
+rule. `arrivalWindowIsOpen` is still written as `readings <= bound` rather than
+`== Just 0` for the same reason, and a case says so.
+
+**The unit is readings**, which is what every other bound in these bots is
+counted in — `approachIndicationTrustedForTicks` is 10,
+`dockingRunInPatienceReadings` 20, `gateRefusesThisShipTicks` 40 and
+`droneRecallGiveUpTicks` 60 — so any future widening is comparable to those
+without a conversion done in the reader's head. Confusing this unit with a clock
+has cost `stall_watch.py` a threshold calibration twice, #141 a retreat
+measurement and #164 an issue's whole diagnosis. In wall-clock terms a reading is
+one to eight seconds by this file's own two disagreeing figures, so the 30 that
+was first proposed was 30 s to 4 minutes of grid to be wrong about. The counter
+is advanced in `updateMemoryForNewReadingFromGame`, which is #102's and #126's
+placement rule and the only thing that runs on every reading unconditionally.
+
+**The list accumulates rather than being overwritten, and that is the latch.**
+Adding only can never unsay a reason, so the verdict is written during arrival
+and untouched afterwards, which is what the do-not-come-back half reads. Order is
+first-seen first, because `findReasonToAvoidAnomalyFromMemory` reports the head
+and the pilot who was already there is the one an operator wants named. At a
+bound of 0 that rule folds over one reading, and it is still the rule: it is what
+a widening would rest on.
+
+**Two things #194 offered and this deliberately does not do.** The memory keying
+is untouched, and the snapshot still sits inside the branch that has an anomaly
+ID to file it under — the issue's other option was to make the snapshot
+independent of the scanner, and that is not what shipped. Cases assert both, so a
+later change has to argue against them rather than drift into them.
+
+**Nothing about this was visible on a reading before**, which is most of why it
+took a corpus sweep to find: a snapshot that never ran and a grid with nobody on
+it printed identically. `describeArrivalWindow` separates the three ways the
+feature can still be inert —
+
+```
+Arrival window: OPEN, 0 of 0 readings since the last warp ended; no anomaly named in the probe scanner, so nothing can be recorded.
+Arrival window: closed, 91 of 0 readings since the last warp ended; found on arrival here: Vladimir Barmin.
+Arrival window: no warp has finished this session; nobody recorded on arrival here.
+```
+
+— and it is read by the status line and by no decision.
+
+**Both apps.** `eve-online-combat-anomaly-bot` carries the same
+`otherPilotsFoundOnArrival`, and its `weJustFinishedWarping` had already been
+corrected upstream to the `Just True -> not Just True` shape — so its trigger was
+**not** dead, which is worth knowing before assuming two copies share a bug. Both
+now share `shipWarpingFromReading` and `warpJustEnded`, which also gives the
+combat bot the ship-UI-presence guard it lacked and removes a real drift: the two
+apps derived `shipIsWarping` inline in two different shapes, a pipeline and a
+`case`. Six declarations are byte-identical across the two and a case compares
+them rather than merely checking both are present.
+
+**`eve-online-mission-runner` and `eve-online-wingus` still carry the dead
+trigger**, and that is #205 rather than this change. Wingus has #194 verbatim —
+the same single-reading snapshot on the same unreachable condition. The mission
+runner has no arrival snapshot, but the same condition gates its drone
+abandonment (`shipLeftThisReading`, whose other half — undocking — does work) and
+#154's per-warp ammo-swap retry, so the fix is the same three lines with two
+different consequences that each need their own argument and their own cases.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_arrival_pilot_window.py` (43 cases against **both**
+apps, 2 of them reading `~/eve-bot-logs` and skipping where it is absent). The
+transition is executed end to end: readings built in the captured shape go
+through the real `EveOnline.ParseUserInterface`, and the real `warpJustEnded`
+is asked about them in `elm repl`. The condition it replaces is executed on the
+same pair and asserted to answer `False`, so restoring the old shape fails with
+the reason rather than with an arithmetic mismatch six rules away. The corpus
+numbers above are **recomputed** by the cases rather than quoted, per run, so a
+machine holding only some of the runs still checks those.
+
+Confirmed by mutation. Beyond the twenty the window carried already: the
+`Just False` condition restored, which the captured warp-end reading kills; the
+ship-UI-presence guard dropped, which makes an unreadable client an arrival;
+`shipWarpingFromReading` reading `ManeuverJump` instead of `ManeuverWarp`; and
+the bound returned to 30, which fails the constant's case, the corpus case that
+prices it and the boundary either side.
+
+**Unverified: any of it running.** `FoundOtherPilotOnArrival` has still never been
+constructed by either bot. What to watch on the first run is the
+`Arrival window:` clause. `no warp has finished this session` on every reading
+would mean the trigger is still not firing, and is now the one thing that would
+say the capture was not representative. `OPEN` on the landing reading with
+`no anomaly named in the probe scanner` beside it, on every arrival, would mean
+the scanner is later than 123 out of 123 arrivals say and the bound of 0 is
+wrong. And `found on arrival here:` naming somebody who warped in mid-fight would
+mean the window is not closing, which is the direction this must never fail in.
 
 ## Elm toolchain
 
@@ -8163,6 +8571,36 @@ exists.
   panel path sits *behind* the route-settling guard. **Untested against a live
   client**; watch for `Jump through '<system>' from the selected-item panel`
   appearing at all, and the cascade's share of the run falling from a quarter.
+
+  And since #190 it **no longer reprints the client's combat widget into the
+  status text on every reading**, which was the largest single thing in its log
+  and almost none of its information: a third of runs 20 and 21, with 1,376 of
+  run 20's 1,377 feed blocks byte-identical to the block before them and 1,344 of
+  them printed on readings whose own decision line says the ship is docked.
+  **Nothing replaces it** — the incoming half of that channel is already in the
+  status line on every reading as `describeIncomingDamage`, summed host-side and
+  scoped to the reading, where the widget retains messages and outlives the
+  fight. `visibleCombatMessages` is kept unused under the mission runner's own
+  `combatFeedIsReportedByTheHostGameLog` marker, so the two bots read alike here.
+  See "The combat feed was a third of the log and none of it was new" above.
+  **No behaviour changed**: the clause was read by the status line at one site
+  and by no decision. What a run shows is negative — `Combat feed` gone and
+  `dmg N/T (45s, Nrd)` exactly as before.
+
+  And since #194 it **can leave an anomaly somebody was already sitting in**,
+  which it never could: the arrival snapshot needed `weJustFinishedWarping` and
+  the probe scanner naming the anomaly on the *same* reading, and the scanner is
+  late, so `FoundOtherPilotOnArrival` has never been constructed in a recorded
+  run. "Arrival" is a bounded window after warp ends now — 30 readings, the
+  same unit as every other bound in these bots — and the
+  window's *closing* is the half that matters, since a neutral arriving
+  mid-fight must still be fought rather than fled. See "The on-arrival pilot
+  check could not fire, so 'arrival' is a window now" above for why the list
+  accumulates rather than being overwritten, and for the one premise this
+  inherits rather than fixes. **Untested against a live client**, and this path
+  has never run at all; watch the status line's `Arrival window:` clause going
+  `OPEN` after each warp and then `closed`, and escalate on a pilot named there
+  who warped in during a fight.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
@@ -8768,13 +9206,61 @@ a non-text travel label is declined (#49). A NUL cannot appear in an Elm string
 literal — rebuild such input with `Char.fromCode`.
 
 In the suite that recipe is `tools/macos-host/tests/prerequisites.py` and there
-is exactly one of it. `open_repl` copies the app to scratch, patches
-`elm-version`, opens `Bot.elm`'s exports and returns a repl that has been shown
-to evaluate; expressions go in as one `[ a, b, c ]` rather than a line each,
-because the repl recompiles the module per line (#84: twenty expressions, 36.5s
-against 5.8s). Ask for `Bool`s with `evaluate`, `String`s with `strings`, and
-anything else with `values`, which is the one caller still asking line by line —
-inside a list the printed form is the list's rather than each answer's.
+is exactly one of it. `open_repl` hands a class the app's scratch copy — patched,
+compiled and probed **once per app per process** since #172 — and returns a repl
+that has been shown to evaluate; expressions go in as one `[ a, b, c ]` rather
+than a line each, because the repl recompiles the module for every *entry* it is
+given (#84: twenty expressions, 36.5s against 5.8s). Ask for `Bool`s with
+`evaluate`, `String`s with `strings`, and anything else with `values`, which is
+the one caller still asking one expression per entry — inside a list the printed
+form is the list's rather than each answer's.
+
+### What a question costs is entries, and that is where the suite's time went
+
+Issue #172 was filed on a suite taking 20-25 minutes and led with the per-class
+scratch copy: 131 classes, each copying 1.4 MB and compiling its own
+`elm-stuff`. **Profiled before it was optimised, and the ordering changed.**
+On the container it was measured on, `copytree` is **0.003 s** — the copy the
+issue leads with was never the cost. What an `elm repl` costs is *entries*: an
+empty session is 0.02 s, `import Bot` against the mission runner's 21,705-line
+`Bot.elm` is **1.55 s**, and every entry after it costs about the same again
+whether it holds one expression or ten. That last clause is why #84's batching
+worked, and it is also what nobody had followed through: a preamble of six
+bindings was six compiles charged to one answer, on every question that class
+asked.
+
+So two changes, in the order the numbers put them. `built_app` builds one copy
+of an app per process and hands the same directory to every class — a sixth of
+the time. And `ElmRepl.script` folds every binding a caller wrote (a subclass's
+`BINDINGS`, a case's `definitions`) into the single `let ... in` entry that asks
+the question, leaving only imports as entries of their own, because a `let`
+cannot hold an import. Measured over a six-module subset asking the same 94
+questions: **763 s → 646 s → 343 s**. The folded script has *more lines* than
+the one it replaced, which is the measurement's own evidence that what is paid
+for is entries.
+
+**Sharing one built tree between classes is checked rather than trusted**, since
+a suite whose classes can edit each other's compiler input is this repo's
+signature failure with the tests as its subject. `fingerprint_of_app` hashes the
+whole tree bar `elm-stuff` — build output, which `elm repl` rewrites by design —
+at the moment the build's probe passes, and `check_unchanged` re-asks it on
+every hand-out and in every `close`, so a class that writes into the tree is
+named by its own `tearDownClass` rather than deciding what the next class
+compiles. That is also what makes probing **once** as strong as probing 131
+times: the tree handed over is byte for byte the tree that answered the probe.
+
+Two things this leaves alone. `--dist loadfile` in the workflow was justified by
+the per-file scratch build, and that reason is now spent — one build per worker
+process happens whatever the distribution — but the granularity is not what
+bounds a parallel run either: on four cores the whole suite spends 4,078 s of
+case time and finishes in 1,057 s against a perfect packing of 1,020 s, with the
+longest single file at 310 s. There is nothing for `loadscope` to recover, so
+the flag stays as a default rather than as a constraint.
+
+And **how much of a local run is the corpus-reading cases is still unmeasured**:
+they skip wherever `~/eve-bot-logs` is absent, which is CI and was the machine
+these numbers came from, so a local run that reads a 122 MB log carries a cost
+none of this touches.
 
 ### A fixture that never arrived reads exactly like a rule that answered nothing
 
