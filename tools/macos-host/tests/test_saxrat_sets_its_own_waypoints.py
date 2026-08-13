@@ -335,6 +335,14 @@ class TheBranchIsReachableAndSaysSo(unittest.TestCase):
 
 class TheSettingsAreRealSettings(unittest.TestCase):
 
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(SaxratRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
     def test_both_are_parsed(self):
         source = collapsed(source_of(SAXRAT_BOT_ELM))
         self.assertIn('( "hunt-system"', source)
@@ -342,10 +350,22 @@ class TheSettingsAreRealSettings(unittest.TestCase):
 
     def test_the_circuit_setting_accumulates_in_the_order_written(self):
         """`anomaly-name` prepends, so repeated keys come out reversed. A
-        circuit is an ordered route and must not."""
-        source = collapsed(source_of(SAXRAT_BOT_ELM))
-        self.assertIn(
-            "settings.huntSystemNames ++ [ String.trim systemName ]", source,
+        circuit is an ordered route and must not.
+
+        Asked of the parser rather than asserted as a substring of the handler.
+        It was the substring
+        `settings.huntSystemNames ++ [ String.trim systemName ]` until #182 gave
+        this setting `splitSettingIntoNames`, which changed the shape while
+        leaving the property -- so the case went red for a change that could not
+        break what it exists to protect, which is what a shape assertion buys.
+        The comma form's own ordering is in
+        `test_saxrat_comma_split_settings.TheSettingsAreStillRepeatableTest`.
+        """
+        self.assertEqual(
+            self.repl.evaluate([
+                '(parseBotSettings "hunt-system=A\\nhunt-system=B"'
+                ' |> Result.map .huntSystemNames) == Ok ["A","B"]']),
+            [True],
             "the circuit is built by prepending, so it would be walked in the "
             "reverse of the order it was configured in")
 

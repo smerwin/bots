@@ -41,9 +41,9 @@
       nothing at all -- removed rather than left as a setting that looks like it
       works.)
 
-      + `anomaly-name` : Choose the name of anomalies to take. You can use this setting multiple times to select multiple names. **Naming any replaces the shipped defaults** (`sansha rally point` and `angel rally point`) rather than adding to them, so the list is exactly what you write; with no `anomaly-name` at all those two are what the bot hunts. Matched whole and ignoring case, so the name must be written as the probe scanner's own Name column shows it -- except that an entry ending in `*` matches any name starting with the rest of it, so `anomaly-name=Sansha*` takes every Sansha site and `anomaly-name=*` takes every combat anomaly. Note a wildcard cannot tell an easy site from one that will kill this ship: it matches Havens and Sanctums as readily as Burrows.
+      + `anomaly-name` : Choose the name of anomalies to take. You can use this setting multiple times to select multiple names, or separate several with commas on one line. The comma always separates, so a name that itself contains one cannot be written here in either form. Matched whole and ignoring case, so the name must be written as the probe scanner's own Name column shows it -- except that an entry ending in `*` matches any name starting with the rest of it, so `anomaly-name=Sansha*` takes every Sansha site. Note a wildcard cannot tell an easy site from one that will kill this ship: it matches Havens and Sanctums as readily as Burrows.
       + `hide-when-neutral-in-local` : Set this to 'yes' to make the bot dock in a station or structure when a neutral or hostile appears in the 'local' chat.
-      + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. You can use this setting multiple times to select multiple names.
+      + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. You can use this setting multiple times to select multiple names, or separate several with commas on one line. The comma always separates, so a name that itself contains one cannot be written here in either form.
       + `anomaly-wait-time`: Minimum time to wait after arriving in an anomaly before considering it finished. Use this if you see anomalies in which rats arrive later than you arrive on grid.
       + `warp-at`: Distance in km to warp to when warping to an anomaly, e.g. `warp-at=30`. Must match one of the game client's own preset "Warp to Within" distances offered in that menu (typically 0, 5, 10, 15, 20, 30, 50, 70, 100) -- an arbitrary value will not match any menu entry and will leave the bot stuck. Defaults to 100.
       + `accept-fleet-invite-from`: Name of a pilot whose fleet invitations this bot should accept, exactly as the client writes it. You can use this setting multiple times to name several pilots. With no such setting the bot accepts no invitation at all and declines every dialog as it always has -- and note the client renders a fleet invitation as an ordinary message box, so before this setting existed the bot actively clicked 'No' on them. Accepting means the fleet commander can warp this ship, so name only pilots you would hand the ship to.
@@ -51,7 +51,7 @@
       + `keep-at-range`: Set this to 'yes' to keep range from the target instead of orbiting or aligning.
       + `targeting-range`: Maximum distance in meters to lock a target from the overview, e.g. `targeting-range=50000`. Beyond this, the bot approaches instead of locking. Defaults to 66000. This is a starting value, not the last word: the bot narrows it during the session from the client's own answers -- the greatest distance at which a lock was accepted and the smallest at which one was provably refused -- and the setting is clamped between the two. Set it to pin the starting point; it still gives way to what the client has actually granted. See `lockRangeThresholdInMeters`.
       + `max-targets`: How many rats to hold locked at once, e.g. `max-targets=6`. Defaults to 4. This is a starting value, not the last word: the client states its own maximum on the game log -- `You are already managing 6 targets, as many as you have skill to.` -- and the target bar proves a floor by holding that many, so the bot raises or lowers this from what the client has actually granted. With no evidence it is exactly the setting. Until the client has stated its maximum the bot asks for one more than it believes in, once per reading it has a row to spare, because that sentence is only written when a lock is attempted beyond the cap. See `maxTargetsCeiling` and `maxTargetsRowsToTake`.
-      + `hunt-system`: Name of a solar system to hunt anomalies in, e.g. `hunt-system=Irnin`. Use it several times to give the bot a circuit. When a system has nothing left worth hunting and no route is set, the bot asks the host to set the autopilot destination to the next system on this list and flies there on its own. Without this setting the bot behaves as it always did: it parks and waits for a human to set a route.
+      + `hunt-system`: Name of a solar system to hunt anomalies in, e.g. `hunt-system=Irnin`. Use it several times to give the bot a circuit, or write the circuit as one comma-separated line -- either way the circuit is walked in the order written. When a system has nothing left worth hunting and no route is set, the bot asks the host to set the autopilot destination to the next system on this list and flies there on its own. Without this setting the bot behaves as it always did: it parks and waits for a human to set a route.
       + `home-system`: Name of the solar system to fall back to once every `hunt-system` has been tried, e.g. `home-system=Amarr`. Optional, and only consulted after the circuit is exhausted.
       + `run-away-incoming-damage-threshold`: Hitpoints of incoming damage, summed from the client's own combat log over a rolling 45-second window, past which the bot breaks off and runs. Unlike the two hitpoint settings above this needs no HUD gauge, which is the point of it: the gauge is scraped out of the client's live memory and produces values like 2132822% and a spurious 0%. Defaults to 3500, calibrated against sixteen recorded sessions of one hull -- the worst any session the ship survived absorbed was 3114, and the session it was lost in peaked at 4101. **That is a number about a hull, not about the game**, so re-derive it for a different ship. Set to -1 to disable.
       + `short-range-ammo`, `long-range-ammo`, `ammo-swap-range`: the ammo swap, off unless **all three** are set. The first two name the charges as the weapon's own right-click menu writes them, e.g. `short-range-ammo=Multifrequency M` and `long-range-ammo=Radio M`. The third is the distance in meters at which the bot changes over, e.g. `ammo-swap-range=29000`: inside it the ship wants the short-range charge, outside it the long-range one, with a 3000 m deadband either side so a target sitting on the line does not swap every reading. There is no way to leave the distance out and have the bot work it out -- the mission runner derives one from the weapon's tooltip and this bot does not read tooltips at all, so the number is asked for rather than guessed. Loading takes the guns offline for a few readings, which the bot will not do while the client's combat log reports more incoming damage than an eighth of `run-away-incoming-damage-threshold`. Setting either ammo name to nothing (`short-range-ammo=`) switches the swap off without deleting the line.
@@ -234,8 +234,11 @@ parseBotSettings =
            )
          , ( "hunt-system"
            , AppSettings.valueTypeString
-                (\systemName settings ->
-                    { settings | huntSystemNames = settings.huntSystemNames ++ [ String.trim systemName ] }
+                (\systemNames settings ->
+                    { settings
+                        | huntSystemNames =
+                            settings.huntSystemNames ++ splitSettingIntoNames systemNames
+                    }
                 )
            )
          , ( "home-system"
@@ -274,14 +277,20 @@ parseBotSettings =
            )
          , ( "anomaly-name"
            , AppSettings.valueTypeString
-                (\anomalyName settings ->
-                    { settings | anomalyNames = String.trim anomalyName :: settings.anomalyNames }
+                (\anomalyNames settings ->
+                    { settings
+                        | anomalyNames =
+                            splitSettingIntoNames anomalyNames ++ settings.anomalyNames
+                    }
                 )
            )
          , ( "avoid-rat"
            , AppSettings.valueTypeString
-                (\ratToAvoid settings ->
-                    { settings | avoidRats = String.trim ratToAvoid :: settings.avoidRats }
+                (\ratsToAvoid settings ->
+                    { settings
+                        | avoidRats =
+                            splitSettingIntoNames ratsToAvoid ++ settings.avoidRats
+                    }
                 )
            )
          , ( "anomaly-wait-time"
@@ -372,10 +381,34 @@ nonEmptySettingValue value =
 
 **A comma cannot occur in an EVE character name** -- the client's own naming
 rules allow letters, digits, spaces, hyphens and apostrophes and nothing else --
-so the separator cannot eat part of a name. That claim is not load-bearing all
-the same: every setting that uses this is _also_ repeatable, so a name this
-splitter would cut can still be given a line of its own. The design does not
-rest on the naming rules being remembered correctly.
+so the separator cannot eat part of a name.
+
+**What repeatability buys is not what this comment used to claim.** It said a
+name this splitter would cut "can still be given a line of its own", and that is
+false: the split is applied to the value of every line, so `avoid-rat=Foo, Bar`
+is two entries whether it shares a line with anything or not, and a name that
+really contains a comma cannot be expressed in _either_ form. Executed rather
+than reasoned -- `TheCommaIsUnconditionalTest` asks the shipped parser. What
+repeatability actually buys is that nothing _forces_ the comma form: one name per
+line still parses to exactly what it always did, which is what makes this change
+free for every settings string in the repo, `run_saxrat.sh`'s included.
+
+So the naming-rules claim is load-bearing after all, and it does not cover all
+five settings equally. `accept-fleet-invite-from` and `follow-fleet-broadcast-from`
+name characters and `hunt-system` names a solar system, whose names have the same
+property. `anomaly-name` and `avoid-rat` name neither: they are matched against
+the probe scanner's own Name column and against an overview row, and **nothing
+here has established what those columns may contain**. The cost is stated rather
+than hidden -- an anomaly or a rat whose name carries a comma became unmatchable
+here, and the evidence that would settle whether such a name exists is a live
+read nobody has taken.
+
+Splitting these three at all is issue #182. The two fleet settings split and
+these did not, so a comma-separated value parsed with no complaint into **one**
+entry that is not a system, an anomaly or a rat: `hunt-system` then asked the
+host to set the destination to the whole string, and `anomaly-name` and
+`avoid-rat` matched nothing -- the second of those in the direction that engages
+a rat which should have been left alone.
 
 An empty entry is dropped rather than kept, because a trailing comma is how one
 gets written by accident and the other names on the line still carry what was
