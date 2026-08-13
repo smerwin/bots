@@ -7326,6 +7326,35 @@ offered once the ship leaves reach, and nothing remembers that its gate was give
 up on. **Income is the outcome measure and there is a clean control**: run 38 did
 1,536,545 ISK/hr on these settings before this path started dominating.
 
+### The host says so when reads stop completing
+
+Issue #166. In run 11 the client stopped answering read requests and the bot did
+not notice -- 18,158 issued, 17,263 completed, 895 that never came back. From that
+moment `ReadingFromGameClientCompleted` never fired again, so
+`updateMemoryForNewReadingFromGame` never ran, so every counter it writes froze at
+the same instant and the whole memory line was byte-identical for the rest of the
+run.
+
+**There is no rule to fix**, which is why this is host-side. PR #165 established
+the message-box ladder was correct as written; nothing in `Bot.elm` can advance a
+counter on a reading that never arrived. The cost is that the log lies: the host
+reprints the current decision on every line, so a stalled pipeline reads exactly
+like thousands of healthy readings -- and by #165's count that has already cost a
+threshold calibration twice, a retreat measurement in #141, and the whole
+diagnosis of #164.
+
+`ReadCompletionWatch` counts consecutive volatile-process reads that came back
+`Err` and prints once at three, again every sixtieth, and once on recovery naming
+how many were missed. **Only the volatile-process read is judged**: the 2023 host
+interface routes input through a volatile-process request, so a read-shaped `Err`
+can arrive from a task that was never a read, and judging by shape would put "the
+client did not answer" in the log for a failed keystroke.
+
+**Unverified:** nothing has been flown, and the threshold of three is a judgement
+rather than a measurement -- run 11 carried 895 consecutive failures, so anything
+in this range catches it early, but no run has shown how often a single read fails
+harmlessly.
+
 ### A shut probe window hid the gate and the opportunity from the whole path
 
 Issue #204. `decideNextActionWhenInSpace` splits on `probeScannerWindow`, and both
