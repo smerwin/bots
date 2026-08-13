@@ -5366,8 +5366,8 @@ droneRecallAskedLookbackSteps =
 Read out of the effects rather than the decision, because
 `updateMemoryForNewReadingFromGame` is the only place that can write memory and
 it never sees the decision. `vkey_R` is used for nothing else in this bot --
-`vkey_E` is the approach chord and `vkey_W` the orbit -- so the chord is
-unambiguous.
+`vkey_Q` is the approach chord, `vkey_E` the keep-at-range and `vkey_W` the
+orbit -- so the chord is unambiguous.
 
 -}
 recentStepAskedForDroneRecall : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
@@ -5472,9 +5472,9 @@ lockTargetFromOverviewEntry context overviewEntry =
             else
                 describeBranch ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Approach.")
                     (decideActionForCurrentStep
-                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_E ]
+                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_Q ]
                          , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-                         , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_E ]
+                         , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_Q ]
                          ]
                             |> List.concat
                         )
