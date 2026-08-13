@@ -2457,63 +2457,82 @@ setRouteToNextHuntingGround context =
 
 jumpToNextSystem : BotDecisionContext -> DecisionPathNode
 jumpToNextSystem context =
-    case context.readingFromGameClient |> infoPanelRouteFirstMarkerFromReadingFromGameClient of
-        Nothing ->
-            setRouteToNextHuntingGround context
+    if routePanelSaysNoDestination context.readingFromGameClient then
+        -- #191. The marker strip and the panel's own words disagree, and the
+        -- words are the ones that turned out to be true: run 23 spent 1,200+
+        -- consecutive readings travelling a route the client had never
+        -- computed, because a stale pip reads as a route to
+        -- `infoPanelRouteFirstMarkerFromReadingFromGameClient` and nothing ever
+        -- read the text beside it.
+        --
+        -- Answering it as "no route" is what bounds this. The travel leg itself
+        -- has no limit -- it is a fall-back to a cascade, and a cascade that
+        -- keeps finding its icon never gives up -- where asking for a route is
+        -- bounded by `routeAskGiveUpReadings` and ends in the hunt circuit
+        -- moving on. So the fix is not a counter here; it is letting the
+        -- reading reach the branch that already has one.
+        describeBranch
+            "The route panel says there is no destination while still showing a marker -- the marker is stale, so there is no route to travel here."
+            (setRouteToNextHuntingGround context)
 
-        Just infoPanelRouteFirstMarker ->
-            -- Feedback: right after the route is reset and a new
-            -- destination is set (whether by the bot or manually), EVE's
-            -- own route panel needs a moment to actually compute the new
-            -- multi-jump path -- during that brief window the marker
-            -- strip can be empty, partial, or still shifting. Clicking
-            -- during that window means right-clicking a position that
-            -- has no clickable icon there yet (or not there anymore by
-            -- the time the click lands) -- observed live as hundreds of
-            -- consecutive ticks of "open context menu on route element
-            -- icon" with no menu ever actually appearing, not even a
-            -- wrong one to discard. A live, isolated check (read the
-            -- same marker 5 times, 300ms apart) found its position
-            -- perfectly stable under normal conditions, so this is a
-            -- real but transient settling window, not a persistent
-            -- coordinate bug -- guard against it by requiring the first
-            -- marker's own display region to have stayed the same for
-            -- at least one full tick (tracked in BotMemory --
-            -- previousReadingsFromGameClient only retains contextMenus,
-            -- not route/info-panel data, so this can't be checked
-            -- directly against a prior reading the way the context-menu
-            -- "no progress" check does) before acting on it.
-            if context.memory.routeFirstMarkerUnchangedTicks < 1 then
-                describeBranch
-                    "Route panel's first marker just appeared or moved since the last reading -- wait for the route to finish (re)computing before clicking it."
-                    waitForProgressInGame
+    else
+        case context.readingFromGameClient |> infoPanelRouteFirstMarkerFromReadingFromGameClient of
+            Nothing ->
+                setRouteToNextHuntingGround context
 
-            else
-                returnDronesToBay context
-                    (jumpThroughRouteStargate context
-                        (useContextMenuCascadeWithCustomConfig
-                            -- Feedback: "Jump Through Stargate" took 3-4 menu
-                            -- opens before being recognized. The route icon is
-                            -- small and sits in a strip that can shift as the
-                            -- route updates, so the default distance tolerance
-                            -- (70, already once widened from 40 for this same
-                            -- kind of drift on other elements) was plausibly
-                            -- discarding a menu that had, in fact, opened
-                            -- correctly. Widened just for this one cascade
-                            -- rather than the shared default, since other
-                            -- cascades' tolerance is already tuned from past
-                            -- observations and this is a different UI element.
-                            (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
-                            { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
-                            (useMenuEntryWithTextContainingFirstOf
-                                [ "dock"
-                                , "jump"
-                                ]
-                                menuCascadeCompleted
+            Just infoPanelRouteFirstMarker ->
+                -- Feedback: right after the route is reset and a new
+                -- destination is set (whether by the bot or manually), EVE's
+                -- own route panel needs a moment to actually compute the new
+                -- multi-jump path -- during that brief window the marker
+                -- strip can be empty, partial, or still shifting. Clicking
+                -- during that window means right-clicking a position that
+                -- has no clickable icon there yet (or not there anymore by
+                -- the time the click lands) -- observed live as hundreds of
+                -- consecutive ticks of "open context menu on route element
+                -- icon" with no menu ever actually appearing, not even a
+                -- wrong one to discard. A live, isolated check (read the
+                -- same marker 5 times, 300ms apart) found its position
+                -- perfectly stable under normal conditions, so this is a
+                -- real but transient settling window, not a persistent
+                -- coordinate bug -- guard against it by requiring the first
+                -- marker's own display region to have stayed the same for
+                -- at least one full tick (tracked in BotMemory --
+                -- previousReadingsFromGameClient only retains contextMenus,
+                -- not route/info-panel data, so this can't be checked
+                -- directly against a prior reading the way the context-menu
+                -- "no progress" check does) before acting on it.
+                if context.memory.routeFirstMarkerUnchangedTicks < 1 then
+                    describeBranch
+                        "Route panel's first marker just appeared or moved since the last reading -- wait for the route to finish (re)computing before clicking it."
+                        waitForProgressInGame
+
+                else
+                    returnDronesToBay context
+                        (jumpThroughRouteStargate context
+                            (useContextMenuCascadeWithCustomConfig
+                                -- Feedback: "Jump Through Stargate" took 3-4 menu
+                                -- opens before being recognized. The route icon is
+                                -- small and sits in a strip that can shift as the
+                                -- route updates, so the default distance tolerance
+                                -- (70, already once widened from 40 for this same
+                                -- kind of drift on other elements) was plausibly
+                                -- discarding a menu that had, in fact, opened
+                                -- correctly. Widened just for this one cascade
+                                -- rather than the shared default, since other
+                                -- cascades' tolerance is already tuned from past
+                                -- observations and this is a different UI element.
+                                (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
+                                { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
+                                (useMenuEntryWithTextContainingFirstOf
+                                    [ "dock"
+                                    , "jump"
+                                    ]
+                                    menuCascadeCompleted
+                                )
+                                context
                             )
-                            context
                         )
-                    )
 
 
 {-| What the panel may be asked to do about the route's next stargate.
@@ -2705,6 +2724,49 @@ parseNextSystemInRouteFromLabelText labelText =
         |> List.map String.trim
         |> List.filter (String.isEmpty >> not)
         |> List.head
+
+
+{-| The words the route panel writes when the client has no route at all.
+
+Lower-cased before comparing, because the panel's own casing is not something
+this has evidence about beyond the one capture.
+
+-}
+routePanelNoDestinationMarker : String
+routePanelNoDestinationMarker =
+    "no destination"
+
+
+{-| Whether the route panel says outright that there is no destination.
+
+**A reading can carry this _and_ a next-system label at the same time**, and that
+is #191. Read off the live client while saxrat run 23 was stuck, the panel held
+
+    No Destination
+    <a href="showinfo:5//30002217" alt="Next System in Route">Hutian</a>
+    No Destination
+
+with one marker icon. The bot read the label, looked for an overview row named
+`Hutian`, found none, fell back to the route-marker cascade, and repeated -- 1,200+
+consecutive readings, never moving, because the client had not computed a route to
+that system and the label was left over.
+
+`infoPanelRouteFirstMarkerFromReadingFromGameClient` answers the panel's
+_visibility_ and has never read its text, so a stale pip reads as a route. The
+panel's own sentence is the one piece of evidence that contradicts it, and this is
+the reading of it.
+
+-}
+routePanelSaysNoDestination : ReadingFromGameClient -> Bool
+routePanelSaysNoDestination readingFromGameClient =
+    readingFromGameClient.infoPanelContainer
+        |> Maybe.andThen .infoPanelRoute
+        |> Maybe.map (.uiNode >> .uiNode >> EveOnline.ParseUserInterface.getAllContainedDisplayTexts)
+        |> Maybe.withDefault []
+        |> List.any
+            (\text ->
+                text |> String.toLower |> String.contains routePanelNoDestinationMarker
+            )
 
 
 {-| Whether an overview row's own words say it is a stargate.

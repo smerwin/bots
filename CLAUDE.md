@@ -7354,6 +7354,34 @@ client did not answer" in the log for a failed keystroke.
 rather than a measurement -- run 11 carried 895 consecutive failures, so anything
 in this range catches it early, but no run has shown how often a single read fails
 harmlessly.
+### The route panel can say 'No Destination' beside a marker, and the marker lies
+
+Issue #191. saxrat run 23 spent 1,200+ consecutive readings on `No stargate on
+the overview is named for 'Hutian'` and never moved. It was travelling a route
+the client had never computed. The panel, read live while it was stuck, carried
+`No Destination`, a `Next System in Route` label naming Hutian, and `No
+Destination` again -- with one marker icon.
+
+`infoPanelRouteFirstMarkerFromReadingFromGameClient` answers the panel's
+**visibility** and has never read its text, so a stale pip reads as a route.
+`routePanelSaysNoDestination` reads the words, and `jumpToNextSystem` asks it
+before the marker.
+
+**The answer is `setRouteToNextHuntingGround`, not a counter.** The travel leg is
+a fall-back to a cascade and has no bound; asking for a route is bounded by
+`routeAskGiveUpReadings` and ends in the circuit moving on. Letting the reading
+reach the branch that already has a bound is what ends the loop -- a second
+counter here would only have made the parking quieter.
+
+It is the destination rather than the client: from the same position, `Hamse`
+gave `Route 5 Jumps` and `Amarr` `Route 6 Jumps`, while `Hutian` gave no route.
+So `hunt-system` can hold a system the client will not route to, and the circuit
+rotates onto it eventually.
+
+**Unverified:** whether Hutian is unreachable by gate at all or excluded by an
+autopilot route preference is **not established**, and #191 says so -- that
+distinction decides whether a bot could detect it in advance, and nothing here
+rests on it. Nothing has been flown.
 
 ### A shut probe window hid the gate and the opportunity from the whole path
 
