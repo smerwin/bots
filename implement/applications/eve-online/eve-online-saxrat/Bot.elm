@@ -560,6 +560,7 @@ type alias BotMemory =
     -- the reading a bound moved, which is what makes one line per change need
     -- no "already reported" flag. See `lockRangeThresholdInMeters`.
     , lockAttempt : Maybe LockAttempt
+    , lockRangeStatedMeters : Maybe Int
     , lockProvenAtMeters : Maybe Int
     , lockRefusedAtMeters : Maybe Int
     , lockRangeLastChange : Maybe String
@@ -5536,6 +5537,7 @@ rule reachable only through one can be checked by reading it and no other way.
 -}
 type alias LockRangeState =
     { fromSetting : Int
+    , statedMeters : Maybe Int
     , provenAtMeters : Maybe Int
     , refusedAtMeters : Maybe Int
     , attempt : Maybe LockAttempt
@@ -5545,6 +5547,7 @@ type alias LockRangeState =
 lockRangeStateFrom : BotDecisionContext -> LockRangeState
 lockRangeStateFrom context =
     { fromSetting = context.eventContext.botSettings.targetingRangeMeters
+    , statedMeters = context.memory.lockRangeStatedMeters
     , provenAtMeters = context.memory.lockProvenAtMeters
     , refusedAtMeters = context.memory.lockRefusedAtMeters
     , attempt = context.memory.lockAttempt
@@ -5580,13 +5583,34 @@ lockRangeThresholdInMeters state =
 
                 Just refusedAt ->
                     min state.fromSetting (refusedAt - 1)
-    in
-    case state.provenAtMeters of
-        Nothing ->
-            loweredByRefusal
 
-        Just provenAt ->
-            max provenAt loweredByRefusal
+        fromMeasurements : Int
+        fromMeasurements =
+            case state.provenAtMeters of
+                Nothing ->
+                    loweredByRefusal
+
+                Just provenAt ->
+                    max provenAt loweredByRefusal
+    in
+    case state.statedMeters of
+        -- The client naming the number outranks both measurements, and #206 is
+        -- what happens when it does not. `provenAtMeters` only ever rises, so an
+        -- attribution error that credits a lock to a more distant row is
+        -- permanent -- run 28 ratcheted to 77 km on a hull whose real range is
+        -- 49 km, crossing its own refusal at 33 km, while the client had said
+        -- `It must be within 49 km` on 1,277 live sightings of that run. A bound
+        -- inferred from several conditions holding at once cannot outweigh the
+        -- client answering in words.
+        --
+        -- Still `min` with the setting, because an operator asking for a
+        -- narrower range than the ship can manage is asking for something the
+        -- client will grant, and this rule has never overridden that direction.
+        Just stated ->
+            min state.fromSetting stated
+
+        Nothing ->
+            fromMeasurements
 
 
 {-| Whether the ship can lock this row from where it is standing.
@@ -6117,6 +6141,82 @@ lockAttemptCanTeachRange attempt =
     attempt.targetsCount == 0
 
 
+{-| The first of the pair the client's own sentence has to carry.
+
+`#31`'s reason: one common phrase matches sentences this must not read. "too far
+away" alone is written about warping, about approaching, and about interacting
+with a container; only the pairing with a stated ceiling makes it the lock range.
+
+-}
+lockRangeTooFarMarker : String
+lockRangeTooFarMarker =
+    "too far away"
+
+
+{-| The second, and the one carrying the number.
+
+    The target <b>Centii Minion</b> is too far away. It must be within <b>49 km</b>.
+
+-}
+lockRangeCeilingMarker : String
+lockRangeCeilingMarker =
+    "must be within"
+
+
+{-| The ceiling the client stated on this reading, in meters, if it stated one.
+
+**Only `km`.** The corpus writes this sentence one way and every sighting is in
+kilometres; a bare number or a unit this does not know is answered `Nothing`
+rather than guessed at, because the failure of a guess here is a threshold the
+bot then trusts over its own measurements.
+
+Markup is stripped first -- the number arrives inside `<b>` tags -- which is
+`textWithoutMarkupTags`' job and the same thing the fleet-invitation reader does
+with a `showinfo` link.
+
+-}
+lockRangeStatedInText : String -> Maybe Int
+lockRangeStatedInText text =
+    let
+        plain : String
+        plain =
+            text |> textWithoutMarkupTags |> String.toLower
+    in
+    if not (plain |> String.contains lockRangeTooFarMarker) then
+        Nothing
+
+    else
+        case plain |> String.split lockRangeCeilingMarker of
+            _ :: afterMarker :: _ ->
+                case afterMarker |> String.words of
+                    number :: unit :: _ ->
+                        if unit |> String.startsWith "km" then
+                            number |> String.toInt |> Maybe.map ((*) 1000)
+
+                        else
+                            Nothing
+
+                    _ ->
+                        Nothing
+
+            _ ->
+                Nothing
+
+
+{-| What the client said about the lock range on this reading, if anything.
+
+Read from the quick message **on screen now** rather than from the game log's
+echo of it: the same sentence is reprinted under every decision for as long as it
+is remembered, and counting those would make one refusal look like hundreds.
+
+-}
+lockRangeStatedInQuickMessage : ReadingFromGameClient -> Maybe Int
+lockRangeStatedInQuickMessage readingFromGameClient =
+    readingFromGameClient
+        |> quickMessageOnScreen
+        |> Maybe.andThen (.text >> lockRangeStatedInText)
+
+
 {-| The lock-range bounds, for the status line.
 
 Continuous rather than once-per-change, unlike the decision-log line: a number
@@ -6134,6 +6234,8 @@ describeLockRange state =
         ++ (lockRangeThresholdInMeters state |> String.fromInt)
         ++ " m (setting "
         ++ (state.fromSetting |> String.fromInt)
+        ++ ", client stated "
+        ++ (state.statedMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
         ++ ", proven "
         ++ (state.provenAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
         ++ ", refused "
@@ -6971,6 +7073,7 @@ initBotMemory =
     -- "the client refused at 0 m", and is why these are `Maybe Int` rather
     -- than a defaulted number. With both absent the threshold is exactly the
     -- setting, so a session that learns nothing behaves as it always did.
+    , lockRangeStatedMeters = Nothing
     , lockProvenAtMeters = Nothing
     , lockRefusedAtMeters = Nothing
     , lockRangeLastChange = Nothing
@@ -11438,6 +11541,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         lockRangeLearning =
             updateLockRangeLearning (lockRangeReadingFrom context)
                 { fromSetting = context.botSettings.targetingRangeMeters
+                , statedMeters = botMemoryBefore.lockRangeStatedMeters
                 , provenAtMeters = botMemoryBefore.lockProvenAtMeters
                 , refusedAtMeters = botMemoryBefore.lockRefusedAtMeters
                 , attempt = botMemoryBefore.lockAttempt
@@ -11823,6 +11927,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     , lockBatchLastChange = lockBatchAccounting.change
     , targetsCountLastReading = context.readingFromGameClient.targets |> List.length
     , lockAttempt = lockRangeLearning.attempt
+    , lockRangeStatedMeters =
+        -- Overwritten rather than narrowed: the ceiling is not a constant even
+        -- for one hull. Only 49 km and 39 km occur across the corpus and runs 13
+        -- and 14 carry both within one session, so a monotone bound here would
+        -- be #206 again in the other direction. A reading that says nothing
+        -- keeps the last thing the client said.
+        case lockRangeStatedInQuickMessage context.readingFromGameClient of
+            Just stated ->
+                Just stated
+
+            Nothing ->
+                botMemoryBefore.lockRangeStatedMeters
     , lockProvenAtMeters = lockRangeLearning.provenAtMeters
     , lockRefusedAtMeters = lockRangeLearning.refusedAtMeters
     , lockRangeLastChange = lockRangeLearning.change

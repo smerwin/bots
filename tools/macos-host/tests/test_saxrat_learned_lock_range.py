@@ -189,12 +189,14 @@ class LockRangeRepl(SaxratRepl):
         "step = \\reading state ->"
         " let learned = updateLockRangeLearning reading state in"
         " { fromSetting = state.fromSetting"
+        " , statedMeters = state.statedMeters"
         " , provenAtMeters = learned.provenAtMeters"
         " , refusedAtMeters = learned.refusedAtMeters"
         " , attempt = learned.attempt }",
         "changeOf = \\reading state ->"
         " (updateLockRangeLearning reading state).change",
-        "noEvidence = { fromSetting = 66000, provenAtMeters = Nothing"
+        "noEvidence = { fromSetting = 66000, statedMeters = Nothing"
+        " , provenAtMeters = Nothing"
         " , refusedAtMeters = Nothing, attempt = Nothing }",
     ]
 
@@ -271,6 +273,7 @@ class LockRangeThresholdTest(unittest.TestCase):
 
     def threshold(self, setting, proven, refused):
         return ("lockRangeThresholdInMeters { fromSetting = %d"
+                ", statedMeters = Nothing"
                 ", provenAtMeters = %s, refusedAtMeters = %s"
                 ", attempt = Nothing }"
                 % (setting,
@@ -770,7 +773,8 @@ class LearningASessionTest(unittest.TestCase):
         # make them: a lock accepted at 60,000 m is not further than the 60,000
         # already proven, and a refusal at 60,000 m is not tighter than the
         # 50,000 already refused.
-        learned = ("{ fromSetting = 66000, provenAtMeters = Just 60000"
+        learned = ("{ fromSetting = 66000, statedMeters = Nothing"
+                   ", provenAtMeters = Just 60000"
                    ", refusedAtMeters = Just 50000, attempt = Nothing }")
         accepted = self.fold([self.click("waiting"), self.idle("locked")],
                              start=learned)
@@ -863,19 +867,21 @@ class StatusAndWiringTest(unittest.TestCase):
         has said. A clause carrying only the first cannot distinguish "the
         setting is right" from "the setting was overruled"."""
         [nothing_known, run_36] = self.repl.strings([
-            "describeLockRange { fromSetting = 66000, provenAtMeters = Nothing"
+            "describeLockRange { fromSetting = 66000, statedMeters = Nothing"
+            ", provenAtMeters = Nothing"
             ", refusedAtMeters = Nothing, attempt = Nothing }",
-            "describeLockRange { fromSetting = %d, provenAtMeters = Just %d"
+            "describeLockRange { fromSetting = %d, statedMeters = Nothing"
+            ", provenAtMeters = Just %d"
             ", refusedAtMeters = Just %d, attempt = Nothing }"
             % (RUN_36["setting"], RUN_36["proven"], RUN_36["refused"])])
         self.assertEqual(
             nothing_known,
-            "Lock range: 66000 m (setting 66000, proven -, refused -, "
-            "attempt none).")
+            "Lock range: 66000 m (setting 66000, client stated -, "
+            "proven -, refused -, attempt none).")
         self.assertEqual(
             run_36,
-            "Lock range: 59000 m (setting 37000, proven 59000, refused 67000, "
-            "attempt none).")
+            "Lock range: 59000 m (setting 37000, client stated -, "
+            "proven 59000, refused 67000, attempt none).")
 
     def test_a_pending_attempt_is_reported_with_its_distance_and_age(self):
         """A bot clicking a lock it will never get shows up as an attempt
@@ -884,7 +890,8 @@ class StatusAndWiringTest(unittest.TestCase):
         reading is the identity rule declining to attribute, which is expected
         here rather than a fault."""
         [pending] = self.repl.strings([
-            "describeLockRange { fromSetting = 66000, provenAtMeters = Nothing"
+            "describeLockRange { fromSetting = 66000, statedMeters = Nothing"
+            ", provenAtMeters = Nothing"
             ", refusedAtMeters = Nothing, attempt = Just"
             " { handle = \"id:111\", distanceInMeters = 60000"
             ", targetsCount = 0, readingsWaited = 8 } }"])

@@ -7382,6 +7382,37 @@ rotates onto it eventually.
 autopilot route preference is **not established**, and #191 says so -- that
 distinction decides whether a bot could detect it in advance, and nothing here
 rests on it. Nothing has been flown.
+### The client states its lock range in words, and it now outranks the ratchet
+
+Issue #206. `lockProvenAtMeters` only rises, so an attribution error crediting a
+lock to a more distant row is permanent. Run 28 ratcheted to 77 km on a hull whose
+real range is 49 km while `lockRefusedAtMeters` fell to 33 km -- the two crossed,
+`lockRangeThresholdInMeters` resolved it in favour of proven, and
+`targeting-range=49000` sat inert with only a restart able to clear it.
+
+The client had said the number outright, 1,277 live sightings in that same run:
+`The target <b>Centii Minion</b> is too far away. It must be within <b>49 km</b>.`
+
+`lockRangeStatedInQuickMessage` reads it and the threshold takes it as
+`min fromSetting stated`, so a measurement can no longer raise the bound past what
+the client stated. The setting still wins when it is _narrower_, which is the one
+direction this rule has never overridden.
+
+**Overwritten, never narrowed.** The ceiling is not a constant even for one hull:
+only 49 km and 39 km occur across the corpus and runs 13 and 14 carry both within
+one session, a sensor booster being the obvious candidate. A monotone bound here
+would be #206 again in the other direction, and a case pins the absence of any
+`min` or `max` at the write site.
+
+**Read from the live quick message, not the game log echo**, which reprints the
+sentence under every decision -- counting those would make one refusal look like
+hundreds. And read as a **pair** (`too far away` with `must be within`), because
+the first phrase alone is written about warping, approaching and containers.
+
+**Unverified:** nothing has been flown, and the sensor-booster explanation for the
+ceiling moving is consistent with the corpus but unconfirmed. Only `km` is
+accepted; a sighting in other units would be declined rather than guessed at, and
+none is known to exist.
 
 ### A shut probe window hid the gate and the opportunity from the whole path
 
