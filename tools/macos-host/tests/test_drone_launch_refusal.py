@@ -106,6 +106,12 @@ OTHER_DRONE_MESSAGES = [
 
 # The declarations both apps carry identically. A port that keeps one and drops
 # another is what `BothAppsCarryTheSameRule` refuses.
+#
+# `describeDroneLaunchCeiling` is deliberately not among them: #242 shortened
+# saxrat's status line and left the mission runner's alone, so the two render
+# the same three numbers in different words. What each renders is asserted per
+# app in `TheStatusLineSaysWhereTheCeilingCameFrom`, which is where a drift in
+# either wording shows up.
 SHARED_DECLARATIONS = (
     "droneLaunchRefusedMarker",
     "droneLaunchSkillMarker",
@@ -116,14 +122,32 @@ SHARED_DECLARATIONS = (
     "dronesInSpaceLimitFromWindow",
     "droneLaunchCeiling",
     "updateDroneLaunchLearning",
-    "describeDroneLaunchCeiling",
 )
 
-# Where the popup text sits in a status line, either form of the clause. Used
+# What each app's status line says the ceiling is, for a window of 8 with the
+# client silent and then with it having stated 5. Both halves are named in both
+# apps -- that is the property -- and only the words differ.
+CEILING_CLAUSES = {
+    "saxrat": ("dronecap 8 (window 8 client -).",
+               "dronecap 5 (window 8 client 5)."),
+    "mission runner": (
+        "Drone launch ceiling: 8 (drones window says 8, client stated -).",
+        "Drone launch ceiling: 5 (drones window says 8, client stated 5)."),
+}
+
+# Where the popup text sits in a status line, in every form of the clause. Used
 # only by the corpus cases, to recover the wordings the runs recorded.
+#
+# Two forms rather than one because #242 shortened saxrat's clause -- `Quick
+# msg (now)` where the mission runner still writes `Quick message (on screen
+# now)` -- and the recorded runs straddle that change. Reading only one form
+# would quietly halve the corpus these cases are measured against, which is the
+# direction a matcher on client text fails in and looks like success.
 RECORDED_QUICK_MESSAGE = re.compile(
-    r'Quick message \((?:on screen now|NOT on screen now[^)]*)\): "(.*)"\.\s*$')
-LIVE_QUICK_MESSAGE = re.compile(r'Quick message \(on screen now\): "(.*)"\.\s*$')
+    r'Quick (?:message|msg) \((?:on screen now|NOT on screen now[^)]*'
+    r'|now|\d+ ago)\): "(.*)"\.\s*$')
+LIVE_QUICK_MESSAGE = re.compile(
+    r'Quick (?:message|msg) \((?:on screen now|now)\): "(.*)"\.\s*$')
 
 
 def state(from_window, stated=None):
@@ -452,14 +476,27 @@ class TheStatusLineSaysWhereTheCeilingCameFrom(
                 ["describeDroneLaunchCeiling %s" % state(8),
                  "describeDroneLaunchCeiling %s"
                  % state(8, stated=CLIENT_MAXIMUM)])
-            self.assertEqual(
-                said[0],
-                "Drone launch ceiling: 8 (drones window says 8, client stated "
-                "-).", app)
-            self.assertEqual(
-                said[1],
-                "Drone launch ceiling: 5 (drones window says 8, client stated "
-                "5).", app)
+            self.assertEqual(said, list(CEILING_CLAUSES[app]), app)
+
+    def test_neither_app_drops_a_half_however_short_the_words_get(self):
+        """The property under the wording, since the wording is per app now.
+
+        #242 abbreviated saxrat's clause and could have gone one step further
+        and printed the answer alone, which is the thing this class exists to
+        refuse. So both numbers are asked for by *value* rather than by the
+        words around them: a clause naming 5 and nothing else satisfies no
+        reading of this.
+        """
+        for app, repl in self.repls.items():
+            [said] = repl.strings(
+                ["describeDroneLaunchCeiling %s"
+                 % state(8, stated=CLIENT_MAXIMUM)])
+            self.assertIn("8", said,
+                          "%s no longer says what the drones window offered, "
+                          "so a ship whose skill was not the binding "
+                          "constraint reads the same as one whose was" % app)
+            self.assertIn("5", said,
+                          "%s no longer says what the client stated" % app)
 
 
 class TheWiringIsWhatMakesAnyOfThisReachable(unittest.TestCase):
