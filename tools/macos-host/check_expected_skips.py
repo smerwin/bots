@@ -38,6 +38,8 @@ EXPECTED = [
      "the shared corpus gate in prerequisites.recorded_runs"),
     (r"^no recorded mission_run\d+\.log$",
      "one named recorded run this machine does not have"),
+    (r"^no recorded saxrat_run\d+\.log$",
+     "one named recorded saxrat run this machine does not have"),
     (r"^no recorded runs?\d*\b",
      "the recorded runs in ~/eve-bot-logs"),
     (r"^none of the recorded runs are present$",

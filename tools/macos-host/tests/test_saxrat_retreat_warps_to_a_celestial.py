@@ -186,9 +186,7 @@ class TheExitIsThePanelAndNotTheDockCascade(unittest.TestCase):
 def run35():
     path = os.path.join(EVE_BOT_LOGS, "saxrat_run35.log")
     if not os.path.exists(path):
-        raise unittest.SkipTest(
-            "no saxrat_run35.log in %s -- the run this change is derived from "
-            "is not on this machine" % EVE_BOT_LOGS)
+        raise unittest.SkipTest("no recorded saxrat_run35.log")
     return path
 
 
