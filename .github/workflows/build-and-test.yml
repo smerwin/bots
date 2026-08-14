@@ -138,8 +138,13 @@ jobs:
         # is not the constraint either. On a 4-core container the run after #172
         # spent 4078s of case time and finished in 1057s, against a perfect
         # packing of 1020s -- and the longest single *file* is 310s, well under
-        # the wall clock. There is nothing for `loadscope` to recover here; what
-        # is left is total work, not how it is dealt out.
+        # the wall clock. So `loadscope` has about 37s of a 17-minute run to
+        # recover: this is a **measured** choice with a stated margin, not a
+        # constraint and not an unexamined default.
+        #
+        # A margin is the kind of claim that stops holding without saying so, so
+        # the step below re-takes it from this run's own report rather than
+        # leaving it here to be believed. #199.
         #
         # Measured on a 4-core runner, before #172: 1266s sequential, 395s this
         # way.
@@ -158,3 +163,16 @@ jobs:
         # whose skips are worth seeing.
         if: always()
         run: python3 tools/macos-host/check_expected_skips.py test-report.xml
+
+      - name: No single file may be what bounds the run
+        # Issue #199. `--dist loadfile` above is kept on a measurement rather
+        # than on a constraint, and this is that measurement re-taken on every
+        # run: the longest file's case time against the case time this suite
+        # would take spread evenly over the workers. It compares two numbers
+        # from the same run, so a slow runner stretches both and it reads the
+        # shape of the suite rather than the speed of the machine.
+        #
+        # It runs even when the suite failed -- a run that lost a case still
+        # says how the rest of it packed.
+        if: always()
+        run: python3 tools/macos-host/check_file_packing.py test-report.xml
