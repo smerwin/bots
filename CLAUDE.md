@@ -9325,11 +9325,14 @@ times: the tree handed over is byte for byte the tree that answered the probe.
 Two things this leaves alone. `--dist loadfile` in the workflow was justified by
 the per-file scratch build, and that reason is now spent — one build per worker
 process happens whatever the distribution — but the granularity is not what
-bounds a parallel run either: on four cores the whole suite spends 4,078 s of
-case time and finishes in 1,057 s against a perfect packing of 1,020 s, with the
-longest single file at 310 s. So `loadscope` has about **37 s of a 17-minute
-run** to recover, and the flag stays — a *measured* choice with a stated margin,
-neither a constraint nor an unexamined default.
+bounds a parallel run either. Measured on CI's own four-core runner (#199): 86
+files, **3,643 s** of case time, finishing in **927 s** against a perfect
+packing of **911 s**, with the longest single file at **256 s** — a third of
+that floor. So `loadscope` has about **16 s of a 15-minute run** to recover, and
+the flag stays — a *measured* choice with a stated margin, neither a constraint
+nor an unexamined default. #172 measured the same shape on a 4-core container
+(4,078 s of case time, 1,057 s against a 1,020 s packing, longest file 310 s),
+so this is two runners agreeing rather than one number.
 
 **A margin is a claim that stops holding without saying so**, which is what #199
 was filed on: revert the shared build, or let one file grow past the floor, and

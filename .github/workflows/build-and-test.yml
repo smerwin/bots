@@ -135,12 +135,14 @@ jobs:
         # paying anyway.
         #
         # What keeps it is a different measurement, and it says the granularity
-        # is not the constraint either. On a 4-core container the run after #172
-        # spent 4078s of case time and finished in 1057s, against a perfect
-        # packing of 1020s -- and the longest single *file* is 310s, well under
-        # the wall clock. So `loadscope` has about 37s of a 17-minute run to
-        # recover: this is a **measured** choice with a stated margin, not a
-        # constraint and not an unexamined default.
+        # is not the constraint either. Taken on this runner: 86 files, 3643s of
+        # case time, finishing in 927s against a perfect packing of 911s -- and
+        # the longest single *file* is 256s, a third of that floor. So
+        # `loadscope` has about 16s of a 15-minute run to recover, and this is a
+        # **measured** choice with a stated margin, not a constraint and not an
+        # unexamined default. (#172 measured the same shape on a 4-core
+        # container: 4078s of case time, 1057s against a 1020s packing, longest
+        # file 310s.)
         #
         # A margin is the kind of claim that stops holding without saying so, so
         # the step below re-takes it from this run's own report rather than
