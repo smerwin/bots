@@ -220,6 +220,7 @@ def dispatch(items, fail_on=None):
     dispatcher._scale_y = 1.0
     dispatcher._last_mouse_pos = (0.0, 0.0)
     dispatcher._last_input_post_at = 0.0
+    dispatcher._glide_costs_this_step = []
     dispatcher.volatile = types.SimpleNamespace(game_pid=1234)
 
     recorder = Recorder(fail_on=fail_on)

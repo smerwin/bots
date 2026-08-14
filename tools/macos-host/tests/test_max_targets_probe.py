@@ -98,6 +98,23 @@ from test_learned_max_targets import (
 from test_saxrat_learned_lock_range import (
     LockRangeRepl, flying, overview_rows, row_center)
 
+# What each app's status line says the ceiling is: nothing learned, the target
+# bar having held six, and the client having stated six. #242 shortened
+# saxrat's status line and left the mission runner's alone, so the two render
+# the same four facts in different words -- and what the case below asserts is
+# that all four survive whichever spelling the app uses.
+MAX_TARGETS_CLAUSES = {
+    "saxrat": ("maxtgt 4 (setting 4 client - held - probing 5).",
+               "maxtgt 6 (setting 4 client - held 6 probing 7).",
+               "maxtgt 6 (setting 4 client 6 held 5)."),
+    "mission runner": (
+        "Max targets: 4 (setting 4, client stated -, most held at once -, "
+        "probing for 5).",
+        "Max targets: 6 (setting 4, client stated -, most held at once 6, "
+        "probing for 7).",
+        "Max targets: 6 (setting 4, client stated 6, most held at once 5)."),
+}
+
 # The declarations #150 adds, which both apps carry identically. A port that
 # keeps one and drops another is what `BothAppsCarryTheSameRule` refuses, and
 # the failure would be quiet -- a bot that never probes reads exactly like a
@@ -474,18 +491,7 @@ class TheStatementIsWhatEndsTheProbing(BothAppsRepl, unittest.TestCase):
                  "describeMaxTargets %s"
                  % state(SHIPPED_DEFAULT, stated=CLIENT_MAXIMUM, held=5)],
                 repl.with_helpers([]))
-            self.assertEqual(
-                said[0],
-                "Max targets: 4 (setting 4, client stated -, most held at "
-                "once -, probing for 5).", app)
-            self.assertEqual(
-                said[1],
-                "Max targets: 6 (setting 4, client stated -, most held at "
-                "once 6, probing for 7).", app)
-            self.assertEqual(
-                said[2],
-                "Max targets: 6 (setting 4, client stated 6, most held at "
-                "once 5).", app)
+            self.assertEqual(said, list(MAX_TARGETS_CLAUSES[app]), app)
 
 
 class ARefusedProbeIsNotAStuckLock(unittest.TestCase):

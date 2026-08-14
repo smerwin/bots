@@ -2023,6 +2023,14 @@ findMouseButtonClickLocationsInListOfEffects mouseButton =
         mouseButtonCode : Common.EffectOnWindow.VirtualKeyCode
         mouseButtonCode =
             Common.EffectOnWindow.virtualKeyCodeFromMouseButton mouseButton
+
+        recordClick maybeLastMouseMoveLocation clickLocations =
+            case maybeLastMouseMoveLocation of
+                Nothing ->
+                    ( maybeLastMouseMoveLocation, clickLocations )
+
+                Just lastMouseMoveLocation ->
+                    ( maybeLastMouseMoveLocation, clickLocations ++ [ lastMouseMoveLocation ] )
     in
     List.foldl
         (\effect ( maybeLastMouseMoveLocation, clickLocations ) ->
@@ -2030,17 +2038,35 @@ findMouseButtonClickLocationsInListOfEffects mouseButton =
                 Common.EffectOnWindow.MouseMoveTo mouseMoveTo ->
                     ( Just mouseMoveTo, clickLocations )
 
+                -- The constructor a mouse click is actually built from.
+                -- `effectsMouseClickAtLocation` emits MouseMoveTo/ButtonDown/
+                -- ButtonUp, so before this case existed the fold matched
+                -- nothing and the function returned an empty list for every
+                -- click ever issued. Everything downstream that asks "did we
+                -- already click there?" therefore always answered no:
+                -- `doEffectsClickModuleButton` never once recognised its own
+                -- click, so every module activation was clicked repeatedly and
+                -- only came out right because a module toggles on an odd number
+                -- of presses. That was measured across two full live sessions
+                -- of `eve-online-mission-runner` and `eve-online-saxrat`; #239
+                -- found the same arm missing in `eve-online-combat-anomaly-bot`
+                -- and `eve-online-warp-to-0-autopilot`, where no run of either
+                -- has been examined for it.
+                Common.EffectOnWindow.ButtonDown button ->
+                    if button == mouseButton then
+                        recordClick maybeLastMouseMoveLocation clickLocations
+
+                    else
+                        ( maybeLastMouseMoveLocation, clickLocations )
+
+                -- Kept for effect sequences that spell a mouse button out as a
+                -- virtual key code rather than using ButtonDown.
                 Common.EffectOnWindow.KeyDown keyDown ->
-                    case maybeLastMouseMoveLocation of
-                        Nothing ->
-                            ( maybeLastMouseMoveLocation, clickLocations )
+                    if keyDown == mouseButtonCode then
+                        recordClick maybeLastMouseMoveLocation clickLocations
 
-                        Just lastMouseMoveLocation ->
-                            if keyDown == mouseButtonCode then
-                                ( maybeLastMouseMoveLocation, clickLocations ++ [ lastMouseMoveLocation ] )
-
-                            else
-                                ( maybeLastMouseMoveLocation, clickLocations )
+                    else
+                        ( maybeLastMouseMoveLocation, clickLocations )
 
                 _ ->
                     ( maybeLastMouseMoveLocation, clickLocations )

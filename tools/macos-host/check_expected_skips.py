@@ -53,6 +53,13 @@ EXPECTED = [
      "the client's own game logs, which only a machine that has played has"),
     (r"^no game log lines recorded under ",
      "recorded runs that carry no game log"),
+    (r"^not macOS: cg_input\b",
+     "the cases that build and drive cg_input itself, which is CoreGraphics "
+     "and does not compile on the Linux runner. The platform is the absent "
+     "evidence here rather than a missing tool -- and the composition rule "
+     "those cases exist for is checked on this runner too, in a header that "
+     "deliberately depends on nothing, so the skip does not take the rule "
+     "with it."),
 ]
 
 # Reasons that are never acceptable, with what each one means. Anything not in
