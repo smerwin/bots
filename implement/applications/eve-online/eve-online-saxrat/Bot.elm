@@ -12368,6 +12368,7 @@ before its name ever reaches the overview cross-reference, so it can never
 become the "other pilot" the memory records. A chat row with no hint at all
 stays in the list -- absent evidence reads as a stranger, which is today's
 behaviour and the direction this must fail in.
+
 -}
 getNamesOfOtherPilotsInOverview : ReadingFromGameClient -> List String
 getNamesOfOtherPilotsInOverview readingFromGameClient =
