@@ -318,13 +318,23 @@ class TheBranchIsReachableAndSaysSo(unittest.TestCase):
                       "the branch no longer writes the directive")
 
     def test_the_operator_can_see_the_circuit_every_reading(self):
+        """Three states, in whatever words #242 left them.
+
+        A bot with no circuit will never set a route, an ask that is going
+        unanswered is the host not answering, and the give-up is the end of the
+        asking. Each has to be distinguishable on a reading -- what the clause
+        calls them is the status line's business and changed with #242, so the
+        wording asserted here is only what the shipped clause says today.
+        """
         describe = collapsed(body_of(source_of(SAXRAT_BOT_ELM),
                                      "describeHuntCircuit"))
-        self.assertIn("none configured", describe,
+        self.assertIn("no hunt circuit", describe,
                       "a bot that will never set a route does not say so")
         self.assertIn("ROUTE SETTING GIVEN UP", describe)
-        self.assertIn("with no route yet", describe,
-                      "an ask that is going unanswered is invisible")
+        self.assertIn("routeAskGiveUpReadings", describe,
+                      "an ask that is going unanswered is invisible -- the "
+                      "clause names neither how long it has waited nor the "
+                      "bound it is waiting against")
 
     def test_the_status_line_actually_carries_it(self):
         source = collapsed(source_of(SAXRAT_BOT_ELM))
