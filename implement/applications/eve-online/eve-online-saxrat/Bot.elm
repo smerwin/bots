@@ -3958,6 +3958,19 @@ quickMessageStatusCharacterBudget =
     400
 
 
+{-| How long a quick message stays in the status line after it left the screen.
+
+The sighting is carried forward with an age so a notice can be read beside the
+decision that followed it, which is a reading or two rather than minutes. Past
+this it is a notice from minutes ago printed next to a reading it has nothing to
+do with, so the clause says "none recent" instead of reprinting it.
+
+-}
+quickMessageStaleAfterReadings : Int
+quickMessageStaleAfterReadings =
+    100
+
+
 {-| A quick message rendered as one line, losing nothing that cannot be undone.
 
 Two transformations and no others. The text is cut to
@@ -4001,28 +4014,30 @@ describeQuickMessage sighting =
             "Quick message: none on this reading, and none seen this session."
 
         Just seen ->
-            "Quick message"
-                ++ (if seen.readingsSince == 0 then
-                        " (on screen now)"
+            if quickMessageStaleAfterReadings < seen.readingsSince then
+                "Quick message: none recent."
 
-                    else
-                        " (NOT on screen now -- last seen "
-                            ++ String.fromInt seen.readingsSince
-                            ++ " readings ago)"
-                   )
-                ++ ": \""
-                ++ quickMessageTextForStatusLine seen.text
-                ++ "\""
-                ++ (if String.length seen.text <= quickMessageStatusCharacterBudget then
-                        ""
+            else
+                "Quick msg"
+                    ++ (if seen.readingsSince == 0 then
+                            " (now)"
 
-                    else
-                        " (CAPPED at "
-                            ++ String.fromInt quickMessageStatusCharacterBudget
-                            ++ " of "
-                            ++ String.fromInt (String.length seen.text)
-                            ++ " characters)"
-                   )
+                        else
+                            " (" ++ String.fromInt seen.readingsSince ++ " ago)"
+                       )
+                    ++ ": \""
+                    ++ quickMessageTextForStatusLine seen.text
+                    ++ "\""
+                    ++ (if String.length seen.text <= quickMessageStatusCharacterBudget then
+                            ""
+
+                        else
+                            " (CAPPED "
+                                ++ String.fromInt quickMessageStatusCharacterBudget
+                                ++ "/"
+                                ++ String.fromInt (String.length seen.text)
+                                ++ ")"
+                       )
                 ++ (if seen.messagesInLayer <= 1 then
                         ""
 
@@ -5182,11 +5197,11 @@ binding constraint at all. `describeMaxTargets`' argument, applied to this pair.
 -}
 describeDroneLaunchCeiling : DroneLaunchState -> String
 describeDroneLaunchCeiling state =
-    "Drone launch ceiling: "
+    "dronecap "
         ++ (droneLaunchCeiling state |> String.fromInt)
-        ++ " (drones window says "
+        ++ " (window "
         ++ (state.fromWindow |> String.fromInt)
-        ++ ", client stated "
+        ++ " client "
         ++ (state.statedByClient |> Maybe.map String.fromInt |> Maybe.withDefault "-")
         ++ ")."
 
@@ -5436,29 +5451,36 @@ appeared", and a clause that shows up only on success cannot say that.
 -}
 describeHuntCircuit : BotDecisionContext -> String
 describeHuntCircuit context =
+    let
+        currentSystem =
+            context.readingFromGameClient.infoPanelContainer
+                |> Maybe.andThen .infoPanelLocationInfo
+                |> Maybe.andThen .currentSolarSystemName
+                |> Maybe.map String.trim
+                |> Maybe.withDefault "?"
+    in
     if List.isEmpty context.eventContext.botSettings.huntSystemNames then
-        "Hunt circuit: none configured (no 'hunt-system'), so this bot waits for a route rather than setting one."
+        "Sys " ++ currentSystem ++ " (no hunt circuit)."
 
     else
-        "Hunt circuit: "
-            ++ (context.eventContext.botSettings.huntSystemNames |> String.join " -> ")
-            ++ ", next "
+        "Sys "
+            ++ currentSystem
+            ++ " -> "
             ++ (nextHuntingGround context |> Maybe.withDefault "nowhere")
             ++ (case context.memory.destinationAskedFor of
                     Nothing ->
                         ""
 
                     Just asked ->
-                        ". Asked for '"
+                        " asked '"
                             ++ asked
                             ++ "' "
                             ++ String.fromInt context.memory.destinationAskReadings
                             ++ "/"
                             ++ String.fromInt routeAskGiveUpReadings
-                            ++ " readings ago with no route yet"
                )
             ++ (if context.memory.routeSettingGivenUp then
-                    ". ROUTE SETTING GIVEN UP -- this host does not set destinations"
+                    " ROUTE SETTING GIVEN UP -- this host does not set destinations"
 
                 else
                     ""
@@ -5468,11 +5490,11 @@ describeHuntCircuit context =
 
 describeDroneRecall : BotDecisionContext -> String
 describeDroneRecall context =
-    "Drones: "
+    "drones "
         ++ (context.memory.dronesInSpaceCountLastReading |> String.fromInt)
-        ++ " in space ("
+        ++ " out ("
         ++ (context.memory.dronesInSpaceTicks |> String.fromInt)
-        ++ " readings), unanswered recall "
+        ++ "rd) recall "
         ++ (context.memory.droneRecallUnansweredTicks |> String.fromInt)
         ++ "/"
         ++ (droneRecallGiveUpTicks |> String.fromInt)
@@ -6366,19 +6388,19 @@ rule declining to attribute, which is the expected answer here and not a fault.
 -}
 describeLockRange : LockRangeState -> String
 describeLockRange state =
-    "Lock range: "
+    "lock "
         ++ (lockRangeThresholdInMeters state |> String.fromInt)
-        ++ " m (setting "
+        ++ "m (set "
         ++ (state.fromSetting |> String.fromInt)
-        ++ ", client stated "
+        ++ " client "
         ++ (state.statedMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
-        ++ ", proven "
+        ++ " proven "
         ++ (state.provenAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
-        ++ ", refused "
+        ++ " refused "
         ++ (state.refusedAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
-        ++ ", attempt "
+        ++ " attempt "
         ++ (state.attempt
-                |> Maybe.map (\attempt -> String.fromInt attempt.distanceInMeters ++ " m for " ++ String.fromInt attempt.readingsWaited ++ " readings")
+                |> Maybe.map (\attempt -> String.fromInt attempt.distanceInMeters ++ "m/" ++ String.fromInt attempt.readingsWaited ++ " readings")
                 |> Maybe.withDefault "none"
            )
         ++ ")."
@@ -6584,11 +6606,11 @@ an operator can make across a session.
 -}
 describeLockBatch : LockBatchState -> String
 describeLockBatch state =
-    "Lock batch: up to "
+    "batch "
         ++ (lockBatchMaximumClicks |> String.fromInt)
-        ++ " clicks a step, asked "
+        ++ " asked "
         ++ (state.clicksAsked |> String.fromInt)
-        ++ " and the bar answered "
+        ++ " got "
         ++ (state.clicksAnswered |> String.fromInt)
         ++ " this session"
         ++ (case state.dispatch of
@@ -7127,20 +7149,20 @@ anything has a rule reading something other than its own state.
 -}
 describeMaxTargets : MaxTargetsState -> String
 describeMaxTargets state =
-    "Max targets: "
+    "maxtgt "
         ++ (maxTargetsCeiling state |> String.fromInt)
         ++ " (setting "
         ++ (state.fromSetting |> String.fromInt)
-        ++ ", client stated "
+        ++ " client "
         ++ (state.statedByClient |> Maybe.map String.fromInt |> Maybe.withDefault "-")
-        ++ ", most held at once "
+        ++ " held "
         ++ (state.heldAtOnce |> Maybe.map String.fromInt |> Maybe.withDefault "-")
         ++ (case state.statedByClient of
                 Just _ ->
                     ""
 
                 Nothing ->
-                    ", probing for " ++ (maxTargetsCeiling state + 1 |> String.fromInt)
+                    " probing " ++ (maxTargetsCeiling state + 1 |> String.fromInt)
            )
         ++ ")."
 
@@ -9480,28 +9502,28 @@ statusTextFromState context =
         -- in the per-tick log instead of only being inferable from how
         -- many consecutive ticks repeat the same decision-path text.
         describeMenuAndSettlingCounters =
-            "Context menus open: "
+            "menus "
                 ++ (readingFromGameClient.contextMenus |> List.length |> String.fromInt)
-                ++ " (cascade level "
+                ++ "/L"
                 ++ (context.contextMenuCascadeLevel |> String.fromInt)
-                ++ ", stuck ticks "
+                ++ " stuck "
                 ++ (context.memory.contextMenuStuckTicks |> String.fromInt)
-                ++ "). Route marker unchanged ticks: "
+                ++ " | route "
                 ++ (context.memory.routeFirstMarkerUnchangedTicks |> String.fromInt)
-                ++ ". Target-to-unlock unchanged ticks: "
+                ++ " | unlock "
                 ++ (context.memory.targetToUnlockUnchangedTicks |> String.fromInt)
-                ++ ". Loot window open ticks: "
+                ++ " | loot "
                 ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
-                ++ ". No scan results and no route last time in space: "
+                ++ " | dead-end "
                 ++ (if context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace then
                         "yes"
 
                     else
                         "no"
                    )
-                ++ ". Approaching ticks: "
+                ++ " | approach "
                 ++ (context.memory.shipApproachingTicks |> String.fromInt)
-                ++ ". "
+                ++ " | "
                 ++ describeGateActivationAsk
                     { asked = askingAnAccelerationGateToOpen readingFromGameClient
                     , gateWithinReach = accelerationGateIsWithinReach readingFromGameClient
@@ -9518,9 +9540,9 @@ statusTextFromState context =
                         |> Maybe.map (.objectDistanceInMeters >> distantGateVerdict >> describeDistantGate)
                         |> Maybe.withDefault ""
                    )
-                ++ ". Wrecks already opened: "
+                ++ " | wrecks "
                 ++ (context.memory.lootedWreckIds |> List.length |> String.fromInt)
-                ++ ". "
+                ++ " | "
                 ++ describeModulesToActivateAlways readingFromGameClient
                 ++ "\n"
                 ++ describeIncomingDamage context
@@ -9656,17 +9678,17 @@ statusTextFromState context =
                                 ++ "."
 
                         describeRatsInOverview =
-                            "Rats in overview: " ++ (namesOfRatsInOverview |> List.length |> String.fromInt) ++ "."
+                            "rats " ++ (namesOfRatsInOverview |> List.length |> String.fromInt) ++ "."
 
                         describeCurrentTarget =
                             case currentTargetName of
                                 Nothing ->
                                     -- No condition clause here: there is
                                     -- nothing whose condition it would be.
-                                    "Current target: None."
+                                    "no target."
 
                                 Just name ->
-                                    "Current target: "
+                                    "target "
                                         ++ name
                                         ++ " "
                                         ++ describeTargetHitpoints
@@ -10009,16 +10031,16 @@ describeTargetHitpoints : Maybe EveOnline.ParseUserInterface.Hitpoints -> String
 describeTargetHitpoints hitpoints =
     case hitpoints of
         Nothing ->
-            "(Shield/Armor/Hull unknown)"
+            "[?/?/?]"
 
         Just percent ->
-            "(Shield: "
+            "["
                 ++ (percent.shield |> String.fromInt)
-                ++ "%  Armor: "
+                ++ "/"
                 ++ (percent.armor |> String.fromInt)
-                ++ "%  Hull: "
+                ++ "/"
                 ++ (percent.structure |> String.fromInt)
-                ++ "%)"
+                ++ "]"
 
 
 {-| Safety net for the weapon/drone-activation branches, independent of the
