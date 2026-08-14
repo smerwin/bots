@@ -587,6 +587,8 @@ procedure and its traps; this file carries the facts.
 | `reload_drones.py` | standalone one-off: refill drone bay from station hangar. Still the way to restock *outside* a session; the mission runner now does the same thing for itself while winding down |
 | `route_setter/route_setter.py` | standalone one-off: set the autopilot route from a chat channel's MOTD |
 | `esi_waypoint.py` | set the client's autopilot destination through ESI, the official API. A CLI (`auth`/`resolve`/`set`) and an importable module -- `botlab_host.py` calls `set_destination` in-process for `SetAutopilotDestinationRequest`, so failures arrive as `EsiError` values rather than exit codes with a reason on stdout |
+| `cg_record/` | passive **listen-only** `CGEventTap`, the mirror of `cg_input`: one line per mouse or key event on stdout, in the same screen points `cg_input` takes. Needs the same Accessibility grant, and says so on stderr rather than recording nothing when it lacks it |
+| `action_shape.py` | records the *shape* of manual actions rather than their coordinates -- resolves each click against the UI tree to "the overview row of typeID N", "the menu entry containing 'Warp to'", "`selectedItemWarpTo`" -- then collapses a right-click-then-menu-entry pair into the one cascade it is, and emits an Elm **sketch**. `self-test` and `resolve` run anywhere `eve_repl` does; `record` is macOS-only since it drives `cg_record` |
 
 **Launcher `--help`** is answered *before* the one-bot-at-a-time guard runs, so
 asking what the settings are never kills a session in progress. `bot_help.py`
@@ -966,6 +968,77 @@ Distances only parse as `m` and `km`. An **AU** distance is an `Err`, which ever
 consumer turned into a `999999` placeholder that reads as merely far rather than
 unreachable — one run logged "Failed to read the distance" 444 times. Exclude
 those objects from anything the ship might act on.
+
+### Strings and identities read off a live client
+
+Captured during a saxrat run on an **armour-tanked Coercer** -- a much smaller
+hull than the battlecruiser most of this file is calibrated on, which is what
+makes several of these separate.
+
+**`Pilot is in your fleet`**, on `FlagIconWithState` nodes inside local chat
+rows (`XmppChatUserEntry`). The parser already lifts it, per pilot, as
+`ChatUserEntry.standingIconHint` (`ParseUserInterface.elm:483`). It is **not**
+on the overview row: five rows were checked and none carried a
+`rightAlignedIconContainer` hint at all. That matters because
+`getNamesOfOtherPilotsInOverview` already reads exactly these chat rows to build
+its names, so excluding fleetmates is a filter on a list the function already
+holds -- see #224.
+
+**`Pilot is tracking disrupting me`**, in an overview row's own cell text. The
+open gap below says the EWAR hints "appear nowhere in the ten recorded runs";
+this is one of that family, captured. It is a *tracking disruptor* rather than
+the webifier that gap is about, so `Pilot is webifying me` is still unread and
+the guard resting on it still has no evidence.
+
+**Overview rows carry three ids in `dictEntriesOfInterest`**, and the parser's
+`objectItemID` is its own name for the first -- there is no dict key spelled
+that way, which is worth knowing before reading for one:
+
+| key | what it is |
+|---|---|
+| `itemID`, `stateItemID` | the **instance**. What `overviewEntryLockHandle` attributes a lock outcome with. Gone by the next session -- that rat is dead |
+| `typeID` | the **kind** of object. Survives sessions, and is what "I clicked a Centior Abomination" actually means |
+
+Which of the two a consumer wants is decided by whether it is reasoning about
+*this* object or about a class of them, and they are easy to confuse because
+both are unique-looking integers on the same node.
+
+**The overview's icon colour is on the row**, as `iconSprite` colour
+percentages under `mainIcon` -- the mechanism `iconSpriteHasColorOfRat` already
+uses. Live, every rat read
+`{'aPercent': 100, 'rPercent': 100, 'gPercent': 10, 'bPercent': 10}` against
+white and yellow for the stargates and the sun. **The purple a fleet member
+draws is still uncaptured**, because none was on the overview during the read --
+so a fleet test built on colour today would be guessing an RGB triple, which is
+the same trap as guessing a string.
+
+**The damage-rate retreat has now fired, for the first time on either bot.**
+This file records it as having fired "not once on the damage window" across 36
+runs, every retreat having come from a gauge. On this Coercer, with
+`run-away-incoming-damage-threshold` at 900:
+
+```
++ The client's combat log says this ship has taken 919 hitpoints in the last 45 s,
+  against a threshold of 900. Get out -- this does not depend on the HUD gauge.
+```
+
+The attacker was `Tower Sentry Sansha I`, a sentry, which neither misses nor
+stops. **Raising the threshold to 1000 did not stop it firing** -- peak window
+1294 afterwards -- so on a hull this size a sentry site crosses any threshold
+that is still a guard. What the operator wanted from it was the retreat itself:
+warp off, let the repairer cycle, come back, since the tower cannot follow.
+
+**The armour gauge on this hull is corrupt at a high rate, and the filtering
+holds.** Ten consecutive live samples of `armorGauge._lastValue` gave `67.5766,
+1.0, None, None, 0.99, 1.0, 0.98, 400288.0, 0.99, 0.5412` -- three impossible or
+absent out of ten. Over the run the bot printed 1,745 armour values, minimum
+**-213%**, maximum **40,028,800%**, and one large enough to overflow a 32-bit
+int (43,158,732,982,400). **97 of those prints read below the 80% threshold and
+the guard fired once**, which is `plausibleHitpointsPercent` and `believed`
+doing precisely what they were built to do, measured rather than assumed. The
+shield read 0% throughout while the armour read 99%, so this is a second hull
+confirming that the shield is a fuse rather than a buffer and that
+`run-away-shield-hitpoints-threshold-percent` belongs at `-1`.
 
 ## What the bot is willing to shoot
 
