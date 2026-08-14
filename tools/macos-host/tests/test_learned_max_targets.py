@@ -121,6 +121,21 @@ CLIENT_MAXIMUM = 6
 
 APPS = (("saxrat", SAXRAT_BOT_ELM), ("mission runner", MISSION_RUNNER_BOT_ELM))
 
+
+# What each app's status line says the ceiling is, with nothing learned and then
+# with the client having stated six. #242 shortened saxrat's status line and
+# left the mission runner's alone, so the two render the same four facts in
+# different words -- which is why `describeMaxTargets` is not among the shared
+# declarations below and why every case here asks this table for the wording.
+MAX_TARGETS_CLAUSES = {
+    "saxrat": ("maxtgt 4 (setting 4 client - held - probing 5).",
+               "maxtgt 6 (setting 4 client 6 held 5)."),
+    "mission runner": (
+        "Max targets: 4 (setting 4, client stated -, most held at once -, "
+        "probing for 5).",
+        "Max targets: 6 (setting 4, client stated 6, most held at once 5)."),
+}
+
 # The declarations both apps carry identically. A port that keeps one and drops
 # another is what `BothAppsCarryTheSameRule` refuses.
 SHARED_DECLARATIONS = (
@@ -128,7 +143,6 @@ SHARED_DECLARATIONS = (
     "maxTargetsStatedInGameLog",
     "maxTargetsInStatement",
     "updateMaxTargetsLearning",
-    "describeMaxTargets",
     "maxTargetsStatedMarker",
     "maxTargetsSkillMarker",
 )
@@ -539,14 +553,7 @@ class TheStatusLineSaysWhereTheCeilingCameFrom(
             # `client stated` is `-`: the statement is the only thing that ends
             # the probing, so a run whose two clauses disagree has a rule
             # reading something other than its own state.
-            self.assertEqual(
-                said[0],
-                "Max targets: 4 (setting 4, client stated -, most held at "
-                "once -, probing for 5).", app)
-            self.assertEqual(
-                said[1],
-                "Max targets: 6 (setting 4, client stated 6, most held at "
-                "once 5).", app)
+            self.assertEqual(said, list(MAX_TARGETS_CLAUSES[app]), app)
 
 
 class TheSettingIsReachableAndRefusesAnEmptyValue(
@@ -721,6 +728,37 @@ class BothAppsCarryTheSameRule(unittest.TestCase):
             self.assertEqual(
                 body_of(saxrat, name), body_of(mission, name),
                 "%s has drifted between the two apps" % name)
+
+    def test_only_the_rendering_diverges_and_it_says_the_same_four_things(self):
+        """`describeMaxTargets` is the one that is deliberately not shared.
+
+        #242 shortened saxrat's status line, so the same state reads
+        `maxtgt 4 (setting 4 client - held - probing 5).` there and
+        `Max targets: 4 (setting 4, client stated -, ...)` in the mission
+        runner. That is a decision about one bot's log rather than about what
+        either bot learns, which is why every rule above is still compared.
+
+        What both still have to carry is the four facts, because they fail
+        differently: a `client stated` stuck at `-` is a game log not reaching
+        the rule, a `held` that never rises is a ship that never filled its
+        slots, and the answer alone would leave those grepping the same. Both
+        renderings are executed against the table above, so this case only has
+        to refuse the collapse into one figure.
+        """
+        saxrat = body_of(source_of(SAXRAT_BOT_ELM), "describeMaxTargets")
+        mission = body_of(source_of(MISSION_RUNNER_BOT_ELM),
+                          "describeMaxTargets")
+        self.assertNotEqual(
+            saxrat, mission,
+            "the two clauses now read the same, so this case is asserting a "
+            "divergence that is over -- put describeMaxTargets back among the "
+            "shared declarations instead")
+
+        for app, body in (("saxrat", saxrat), ("mission runner", mission)):
+            with self.subTest(app=app):
+                for field in ("state.fromSetting", "state.statedByClient",
+                              "state.heldAtOnce"):
+                    self.assertIn(field, body, field)
 
 
 class TheRowIdentityDisciplineIsUntouched(unittest.TestCase):

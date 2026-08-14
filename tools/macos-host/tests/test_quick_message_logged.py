@@ -239,10 +239,25 @@ class QuickMessageCases:
     identical and so is what has to be recorded -- while the status line each
     clause is placed in is not, which is what the wiring cases below check
     separately per app.
+
+    The clause's *wording* is one of the things that is not shared, since #242
+    shortened saxrat's status line and left the mission runner's alone. What
+    both have to say is the same and is what every case here asserts: whether
+    the message is on the screen now, said first and never implied, and an age
+    where it is not. Each subclass names the two markers its own app prints, so
+    a drift in either is a failure rather than a loosened assertion.
     """
 
     REPL_CLASS = None
     BOT_ELM = None
+
+    # What the clause says for a message on this reading, and for one carried
+    # forward. Each has to be absent from the other's clause, which is what the
+    # case below asserts in both directions -- the mission runner's pair is
+    # `(on screen now)` against `NOT on screen now`, where a marker chosen
+    # carelessly would be a substring of the other and assert nothing.
+    LIVE_MARKER = None
+    STALE_MARKER = None
 
     @classmethod
     def setUpClass(cls):
@@ -387,13 +402,14 @@ class QuickMessageCases:
         self.assertIn(AWKWARD_TEXT, stale)
         self.assertNotEqual(live, stale)
 
-        self.assertIn("on screen now", live)
-        self.assertNotIn("NOT on screen now", live)
-        self.assertNotIn("readings ago", live)
+        self.assertIn(self.LIVE_MARKER, live)
+        self.assertNotIn(self.STALE_MARKER, live)
 
-        self.assertIn("NOT on screen now", stale)
-        self.assertIn("7", stale)
-        self.assertIn("readings ago", stale)
+        self.assertIn(self.STALE_MARKER, stale)
+        self.assertNotIn(self.LIVE_MARKER, stale)
+        self.assertIn("7", stale,
+                      "a carried-forward message has to name its age, or a "
+                      "reader cannot date the wording to a decision")
 
     def test_the_age_advances_while_no_message_is_on_the_screen(self):
         """Folded over a run of readings, which is where this can be wrong.
@@ -488,7 +504,7 @@ class QuickMessageCases:
             definitions=[
                 reading_binding("one", [layer_abovemain([[AWKWARD_TEXT]])])])
         self.assertIn(AWKWARD_TEXT, clause)
-        self.assertIn("on screen now", clause)
+        self.assertIn(self.LIVE_MARKER, clause)
 
     def test_nothing_decides_anything_on_the_carried_forward_message(self):
         """The scope of #123, and since #146 the line between two fields.
@@ -567,11 +583,15 @@ class QuickMessageCases:
 class MissionRunnerQuickMessageTest(QuickMessageCases, unittest.TestCase):
     REPL_CLASS = MissionRunnerRepl
     BOT_ELM = MISSION_RUNNER_BOT_ELM
+    LIVE_MARKER = "(on screen now)"
+    STALE_MARKER = "NOT on screen now"
 
 
 class SaxratQuickMessageTest(QuickMessageCases, unittest.TestCase):
     REPL_CLASS = SaxratRepl
     BOT_ELM = SAXRAT_BOT_ELM
+    LIVE_MARKER = "(now)"
+    STALE_MARKER = "ago)"
 
 
 class BothAppsRecordTheSameThing(unittest.TestCase):
@@ -580,24 +600,77 @@ class BothAppsRecordTheSameThing(unittest.TestCase):
     `ParseUserInterface.elm` is vendored per app and the policy is that a change
     lands in every copy identically; the same argument applies to a rule reading
     one of its fields. The status *line* differs between the apps deliberately
-    -- their conventions do -- so what is compared here is the rules and not
-    where their output is placed.
+    -- their conventions do, and since #242 so does the clause's own wording --
+    so what is compared here is the rules and not what is printed from them,
+    which the case below takes on separately.
 
     Nothing here needs `elm`.
     """
 
+    # What the message is, when it was seen, and how it is cut down to one line:
+    # the three questions #123 is about, and the three rules that answer them.
+    # A drift in any of these is a drift in what gets recorded.
+    SHARED_RULES = [
+        "quickMessageOnScreen",
+        "quickMessageAfterReading",
+        "quickMessageTextForStatusLine",
+    ]
+
     def rules(self, path):
         return {name: collapsed(declaration(source_of(path), name))
-                for name in [
-            "quickMessageOnScreen",
-            "quickMessageAfterReading",
-            "quickMessageTextForStatusLine",
-            "describeQuickMessage",
-        ]}
+                for name in self.SHARED_RULES}
 
     def test_the_rules_are_identical_in_both_apps(self):
         self.assertEqual(self.rules(MISSION_RUNNER_BOT_ELM),
                          self.rules(SAXRAT_BOT_ELM))
+
+    def test_only_the_rendering_diverges_and_it_diverges_one_way(self):
+        """`describeQuickMessage` is the one that is deliberately not shared.
+
+        #242 shortened saxrat's status line and left the mission runner's alone,
+        so the same sighting reads `Quick msg (now)` in one app and
+        `Quick message (on screen now)` in the other, and saxrat drops a message
+        older than `quickMessageStaleAfterReadings` rather than reprinting it
+        beside a reading it has nothing to do with. That is a decision about one
+        bot's log rather than about what either bot records, which is why the
+        three rules above are still compared and this one is not.
+
+        What is asserted is the *shape* of the divergence, so that a rendering
+        drifting for any other reason -- or the cutoff appearing in the mission
+        runner without anyone deciding to put it there -- is a failure rather
+        than something this case quietly permits.
+        """
+        mission = source_of(MISSION_RUNNER_BOT_ELM)
+        saxrat = source_of(SAXRAT_BOT_ELM)
+
+        self.assertNotEqual(
+            collapsed(declaration(mission, "describeQuickMessage")),
+            collapsed(declaration(saxrat, "describeQuickMessage")),
+            "the two clauses now read the same, so this case is asserting a "
+            "divergence that is over -- compare the rendering with the rest of "
+            "the rules again instead")
+
+        self.assertIn("quickMessageStaleAfterReadings",
+                      collapsed(declaration(saxrat, "describeQuickMessage")))
+        self.assertEqual(
+            source_of(MISSION_RUNNER_BOT_ELM).count(
+                "quickMessageStaleAfterReadings"), 0,
+            "the mission runner has grown saxrat's staleness cutoff -- if that "
+            "is wanted then say so here, since a message dropped from the "
+            "status line is one an operator cannot read beside the decision "
+            "that followed it")
+
+        # Both still say the same things about the message itself, whatever
+        # words they say them in.
+        for path in (MISSION_RUNNER_BOT_ELM, SAXRAT_BOT_ELM):
+            with self.subTest(app=os.path.basename(os.path.dirname(path))):
+                clause = collapsed(
+                    declaration(source_of(path), "describeQuickMessage"))
+                self.assertIn("quickMessageTextForStatusLine seen.text", clause)
+                self.assertIn("String.fromInt seen.readingsSince", clause)
+                self.assertIn("quickMessageStatusCharacterBudget", clause)
+                self.assertIn("seen.messagesInLayer", clause)
+                self.assertIn("seen.displayTextsInMessage", clause)
 
     def test_both_apps_cap_at_the_same_length(self):
         mission = integer_constant(source_of(MISSION_RUNNER_BOT_ELM),

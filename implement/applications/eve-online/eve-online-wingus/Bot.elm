@@ -237,6 +237,72 @@ memoryOfAnomalyWithID anomalyID =
     .visitedAnomalies >> Dict.get anomalyID
 
 
+{-| Whether the ship is warping, as far as this reading can say.
+
+**Three answers rather than two, and the third one is issue #194.** `Just True`
+is the client naming `Warp`; `Just False` is the client naming some other
+maneuver -- `Orbit`, `Approach`, `Aligning`; and `Nothing` is the client naming
+none, which is what a ship that has stopped maneuvering looks like and also what
+a reading with no ship UI at all looks like. Whoever reads this has to decide
+which of the last two they meant, because the type cannot.
+
+Lifted out of `updateMemoryForNewReadingFromGame` so that a case can execute it
+against a real parsed reading. Both apps derived it inline, and in two different
+shapes -- one a pipeline, one a `case` -- which is a drift that compiles.
+
+-}
+shipWarpingFromReading : ReadingFromGameClient -> Maybe Bool
+shipWarpingFromReading readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.andThen .indication
+        |> Maybe.andThen .maneuverType
+        |> Maybe.map ((==) EveOnline.ParseUserInterface.ManeuverWarp)
+
+
+{-| Whether this reading is the one a warp ended on.
+
+**Issue #194: the form this replaces could never answer `True` at the end of a
+warp.** It asked for `shipWarpingInLastReading == Just True` together with
+`shipIsWarping == Just False`, and `shipIsWarping` is a `Maybe` over the
+maneuver the client _names_: `Just True` for `Warp`, `Just False` for some
+**other** named maneuver, and `Nothing` when no maneuver is named at all. So
+`Just False` never meant "the ship is not warping" -- it meant "the ship is
+orbiting, or approaching, or aligning". A ship that has simply stopped answers
+`Nothing`.
+
+Captured off the live client during saxrat run 29, sampling the ship UI's
+indication about once a second across two warps: while warping the container
+holds `Warp Drive Active` and the destination, and on the reading the warp ends
+the container is still present and holds only the location labels -- no maneuver
+word anywhere in it. The parser reads no `maneuverType` from that, so the
+transition a warp really makes is `Just True -> Nothing`, and the condition that
+demanded `Just False` was unreachable in every recorded run.
+`EveOnline.BotFramework.shipUIIndicatesShipIsWarpingOrJumping` already treats an
+absent indication as "not maneuvering", and says so in a comment; this was the
+one place that did not.
+
+So the transition is `Just True` followed by anything that is _not_ `Just True`.
+
+**And the ship UI has to be present to say so.** `Nothing` is equally what a
+reading with no ship UI at all answers -- docked, a client that did not render,
+a reading taken across a session change -- and none of those is an arrival,
+because nothing arrived. The presence of the ship UI is read separately for
+exactly that reason: it is what keeps "the ship stopped maneuvering" apart from
+"we could not see the ship", which the `Maybe Bool` cannot distinguish on its
+own and which `shipWarpingInLastReading` stores in the same shape.
+
+-}
+warpJustEnded :
+    { warpingLastReading : Maybe Bool
+    , readingNow : ReadingFromGameClient
+    }
+    -> Bool
+warpJustEnded { warpingLastReading, readingNow } =
+    (warpingLastReading == Just True)
+        && (readingNow.shipUI /= Nothing)
+        && (shipWarpingFromReading readingNow /= Just True)
+
+
 anomalyBotDecisionRoot : BotDecisionContext -> DecisionPathNode
 anomalyBotDecisionRoot context =
     anomalyBotDecisionRootBeforeApplyingSettings context
@@ -861,16 +927,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 |> Maybe.andThen .currentStationName
 
         shipIsWarping =
-            context.readingFromGameClient.shipUI
-                |> Maybe.andThen .indication
-                |> Maybe.andThen .maneuverType
-                |> Maybe.map ((==) EveOnline.ParseUserInterface.ManeuverWarp)
+            shipWarpingFromReading context.readingFromGameClient
 
         namesOfRatsInOverview =
             getNamesOfRatsInOverview context.readingFromGameClient
 
         weJustFinishedWarping =
-            (botMemoryBefore.shipWarpingInLastReading == Just True) && (shipIsWarping == Just False)
+            warpJustEnded
+                { warpingLastReading = botMemoryBefore.shipWarpingInLastReading
+                , readingNow = context.readingFromGameClient
+                }
 
         visitedAnomalies =
             if shipIsWarping == Just True then

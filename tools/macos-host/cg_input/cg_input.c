@@ -15,6 +15,14 @@
 //   text <utf8>                type literal text (by character, not keycode)
 //   scroll <dx> <dy>           scroll wheel event
 //
+// `--dry-run` composes and reports every event without posting any of them:
+// each prints `post <kind> <code> born=0x... intrinsic=0x... flags=0x...`
+// before its `ok` -- what the session put on the event, what the key carries of
+// its own, and what goes out. That is how
+// the flag composition below is tested, because the alternative -- posting real
+// events from a test -- would drive whatever is frontmost, and on this machine
+// that is usually a live client.
+//
 // `doubleclick` is its own command rather than two `down`/`up` pairs because
 // two ordinary clicks in a row are not a double click, however fast they are
 // sent: what makes the second one count is the kCGMouseEventClickState field,
@@ -29,7 +37,49 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <IOKit/hidsystem/IOLLEvent.h>
+
+#include "input_flags.h"
+
+// input_flags.h restates these so it can be compiled and tested anywhere. Here
+// is where they are held to the system's own values.
+_Static_assert(CGI_FLAG_CAPSLOCK == kCGEventFlagMaskAlphaShift, "caps lock bit");
+_Static_assert(CGI_FLAG_SHIFT == kCGEventFlagMaskShift, "shift bit");
+_Static_assert(CGI_FLAG_CONTROL == kCGEventFlagMaskControl, "control bit");
+_Static_assert(CGI_FLAG_OPTION == kCGEventFlagMaskAlternate, "option bit");
+_Static_assert(CGI_FLAG_COMMAND == kCGEventFlagMaskCommand, "command bit");
+_Static_assert(CGI_FLAG_HELP == kCGEventFlagMaskHelp, "help bit");
+_Static_assert(CGI_FLAG_FN == kCGEventFlagMaskSecondaryFn, "fn bit");
+_Static_assert(CGI_DEVICE_LCONTROL == NX_DEVICELCTLKEYMASK, "left control bit");
+_Static_assert(CGI_DEVICE_RCONTROL == NX_DEVICERCTLKEYMASK, "right control bit");
+_Static_assert(CGI_DEVICE_LSHIFT == NX_DEVICELSHIFTKEYMASK, "left shift bit");
+_Static_assert(CGI_DEVICE_RSHIFT == NX_DEVICERSHIFTKEYMASK, "right shift bit");
+_Static_assert(CGI_DEVICE_LCOMMAND == NX_DEVICELCMDKEYMASK, "left command bit");
+_Static_assert(CGI_DEVICE_RCOMMAND == NX_DEVICERCMDKEYMASK, "right command bit");
+_Static_assert(CGI_DEVICE_LOPTION == NX_DEVICELALTKEYMASK, "left option bit");
+_Static_assert(CGI_DEVICE_ROPTION == NX_DEVICERALTKEYMASK, "right option bit");
+_Static_assert(CGI_DEVICE_CAPSLOCK == NX_DEVICE_ALPHASHIFT_STATELESS_MASK,
+               "caps lock device bit");
+// The one bit inside the low byte that is not a modifier, and so must stay
+// outside CGI_MANAGED_MODIFIERS.
+_Static_assert((CGI_MANAGED_MODIFIERS & NX_NONCOALSESCEDMASK) == 0,
+               "non-coalesced is not a modifier");
+
 static CGPoint lastPos = {0, 0};
+
+// The modifiers *this process* is holding, maintained from the keydown and
+// keyup commands it is given. Every posted event carries these and nothing
+// else -- see postEvent.
+static uint64_t heldModifiers = 0;
+
+static int dryRun = 0;
+
+// A source that does not inherit the session's modifier state, used only to
+// ask macOS what a key carries of its own. Measured on a session reporting a
+// stray Fn: a private-source `Q` reads 0x20000000 and a NULL-source `Q` reads
+// 0x20800000, while F1 reads 0x20800000 from both -- so the private twin
+// separates "this key is an Fn key" from "the session says Fn".
+static CGEventSourceRef intrinsicSource = NULL;
 
 static CGMouseButton buttonFromInt(int b) {
     if (b == 1) return kCGMouseButtonRight;
@@ -37,9 +87,72 @@ static CGMouseButton buttonFromInt(int b) {
     return kCGMouseButtonLeft;
 }
 
+// What this key carries because of what it is: Fn for the function row, the
+// arrows and the navigation block, Fn and the numeric-pad bit for the arrows,
+// the modifier's own bit for a modifier keydown. Asked of the system rather
+// than restated, so it cannot drift from the convention it describes.
+//
+// Mouse and scroll events have no such flags -- a private-source mouse event
+// reads 0x0 -- so those call sites pass 0 rather than paying for a twin.
+static CGEventFlags intrinsicFlagsForKey(CGKeyCode key, bool down) {
+    if (intrinsicSource == NULL) {
+        return 0;
+    }
+    CGEventRef twin = CGEventCreateKeyboardEvent(intrinsicSource, key, down);
+    if (twin == NULL) {
+        return 0;
+    }
+    CGEventFlags flags = CGEventGetFlags(twin);
+    CFRelease(twin);
+    return flags;
+}
+
+// The single exit. Every event this file creates leaves through here, because
+// what has to be true of all of them is true of none of them by default.
+//
+// An event created with a NULL source is born carrying the session's current
+// modifier state rather than an empty one -- measured, on a session reporting
+// a stray Fn, as an unposted mouse event reading back 0x20800000 when a
+// private-source one reads 0x0. Before #240 that made every key the bot
+// pressed a Globe chord: Q is Quick Note, E the emoji picker, C Control
+// Centre, F toggle-full-screen. Mouse events inherit the same way, and a click
+// carrying a stray Control is a *secondary* click -- a context menu where the
+// bot meant to select.
+//
+// The bit is not ambient. macOS marks F1-F4, the arrows and the navigation
+// block as Fn keys by convention, and this bot posts F1-F4 as weapon hotkeys,
+// so its own F1 asserts Fn into the session and every later event inherits it.
+// That is why neither clearing nor keeping the flags is right on its own:
+//
+//   * clearing them breaks Ctrl+click, which is how the bot locks a target,
+//     and Ctrl+Shift+click, which is how it unlocks -- and would strip the Fn
+//     that F1 is entitled to, which could stop F1 registering as F1;
+//   * keeping them is the leak, one key's flags riding on the next key's
+//     event.
+//
+// So each event carries what the key itself carries, plus what we are
+// deliberately holding, and nothing that merely happened to be in the session.
+static void postEvent(CGEventRef event, CGEventFlags intrinsic,
+                      const char *kind, long long code) {
+    CGEventFlags born = CGEventGetFlags(event);
+    CGEventSetFlags(event, (CGEventFlags)cgi_compose(
+        (uint64_t)born, (uint64_t)intrinsic, heldModifiers));
+    if (dryRun) {
+        // `born` is the key's own flags and the session's mixed together, and
+        // is reported alongside the rest so a reader can see what was taken
+        // off as well as what went on.
+        printf("post %s %lld born=0x%llx intrinsic=0x%llx flags=0x%llx\n",
+               kind, code, (unsigned long long)born,
+               (unsigned long long)intrinsic,
+               (unsigned long long)CGEventGetFlags(event));
+    } else {
+        CGEventPost(kCGHIDEventTap, event);
+    }
+}
+
 static void postMouse(CGEventType type, CGPoint point, CGMouseButton button) {
     CGEventRef event = CGEventCreateMouseEvent(NULL, type, point, button);
-    CGEventPost(kCGHIDEventTap, event);
+    postEvent(event, 0, "mouse", (long long)button);
     CFRelease(event);
     lastPos = point;
 }
@@ -52,12 +165,31 @@ static void postMouseWithClickState(CGEventType type, CGPoint point,
                                     CGMouseButton button, int64_t clickState) {
     CGEventRef event = CGEventCreateMouseEvent(NULL, type, point, button);
     CGEventSetIntegerValueField(event, kCGMouseEventClickState, clickState);
-    CGEventPost(kCGHIDEventTap, event);
+    postEvent(event, 0, "mouse", (long long)button);
     CFRelease(event);
     lastPos = point;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--dry-run") == 0) {
+            dryRun = 1;
+        } else {
+            fprintf(stderr, "cg_input: unknown argument %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    intrinsicSource = CGEventSourceCreate(kCGEventSourceStatePrivate);
+    if (intrinsicSource == NULL) {
+        // Degraded rather than fatal: without it a key's own flags cannot be
+        // told from the session's, so F1 goes out without the Fn that makes it
+        // F1. Said out loud because that is a real change in what the bot
+        // presses, and silence is how it would be found much later.
+        fprintf(stderr, "cg_input: no private event source; keys will be "
+                        "posted without the flags they carry of their own\n");
+    }
+
     char line[256];
     while (fgets(line, sizeof(line), stdin)) {
         char cmd[32];
@@ -106,8 +238,13 @@ int main(void) {
             } else if (strcmp(cmd, "keydown") == 0 || strcmp(cmd, "keyup") == 0) {
                 CGKeyCode key = (CGKeyCode)a1;
                 bool down = strcmp(cmd, "keydown") == 0;
+                // Before the event is stamped, so that the modifier keydown
+                // carries its own bit and its keyup does not -- which is what
+                // the same press does in hardware.
+                heldModifiers = cgi_hold(heldModifiers, (uint16_t)key, down);
                 CGEventRef event = CGEventCreateKeyboardEvent(NULL, key, down);
-                CGEventPost(kCGHIDEventTap, event);
+                postEvent(event, intrinsicFlagsForKey(key, down),
+                          down ? "key" : "keyup", (long long)key);
                 CFRelease(event);
                 printf("ok\n");
             } else if (strcmp(cmd, "text") == 0) {
@@ -146,12 +283,12 @@ int main(void) {
                         UniChar ch = CFStringGetCharacterAtIndex(str, i);
                         CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0, true);
                         CGEventKeyboardSetUnicodeString(down, 1, &ch);
-                        CGEventPost(kCGHIDEventTap, down);
+                        postEvent(down, 0, "text", (long long)ch);
                         CFRelease(down);
 
                         CGEventRef up = CGEventCreateKeyboardEvent(NULL, 0, false);
                         CGEventKeyboardSetUnicodeString(up, 1, &ch);
-                        CGEventPost(kCGHIDEventTap, up);
+                        postEvent(up, 0, "text", (long long)ch);
                         CFRelease(up);
                     }
                     CFRelease(str);
@@ -169,7 +306,7 @@ int main(void) {
             } else if (strcmp(cmd, "scroll") == 0) {
                 CGEventRef event = CGEventCreateScrollWheelEvent(
                     NULL, kCGScrollEventUnitLine, 2, (int32_t)a2, (int32_t)a1);
-                CGEventPost(kCGHIDEventTap, event);
+                postEvent(event, 0, "scroll", 0);
                 CFRelease(event);
                 printf("ok\n");
             } else {
