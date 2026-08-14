@@ -37,9 +37,17 @@ def find_bot_elm(bot_source):
 def settings_section(bot_elm_text):
     """The '## Configuration Settings' part of Bot.elm's header comment.
 
-    Ends at the next '##' heading or at the header's own example settings
-    string, whichever comes first -- the example is already shown separately as
-    this script's own defaults.
+    Ends at the next '##' heading, at the header's own example settings
+    string, or at the header's own closing '-}', whichever comes first -- the
+    example is already shown separately as this script's own defaults.
+
+    The '-}' bound is what keeps this safe for an app whose header has
+    neither of the other two terminators, such as
+    eve-online-warp-to-0-autopilot's: without it, the section runs past the
+    header into the rest of the source, and `--help` prints the whole file
+    under "Bot settings". Every header closes with one by construction, so
+    this bound costs nothing on an app the other two already stop -- they are
+    always reached first there.
     """
     lines = bot_elm_text.split("\n")
     start = None
@@ -56,6 +64,8 @@ def settings_section(bot_elm_text):
         if stripped.startswith("##"):
             break
         if stripped.startswith("When using more than one setting"):
+            break
+        if line.rstrip() == "-}":
             break
         collected.append(line)
 
