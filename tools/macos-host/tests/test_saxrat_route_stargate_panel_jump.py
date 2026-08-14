@@ -816,11 +816,19 @@ class TheWarpHalfIsNotServableTest(unittest.TestCase):
                       signature)
 
     def test_the_panel_press_this_change_adds_is_the_only_new_one(self):
-        """Two panel presses in the file now -- the acceleration gate's and this
-        one -- and nothing else has started reaching for a panel button."""
+        """Three panel presses in the file now -- the acceleration gate's, this
+        one, and #222's retreat warp -- and nothing else has started reaching
+        for a panel button.
+
+        The retreat's is a deliberate third rather than drift: `runAway` used to
+        be an alias for `tetherAtStructure` and left the grid through a
+        surroundings-menu cascade with `Dock` at the top of its priority, which
+        is what killed run 35. It binds the button once and uses it twice, so
+        one press is one occurrence here.
+        """
         self.assertEqual(
             len(re.findall(r"selectedItemButtonNamed context\.",
-                           without_comments(self.source))), 2)
+                           without_comments(self.source))), 3)
 
 
 class TheCorpusTest(unittest.TestCase):

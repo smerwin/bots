@@ -3777,13 +3777,15 @@ runAway context =
             let
                 celestialName =
                     celestial.objectName |> Maybe.withDefault "a celestial"
+
+                warpToButton =
+                    selectedItemButtonNamed context.readingFromGameClient "selectedItemWarpTo"
             in
             case
                 retreatWarpStep
                     { panelShowsTheCelestial =
                         selectedItemIsOverviewEntry context.readingFromGameClient celestial
-                    , panelOffersWarpTo =
-                        selectedItemButtonNamed context.readingFromGameClient "selectedItemWarpTo" /= Nothing
+                    , panelOffersWarpTo = warpToButton /= Nothing
                     }
             of
                 SelectTheCelestial ->
@@ -3797,7 +3799,7 @@ runAway context =
                         waitForProgressInGame
 
                 PressWarpTo ->
-                    case selectedItemButtonNamed context.readingFromGameClient "selectedItemWarpTo" of
+                    case warpToButton of
                         Nothing ->
                             describeBranch "Get out -- the warp button went away between reading it and pressing it."
                                 waitForProgressInGame
