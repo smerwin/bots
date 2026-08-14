@@ -5104,22 +5104,47 @@ only because the identity condition makes the risk unreachable rather than small
 `test_route_stargate_panel_jump` reads those counts back out of the doc comment
 and recomputes them, so a claim the corpus stops supporting goes red.
 
-### A finding this turned up and did not act on
+### A finding this turned up, and #171 is what fixed it
 
 **`dockAtDestinationStation`'s "exactly one route marker means the destination is
-in this system" is not what the panel draws.** Read live: the header said `Route
+in this system" was not what the panel draws.** Read live: the header said `Route
 1 Jump`, the panel held **one** `AutopilotDestinationIcon`, and that marker
 carried `solarSystemID 30005001`, `destinationID 60012607` (a station) and
 `numJumps 1` — a destination one jump away, not in this system. The 2019
 recording agrees from the other end: `Route <fontsize=12></b>3 Jumps` with
 **three** markers. So the count is jumps remaining, and `destinationIsInThisSystem`
-is true one system early. Run 37 shows it live, reaching the dock branch mid-route
+was true one system early. Run 37 shows it live, reaching the dock branch mid-route
 and being saved only by #98's undocked-from guard.
 
-**Not fixed here.** It is #98's area, changing it is a behaviour change on the
-dock path with its own evidence to gather, and the markers turn out to carry
-`numJumps` — so the reading that would settle it outright exists and the parser
-does not lift it. Nothing in this change depends on the marker count.
+**Not fixed at the time this section was written** — that was #98's area, and
+changing it was a behaviour change on the dock path wanting its own evidence.
+Issue #171 is that evidence and that change:
+`InfoPanelRouteRouteElementMarker.numJumps` is lifted into all six vendored
+parser copies (`getIntPropertyFromDictEntries "numJumps"`, identical across all
+six), and `dockAtDestinationStation`'s `destinationIsInThisSystem` now asks
+`destinationIsInThisSystemFromRouteMarkers` — exactly one marker, and that
+marker's own `numJumps` reading `Just 0` — instead of counting icons. Neither
+`routeMarkerCascade` (which right-clicks the head marker's `uiNode` and never
+counts) nor #170's `routeStargateJump` / `jumpThroughRouteStargate` (which
+reads the `Next System in Route` label and the overview, and never touches
+`routeElementMarker` at all) depended on the count meaning waypoints, checked
+rather than assumed. #98's `stationIsTheOneJustUndockedFrom` guard is
+untouched — it was doing real work for a reason unrelated to the marker count,
+and still runs on every dock this branch attempts.
+
+**What the client writes on genuine arrival is still unread.** Every live
+reading available had at least one jump remaining, so whether `numJumps` reads
+`Just 0`, `Nothing`, or something else there is not established. The rule
+fails closed on that: an empty list, several markers, or an
+unreadable/nonzero `numJumps` all decline and send the ship to the cascade
+fall-back, which still travels the route. **Untested against a live client**;
+see `tools/macos-host/tests/test_route_marker_num_jumps.py` for the parser and
+the rule, both executed through the real `Bot.elm` and the real
+`EveOnline.ParseUserInterface` rather than restated in Python. What to watch
+on the first run that reaches this branch: whether `destinationIsInThisSystem`
+ever answers `True` at all — if it never does, the client is not writing `0`
+where this rule expects it, and the branch is falling through to the cascade
+exactly as before #171.
 
 **Verified without a live client**, in
 `tools/macos-host/tests/test_route_stargate_panel_jump.py` (44 cases). The rule is
