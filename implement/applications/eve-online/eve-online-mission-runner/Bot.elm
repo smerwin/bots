@@ -9695,21 +9695,13 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
             overviewEntriesToAttackFromReadingFromGameClient
                 (objectNamesToAttack context)
                 context.readingFromGameClient
-                -- Anything warp-disrupting us goes to the front, ahead of the
-                -- distance order everything else is in. This list drives what
-                -- gets locked and, through clickTargetBeforeShooting, what
-                -- becomes the active target -- so putting the scrambler first
-                -- also points keep-at-range at it, which is the one target
-                -- worth holding range on. Stable sort, so the nearest
-                -- scrambler leads and the rest keep their existing order.
-                |> List.sortBy
-                    (\entry ->
-                        if overviewEntryIsWarpDisruptingMe entry then
-                            0
-
-                        else
-                            1
-                    )
+                -- `combatPriorityTier`'s three tiers, ahead of the distance
+                -- order the helper returns rows in. This list drives what gets
+                -- locked and, through clickTargetBeforeShooting, what becomes
+                -- the active target -- so the head also points keep-at-range at
+                -- it. Stable sort, so the nearest row in each tier leads and
+                -- the rest keep their existing order.
+                |> List.sortBy combatPriorityTier
 
         clearing =
             clearingCaseForContext context
@@ -16539,6 +16531,73 @@ overviewEntryIsWarpDisruptingMe overviewEntry =
     overviewEntry.commonIndications.isWarpDisruptingMe
 
 
+{-| Whether this object is stopping the ship fighting, as opposed to stopping it
+leaving.
+
+The client names both of these on the same overview row it names the scrambler
+on, and the bot read neither until #231. They sit in their own tier _behind_
+`overviewEntryIsWarpDisruptingMe` and _ahead_ of the distance order: a scrambler
+takes an option away, where these two make the ship worse at using one.
+
+**"dampening", not "damping"** -- that is the client's own spelling, and it is
+exactly the detail a matcher written from memory gets wrong. Both literals were
+cut out of `~/eve-bot-logs` rather than guessed, which is what made #40's
+attacker rule safe and is the same discipline. Tracking disruption is the most
+common indication in the whole corpus, at nineteen times the warp disruption the
+bot was already acting on.
+
+**Neither of the two harms #231 argues for has been observed**, and this rule
+deliberately does not rest on them -- see the PR for the recount. A tracking
+disruptor was expected to drive #90's zero-damage give-up, and #90's own tally
+reads `none` on every reading of every run carrying both. A dampener was
+expected to teach `lockRefusedAtMeters` an artefact bound that only ever moves
+down, and the one run carrying the dampening hint never moved that bound. What
+this rests on instead is the client's own statement of fact about a row, and how
+often it makes it.
+
+Target painting and webifying are deliberately not here. A painter makes the ship
+easier to hit rather than less able to fight, and a webifier is #40's open case.
+
+-}
+overviewEntryIsStoppingUsFighting : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsStoppingUsFighting overviewEntry =
+    overviewEntry.commonIndications.isTrackingDisruptingMe
+        || overviewEntry.commonIndications.isSensorDampeningMe
+
+
+{-| Where an attackable row sorts, ahead of the distance order.
+
+Three tiers rather than two, and the split is between _taking an option away_
+and _making the ship worse at using one_:
+
+  - **Tier 0, holding the ship in place** -- `overviewEntryIsWarpDisruptingMe`.
+    Everything the bot does when a fight goes wrong assumes it can leave, and
+    warping is precisely what a scrambler prevents, so killing it is the only
+    thing that restores the option. Survival, and it stays ahead of the rest.
+  - **Tier 1, stopping the ship fighting** --
+    `overviewEntryIsStoppingUsFighting`. Effectiveness rather than survival: the
+    ship can still leave, it is just bad at the fight while these are on it.
+  - **Tier 2, everything else**, in the distance order it arrived in.
+
+This is a **reordering and not a widening**, which is what makes it safe by
+placement rather than by argument: every row it can move is a row
+`shouldAttackOverviewEntry` already admitted, so no guard is bypassed and no row
+is added. A tier is a number about a row and reads nothing else -- no memory, no
+settings, no reading -- so it can be executed on rows the parser built.
+
+-}
+combatPriorityTier : EveOnline.ParseUserInterface.OverviewWindowEntry -> Int
+combatPriorityTier entry =
+    if overviewEntryIsWarpDisruptingMe entry then
+        0
+
+    else if overviewEntryIsStoppingUsFighting entry then
+        1
+
+    else
+        2
+
+
 {-| The hint text behind the little icons on the right of each overview row.
 
 Reported rather than acted on, and here for one specific reason: issue #40 says
@@ -16547,14 +16606,19 @@ applies no damage produces no combat-log line at all**, so the attacker set in
 `namesOfRecentAttackers` cannot see it. That case is not covered by this change
 and this line is what would let it be.
 
-The parser has carried `rightAlignedIconsHints` all along and
-`commonIndications` reads exactly two literals out of it -- "is jamming me" and
-"is warp disrupting me" -- both inherited from upstream. The webifier's literal
-is not among them, and **it appears nowhere in the ten recorded runs**, because
-nothing has ever printed these hints. Guessing at the string and matching it
-would be a guard whose premise no evidence supports, which is how this repo
-gets guards that quietly never fire. Printing them instead costs one status
-line and turns the next run into the evidence a follow-up can be built on.
+The parser has carried `rightAlignedIconsHints` all along, and this clause is
+what turned it into a corpus. When it was written `commonIndications` read two
+literals out of it -- "is jamming me" and "is warp disrupting me", both
+inherited from upstream -- and nothing else appeared in the ten recorded runs,
+because nothing had ever printed these hints. **That premise expired**: the
+corpus now carries five distinct literals, and #231 added the matchers for two
+of them off the strings this line recorded rather than off a guess.
+
+The webifier's is still unread, and so is the painter's. `is jamming me` is the
+other way round -- matched since upstream and written by this client **not
+once**, so a parsed field firing on no reading is a separate question the corpus
+cannot answer. Printing the hints costs one status line and is still how the
+next literal gets read rather than guessed at.
 
 Capped and deduplicated: distinct strings across rendered rows only, since an
 undisplayed row's contents belong to whatever was recycled into its place.

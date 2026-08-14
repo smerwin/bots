@@ -4568,6 +4568,20 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
     let
         overviewEntriesToAttack =
             overviewEntriesToAttackFromReadingFromGameClient (namesOfRecentAttackers context.memory.incomingDamage) context.readingFromGameClient
+                -- `combatPriorityTier`'s three tiers, ahead of the distance
+                -- order the helper returns rows in. saxrat had no scrambler
+                -- priority at all before #231, in the hull that was lost twice.
+                -- Stable sort, so the nearest row in each tier leads and the
+                -- rest keep their existing order.
+                --
+                -- Sorted here rather than inside
+                -- `overviewEntriesToAttackFromReadingFromGameClient`, which is
+                -- where `shouldAttackOverviewEntry` applies every guard this
+                -- must not disturb. A tier only moves a row that rule already
+                -- admitted -- it adds none -- so `overviewEntryDistanceIsOnGrid`
+                -- still holds by construction, and the `overviewEntryIsDisplayed`
+                -- filter below still runs before anything is clicked.
+                |> List.sortBy combatPriorityTier
 
         overviewEntriesToAttackFirst =
             overviewEntriesToAttack
@@ -9986,6 +10000,92 @@ overviewEntryIsActiveTarget : EveOnline.ParseUserInterface.OverviewWindowEntry -
 overviewEntryIsActiveTarget =
     .namesUnderSpaceObjectIcon
         >> Set.member "myActiveTargetIndicator"
+
+
+{-| Whether this object is holding the ship in place.
+
+The client says so on the overview entry itself, and saxrat had read it **not
+once**: `isWarpDisruptingMe` was parsed on every reading of every recorded run
+and the only read site in the repository was the mission runner's. It matters
+more than any other property of a target, because everything the bot does when a
+fight goes wrong assumes it can leave -- the retreat warps to a celestial, and
+warping is precisely what a scrambler prevents.
+
+So a scrambler is shot first, ahead of `overviewEntryIsStoppingUsFighting` and
+ahead of the distance order. Killing it is the only thing that restores the
+option to leave.
+
+-}
+overviewEntryIsWarpDisruptingMe : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsWarpDisruptingMe overviewEntry =
+    overviewEntry.commonIndications.isWarpDisruptingMe
+
+
+{-| Whether this object is stopping the ship fighting, as opposed to stopping it
+leaving.
+
+The client names both of these on the same overview row it names the scrambler
+on, and the bot read neither until #231. They sit in their own tier _behind_
+`overviewEntryIsWarpDisruptingMe` and _ahead_ of the distance order: a scrambler
+takes an option away, where these two make the ship worse at using one.
+
+**"dampening", not "damping"** -- that is the client's own spelling, and it is
+exactly the detail a matcher written from memory gets wrong. Both literals were
+cut out of `~/eve-bot-logs` rather than guessed, which is what made #40's
+attacker rule safe and is the same discipline. Tracking disruption is the most
+common indication in the whole corpus, at nineteen times the warp disruption the
+bot was already acting on.
+
+**Neither of the two harms #231 argues for has been observed**, and this rule
+deliberately does not rest on them -- see the PR for the recount. A tracking
+disruptor was expected to drive #90's zero-damage give-up, and #90's own tally
+reads `none` on every reading of every run carrying both. A dampener was
+expected to teach `lockRefusedAtMeters` an artefact bound that only ever moves
+down, and the one run carrying the dampening hint never moved that bound. What
+this rests on instead is the client's own statement of fact about a row, and how
+often it makes it.
+
+Target painting and webifying are deliberately not here. A painter makes the ship
+easier to hit rather than less able to fight, and a webifier is #40's open case.
+
+-}
+overviewEntryIsStoppingUsFighting : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsStoppingUsFighting overviewEntry =
+    overviewEntry.commonIndications.isTrackingDisruptingMe
+        || overviewEntry.commonIndications.isSensorDampeningMe
+
+
+{-| Where an attackable row sorts, ahead of the distance order.
+
+Three tiers rather than two, and the split is between _taking an option away_
+and _making the ship worse at using one_:
+
+  - **Tier 0, holding the ship in place** -- `overviewEntryIsWarpDisruptingMe`.
+    Everything the bot does when a fight goes wrong assumes it can leave, and
+    warping is precisely what a scrambler prevents, so killing it is the only
+    thing that restores the option. Survival, and it stays ahead of the rest.
+  - **Tier 1, stopping the ship fighting** --
+    `overviewEntryIsStoppingUsFighting`. Effectiveness rather than survival: the
+    ship can still leave, it is just bad at the fight while these are on it.
+  - **Tier 2, everything else**, in the distance order it arrived in.
+
+This is a **reordering and not a widening**, which is what makes it safe by
+placement rather than by argument: every row it can move is a row
+`shouldAttackOverviewEntry` already admitted, so no guard is bypassed and no row
+is added. A tier is a number about a row and reads nothing else -- no memory, no
+settings, no reading -- so it can be executed on rows the parser built.
+
+-}
+combatPriorityTier : EveOnline.ParseUserInterface.OverviewWindowEntry -> Int
+combatPriorityTier entry =
+    if overviewEntryIsWarpDisruptingMe entry then
+        0
+
+    else if overviewEntryIsStoppingUsFighting entry then
+        1
+
+    else
+        2
 
 
 {-| Whatever the client says is shooting this ship is a valid target.

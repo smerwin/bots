@@ -291,6 +291,8 @@ type alias OverviewWindowEntryCommonIndications =
     , targetedByMe : Bool
     , isJammingMe : Bool
     , isWarpDisruptingMe : Bool
+    , isTrackingDisruptingMe : Bool
+    , isSensorDampeningMe : Bool
     }
 
 
@@ -1819,6 +1821,8 @@ parseOverviewWindowEntry entriesHeaders overviewEntryNode =
             , targetedByMe = namesUnderSpaceObjectIcon |> Set.member "targetedByMeIndicator"
             , isJammingMe = rightAlignedIconsHintsContainsTextIgnoringCase "is jamming me"
             , isWarpDisruptingMe = rightAlignedIconsHintsContainsTextIgnoringCase "is warp disrupting me"
+            , isTrackingDisruptingMe = rightAlignedIconsHintsContainsTextIgnoringCase "is tracking disrupting me"
+            , isSensorDampeningMe = rightAlignedIconsHintsContainsTextIgnoringCase "is sensor dampening me"
             }
 
         opacityPercent =
