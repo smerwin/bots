@@ -246,7 +246,7 @@ anomalyBotDecisionRoot context =
 
 anomalyBotDecisionRootBeforeApplyingSettings : BotDecisionContext -> DecisionPathNode
 anomalyBotDecisionRootBeforeApplyingSettings context =
-    generalSetupInUserInterface context.readingFromGameClient
+    generalSetupInUserInterface context.previousStepEffects context.readingFromGameClient
         |> Maybe.withDefault
             (branchDependingOnDockedOrInSpace
                 { ifDocked =
@@ -275,9 +275,12 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
             )
 
 
-generalSetupInUserInterface : ReadingFromGameClient -> Maybe DecisionPathNode
-generalSetupInUserInterface readingFromGameClient =
-    [ closeMessageBox, ensureInfoPanelLocationInfoIsExpanded ]
+generalSetupInUserInterface :
+    List EffectOnWindow.EffectOnWindowStructure
+    -> ReadingFromGameClient
+    -> Maybe DecisionPathNode
+generalSetupInUserInterface previousStepEffects readingFromGameClient =
+    [ closeMessageBox, ensureInfoPanelLocationInfoIsExpanded previousStepEffects ]
         |> List.filterMap
             (\maybeSetupDecisionFromGameReading ->
                 maybeSetupDecisionFromGameReading readingFromGameClient

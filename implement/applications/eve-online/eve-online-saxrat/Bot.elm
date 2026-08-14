@@ -1338,6 +1338,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
         |> Maybe.withDefault
             (generalSetupInUserInterface context.memory.messageBoxStandoff
                 context.eventContext.botSettings.acceptFleetInviteFrom
+                context.previousStepsEffects
                 context.readingFromGameClient
                 |> Maybe.withDefault
                     (recoverPodAfterShipLoss context
@@ -1463,7 +1464,10 @@ about the game itself.
 `messageBoxStandoff` is passed down rather than read in `closeMessageBox`
 because it is not a fact about this reading: it is how many readings the box in
 front of the bot has already survived, and only `BotMemory` can say. Everything
-else here is answerable from the reading alone and stays that way.
+else here is answerable from the reading alone -- except
+`ensureInfoPanelLocationInfoIsExpanded`'s own settling guard, which reads the
+previous steps' effects for the same reason a module button's click-settling
+guard does.
 
 **This whole list is evaluated above the docked-or-in-space split**, so anything
 in it that can repeat forever freezes the entire bot rather than one branch.
@@ -1473,11 +1477,16 @@ which is why `endSessionOnAnExpiredBound` is asked above this list rather than
 below it.
 
 -}
-generalSetupInUserInterface : Maybe MessageBoxStandoff -> List String -> ReadingFromGameClient -> Maybe DecisionPathNode
-generalSetupInUserInterface messageBoxStandoff acceptFleetInviteFrom readingFromGameClient =
+generalSetupInUserInterface :
+    Maybe MessageBoxStandoff
+    -> List String
+    -> List (List EffectOnWindow.EffectOnWindowStruct)
+    -> ReadingFromGameClient
+    -> Maybe DecisionPathNode
+generalSetupInUserInterface messageBoxStandoff acceptFleetInviteFrom previousStepsEffects readingFromGameClient =
     [ closeSystemSettingsMenu
     , closeMessageBox messageBoxStandoff acceptFleetInviteFrom
-    , ensureInfoPanelLocationInfoIsExpanded
+    , ensureInfoPanelLocationInfoIsExpanded previousStepsEffects
     ]
         |> List.filterMap
             (\maybeSetupDecisionFromGameReading ->
