@@ -40,6 +40,7 @@ type alias ParsedUserInterface =
     , inventoryWindows : List InventoryWindow
     , chatWindowStacks : List ChatWindowStack
     , agentConversationWindows : List AgentConversationWindow
+    , opportunityInfoPanelEntries : List OpportunityInfoPanelEntry
     , marketOrdersWindow : Maybe MarketOrdersWindow
     , surveyScanWindow : Maybe SurveyScanWindow
     , bookmarkLocationWindow : Maybe BookmarkLocationWindow
@@ -519,6 +520,35 @@ type alias AgentConversationWindow =
     }
 
 
+{-| One escalation in the Opportunities tracker, and the travel button it draws.
+
+`DungeonInfoPanelEntry` is the client's own type name for an entry in that
+panel. Read live with five `Sansha's Command Relay Outpost` escalations in the
+tracker at once, only the **expanded** entry carried the objective chain beneath
+it, so only that one has a travel button at all; the rest render their name and
+a `View Details` row and nothing that can be acted on. That is what answers
+"which escalation" without picking by position -- the client has already chosen,
+and a button belonging to a collapsed entry is not in the tree to be clicked.
+
+-}
+type alias OpportunityInfoPanelEntry =
+    { uiNode : UITreeNodeWithDisplayRegion
+    , siteName : Maybe String
+    , travelButton : Maybe OpportunityTravelButton
+    }
+
+
+{-| The one slot in an escalation's objective chain whose label says what the
+trip needs next -- `Set Destination`, `Jump`, `Warp to Site` and `Warping` have
+all been read off it. The label is the whole of what a decision has to go on,
+which is why it is carried rather than interpreted here.
+-}
+type alias OpportunityTravelButton =
+    { uiNode : UITreeNodeWithDisplayRegion
+    , label : Maybe String
+    }
+
+
 type alias BookmarkLocationWindow =
     { uiNode : UITreeNodeWithDisplayRegion
     , submitButton : Maybe UITreeNodeWithDisplayRegion
@@ -634,6 +664,7 @@ parseUserInterfaceFromUITree uiTree =
     , heatStatusTooltip = parseHeatStatusTooltipFromUITreeRoot uiTree
     , chatWindowStacks = parseChatWindowStacksFromUITreeRoot uiTree
     , agentConversationWindows = parseAgentConversationWindowsFromUITreeRoot uiTree
+    , opportunityInfoPanelEntries = parseOpportunityInfoPanelEntriesFromUITreeRoot uiTree
     , marketOrdersWindow = parseMarketOrdersWindowFromUITreeRoot uiTree
     , surveyScanWindow = parseSurveyScanWindowFromUITreeRoot uiTree
     , bookmarkLocationWindow = parseBookmarkLocationWindowFromUITreeRoot uiTree
@@ -3238,6 +3269,100 @@ parseAgentConversationWindow windowUINode =
     }
 
 
+parseOpportunityInfoPanelEntriesFromUITreeRoot : UITreeNodeWithDisplayRegion -> List OpportunityInfoPanelEntry
+parseOpportunityInfoPanelEntriesFromUITreeRoot uiTreeRoot =
+    uiTreeRoot
+        |> listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "DungeonInfoPanelEntry")
+        |> List.map parseOpportunityInfoPanelEntry
+
+
+parseOpportunityInfoPanelEntry : UITreeNodeWithDisplayRegion -> OpportunityInfoPanelEntry
+parseOpportunityInfoPanelEntry entryNode =
+    let
+        descendants =
+            entryNode |> listDescendantsWithDisplayRegion
+
+        textsOf nodes =
+            nodes
+                |> List.filterMap (.uiNode >> getDisplayText)
+                |> List.filter (String.trim >> String.isEmpty >> not)
+
+        -- Matched on the widget's own **type** name, which is what scopes this
+        -- to the tracker. The label the client puts on it is a word like `Jump`
+        -- that the Selected Item panel also carries on a button of its own, so
+        -- a text search over the tree cannot tell the two apart, while a type
+        -- name reached only from inside a `DungeonInfoPanelEntry` cannot reach
+        -- the panel at all.
+        --
+        -- `startsWith` rather than an equality, because the widget has been
+        -- read under two spellings on this client: `TravelToLocation
+        -- ButtonTaskWidget` while run 26 was flying, and
+        -- `TravelToLocationButtonTask` on a later read. Whether that is a
+        -- client change or a second node in the same chain is unresolved, and
+        -- the prefix covers both without admitting the sibling task widgets --
+        -- narrower than the mission runner's `endsWith "ButtonTaskWidget"`,
+        -- which is wider there because that panel also has a conversation
+        -- button to press at hand-in and this one has no such step.
+        --
+        -- **The display filter is the selection, not a safety net.** The chain
+        -- hides the tasks that are not currently available rather than removing
+        -- them, and picking a hidden one yields a button whose label a decision
+        -- then discards -- which is the same stall by a longer road. Run 14 on
+        -- the other bot sat docked for 750 readings on exactly that.
+        travelButtonNode =
+            descendants
+                |> List.filter
+                    (.uiNode
+                        >> .pythonObjectTypeName
+                        >> String.startsWith "TravelToLocationButtonTask"
+                    )
+                |> List.filter (.uiNode >> nodeIsDisplayedFromDictEntries)
+                |> List.head
+    in
+    { uiNode = entryNode
+    , siteName =
+        -- The escalation's own name, e.g. `Sansha's Command Relay Outpost`, for
+        -- the decision line. Nothing decides anything on it.
+        descendants
+            |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "EveLabelLarge")
+            |> textsOf
+            |> List.head
+    , travelButton =
+        travelButtonNode
+            |> Maybe.map
+                (\buttonNode ->
+                    let
+                        buttonDescendants =
+                            buttonNode |> listDescendantsWithDisplayRegion
+
+                        -- The mission runner's copy of this reads only the
+                        -- descendant named `label`, which is what its own
+                        -- capture of the widget carries. The tracker capture
+                        -- records an `EveLabelMedium` under the button and does
+                        -- not record its `_name`, so requiring that name would
+                        -- risk answering `Nothing` for a button the client is
+                        -- plainly labelling. The named label still wins where
+                        -- there is one; the fallback is any text under the
+                        -- button, whose only other child is a `ButtonUnderlay`
+                        -- carrying none.
+                        namedLabelTexts =
+                            buttonDescendants
+                                |> List.filter (.uiNode >> getNameFromDictEntries >> (==) (Just "label"))
+                                |> textsOf
+                    in
+                    { uiNode = buttonNode
+                    , label =
+                        if List.isEmpty namedLabelTexts then
+                            buttonDescendants |> textsOf |> List.head
+
+                        else
+                            namedLabelTexts |> List.head
+                    }
+                )
+    }
+
+
 stripHtmlTags : String -> String
 stripHtmlTags =
     Regex.replace
@@ -3923,6 +4048,24 @@ getElementIdFromDictEntries =
 getHintTextFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Maybe String
 getHintTextFromDictEntries =
     getStringPropertyFromDictEntries "_hint"
+
+
+{-| Whether the client is rendering this node, from `_display`.
+
+Absent means shown -- the client writes the key to hide something, not to
+reveal it, and the overview's own rows carry no `_display` at all while plainly
+on screen. `Bot.elm` has the identical function for the same reason; this copy
+exists because `parseOpportunityInfoPanelEntry` has to pick between the tracker's
+task widgets where a hidden one is the wrong answer, and a parser cannot ask the
+bot.
+
+-}
+nodeIsDisplayedFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Bool
+nodeIsDisplayedFromDictEntries uiNode =
+    uiNode.dictEntriesOfInterest
+        |> Dict.get "_display"
+        |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.bool >> Result.toMaybe)
+        |> Maybe.withDefault True
 
 
 getTexturePathFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Maybe String
