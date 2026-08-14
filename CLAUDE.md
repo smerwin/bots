@@ -1287,23 +1287,52 @@ absent channel must not read as "the grid is quiet", here it must not read as
 `zero-damage check: NO COMBAT LOG` rather than leaving it to be inferred from a
 verdict that never arrives.
 
-**Eight landed hits at zero, and the corpus is cleaner than the issue expects.**
-Across 77,316 outgoing lines naming 294 distinct targets, **eight targets ever
-produced a zero and none of those eight ever produced a nonzero**; the other 286
-never read zero once. Resists and glancing hits do not round to zero on this fit
-— a glancing hit reads `15 to Mercenary Commander - Acolyte I - Glances Off` —
-and the longest run of zeros anywhere later broken by a real hit is **zero**. So
-there is no observed overlap for a threshold to clear, and eight is margin
-rather than a separator: it is the largest value that still catches every
-episode worth catching, the eight zero-only episodes having run 3, 3, 10, 28,
-74, 86, 101 and 108 landed hits. It fires 20–75 s into each of the six it
-catches, in place of the 41–414 s those episodes actually ran.
+**Eight landed hits at zero, and what it has to clear is a run rather than a
+target.** #90 calibrated it on a disjointness — across 77,316 outgoing lines
+naming 294 distinct targets, eight targets ever produced a zero and none of
+those eight ever produced a nonzero — and called eight "margin rather than a
+separator" on the ground that there was no observed overlap for it to sit in.
+**That claim has expired.** The corpus is now 165,420 outgoing lines naming 317
+targets, ten of them ever read zero, and one of the ten — a `Centii Servant`,
+from the live saxrat runs — also read nonzero. Nothing about the rule changed;
+the evidence did, which is #158.
 
-**It is a number about this ship's guns, not about the game.** A fit whose shots
-are small enough to round to zero against a heavily resisted target would
-accumulate against something it could eventually kill, and nothing in this
-corpus covers that — the same warning `defaultRunAwayIncomingDamageThreshold`
-carries. `give-up-after-zero-damage-hits` sets it; `-1` disables it.
+**The number survives and the re-derived reason is the sharper of the two.**
+`zeroDamageMemoryAfterReading` tallies *consecutive* readings whose whole
+summary for a target was zero and clears the tally outright on any reading that
+target took damage, so the quantity eight has to clear is the run length and
+never was the count of targets. Counted that way the corpus separates cleanly:
+the longest run of consecutive zeros on a target the guns were hurting is
+**one**, and the zero-only episodes still run 3, 3, 5, 10, 28, 74, 86, 101 and
+108 landed hits. So eight sits in a measured gap between one and ten — a
+separator now, where #90 could only say the gap was empty — and it is still the
+largest value that catches every episode worth catching, firing 20–75 s into
+each in place of the 41–414 s those episodes actually ran.
+
+**The overlap never reached the bot at all**, which is what makes this a
+measurement rather than a reprieve. All three `Centii Servant` zeros were
+written in the same second as a real hit on the same target from the same drone
+— `0 to Centii Servant - Acolyte I - Hits` beside `55 to Centii Servant -
+Acolyte I - Smashes` — and the host carries `{name, hits, damage}` summed per
+target per reading rather than lines, so the summary handed over reads
+`damage = 55` and clears the tally instead of adding to it. Folded at the
+client's own second, which is shorter than any real reading and so the fold most
+favourable to a zero standing alone, the tally for that target never leaves
+zero. Resists and glancing hits still do not round to zero on these fits either
+— a glancing hit reads `15 to Mercenary Commander - Acolyte I - Glances Off`.
+
+**It is a number about this ship's guns, not about the game**, and the overlap
+sharpens that warning rather than softening it: the three zeros came from a
+**drone**, and the rule tallies drone hits and gun hits alike because the
+client's outgoing lines give it no way to tell them apart. What the corpus no
+longer is, is one hull — the sustained zero-only episodes were shot with
+`Focused Modulated Medium Energy Beam I`, `Dual Anode Light Particle Stream I`
+and `Small Focused Beam Laser II` across two characters, so the separation now
+holds over three fits rather than the one #90 measured. A fit whose shots are
+small enough to round to zero against a heavily resisted target would still
+accumulate against something it could eventually kill, and nothing here covers
+that — the same warning `defaultRunAwayIncomingDamageThreshold` carries.
+`give-up-after-zero-damage-hits` sets it; `-1` disables it.
 
 **A miss builds no case**, because the host never counts one. Missing is a range
 problem and giving up is not the answer to it — without that, a gun firing out
@@ -5104,22 +5133,47 @@ only because the identity condition makes the risk unreachable rather than small
 `test_route_stargate_panel_jump` reads those counts back out of the doc comment
 and recomputes them, so a claim the corpus stops supporting goes red.
 
-### A finding this turned up and did not act on
+### A finding this turned up, and #171 is what fixed it
 
 **`dockAtDestinationStation`'s "exactly one route marker means the destination is
-in this system" is not what the panel draws.** Read live: the header said `Route
+in this system" was not what the panel draws.** Read live: the header said `Route
 1 Jump`, the panel held **one** `AutopilotDestinationIcon`, and that marker
 carried `solarSystemID 30005001`, `destinationID 60012607` (a station) and
 `numJumps 1` — a destination one jump away, not in this system. The 2019
 recording agrees from the other end: `Route <fontsize=12></b>3 Jumps` with
 **three** markers. So the count is jumps remaining, and `destinationIsInThisSystem`
-is true one system early. Run 37 shows it live, reaching the dock branch mid-route
+was true one system early. Run 37 shows it live, reaching the dock branch mid-route
 and being saved only by #98's undocked-from guard.
 
-**Not fixed here.** It is #98's area, changing it is a behaviour change on the
-dock path with its own evidence to gather, and the markers turn out to carry
-`numJumps` — so the reading that would settle it outright exists and the parser
-does not lift it. Nothing in this change depends on the marker count.
+**Not fixed at the time this section was written** — that was #98's area, and
+changing it was a behaviour change on the dock path wanting its own evidence.
+Issue #171 is that evidence and that change:
+`InfoPanelRouteRouteElementMarker.numJumps` is lifted into all six vendored
+parser copies (`getIntPropertyFromDictEntries "numJumps"`, identical across all
+six), and `dockAtDestinationStation`'s `destinationIsInThisSystem` now asks
+`destinationIsInThisSystemFromRouteMarkers` — exactly one marker, and that
+marker's own `numJumps` reading `Just 0` — instead of counting icons. Neither
+`routeMarkerCascade` (which right-clicks the head marker's `uiNode` and never
+counts) nor #170's `routeStargateJump` / `jumpThroughRouteStargate` (which
+reads the `Next System in Route` label and the overview, and never touches
+`routeElementMarker` at all) depended on the count meaning waypoints, checked
+rather than assumed. #98's `stationIsTheOneJustUndockedFrom` guard is
+untouched — it was doing real work for a reason unrelated to the marker count,
+and still runs on every dock this branch attempts.
+
+**What the client writes on genuine arrival is still unread.** Every live
+reading available had at least one jump remaining, so whether `numJumps` reads
+`Just 0`, `Nothing`, or something else there is not established. The rule
+fails closed on that: an empty list, several markers, or an
+unreadable/nonzero `numJumps` all decline and send the ship to the cascade
+fall-back, which still travels the route. **Untested against a live client**;
+see `tools/macos-host/tests/test_route_marker_num_jumps.py` for the parser and
+the rule, both executed through the real `Bot.elm` and the real
+`EveOnline.ParseUserInterface` rather than restated in Python. What to watch
+on the first run that reaches this branch: whether `destinationIsInThisSystem`
+ever answers `True` at all — if it never does, the client is not writing `0`
+where this rule expects it, and the branch is falling through to the cascade
+exactly as before #171.
 
 **Verified without a live client**, in
 `tools/macos-host/tests/test_route_stargate_panel_jump.py` (44 cases). The rule is
@@ -8803,7 +8857,12 @@ exists.
   and achieve nothing". Verified without a live client: 46 unit tests in
   `tools/macos-host/tests/test_zero_damage_target.py`, with the accumulation
   rule executed through the real `Bot.elm` rather than restated in Python and
-  the threshold recounted from the client's own 77,316 outgoing damage lines.
+  the threshold recounted from the client's own outgoing damage lines — as
+  *relations* since #158, because the disjointness #90 asserted is what a
+  growing corpus turned red. The sessions carrying that overlap are themselves
+  folded into readings and run through the rule, with their damage stripped out
+  beside them as the control: same target, same readings, and the rule gives up
+  on the second.
 
   **Five consumers now, and none has been proven live.** #31's ammo-load
   refusal (`loadRefusedByClient`), #33's capsule refusal (`shipLossFromGameLog`),
@@ -9325,10 +9384,27 @@ times: the tree handed over is byte for byte the tree that answered the probe.
 Two things this leaves alone. `--dist loadfile` in the workflow was justified by
 the per-file scratch build, and that reason is now spent — one build per worker
 process happens whatever the distribution — but the granularity is not what
-bounds a parallel run either: on four cores the whole suite spends 4,078 s of
-case time and finishes in 1,057 s against a perfect packing of 1,020 s, with the
-longest single file at 310 s. There is nothing for `loadscope` to recover, so
-the flag stays as a default rather than as a constraint.
+bounds a parallel run either, and #199 measured that on CI itself rather than
+inheriting it. Two consecutive runs of the job: 86 files and 3,643 s of case
+time with the longest file at 256 s against a 911 s packing floor, then 4,203 s
+with the longest at 290 s against 1,051 s. **The seconds move with the runner
+and the relation does not** — the longest file is 28% of the floor in both, and
+#172 saw 310 s against 1,020 s on its own container. So `loadscope` has of the
+order of **20 s of a 15-to-17-minute run** to recover, and the flag stays — a
+*measured* choice with a stated margin, neither a constraint nor an unexamined
+default.
+
+**A margin is a claim that stops holding without saying so**, which is what #199
+was filed on: revert the shared build, or let one file grow past the floor, and
+the measurement above quietly stops describing this suite while every run still
+looks healthy. So it is asserted rather than remembered.
+`check_file_packing.py` re-takes it from every CI run's own report — the longest
+file's case time against the case time spread evenly over the workers, two
+numbers from the same run, so a loaded runner stretches both and it reads the
+shape of the suite rather than the speed of the machine — and fails when a
+single file grows past the floor, naming it. The other half of the premise, that
+the build really is one per app per *process*, is what
+`test_prerequisites.OneBuiltAppIsHandedToEveryClass` pins.
 
 And **how much of a local run is the corpus-reading cases is still unmeasured**:
 they skip wherever `~/eve-bot-logs` is absent, which is CI and was the machine

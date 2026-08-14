@@ -307,14 +307,34 @@ def clause(reading):
 class TargetHitpointsCases:
     """The cases both apps run. Subclassed once per app, below.
 
-    The parse and the two rules are the same declarations under the same names
-    in both apps -- the field, the lookup and the rendering are facts about the
-    client, not about which bot is flying -- while the status line each clause is
-    placed in is not, which the wiring cases below check separately per app.
+    The parse and the lookup are the same declarations under the same names in
+    both apps -- the field and where it sits are facts about the client, not
+    about which bot is flying -- while the status line each clause is placed in
+    is not, which the wiring cases below check separately per app.
+
+    The *rendering* is no longer shared either: #242 shortened saxrat's status
+    line, so the same three percentages read `(Shield: 58%  Armor: 100%  Hull:
+    100%)` in the mission runner and `[58/100/100]` in saxrat. Every case below
+    asks its subclass for the words rather than assuming them, so what is
+    asserted is the distinction the clause has to carry -- three layers kept
+    apart, a real zero said as zero, and an unreadable bar answered with no
+    number at all -- in whichever spelling the app uses.
     """
 
     REPL_CLASS = None
     BOT_ELM = None
+
+    @classmethod
+    def rendered(cls, shield, armor, structure):
+        """What this app's clause prints for three readable percentages."""
+        raise NotImplementedError
+
+    # What it prints instead when the bars cannot be read: `(Shield/Armor/Hull
+    # unknown)` in the mission runner, `[?/?/?]` in saxrat. Whichever it is, it
+    # is asserted to carry no digit -- a fabricated `0%` is a hull about to
+    # explode as far as any later rule is concerned, and that is the property
+    # rather than the word.
+    UNREADABLE = None
 
     @classmethod
     def setUpClass(cls):
@@ -387,8 +407,7 @@ class TargetHitpointsCases:
              "(describeTargetHitpoints Nothing)"],
             definitions=DEFINITIONS)
         for text in rendered:
-            self.assertIn("unknown", text, text)
-            self.assertNotIn("0%", text, text)
+            self.assertEqual(text, self.UNREADABLE, text)
             self.assertFalse(
                 any(character.isdigit() for character in text),
                 "an unreadable bar printed a number: " + text)
@@ -403,20 +422,36 @@ class TargetHitpointsCases:
         """
         [rendered] = self.repl.strings([clause("collapsed")],
                                        definitions=DEFINITIONS)
-        self.assertIn("Shield: 0%", rendered)
-        self.assertNotIn("unknown", rendered)
+        self.assertEqual(rendered, self.rendered(0, 25, 100))
+        self.assertNotEqual(rendered, self.UNREADABLE)
 
-    def test_the_clause_reads_like_the_ships_own_line(self):
-        """`Shield: 58%  Armor: 100%` is what the ship's line already says.
+    def test_the_clause_keeps_the_three_layers_apart(self):
+        """Three numbers, in the client's own order, never combined.
 
-        #112 asks for the two to read alike so an operator scanning a column of
-        readings does not have to learn a second spelling, and all three layers
-        have to be nameable rather than positional.
+        This is the whole reason the field is a record rather than one figure:
+        the zero-damage case #90 is about is a shield that does not move while
+        armour and hull sit at 100%, which any combined figure hides.
+
+        #112 asked additionally that the clause read like the ship's own
+        `Shield: 58%  Armor: 100%` line, and the mission runner still does; #242
+        traded that in saxrat for `[58/100/100]`, on the argument that a status
+        line printed thousands of times a run is worth shortening. So the
+        spelling is the subclass's and what is asserted here is that all three
+        readings survive it, in an order an operator can rely on.
         """
         [rendered] = self.repl.strings([clause("hurt")], definitions=DEFINITIONS)
-        self.assertIn("Shield: 58%", rendered)
-        self.assertIn("Armor: 100%", rendered)
-        self.assertIn("Hull: 100%", rendered)
+        self.assertEqual(rendered, self.rendered(58, 100, 100))
+
+        # A rendering that dropped a layer, or reordered two, would still equal
+        # its own `rendered` above -- so the three are separated here as well.
+        distinct = self.repl.strings(
+            ["(describeTargetHitpoints " + hitpoints(11, 22, 33) + ")"])
+        for value in ("11", "22", "33"):
+            self.assertIn(value, distinct[0], distinct[0])
+        self.assertLess(distinct[0].index("11"), distinct[0].index("22"),
+                        "the shield is not printed before the armour")
+        self.assertLess(distinct[0].index("22"), distinct[0].index("33"),
+                        "the armour is not printed before the hull")
 
     def test_the_ring_carries_no_width_to_take_a_ratio_of(self):
         """The geometry, asserted rather than described in a comment.
@@ -485,9 +520,8 @@ class TargetHitpointsCases:
             definitions=DEFINITIONS)
         # Asked of the parse as well as of the rendering, because a clamp put in
         # either place produces the same reassuring number.
-        self.assertIn("Shield: -1021821%", answers[0])
-        self.assertIn("Armor: 2132822%", answers[0])
-        self.assertIn("Shield: -1021821%", answers[1])
+        self.assertEqual(answers[0], self.rendered(-1021821, 2132822, 100))
+        self.assertEqual(answers[1], self.rendered(-1021821, 100, 100))
 
     def test_the_two_rules_are_pure_functions_of_what_they_are_handed(self):
         """Neither reaches for a decision context, so a case can execute them.
@@ -657,37 +691,71 @@ class TheParseIsTheSameInBothApps(unittest.TestCase):
         for reached_for in ("totalDisplayRegion", ".width", "droneGaugeBar"):
             self.assertNotIn(reached_for, block, reached_for)
 
-    def test_both_apps_carry_the_same_two_rules(self):
+    def test_both_apps_carry_the_same_lookup(self):
         mission = source_of(MISSION_RUNNER_BOT_ELM)
         saxrat = source_of(SAXRAT_BOT_ELM)
-        for name in ("activeTargetHitpointsPercent", "describeTargetHitpoints"):
-            self.assertEqual(declaration(mission, name),
-                             declaration(saxrat, name), name)
+        self.assertEqual(declaration(mission, "activeTargetHitpointsPercent"),
+                         declaration(saxrat, "activeTargetHitpointsPercent"))
+
+    def test_only_the_rendering_diverges_and_it_says_the_same_things(self):
+        """`describeTargetHitpoints` is the one that is deliberately not shared.
+
+        #242 shortened saxrat's status line, so the same record reads
+        `(Shield: 58%  Armor: 100%  Hull: 100%)` in one app and `[58/100/100]`
+        in the other. That is a decision about one bot's log and not about what
+        either bot can see, which is why the lookup above is still compared.
+
+        What both still have to do is the part that is not a wording: three
+        layers printed separately, and an unreadable bar answered with no number
+        at all. The first is executed per app by `TargetHitpointsCases`; the
+        second is read here, because an app whose unreadable branch started
+        printing `0` would be making the one substitution this whole design
+        refuses.
+        """
+        mission = collapsed(declaration(source_of(MISSION_RUNNER_BOT_ELM),
+                                        "describeTargetHitpoints"))
+        saxrat = collapsed(declaration(source_of(SAXRAT_BOT_ELM),
+                                       "describeTargetHitpoints"))
+        self.assertNotEqual(
+            mission, saxrat,
+            "the two clauses now read the same, so this case is asserting a "
+            "divergence that is over -- compare them with the lookup again "
+            "instead")
+
+        for app, body in (("mission runner", mission), ("saxrat", saxrat)):
+            with self.subTest(app=app):
+                for field in ("percent.shield", "percent.armor",
+                              "percent.structure"):
+                    self.assertIn(field, body, field)
+                unreadable = body.split("Nothing ->")[1].split("Just")[0]
+                self.assertFalse(
+                    any(character.isdigit() for character in unreadable),
+                    "%s prints a number where it cannot read the bars: %s"
+                    % (app, unreadable.strip()))
 
 
 class TheStatusLineCarriesIt(unittest.TestCase):
-    """The wiring, which differs per app because the two status lines do.
+    """The wiring, read per app because the two status lines are each app's own.
 
-    The mission runner's clause is `target <name>` on the middle line; saxrat's
-    is `Current target: <name>.`. Both name the target and then its condition,
-    and both print the condition only where there is a target to have one -- run
-    27 has 10,372 readings naming none, and a `Shield/Armor/Hull unknown` on
-    every one of them would be noise rather than a reading.
+    Both name the target and then its condition, and both print the condition
+    only where there is a target to have one -- run 27 has 10,372 readings
+    naming none, and an unreadable-bar clause on every one of them would be
+    noise rather than a reading.
+
+    The label was `Current target: <name>.` in saxrat until #242 shortened it to
+    the mission runner's `target <name>`, so the two now agree; what each *does*
+    with the condition is what is asked here, since that is the half a port or a
+    reword could quietly drop.
     """
 
-    def test_the_mission_runner_names_the_condition_after_the_target(self):
-        clause_source = self.target_clause(source_of(MISSION_RUNNER_BOT_ELM))
-        self.assertIn(
-            'describeTargetHitpoints (activeTargetHitpointsPercent '
-            'readingFromGameClient)', collapsed(clause_source))
-        self.assertIn('"target "', collapsed(clause_source))
-
-    def test_saxrat_names_the_condition_after_the_target(self):
-        clause_source = self.target_clause(source_of(SAXRAT_BOT_ELM))
-        self.assertIn(
-            'describeTargetHitpoints (activeTargetHitpointsPercent '
-            'readingFromGameClient)', collapsed(clause_source))
-        self.assertIn('"Current target: "', collapsed(clause_source))
+    def test_each_app_names_the_condition_after_the_target(self):
+        for app, path in (("mission runner", MISSION_RUNNER_BOT_ELM),
+                          ("saxrat", SAXRAT_BOT_ELM)):
+            clause_source = collapsed(self.target_clause(source_of(path)))
+            self.assertIn(
+                'describeTargetHitpoints (activeTargetHitpointsPercent '
+                'readingFromGameClient)', clause_source, app)
+            self.assertIn('"target "', clause_source, app)
 
     @staticmethod
     def target_clause(source):
@@ -759,11 +827,22 @@ class TheCorpusSaysWhyThisIsWorthReading(unittest.TestCase):
 class MissionRunnerTargetHitpointsTest(TargetHitpointsCases, unittest.TestCase):
     REPL_CLASS = MissionRunnerRepl
     BOT_ELM = MISSION_RUNNER_BOT_ELM
+    UNREADABLE = "(Shield/Armor/Hull unknown)"
+
+    @classmethod
+    def rendered(cls, shield, armor, structure):
+        return "(Shield: %d%%  Armor: %d%%  Hull: %d%%)" % (
+            shield, armor, structure)
 
 
 class SaxratTargetHitpointsTest(TargetHitpointsCases, unittest.TestCase):
     REPL_CLASS = SaxratRepl
     BOT_ELM = SAXRAT_BOT_ELM
+    UNREADABLE = "[?/?/?]"
+
+    @classmethod
+    def rendered(cls, shield, armor, structure):
+        return "[%d/%d/%d]" % (shield, armor, structure)
 
 
 if __name__ == "__main__":

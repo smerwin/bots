@@ -221,6 +221,7 @@ type alias InfoPanelRoute =
 
 type alias InfoPanelRouteRouteElementMarker =
     { uiNode : UITreeNodeWithDisplayRegion
+    , numJumps : Maybe Int
     }
 
 
@@ -1086,7 +1087,12 @@ parseInfoPanelRouteFromInfoPanelContainer infoPanelContainerNode =
                     infoPanelRouteNode
                         |> listDescendantsWithDisplayRegion
                         |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "AutopilotDestinationIcon")
-                        |> List.map (\uiNode -> { uiNode = uiNode })
+                        |> List.map
+                            (\uiNode ->
+                                { uiNode = uiNode
+                                , numJumps = uiNode.uiNode |> getIntPropertyFromDictEntries "numJumps"
+                                }
+                            )
             in
             Just { uiNode = infoPanelRouteNode, routeElementMarker = routeElementMarker }
 

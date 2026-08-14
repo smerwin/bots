@@ -234,6 +234,7 @@ miningBotDecisionRoot context =
 miningBotDecisionRootBeforeApplyingSettings : BotDecisionContext -> DecisionPathNode
 miningBotDecisionRootBeforeApplyingSettings context =
     generalSetupInUserInterface
+        context.previousStepEffects
         context.readingFromGameClient
         |> Maybe.withDefault
             (branchDependingOnDockedOrInSpace
@@ -405,9 +406,12 @@ returnDronesAndRunAwayIfHitpointsAreTooLowOrWithoutDrones context shipUI =
         Nothing
 
 
-generalSetupInUserInterface : ReadingFromGameClient -> Maybe DecisionPathNode
-generalSetupInUserInterface readingFromGameClient =
-    [ closeMessageBox, ensureInfoPanelLocationInfoIsExpanded ]
+generalSetupInUserInterface :
+    List EffectOnWindow.EffectOnWindowStructure
+    -> ReadingFromGameClient
+    -> Maybe DecisionPathNode
+generalSetupInUserInterface previousStepEffects readingFromGameClient =
+    [ closeMessageBox, ensureInfoPanelLocationInfoIsExpanded previousStepEffects ]
         |> List.filterMap
             (\maybeSetupDecisionFromGameReading ->
                 maybeSetupDecisionFromGameReading readingFromGameClient

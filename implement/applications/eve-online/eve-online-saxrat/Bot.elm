@@ -505,6 +505,11 @@ type alias BotMemory =
     -- no warp has finished this session and is a closed window, never an open
     -- one. See `otherPilotArrivalWindowReadings`.
     , readingsSinceWarpEnded : Maybe Int
+
+    -- Readings since the session began, used only to rotate which
+    -- celestial `runAway` heads for. Monotone by construction: it is
+    -- advanced unconditionally beside every other verdict here.
+    , readingsCount : Int
     , visitedAnomalies : Dict.Dict String MemoryOfAnomaly
     , contextMenuLastDepth : Int
     , contextMenuStuckTicks : Int
@@ -1338,6 +1343,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
         |> Maybe.withDefault
             (generalSetupInUserInterface context.memory.messageBoxStandoff
                 context.eventContext.botSettings.acceptFleetInviteFrom
+                context.previousStepsEffects
                 context.readingFromGameClient
                 |> Maybe.withDefault
                     (recoverPodAfterShipLoss context
@@ -1463,7 +1469,10 @@ about the game itself.
 `messageBoxStandoff` is passed down rather than read in `closeMessageBox`
 because it is not a fact about this reading: it is how many readings the box in
 front of the bot has already survived, and only `BotMemory` can say. Everything
-else here is answerable from the reading alone and stays that way.
+else here is answerable from the reading alone -- except
+`ensureInfoPanelLocationInfoIsExpanded`'s own settling guard, which reads the
+previous steps' effects for the same reason a module button's click-settling
+guard does.
 
 **This whole list is evaluated above the docked-or-in-space split**, so anything
 in it that can repeat forever freezes the entire bot rather than one branch.
@@ -1473,11 +1482,16 @@ which is why `endSessionOnAnExpiredBound` is asked above this list rather than
 below it.
 
 -}
-generalSetupInUserInterface : Maybe MessageBoxStandoff -> List String -> ReadingFromGameClient -> Maybe DecisionPathNode
-generalSetupInUserInterface messageBoxStandoff acceptFleetInviteFrom readingFromGameClient =
+generalSetupInUserInterface :
+    Maybe MessageBoxStandoff
+    -> List String
+    -> List (List EffectOnWindow.EffectOnWindowStruct)
+    -> ReadingFromGameClient
+    -> Maybe DecisionPathNode
+generalSetupInUserInterface messageBoxStandoff acceptFleetInviteFrom previousStepsEffects readingFromGameClient =
     [ closeSystemSettingsMenu
     , closeMessageBox messageBoxStandoff acceptFleetInviteFrom
-    , ensureInfoPanelLocationInfoIsExpanded
+    , ensureInfoPanelLocationInfoIsExpanded previousStepsEffects
     ]
         |> List.filterMap
             (\maybeSetupDecisionFromGameReading ->
@@ -3660,9 +3674,156 @@ recoverPodAfterShipLoss context =
             )
 
 
+{-| How long the retreat sticks with one celestial before trying another.
+
+A retreat that has not worked yet should try a different corner of the system
+rather than re-commanding the one that did not help; rotating on every reading
+would instead mean selecting one celestial and warping to whatever the next
+reading picked. Twelve readings is the mission runner's number, and its own
+alarm is written as three rotations of it.
+
+-}
+runAwayCelestialStickyReadings : Int
+runAwayCelestialStickyReadings =
+    12
+
+
+{-| Somewhere off this grid, at AU range, that the ship can warp to.
+
+`objectDistanceInMeters` is an `Err` for an AU distance -- the parser reads only
+`m` and `km` -- so the placeholder that makes an AU object read as merely far is
+exactly what identifies one here. Displayed rows only: the overview virtualises,
+and a row that is not rendered reports a region belonging to whatever was
+recycled into its place, so selecting one would act on the wrong object.
+
+-}
+escapeCelestialsOnOverview : ReadingFromGameClient -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+escapeCelestialsOnOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter
+            (.objectDistance
+                >> Maybe.map (String.toUpper >> String.contains "AU")
+                >> Maybe.withDefault False
+            )
+
+
+{-| What the retreat does with the celestial it has chosen.
+
+The panel acts on whatever is selected, so this is two steps rather than one and
+the order matters: select the row, then press the button. Extracted as a rule
+over plain booleans so the cases can execute it -- `gateActivationStep`'s shape,
+for its reason.
+
+-}
+type RetreatWarpStep
+    = SelectTheCelestial
+    | WaitForTheWarpButton
+    | PressWarpTo
+
+
+retreatWarpStep : { panelShowsTheCelestial : Bool, panelOffersWarpTo : Bool } -> RetreatWarpStep
+retreatWarpStep { panelShowsTheCelestial, panelOffersWarpTo } =
+    if not panelShowsTheCelestial then
+        SelectTheCelestial
+
+    else if not panelOffersWarpTo then
+        WaitForTheWarpButton
+
+    else
+        PressWarpTo
+
+
+{-| Leave the grid, by the fastest exit the reading offers.
+
+**This was `tetherAtStructure` -- an alias, not a caller** -- so the branch
+meaning _this ship is dying, leave now_ was the same one meaning _nothing to do
+here, sit somewhere safe_, and it inherited that branch's surroundings-menu
+cascade with `Dock` at the top of its entry priority. Run 35 died inside it.
+
+The measurement is what makes the exit worth changing rather than tuning. The
+armour guard fired 90 seconds before the loss, into a grid that was quiet:
+
+    first 10 s of the retreat      0 hp
+    first 20 s                     0 hp
+    first 30 s                    23 hp
+    the last 30 s              2,124 hp   (73% of the whole episode)
+
+and the bot spent that free window opening context menus -- `Move mouse to entry
+'Safilbab I (Barren)'` seventeen times, `Open context menu on surroundings
+button` four times, not one of its 36 blocks in warp. **Nothing was scrambling
+or disrupting the ship at any point in the three minutes before it died**, so
+the warp was available the whole time. A warp commanded when the guard fired
+leaves having taken 23 hitpoints.
+
+So the exit is now select-then-press on the Selected Item panel: two clicks with
+nothing to render in between, against a three-level menu cascade that this
+codebase already records needing several opens before an entry is recognised.
+
+**Docking is not preferred and is not reached.** It is right for the wind-down
+and wrong for a hull losing 57 hp/s; `tetherAtStructure` keeps its own callers
+and is reached from here only when the overview offers nothing at AU range at
+all, which is the case where there is no celestial to warp to.
+
+The drones still come home first. #139 measured the recall as a fifth of retreat
+latency and absent from the longest retreats, so it is not what to cut.
+
+-}
 runAway : BotDecisionContext -> DecisionPathNode
-runAway =
-    tetherAtStructure
+runAway context =
+    case
+        escapeCelestialsOnOverview context.readingFromGameClient
+            |> Common.Basics.listElementAtWrappedIndex
+                (context.memory.readingsCount // runAwayCelestialStickyReadings)
+    of
+        Nothing ->
+            describeBranch
+                "Get out -- nothing at AU range on the overview to warp to, so fall back to the surroundings menu."
+                (tetherAtStructure context)
+
+        Just celestial ->
+            let
+                celestialName =
+                    celestial.objectName |> Maybe.withDefault "a celestial"
+
+                warpToButton =
+                    selectedItemButtonNamed context.readingFromGameClient "selectedItemWarpTo"
+            in
+            case
+                retreatWarpStep
+                    { panelShowsTheCelestial =
+                        selectedItemIsOverviewEntry context.readingFromGameClient celestial
+                    , panelOffersWarpTo = warpToButton /= Nothing
+                    }
+            of
+                SelectTheCelestial ->
+                    describeBranch
+                        ("Get out -- select '" ++ celestialName ++ "', so the panel's own Warp To acts on it.")
+                        (clickUiElement celestial.uiNode)
+
+                WaitForTheWarpButton ->
+                    describeBranch
+                        ("Get out -- '" ++ celestialName ++ "' is selected but the panel offers no 'selectedItemWarpTo' yet.")
+                        waitForProgressInGame
+
+                PressWarpTo ->
+                    case warpToButton of
+                        Nothing ->
+                            describeBranch "Get out -- the warp button went away between reading it and pressing it."
+                                waitForProgressInGame
+
+                        Just button ->
+                            describeBranch
+                                ("Get out -- warp to '"
+                                    ++ celestialName
+                                    ++ "' at "
+                                    ++ (celestial.objectDistance |> Maybe.withDefault "range")
+                                    ++ "."
+                                )
+                                (ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping context
+                                    (clickUiElement button)
+                                )
 
 
 continueIfShouldHide : { ifShouldHide : DecisionPathNode } -> BotDecisionContext -> Maybe DecisionPathNode
@@ -7199,6 +7360,7 @@ initBotMemory =
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , shipWarpingInLastReading = Nothing
     , readingsSinceWarpEnded = Nothing
+    , readingsCount = 0
     , visitedAnomalies = Dict.empty
     , contextMenuLastDepth = 0
     , contextMenuStuckTicks = 0
@@ -12040,6 +12202,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
     , shipWarpingInLastReading = shipIsWarping
     , readingsSinceWarpEnded = readingsSinceWarpEnded
+    , readingsCount = botMemoryBefore.readingsCount + 1
     , visitedAnomalies = visitedAnomalies
     , contextMenuLastDepth = currentContextMenuDepth
     , contextMenuStuckTicks =
@@ -12376,11 +12539,49 @@ getNamesOfRatsInOverview readingFromGameClient =
         |> List.map (.objectName >> Maybe.withDefault "do not see name of overview entry")
 
 
+{-| The client's own words for a fleetmate's icon in local chat -- captured live
+on `FlagIconWithState` nodes inside `XmppChatUserEntry` rows, and never on an
+overview row (five were checked live and none carried a `rightAlignedIconContainer`
+hint at all). See #224 and CLAUDE.md's "Strings and identities read off a live
+client".
+-}
+chatUserStandingHintFleetmateMarker : String
+chatUserStandingHintFleetmateMarker =
+    "Pilot is in your fleet"
+
+
+{-| Absent evidence must not read as "fleetmate". A chat row this bot cannot
+resolve a hint for is a stranger, exactly as it always was, so the anomaly is
+still avoided if such a row lands at the head of `otherPilotsFoundOnArrival`.
+-}
+chatUserIsKnownFleetmate : EveOnline.ParseUserInterface.ChatUserEntry -> Bool
+chatUserIsKnownFleetmate chatUser =
+    case chatUser.standingIconHint of
+        Nothing ->
+            False
+
+        Just standingIconHint ->
+            stringContainsIgnoringCase chatUserStandingHintFleetmateMarker standingIconHint
+
+
 {-| A real pilot on grid also shows up by name in the Local chat
 userlist; a rat/NPC never does. Cross-referencing overview entries
 against Local is how the sibling `eve-online-wingus` bot already does
 this (ported verbatim from there -- same `ChatWindow`/`ChatUserEntry`
 shape in this bot's own `ParseUserInterface.elm`).
+
+**Fleetmates are excluded here, not read for the first time elsewhere** (#224).
+The overview row itself carries no fleet hint to read, so this bot's own
+`findReasonToAvoidAnomalyFromMemory` was avoiding the anomaly whenever the head
+of `otherPilotsFoundOnArrival` was anybody at all, fleet commander included --
+the pilot this bot is by far most likely to land beside, since
+`follow-fleet-broadcast-from` is what sent it there. The fix is a filter on the
+list this function already builds: a chat row with the fleetmate hint drops out
+before its name ever reaches the overview cross-reference, so it can never
+become the "other pilot" the memory records. A chat row with no hint at all
+stays in the list -- absent evidence reads as a stranger, which is today's
+behaviour and the direction this must fail in.
+
 -}
 getNamesOfOtherPilotsInOverview : ReadingFromGameClient -> List String
 getNamesOfOtherPilotsInOverview readingFromGameClient =
@@ -12391,6 +12592,7 @@ getNamesOfOtherPilotsInOverview readingFromGameClient =
                 |> Maybe.andThen .userlist
                 |> Maybe.map .visibleUsers
                 |> Maybe.withDefault []
+                |> List.filter (chatUserIsKnownFleetmate >> not)
                 |> List.filterMap .name
 
         overviewEntryRepresentsOtherPilot overviewEntry =
