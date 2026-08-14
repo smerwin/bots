@@ -3688,9 +3688,9 @@ and a row that is not rendered reports a region belonging to whatever was
 recycled into its place, so selecting one would act on the wrong object.
 
 -}
-escapeCelestialsOnOverview : BotDecisionContext -> List EveOnline.ParseUserInterface.OverviewWindowEntry
-escapeCelestialsOnOverview context =
-    context.readingFromGameClient.overviewWindows
+escapeCelestialsOnOverview : ReadingFromGameClient -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+escapeCelestialsOnOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.filter overviewEntryIsDisplayed
         |> List.filter
@@ -3764,7 +3764,7 @@ latency and absent from the longest retreats, so it is not what to cut.
 runAway : BotDecisionContext -> DecisionPathNode
 runAway context =
     case
-        escapeCelestialsOnOverview context
+        escapeCelestialsOnOverview context.readingFromGameClient
             |> Common.Basics.listElementAtWrappedIndex
                 (context.memory.readingsCount // runAwayCelestialStickyReadings)
     of

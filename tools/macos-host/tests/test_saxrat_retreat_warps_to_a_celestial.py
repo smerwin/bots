@@ -102,12 +102,14 @@ class TheCelestialsAreTheAuRowsThatAreDrawn(unittest.TestCase):
     def names(self, rows, hidden=(), stacked=False):
         binding = SaxratRepl.reading_binding(
             "reading", [overview_rows(rows, hidden=hidden, stacked=stacked)])
+        # The real rule, called by name. An earlier version of this case
+        # inlined the filter chain here instead -- which meant mutating
+        # `escapeCelestialsOnOverview` changed nothing it could see, and the
+        # mutation that admits hidden rows passed. A case that restates the
+        # rule tests the restatement.
         expression = (
-            "(reading |> Maybe.map (\\r -> r.overviewWindows"
-            " |> List.concatMap .entries |> List.filter overviewEntryIsDisplayed"
-            " |> List.filter (.objectDistance >> Maybe.map (String.toUpper >>"
-            " String.contains \"AU\") >> Maybe.withDefault False)"
-            " |> List.filterMap .objectName |> String.join \",\")"
+            "(reading |> Maybe.map (escapeCelestialsOnOverview"
+            " >> List.filterMap .objectName >> String.join \",\")"
             " |> Maybe.withDefault \"NO READING\")")
         return self.repl.strings([expression], [binding])[0]
 
