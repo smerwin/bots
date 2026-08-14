@@ -194,6 +194,81 @@ if IS_WINDOWS:
 # glide steps/step_delay were -- tune from a live run if clicks still miss.
 CLICK_SETTLE_DELAY_SECONDS = 0.15
 
+# What a glide's own pacing spends sleeping, so a caller can back that out of
+# a measured duration and be left with what the posting itself cost. Matches
+# `_glide_to`'s shape exactly -- see there -- and is not read from `_glide_to`
+# at runtime, because the whole point is a figure that does not move if the
+# pacing is retuned without this comment being read.
+GLIDE_STEPS = 10
+GLIDE_STEP_DELAY_SECONDS = 0.025
+
+
+def glide_per_event_cost_ms(duration_seconds, steps=GLIDE_STEPS,
+                             step_delay=GLIDE_STEP_DELAY_SECONDS):
+    """What one posted event cost, backed out of a whole glide's duration.
+
+    Issue #163: a glide is `steps` posted `move` commands with a sleep of
+    `step_delay` between every pair but the last -- `(steps - 1)` sleeps in
+    all -- so its own logged duration is a measurement of what one posted
+    event cost, not just of how long the gesture took. Subtracting the known,
+    deliberate sleep time and dividing by the event count is the whole of the
+    derivation; there is nothing to calibrate and nothing OS- or app-specific
+    in it. Runs 17 and 19 lost `Emperor Family Bureau`/`Academy` to a search
+    bar while every other recorded run typed the same shape of query cleanly,
+    and reading their glides this way is what told the two apart: 53-100ms a
+    posted event against under 18ms everywhere else, on the same shipped
+    pacing.
+
+    A single homogeneous quantity, deliberately not generalised to a whole
+    `WindowsInputRequest`: a request mixes moves, clicks, keys and waits of
+    different intrinsic costs, and blending them would need a weight for each
+    that nothing here has measured. A glide is the one shape in this host
+    that posts the same kind of event a fixed number of times with a fixed,
+    known amount of sleep between them, which is what makes the arithmetic
+    honest.
+    """
+    known_sleep_seconds = max(steps - 1, 0) * step_delay
+    posted_events = max(steps, 1)
+    return (duration_seconds - known_sleep_seconds) / posted_events * 1000.0
+
+
+# Where the corpus draws the line between a healthy posting path and a
+# saturated one. Recomputed from every glide in ~/eve-bot-logs (79 recorded
+# runs at the time of writing, not just the two #75 was filed on): every
+# healthy-looking run's *worst* glide backs out to under 18ms a posted event,
+# and every run showing the saturated pattern -- which by now is a large
+# share of the corpus, not only runs 17 and 19 -- has its *best* glide at
+# 72ms or more. Nothing recorded falls between those two figures. 30ms sits
+# in that gap: comfortably above the noisiest healthy reading and comfortably
+# below the calmest saturated one, so a machine drifting slower over time
+# would have room to be noticed before this fires on ordinary jitter.
+INPUT_COST_SATURATED_MS = 30.0
+
+
+def describe_input_cost(cost_ms, threshold_ms=INPUT_COST_SATURATED_MS):
+    """What this step's posted events cost, in one line for the log.
+
+    Reports only -- see #163's own framing, the same posture as #123's quick
+    message and #139's retreat latency: name the number, decide nothing on
+    it. `cost_ms` is `None` whenever the step posted no glide to measure,
+    which must not print as fast -- a step that moved the mouse in one jump,
+    or posted no move at all, says nothing about whether the window server is
+    keeping up, and reporting it as healthy would be worse than saying
+    nothing.
+    """
+    if cost_ms is None:
+        return ("input cost: no glide posted this step, so there is nothing "
+                "to measure -- not read as fast.")
+    if cost_ms >= threshold_ms:
+        return (f"INPUT COST HIGH: {cost_ms:.1f}ms for the last posted "
+                f"event (glide), at or above the {threshold_ms:.0f}ms mark "
+                f"the recorded runs separate on -- the window server may be "
+                f"saturated and a posted event may be getting dropped "
+                f"(#163). Report only; nothing here changes what the bot "
+                f"does.")
+    return (f"input cost: {cost_ms:.1f}ms for the last posted event "
+            f"(glide), under the {threshold_ms:.0f}ms mark.")
+
 
 class TreeWalkerClient:
     """Client for tree_walker, the native (C) in-process UI-tree walker
@@ -1613,6 +1688,12 @@ class TaskDispatcher:
         # Monotonic time of our own last posted event, so a stand-down check can
         # tell a person's input apart from the bot's own.
         self._last_input_post_at = None
+        # `glide_per_event_cost_ms` readings from every glide `_glide_to` has
+        # posted during the `WindowsInputRequest` currently being executed --
+        # see there and `_report_input_cost`. Reset per step, not carried
+        # across one, so a quiet step cannot be "reported" against a glide
+        # from several steps ago.
+        self._glide_costs_this_step = []
 
     def run_task(self, task):
         """task: {"TagName": <payload>}. Returns a TaskResultStructure dict
@@ -1838,12 +1919,20 @@ class TaskDispatcher:
         return self._cg(f"move {x:.1f} {y:.1f}")
 
     def _glide_to(self, start_x, start_y, target_x, target_y, steps, step_delay):
+        glide_start = time.monotonic()
         for i in range(1, steps):
             t = i / steps
             self._cg_move(start_x + (target_x - start_x) * t, start_y + (target_y - start_y) * t)
             time.sleep(step_delay)
         self._cg_move(target_x, target_y)
         self._last_mouse_pos = (target_x, target_y)
+        # #163: this call, on its own, is exactly the homogeneous shape
+        # `glide_per_event_cost_ms` assumes -- `steps` posted moves and
+        # `(steps - 1)` known sleeps -- whichever of `_move_mouse_eased`'s two
+        # call sites reached it, so recording here rather than at each call
+        # site covers both without duplicating the arithmetic.
+        self._glide_costs_this_step.append(
+            glide_per_event_cost_ms(time.monotonic() - glide_start, steps, step_delay))
 
     def _move_mouse_eased(self, target_x, target_y, steps=10, step_delay=0.025, force_movement=False):
         """Move the cursor to (target_x, target_y) via a few intermediate
@@ -2050,6 +2139,10 @@ class TaskDispatcher:
         scale_y = self._scale_y or 1.0
         completed = 0
         errors = []
+        # Reset per step rather than carried over: #163's report has to say
+        # "no glide posted this step" on a step that genuinely posted none,
+        # and a stale reading from several steps back would answer instead.
+        self._glide_costs_this_step = []
         # Tracks whichever window the sequence most recently named via
         # BringWindowToForeground/AbortIfWindowNotInForeground. Verified
         # right at those checkpoints (the bot's own protocol already
@@ -2261,6 +2354,8 @@ class TaskDispatcher:
                   f"{asked_unbalanced} without a release.", file=sys.stderr)
             self._keys_down = []
 
+        self._report_input_cost()
+
         return {
             "WindowsInputResponse": {
                 "completedStepsCount": completed,
@@ -2269,6 +2364,19 @@ class TaskDispatcher:
                 "errorMessages": errors,
             }
         }
+
+    def _report_input_cost(self):
+        """Print what a posted event on this step cost -- #163.
+
+        Uses the worst (most expensive) glide this step posted, if any: a
+        step can carry several, and the point of this report is to notice a
+        saturated posting path, which the cheapest glide in a mixed step
+        could hide. Resets the reading it consumed, so the next report is
+        never this step's answer repeated.
+        """
+        worst = max(self._glide_costs_this_step) if self._glide_costs_this_step else None
+        self._glide_costs_this_step = []
+        print(f"#   {describe_input_cost(worst)}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------

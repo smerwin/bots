@@ -722,7 +722,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
 generalSetupInUserInterface : BotDecisionContext -> Maybe DecisionPathNode
 generalSetupInUserInterface context =
     [ closeMessageBox
-    , ensureInfoPanelLocationInfoIsExpanded
+    , ensureInfoPanelLocationInfoIsExpanded context.previousStepsEffects
     , case context.eventContext.botSettings.sortOverviewBy of
         Nothing ->
             always Nothing
@@ -2607,6 +2607,31 @@ scanResultLooksLikeItIsOnGrid =
         >> Maybe.map (\text -> (text |> String.contains " m") || (text |> String.contains " km"))
 
 
+{-| The client's own words for a fleetmate's icon in local chat -- captured live
+on `FlagIconWithState` nodes inside `XmppChatUserEntry` rows, and never on an
+overview row (five were checked live and none carried a `rightAlignedIconContainer`
+hint at all). See #224 and CLAUDE.md's "Strings and identities read off a live
+client".
+-}
+chatUserStandingHintFleetmateMarker : String
+chatUserStandingHintFleetmateMarker =
+    "Pilot is in your fleet"
+
+
+{-| Absent evidence must not read as "fleetmate". A chat row this bot cannot
+resolve a hint for is a stranger, exactly as it always was, so the anomaly is
+still avoided if such a row lands at the head of `otherPilotsFoundOnArrival`.
+-}
+chatUserIsKnownFleetmate : EveOnline.ParseUserInterface.ChatUserEntry -> Bool
+chatUserIsKnownFleetmate chatUser =
+    case chatUser.standingIconHint of
+        Nothing ->
+            False
+
+        Just standingIconHint ->
+            stringContainsIgnoringCase chatUserStandingHintFleetmateMarker standingIconHint
+
+
 getNamesOfOtherPilotsInOverview : ReadingFromGameClient -> List String
 getNamesOfOtherPilotsInOverview readingFromGameClient =
     let
@@ -2616,6 +2641,7 @@ getNamesOfOtherPilotsInOverview readingFromGameClient =
                 |> Maybe.andThen .userlist
                 |> Maybe.map .visibleUsers
                 |> Maybe.withDefault []
+                |> List.filter (chatUserIsKnownFleetmate >> not)
                 |> List.filterMap .name
 
         overviewEntryRepresentsOtherPilot overviewEntry =

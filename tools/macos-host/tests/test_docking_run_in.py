@@ -637,13 +637,15 @@ class TheWiringIsInPlace(unittest.TestCase):
     def test_the_dock_leg_only_fires_when_the_destination_is_in_this_system(self):
         """Or it would dock at a station that happens to be on a gate's grid.
 
-        The route panel renders one `AutopilotDestinationIcon` per waypoint, so
-        exactly one marker is the reading saying there is nothing further to
-        jump to.
+        Issue #171: the route panel's marker count is jumps remaining, not
+        waypoints, so counting `AutopilotDestinationIcon`s answered this one
+        system early. `destinationIsInThisSystemFromRouteMarkers` reads the
+        marker's own `numJumps` instead -- see `test_route_marker_num_jumps.py`
+        for the rule itself, executed at each of its cases.
         """
         dock = collapsed(declaration(self.source, "dockAtDestinationStation"))
-        self.assertIn("routeElementMarker >> List.length", dock)
-        self.assertIn("== Just 1", dock)
+        self.assertIn("destinationIsInThisSystemFromRouteMarkers", dock)
+        self.assertNotIn("routeElementMarker >> List.length", dock)
 
     def test_the_jump_leg_still_goes_through_the_cascade(self):
         """A jump is instantaneous once commanded and has never failed this way.

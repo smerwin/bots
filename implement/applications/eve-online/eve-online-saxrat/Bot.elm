@@ -1338,6 +1338,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
         |> Maybe.withDefault
             (generalSetupInUserInterface context.memory.messageBoxStandoff
                 context.eventContext.botSettings.acceptFleetInviteFrom
+                context.previousStepsEffects
                 context.readingFromGameClient
                 |> Maybe.withDefault
                     (recoverPodAfterShipLoss context
@@ -1463,7 +1464,10 @@ about the game itself.
 `messageBoxStandoff` is passed down rather than read in `closeMessageBox`
 because it is not a fact about this reading: it is how many readings the box in
 front of the bot has already survived, and only `BotMemory` can say. Everything
-else here is answerable from the reading alone and stays that way.
+else here is answerable from the reading alone -- except
+`ensureInfoPanelLocationInfoIsExpanded`'s own settling guard, which reads the
+previous steps' effects for the same reason a module button's click-settling
+guard does.
 
 **This whole list is evaluated above the docked-or-in-space split**, so anything
 in it that can repeat forever freezes the entire bot rather than one branch.
@@ -1473,11 +1477,16 @@ which is why `endSessionOnAnExpiredBound` is asked above this list rather than
 below it.
 
 -}
-generalSetupInUserInterface : Maybe MessageBoxStandoff -> List String -> ReadingFromGameClient -> Maybe DecisionPathNode
-generalSetupInUserInterface messageBoxStandoff acceptFleetInviteFrom readingFromGameClient =
+generalSetupInUserInterface :
+    Maybe MessageBoxStandoff
+    -> List String
+    -> List (List EffectOnWindow.EffectOnWindowStruct)
+    -> ReadingFromGameClient
+    -> Maybe DecisionPathNode
+generalSetupInUserInterface messageBoxStandoff acceptFleetInviteFrom previousStepsEffects readingFromGameClient =
     [ closeSystemSettingsMenu
     , closeMessageBox messageBoxStandoff acceptFleetInviteFrom
-    , ensureInfoPanelLocationInfoIsExpanded
+    , ensureInfoPanelLocationInfoIsExpanded previousStepsEffects
     ]
         |> List.filterMap
             (\maybeSetupDecisionFromGameReading ->
@@ -12348,11 +12357,49 @@ getNamesOfRatsInOverview readingFromGameClient =
         |> List.map (.objectName >> Maybe.withDefault "do not see name of overview entry")
 
 
+{-| The client's own words for a fleetmate's icon in local chat -- captured live
+on `FlagIconWithState` nodes inside `XmppChatUserEntry` rows, and never on an
+overview row (five were checked live and none carried a `rightAlignedIconContainer`
+hint at all). See #224 and CLAUDE.md's "Strings and identities read off a live
+client".
+-}
+chatUserStandingHintFleetmateMarker : String
+chatUserStandingHintFleetmateMarker =
+    "Pilot is in your fleet"
+
+
+{-| Absent evidence must not read as "fleetmate". A chat row this bot cannot
+resolve a hint for is a stranger, exactly as it always was, so the anomaly is
+still avoided if such a row lands at the head of `otherPilotsFoundOnArrival`.
+-}
+chatUserIsKnownFleetmate : EveOnline.ParseUserInterface.ChatUserEntry -> Bool
+chatUserIsKnownFleetmate chatUser =
+    case chatUser.standingIconHint of
+        Nothing ->
+            False
+
+        Just standingIconHint ->
+            stringContainsIgnoringCase chatUserStandingHintFleetmateMarker standingIconHint
+
+
 {-| A real pilot on grid also shows up by name in the Local chat
 userlist; a rat/NPC never does. Cross-referencing overview entries
 against Local is how the sibling `eve-online-wingus` bot already does
 this (ported verbatim from there -- same `ChatWindow`/`ChatUserEntry`
 shape in this bot's own `ParseUserInterface.elm`).
+
+**Fleetmates are excluded here, not read for the first time elsewhere** (#224).
+The overview row itself carries no fleet hint to read, so this bot's own
+`findReasonToAvoidAnomalyFromMemory` was avoiding the anomaly whenever the head
+of `otherPilotsFoundOnArrival` was anybody at all, fleet commander included --
+the pilot this bot is by far most likely to land beside, since
+`follow-fleet-broadcast-from` is what sent it there. The fix is a filter on the
+list this function already builds: a chat row with the fleetmate hint drops out
+before its name ever reaches the overview cross-reference, so it can never
+become the "other pilot" the memory records. A chat row with no hint at all
+stays in the list -- absent evidence reads as a stranger, which is today's
+behaviour and the direction this must fail in.
+
 -}
 getNamesOfOtherPilotsInOverview : ReadingFromGameClient -> List String
 getNamesOfOtherPilotsInOverview readingFromGameClient =
@@ -12363,6 +12410,7 @@ getNamesOfOtherPilotsInOverview readingFromGameClient =
                 |> Maybe.andThen .userlist
                 |> Maybe.map .visibleUsers
                 |> Maybe.withDefault []
+                |> List.filter (chatUserIsKnownFleetmate >> not)
                 |> List.filterMap .name
 
         overviewEntryRepresentsOtherPilot overviewEntry =
