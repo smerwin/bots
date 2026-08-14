@@ -1574,6 +1574,7 @@ missionBotDecisionRootBeforeApplyingSettings context =
             , confirmDeclineMission = declineMissionConfirmationIsExpected context
             , messageBoxStandoff = context.memory.messageBoxStandoff
             }
+            context.previousStepsEffects
             context.readingFromGameClient
         , recoverPodAfterShipLoss context
         , windDownBeforeSessionEnd context
@@ -7313,7 +7314,9 @@ a fact about this reading: the first two are the bot's own intent -- see
 `quitMissionConfirmationIsExpected` and `declineMissionConfirmationIsExpected` --
 and the third is how many readings the box in front of it has already survived,
 which only `BotMemory` can say. Everything else here is answerable from the
-reading alone and stays that way.
+reading alone -- except `ensureInfoPanelLocationInfoIsExpanded`'s own settling
+guard, which reads the previous steps' effects for the same reason a module
+button's click-settling guard does.
 
 **This whole list is evaluated above the docked-or-in-space split**, so anything
 in it that can repeat forever freezes the entire bot rather than one branch.
@@ -7328,16 +7331,17 @@ generalSetupInUserInterface :
     , confirmDeclineMission : Bool
     , messageBoxStandoff : Maybe MessageBoxStandoff
     }
+    -> List (List EffectOnWindow.EffectOnWindowStruct)
     -> ReadingFromGameClient
     -> Maybe DecisionPathNode
-generalSetupInUserInterface { confirmQuitMission, confirmDeclineMission, messageBoxStandoff } readingFromGameClient =
+generalSetupInUserInterface { confirmQuitMission, confirmDeclineMission, messageBoxStandoff } previousStepsEffects readingFromGameClient =
     [ closeSystemSettingsMenu
     , closeMessageBox
         { confirmQuitMission = confirmQuitMission
         , confirmDeclineMission = confirmDeclineMission
         , standoff = messageBoxStandoff
         }
-    , ensureInfoPanelLocationInfoIsExpanded
+    , ensureInfoPanelLocationInfoIsExpanded previousStepsEffects
     ]
         |> List.filterMap
             (\maybeSetupDecisionFromGameReading ->

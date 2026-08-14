@@ -722,7 +722,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
 generalSetupInUserInterface : BotDecisionContext -> Maybe DecisionPathNode
 generalSetupInUserInterface context =
     [ closeMessageBox
-    , ensureInfoPanelLocationInfoIsExpanded
+    , ensureInfoPanelLocationInfoIsExpanded context.previousStepsEffects
     , case context.eventContext.botSettings.sortOverviewBy of
         Nothing ->
             always Nothing

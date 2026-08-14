@@ -520,8 +520,32 @@ identifyingInfoFromContextMenu =
     .uiNode >> .totalDisplayRegion
 
 
-ensureInfoPanelLocationInfoIsExpanded : ReadingFromGameClient -> Maybe DecisionPathNode
-ensureInfoPanelLocationInfoIsExpanded readingFromGameClient =
+{-| Whether these effects already clicked this UI element.
+
+Generalizes `EveOnline.BotFramework.doEffectsClickModuleButton` to any element
+carrying a display region, for the reason that function's own comment gives: a
+widget that is a toggle must not be clicked again while an earlier click's
+effect on it is still in flight, or the second click undoes the first.
+
+-}
+doEffectsClickUIElement : UIElement -> List Common.EffectOnWindow.EffectOnWindowStructure -> Bool
+doEffectsClickUIElement uiElement =
+    let
+        regionsAimedAt =
+            [ uiElement.totalDisplayRegionVisible
+            , uiElement.totalDisplayRegion
+            ]
+                |> List.map (growRegionOnAllSides 1)
+    in
+    EveOnline.BotFramework.findMouseButtonClickLocationsInListOfEffects Common.EffectOnWindow.MouseButtonLeft
+        >> List.any (\location -> regionsAimedAt |> List.any (\region -> isPointInRectangle region location))
+
+
+ensureInfoPanelLocationInfoIsExpanded :
+    List Common.EffectOnWindow.EffectOnWindowStructure
+    -> ReadingFromGameClient
+    -> Maybe DecisionPathNode
+ensureInfoPanelLocationInfoIsExpanded previousStepEffects readingFromGameClient =
     case readingFromGameClient.infoPanelContainer |> Maybe.andThen .infoPanelLocationInfo of
         Nothing ->
             Just
@@ -531,12 +555,26 @@ ensureInfoPanelLocationInfoIsExpanded readingFromGameClient =
                             Common.DecisionPath.describeBranch "I do not see the icon for the location info panel." askForHelpToGetUnstuck
 
                         Just iconLocationInfoPanel ->
-                            Common.DecisionPath.describeBranch
-                                "Click on the icon to enable the info panel."
-                                (iconLocationInfoPanel
-                                    |> mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft
-                                    |> decideActionForCurrentStep
-                                )
+                            -- The icon is a toggle, and clicking it here used to
+                            -- carry no settling guard at all -- fired once per
+                            -- reading for as long as the panel stayed absent, and
+                            -- roughly every second click in a stretch like that
+                            -- turns the panel back off. Give the click a reading
+                            -- to show its result before clicking again, the same
+                            -- way `doEffectsClickModuleButton` guards a module
+                            -- button.
+                            if doEffectsClickUIElement iconLocationInfoPanel previousStepEffects then
+                                Common.DecisionPath.describeBranch
+                                    "I clicked this icon last step and the client has not shown the change yet -- wait rather than click it again, which would toggle it back."
+                                    waitForProgressInGame
+
+                            else
+                                Common.DecisionPath.describeBranch
+                                    "Click on the icon to enable the info panel."
+                                    (iconLocationInfoPanel
+                                        |> mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft
+                                        |> decideActionForCurrentStep
+                                    )
                     )
                 )
 
