@@ -2104,9 +2104,13 @@ findMouseButtonClickLocationsInListOfEffects mouseButton =
                 -- click ever issued. Everything downstream that asks "did we
                 -- already click there?" therefore always answered no:
                 -- `doEffectsClickModuleButton` never once recognised its own
-                -- click across two full live sessions, so every module
-                -- activation was clicked repeatedly and only came out right
-                -- because a module toggles on an odd number of presses.
+                -- click, so every module activation was clicked repeatedly and
+                -- only came out right because a module toggles on an odd number
+                -- of presses. That was measured across two full live sessions
+                -- of `eve-online-mission-runner` and `eve-online-saxrat`; #239
+                -- found the same arm missing in `eve-online-combat-anomaly-bot`
+                -- and `eve-online-warp-to-0-autopilot`, where no run of either
+                -- has been examined for it.
                 Common.EffectOnWindow.ButtonDown button ->
                     if button == mouseButton then
                         recordClick maybeLastMouseMoveLocation clickLocations
