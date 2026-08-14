@@ -816,19 +816,27 @@ class TheWarpHalfIsNotServableTest(unittest.TestCase):
                       signature)
 
     def test_the_panel_press_this_change_adds_is_the_only_new_one(self):
-        """Three panel presses in the file now -- the acceleration gate's, this
-        one, and #222's retreat warp -- and nothing else has started reaching
-        for a panel button.
+        """Four panel presses in the file now, and nothing else has started
+        reaching for a panel button.
 
-        The retreat's is a deliberate third rather than drift: `runAway` used to
-        be an alias for `tetherAtStructure` and left the grid through a
-        surroundings-menu cascade with `Dock` at the top of its priority, which
-        is what killed run 35. It binds the button once and uses it twice, so
-        one press is one occurrence here.
+        Each is a deliberate addition rather than drift, and each names its
+        incident:
+
+        * the acceleration gate's, and this file's route jump;
+        * #222's retreat warp -- `runAway` used to be an alias for
+          `tetherAtStructure` and left the grid through a surroundings-menu
+          cascade with `Dock` at the top of its priority, which is what killed
+          run 35;
+        * the distant-row warp -- `lockTargetFromOverviewEntry` had no upper
+          bound on its approach, so run 41 double-clicked a row 2,266 km away
+          13,541 times and never moved the ship.
+
+        Each binds the button once and uses it once or twice, so one press is
+        one occurrence here.
         """
         self.assertEqual(
             len(re.findall(r"selectedItemButtonNamed context\.",
-                           without_comments(self.source))), 3)
+                           without_comments(self.source))), 4)
 
 
 class TheCorpusTest(unittest.TestCase):

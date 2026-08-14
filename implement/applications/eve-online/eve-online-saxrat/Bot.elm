@@ -5724,12 +5724,79 @@ lockTargetFromOverviewEntry context overviewEntry =
                     describeBranch ("Lock target from overview entry '" ++ (overviewEntry.objectName |> Maybe.withDefault "") ++ "'")
                         (decideActionForCurrentStep (lockChordForOverviewEntry overviewEntry))
 
-            else
+            else if distanceInMeters <= approachRangeLimitMeters then
                 describeBranch ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Approach.")
                     (doubleClickUiElement overviewEntry.uiNode)
 
+            else
+                warpToDistantOverviewEntry context overviewEntry distanceInMeters
+
         Err error ->
             describeBranch ("Failed to read the distance: " ++ error) askForHelpToGetUnstuck
+
+
+{-| Past this, approaching is the wrong gesture and the client agrees.
+
+EVE will not warp to anything closer than 150 km and an approach is how you
+close the last of that distance -- so this is the game's own boundary rather
+than a number picked here, and the two branches either side of it are the two
+gestures the client actually offers.
+
+Run 41 is what it costs to have no bound at all. The bot double-clicked a row
+**2,266 km** away 13,541 times across three hours, `Already on the way` fired
+**zero** times, and the ship never moved: three anomalies and 39 kills for a
+session that had done 31 anomalies on the same settings a week earlier. A double
+click at that range is not a slow approach, it is a gesture the client discards,
+and nothing in the loop could tell the difference because the row stayed exactly
+where it was and stayed the nearest thing worth attacking.
+
+This is #168's shape one branch over. That issue is about an acceleration gate
+chased at 1,395 km for four hours; the same failure reaches a lock candidate,
+and a bound written only for gates would not have covered run 41.
+
+-}
+approachRangeLimitMeters : Int
+approachRangeLimitMeters =
+    150000
+
+
+{-| Warp to a row too far to approach, or leave it alone.
+
+Select-then-press on the Selected Item panel, the shape `runAway` already uses:
+the panel acts on whatever is selected, so the order is load-bearing and
+pressing first would warp to whatever the panel happened to be showing.
+
+**A panel that offers no Warp To ends the attempt rather than falling back to
+the approach.** That is the "do nothing" half and it is the point of the whole
+change: the row is out of reach by both gestures, so spending the reading on it
+is what run 41 did 13,541 times.
+
+-}
+warpToDistantOverviewEntry : BotDecisionContext -> OverviewWindowEntry -> Int -> DecisionPathNode
+warpToDistantOverviewEntry context overviewEntry distanceInMeters =
+    let
+        name =
+            overviewEntry.objectName |> Maybe.withDefault "it"
+
+        howFar =
+            " (" ++ (distanceInMeters // 1000 |> String.fromInt) ++ " km away, too far to approach)"
+    in
+    if not (selectedItemIsOverviewEntry context.readingFromGameClient overviewEntry) then
+        describeBranch
+            ("Select '" ++ name ++ "'" ++ howFar ++ ", so the panel's own Warp To acts on it.")
+            (clickUiElement overviewEntry.uiNode)
+
+    else
+        case selectedItemButtonNamed context.readingFromGameClient "selectedItemWarpTo" of
+            Just button ->
+                describeBranch
+                    ("Warp to '" ++ name ++ "'" ++ howFar ++ ".")
+                    (ensureDronesRecalledBeforeWarping context (clickUiElement button))
+
+            Nothing ->
+                describeBranch
+                    ("Leaving '" ++ name ++ "' alone" ++ howFar ++ " -- the panel offers no Warp To, so neither gesture reaches it.")
+                    waitForProgressInGame
 
 
 {-| The lock chord for one row: Ctrl held over a plain left click.
