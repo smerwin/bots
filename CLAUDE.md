@@ -985,10 +985,14 @@ its names, so excluding fleetmates is a filter on a list the function already
 holds -- see #224.
 
 **`Pilot is tracking disrupting me`**, in an overview row's own cell text. The
-open gap below says the EWAR hints "appear nowhere in the ten recorded runs";
-this is one of that family, captured. It is a *tracking disruptor* rather than
-the webifier that gap is about, so `Pilot is webifying me` is still unread and
-the guard resting on it still has no evidence.
+open gap below said the EWAR hints "appear nowhere in the ten recorded runs";
+this is one of that family, captured. **That gap is closed for this one and for
+the dampener** — the corpus now carries five distinct EWAR literals and #231
+matches two of them, off the strings `Overview indications:` recorded rather
+than off a guess. `Pilot is webifying me` is in the corpus too (306 readings
+across 5 runs) and is still **unread**, which is now a scope decision rather
+than an absence of evidence: a webifier makes the ship slow rather than unable
+to fight, so #231 leaves it and the painter alone.
 
 **Overview rows carry three ids in `dictEntriesOfInterest`**, and the parser's
 `objectItemID` is its own name for the first -- there is no dict key spelled
@@ -1226,19 +1230,188 @@ which is the direction this would fail silently in.
 damage at all, and then it writes no combat line, so a signal built on damage
 cannot see it — which is precisely run 10's two frigates, whose rows the issue
 reports rendering "Pilot is webifying me". They happened also to deal damage, so
-run 10 itself is covered; a pure webifier would not be. That string appears
-**nowhere in the ten recorded runs** — nothing had ever printed these hints — so
-matching it would be a guard resting on a premise no evidence supports. The
-hints are printed instead (`Overview indications:` in the status line, distinct
-strings from rendered rows only), which is what turns the next run into the
-evidence a follow-up can be built on. `commonIndications` still reads exactly
-the two literals it inherited, `is jamming me` and `is warp disrupting me`.
+run 10 itself is covered; a pure webifier would not be. When this was written
+that string appeared **nowhere in the ten recorded runs** — nothing had ever
+printed these hints — so matching it would have been a guard resting on a
+premise no evidence supports. The hints are printed instead
+(`Overview indications:` in the status line, distinct strings from rendered rows
+only), which is what turns the next run into the evidence a follow-up can be
+built on.
+
+**It did, and #231 is what was built on it** — see "The client names two other
+kinds of EWAR and the bot read neither" below. `commonIndications` now reads
+four literals: the two it inherited (`is jamming me`, which this client has
+written **not once** in the whole corpus, and `is warp disrupting me`) plus
+`is tracking disrupting me` and `is sensor dampening me`. The webifier's is
+still unread and so is the painter's, though both are now in the corpus —
+they are not damage-suppressing and #231 leaves them deliberately out of scope.
 
 Every engagement of this kind names itself in the decision log —
 `Shooting back at '…': the client's combat log names it as having hit this ship
 in the last 45 s, and nothing else here marks it as a target.` — and only when
 nothing else would have selected the row, so the line means "this is new" rather
 than appearing beside every rat in the pocket.
+
+### The client names two other kinds of EWAR and the bot read neither
+
+Issue #231. `overviewEntryIsWarpDisruptingMe` shoots a warp scrambler first, on
+the argument that everything the bot does when a fight goes wrong assumes it can
+leave. The client names two other EWAR types on the same overview row and the
+bot read **neither** — so it acted on the rarest of the three and ignored the
+most common by a factor of nineteen.
+
+**The evidence was already there and nobody had read it.** #130's
+`Overview indications:` clause has been printing the rendered rows'
+`rightAlignedIconsHints` since it was added for exactly this. Counted across
+`~/eve-bot-logs`, per *reading* as well as per line, because the status line is
+reprinted under every decision:
+
+| literal, as the client writes it | lines | readings | runs |
+|---|---:|---:|---:|
+| `Pilot is tracking disrupting me` | 5,320 | **1,640** | 13 |
+| `Pilot is webifying me`           |   992 |      306 |  5 |
+| `Pilot is target painting me`     |   732 |      228 |  4 |
+| `Pilot is warp disrupting me`     |   290 |       86 |  3 |
+| `Pilot is sensor dampening me`    |   265 |       89 |  1 |
+| `Pilot is jamming me`             |     0 |        0 |  0 |
+
+87 runs, 288,912 readings. The line counts reproduce the issue's exactly; the
+reading counts are three to four times smaller, which is this file's own "a
+decision in the log is not an action" applied to counting — the unit that has
+cost `stall_watch.py` two threshold calibrations, #141 a retreat measurement and
+#164 an issue's whole diagnosis.
+
+**"dampening", not "damping"**, which is the client's own spelling and exactly
+the detail a matcher written from memory gets wrong. Both literals were cut out
+of the corpus rather than typed from the issue.
+
+**`is jamming me` is the shape in reverse**: matched by all six vendored parsers
+since upstream and written by this client **not once** in 288,912 readings, and
+read by no decision in any app. Either the literal is wrong for this client or
+jamming genuinely never happens here, and the corpus cannot tell those apart.
+Recorded as a scope note; a case goes red the day a run writes it.
+
+### Three tiers, because "cannot leave" and "shooting badly" are not one priority
+
+`combatPriorityTier` replaces the two-way sort in both apps:
+
+- **Tier 0, holding the ship in place** — `overviewEntryIsWarpDisruptingMe`.
+  Survival, and the only one of the three that takes an option away.
+- **Tier 1, stopping the ship fighting** — `overviewEntryIsStoppingUsFighting`,
+  the two new literals. Effectiveness: the ship can still leave, it is just bad
+  at the fight.
+- **Tier 2, everything else**, in the distance order it arrived in.
+
+**It is a reordering and not a widening**, which is stronger than the property
+#40 needed and is what makes it safe by placement rather than by argument. The
+sort is applied *after*
+`overviewEntriesToAttackFromReadingFromGameClient`, so every row a tier can move
+is a row `shouldAttackOverviewEntry` already admitted: `overviewEntryDistanceIsOnGrid`
+still holds by construction, `overviewEntryIsDisplayed` still runs at the lock
+site, and a row under EWAR that nothing else would have shot is still not shot.
+#231's own phrasing — "adds rows to the target set at their own distance rank" —
+is #40's carried over and is not what this does.
+
+**saxrat read none of it, and that is the bigger half.** `isWarpDisruptingMe`
+was parsed on every reading of every recorded run and the only read site in the
+repository was the mission runner's, so the bot that flies unattended in the
+hull that was lost twice had no scrambler priority whatever. It has all three
+tiers now.
+
+### Both of the issue's harm arguments are unobserved, and the change does not rest on them
+
+Measured rather than repeated, and this is the part a reviewer should weigh.
+
+- **The #90 interaction is not in the corpus.** #231 argues that the bot's
+  answer to "my shots achieve nothing" is to give up on the *target*, which is
+  backwards when a third party is jamming the guns. Six recorded runs carry both
+  the tracking-disruption hint and #90's own tally clause, and across **12,496**
+  readings -- 39,757 lines, which is the same over-count this file warns
+  about -- that clause reads `shots landing for zero: none` on every one of
+  them, the tally never once leaving zero. `did zero damage` — the give-up line — has fired in **no** recorded run
+  at all. That is consistent with the mechanism rather than surprising:
+  #90 counts *landed* shots at zero and says in its own words that "a miss
+  builds no case, because the host never counts one", while tracking disruption
+  produces misses and glancing hits, and a glancing hit reads a real number.
+  **Making the give-up rule aware of tracking disruption is therefore a scope
+  increase resting on a premise the corpus does not support**, and it is
+  deliberately not done.
+- **The sticky lock-range bound is not in the corpus either.** #231 argues a
+  dampener teaches `lockRefusedAtMeters` an artefact that only ever moves down.
+  Run 20 is the one run carrying the dampening hint and its `Lock range:` clause
+  reads `refused -` on every reading of it — the bound never moved. The refusal
+  test needs an empty target bar at both ends of an attempt, which is a strict
+  condition that rarely fires; nothing says a dampener would not do this, only
+  that nothing has watched one do it.
+
+What the change does rest on is the client's own statement of fact about a row
+and the frequency it makes it at, which is #40's standard, not a measured harm.
+
+### Verified without a live client
+
+`tools/macos-host/tests/test_ewar_priority_targets.py` (41 cases, run against
+**both** apps). The parse and the tier are executed through the real `Bot.elm`
+in `elm repl` and the overview rows they are asked about come from the **real**
+`EveOnline.ParseUserInterface`, so the parser half is executed rather than read
+— a Python restatement of "what does this matcher make of this hint" would test
+the restatement. The discriminating case for the spelling is the plainest one:
+the corpus literal fed in byte for byte, since `is sensor damping me` is no
+substring of `Pilot is sensor dampening me` and a misspelled matcher answers
+`False`. The corpus is recounted as **relations** — tracking disruption dwarfs
+warp disruption, the misspelling occurs nowhere, `is jamming me` occurs nowhere,
+lines exceed readings — so a growing corpus cannot turn a true claim red.
+
+**One case is weaker than the rest and says so.** `test_the_sort_puts_them_in_
+that_order` applies the real `combatPriorityTier` with a real `List.sortBy` over
+really parsed rows, but that `List.sortBy` is written in the case rather than
+reached through `decideActionInCombat`, which takes a whole
+`BotDecisionContext`. A source read beside it pins the decision to that
+expression, and #40's own
+`test_a_scrambler_still_outranks_something_merely_shooting_us` reads it too —
+that case moved with the code rather than being deleted.
+
+### The vendored-parser question, checked rather than assumed
+
+`CLAUDE.md` states the policy over the whole file; what the repo **enforces** is
+`test_game_log_channel.VendoredParserTest` over the game-log block, and outside
+that block the six copies have already diverged — PR #252 concluded from that
+divergence that an app-local panel parser lands in **one** copy.
+
+**This lands in all six, and the difference is a measurement rather than an
+appeal to the stated policy.** `OverviewWindowEntryCommonIndications` is a field
+on a *shared* overview type that five of the six `Bot.elm`s read, and it is one of the
+places the six have **not** diverged: the type alias and the matcher block were
+byte-identical across all six before this change, and are again after it. Adding
+to one copy would put a divergence into a block that has none, in a type whose
+readers are spread across the apps, so #252's app-local argument does not reach
+it. `TheVendoredParserPolicy` asserts all four halves — both fields in all six,
+the literals in all six, the two blocks identical across the six, and the whole
+files still differing, which is what makes "identical here" a property of this
+block rather than an accident.
+
+### Unverified: any of it running, and what it costs #178
+
+No run has been flown; this was written with a saxrat run in flight. What to
+watch on the first run that meets one of these: a row the overview marks under
+tracking disruption being locked and shot **ahead of** a nearer rat, and
+`Overview indications:` carrying the hint on the same reading. A run that meets
+the hint and never changes its lock order means the field is parsed and the sort
+is not reaching it, which is the direction this fails silently in.
+
+**The cost to #178 is predicted and not measured.** `lockBatchRowsInReach`
+counts the in-range *prefix* of the candidate list precisely because a priority
+row that is out of reach sits ahead of rats that are in reach. Moving the head
+of that list from something seen on 86 readings to something also seen on 1,640
+means the head will be out of reach more often, so batches will collapse to a
+single lock more often and part of #178's ramp is given back. Nothing here
+measures how much — it needs a run, and the tell is `Lock batch:` asking for one
+row on readings whose `Overview indications:` names one of these two.
+
+Also unverified, and inherited: whether the hint text is stable across clients.
+Every count above comes from one account on one client build. And the counts are
+of rows the client **rendered** — `Overview indications:` reports distinct
+strings from rendered rows only — so a virtualised row carrying one of these
+hints is in none of these numbers.
 
 ## What the bot gives up on: shots that land and achieve nothing
 

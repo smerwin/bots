@@ -319,11 +319,21 @@ class TheWideningKeepsEveryExistingGuardTest(unittest.TestCase):
         self.assertIn("List.filter overviewEntryIsDisplayed", lock)
 
     def test_a_scrambler_still_outranks_something_merely_shooting_us(self):
-        # Being unable to leave outranks being shot, so the sort is untouched
-        # and the new entries take their distance rank like everything else.
+        # Being unable to leave outranks being shot, so #40's own entries take
+        # their distance rank like everything else.
+        #
+        # The comparison used to be an inline lambda here and #231 moved it into
+        # `combatPriorityTier`, which is a rule over a row and can therefore be
+        # *executed* -- see `test_ewar_priority_targets`, which asks it what a
+        # scrambler and a plain rat sort to. What is left here is the half that
+        # is not an expression: that this sort is the one being applied, and
+        # that #40's attacker set did not grow a second priority order beside
+        # it.
         combat = function_body(self.source, "decideActionInCombat")
         everything = combat[combat.index("everythingWorthAttacking ="):]
-        self.assertIn("overviewEntryIsWarpDisruptingMe entry", everything)
+        self.assertIn("List.sortBy combatPriorityTier", everything)
+        tier = function_body(self.source, "combatPriorityTier")
+        self.assertIn("if overviewEntryIsWarpDisruptingMe entry then", tier)
         selection = combat[:combat.index("targetsToUnlock =")]
         self.assertNotIn("fromIncomingDamage entry then", selection,
                          "the attacker set must not introduce a second priority "
