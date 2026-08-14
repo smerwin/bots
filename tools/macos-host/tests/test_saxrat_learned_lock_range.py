@@ -876,12 +876,12 @@ class StatusAndWiringTest(unittest.TestCase):
             % (RUN_36["setting"], RUN_36["proven"], RUN_36["refused"])])
         self.assertEqual(
             nothing_known,
-            "Lock range: 66000 m (setting 66000, client stated -, "
-            "proven -, refused -, attempt none).")
+            "lock 66000m (set 66000 client - proven - refused - "
+            "attempt none).")
         self.assertEqual(
             run_36,
-            "Lock range: 59000 m (setting 37000, client stated -, "
-            "proven 59000, refused 67000, attempt none).")
+            "lock 59000m (set 37000 client - proven 59000 refused 67000 "
+            "attempt none).")
 
     def test_a_pending_attempt_is_reported_with_its_distance_and_age(self):
         """A bot clicking a lock it will never get shows up as an attempt
@@ -895,7 +895,7 @@ class StatusAndWiringTest(unittest.TestCase):
             ", refusedAtMeters = Nothing, attempt = Just"
             " { handle = \"id:111\", distanceInMeters = 60000"
             ", targetsCount = 0, readingsWaited = 8 } }"])
-        self.assertIn("attempt 60000 m for 8 readings", pending)
+        self.assertIn("attempt 60000m/8 readings", pending)
 
     def test_the_status_line_carries_the_clause(self):
         status = collapsed(body_of(source_of(SAXRAT_BOT_ELM),

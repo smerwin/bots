@@ -1574,6 +1574,7 @@ missionBotDecisionRootBeforeApplyingSettings context =
             , confirmDeclineMission = declineMissionConfirmationIsExpected context
             , messageBoxStandoff = context.memory.messageBoxStandoff
             }
+            context.previousStepsEffects
             context.readingFromGameClient
         , recoverPodAfterShipLoss context
         , windDownBeforeSessionEnd context
@@ -7313,7 +7314,9 @@ a fact about this reading: the first two are the bot's own intent -- see
 `quitMissionConfirmationIsExpected` and `declineMissionConfirmationIsExpected` --
 and the third is how many readings the box in front of it has already survived,
 which only `BotMemory` can say. Everything else here is answerable from the
-reading alone and stays that way.
+reading alone -- except `ensureInfoPanelLocationInfoIsExpanded`'s own settling
+guard, which reads the previous steps' effects for the same reason a module
+button's click-settling guard does.
 
 **This whole list is evaluated above the docked-or-in-space split**, so anything
 in it that can repeat forever freezes the entire bot rather than one branch.
@@ -7328,16 +7331,17 @@ generalSetupInUserInterface :
     , confirmDeclineMission : Bool
     , messageBoxStandoff : Maybe MessageBoxStandoff
     }
+    -> List (List EffectOnWindow.EffectOnWindowStruct)
     -> ReadingFromGameClient
     -> Maybe DecisionPathNode
-generalSetupInUserInterface { confirmQuitMission, confirmDeclineMission, messageBoxStandoff } readingFromGameClient =
+generalSetupInUserInterface { confirmQuitMission, confirmDeclineMission, messageBoxStandoff } previousStepsEffects readingFromGameClient =
     [ closeSystemSettingsMenu
     , closeMessageBox
         { confirmQuitMission = confirmQuitMission
         , confirmDeclineMission = confirmDeclineMission
         , standoff = messageBoxStandoff
         }
-    , ensureInfoPanelLocationInfoIsExpanded
+    , ensureInfoPanelLocationInfoIsExpanded previousStepsEffects
     ]
         |> List.filterMap
             (\maybeSetupDecisionFromGameReading ->
@@ -8058,14 +8062,55 @@ the first place.
 
 Three conditions, and each is a way it could act on the wrong thing:
 
-**One route marker.** The panel presses a button on a station this function
-picked off the overview, and nothing in that pick says the station is the route's
-destination -- a station on a stargate's grid in an intermediate system is a
-station too, and docking at it would end the trip in the wrong place with every
-log line reading like success. The route panel renders one
-`AutopilotDestinationIcon` per waypoint, so exactly one marker is the reading
-saying the destination is here and there is nothing further to jump to. Where
-that is not true the cascade runs, which is today's behaviour.
+**The destination is in this system, read from the client's own count rather
+than from how many icons are drawn.** The panel presses a button on a station
+this function picked off the overview, and nothing in that pick says the
+station is the route's destination -- a station on a stargate's grid in an
+intermediate system is a station too, and docking at it would end the trip in
+the wrong place with every log line reading like success. This used to be "the
+route panel renders exactly one `AutopilotDestinationIcon`", and issue #171
+found that wrong: the marker count is jumps _remaining_, not waypoints, so a
+single marker is true one system early rather than on arrival. Read live while
+still a jump out: header `Route 1 Jump`, one marker, carrying `solarSystemID
+30005001`, `destinationID 60012607` (a station) and **`numJumps 1`** -- one
+jump away, not in this system. A 2019 recording in `explore/` agrees from the
+other end: `3 Jumps`, three markers. `numJumps` was on the marker in the
+client's own tree the whole time and `ParseUserInterface` never read it;
+`InfoPanelRouteRouteElementMarker.numJumps` lifts it now, and
+`destinationIsInThisSystem` asks the marker rather than counting icons: exactly
+one marker, and that marker's own `numJumps` reading `Just 0`. The one-marker
+precondition is kept rather than dropped -- it is the only shape this branch
+has ever been observed running in, and requiring both narrows when the branch
+fires without ever widening it. Where either half is not true the cascade
+runs, which is today's behaviour and was already the fallback for the old
+condition.
+
+**#98's guard is untouched, and is not what this fix is.** `stationIsTheOneJustUndockedFrom`
+refuses to dock at the station the ship has not left, for a reason unrelated to
+route markers, and it is why the old "one system early" bug never cost a run
+anything observed: the nearest station in a system the ship is passing through
+is generally not the one it just undocked from, so the wrong-station dock kept
+being caught by a rule written for a different purpose. That luck is not a
+substitute for reading `numJumps`, and this change does not remove or weaken the
+guard -- it still runs after `destinationIsInThisSystem` on every dock this
+branch attempts.
+
+**Checked rather than assumed: neither `routeMarkerCascade` nor #170's
+`jumpToNextSystem` panel-jump path depends on the marker count meaning
+waypoints.** `routeMarkerCascade` takes `infoPanelRouteFirstMarker` -- the head
+of the list, however long it is -- and right-clicks its `uiNode`; nothing in it
+counts markers or reads `numJumps`. `routeStargateJump` (the panel-jump path)
+reads the route panel's `Next System in Route` label and the overview row's
+Name, and falls back to `routeMarkerCascade` on every one of its five
+refusals; it never inspects `routeElementMarker` at all. Both are unaffected by
+this change.
+
+**What the client writes when the destination genuinely is in this system is
+still unread.** Every live reading available had at least one jump remaining,
+so whether `numJumps` there reads `Just 0`, `Nothing`, or something else is not
+established -- see Unverified below. The fail direction is the safe one: if the
+client never writes `0`, this branch simply stops firing and every dock falls
+through to the cascade, which still travels the route.
 
 **Not the station this ship just undocked from.** #98, and the hole in the
 paragraph above: one marker says the destination is in this system, and says
@@ -8095,11 +8140,12 @@ dockAtDestinationStation : BotDecisionContext -> DecisionPathNode -> DecisionPat
 dockAtDestinationStation context ifThePanelCannotDoIt =
     let
         destinationIsInThisSystem =
-            (context.readingFromGameClient.infoPanelContainer
-                |> Maybe.andThen .infoPanelRoute
-                |> Maybe.map (.routeElementMarker >> List.length)
-            )
-                == Just 1
+            destinationIsInThisSystemFromRouteMarkers
+                (context.readingFromGameClient.infoPanelContainer
+                    |> Maybe.andThen .infoPanelRoute
+                    |> Maybe.map .routeElementMarker
+                    |> Maybe.withDefault []
+                )
     in
     case
         ( destinationIsInThisSystem
@@ -8145,6 +8191,35 @@ dockAtDestinationStation context ifThePanelCannotDoIt =
 
         _ ->
             ifThePanelCannotDoIt
+
+
+{-| Whether the route panel's own markers say the ship is already in the
+destination system.
+
+Issue #171. The marker count is jumps _remaining_, not waypoints -- a single
+marker read live carried `numJumps 1`, one jump away, not zero -- so counting
+icons answered this question one system early. The client states the number
+directly on the marker itself, so this reads that instead of the list's
+length.
+
+Two things narrow when it fires rather than widen it, on purpose, because what
+the client writes on genuine arrival is unread (see the Unverified note over
+`dockAtDestinationStation`): exactly one marker, which is the only shape this
+branch has ever been observed running in, and that marker's own `numJumps`
+reading `Just 0`. An empty list, several markers, or a marker whose `numJumps`
+is unreadable or nonzero all answer `False` and send the caller to the
+fall-back cascade, which is the safe direction -- a route panel this rule
+cannot read is a route the cascade still travels.
+
+-}
+destinationIsInThisSystemFromRouteMarkers : List EveOnline.ParseUserInterface.InfoPanelRouteRouteElementMarker -> Bool
+destinationIsInThisSystemFromRouteMarkers markers =
+    case markers of
+        [ onlyMarker ] ->
+            onlyMarker.numJumps == Just 0
+
+        _ ->
+            False
 
 
 {-| Whether the station picked off the overview is the one the ship is standing
