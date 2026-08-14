@@ -32,30 +32,43 @@ import xml.etree.ElementTree as ElementTree
 
 
 def module_of(classname):
-    """The test file a case belongs to, from its dotted `classname`.
+    """The test file a case belongs to, or `None` if it does not name one.
 
     pytest writes `tools.macos-host.tests.test_thing.SomeClass` and no `file`
     attribute, so the file is the last segment named the way a test module is.
+    Not every case has one -- two runs of the same commit bucketed 86 files and
+    91 -- and a case whose file cannot be read must not become a file of its
+    own, which would be a bucket small enough to look healthy for ever.
     """
     for segment in reversed(classname.split(".")):
         if segment.startswith("test_"):
             return segment
-    return classname
+    return None
 
 
 def file_totals(paths):
-    """Seconds of case time per test file across `paths`, and the total."""
+    """Seconds of case time per test file across `paths`.
+
+    Answers the per-file totals, the seconds belonging to no file, and the
+    total -- which counts both, since unattributed time is still time a worker
+    spent and still part of what the run could be packed into.
+    """
     totals = collections.Counter()
+    unattributed = 0.0
     for path in paths:
         for case in ElementTree.parse(path).iter("testcase"):
-            totals[module_of(case.get("classname") or "")] += float(
-                case.get("time") or 0.0)
-    return totals, sum(totals.values())
+            seconds = float(case.get("time") or 0.0)
+            name = module_of(case.get("classname") or "")
+            if name is None:
+                unattributed += seconds
+            else:
+                totals[name] += seconds
+    return totals, unattributed, sum(totals.values()) + unattributed
 
 
 def report(paths, workers, out=sys.stdout):
     """Print the packing and answer whether `--dist loadfile` still holds."""
-    totals, total = file_totals(paths)
+    totals, unattributed, total = file_totals(paths)
     if not totals:
         print("no cases at all: the suite did not run", file=out)
         return False
@@ -67,6 +80,8 @@ def report(paths, workers, out=sys.stdout):
           % (len(totals), total, workers, floor), file=out)
     for name, seconds in sorted(totals.items(), key=lambda pair: -pair[1])[:5]:
         print("%8.0fs  %s" % (seconds, name), file=out)
+    if unattributed:
+        print("%8.0fs  (cases naming no test file)" % unattributed, file=out)
 
     if longest_time > floor:
         print("\n%s alone is %.0fs, past the %.0fs floor: with --dist loadfile "

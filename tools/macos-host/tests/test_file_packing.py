@@ -69,11 +69,42 @@ class TheFileIsWhatIsCountedRatherThanTheClass(unittest.TestCase):
             check_file_packing.module_of("tools.macos-host.tests.test_bot_help"),
             "test_bot_help")
 
+    def test_a_case_naming_no_file_is_not_a_file_of_its_own(self):
+        # Two runs of one commit bucketed 86 files and 91, so some cases reach
+        # the report with no module in their classname. Counting each as a file
+        # would be a bucket too small ever to fail, and could split time off the
+        # file that is really the longest.
+        self.assertIsNone(check_file_packing.module_of(""))
+        self.assertIsNone(check_file_packing.module_of("pytest.internal"))
+
     def test_every_class_in_one_file_adds_up_to_that_file(self):
-        totals, total = check_file_packing.file_totals(
+        totals, unattributed, total = check_file_packing.file_totals(
             [report_of(spread("test_one", 40) + spread("test_two", 10))])
         self.assertEqual(dict(totals), {"test_one": 40.0, "test_two": 10.0})
+        self.assertEqual(unattributed, 0.0)
         self.assertEqual(total, 50.0)
+
+    def test_unattributed_time_is_kept_in_the_total_and_named(self):
+        # It is still time a worker spent, so the floor has to carry it -- but
+        # it is not a file, so it can never be reported as the longest one.
+        path = report_of(
+            [("test_%d" % index, "C", 40.0) for index in range(5)])
+        try:
+            with open(path, encoding="utf-8") as handle:
+                body = handle.read()
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(body.replace(
+                    "</testsuite>",
+                    '<testcase classname="" name="stray" time="9"/>'
+                    "</testsuite>"))
+            out = io.StringIO()
+            self.assertTrue(check_file_packing.report([path], 4, out))
+            printed = out.getvalue()
+        finally:
+            os.unlink(path)
+        self.assertIn("5 files, 209s of case time", printed)
+        self.assertIn("cases naming no test file", printed)
+        self.assertIn("longest file test_0", printed)
 
 
 class AFileUnderTheFloorIsNotWhatBoundsTheRun(unittest.TestCase):
