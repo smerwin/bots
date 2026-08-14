@@ -238,13 +238,21 @@ class TheStatusClauseSaysItTest(unittest.TestCase):
                                             proven=77000, refused=33000)])
         self.assertEqual(
             clause,
-            "Lock range: 49000 m (setting 66000, client stated 49000, "
-            "proven 77000, refused 33000, attempt none).")
+            "lock 49000m (set 66000 client 49000 proven 77000 refused 33000 "
+            "attempt none).")
 
     def test_an_unstated_ceiling_reads_as_absent_rather_than_as_zero(self):
+        """`-` rather than `0`, which is the distinction this whole rule is.
+
+        A ceiling nobody stated and a ceiling stated as zero are opposite
+        facts -- the first leaves the setting alone and the second would refuse
+        every lock -- so the clause has to keep them apart however short #242
+        makes it.
+        """
         [clause] = self.repl.strings(
             ["describeLockRange %s" % state(setting=66000)])
-        self.assertIn("client stated -", clause)
+        self.assertIn("client -", clause)
+        self.assertNotIn("client 0", clause)
 
 
 if __name__ == "__main__":
