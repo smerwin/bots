@@ -61,7 +61,11 @@ MISSION_RUNNER_BOT_ELM = os.path.join(
 RUN_SAXRAT = os.path.join(
     REPO_DIR, "tools", "macos-host", "run_saxrat.sh")
 
-# The two entries `defaultBotSettings` ships, which `anomaly-name` prepends to
+# The two entries `defaultBotSettings` used to ship in the field itself. Since
+# #198 they are a fallback supplied by `anomalyNamesInEffect` when nothing was
+# named, so an answer that names anything carries exactly what was written and
+# these do not appear in it. Kept because the fallback is still what an
+# unconfigured bot hunts
 # rather than replacing. That is pre-existing behaviour and #182 does not touch
 # it; it is written down here because every `anomaly-name` answer below carries
 # it, and a case that did not expect it would read as a split gone wrong.
@@ -171,7 +175,7 @@ class TheThreeSettingsSplitOnCommasTest(unittest.TestCase):
         self.assertEqual(
             self.repl.evaluate([parses_to(
                 "anomaly-name=sansha hideaway, sansha refuge", "anomalyNames",
-                ["sansha hideaway", "sansha refuge"] + DEFAULT_ANOMALY_NAMES)]),
+                ["sansha hideaway", "sansha refuge"])]),
             [True])
 
     def test_avoid_rat_splits_one_line_into_names(self):
@@ -205,7 +209,7 @@ class TheThreeSettingsSplitOnCommasTest(unittest.TestCase):
                 parses_to("avoid-rat=Infested Carrier", "avoidRats",
                           ["Infested Carrier"]),
                 parses_to("anomaly-name=sansha hideaway", "anomalyNames",
-                          ["sansha hideaway"] + DEFAULT_ANOMALY_NAMES),
+                          ["sansha hideaway"]),
             ]),
             [True, True, True])
 
@@ -232,7 +236,7 @@ class TheSettingsAreStillRepeatableTest(unittest.TestCase):
                           ["A", "B"]),
                 parses_to("avoid-rat=A\navoid-rat=B", "avoidRats", ["B", "A"]),
                 parses_to("anomaly-name=A\nanomaly-name=B", "anomalyNames",
-                          ["B", "A"] + DEFAULT_ANOMALY_NAMES),
+                          ["B", "A"]),
             ]),
             [True, True, True])
 
@@ -267,7 +271,7 @@ class TheSettingsAreStillRepeatableTest(unittest.TestCase):
         self.assertEqual(
             self.repl.evaluate(
                 [parses_to(settings, "anomalyNames",
-                           expected + DEFAULT_ANOMALY_NAMES)]),
+                           expected)]),
             [True])
 
 
@@ -294,7 +298,7 @@ class TheCommaIsUnconditionalTest(unittest.TestCase):
             self.repl.evaluate([
                 parses_to("avoid-rat=Foo, Bar", "avoidRats", ["Foo", "Bar"]),
                 parses_to("anomaly-name=Foo, Bar", "anomalyNames",
-                          ["Foo", "Bar"] + DEFAULT_ANOMALY_NAMES),
+                          ["Foo", "Bar"]),
             ]),
             [True, True])
 
@@ -350,8 +354,11 @@ class AnEmptyValueAddsNoEntryTest(unittest.TestCase):
             self.repl.evaluate([
                 parses_to("hunt-system=", "huntSystemNames", []),
                 parses_to("avoid-rat=", "avoidRats", []),
-                parses_to("anomaly-name=", "anomalyNames",
-                          DEFAULT_ANOMALY_NAMES),
+                # Empty since #198: the field starts empty and an empty value
+                # adds nothing, so what an unconfigured bot hunts is supplied by
+                # `anomalyNamesInEffect` rather than carried here. The case's
+                # own point -- an empty value adds no entry -- is unchanged.
+                parses_to("anomaly-name=", "anomalyNames", []),
             ]),
             [True, True, True])
 

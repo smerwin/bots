@@ -184,20 +184,22 @@ class TheReadSiteHasNoSecondOpinionTest(unittest.TestCase):
                       re.sub(r"\s+", " ", self.source))
 
     def test_nothing_else_reads_the_field(self):
-        """Six uses, each accounted for, and no seventh.
+        """Eight uses, each accounted for, and no ninth.
 
-        The default, the handler's two (`settings | anomalyNames =` and the
-        `settings.anomalyNames` it prepends to), the record field, and
+        The default; the handler's four, which grew by two when #182 added the
+        comma split (its lambda parameter, the record update, the
+        `splitSettingIntoNames` call on the parameter, and the
+        `settings.anomalyNames` it prepends to); the record field; and
         `anomalyNamesInEffect`'s two -- the emptiness test and the answer it
-        gives when the list is not empty. A seventh is a second opinion about
-        what is hunted, which is the shape #198 was.
+        gives when the list is not empty. A ninth is a second opinion about what
+        is hunted, which is the shape #198 was.
         """
         uses = len(re.findall(r"\banomalyNames\b",
                               re.sub(r"\{-.*?-\}", "", self.source,
                                      flags=re.DOTALL)))
         self.assertEqual(
-            uses, 6,
-            "expected the default, the handler's two, the record field and the"
+            uses, 8,
+            "expected the default, the handler's four, the record field and the"
             " rule's two; a further use is a second opinion about what is"
             " hunted")
 
