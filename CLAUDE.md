@@ -7439,6 +7439,58 @@ string names six sites and would have hunted eight. `eve-online-combat-anomaly-b
 and `eve-online-wingus` both carry an anomaly-name setting and neither was
 examined.
 
+### The retreat was an alias for parking, so it docked while the ship died
+
+Issue #222. `runAway` was a literal alias for `tetherAtStructure` -- not "calls",
+not "falls back to" -- so the branch meaning *this ship is dying, leave now* was
+the same one meaning *nothing to do here, sit somewhere safe*, and it inherited
+that branch's surroundings-menu cascade and its entry priority, which prefers
+**Dock** over Warp. Docking is the slowest thing on that list: a dock is a run-in
+the ship has to fly, where a warp to a celestial is instant once commanded.
+
+Run 35 lost a Coercer to it. The retreat fired correctly and then spent 90 seconds
+and 36 decision blocks driving the cascade toward a station while taking about 57
+hitpoints a second; the armour went 100, 99, 79, 35, 23, 11, 0 and the ship died
+with the menu still open. **Not one of those 36 blocks was in warp** -- 17 were
+moving the mouse toward a station entry and 8 were waiting for a menu that had not
+rendered.
+
+The mission runner had already solved this, and its own `tetherAtStructure`
+comment records the same shape from its side: nineteen decisions clicking menu
+entries while armour fell from 58% to 31%. This is that solution ported, so the
+two bots retreat alike.
+
+`escapeCelestialsOnOverview` takes anything the client's own distance column marks
+in **AU**, which is a unit rather than a name -- the mission runner learned that
+matching a *station* by name picks up site scenery called `... - 1`, and then
+waits 119 readings for a Dock button scenery never offers. Virtualised rows are
+excluded, because a row scrolled out of view reports a region belonging to
+whatever was recycled into its place, and on this path that means warping
+somewhere nobody chose. The choice rotates every
+`runAwayCelestialStickyReadings` (12) readings against a new `readingsCount`
+advanced in the memory update, so a retreat that has not worked tries a different
+corner of the system rather than re-issuing the warp that did not help.
+
+The cascade survives as the answer to *nothing at AU range on the overview*, and
+as the answer to a panel that shows the celestial and offers no `selectedItemWarpTo`
+-- falling back there rather than waiting, because waiting is what run 35 died
+doing.
+
+`escapeCelestialsOnOverview` takes a `ReadingFromGameClient` rather than a
+`BotDecisionContext`, which is #106's lesson: a rule reachable only through a
+whole context cannot be executed, and this one is now folded over real parsed
+readings in `elm repl`.
+
+**Unverified, and one of these is a known gap rather than an unknown.** Nothing
+has been flown. Whether this client draws `selectedItemWarpTo` for a *celestial*
+is unread -- it is confirmed for a stargate, and if it is absent the retreat falls
+back to the cascade, which is today's behaviour. And **the select step is
+unbounded**: if the panel never comes to show the celestial, the retreat clicks
+the overview row every reading and never warps. That is the mission runner's
+state too -- its own comment records run 127 sitting in the equivalent branch for
+11,964 decisions -- and it is the shape #222 itself is, so it wants its own bound
+and its own evidence rather than a number invented on the retreat path.
+
 ### A shut probe window hid the gate and the opportunity from the whole path
 
 Issue #204. `decideNextActionWhenInSpace` splits on `probeScannerWindow`, and both

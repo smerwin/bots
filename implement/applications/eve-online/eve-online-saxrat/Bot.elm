@@ -504,6 +504,7 @@ type alias BotMemory =
     -- arrival window the other-pilot snapshot is taken inside. `Nothing` means
     -- no warp has finished this session and is a closed window, never an open
     -- one. See `otherPilotArrivalWindowReadings`.
+    , readingsCount : Int
     , readingsSinceWarpEnded : Maybe Int
     , visitedAnomalies : Dict.Dict String MemoryOfAnomaly
     , contextMenuLastDepth : Int
@@ -3660,9 +3661,112 @@ recoverPodAfterShipLoss context =
             )
 
 
+{-| How long one escape choice is kept before the next celestial is tried.
+
+Twelve readings, the mission runner's own number and for its reason: a retreat
+that has not worked yet should try a different corner of the system rather than
+re-issuing a warp to the one that did not help, and rotating every reading would
+never let a warp start at all.
+
+-}
+runAwayCelestialStickyReadings : Int
+runAwayCelestialStickyReadings =
+    12
+
+
+{-| Everything on the overview far enough away to be off this grid.
+
+`AU` in the distance column is the whole test, and it is the client's own unit
+rather than a name match. The mission runner learned that the hard way: matching
+a _station_ by name picked up site scenery called `... - 1`, and the bot then
+waited 119 readings for a Dock button that scenery never offers while its armour
+drained to nothing.
+
+Virtualised rows are excluded, because a row scrolled out of view reports a
+region belonging to whatever was recycled into its place -- so clicking it
+selects the wrong object, which on this path means warping somewhere nobody
+chose.
+
+-}
+escapeCelestialsOnOverview : ReadingFromGameClient -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+escapeCelestialsOnOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter
+            (.objectDistance
+                >> Maybe.map (String.toUpper >> String.contains "AU")
+                >> Maybe.withDefault False
+            )
+
+
+{-| Leave, and keep leaving until the hitpoints hysteresis says we are safe.
+
+**This was `tetherAtStructure` -- not "calls", an alias** -- so the branch meaning
+_this ship is dying, leave now_ was the same one meaning _nothing to do here, sit
+somewhere safe_, and it inherited that branch's surroundings-menu cascade and its
+entry priority, which prefers **Dock** over Warp. Docking is the slowest thing on
+that list: a dock is a run-in the ship has to fly (see the docking section), where
+a warp to a celestial is instant once commanded.
+
+Run 35 is what that cost. The retreat fired correctly and then spent 90 seconds
+and 36 decision blocks driving the cascade towards a station while taking about
+57 hitpoints a second; the armour went 100, 99, 79, 35, 23, 11, 0 and the Coercer
+died with the menu still open. **Not one of those 36 blocks was in warp.** The
+cascade is also the least reliable thing to be doing under fire -- it discards and
+reopens a menu that has not advanced, and this repo's own notes record it needing
+several opens before an entry is recognised.
+
+So the warp is commanded through the Selected Item panel, which is two clicks with
+nothing to render in between, and the cascade survives only as the answer to _no
+celestial on the overview at all_.
+
+-}
 runAway : BotDecisionContext -> DecisionPathNode
-runAway =
-    tetherAtStructure
+runAway context =
+    case escapeCelestialsOnOverview context.readingFromGameClient of
+        [] ->
+            describeBranch
+                "Get out -- nothing at AU range on the overview to warp to, so the surroundings menu is all that is left."
+                (tetherAtStructure context)
+
+        celestials ->
+            case
+                celestials
+                    |> listElementAtWrappedIndex
+                        (context.memory.readingsCount // runAwayCelestialStickyReadings)
+            of
+                Nothing ->
+                    tetherAtStructure context
+
+                Just celestial ->
+                    let
+                        description : String
+                        description =
+                            "Get out -- warp to '"
+                                ++ (celestial.objectName |> Maybe.withDefault "a celestial")
+                                ++ "' at "
+                                ++ (celestial.objectDistance |> Maybe.withDefault "range")
+                    in
+                    if not (selectedItemIsOverviewEntry context.readingFromGameClient celestial) then
+                        describeBranch
+                            (description ++ " -- selecting it first, so the panel's own Warp To acts on it.")
+                            (clickUiElement celestial.uiNode)
+
+                    else
+                        case selectedItemButtonNamed context.readingFromGameClient "selectedItemWarpTo" of
+                            Nothing ->
+                                -- The panel is showing the celestial and offers no
+                                -- warp button. Falling back rather than waiting:
+                                -- waiting here is what run 35 died doing, and the
+                                -- cascade at least dispatches something.
+                                describeBranch
+                                    (description ++ " -- the panel offers no 'selectedItemWarpTo', so try the surroundings menu.")
+                                    (tetherAtStructure context)
+
+                            Just warpButton ->
+                                returnDronesToBay context
+                                    (describeBranch description (clickUiElement warpButton))
 
 
 continueIfShouldHide : { ifShouldHide : DecisionPathNode } -> BotDecisionContext -> Maybe DecisionPathNode
@@ -7164,6 +7268,7 @@ initBotMemory =
     { lastDockedStationNameFromInfoPanel = Nothing
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , shipWarpingInLastReading = Nothing
+    , readingsCount = 0
     , readingsSinceWarpEnded = Nothing
     , visitedAnomalies = Dict.empty
     , contextMenuLastDepth = 0
@@ -11930,6 +12035,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- rule, and the reason this can be a reading count at all. It is never
         -- cleared: it ages out of the bound on its own, and a `Nothing` restored
         -- here would read as "no warp this session", which is a different fact.
+        readingsCount : Int
+        readingsCount =
+            -- Advanced here because this is the only thing that runs on every
+            -- reading whatever the bot is doing -- the placement rule #102
+            -- established. Read by exactly one thing, the retreat's escape
+            -- rotation, which needs only a monotone count: a choice that changes
+            -- every `runAwayCelestialStickyReadings` readings rather than every
+            -- reading, so a warp has time to start.
+            botMemoryBefore.readingsCount + 1
+
         readingsSinceWarpEnded =
             if weJustFinishedWarping then
                 Just 0
@@ -11989,6 +12104,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         botMemoryBefore.shipModules
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
     , shipWarpingInLastReading = shipIsWarping
+    , readingsCount = readingsCount
     , readingsSinceWarpEnded = readingsSinceWarpEnded
     , visitedAnomalies = visitedAnomalies
     , contextMenuLastDepth = currentContextMenuDepth
