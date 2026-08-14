@@ -5201,7 +5201,7 @@ describeDroneLaunchCeiling state =
         ++ (droneLaunchCeiling state |> String.fromInt)
         ++ " (window "
         ++ (state.fromWindow |> String.fromInt)
-        ++ ", client stated "
+        ++ " client "
         ++ (state.statedByClient |> Maybe.map String.fromInt |> Maybe.withDefault "-")
         ++ ")."
 
@@ -6392,7 +6392,7 @@ describeLockRange state =
         ++ (lockRangeThresholdInMeters state |> String.fromInt)
         ++ "m (set "
         ++ (state.fromSetting |> String.fromInt)
-        ++ ", client stated "
+        ++ " client "
         ++ (state.statedMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
         ++ " proven "
         ++ (state.provenAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
@@ -7153,7 +7153,7 @@ describeMaxTargets state =
         ++ (maxTargetsCeiling state |> String.fromInt)
         ++ " (setting "
         ++ (state.fromSetting |> String.fromInt)
-        ++ ", client stated "
+        ++ " client "
         ++ (state.statedByClient |> Maybe.map String.fromInt |> Maybe.withDefault "-")
         ++ " held "
         ++ (state.heldAtOnce |> Maybe.map String.fromInt |> Maybe.withDefault "-")
