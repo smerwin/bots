@@ -5595,8 +5595,10 @@ droneRecallAskedLookbackSteps =
 Read out of the effects rather than the decision, because
 `updateMemoryForNewReadingFromGame` is the only place that can write memory and
 it never sees the decision. `vkey_R` is used for nothing else in this bot --
-`vkey_Q` is the approach chord, `vkey_E` the keep-at-range and `vkey_W` the
-orbit -- so the chord is unambiguous.
+`vkey_E` is the keep-at-range and `vkey_W` the orbit and the loot window's
+Ctrl+W -- so the chord is unambiguous. It used to be `vkey_Q` that carried the
+approach; that is a double click on the row now and presses no key at all, so
+this argument has one fewer key to be unambiguous against rather than one more.
 
 -}
 recentStepAskedForDroneRecall : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
@@ -5688,6 +5690,23 @@ describeDroneRecall context =
         ++ "."
 
 
+{-| Lock a row, or close on it where the client will not grant a lock yet.
+
+The approach is a **double click on the row** and presses no key. It used to
+wrap a left click in a `Q` chord, which the client reads the same way -- and
+`cg_input` posts a keystroke without stamping flags on it, so a posted `Q`
+carries whatever modifier state the session happens to hold. With the Fn bit
+set that is macOS Quick Note, and one recorded run took this branch 1,571 times
+while Notes came to the front 241 times with nobody at the machine. PR #241
+stops the mis-stamping; this stops the keystroke existing, and takes a
+modifier-timing dependency off the hottest path in the bot.
+
+It adds no row-shift exposure over the click it replaces. #90's concern is the
+overview re-sorting between the reading and the click; a double click is one
+gesture dispatched in one step, with no re-derivation between its two presses,
+so it is exactly as exposed as the single click already here and no more.
+
+-}
 lockTargetFromOverviewEntry : BotDecisionContext -> OverviewWindowEntry -> DecisionPathNode
 lockTargetFromOverviewEntry context overviewEntry =
     let
@@ -5707,14 +5726,7 @@ lockTargetFromOverviewEntry context overviewEntry =
 
             else
                 describeBranch ("Object is not in range (" ++ (distanceInMeters |> String.fromInt) ++ " m away). Approach.")
-                    (decideActionForCurrentStep
-                        ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_Q ]
-                         , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
-                         , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_Q ]
-                         ]
-                            |> List.concat
-                        )
-                    )
+                    (doubleClickUiElement overviewEntry.uiNode)
 
         Err error ->
             describeBranch ("Failed to read the distance: " ++ error) askForHelpToGetUnstuck
@@ -11483,17 +11495,33 @@ clickUiElement uiElement =
         (mouseClickOnUIElement MouseButtonLeft uiElement |> Result.withDefault [])
 
 
-{-| Double-click a UI element. EVE reads a double click on an object in space
-or its overview row as "Open Cargo", which is the whole context-menu cascade --
-right-click, wait for the flyout to render, find the entry, click it -- in a
-single step.
+{-| Double-click a UI element, and say so where the element cannot be clicked.
+
+EVE answers a double click on an object in space or its overview row with that
+object's own default action, and that is not one action. A container opens its
+cargo, which is the whole context-menu cascade -- right-click, wait for the
+flyout to render, find the entry, click it -- in a single step, and from
+outside looting range the client flies there and opens on arrival. A hostile
+ship has no cargo to open, and the client answers by approaching it instead.
+Both are operator-confirmed rather than read out of any documentation, which is
+why this comment names them as behaviours seen rather than as a rule.
+
+`mouseDoubleClickOnUIElement` answers `Err` for an element whose visible region
+is too small to click, and `Result.withDefault []` on that is a branch that
+prints an action and dispatches nothing -- this repo's signature failure. So
+the decline is spoken instead.
+
 -}
 doubleClickUiElement : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> DecisionPathNode
 doubleClickUiElement uiElement =
-    decideActionForCurrentStep
-        (EveOnline.BotFramework.mouseDoubleClickOnUIElement MouseButtonLeft uiElement
-            |> Result.withDefault []
-        )
+    case EveOnline.BotFramework.mouseDoubleClickOnUIElement MouseButtonLeft uiElement of
+        Ok doubleClickEffects ->
+            decideActionForCurrentStep doubleClickEffects
+
+        Err () ->
+            describeBranch
+                "The visible part of this element is too small to click, so there is nothing to dispatch."
+                waitForProgressInGame
 
 
 {-| EVE's own shortcut for unlocking a target directly from the target bar:
