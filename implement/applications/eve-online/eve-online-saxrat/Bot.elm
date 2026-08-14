@@ -11352,7 +11352,20 @@ to follow.
 **The whole-tree search cannot tell "an opportunity exists" from "we are not
 there yet", and the grid can.** The button is drawn identically before and after
 arrival and the client says nothing when it is clicked in the stale state, so
-there is no reading of the panel that separates them. An acceleration gate is a
+there is no reading of the panel that separates them.
+
+**#200 removed the search and the panel can now answer that after all**, which
+narrows this argument without retiring it: the tracker's own button carries a
+_label_, and it reads `Warping` once the ship is under way, so
+`warpToOpportunitySiteIfAvailable` declines the state run 5 spent 3,458 readings
+in. The clause below stays for the readings where the label is silent -- a
+tracker the parser cannot read, an escalation nobody has expanded, a word the
+client has invented -- and because #147's ordering is a claim about work rather
+than about a search: a gate on the grid is the job in front of the ship whatever
+the panel says. Run 5's measurement is what the ordering rests on and stands as
+recorded.
+
+An acceleration gate is a
 different question with the same answer: gates exist only inside sites, so one on
 the overview means the ship has already arrived somewhere, and every recorded
 opportunity episode agrees --
@@ -11455,32 +11468,180 @@ siteProgressStepOrElse context ifNeither =
             ifNeither
 
 
-{-| The "Opportunities" panel (e.g. "Sansha's Command Relay Outpost") is a
-separate mechanism from the probe-scanner anomalies this bot otherwise
-hunts -- confirmed live it has no existing parsing anywhere in this
-codebase. Rather than adding a dedicated parser for that whole panel, this
-just looks for a clickable "Warp to Site" button anywhere on screen (the
-same generic whole-tree text search already proven for the "Loot All" and
-message-box-close buttons) and clicks it directly.
+{-| The step the Opportunities tracker is offering, where it is offering one the
+bot may take.
 
-**What that search answers is "an opportunity exists", never "the ship still
-needs to go there"**, because the panel goes on offering the button after
-arrival. Narrowing the search is not the repair -- the button legitimately stays
-drawn, and a search trying to tell "offered" from "already taken" would be
-guessing at panel state this bot deliberately does not parse. `siteProgressStep`
-is what separates them, off the grid rather than off the panel, and carries the
-measurement.
+**The tracker draws one button whose label changes with what the trip needs**,
+and this used to be a whole-tree text search for one of that label's values.
+Read off the live client with five `Sansha's Command Relay Outpost` escalations
+in the panel, the widget renders `Jump` while the destination is several jumps
+out, `Warping` once the ship is under way, `Warp to Site` in system, and
+`Set Destination` before a route exists. So `Warp to Site` was one value of four
+and the other three were invisible: runs 25 and 26 made 44 and 168 route-panel
+stargate jumps between them and used the tracker **zero** times.
+
+**Adding `Jump` to the old search is the wrong fix and that is why this is a
+parse.** The Selected Item panel carries its own `Jump` button -- read live at
+canvas (1517,142) in the same reading, and the one `selectedItemJump` presses --
+so a whole-tree search for that word collides with it on the first reading and
+nothing afterwards can say which was clicked. Matching on the widget's own type
+name, inside a `DungeonInfoPanelEntry`, cannot reach the panel at all.
+
+Three things decide whether a label is a step, and each excludes a different
+failure:
+
+  - **It has to be text the client rendered** (`travelLabelIsReadableText`).
+    Run 11 on the mission runner rendered a travel step as six C0 control
+    characters around one unassigned codepoint, and run 22 as a distance wrapped
+    in NULs. Accepting anything is the only way this change could send a ship
+    somewhere nobody asked for.
+  - **It has to be a command rather than a state** (`travelLabelIsACommand`).
+    `Warping`, `Jumping` and `Docking` are the client saying the trip is already
+    happening; clicking one is re-commanding a manoeuvre already under way, which
+    is #99's docking run-in with a different button.
+  - **The button has to be one the client is showing.** That is the parser's
+    `_display` filter, where it belongs -- the chain hides the tasks that are not
+    available rather than removing them.
+
+**#147's ordering is untouched.** `siteProgressStep` still asks the acceleration
+gate first and still declines this branch while a gate is in reach: a gate is
+progress _inside_ the site and this button is how the ship reaches the next one.
+What does change is that the old search's own premise no longer holds -- it
+answered `Just` whether or not the ship had arrived, and the label answers
+`Warping` once it has, so the panel now separates the two states the grid was
+brought in to separate. The gate clause stays anyway, because it is what bounds
+this branch on a reading whose label the parser could not read.
 
 -}
+opportunityTravelStep :
+    ReadingFromGameClient
+    ->
+        Maybe
+            { siteName : Maybe String
+            , label : String
+            , buttonNode : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+            }
+opportunityTravelStep readingFromGameClient =
+    readingFromGameClient.opportunityInfoPanelEntries
+        |> List.filterMap
+            (\entry ->
+                entry.travelButton
+                    |> Maybe.andThen
+                        (\button ->
+                            button.label
+                                |> Maybe.andThen
+                                    (\label ->
+                                        if travelLabelIsACommand label then
+                                            Just
+                                                { siteName = entry.siteName
+                                                , label = label
+                                                , buttonNode = button.uiNode
+                                                }
+
+                                        else
+                                            Nothing
+                                    )
+                        )
+            )
+        |> List.head
+
+
 warpToOpportunitySiteIfAvailable : ReadingFromGameClient -> Maybe DecisionPathNode
 warpToOpportunitySiteIfAvailable readingFromGameClient =
-    readingFromGameClient.uiTree
-        |> findUiElementWithText "Warp to Site"
+    opportunityTravelStep readingFromGameClient
         |> Maybe.map
-            (\warpToSiteButton ->
-                describeBranch "I see a 'Warp to Site' opportunity -- warp there."
-                    (clickUiElement warpToSiteButton)
+            (\step ->
+                describeBranch
+                    ("The Opportunities tracker offers '"
+                        ++ step.label
+                        ++ "' for "
+                        ++ (step.siteName |> Maybe.withDefault "an escalation it does not name")
+                        ++ " -- take it."
+                    )
+                    (clickUiElement step.buttonNode)
             )
+
+
+{-| Whether the tracker's travel label names a step to take, rather than one
+already under way or a word nobody has seen this button carry.
+
+**An allow-list rather than a list of the states to refuse**, which is the
+direction this rule chooses and the deliberate part. A deny-list fires on
+anything the client's vocabulary grows next, and that vocabulary has already
+grown twice without anyone deciding to -- `View Details` is on a collapsed
+escalation in the very capture this was written from, and it is not a trip. So a
+label nobody has read leaves the bot behaving exactly as it did before this
+change, which is a route-panel stargate cascade rather than a click into a panel
+listing several escalations.
+
+The five words are the ones the mission runner's own `missionTravelStep` sorts as
+commands -- `Set Destination`, `Jump`, `Warp to Location`, `Dock` -- plus
+`Warp to Site`, which is what this branch has been matching all along. `Dock` has
+never been read off _this_ widget and is carried on the strength of that
+separation rather than on an observation here.
+
+Compared case-insensitively on the trimmed label, so a client that changes its
+capitalisation does not switch the branch off; the comparison is still an
+equality, so it cannot widen to a different word the way a substring test would
+take `Dock` out of `Dock in Station`.
+
+-}
+travelLabelIsACommand : String -> Bool
+travelLabelIsACommand label =
+    travelLabelIsReadableText label
+        && (opportunityTravelCommandLabels
+                |> List.member (label |> String.trim |> String.toLower)
+           )
+
+
+opportunityTravelCommandLabels : List String
+opportunityTravelCommandLabels =
+    [ "set destination", "jump", "warp to site", "warp to location", "dock" ]
+
+
+{-| Whether the tracker's travel label is something the client rendered for a
+person to read.
+
+Ported from the mission runner, where the corpus is. Run 11 there rendered a
+travel step three times as the codepoints `U+0002 U+0000 U+AD1D8 U+0001 U+0001
+U+0000 U+0001` -- six C0 controls around one codepoint that is unassigned
+(category `Cn`, plane 10) rather than private-use, which is the trap: a rule
+recognising "not text" by private-use membership calls that text. Run 22
+rendered one as `U+0000 U+0000 . 5 0 space A U U+0000`, a distance readout
+wrapped in NULs.
+
+The test is printable ASCII with at least one letter in it. Every label either
+bot has recorded on this widget is ASCII, and neither non-text one is: the first
+has no printable character at all, the second has letters with NULs around them.
+
+The cost is stated rather than hidden: a client rendering this button in a
+non-Latin script disables the branch entirely and the bot travels by route panel
+as it does today. That is the safe direction, and it is the same assumption the
+rest of this file already makes about the client's language.
+
+`travelLabelIsACommand`'s allow-list already refuses both recorded non-text
+labels on its own, since neither trims to one of five English words. This is kept
+in front of it deliberately: it is the clause that would still hold if that list
+were ever widened, and it is the one this file can point at when asked where
+unreadable input is declined.
+
+-}
+travelLabelIsReadableText : String -> Bool
+travelLabelIsReadableText label =
+    let
+        trimmed =
+            String.trim label
+
+        characterIsPrintableAscii character =
+            let
+                code =
+                    Char.toCode character
+            in
+            0x20 <= code && code <= 0x7E
+    in
+    not (String.isEmpty trimmed)
+        && String.all characterIsPrintableAscii trimmed
+        && String.any Char.isAlpha trimmed
 
 
 {-| The rank words that mark a rat whose wreck is worth looting. See

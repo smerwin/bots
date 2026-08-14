@@ -38,6 +38,15 @@ Three things follow, and each has cases below:
     within 0 to 15 readings of coming into reach and a gate that does not runs to
     a count more than four times the bound.
 
+**#200 replaced the search with a parse and the ordering is unchanged.**
+`warpToOpportunitySiteIfAvailable` now reads the tracker's own travel widget and
+its label, so the branch declines a `Warping` of its own accord -- but a gate on
+the grid still outranks it, because that ordering is a claim about which work
+comes first rather than about what a search can tell. The one case here that
+asserted the search's *inability* moved with the code and says the bare panel
+text is no longer read at all; everything else stands as it was, including all
+of the corpus.
+
 The rules are executed through the real `Bot.elm` in `elm repl` rather than
 restated in Python, and the readings the search is asked about go through the
 real `EveOnline.ParseUserInterface`. The ordering itself is not an expression, so
@@ -414,6 +423,14 @@ class TheSearchCannotTellArrivalTest(unittest.TestCase):
     What is asserted is an *inability*: the whole-tree search answers the same
     thing whether or not the ship has arrived, so the ordering cannot be built
     on it. The grid answers differently, which is what it is built on instead.
+
+    **#200 removed that search and the branch no longer has the inability**, so
+    the case that asserted it moved with the code rather than being deleted: the
+    text on the panel is now read past by the branch entirely, and what still
+    holds -- and is what the ordering rests on -- is that the *grid* separates
+    the two states. The label doing so as well is
+    `test_saxrat_opportunity_tracker_button
+    .TheBranchActsOnWhatTheTrackerOffers.test_a_state_label_is_not_taken`.
     """
 
     @classmethod
@@ -426,19 +443,26 @@ class TheSearchCannotTellArrivalTest(unittest.TestCase):
              for e in expressions],
             definitions=[GateRepl.reading_binding("reading", children)])
 
-    def test_the_button_reads_the_same_before_and_after_arrival(self):
+    def test_the_panels_bare_text_is_no_longer_what_is_read(self):
+        """The search this replaced answered `Just` for both of these.
+
+        A `Warp to Site` drawn anywhere in the tree, with and without a gate on
+        the grid: identical to the old search and nothing to the new branch,
+        which wants the tracker's own widget under a `DungeonInfoPanelEntry`.
+        That is also the collision the issue rules out -- the same text search
+        widened to `Jump` would have found the Selected Item panel's button.
+        """
         before = self.ask(
             ["\\r -> warpToOpportunitySiteIfAvailable r /= Nothing"],
             [warp_to_site_button()])[0]
         after = self.ask(
             ["\\r -> warpToOpportunitySiteIfAvailable r /= Nothing"],
             reading(gate_distance="1500 m") + [warp_to_site_button()])[0]
-        self.assertTrue(before, "the search did not find the panel's button")
-        self.assertTrue(
-            after,
-            "the search answered differently once a gate was on the grid -- if "
-            "it can tell arrival apart after all, this change's premise has "
-            "moved")
+        self.assertFalse(
+            before,
+            "a bare panel label is being acted on again, which is the "
+            "whole-tree search #200 removed")
+        self.assertFalse(after, "the same, with a gate on the grid")
 
     def test_the_grid_is_what_answers_differently(self):
         away, arrived = (
