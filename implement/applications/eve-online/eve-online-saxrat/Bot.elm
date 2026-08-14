@@ -5436,29 +5436,36 @@ appeared", and a clause that shows up only on success cannot say that.
 -}
 describeHuntCircuit : BotDecisionContext -> String
 describeHuntCircuit context =
+    let
+        currentSystem =
+            context.readingFromGameClient.infoPanelContainer
+                |> Maybe.andThen .infoPanelLocationInfo
+                |> Maybe.andThen .currentSolarSystemName
+                |> Maybe.map String.trim
+                |> Maybe.withDefault "?"
+    in
     if List.isEmpty context.eventContext.botSettings.huntSystemNames then
-        "Hunt circuit: none configured (no 'hunt-system'), so this bot waits for a route rather than setting one."
+        "Sys " ++ currentSystem ++ " (no hunt circuit)."
 
     else
-        "Hunt circuit: "
-            ++ (context.eventContext.botSettings.huntSystemNames |> String.join " -> ")
-            ++ ", next "
+        "Sys "
+            ++ currentSystem
+            ++ " -> "
             ++ (nextHuntingGround context |> Maybe.withDefault "nowhere")
             ++ (case context.memory.destinationAskedFor of
                     Nothing ->
                         ""
 
                     Just asked ->
-                        ". Asked for '"
+                        " asked '"
                             ++ asked
                             ++ "' "
                             ++ String.fromInt context.memory.destinationAskReadings
                             ++ "/"
                             ++ String.fromInt routeAskGiveUpReadings
-                            ++ " readings ago with no route yet"
                )
             ++ (if context.memory.routeSettingGivenUp then
-                    ". ROUTE SETTING GIVEN UP -- this host does not set destinations"
+                    " ROUTE SETTING GIVEN UP -- this host does not set destinations"
 
                 else
                     ""
@@ -10009,16 +10016,16 @@ describeTargetHitpoints : Maybe EveOnline.ParseUserInterface.Hitpoints -> String
 describeTargetHitpoints hitpoints =
     case hitpoints of
         Nothing ->
-            "(Shield/Armor/Hull unknown)"
+            "[?/?/?]"
 
         Just percent ->
-            "(Shield: "
+            "["
                 ++ (percent.shield |> String.fromInt)
-                ++ "%  Armor: "
+                ++ "/"
                 ++ (percent.armor |> String.fromInt)
-                ++ "%  Hull: "
+                ++ "/"
                 ++ (percent.structure |> String.fromInt)
-                ++ "%)"
+                ++ "]"
 
 
 {-| Safety net for the weapon/drone-activation branches, independent of the
