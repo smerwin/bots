@@ -3958,6 +3958,19 @@ quickMessageStatusCharacterBudget =
     400
 
 
+{-| How long a quick message stays in the status line after it left the screen.
+
+The sighting is carried forward with an age so a notice can be read beside the
+decision that followed it, which is a reading or two rather than minutes. Past
+this it is a notice from minutes ago printed next to a reading it has nothing to
+do with, so the clause says "none recent" instead of reprinting it.
+
+-}
+quickMessageStaleAfterReadings : Int
+quickMessageStaleAfterReadings =
+    100
+
+
 {-| A quick message rendered as one line, losing nothing that cannot be undone.
 
 Two transformations and no others. The text is cut to
@@ -4001,28 +4014,30 @@ describeQuickMessage sighting =
             "Quick message: none on this reading, and none seen this session."
 
         Just seen ->
-            "Quick message"
-                ++ (if seen.readingsSince == 0 then
-                        " (on screen now)"
+            if quickMessageStaleAfterReadings < seen.readingsSince then
+                "Quick message: none recent."
 
-                    else
-                        " (NOT on screen now -- last seen "
-                            ++ String.fromInt seen.readingsSince
-                            ++ " readings ago)"
-                   )
-                ++ ": \""
-                ++ quickMessageTextForStatusLine seen.text
-                ++ "\""
-                ++ (if String.length seen.text <= quickMessageStatusCharacterBudget then
-                        ""
+            else
+                "Quick msg"
+                    ++ (if seen.readingsSince == 0 then
+                            " (now)"
 
-                    else
-                        " (CAPPED at "
-                            ++ String.fromInt quickMessageStatusCharacterBudget
-                            ++ " of "
-                            ++ String.fromInt (String.length seen.text)
-                            ++ " characters)"
-                   )
+                        else
+                            " (" ++ String.fromInt seen.readingsSince ++ " ago)"
+                       )
+                    ++ ": \""
+                    ++ quickMessageTextForStatusLine seen.text
+                    ++ "\""
+                    ++ (if String.length seen.text <= quickMessageStatusCharacterBudget then
+                            ""
+
+                        else
+                            " (CAPPED "
+                                ++ String.fromInt quickMessageStatusCharacterBudget
+                                ++ "/"
+                                ++ String.fromInt (String.length seen.text)
+                                ++ ")"
+                       )
                 ++ (if seen.messagesInLayer <= 1 then
                         ""
 
