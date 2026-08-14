@@ -397,11 +397,31 @@ So the naming-rules claim is load-bearing after all, and it does not cover all
 five settings equally. `accept-fleet-invite-from` and `follow-fleet-broadcast-from`
 name characters and `hunt-system` names a solar system, whose names have the same
 property. `anomaly-name` and `avoid-rat` name neither: they are matched against
-the probe scanner's own Name column and against an overview row, and **nothing
-here has established what those columns may contain**. The cost is stated rather
-than hidden -- an anomaly or a rat whose name carries a comma became unmatchable
-here, and the evidence that would settle whether such a name exists is a live
-read nobody has taken.
+the probe scanner's own Name column and against an overview row, and both of
+those the _client_ writes. Issue #197 is the read of what those two columns are
+recorded as containing, and it answers one of them and not the other.
+
+**`avoid-rat`: measured, and no name carries a comma.** Across the 86 recorded
+runs the bots quote **231** distinct names off an overview row and the client
+writes **225** into the `(combat)` lines the host echoes beside them -- 245
+distinct between the two, on 69 runs, and **not one contains a comma**. That is
+not a column of plain words, which is what makes the absence a reading rather
+than a narrow sample: the same names carry apostrophes (`Kruul's Henchman`), full
+stops (`R.S. Officer`), hyphens, brackets and a slash (`Gas/Storage Silo`). The
+client's own game logs say it again independently -- 348 distinct actors across
+360,788 `(combat)` lines in 40 sessions, no comma.
+
+**`anomaly-name`: still unread, and the corpus cannot read it.** Nothing here
+ever logs the scanner's Name cell -- `We are in anomaly '...'` prints the ID the
+scanner gives -- so no recorded run carries one, and the site words the launcher
+itself asks for (`Hideaway`, `Refuge`, `Burrow`, `Rally Point`, ...) occur in all
+86 runs exactly **zero** times. The only probe-scanner names anybody has written
+down are the five read off a live scanner for #188 and kept in
+`test_saxrat_anomaly_name_wildcard.py`, and one of them is
+`Dread Assault: Blood Raider Temple` -- a colon, so this column is not restricted
+to the letters and spaces the other four suggest. The cost is stated rather than
+hidden: an anomaly whose name carries a comma is unmatchable here, and what would
+settle whether one exists is a live read of the scanner nobody has taken.
 
 Splitting these three at all is issue #182. The two fleet settings split and
 these did not, so a comma-separated value parsed with no complaint into **one**

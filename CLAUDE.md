@@ -7566,6 +7566,95 @@ string names six sites and would have hunted eight. `eve-online-combat-anomaly-b
 and `eve-online-wingus` both carry an anomaly-name setting and neither was
 examined.
 
+### The comma the settings parser eats: one of the two columns is read, one cannot be
+
+Issue #197, and it is a reading rather than a change -- nothing about
+`splitSettingIntoNames` moves. #182 made saxrat's `hunt-system`, `anomaly-name`
+and `avoid-rat` split their value on commas, and the split is applied to the
+value of **every** line, so there is no form -- one name per line, several per
+line, any mixture -- in which a name containing a comma reaches the bot. For a
+character name and a solar system name that costs nothing, because the client's
+own naming rules forbid a comma. For the other two it was an open question, and
+the issue's point was that it was *unread* rather than known-safe.
+
+**`avoid-rat` is answered: no client-written object name in any recording carries
+a comma.** Two independent readings, both from the recorded corpus:
+
+| reading | distinct names | mentions | runs |
+|---|---:|---:|---:|
+| a Name the bots quoted off an overview row | **231** | 637,060 | 68 |
+| a name the client wrote in a `(combat)` line | **225** | 306,756 | 68 |
+| the two together | **245** | | 69 of 86 |
+
+and the client's own logs say it a third time from a source this repo does not
+parse at all: **348** distinct actors across **360,788** `(combat)` lines in 40
+sessions of `~/Documents/EVE/logs/Gamelogs`. Not one of any of them contains a
+comma.
+
+**What makes that a measurement rather than a search that came up empty is that
+these are not plain words.** The same names carry apostrophes
+(`Kruul's Henchman`, 501 sightings), full stops (`R.S. Officer`), hyphens
+(`Rent-A-Dream Pleasure Gardens`), brackets and parentheses
+(`Acolyte I[MNRLG](Acolyte I)`) and a slash (`Gas/Storage Silo`). A column that
+admitted a comma had every opportunity to show one. That is the case a mutation
+would otherwise pass: a corpus of letters and spaces says nothing about whether
+a comma is possible, so `test_the_column_does_carry_other_punctuation` is what
+stops the finding resting on a narrow sample.
+
+**`anomaly-name` is not answered, and the corpus is structurally unable to answer
+it.** Neither bot ever logs the probe scanner's Name cell. `Dict.get "Name"`
+occurs once in saxrat's `Bot.elm`, inside `matchesAnomalyNameFromSettings`, where
+it is folded into a `Bool` and dropped; what a run prints about an anomaly is the
+**ID** the scanner gives it (`We are in anomaly 'AIC-176'`). So the site words
+`run_saxrat.sh` itself asks for -- `Hideaway`, `Refuge`, `Burrow`, `Rally Point`,
+`Sanctum`, `Haven`, `Forsaken`, `Forlorn` -- occur across all 86 recorded runs
+**zero** times. There is no reading to go back to, and no amount of corpus makes
+one.
+
+**The five names anybody has written down are the whole of the direct evidence,
+and one of them is the useful one.** `test_saxrat_anomaly_name_wildcard.py` keeps
+what a live scanner showed for #188: `Sansha Burrow`, `Sansha Hideaway`,
+`Sansha Refuge`, `Drone Assembly`, and **`Dread Assault: Blood Raider Temple`**.
+Five is not a sample and this is not claimed as one. What the fifth does settle
+is that the column is not letters and spaces -- it carries a colon -- so the
+naming-rules argument that covers a character and a solar system has nothing to
+say here, and the question stays open on its own terms rather than by analogy.
+
+**Recorded as a test rather than as a sentence**, in
+`tools/macos-host/tests/test_saxrat_comma_split_settings.py` (four new classes).
+The corpus half reads `~/eve-bot-logs` in one cached pass -- 1.6 GB, about two
+minutes -- and skips on a machine that has none, so it runs locally and not in
+CI, like every other corpus-reading case here. The counts above are asserted as *relations*
+against floors far below them, and a sample thinner than the floor **skips**
+rather than passing, since an absence found in a handful of names is not a
+finding. The scanner half is pinned the other way round: a case reads the source
+for the single `Dict.get "Name"` and a case asserts the site words are absent
+from the corpus, so **the day a run starts printing an anomaly's name, that case
+goes red** -- which is the day the question becomes answerable and somebody
+should be looking.
+
+**One extraction trap, kept because it is the shape of the bug being looked
+for.** A `'A', 'B', 'C'` clause -- the lock batch's, and the attacker list's --
+cannot be read with `'([^']*)'`, because `Kruul's Henchman` splits it into
+`Kruul` and `, `. The second of those *contains a comma*, so the naive reader
+reports a comma-bearing name that is entirely its own doing. The first pass of
+this measurement did exactly that and it is why `names_in_a_quoted_list` splits
+on the separator instead.
+
+**One mutation survived the first pass and the hole was real.** The punctuation
+case asked its question of the *union* of the two readings, so flattening the
+bots' own overview names to letters and spaces still passed on the strength of
+the client's `(combat)` lines -- a defect in this repo's parsing hidden by a
+source that does not use it. It is asked of each reading separately now.
+
+**Unverified: whether an anomaly's name can contain a comma**, which is the
+question #197 was filed on and the half this does not close. `/check-ui-parse`
+against a live scanner is the procedure, and one reading of a system's scan
+results would settle it. Also unverified in the other direction: nothing here
+establishes that an overview Name *cannot* carry a comma, only that across
+245 distinct names and three readings none does. And #197's second Unverified
+item stands untouched -- the mission runner's own name lists were not audited.
+
 ### A shut probe window hid the gate and the opportunity from the whole path
 
 Issue #204. `decideNextActionWhenInSpace` splits on `probeScannerWindow`, and both
