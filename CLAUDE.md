@@ -9473,10 +9473,27 @@ times: the tree handed over is byte for byte the tree that answered the probe.
 Two things this leaves alone. `--dist loadfile` in the workflow was justified by
 the per-file scratch build, and that reason is now spent — one build per worker
 process happens whatever the distribution — but the granularity is not what
-bounds a parallel run either: on four cores the whole suite spends 4,078 s of
-case time and finishes in 1,057 s against a perfect packing of 1,020 s, with the
-longest single file at 310 s. There is nothing for `loadscope` to recover, so
-the flag stays as a default rather than as a constraint.
+bounds a parallel run either, and #199 measured that on CI itself rather than
+inheriting it. Two consecutive runs of the job: 86 files and 3,643 s of case
+time with the longest file at 256 s against a 911 s packing floor, then 4,203 s
+with the longest at 290 s against 1,051 s. **The seconds move with the runner
+and the relation does not** — the longest file is 28% of the floor in both, and
+#172 saw 310 s against 1,020 s on its own container. So `loadscope` has of the
+order of **20 s of a 15-to-17-minute run** to recover, and the flag stays — a
+*measured* choice with a stated margin, neither a constraint nor an unexamined
+default.
+
+**A margin is a claim that stops holding without saying so**, which is what #199
+was filed on: revert the shared build, or let one file grow past the floor, and
+the measurement above quietly stops describing this suite while every run still
+looks healthy. So it is asserted rather than remembered.
+`check_file_packing.py` re-takes it from every CI run's own report — the longest
+file's case time against the case time spread evenly over the workers, two
+numbers from the same run, so a loaded runner stretches both and it reads the
+shape of the suite rather than the speed of the machine — and fails when a
+single file grows past the floor, naming it. The other half of the premise, that
+the build really is one per app per *process*, is what
+`test_prerequisites.OneBuiltAppIsHandedToEveryClass` pins.
 
 And **how much of a local run is the corpus-reading cases is still unmeasured**:
 they skip wherever `~/eve-bot-logs` is absent, which is CI and was the machine
