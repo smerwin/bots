@@ -45,6 +45,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(MACOS_HOST_DIR, "botlab_host"))
 
 import botlab_host  # noqa: E402
+from prerequisites import recorded_runs  # noqa: E402
 
 EVE_BOT_LOGS = os.path.join(os.path.expanduser("~"), "eve-bot-logs")
 
@@ -309,7 +310,11 @@ class TheCorpusStillDrawsACleanGapTest(unittest.TestCase):
 
     def setUp(self):
         if not os.path.isdir(EVE_BOT_LOGS):
-            self.skipTest("no ~/eve-bot-logs on this machine")
+            # Matches check_expected_skips.py's EXPECTED entry for
+            # "the recorded runs in ~/eve-bot-logs" -- reworded to that
+            # entry rather than adding a near-duplicate one.
+            self.skipTest("no recorded runs in ~/eve-bot-logs, so a claim "
+                           "about the corpus as a whole cannot be made here")
 
     def per_run_worst_costs(self):
         worst = {}
@@ -323,25 +328,21 @@ class TheCorpusStillDrawsACleanGapTest(unittest.TestCase):
         """The two runs #75 was filed on, and the eight #160 checked against
         them -- kept as the fixed control, so a threshold placed wrong fails
         here independently of anything the corpus has grown into since.
+
+        Uses `prerequisites.recorded_runs`, the shared corpus gate, rather
+        than a hand-rolled one -- its skip reason is already the one
+        `check_expected_skips.py` recognises.
         """
-        saturated_names = ["mission_run17.log", "mission_run19.log"]
-        healthy_names = ["mission_run27.log", "mission_run29.log",
-                          "mission_run30.log", "mission_run31.log",
-                          "mission_run34.log", "mission_run35.log",
-                          "mission_run36.log", "mission_run37.log"]
-        found = {name: os.path.join(EVE_BOT_LOGS, name)
-                 for name in saturated_names + healthy_names
-                 if os.path.exists(os.path.join(EVE_BOT_LOGS, name))}
-        if not found:
-            self.skipTest("none of the named control runs are on this machine")
-        saturated = [worst_per_event_cost(found[n]) for n in saturated_names
-                     if n in found]
-        healthy = [worst_per_event_cost(found[n]) for n in healthy_names
-                   if n in found]
+        saturated_pairs = recorded_runs("17", "19")
+        healthy_pairs = recorded_runs("27", "29", "30", "31", "34", "35",
+                                       "36", "37")
+        saturated = [worst_per_event_cost(path) for _, path in saturated_pairs]
+        healthy = [worst_per_event_cost(path) for _, path in healthy_pairs]
         saturated = [c for c in saturated if c is not None]
         healthy = [c for c in healthy if c is not None]
         if not saturated or not healthy:
-            self.skipTest("the named control runs on this machine carry no glides")
+            self.skipTest("no recorded runs in ~/eve-bot-logs, so a claim "
+                           "about the corpus as a whole cannot be made here")
         for cost in healthy:
             self.assertLess(cost, botlab_host.INPUT_COST_SATURATED_MS,
                              "a run #160 called healthy must read under the mark")
@@ -357,8 +358,8 @@ class TheCorpusStillDrawsACleanGapTest(unittest.TestCase):
         """
         worst = self.per_run_worst_costs()
         if len(worst) < 10:
-            self.skipTest("too few runs with glides on this machine to "
-                           "say anything about a corpus-wide gap")
+            self.skipTest("no recorded runs in ~/eve-bot-logs, so a claim "
+                           "about the corpus as a whole cannot be made here")
         threshold = botlab_host.INPUT_COST_SATURATED_MS
         below = [c for c in worst.values() if c < threshold]
         at_or_above = [c for c in worst.values() if c >= threshold]
