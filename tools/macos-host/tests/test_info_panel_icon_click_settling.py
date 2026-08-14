@@ -64,21 +64,20 @@ icon-click branch is the one reached. The wiring -- that `previousStepsEffects`
 actually reaches the function from `generalSetupInUserInterface` -- is read out
 of the source instead, since it is not an expression.
 
-**Unverified.** Two of the six vendored copies -- `eve-online-combat-anomaly-bot`
-and `eve-online-warp-to-0-autopilot` -- carry a *separate, pre-existing* defect
-in their own vendored `EveOnline/BotFramework.elm`:
-`findMouseButtonClickLocationsInListOfEffects` there still recognizes only the
-older `KeyDown`-encoded click, never the `ButtonDown`/`ButtonUp` pair
-`effectsMouseClickAtLocation` actually emits in their host interface. That
-function is what both the pre-existing `doEffectsClickModuleButton` and this
-change's `doEffectsClickUIElement` are built on, so in those two apps *neither*
-guard can currently recognize a click that was just dispatched -- the settling
-check silently falls through to "click" every time, which is the same behaviour
-as before this change and not a regression it introduces. Fixing that is a
-change to `BotFramework.elm`'s click-detection primitive, affects the existing
-module-button guard as much as this one, and is out of scope for issue #227.
-`TheClickDetectionPrimitiveInGroupBIsKnownBroken` records the finding as a case
-rather than leaving it to be rediscovered.
+**Since fixed.** Two of the six vendored copies --
+`eve-online-combat-anomaly-bot` and `eve-online-warp-to-0-autopilot` -- carried
+a *separate, pre-existing* defect in their own vendored
+`EveOnline/BotFramework.elm`: `findMouseButtonClickLocationsInListOfEffects`
+there recognized only the older `KeyDown`-encoded click, never the
+`ButtonDown`/`ButtonUp` pair `effectsMouseClickAtLocation` actually emits in
+their host interface. That function is what both the pre-existing
+`doEffectsClickModuleButton` and this change's `doEffectsClickUIElement` are
+built on, so in those two apps *neither* guard could recognize a click that had
+just been dispatched. Issue #239 took that up and the arm is now present in
+every app whose interface has the constructor, so both guards settle there too.
+The claim this file used to record as a case now lives in
+`test_click_matcher_reads_its_own_click.py`, which pins the arm and the
+encoding it matches across all six apps.
 
 Also unverified: whether the click lands on the live client at all, and whether
 a landed click enables the panel or a second one undoes it -- see the issue's
@@ -444,22 +443,20 @@ class BotElmThreadsThePreviousStepsEffectsThroughTest(unittest.TestCase):
                 "element" % app)
 
 
-class TheClickDetectionPrimitiveInGroupBIsKnownBrokenTest(unittest.TestCase):
-    """Recorded so this is not silently rediscovered.
+class TheClickDetectionPrimitiveIsFixedEverywhereTest(unittest.TestCase):
+    """The settling guard in this file is only as good as what it is built on.
 
-    `eve-online-combat-anomaly-bot` and `eve-online-warp-to-0-autopilot`
-    vendor a `findMouseButtonClickLocationsInListOfEffects` that still only
-    recognizes a click encoded as `KeyDown` -- the older convention -- and
-    never `ButtonDown`/`ButtonUp`, which `effectsMouseClickAtLocation` is what
-    their own `Common/EffectOnWindow.elm` actually emits. Both
-    `doEffectsClickModuleButton` (pre-existing) and this change's
-    `doEffectsClickUIElement` are built on that function, so in these two
-    apps neither settling guard can currently recognize a click that was just
-    dispatched -- confirmed live above, where the mission runner and saxrat
-    wait and these two do not. This is not a regression: the icon click in
-    these two apps behaves exactly as it did before this PR. Fixing the
-    primitive is a separate change with its own evidence, since it would also
-    change the pre-existing module-button guard's behaviour in both apps.
+    `doEffectsClickUIElement` reads
+    `findMouseButtonClickLocationsInListOfEffects`, so an app whose copy of
+    that function cannot recognize its own click has a guard that falls
+    through to "click" every reading however correct the guard itself is.
+    `eve-online-combat-anomaly-bot` and `eve-online-warp-to-0-autopilot` were
+    in exactly that state when this file was written; #239 fixed them.
+
+    What the arm matches per interface dialect, and the four copies being
+    identical, is `test_click_matcher_reads_its_own_click.py`'s subject. This
+    case asserts only the part this file depends on: every app whose settling
+    guard this file exercises can see a `ButtonDown`-encoded click.
     """
 
     FRAMEWORKS = {
@@ -467,26 +464,17 @@ class TheClickDetectionPrimitiveInGroupBIsKnownBrokenTest(unittest.TestCase):
             COMBAT_ANOMALY_DIR, "EveOnline", "BotFramework.elm"),
         "warp-to-0 autopilot": os.path.join(
             WARP_TO_0_DIR, "EveOnline", "BotFramework.elm"),
+        "mission runner": os.path.join(
+            MISSION_RUNNER_DIR, "EveOnline", "BotFramework.elm"),
+        "saxrat": os.path.join(SAXRAT_DIR, "EveOnline", "BotFramework.elm"),
     }
 
-    def test_neither_recognizes_a_button_down_click(self):
+    def test_every_app_recognizes_a_button_down_click(self):
         for app, path in self.FRAMEWORKS.items():
             block = collapsed(
                 body_of(source_of(path), "findMouseButtonClickLocationsInListOfEffects"))
-            self.assertNotIn(
+            self.assertIn(
                 "ButtonDown button ->", block,
-                "%s's click-finder has been fixed -- if so, this case (and "
-                "this file's own doc comment) is stale and should be "
-                "updated rather than left claiming a defect that is gone."
-                % app)
-
-    def test_mission_runner_and_saxrat_do_not_share_the_defect(self):
-        for app, path in (("mission runner",
-                            os.path.join(MISSION_RUNNER_DIR, "EveOnline",
-                                         "BotFramework.elm")),
-                           ("saxrat",
-                            os.path.join(SAXRAT_DIR, "EveOnline",
-                                         "BotFramework.elm"))):
-            block = collapsed(
-                body_of(source_of(path), "findMouseButtonClickLocationsInListOfEffects"))
-            self.assertIn("ButtonDown button ->", block, app)
+                "%s's click-finder no longer reads the constructor its own "
+                "clicks are built from, so this file's settling guard cannot "
+                "recognize a click it just dispatched" % app)
