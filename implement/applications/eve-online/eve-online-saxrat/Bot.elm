@@ -5197,9 +5197,9 @@ binding constraint at all. `describeMaxTargets`' argument, applied to this pair.
 -}
 describeDroneLaunchCeiling : DroneLaunchState -> String
 describeDroneLaunchCeiling state =
-    "Drone launch ceiling: "
+    "dronecap "
         ++ (droneLaunchCeiling state |> String.fromInt)
-        ++ " (drones window says "
+        ++ " (window "
         ++ (state.fromWindow |> String.fromInt)
         ++ ", client stated "
         ++ (state.statedByClient |> Maybe.map String.fromInt |> Maybe.withDefault "-")
@@ -5490,11 +5490,11 @@ describeHuntCircuit context =
 
 describeDroneRecall : BotDecisionContext -> String
 describeDroneRecall context =
-    "Drones: "
+    "drones "
         ++ (context.memory.dronesInSpaceCountLastReading |> String.fromInt)
-        ++ " in space ("
+        ++ " out ("
         ++ (context.memory.dronesInSpaceTicks |> String.fromInt)
-        ++ " readings), unanswered recall "
+        ++ "rd) recall "
         ++ (context.memory.droneRecallUnansweredTicks |> String.fromInt)
         ++ "/"
         ++ (droneRecallGiveUpTicks |> String.fromInt)
@@ -6388,19 +6388,19 @@ rule declining to attribute, which is the expected answer here and not a fault.
 -}
 describeLockRange : LockRangeState -> String
 describeLockRange state =
-    "Lock range: "
+    "lock "
         ++ (lockRangeThresholdInMeters state |> String.fromInt)
-        ++ " m (setting "
+        ++ "m (set "
         ++ (state.fromSetting |> String.fromInt)
         ++ ", client stated "
         ++ (state.statedMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
-        ++ ", proven "
+        ++ " proven "
         ++ (state.provenAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
-        ++ ", refused "
+        ++ " refused "
         ++ (state.refusedAtMeters |> Maybe.map String.fromInt |> Maybe.withDefault "-")
-        ++ ", attempt "
+        ++ " attempt "
         ++ (state.attempt
-                |> Maybe.map (\attempt -> String.fromInt attempt.distanceInMeters ++ " m for " ++ String.fromInt attempt.readingsWaited ++ " readings")
+                |> Maybe.map (\attempt -> String.fromInt attempt.distanceInMeters ++ "m/" ++ String.fromInt attempt.readingsWaited ++ " readings")
                 |> Maybe.withDefault "none"
            )
         ++ ")."
@@ -6606,11 +6606,11 @@ an operator can make across a session.
 -}
 describeLockBatch : LockBatchState -> String
 describeLockBatch state =
-    "Lock batch: up to "
+    "batch "
         ++ (lockBatchMaximumClicks |> String.fromInt)
-        ++ " clicks a step, asked "
+        ++ " asked "
         ++ (state.clicksAsked |> String.fromInt)
-        ++ " and the bar answered "
+        ++ " got "
         ++ (state.clicksAnswered |> String.fromInt)
         ++ " this session"
         ++ (case state.dispatch of
@@ -7149,20 +7149,20 @@ anything has a rule reading something other than its own state.
 -}
 describeMaxTargets : MaxTargetsState -> String
 describeMaxTargets state =
-    "Max targets: "
+    "maxtgt "
         ++ (maxTargetsCeiling state |> String.fromInt)
         ++ " (setting "
         ++ (state.fromSetting |> String.fromInt)
         ++ ", client stated "
         ++ (state.statedByClient |> Maybe.map String.fromInt |> Maybe.withDefault "-")
-        ++ ", most held at once "
+        ++ " held "
         ++ (state.heldAtOnce |> Maybe.map String.fromInt |> Maybe.withDefault "-")
         ++ (case state.statedByClient of
                 Just _ ->
                     ""
 
                 Nothing ->
-                    ", probing for " ++ (maxTargetsCeiling state + 1 |> String.fromInt)
+                    " probing " ++ (maxTargetsCeiling state + 1 |> String.fromInt)
            )
         ++ ")."
 
@@ -9678,17 +9678,17 @@ statusTextFromState context =
                                 ++ "."
 
                         describeRatsInOverview =
-                            "Rats in overview: " ++ (namesOfRatsInOverview |> List.length |> String.fromInt) ++ "."
+                            "rats " ++ (namesOfRatsInOverview |> List.length |> String.fromInt) ++ "."
 
                         describeCurrentTarget =
                             case currentTargetName of
                                 Nothing ->
                                     -- No condition clause here: there is
                                     -- nothing whose condition it would be.
-                                    "Current target: None."
+                                    "no target."
 
                                 Just name ->
-                                    "Current target: "
+                                    "target "
                                         ++ name
                                         ++ " "
                                         ++ describeTargetHitpoints
