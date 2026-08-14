@@ -79,15 +79,17 @@ class TheFileIsWhatIsCountedRatherThanTheClass(unittest.TestCase):
 class AFileUnderTheFloorIsNotWhatBoundsTheRun(unittest.TestCase):
 
     def test_the_shape_this_suite_has_today_passes(self):
-        # This suite's own shape, off the CI run #199 was measured on: 86 files
-        # and 3,643s of case time on four workers, the longest of them 256s
-        # against a 911s floor. That margin is why the flag is left alone.
-        ok, printed = accepts(
-            spread("test_longest", 256)
-            + [("test_%d" % index, "C", 40.0) for index in range(85)],
-            workers=4)
-        self.assertTrue(ok, printed)
-        self.assertIn("granularity is not what bounds this run", printed)
+        # Both CI runs #199 was measured on, which differ by 15% in seconds and
+        # not at all in shape: the longest file is 28% of the floor in each.
+        # That margin is why the flag is left alone.
+        for longest, others in ((256.0, 40.0), (290.0, 46.0)):
+            with self.subTest(longest=longest):
+                ok, printed = accepts(
+                    spread("test_longest", longest)
+                    + [("test_%d" % index, "C", others) for index in range(85)],
+                    workers=4)
+                self.assertTrue(ok, printed)
+                self.assertIn("granularity is not what bounds this run", printed)
 
     def test_a_file_that_grows_past_the_floor_fails(self):
         # The staleness the comment could not announce: one file long enough
