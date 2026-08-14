@@ -4038,23 +4038,23 @@ describeQuickMessage sighting =
                                 ++ String.fromInt (String.length seen.text)
                                 ++ ")"
                        )
-                ++ (if seen.messagesInLayer <= 1 then
-                        ""
+                    ++ (if seen.messagesInLayer <= 1 then
+                            ""
 
-                    else
-                        " (1 of "
-                            ++ String.fromInt seen.messagesInLayer
-                            ++ " quick messages in the layer -- the parser keeps the first and drops the rest)"
-                   )
-                ++ (if seen.displayTextsInMessage <= 1 then
-                        ""
+                        else
+                            " (1 of "
+                                ++ String.fromInt seen.messagesInLayer
+                                ++ " quick messages in the layer -- the parser keeps the first and drops the rest)"
+                       )
+                    ++ (if seen.displayTextsInMessage <= 1 then
+                            ""
 
-                    else
-                        " (1 of "
-                            ++ String.fromInt seen.displayTextsInMessage
-                            ++ " display texts in the message -- the parser keeps the first and drops the rest)"
-                   )
-                ++ "."
+                        else
+                            " (1 of "
+                                ++ String.fromInt seen.displayTextsInMessage
+                                ++ " display texts in the message -- the parser keeps the first and drops the rest)"
+                       )
+                    ++ "."
 
 
 {-| 2020-07-11 Discovery by Viktor:
