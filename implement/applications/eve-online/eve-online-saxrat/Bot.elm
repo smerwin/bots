@@ -9502,28 +9502,28 @@ statusTextFromState context =
         -- in the per-tick log instead of only being inferable from how
         -- many consecutive ticks repeat the same decision-path text.
         describeMenuAndSettlingCounters =
-            "Context menus open: "
+            "menus "
                 ++ (readingFromGameClient.contextMenus |> List.length |> String.fromInt)
-                ++ " (cascade level "
+                ++ "/L"
                 ++ (context.contextMenuCascadeLevel |> String.fromInt)
-                ++ ", stuck ticks "
+                ++ " stuck "
                 ++ (context.memory.contextMenuStuckTicks |> String.fromInt)
-                ++ "). Route marker unchanged ticks: "
+                ++ " | route "
                 ++ (context.memory.routeFirstMarkerUnchangedTicks |> String.fromInt)
-                ++ ". Target-to-unlock unchanged ticks: "
+                ++ " | unlock "
                 ++ (context.memory.targetToUnlockUnchangedTicks |> String.fromInt)
-                ++ ". Loot window open ticks: "
+                ++ " | loot "
                 ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
-                ++ ". No scan results and no route last time in space: "
+                ++ " | dead-end "
                 ++ (if context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace then
                         "yes"
 
                     else
                         "no"
                    )
-                ++ ". Approaching ticks: "
+                ++ " | approach "
                 ++ (context.memory.shipApproachingTicks |> String.fromInt)
-                ++ ". "
+                ++ " | "
                 ++ describeGateActivationAsk
                     { asked = askingAnAccelerationGateToOpen readingFromGameClient
                     , gateWithinReach = accelerationGateIsWithinReach readingFromGameClient
@@ -9540,9 +9540,9 @@ statusTextFromState context =
                         |> Maybe.map (.objectDistanceInMeters >> distantGateVerdict >> describeDistantGate)
                         |> Maybe.withDefault ""
                    )
-                ++ ". Wrecks already opened: "
+                ++ " | wrecks "
                 ++ (context.memory.lootedWreckIds |> List.length |> String.fromInt)
-                ++ ". "
+                ++ " | "
                 ++ describeModulesToActivateAlways readingFromGameClient
                 ++ "\n"
                 ++ describeIncomingDamage context
