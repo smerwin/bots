@@ -29,7 +29,9 @@ MACOS_HOST_DIR = os.path.dirname(HERE)
 sys.path.insert(0, MACOS_HOST_DIR)
 import check_expected_skips  # noqa: E402
 
+sys.path.insert(0, HERE)
 from prerequisites import NO_TOOLCHAIN_SKIP_REASON  # noqa: E402
+from test_posted_event_flags import NOT_MACOS  # noqa: E402
 
 
 def report_of(cases):
@@ -98,6 +100,24 @@ class TheCorpusSkipsCiActuallyHasArePermitted(unittest.TestCase):
         self.assertTrue(ok, printed)
         self.assertIn("%d executed" % 20, printed)
         self.assertIn("%d skipped" % len(CORPUS_SKIPS), printed)
+
+
+class ThePlatformSkipIsPermitted(unittest.TestCase):
+    """The one skip that is about the machine rather than the corpus.
+
+    `test_posted_event_flags.py` builds and drives `cg_input`, which is
+    CoreGraphics, so those cases cannot run on the Linux runner. Coupled the
+    same way the toolchain reason is: the string the suite writes is asserted
+    here rather than a copy of it, because a rewording on one side only would
+    leave the build green while the skip walked through unnamed.
+    """
+
+    def test_the_reason_the_suite_writes_is_the_one_expected(self):
+        self.assertIsNone(check_expected_skips.unexpected(NOT_MACOS))
+
+    def test_a_run_carrying_it_still_passes(self):
+        ok, printed = accepts([("executed", None), ("skipped", NOT_MACOS)])
+        self.assertTrue(ok, printed)
 
 
 class ABrokenEnvironmentIsRefused(unittest.TestCase):
