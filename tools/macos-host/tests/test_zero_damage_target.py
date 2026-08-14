@@ -27,6 +27,15 @@ mid-volley produced a zero -- and refusing is latched for the session, so a
 false positive costs the run. `ThresholdCalibrationTest` reads the number out of
 `Bot.elm` and checks it against what the client actually wrote.
 
+**What the threshold has to clear is a run, not a target.** #90's own
+calibration rested on there being no target that ever read both zero and
+nonzero, and issue #158 is that claim expiring on a `Centii Servant` while the
+rule was untouched. The rule never asked that question: it tallies *consecutive*
+readings whose whole summary for a target was zero and clears the tally on any
+reading that target took damage. So the separation is recounted here as the run
+length -- one, against the ten the shortest episode worth catching runs -- and
+eight is a number in that gap rather than one in empty space.
+
 **A verdict that is not written down is not a verdict.** A reading's entries are
 gone by the next one, so a branch that saw the zero and recorded nothing would
 see it once and go back to shooting the same object -- the failure
@@ -34,13 +43,16 @@ see it once and go back to shooting the same object -- the failure
 
 The corpus is real. Every line quoted here was written by the client during a
 recorded session under `~/Documents/EVE/logs/Gamelogs`, and the aggregate counts
-come from the 77,316 outgoing damage lines across those files. Nothing here
-reads a live game client, a bot, or the game log directory.
+come from the outgoing damage lines across those files -- 77,316 of them when
+#90 was written and 165,420 today. Nothing here reads a live game client or a
+bot; the counts are asserted as relations rather than as numbers, so a corpus
+that goes on growing cannot turn a true claim red.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
 import collections
 import glob
+import json
 import os
 import re
 import sys
@@ -112,28 +124,95 @@ NON_COMBAT = [
 ]
 
 
-def outgoing_damage_in_recorded_logs():
-    """Every `N to <target>` line the client wrote, as `(amount, target)`.
+def bot_constant(name):
+    """A number read out of `Bot.elm` rather than restated beside it.
+
+    The same coupling `test_incoming_damage` puts on the retreat's thresholds.
+    A threshold quietly edited to a value the evidence does not support is the
+    kind of change that never fails until a run refuses to shoot something it
+    could have killed.
+    """
+    with open(MISSION_RUNNER_BOT_ELM, encoding="utf-8") as handle:
+        source = handle.read()
+    match = re.search(rf"^{name} =\n    (-?\d+)$", source, re.MULTILINE)
+    if match is None:
+        raise AssertionError(f"{name} not found in Bot.elm")
+    return int(match.group(1))
+
+
+_RECORDED_OUTGOING = []
+
+
+def recorded_outgoing_damage():
+    """Every `N to <target>` line the client wrote, timestamp included.
 
     Read through the host's own stripping and parsing rather than a second
     regex here, so a matcher that drifts from what the client writes is what
     these cases measure rather than something they reimplement.
+
+    Cached for the process: the corpus is 185 files and several cases fold it
+    more than one way, so re-reading it per case was most of this file's time.
     """
+    if _RECORDED_OUTGOING:
+        return _RECORDED_OUTGOING
     paths = sorted(glob.glob(GAMELOGS_GLOB))
     if not paths:
         raise unittest.SkipTest(NO_GAMELOGS)
-    events = []
     for path in paths:
         with open(path, encoding="utf-8", errors="replace") as handle:
             for raw in handle:
                 line = " ".join(botlab_host._GAME_LOG_MARKUP.sub("", raw).split())
-                dealt = botlab_host.parse_outgoing_damage(
-                    botlab_host.parse_game_log_line(line))
+                entry = botlab_host.parse_game_log_line(line)
+                dealt = botlab_host.parse_outgoing_damage(entry)
                 if dealt is not None:
-                    events.append((path, dealt[0], dealt[1]))
-    if not events:
+                    _RECORDED_OUTGOING.append(
+                        (path, dealt[0], dealt[1], entry["timestamp"]))
+    if not _RECORDED_OUTGOING:
         raise unittest.SkipTest(NO_GAMELOGS)
-    return events
+    return _RECORDED_OUTGOING
+
+
+def outgoing_damage_in_recorded_logs():
+    """The same lines as `(path, amount, target)`, which is what most cases want."""
+    return [(path, amount, target)
+            for path, amount, target, _ in recorded_outgoing_damage()]
+
+
+def targets_that_ever_took_damage():
+    return {target for _, amount, target in outgoing_damage_in_recorded_logs()
+            if amount != 0}
+
+
+def summaries_the_host_would_have_built():
+    """What each reading's `MacOsHostSyntheticOutgoingDamage` node would have said.
+
+    The host does not carry lines, it carries `{name, hits, damage}` summed per
+    target per reading -- so a reading in which one gun reads 0 and a drone
+    reads 55 on the same target is handed to the bot as `damage = 55`, and the
+    rule reads that as the target taking damage rather than as a zero. Any case
+    counting *lines* is therefore measuring something the bot never sees.
+
+    Readings are the client's own second, which is the finest its timestamps
+    can distinguish and shorter than any real reading (one to eight seconds).
+    That is the fold most favourable to a zero standing alone in a reading of
+    its own, so a claim that holds here holds at every real reading length.
+
+    Returns `{(path, target): [summary, ...]}` in order, one entry per reading
+    that named the target, in `outgoing_damage_for_reading`'s own shape plus the
+    timestamp the fold was cut on -- which the host's node does not carry and
+    nothing handed to the rule reads.
+    """
+    readings = collections.OrderedDict()
+    for path, amount, target, timestamp in recorded_outgoing_damage():
+        key = (path, target)
+        entries = readings.setdefault(key, [])
+        if entries and entries[-1]["timestamp"] == timestamp:
+            entries[-1]["hits"] += 1
+            entries[-1]["damage"] += amount
+        else:
+            entries.append({"name": target, "hits": 1, "damage": amount,
+                            "timestamp": timestamp})
+    return readings
 
 
 class OutgoingDamageMatchingTest(unittest.TestCase):
@@ -416,14 +495,8 @@ class ThresholdCalibrationTest(unittest.TestCase):
     never fails until a run refuses to shoot something it could have killed.
     """
 
-    def setUp(self):
-        with open(MISSION_RUNNER_BOT_ELM, encoding="utf-8") as handle:
-            self.source = handle.read()
-
     def constant(self, name):
-        match = re.search(rf"^{name} =\n    (-?\d+)$", self.source, re.MULTILINE)
-        self.assertIsNotNone(match, f"{name} not found in Bot.elm")
-        return int(match.group(1))
+        return bot_constant(name)
 
     def episodes(self):
         """Runs of consecutive zero-damage hits on one target within a session.
@@ -442,43 +515,63 @@ class ThresholdCalibrationTest(unittest.TestCase):
         finished.extend((target, len(hits)) for (_, target), hits in running.items())
         return finished
 
-    def test_no_target_that_ever_took_damage_produced_a_zero(self):
-        """The separation the threshold rests on, recounted.
+    def test_a_zero_on_a_target_the_guns_are_hurting_is_isolated(self):
+        """The premise the threshold rests on, which is about runs and not targets.
 
-        Across 77,316 outgoing damage lines naming 294 distinct targets, eight
-        ever produced a zero and none of those eight ever produced a nonzero.
-        Resists and glancing hits do not round to zero on this fit -- a glancing
-        hit reads 15 -- so there is no observed overlap for a threshold to
-        clear, and the number below is margin rather than a separator.
+        #90 rested it on a disjointness instead -- across 77,316 outgoing lines
+        naming 294 distinct targets, eight ever produced a zero and none of the
+        eight ever produced a nonzero -- and called eight margin rather than a
+        separator because there was no observed overlap for it to sit in. Issue
+        #158 is that claim expiring: `Centii Servant` now both took damage and
+        read zero, and no edit to the rule caused it.
+
+        **The rule never asked that question.** `zeroDamageMemoryAfterReading`
+        tallies *consecutive* readings in which a target's whole summary was
+        zero and clears the tally outright on any reading it took damage, so
+        what has to stay small is the run and not the count of targets. So the
+        separation is recounted here as the run length, which is what eight has
+        to clear.
+
+        Two things ride beside the relation, because a comparison against a
+        constant is satisfied by any constant large enough. The threshold has to
+        keep **several times** the observed worst case rather than one hit of
+        headroom -- a false positive is latched for the session, so a number one
+        above the longest run the corpus has ever shown is not a calibration --
+        which is what rules out a threshold of two or three sitting in the same
+        gap and claiming the same evidence. And the run itself has a fixed
+        ceiling, which is what stops a threshold raised to cover a real overlap
+        from making this pass: the corpus's own answer is one, and a target
+        being hit that reads zero three times running is a different animal from
+        an isolated resist and wants looking at whatever the threshold says.
         """
-        zeros, nonzeros = set(), set()
-        for _, amount, target in outgoing_damage_in_recorded_logs():
-            (zeros if amount == 0 else nonzeros).add(target)
-        self.assertTrue(zeros, "no zero-damage line in the corpus at all")
-        self.assertEqual(
-            zeros & nonzeros, set(),
-            "a target both took damage and read zero, so the threshold's "
-            "premise no longer holds: " + repr(sorted(zeros & nonzeros)))
-
-    def test_nothing_transient_reaches_the_threshold(self):
-        # A zero-damage run that was later broken by a real hit is the false
-        # positive this guards against. The corpus contains none at all, so
-        # every episode measured here is one of the eight zero-only targets.
+        hurt = targets_that_ever_took_damage()
+        overlap = {target for _, amount, target in outgoing_damage_in_recorded_logs()
+                   if amount == 0 and target in hurt}
+        self.assertTrue(
+            overlap,
+            "no target in this corpus both read zero and took damage, so this "
+            "case is measuring nothing -- see issue #158")
+        runs = sorted(((target, length) for target, length in self.episodes()
+                       if target in hurt), key=lambda pair: -pair[1])
+        longest = runs[0][1]
         threshold = self.constant("defaultZeroDamageHitsBeforeGivingUp")
-        transient = [(target, length) for target, length in self.episodes()
-                     if length >= threshold and target in
-                     {t for _, amount, t in outgoing_damage_in_recorded_logs()
-                      if amount != 0}]
-        self.assertEqual(transient, [], repr(transient))
+        self.assertLess(longest, threshold, repr(runs))
+        self.assertLessEqual(longest * 4, threshold, repr(runs))
+        self.assertLessEqual(longest, 3, repr(runs))
 
     def test_the_threshold_catches_every_episode_worth_catching(self):
         """Eight is the largest value that still catches the long ones.
 
-        The eight zero-only episodes ran 3, 3, 10, 28, 74, 86, 101 and 108
-        landed hits. The two three-hit ones ended on their own inside eight
-        seconds and are nothing to fix; the smallest that did not is ten, so a
-        threshold above that would have watched run 27 shoot its rock for the
-        full 414 seconds and said nothing.
+        The zero-only episodes ran 3, 3, 5, 10, 28, 74, 86, 101 and 108 landed
+        hits. The short ones ended on their own inside a few seconds and are
+        nothing to fix; the smallest that did not is ten, so a threshold above
+        that would have watched run 27 shoot its rock for the full 414 seconds
+        and said nothing.
+
+        With the case above this is the whole calibration: the longest run on a
+        target the guns were hurting is one, the shortest episode worth catching
+        is ten, and eight is a number in that gap. #90 could only say the gap was
+        empty, which is what issue #158 retired.
         """
         threshold = self.constant("defaultZeroDamageHitsBeforeGivingUp")
         lengths = sorted(length for _, length in self.episodes())
@@ -540,6 +633,82 @@ class ZeroDamageRuleTest(unittest.TestCase):
         # And it is recorded once however long the object is shot at, so the
         # list cannot grow with every reading after the verdict.
         self.assertEqual(over, '"Infested Asteroid"')
+
+    def test_the_corpus_overlap_folded_through_the_rule_tallies_nothing(self):
+        """Issue #158's own overlap, as readings, through the real rule.
+
+        `ThresholdCalibrationTest` recounts the separation as *lines*, which is
+        the pessimistic fold. The host does not carry lines: it carries
+        `{name, hits, damage}` summed per target per reading, so a reading in
+        which a drone reads 0 and the same drone reads 55 on the same target is
+        handed over as `damage = 55` -- which this rule reads as the target
+        taking damage and clears the tally on.
+
+        That is what every one of the corpus's zeros on a target that was being
+        hurt turns out to be. All three were written in the same second as a
+        real hit on that same target:
+
+            0 to Centii Servant - Acolyte I - Hits
+            55 to Centii Servant - Acolyte I - Smashes
+
+        So the sessions carrying the overlap are folded here at the client's own
+        second -- shorter than any real reading, and so the fold most favourable
+        to a zero standing alone -- and run through `Bot.elm` itself. Nothing is
+        given up on, and the tally never leaves zero: the overlap that retired
+        #90's claim never reached the bot at all.
+
+        The peak is asserted against a fixed ceiling as well as against the
+        threshold, so a threshold raised to cover a real overlap cannot make
+        this pass.
+
+        **The same session with its damage taken out is the control**, and it
+        rides along because an assertion that something did not happen passes
+        just as well on a fold that produced nothing, a literal the repl could
+        not compile, or a session that turned out to be empty. Same target, same
+        readings, same hit counts, `damage = 0` throughout: the rule gives up on
+        it. So what saves the bot here is the damage in those readings and not
+        an answer that never arrived.
+        """
+        hurt = targets_that_ever_took_damage()
+        # The sessions that wrote a zero-damage *line* against such a target.
+        # No other session can tally anything for it, so folding those adds
+        # thousands of readings and can only ever answer nothing.
+        wrote_a_zero = {(path, target)
+                        for path, amount, target in outgoing_damage_in_recorded_logs()
+                        if amount == 0 and target in hurt}
+        sessions = [(key, summaries)
+                    for key, summaries in summaries_the_host_would_have_built().items()
+                    if key in wrote_a_zero]
+        self.assertTrue(
+            sessions,
+            "no session in this corpus holds a zero on a target that was being "
+            "hurt, so this case is measuring nothing -- see issue #158")
+        threshold = bot_constant("defaultZeroDamageHitsBeforeGivingUp")
+        peak_definition = (
+            "peak t os = List.foldl (\\o ( m, best ) -> let next = step t"
+            " (Just o) m in ( next, max best (List.sum (List.map .hits"
+            " next.landedHitsAtZero)) )) ( empty, 0 ) os |> Tuple.second",)
+        for (path, target), summaries in sessions:
+            def fold(damage_of):
+                return ", ".join(
+                    "[ { name = %s, hits = %d, damage = %d } ]"
+                    % (json.dumps(target), summary["hits"], damage_of(summary))
+                    for summary in summaries)
+
+            readings = fold(lambda summary: summary["damage"])
+            without_damage = fold(lambda _: 0)
+            where = "%s / %s" % (os.path.basename(path), target)
+            given_up, control = self.given_up([
+                "(run %d [ %s ]).namesGivenUpOn" % (threshold, readings),
+                "(run %d [ %s ]).namesGivenUpOn" % (threshold, without_damage),
+            ])
+            self.assertEqual(given_up, "", where)
+            self.assertEqual(control, json.dumps(target), where)
+            peak, = self.repl.values(
+                ["peak %d [ %s ]" % (threshold, readings)],
+                r"(\d+) : Int", definitions=self.DEFINITIONS + peak_definition)
+            self.assertLess(int(peak), threshold, where)
+            self.assertLessEqual(int(peak), 3, where)
 
     def test_a_target_taking_any_damage_never_trips_it(self):
         """A merely well-tanked target is not an immune one.
