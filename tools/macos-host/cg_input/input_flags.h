@@ -59,6 +59,11 @@
 // for a key that holds nothing. Both halves, so what is stamped on the events
 // that follow is what the same key held down in hardware would put there.
 //
+// This is about what a key holds down for the events *after* it, which is a
+// different question from what a key carries on its own event. F1 carries Fn
+// and holds nothing; Control carries Control and holds it too. Only the first
+// question is answered here -- see cgi_compose for the second.
+//
 // Caps Lock (0x39) is deliberately absent: it latches rather than being held,
 // so a keydown of it does not mean "capitals from here on". Its bits are still
 // in CGI_MANAGED_MODIFIERS, so a session with Caps Lock on cannot capitalise
@@ -93,10 +98,24 @@ static inline uint64_t cgi_hold(uint64_t held, uint16_t key, int down) {
     return down ? (held | bit) : (held & ~bit);
 }
 
-// The flags to post an event with: the ones we are holding, and none of the
-// session's. `event_flags` is what the event was born with.
-static inline uint64_t cgi_compose(uint64_t event_flags, uint64_t held) {
-    return (event_flags & ~CGI_MANAGED_MODIFIERS) | (held & CGI_MANAGED_MODIFIERS);
+// The flags to post an event with: the ones the key itself carries, plus the
+// ones we are holding, and none of the session's.
+//
+// `event_flags` is what the event was born with, which is the key's own flags
+// *and* the session's, mixed. `intrinsic` is the key's own alone, which
+// cg_input.c reads off a private-source twin of the same event rather than
+// restating macOS's table here.
+//
+// Both terms are needed and neither is enough. F1 carries Fn because it is F1
+// -- measured, on a clean session -- so dropping it could stop F1 registering
+// as F1. Control carries Control because we are holding it down, which no
+// twin of a mouse event will ever say. What must not survive is the third
+// thing: a modifier that reached this event only by being in the session when
+// it was created, which is how one key's Fn ends up on the next key's event.
+static inline uint64_t cgi_compose(uint64_t event_flags, uint64_t intrinsic,
+                                   uint64_t held) {
+    return (event_flags & ~CGI_MANAGED_MODIFIERS)
+           | ((intrinsic | held) & CGI_MANAGED_MODIFIERS);
 }
 
 #endif
