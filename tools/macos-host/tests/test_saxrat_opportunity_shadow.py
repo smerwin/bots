@@ -241,9 +241,21 @@ class TheWiringTest(unittest.TestCase):
             r"WorkTheAccelerationGate -> accelerationGateStep \|> Maybe\.withDefault")
 
     def test_the_warp_branch_is_what_the_warp_answer_runs(self):
-        self.assertRegex(
-            self.binding,
-            r"WarpToTheOpportunitySite -> opportunityWarpStep \|> Maybe\.withDefault")
+        """Still the warp step and nothing else -- now through the tank.
+
+        The arm gained `tankBeforeWarpingToTheSite`, which switches an inactive
+        always-active module on before the ship warps into a site and falls
+        through to this same `warpStep` once none is left. What must not change
+        is which step the warp answer runs, so both halves are asserted: the
+        answer resolves `opportunityWarpStep`, and an absent one still falls
+        back to the caller's floor rather than to a different action.
+        """
+        arm = self.binding.split("WarpToTheOpportunitySite ->")[1]
+        arm = arm.split("HuntWithTheProbeScanner")[0]
+        self.assertIn("opportunityWarpStep", arm)
+        self.assertIn("tankBeforeWarpingToTheSite", arm)
+        self.assertIn("Nothing -> ifNeither", arm,
+                      "an unoffered warp must still fall back to the floor")
 
     def test_the_two_steps_are_the_branches_they_are_named_for(self):
         """So a swap has to be visible here rather than hiding in a name."""
@@ -283,7 +295,8 @@ class TheWiringTest(unittest.TestCase):
         """
         self.assertIn("HuntWithTheProbeScanner -> ifNeither", self.binding)
         self.assertIn(
-            "siteProgressStepOrElse context pickAnotherAnomalyOrLeaveViaScanResults",
+            "siteProgressStepOrElse context seeUndockingComplete"
+            " pickAnotherAnomalyOrLeaveViaScanResults",
             collapsed(self.source))
 
     def test_both_arms_of_the_probe_window_split_reach_the_rule(self):
@@ -296,10 +309,12 @@ class TheWiringTest(unittest.TestCase):
         """
         whole = collapsed(self.source)
         self.assertIn(
-            "siteProgressStepOrElse context pickAnotherAnomalyOrLeaveViaScanResults",
+            "siteProgressStepOrElse context seeUndockingComplete"
+            " pickAnotherAnomalyOrLeaveViaScanResults",
             whole, "the arm with a scanner must go through the rule")
         self.assertIn(
-            "siteProgressStepOrElse context (jumpToNextSystem context)", whole,
+            "siteProgressStepOrElse context seeUndockingComplete"
+            " (jumpToNextSystem context)", whole,
             "the arm without a scanner must go through it too, and fall back to"
             " leaving the system")
 
