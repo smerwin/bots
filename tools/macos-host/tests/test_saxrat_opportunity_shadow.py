@@ -132,11 +132,17 @@ def let_binding_of(source, name):
 
 
 class TheOrderingRuleTest(unittest.TestCase):
-    """`siteProgressStep`, executed at every combination of its three inputs.
+    """`siteProgressStep`, executed at every combination of its inputs.
 
     Asked as three equalities per case rather than one, so a rule that answered
     two things at once -- or none -- would fail rather than pass on the one
     constructor a case happened to name.
+
+    The fourth input, `probeScannerWindowIsClosed`, is swept here only where the
+    answer must not depend on it; the cases about the opportunity hold the
+    scanner **closed**, which is the state that leaves the tracker's step
+    reachable at all. What that input is for, and what it costs, is
+    `test_saxrat_opportunity_needs_the_probe_window_closed.py`.
     """
 
     STEPS = ("WorkTheAccelerationGate", "WarpToTheOpportunitySite",
@@ -146,13 +152,15 @@ class TheOrderingRuleTest(unittest.TestCase):
     def setUpClass(cls):
         cls.repl = open_repl(GateRepl)
 
-    def step(self, gate_step, warp_offered, gate_in_reach):
+    def step(self, gate_step, warp_offered, gate_in_reach, window_closed=True):
         expression = (
             "siteProgressStep { gateBranchOffersAStep = %s"
-            ", warpToSiteIsOffered = %s, gateWithinReach = %s }" % (
+            ", warpToSiteIsOffered = %s, gateWithinReach = %s"
+            ", probeScannerWindowIsClosed = %s }" % (
                 "True" if gate_step else "False",
                 "True" if warp_offered else "False",
-                "True" if gate_in_reach else "False"))
+                "True" if gate_in_reach else "False",
+                "True" if window_closed else "False"))
         answers = self.repl.evaluate(
             ["(%s) == %s" % (expression, step) for step in self.STEPS])
         chosen = [step for step, yes in zip(self.STEPS, answers) if yes]
@@ -171,11 +179,13 @@ class TheOrderingRuleTest(unittest.TestCase):
         """
         for warp_offered in (True, False):
             for gate_in_reach in (True, False):
-                self.assertEqual(
-                    self.step(True, warp_offered, gate_in_reach),
-                    "WorkTheAccelerationGate",
-                    "warp_offered=%s gate_in_reach=%s"
-                    % (warp_offered, gate_in_reach))
+                for window_closed in (True, False):
+                    self.assertEqual(
+                        self.step(True, warp_offered, gate_in_reach,
+                                  window_closed),
+                        "WorkTheAccelerationGate",
+                        "warp_offered=%s gate_in_reach=%s window_closed=%s"
+                        % (warp_offered, gate_in_reach, window_closed))
 
     def test_a_site_is_warped_to_where_no_gate_is_in_reach(self):
         """The state both recorded warps that worked were taken from."""
@@ -489,7 +499,8 @@ class TheSearchCannotTellArrivalTest(unittest.TestCase):
         """The rule executed on what the parser said about each reading."""
         answers = self.repl.evaluate([
             "siteProgressStep { gateBranchOffersAStep = False"
-            ", warpToSiteIsOffered = True, gateWithinReach = %s }"
+            ", warpToSiteIsOffered = True, gateWithinReach = %s"
+            ", probeScannerWindowIsClosed = True }"
             " == WarpToTheOpportunitySite" % state
             for state in ("False", "True")])
         self.assertEqual(answers, [True, False])

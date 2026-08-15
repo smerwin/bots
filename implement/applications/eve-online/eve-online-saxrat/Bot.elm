@@ -11498,6 +11498,19 @@ its condition is almost always true. `HuntWithTheProbeScanner` is reached only
 where the gate branch has nothing to do and the button is either absent or being
 offered to a ship that is standing on a gate.
 
+**The opportunity is taken only while the probe scanner window is closed**, and
+that clause is an operator's switch rather than a reading of the site. Closing
+the scanner is a deliberate act nothing in the client does on its own, so it is
+the one thing on a reading that can carry an intent: with it closed the bot goes
+and works escalations, with it open it hunts locally. It is a hard gate and not a
+preference -- with the window open the tracker's step is not taken at all,
+whatever the panel is offering.
+
+**Only the opportunity is gated.** `WorkTheAccelerationGate` does not consult the
+scanner window at all, in either direction: a gate on the grid is the job in
+front of the ship whether or not anybody has a scanner open, and #202 and #204
+are what a scanner window deciding the gate's visibility costs.
+
 -}
 type SiteProgressStep
     = WorkTheAccelerationGate
@@ -11509,13 +11522,18 @@ siteProgressStep :
     { gateBranchOffersAStep : Bool
     , warpToSiteIsOffered : Bool
     , gateWithinReach : Bool
+    , probeScannerWindowIsClosed : Bool
     }
     -> SiteProgressStep
 siteProgressStep progressCase =
     if progressCase.gateBranchOffersAStep then
         WorkTheAccelerationGate
 
-    else if progressCase.warpToSiteIsOffered && not progressCase.gateWithinReach then
+    else if
+        progressCase.warpToSiteIsOffered
+            && progressCase.probeScannerWindowIsClosed
+            && not progressCase.gateWithinReach
+    then
         WarpToTheOpportunitySite
 
     else
@@ -11537,6 +11555,25 @@ the scanner branch falls back to its own scan results, and the branch without a
 scanner falls back to leaving the system. Neither can now grow a repertoire the
 other silently lacks.
 
+**The scanner window decides the opportunity step, which is a coupling this very
+function was written to remove -- deliberately, and in the opposite polarity.**
+#202 and #204 are about a **closed** window hiding both steps: a shut scanner
+made a gate standing on grid and a "Warp to Site" on offer equally invisible,
+which is the reachable-code-nothing-could-reach defect above. What
+`probeScannerWindowIsClosed` does is the reverse -- closed _enables_ the
+opportunity, and a window nobody has touched leaves the bot hunting exactly as it
+does today. So no step is hidden by a reading the operator did not choose, and
+nothing here can make the gate step invisible again: the gate is asked before the
+window is consulted at all, and `siteProgressStep` gives it no scanner clause in
+either direction.
+
+**Declining the opportunity is not a wait, which is the property to keep.** With
+the window open the reading falls through to `ifNeither`, which is a branch that
+acts -- the hunt loop or leaving the system -- so this can never be the only
+thing between the bot and its next command. PR #257 put an unbounded wait on this
+exact path and stopped the bot dead for 108 minutes; a gate that hands the
+reading on cannot do that, and it must stay one.
+
 **Where this is reached is what keeps it safe.** `decideActionInAnomaly` asks for
 its continuation only once there is nothing left to attack, loot or unlock, so an
 opportunity appearing mid-fight still cannot pull the ship out of one.
@@ -11556,6 +11593,7 @@ siteProgressStepOrElse context ifNeither =
             { gateBranchOffersAStep = accelerationGateStep /= Nothing
             , warpToSiteIsOffered = opportunityWarpStep /= Nothing
             , gateWithinReach = accelerationGateIsWithinReach context.readingFromGameClient
+            , probeScannerWindowIsClosed = context.readingFromGameClient.probeScannerWindow == Nothing
             }
     of
         WorkTheAccelerationGate ->

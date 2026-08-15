@@ -560,8 +560,13 @@ class TheGateStillOutranksTheTracker(unittest.TestCase):
 
     The tracker's button is how the ship reaches the *next* site; an
     acceleration gate on the overview means it has already arrived at one, and
-    that work comes first. The rule is `siteProgressStep` and it is unchanged --
-    what this asserts is that the new branch has not been wired around it.
+    that work comes first. The rule is `siteProgressStep` and this ordering
+    within it is unchanged -- what this asserts is that the new branch has not
+    been wired around it.
+
+    The scanner window is held **closed** throughout, which is the state that
+    leaves the tracker's step reachable at all; the gate clause is what these
+    cases are about, and it applies in either state.
     """
 
     STEPS = ("WorkTheAccelerationGate", "WarpToTheOpportunitySite",
@@ -580,6 +585,7 @@ class TheGateStillOutranksTheTracker(unittest.TestCase):
              " , warpToSiteIsOffered ="
              " warpToOpportunitySiteIfAvailable r /= Nothing"
              " , gateWithinReach = accelerationGateIsWithinReach r"
+             " , probeScannerWindowIsClosed = True"
              " } == %s) |> Maybe.withDefault False" % step
              for step in self.STEPS],
             definitions=[TrackerRepl.reading_binding("reading", children)])
