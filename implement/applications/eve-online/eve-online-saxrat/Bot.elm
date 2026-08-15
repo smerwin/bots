@@ -11643,7 +11643,7 @@ opportunityTravelStep readingFromGameClient =
                                     )
                         )
             )
-        |> List.head
+        |> opportunityStepArrivingFirst
 
 
 warpToOpportunitySiteIfAvailable : ReadingFromGameClient -> Maybe DecisionPathNode
@@ -11697,6 +11697,58 @@ travelLabelIsACommand label =
 opportunityTravelCommandLabels : List String
 opportunityTravelCommandLabels =
     [ "set destination", "jump", "warp to site", "warp to location", "dock" ]
+
+
+{-| Of the steps the tracker is offering, the one that gets the ship _into_ a
+site, preferring it over one that travels somewhere else.
+
+`List.head` was the whole of this, and with several escalations open it is not a
+choice at all -- it takes whichever entry the panel happens to list first. Run 38
+is what that costs. The panel held three `Sansha's Command Relay Outpost`
+entries; the ship arrived in the system holding one of them, where that entry
+offers `Warp to Site`; and the branch took the _first_ entry's `Jump` instead and
+travelled on. Over three hours it pressed `Jump` 1,989 times and
+`Set Destination` 257, **never once warped to a site**, crossed from Domain into
+Kor-Azor, and finished the session having visited two anomalies.
+
+The ordering is between the two kinds of label rather than between entries: a
+warp or a dock is the ship arriving at a site it is already in the system for,
+where `jump` and `set destination` are it leaving for another one. Arriving wins,
+because arriving is what the travelling was for.
+
+**It is a preference, not a filter.** With nothing arriving on offer the answer
+is the first travelling step exactly as before, so a run with one distant
+escalation behaves as it does today.
+
+-}
+opportunityStepArrivingFirst :
+    List { siteName : Maybe String, label : String, buttonNode : a }
+    -> Maybe { siteName : Maybe String, label : String, buttonNode : a }
+opportunityStepArrivingFirst offered =
+    case offered |> List.filter (.label >> opportunityLabelArrivesAtTheSite) of
+        arriving :: _ ->
+            Just arriving
+
+        [] ->
+            offered |> List.head
+
+
+opportunityLabelArrivesAtTheSite : String -> Bool
+opportunityLabelArrivesAtTheSite label =
+    opportunityArrivalCommandLabels
+        |> List.member (label |> String.trim |> String.toLower)
+
+
+{-| The subset of `opportunityTravelCommandLabels` that ends travelling.
+
+Read off the same widget as the rest: `Warp to Site` is what the panel showed
+beside the outpost the ship had reached in run 38's own screenshot, while `Jump`
+and `Set Destination` are what it showed for the two it had not.
+
+-}
+opportunityArrivalCommandLabels : List String
+opportunityArrivalCommandLabels =
+    [ "warp to site", "warp to location", "dock" ]
 
 
 {-| Whether the tracker's travel label is something the client rendered for a
