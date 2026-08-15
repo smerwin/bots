@@ -567,6 +567,11 @@ class TheGateStillOutranksTheTracker(unittest.TestCase):
     The scanner window is held **closed** throughout, which is the state that
     leaves the tracker's step reachable at all; the gate clause is what these
     cases are about, and it applies in either state.
+
+    Every fixture here offers `Jump`, which since #261 matters: an *arrival*
+    label is asked above the gate now and a travelling one is not, so these
+    cases are about the half of #147's ordering that is unchanged. The
+    reversal has its own file.
     """
 
     STEPS = ("WorkTheAccelerationGate", "WarpToTheOpportunitySite",
@@ -582,6 +587,9 @@ class TheGateStillOutranksTheTracker(unittest.TestCase):
         answers = self.repl.evaluate(
             ["reading |> Maybe.map (\\r -> siteProgressStep"
              " { gateBranchOffersAStep = False"
+             " , arrivalIsOffered ="
+             " (opportunityTravelStep r |> Maybe.map (.label >>"
+             " opportunityLabelArrivesAtTheSite) |> Maybe.withDefault False)"
              " , warpToSiteIsOffered ="
              " warpToOpportunitySiteIfAvailable r /= Nothing"
              " , gateWithinReach = accelerationGateIsWithinReach r"

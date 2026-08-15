@@ -10886,9 +10886,13 @@ runner's `gateWithinReachTicks` carries the same correction for the same reason
 see `gateAskedReadingsAfterReading`.
 
 **Why the branch was not reached was #147, and it is fixed in
-`siteProgressStep`** -- the gate is asked before the opportunity warp now, and a
-"Warp to Site" offered while a gate is in reach is declined as the panel still
-showing the site the ship is standing in. The reading of the corpus that made
+`siteProgressStep`** -- the gate is asked before a travelling opportunity step
+now, and a `Jump` offered while a gate is in reach is declined as the panel still
+showing a site the ship has not gone to. An _arrival_ is asked above the gate
+since #261, so a "Warp to Site" with the probe scanner shut can shadow the gate
+again by one reading; the scanner is open on 98.7% of every reading the corpus
+holds, so what that costs this counter is close to nothing and is bounded by the
+same give-up either way. The reading of the corpus that made
 this counter necessary is unchanged and is what that fix rests on:
 `warpToOpportunitySiteIfAvailable` answers `Just` whenever a "Warp to Site"
 button is anywhere in the tree, so while the old ordering held, the gate was
@@ -11491,6 +11495,29 @@ without the clause the very next reading would fall into run 5's dead click with
 nothing left to bound it. Declining sends it to the hunt loop instead, which is
 the recovery run 4 eventually made on its own after 238 wasted readings.
 
+**#147's ordering is reversed for an arrival, and for nothing else.** That
+argument is about a label the ship has not travelled to yet: `Jump` and
+`Set Destination` are the tracker offering to leave for a site somewhere else,
+and a gate on the grid is work inside the site the ship is already in, so the
+gate wins. An **arrival** -- `opportunityArrivalCommandLabels`, which is
+`warp to site`, `warp to location` and `dock` -- is not that. It is the client
+saying the escalation is reachable from where the ship is standing, and it is
+the step run 38 pressed `Jump` 1,989 times instead of taking (#256). So
+`arrivalIsOffered` is asked **above** the gate, and the travelling case keeps
+`not gateWithinReach` exactly as #147 wrote it. Nothing about a `Jump` moved.
+
+**The scope of the reversal is one tier and the rest of #147 stands**: a gate
+still outranks a travelling step, still outranks the hunt loop, and is still
+consulted with no reference whatever to the scanner window.
+
+**`arrivalIsOffered` is the narrower of the two inputs and `warpToSiteIsOffered`
+is not what its name says.** That one is true for _any_ label the tracker offers
+that the branch would click, `Jump` and `Set Destination` included -- it is
+named after the one word the whole-tree search this branch replaced used to look
+for. The new input is the one that means what it says: the entry the branch
+would press carries an arrival label. Where an arrival is on offer both are
+true, so the tiers are ordered rather than exclusive.
+
 **Both still outrank the probe-scan hunt loop**, which is all the comment at the
 call site ever claimed and is compatible with either order -- what it never said
 is which of the pair wins, and the code answered "the first one, always" because
@@ -11504,7 +11531,21 @@ the scanner is a deliberate act nothing in the client does on its own, so it is
 the one thing on a reading that can carry an intent: with it closed the bot goes
 and works escalations, with it open it hunts locally. It is a hard gate and not a
 preference -- with the window open the tracker's step is not taken at all,
-whatever the panel is offering.
+whatever the panel is offering. **The arrival tier carries the same clause**, so
+the switch is one switch: an arrival with the scanner open is declined exactly as
+a travelling step is, and the reading falls through to the gate.
+
+**How rarely the arrival tier will be reached is measured rather than hoped
+for.** Recounted over every `saxrat_run*.log` this machine holds -- 49 of them --
+the scanner window was open on **139,904 in-space readings against 1,856 shut**,
+**31 of the 47 runs that reached space never closed it once**, and of the 3,926
+readings that ever took an opportunity step **exactly one** had it shut. So
+until somebody flies with the scanner closed on purpose this tier is close to
+unreachable. That was measured before it was built and chosen with the caveat
+stated: the switch is what makes the escalation work deliberate, and a fallback
+that fired the tier anyway would be the switch not existing.
+`test_saxrat_opportunity_needs_the_probe_window_closed.py` recounts those as
+relations, so a growing corpus cannot turn the claim red.
 
 **Only the opportunity is gated.** `WorkTheAccelerationGate` does not consult the
 scanner window at all, in either direction: a gate on the grid is the job in
@@ -11520,13 +11561,17 @@ type SiteProgressStep
 
 siteProgressStep :
     { gateBranchOffersAStep : Bool
+    , arrivalIsOffered : Bool
     , warpToSiteIsOffered : Bool
     , gateWithinReach : Bool
     , probeScannerWindowIsClosed : Bool
     }
     -> SiteProgressStep
 siteProgressStep progressCase =
-    if progressCase.gateBranchOffersAStep then
+    if progressCase.arrivalIsOffered && progressCase.probeScannerWindowIsClosed then
+        WarpToTheOpportunitySite
+
+    else if progressCase.gateBranchOffersAStep then
         WorkTheAccelerationGate
 
     else if
@@ -11563,16 +11608,28 @@ which is the reachable-code-nothing-could-reach defect above. What
 `probeScannerWindowIsClosed` does is the reverse -- closed _enables_ the
 opportunity, and a window nobody has touched leaves the bot hunting exactly as it
 does today. So no step is hidden by a reading the operator did not choose, and
-nothing here can make the gate step invisible again: the gate is asked before the
-window is consulted at all, and `siteProgressStep` gives it no scanner clause in
-either direction.
+`siteProgressStep` still gives the gate no scanner clause in either direction:
+a shut scanner can move the gate down one place, and no reading of the window can
+make it invisible.
 
-**Declining the opportunity is not a wait, which is the property to keep.** With
-the window open the reading falls through to `ifNeither`, which is a branch that
-acts -- the hunt loop or leaving the system -- so this can never be the only
-thing between the bot and its next command. PR #257 put an unbounded wait on this
-exact path and stopped the bot dead for 108 minutes; a gate that hands the
-reading on cannot do that, and it must stay one.
+**`arrivalIsOffered` is derived from the tracker's parsed entries and not from a
+search.** `opportunityTravelStep` is the same read the click itself is aimed at,
+and `opportunityStepArrivingFirst` already prefers an arrival over a travelling
+step -- so the step whose label is asked about here is exactly the step
+`WarpToTheOpportunitySite` would press. That is what keeps the tier and the click
+from disagreeing about which entry the panel is offering, and it is why the
+answer cannot come from `findUiElementWithText`, which is the whole-tree search
+#252 removed and which answered `Just` on a panel the ship had already arrived
+at.
+
+**Declining is not a wait, which is the property to keep, and the new tier makes
+it matter more.** Every answer this function can give runs a branch: an arrival
+declined for an open scanner falls through to the gate and then to `ifNeither`,
+which is the hunt loop or leaving the system. And the arrival answer cannot
+decline: `arrivalIsOffered` is read off the very step `opportunityWarpStep`
+carries, so the `Maybe.withDefault ifNeither` beside it is unreachable rather
+than load-bearing. PR #257 put an unbounded wait on this exact path and stopped
+the bot dead for 108 minutes; nothing here may become one.
 
 **Where this is reached is what keeps it safe.** `decideActionInAnomaly` asks for
 its continuation only once there is nothing left to attack, loot or unlock, so an
@@ -11587,10 +11644,16 @@ siteProgressStepOrElse context ifNeither =
 
         opportunityWarpStep =
             warpToOpportunitySiteIfAvailable context.readingFromGameClient
+
+        arrivalIsOffered =
+            opportunityTravelStep context.readingFromGameClient
+                |> Maybe.map (.label >> opportunityLabelArrivesAtTheSite)
+                |> Maybe.withDefault False
     in
     case
         siteProgressStep
             { gateBranchOffersAStep = accelerationGateStep /= Nothing
+            , arrivalIsOffered = arrivalIsOffered
             , warpToSiteIsOffered = opportunityWarpStep /= Nothing
             , gateWithinReach = accelerationGateIsWithinReach context.readingFromGameClient
             , probeScannerWindowIsClosed = context.readingFromGameClient.probeScannerWindow == Nothing
@@ -11641,14 +11704,19 @@ failure:
     `_display` filter, where it belongs -- the chain hides the tasks that are not
     available rather than removing them.
 
-**#147's ordering is untouched.** `siteProgressStep` still asks the acceleration
-gate first and still declines this branch while a gate is in reach: a gate is
-progress _inside_ the site and this button is how the ship reaches the next one.
-What does change is that the old search's own premise no longer holds -- it
-answered `Just` whether or not the ship had arrived, and the label answers
-`Warping` once it has, so the panel now separates the two states the grid was
-brought in to separate. The gate clause stays anyway, because it is what bounds
-this branch on a reading whose label the parser could not read.
+**#147's ordering is untouched for a travelling label and reversed for an
+arrival**, which is a distinction this function is what makes readable. `Jump`
+and `Set Destination` are the ship leaving for a site somewhere else, so
+`siteProgressStep` still asks the acceleration gate first and still declines
+them while a gate is in reach: a gate is progress _inside_ the site and those
+labels are how the ship reaches the next one. `opportunityArrivalCommandLabels`
+is the ship arriving at a site it is already in the system for, and that is
+asked above the gate. What does change for both is that the old search's own
+premise no longer holds -- it answered `Just` whether or not the ship had
+arrived, and the label answers `Warping` once it has, so the panel now separates
+the two states the grid was brought in to separate. The gate clause stays on the
+travelling case anyway, because it is what bounds this branch on a reading whose
+label the parser could not read.
 
 -}
 opportunityTravelStep :
