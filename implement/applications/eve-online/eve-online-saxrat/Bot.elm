@@ -4315,7 +4315,7 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                         }
                                         context
                                         seeUndockingComplete
-                                        (siteProgressStepOrElse context seeUndockingComplete (jumpToNextSystem context))
+                                        (siteProgressStepOrElse context (jumpToNextSystem context))
                             )
 
                     Just probeScannerWindow ->
@@ -4366,7 +4366,7 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                     -- while a gate is in reach is the panel still showing
                                     -- the site the ship is standing in.
                                     pickAnotherAnomalyOrLeave =
-                                        siteProgressStepOrElse context seeUndockingComplete pickAnotherAnomalyOrLeaveViaScanResults
+                                        siteProgressStepOrElse context pickAnotherAnomalyOrLeaveViaScanResults
                                 in
                                 -- The anomaly's own signature can drop off the probe
                                 -- scanner (site "resolved"/expired) while rats are
@@ -11542,8 +11542,8 @@ its continuation only once there is nothing left to attack, loot or unlock, so a
 opportunity appearing mid-fight still cannot pull the ship out of one.
 
 -}
-siteProgressStepOrElse : BotDecisionContext -> SeeUndockingComplete -> DecisionPathNode -> DecisionPathNode
-siteProgressStepOrElse context seeUndockingComplete ifNeither =
+siteProgressStepOrElse : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+siteProgressStepOrElse context ifNeither =
     let
         accelerationGateStep =
             activateAccelerationGateIfPresent context
@@ -11562,52 +11562,10 @@ siteProgressStepOrElse context seeUndockingComplete ifNeither =
             accelerationGateStep |> Maybe.withDefault ifNeither
 
         WarpToTheOpportunitySite ->
-            case opportunityWarpStep of
-                Nothing ->
-                    ifNeither
-
-                Just warpStep ->
-                    tankBeforeWarpingToTheSite context seeUndockingComplete warpStep
+            opportunityWarpStep |> Maybe.withDefault ifNeither
 
         HuntWithTheProbeScanner ->
             ifNeither
-
-
-{-| Switch the tank on before the ship warps into a site.
-
-`manageMiddleRowModules` activates these modules only while `somethingToFight`
-is true, which is right for an ordinary grid -- hardeners are a waste of
-capacitor with nothing shooting -- and is exactly wrong here. **Warping to a
-site is the one moment the ship knows a fight is coming and can still do
-something about it**, and it is also a moment when nothing on the current grid
-can make `somethingToFight` true, so that gate can never open by itself.
-
-The second half of the defect is placement. `manageMiddleRowModules` is
-consulted only on the branch where the ship is already inside a named anomaly;
-the branch that takes a site step is reached with `getCurrentAnomalyIDAsSeenIn
-ProbeScanner` answering `Nothing`, and never asked it at all. So the ship warped
-into escalations with the tank cold whichever way the gate was written.
-
-One module per reading, the same shape `manageMiddleRowModules` uses, and it
-falls through to the warp the moment there is nothing left inactive -- so a ship
-whose tank is already running warps on the same reading it would have before.
-
-Scoped to the opportunity warp because that is where the defect was reported and
-where the evidence is. **Entering an anomaly has the same gap** and is
-deliberately not changed here: that path is reached constantly, its capacitor
-cost is a different measurement, and it wants its own change.
-
--}
-tankBeforeWarpingToTheSite : BotDecisionContext -> SeeUndockingComplete -> DecisionPathNode -> DecisionPathNode
-tankBeforeWarpingToTheSite context seeUndockingComplete warpStep =
-    case seeUndockingComplete |> inactiveModulesToActivateAlways |> List.head of
-        Just moduleButton ->
-            describeBranch
-                "Switch the tank on before warping to the site -- the fight starts on arrival, and nothing on this grid can turn it on for us."
-                (clickModuleButtonButWaitIfClickedInPreviousStep context moduleButton)
-
-        Nothing ->
-            warpStep
 
 
 {-| The step the Opportunities tracker is offering, where it is offering one the
