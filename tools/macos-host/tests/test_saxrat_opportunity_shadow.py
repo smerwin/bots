@@ -138,11 +138,15 @@ class TheOrderingRuleTest(unittest.TestCase):
     two things at once -- or none -- would fail rather than pass on the one
     constructor a case happened to name.
 
-    The fourth input, `probeScannerWindowIsClosed`, is swept here only where the
-    answer must not depend on it; the cases about the opportunity hold the
-    scanner **closed**, which is the state that leaves the tracker's step
-    reachable at all. What that input is for, and what it costs, is
+    `probeScannerWindowIsClosed` is swept here only where the answer must not
+    depend on it; the cases about the opportunity hold the scanner **closed**,
+    which is the state that leaves the tracker's step reachable at all. What
+    that input is for, and what it costs, is
     `test_saxrat_opportunity_needs_the_probe_window_closed.py`.
+
+    `arrivalIsOffered` is held **clear** throughout -- see `step` -- so every
+    case here is about a travelling label, which is the half of the ordering
+    #261 left exactly as #147 wrote it.
     """
 
     STEPS = ("WorkTheAccelerationGate", "WarpToTheOpportunitySite",
@@ -152,12 +156,24 @@ class TheOrderingRuleTest(unittest.TestCase):
     def setUpClass(cls):
         cls.repl = open_repl(GateRepl)
 
-    def step(self, gate_step, warp_offered, gate_in_reach, window_closed=True):
+    def step(self, gate_step, warp_offered, gate_in_reach, window_closed=True,
+             arrival=False):
+        """`arrival` is held clear here, which is what these cases are about.
+
+        #261 added a fifth input and a tier above the gate for it: an
+        *arrival* label -- `warp to site`, `warp to location`, `dock` -- is the
+        ship being told it can reach the escalation from where it stands, and
+        that outranks the gate. Every case in this class is about a
+        **travelling** step, where #147's ordering is unchanged, so the flag is
+        clear throughout; the reversal has its own file.
+        """
         expression = (
             "siteProgressStep { gateBranchOffersAStep = %s"
+            ", arrivalIsOffered = %s"
             ", warpToSiteIsOffered = %s, gateWithinReach = %s"
             ", probeScannerWindowIsClosed = %s }" % (
                 "True" if gate_step else "False",
+                "True" if arrival else "False",
                 "True" if warp_offered else "False",
                 "True" if gate_in_reach else "False",
                 "True" if window_closed else "False"))
@@ -499,6 +515,7 @@ class TheSearchCannotTellArrivalTest(unittest.TestCase):
         """The rule executed on what the parser said about each reading."""
         answers = self.repl.evaluate([
             "siteProgressStep { gateBranchOffersAStep = False"
+            ", arrivalIsOffered = False"
             ", warpToSiteIsOffered = True, gateWithinReach = %s"
             ", probeScannerWindowIsClosed = True }"
             " == WarpToTheOpportunitySite" % state

@@ -105,6 +105,16 @@ def tracker_offering_a_step():
     return tracker([expanded_entry([travel_button("Warp to Site")])])
 
 
+def tracker_offering_a_travelling_step():
+    """The same panel offering `Jump`, which is not an arrival.
+
+    Since #261 the two go through different tiers of `siteProgressStep`, so a
+    case about the gate clause has to say which kind of label it is asking
+    about rather than leaving it to whichever one the fixture happened to use.
+    """
+    return tracker([expanded_entry([travel_button("Jump")])])
+
+
 class TheRuleTest(unittest.TestCase):
     """`siteProgressStep`, executed at every combination of its four inputs.
 
@@ -117,12 +127,22 @@ class TheRuleTest(unittest.TestCase):
     def setUpClass(cls):
         cls.repl = open_repl(TrackerRepl)
 
-    def step(self, gate_step, warp_offered, gate_in_reach, window_closed):
+    def step(self, gate_step, warp_offered, gate_in_reach, window_closed,
+             arrival=False):
+        """`arrival` is held clear unless a case says otherwise.
+
+        #261 added a fifth input and a tier above the gate for it. The scanner
+        clause this file is about is carried by **both** tiers, so the cases
+        below ask it of the travelling one and
+        `test_an_arrival_is_gated_by_the_scanner_too` asks it of the new one.
+        """
         expression = (
             "siteProgressStep { gateBranchOffersAStep = %s"
+            ", arrivalIsOffered = %s"
             ", warpToSiteIsOffered = %s, gateWithinReach = %s"
             ", probeScannerWindowIsClosed = %s }" % (
                 "True" if gate_step else "False",
+                "True" if arrival else "False",
                 "True" if warp_offered else "False",
                 "True" if gate_in_reach else "False",
                 "True" if window_closed else "False"))
@@ -151,6 +171,23 @@ class TheRuleTest(unittest.TestCase):
         self.assertEqual(
             self.step(gate_step=False, warp_offered=True,
                       gate_in_reach=False, window_closed=False),
+            "HuntWithTheProbeScanner")
+
+    def test_an_arrival_is_gated_by_the_scanner_too(self):
+        """#261's tier carries this clause, so the switch stays one switch.
+
+        Without it the operator's shut scanner would mean one thing for a
+        `Jump` and nothing at all for a `Warp to Site`, and the tracker work
+        would run on almost every reading of the corpus rather than on the
+        1.3% the operator asked for.
+        """
+        self.assertEqual(
+            self.step(gate_step=False, warp_offered=True, gate_in_reach=False,
+                      window_closed=True, arrival=True),
+            "WarpToTheOpportunitySite")
+        self.assertEqual(
+            self.step(gate_step=False, warp_offered=True, gate_in_reach=False,
+                      window_closed=False, arrival=True),
             "HuntWithTheProbeScanner")
 
     def test_the_acceleration_gate_is_unaffected_by_the_scanner_window(self):
@@ -220,7 +257,10 @@ class TheRuleAgainstRealReadingsTest(unittest.TestCase):
 
     Every input but the gate branch's own step is read off the reading here, so
     what the cases assert on is the bot's own view of a client with the scanner
-    open and of the same client with it shut.
+    open and of the same client with it shut. That includes #261's
+    `arrivalIsOffered`, which the fixtures below satisfy -- `Warp to Site` is
+    an arrival label -- so the readings here go through the tier above the gate
+    and the scanner clause being asserted is that tier's copy of it.
     """
 
     @classmethod
@@ -231,6 +271,9 @@ class TheRuleAgainstRealReadingsTest(unittest.TestCase):
         answers = self.repl.evaluate(
             ["reading |> Maybe.map (\\r -> siteProgressStep"
              " { gateBranchOffersAStep = False"
+             " , arrivalIsOffered ="
+             " (opportunityTravelStep r |> Maybe.map (.label >>"
+             " opportunityLabelArrivesAtTheSite) |> Maybe.withDefault False)"
              " , warpToSiteIsOffered ="
              " warpToOpportunitySiteIfAvailable r /= Nothing"
              " , gateWithinReach = accelerationGateIsWithinReach r"
@@ -285,14 +328,20 @@ class TheRuleAgainstRealReadingsTest(unittest.TestCase):
             "HuntWithTheProbeScanner")
 
     def test_a_gate_in_reach_wins_with_the_window_shut(self):
-        """#147 on a real reading, with the new clause satisfied.
+        """#147 on a real reading, with the scanner clause satisfied.
 
         The gate branch is handed `False` here, so what declines the tracker is
         the reading's own gate distance rather than anything about the scanner.
+
+        The label is a **travelling** one since #261, which is what keeps this
+        case asking the question it was written for: `not gateWithinReach` is on
+        the travelling tier and an arrival is now asked above the gate, so a
+        `Warp to Site` here would be declined by nothing and the case would be
+        about the reversal instead of about #147's clause.
         """
         self.assertEqual(
             self.step_for(reading(gate_distance="1500 m")
-                          + [tracker_offering_a_step()]),
+                          + [tracker_offering_a_travelling_step()]),
             "HuntWithTheProbeScanner")
 
 
