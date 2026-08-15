@@ -259,11 +259,32 @@ def probe_app(app):
 
 
 def run_elm_repl(app, lines):
-    """One repl session over `lines` in `app`, colour codes stripped."""
+    """One repl session over `lines` in `app`, colour codes stripped.
+
+    **The script is written as bytes, and that is load-bearing on Windows.**
+    `text=True` translates every `\\n` to `\\r\\n` there, so the blank line that
+    closes a multi-line `let` entry arrives carrying a carriage return and is no
+    longer blank: the repl stays in its continuation prompt until stdin ends and
+    answers nothing at all. That reads at a case exactly like the rule under
+    test returning no answers -- `> > | | | | |` and no result -- which is the
+    same failure `entry`'s own docstring describes for a missing blank line.
+
+    Measured on this machine, the identical script both ways:
+
+        text=True (CRLF)  > > | | | | | >
+        bytes     (LF)    > > | | | | ["b"] : List String
+
+    Every case using a `definitions` binding failed on Windows because of it,
+    including ones that were green when written on macOS. The output is decoded
+    here rather than by the pipe for the same reason: nothing should rewrite the
+    bytes either side of this boundary.
+    """
     result = subprocess.run(
-        ["elm", "repl"], cwd=app, capture_output=True, text=True,
-        input="".join(line + "\n" for line in lines))
-    return re.sub(r"\x1b\[[0-9;]*m", "", result.stdout), result.stderr
+        ["elm", "repl"], cwd=app, capture_output=True,
+        input="".join(line + "\n" for line in lines).encode("utf-8"))
+    stdout = result.stdout.decode("utf-8", "replace")
+    stderr = result.stderr.decode("utf-8", "replace")
+    return re.sub(r"\x1b\[[0-9;]*m", "", stdout), stderr
 
 
 class BuiltApp:
