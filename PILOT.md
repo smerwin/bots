@@ -4,6 +4,73 @@ How to pick this up cold: start a run, watch it, tell a real problem from noise,
 and hand it back. CLAUDE.md carries the *facts* about the client and the bot;
 this carries the *procedure* for operating one.
 
+## On Windows, read this first
+
+Everything below is written for macOS and most of its commands do not exist
+here. The bot, the host and `eve_repl` all work on Windows; the *operating*
+procedure is what differs, and each of these cost real time to find.
+
+**There is no `cycle_run.sh` and no `run_saxrat.sh`** -- both are zsh. Start a
+run with a PowerShell launcher, and **pass settings in a file, never as
+arguments**: `Start-Process -ArgumentList` flattens its array with naive
+quoting, so `accept-fleet-invite-from=Gal Bistot` arrives as two arguments and
+argparse dies on `unrecognized arguments: Bistot`. A small shim that reads the
+file and hands the host one string is the fix.
+
+**`pgrep` and `pkill` under Git Bash cannot see native processes.** They report
+nothing and exit cleanly, which reads exactly like a machine with no bot
+running. Use `Get-Process` / `Stop-Process -Id`. `Stop-Process` by id also never
+prints a command line, which is what keeps the `/ssoToken=` rule above intact.
+
+**`python` may not be Python.** The Microsoft Store stubs shadow a real
+interpreter and exit 0 having done nothing -- a compile check once reported
+success having compiled nothing at all. Resolve the machine and user PATH
+explicitly (`[Environment]::GetEnvironmentVariable("Path","Machine")` plus the
+user one) or call the interpreter by absolute path.
+
+**Logs are PowerShell-wrapped and carry NULs.** `Select-String -Encoding utf8`
+reads them; a naive `grep -c` over-counts because of echo inflation.
+
+**There is no `screencapture`.** Prefer `tools/windows-host/engagement_watch.py`
+-- it follows a live log and grabs the client on anomaly *arrival* and on the
+*first lock* in that anomaly, one of each per site, so a four-hundred-reading
+site costs two pictures. It deliberately never posts input: a synthetic key to
+raise the window would trip the host's five-second human-input stand-down and
+idle the bot on every screenshot. Note its `sys.path.insert` points at another
+checkout, so run it from its own directory. For a one-off, `GetWindowRect` plus
+`CopyFromScreen` through `Add-Type` works.
+
+**Starting the client is scripted**: `tools/windows-host/launch_character.py
+"Cathy Crokite" --wait-in-game`. It presses and holds the avatar rather than
+PLAY NOW, and verifies the result from the window title. **The client pid *and*
+window handle change on every restart** -- re-resolve both, never cache them
+across a restart, or a `BitBlt` will quietly capture whatever is in front now.
+
+**`eve_repl` works, with two limits worth knowing before relying on it.** Its
+`KEYS` table has ten entries and `s` is not one of them, so Ctrl+S -- the
+autopilot -- is not reachable from it. And this client's `ALL` overview preset
+carries no stargate rows, so `eve.jump(needle)` can never resolve a gate: fly by
+letting the bot travel a route, not by driving jumps from the repl.
+
+**A console settings POST is runtime-only.** `/api/settings` does not write the
+settings file, so the next launch silently reverts. Change the file *and* the
+session, every time. This has already cost one run its thresholds.
+
+**Restarting a run costs about three seconds here, not minutes.** Measured. The
+four-minute gap that cost run 7 its ship was a *cold dependency fetch*
+(`Verifying dependencies 0/17`), not every cycle -- so cycling mid-fight is far
+less dangerous on this box than the macOS notes imply. Check the damage window
+first regardless.
+
+**A session cannot be extended without a restart** (#230): the host reads
+`@host extend-session`, the mission runner writes it, saxrat never does, and the
+console's only commands are `pause`/`resume`/`stop`.
+
+**Seed a destination the ship is not already in** (#262). Asking the circuit for
+a route to the current system returns zero jumps and no marker, which the bot
+reads as "the host does not set destinations" and latches route-setting off for
+the whole session. One run lost three hours to it.
+
 ## First minute: what is the state?
 
 ```
