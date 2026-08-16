@@ -30,7 +30,9 @@ import os
 import re
 import unittest
 
-from prerequisites import ElmRepl, REPO_DIR, open_repl
+from prerequisites import REPO_DIR, open_repl
+from test_saxrat_ported_guards import SaxratRepl as PortedGuardsRepl
+from test_saxrat_route_to_the_system_we_are_in import location_panel, pick
 
 SAXRAT_DIR = os.path.join(
     REPO_DIR, "implement", "applications", "eve-online", "eve-online-saxrat")
@@ -38,7 +40,14 @@ SAXRAT_BOT_ELM = os.path.join(SAXRAT_DIR, "Bot.elm")
 BOTLAB_HOST_PY = os.path.join(
     REPO_DIR, "tools", "macos-host", "botlab_host", "botlab_host.py")
 
-PREAMBLE = ("import Bot exposing (..)",)
+# The parser imports come with the readings: since #262 the picker takes the
+# reading the ship's own location panel is in, so these cases hand it one the
+# real `EveOnline.ParseUserInterface` produced rather than a record built here.
+PREAMBLE = (
+    "import Bot exposing (..)",
+    "import EveOnline.MemoryReading",
+    "import EveOnline.ParseUserInterface",
+)
 
 # Real solar system names from this repo's own recorded runs and CLAUDE.md.
 # `Amarr VIII (Oris) - Emperor Family Academy` is the station that motivated
@@ -66,7 +75,14 @@ def body_of(source, name):
     return match.group(0)
 
 
-class SaxratRepl(ElmRepl):
+# Somewhere the circuit does not name. `nextHuntingGroundFrom` skips a hunting
+# ground the ship is standing in (#262), so the rotation these cases are about
+# is only visible from a reading taken somewhere else -- which is where the
+# circuit spends nearly all of its readings anyway.
+ELSEWHERE = "Jita IV"
+
+
+class SaxratRepl(PortedGuardsRepl):
     def __init__(self, **kwargs):
         kwargs.setdefault("prefix", "saxrat-waypoint-")
         kwargs.setdefault("app_dir", SAXRAT_DIR)
@@ -79,6 +95,10 @@ class SaxratRepl(ElmRepl):
         return "{ defaultBotSettings | huntSystemNames = [ %s ], homeSystemName = %s }" % (
             ", ".join('"%s"' % name for name in hunt),
             'Just "%s"' % home if home else "Nothing")
+
+    def elsewhere(self):
+        """A real parsed reading naming a system that is not on the circuit."""
+        return [self.reading_binding("elsewhere", [location_panel(ELSEWHERE)])]
 
 
 class TheDirectiveTheHostActuallyMatches(unittest.TestCase):
@@ -164,8 +184,10 @@ class TheCircuitRotates(unittest.TestCase):
     def test_it_walks_the_list_in_order_and_wraps(self):
         settings = self.repl.settings(hunt=SYSTEMS)
         answers = self.repl.strings(
-            ["nextHuntingGroundFrom %s %d |> Maybe.withDefault \"nowhere\""
-             % (settings, index) for index in range(len(SYSTEMS))])
+            ["%s |> Maybe.withDefault \"nowhere\""
+             % pick(settings, index, "elsewhere")
+             for index in range(len(SYSTEMS))],
+            self.repl.elsewhere())
         self.assertEqual(
             answers, SYSTEMS,
             "the circuit does not visit its systems in the order they were "
@@ -175,14 +197,15 @@ class TheCircuitRotates(unittest.TestCase):
         with_home = self.repl.settings(hunt=SYSTEMS, home="Jita")
         without = self.repl.settings(hunt=SYSTEMS)
         answers = self.repl.strings(
-            ["nextHuntingGroundFrom %s 3 |> Maybe.withDefault \"nowhere\""
-             % with_home,
-             "nextHuntingGroundFrom %s 5 |> Maybe.withDefault \"nowhere\""
-             % with_home,
+            ["%s |> Maybe.withDefault \"nowhere\""
+             % pick(with_home, 3, "elsewhere"),
+             "%s |> Maybe.withDefault \"nowhere\""
+             % pick(with_home, 5, "elsewhere"),
              # With no home system the circuit simply keeps going round, which
              # is the right answer for a ratting bot: anomalies respawn.
-             "nextHuntingGroundFrom %s 3 |> Maybe.withDefault \"nowhere\""
-             % without])
+             "%s |> Maybe.withDefault \"nowhere\""
+             % pick(without, 3, "elsewhere")],
+            self.repl.elsewhere())
         self.assertEqual(
             answers, ["Jita", "Jita", SYSTEMS[0]],
             "a completed lap does not reach the staging system, or an absent "
@@ -190,12 +213,13 @@ class TheCircuitRotates(unittest.TestCase):
 
     def test_no_circuit_configured_names_nowhere(self):
         answers = self.repl.evaluate(
-            ["nextHuntingGroundFrom %s 0 == Nothing" % self.repl.settings(),
+            ["%s == Nothing" % pick(self.repl.settings(), 0, "elsewhere"),
              # A staging system alone is not a circuit: with nothing to
              # exhaust, there is no lap to complete.
-             "nextHuntingGroundFrom %s 0 == Nothing"
-             % self.repl.settings(home="Jita"),
-             "huntSystemAtIndex %s 7 == Nothing" % self.repl.settings()])
+             "%s == Nothing"
+             % pick(self.repl.settings(home="Jita"), 0, "elsewhere"),
+             "huntSystemAtIndex %s 7 == Nothing" % self.repl.settings()],
+            self.repl.elsewhere())
         self.assertEqual(
             answers, [True] * 3,
             "a bot with no 'hunt-system' must name nowhere, so it parks "
@@ -281,11 +305,13 @@ class TheAskIsBoundedAndCountsTheRightThing(unittest.TestCase):
         source = collapsed(source_of(SAXRAT_BOT_ELM))
         self.assertIn(
             "nextHuntingGround context = nextHuntingGroundFrom "
-            "context.eventContext.botSettings context.memory.huntSystemIndex",
+            "context.eventContext.botSettings context.memory.huntSystemIndex "
+            "context.readingFromGameClient",
             source)
         self.assertIn(
             "nextHuntingGroundFrom context.botSettings "
-            "botMemoryBefore.huntSystemIndex", source,
+            "botMemoryBefore.huntSystemIndex context.readingFromGameClient",
+            source,
             "the memory update names the destination some other way than the "
             "decision does")
 
