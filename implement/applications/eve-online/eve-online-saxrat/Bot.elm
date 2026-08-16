@@ -10324,6 +10324,20 @@ wreckLootWindowsFromReadingFromGameClient readingFromGameClient =
         |> List.filter (.uiNode >> findUiElementWithText "Loot All" >> (/=) Nothing)
 
 
+{-| Whether a row is loot rather than something to shoot.
+
+Whole words rather than substrings, which is `containsWords`' own reason for
+existing and is the mission runner's `textNamesALootableObject` rule: the live
+rat `Wrecker Alvum` contains "wreck", and a substring test therefore reads it as
+a container. Run 44 is what that costs -- `activeTargetOverviewEntryIsStray` then
+answers `True` for a rat the guns are pointed at, the branch above holds fire,
+and the rat sits at 99% shield while the anomaly runs 36 minutes.
+
+Holding fire is the expensive direction, which is why this is the site that
+matters more than the unlock beside it: declining to shoot needs no cascade to
+land and nothing bounds it.
+
+-}
 overviewEntryIsStrayLockTarget : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
 overviewEntryIsStrayLockTarget overviewEntry =
     let
@@ -10332,7 +10346,7 @@ overviewEntryIsStrayLockTarget overviewEntry =
                 |> List.filterMap identity
     in
     [ "container", "wreck" ]
-        |> List.any (\pattern -> textsToCheck |> List.any (stringContainsIgnoringCase pattern))
+        |> List.any (\pattern -> textsToCheck |> List.any (containsWords pattern))
 
 
 {-| Click the object we are about to shoot, before shooting it.
@@ -10522,8 +10536,24 @@ line, which reads that same field), the locked target never matched --
 meaning `Target.textsTopToBottom` apparently isn't an exact match for
 whatever the overview shows (likely bundled with other text, different
 whitespace, etc. -- never actually confirmed, since matching on the
-target's own text sidesteps the question entirely). Checking substrings
-directly on the target bar's own text removes that cross-tree assumption.
+target's own text sidesteps the question entirely). Matching directly on the
+target bar's own text removes that cross-tree assumption.
+
+Whole words rather than substrings, for `containsWords`' reason and for
+`overviewEntryIsStrayLockTarget`'s: `Wrecker Alvum` contains "wreck", so a
+substring test asks the bot to unlock a live rat, which is run 44's 387 unlock
+decisions. The bar carries the object's own name -- that is _why_ the rat
+matched here at all -- so the pattern still has a name to find.
+
+What is unconfirmed is punctuation, and the comment above says why: nothing has
+ever read this field's exact shape. `containsWords` normalises whitespace and
+not punctuation, so a bar that renders `Cargo Container(1)` would stop matching
+here where the substring test matched. That fails to _not_ unlocking a real
+container, which `activeTargetOverviewEntryIsStray` still catches off the
+overview's own clean `objectName`/`objectType` -- the "second opinion" its call
+site already describes. So the two sites keep their independence, and the
+direction this can now be wrong in is the one that leaves the guns firing.
+
 -}
 targetsToUnlockFromReadingFromGameClient : ReadingFromGameClient -> List EveOnline.ParseUserInterface.Target
 targetsToUnlockFromReadingFromGameClient readingFromGameClient =
@@ -10534,7 +10564,7 @@ targetsToUnlockFromReadingFromGameClient readingFromGameClient =
                     |> List.any
                         (\text ->
                             [ "container", "wreck" ]
-                                |> List.any (\pattern -> stringContainsIgnoringCase pattern text)
+                                |> List.any (\pattern -> containsWords pattern text)
                         )
             )
 
