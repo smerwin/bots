@@ -370,7 +370,7 @@ ship somewhere safe, and quit the client only when it is the client you mean.
 Say plainly in the handover: what is running, which log, what is open on GitHub,
 and anything corrected live through the console that is not yet in a file.
 
-`HANDOFF.local.md` is where that goes. It is untracked (`HANDOFF.md` is
-gitignored), so it never travels with a branch and never conflicts -- rewrite it
+`HANDOFF.md` is where that goes. It is what `.gitignore` actually ignores
+(line 23), so it never travels with a branch and never conflicts -- rewrite it
 rather than appending, and pin it to a commit and a run number so the next reader
 can tell at a glance how stale it is.
