@@ -4,6 +4,17 @@ How to pick this up cold: start a run, watch it, tell a real problem from noise,
 and hand it back. CLAUDE.md carries the *facts* about the client and the bot;
 this carries the *procedure* for operating one.
 
+**Everything below is macOS unless it says otherwise. On the Windows machine,
+read "## On Windows" first** — the tooling is different enough that following
+this document top-down there will waste a session.
+
+What transfers is the *reasoning*, not the commands. "Triage: is this real?" and
+"Changing settings without restarting" transfer whole. The dispatch-counting
+diagnostic transfers as a method — `send-effects` lines are in the Windows log
+too — but not as commands, since the client's own log lives elsewhere and
+`eve_read.py` is macOS. Everything about processes, the launcher and file paths
+does not transfer at all.
+
 ## First minute: what is the state?
 
 ```
@@ -256,6 +267,144 @@ Then add the name to `decline-mission` for the next run.
 the same hazard CLAUDE.md documents for computed empty space, and it will sit
 over the UI swallowing later clicks. Cancel it before continuing. Aim
 right-clicks at a node's own centre from the tree, never at a guessed point.
+
+## On Windows
+
+The Windows machine runs `eve-online-saxrat` against the native client. There is
+no `cycle_run.sh`, no `screen`, no `stall_watch.py` (it screenshots through
+macOS `screencapture`), and no `~/eve-bot-logs`. The operating scripts live in
+the session scratchpad rather than the repo, because they are about this
+machine.
+
+**Read `tools/windows-host/FINDINGS.md` § 8 before diagnosing anything.** It
+carries the traps this section only points at: `pgrep`/`pkill` blindness in both
+directions, the `SetForegroundWindow` foreground lock, the four-minute cold
+UI-root scan that looks exactly like a hang, and echo inflation.
+
+### First minute
+
+```bash
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" |
+    Where-Object { \$_.CommandLine -match 'botlab_host' } | ForEach-Object { \$_.CreationDate }"
+ls -lt "$SCRATCH"/saxrat_run*.log | head -3
+gh issue list --repo smerwin/bots --state open
+```
+
+**`pgrep`/`pkill` answer nothing here and exit as though they worked.** Git Bash
+cannot see native Windows processes or their command lines, so
+`pkill -f botlab_host.py` matches nothing, returns 1, and reads as success —
+which is how seven hosts once accumulated, one per "restart", all driving the
+same mouse. Every process question goes through PowerShell and `Win32_Process`.
+
+Note this is the *opposite* failure to the macOS one above, and the two want
+opposite habits: there `pgrep -f` matches too much (a shell command containing
+the string), here it matches nothing at all. A pattern tightened for one is not
+safe on the other.
+
+**Never print the client's command line**, for the macOS reason: it carries live
+`/ssoToken=` and `/refreshToken=`. Match on it, never print it.
+
+### Starting and stopping a run
+
+Through the scripts, never by hand:
+
+```bash
+./start_run.sh <n> <minutes>          # refuses if a host is already alive
+powershell -NoProfile -ExecutionPolicy Bypass -File stop_bots.ps1
+```
+
+`start_run.sh` carries the settings string inline and **refuses to start** if the
+working tree is missing marker identifiers (`anomalyNameMatches`,
+`strayContextMenuGiveUpTicks`, `followFleetBroadcastFrom`) — runs 23 and 24 were
+flown from a tree left on a feature branch and silently lacked the wildcard.
+
+Two things that have each cost a run:
+
+**Comments belong outside the quoted settings string.** Every line inside it goes
+to the bot verbatim, and `AppSettings` answers an unrecognised key with
+`Unknown setting name`, which `BotFramework` turns into a session that ends at
+startup. A verification that filters `^#` will hide exactly this.
+
+**The host compiles the working tree, not a commit.** Fast-forward before
+starting a run that is meant to carry a fix, and check the log's own
+`# bot version:` line rather than assuming.
+
+### The client
+
+Relaunching, which is now proven rather than inferred:
+
+```bash
+python -u tools/windows-host/launch_character.py "Joan d'Arkonor" --wait-in-game
+```
+
+It resolves the avatar from a stored fraction of the launcher window, presses and
+holds, and waits for the window title to become `EVE - <character>`.
+`--wait-in-game` waits further for an overview or station window, because **the
+character-selection screen reads as a running process and as a parsed
+`ShipUI`** — "the process exists" is not "in game".
+
+Kill the old client by pid through PowerShell first; the launcher itself stays
+running between clients. **Stop the run before the client**, for the reason
+"Handing back" gives: quitting the client is not a way to stop a run, and a host
+left alive keeps driving a client that is no longer there.
+
+**Re-arm both watchers after a relaunch.** The host rediscovers the new pid and
+the run survives, but a watcher holding the old one is silently blind — the same
+trap as on macOS, and the engagement watcher here follows the log rather than the
+pid, so only the process watch is affected.
+
+### Watching a run
+
+Arm two, both writing to files rather than the terminal:
+
+```bash
+./watch_run.sh saxrat_runN.log runN_watch.txt &
+python -u tools/windows-host/engagement_watch.py saxrat_runN.log \
+    --out shots/runN --patterns-proven-by <a previous run's log> --max-shots 200 &
+```
+
+`watch_run.sh` is deliberately **not** a stall detector — `stall_watch.py` is the
+calibrated one and cannot run here, and a second hastily-tuned threshold would be
+worse than none. It checks the coarse pair a threshold cannot argue with: the
+host being gone, and the log no longer growing. **A quiet file is a healthy run.**
+
+`engagement_watch.py` screenshots on anomaly arrival and first lock.
+`--patterns-proven-by` makes it refuse to start if its patterns match nothing in
+a log that should contain them — a watcher that silently matches nothing looks
+exactly like a quiet run.
+
+**A liveness check must never terminate the watch**, and the comparison must
+tolerate `\r`: PowerShell emits it, so `"0\r" != "0"` and a naive check never
+fires. That defect ran unnoticed for hours once.
+
+### Reading the client by hand
+
+`eve_repl` works here since #192 — `tools/windows-host/repl_platform.py` supplies
+the platform half. Reading methods take no input and are safe alongside a running
+bot; the virtual-key tables differ per platform, so do not carry a key code
+across from the macOS notes.
+
+The scratchpad also holds single-purpose readers built when the repl was not yet
+ported: `overview_now.py`, `read_local.py`, `scanner.py`, `shot.py`,
+`raise_window.py`, `wait_ready.py`.
+
+### Handing back
+
+saxrat docks itself at session end, so the clean handover is to let the run reach
+its own planned end rather than stopping it. The log says so plainly:
+
+```
+# session duration elapsed 1s ago and the bot has not finished the session -- stopping
+```
+
+Stop early only in a docked window, and stop the watchers too — they outlive the
+host and will sit watching a log that has stopped growing.
+
+Rewrite the handover file rather than appending to it. On this machine it is
+**`HANDOFF.md`**, which is what `.gitignore` actually ignores (line 23), so it
+never travels with a branch. It describes this machine's client, runs and next
+steps, and every machine would otherwise fight over it. Pin it to a commit and a
+run number so the next reader can see at a glance how stale it is.
 
 ## Handing back
 
