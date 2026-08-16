@@ -257,31 +257,70 @@ class TheAskIsBoundedAndCountsTheRightThing(unittest.TestCase):
 
     def test_the_counter_only_advances_in_the_state_the_branch_asks_from(self):
         """Issue #11's mistake is the one to avoid here: a counter that
-        measures something other than the thing it bounds. Counting every
-        reading with no route would run up while the bot was happily fighting
-        in a system full of anomalies, and latch the give-up on a bot that had
-        never asked for anything."""
+        measures something other than the thing it bounds.
+
+        #273 is that mistake, found in this counter and in the direction the
+        case as first written could not see. It asserted the counter was keyed
+        on `standingInADeadEnd`, which was true and was the defect: that
+        predicate demanded an empty probe scanner while the branch asks on the
+        wider "no anomaly matching the settings", so the counter reset on every
+        ordinary reading and the bound was unreachable. It is keyed on
+        `destinationAskedForNow` now -- `Just` exactly when the branch would
+        ask, and for the system it would ask for -- which is what this case was
+        named for. The states that must *not* count are executed in
+        `test_saxrat_route_ask_bound`, over really-parsed readings, rather than
+        being asserted here as a shape.
+        """
         counter = self.counter_source()
-        self.assertIn("if standingInADeadEnd then", counter)
+        self.assertIn("if destinationAskedForNow == Nothing then", counter)
         self.assertIn("botMemoryBefore.destinationAskReadings + 1", counter,
                       "the counter never advances, so its bound is "
                       "unreachable")
-        self.assertIn("else 0", counter,
+        self.assertIn("then 0", counter,
                       "the counter is not cleared once the ship is no longer "
                       "in a dead end")
+        self.assertNotIn(
+            "if standingInADeadEnd then", counter,
+            "the counter is keyed on the dead end again rather than on the "
+            "destination the branch would ask for, so a bot with nowhere to "
+            "ask for spends a budget it never asked against -- which is what "
+            "runs 12, 26 and 27 did")
 
-    def test_the_dead_end_needs_a_ship_no_route_and_an_empty_scanner(self):
+    def test_the_dead_end_needs_a_ship_no_route_and_nothing_worth_hunting(self):
+        """The predicate, and the four clauses it takes to match the ask.
+
+        `scanResults >> List.isEmpty` was the fifth and is #273: the ask fires
+        on "no anomaly matching the settings", so an empty scanner is a
+        narrowing that the corpus says is systematically absent rather than
+        merely rarer. `anomaliesWorthHunting` is the filter the decision reads
+        too.
+        """
         update = collapsed(body_of(source_of(SAXRAT_BOT_ELM),
                                    "updateMemoryForNewReadingFromGame"))
         predicate = update[update.index("standingInADeadEnd ="):]
-        predicate = predicate[:predicate.index("dronesInSpaceCountNow =")]
+        predicate = predicate[:predicate.index("destinationAskedForNow =")]
         self.assertIn("context.readingFromGameClient.shipUI /= Nothing",
                       predicate, "a docked reading would count as a dead end")
         self.assertIn(
             "not (routePanelShowsARoute context.readingFromGameClient)",
             predicate,
             "a ship with a route to follow would count as stuck")
-        self.assertIn("scanResults >> List.isEmpty", predicate)
+        self.assertIn(
+            "not (shipIsWarpingOrJumping context.readingFromGameClient)",
+            predicate,
+            "a ship crossing a system counts as stuck, and a warp runs longer "
+            "than the whole budget")
+        self.assertIn("anomaliesWorthHunting", predicate)
+        self.assertIn(
+            "not (gridStillHasSomethingToDo incomingDamageNow "
+            "context.readingFromGameClient)",
+            predicate,
+            "a fight the site's own signature has dropped out of counts as a "
+            "dead end, which is the case the replaced comment narrowed for")
+        self.assertNotIn(
+            "scanResults >> List.isEmpty", predicate,
+            "the counter is back on an empty probe scanner while the ask fires "
+            "on a scanner with nothing worth hunting on it, which is #273")
 
     def test_the_give_up_latches_for_the_session(self):
         """A host with no ESI credentials will never answer, so the give-up

@@ -916,6 +916,27 @@ type alias BotDecisionContext =
     EveOnline.BotFrameworkSeparatingMemory.StepDecisionContext BotSettings BotMemory
 
 
+{-| The two things "would this bot hunt that anomaly" depends on.
+
+Named rather than taken as a `BotDecisionContext` because
+`updateMemoryForNewReadingFromGame` has to ask the same question and never sees
+a decision -- the same split `nextHuntingGroundFrom` was made for, and for the
+same reason: the counter that bounds the route ask has to measure the state the
+ask fires on, and it cannot do that through a rule only the decision can call.
+
+**Both callers hand it the same two things**, which is what keeps them from
+drifting apart the way #263's two pickers could. `visitedAnomalies` is the
+freshly written value in the memory update rather than `botMemoryBefore`'s, so
+the decision -- which the framework hands the memory this update has already
+written -- is asking about the same set.
+
+-}
+type alias AnomalyChoiceContext =
+    { botSettings : BotSettings
+    , visitedAnomalies : Dict.Dict String MemoryOfAnomaly
+    }
+
+
 type ReasonToIgnoreProbeScanResult
     = ScanResultHasNoID
     | AvoidAnomaly ReasonToAvoidAnomaly
@@ -954,7 +975,75 @@ describeReasonToAvoidAnomaly reason =
 --     case fleetWindow.fleetMembers
 
 
-findReasonToIgnoreProbeScanResult : BotDecisionContext -> EveOnline.ParseUserInterface.ProbeScanResult -> Maybe ReasonToIgnoreProbeScanResult
+{-| The scan results this bot would go and hunt, out of everything on the scanner.
+
+One filter, read by the decision that picks an anomaly and by the memory update
+that bounds the ask for a route out of a system with none. Before #273 the
+memory update asked a _different_ question -- "is the probe scanner empty" --
+and with a narrow `anomaly-name` beside two signatures that do not match it, the
+two answers disagree on every reading: the decision asks for a route and the
+counter meant to bound that asking resets to zero. 442 readings of zero against
+3 of one, in one run.
+
+An absent scanner window answers `[]` rather than `Nothing`, deliberately: the
+decision's own no-scanner arm falls through to leaving the system, so a reading
+with no window is a reading the ask can fire on.
+
+-}
+anomaliesWorthHunting :
+    AnomalyChoiceContext
+    -> ReadingFromGameClient
+    -> List EveOnline.ParseUserInterface.ProbeScanResult
+anomaliesWorthHunting anomalyChoice readingFromGameClient =
+    readingFromGameClient.probeScannerWindow
+        |> Maybe.map .scanResults
+        |> Maybe.withDefault []
+        |> List.filter (findReasonToIgnoreProbeScanResult anomalyChoice >> (==) Nothing)
+
+
+anomalyChoiceFromDecisionContext : BotDecisionContext -> AnomalyChoiceContext
+anomalyChoiceFromDecisionContext context =
+    { botSettings = context.eventContext.botSettings
+    , visitedAnomalies = context.memory.visitedAnomalies
+    }
+
+
+{-| The framework's warp-or-jump indication, over a whole reading.
+
+`decideNextActionWhenInSpace` answers `HOOOOONK in warp` before it can reach the
+route ask, so the counter that bounds that ask has to decline the same readings.
+A ship crossing a system takes longer than `routeAskGiveUpReadings` at this
+bot's step delay, so counting through a warp would latch the give-up on a bot
+that was travelling perfectly well.
+
+-}
+shipIsWarpingOrJumping : ReadingFromGameClient -> Bool
+shipIsWarpingOrJumping readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.map shipUIIndicatesShipIsWarpingOrJumping
+        |> Maybe.withDefault False
+
+
+{-| Something on this grid to shoot, loot or unlock right now.
+
+The anomaly's own signature drops off the probe scanner while rats are still
+alive and wrecks are still on the overview, so `decideNextActionWhenInSpace`
+asks this before it will consider leaving. The counter that bounds the route ask
+asks it too, and that shared use is the whole reason it is a declaration: it is
+the guard the ask's own condition does _not_ imply, so a counter keyed on "no
+anomaly worth hunting" alone would run up through exactly the good fight #273's
+predecessor comment feared -- and two copies of it would be the drift that issue
+is about.
+
+-}
+gridStillHasSomethingToDo : IncomingDamageMemory -> ReadingFromGameClient -> Bool
+gridStillHasSomethingToDo incomingDamage readingFromGameClient =
+    anyAttackableInOverview (namesOfRecentAttackers incomingDamage) readingFromGameClient
+        || anyNotableWreckInOverview readingFromGameClient
+        || (targetsToUnlockFromReadingFromGameClient readingFromGameClient |> List.isEmpty |> not)
+
+
+findReasonToIgnoreProbeScanResult : AnomalyChoiceContext -> EveOnline.ParseUserInterface.ProbeScanResult -> Maybe ReasonToIgnoreProbeScanResult
 findReasonToIgnoreProbeScanResult context probeScanResult =
     case probeScanResult.cellsTexts |> Dict.get "ID" of
         Nothing ->
@@ -995,7 +1084,7 @@ findReasonToIgnoreProbeScanResult context probeScanResult =
                         |> Dict.get "Name"
                         |> Maybe.map
                             (\name ->
-                                anomalyNamesInEffect context.eventContext.botSettings
+                                anomalyNamesInEffect context.botSettings
                                     |> List.any (anomalyNameMatches name)
                             )
                         |> Maybe.withDefault False
@@ -1014,9 +1103,9 @@ findReasonToIgnoreProbeScanResult context probeScanResult =
                     |> Maybe.map AvoidAnomaly
 
 
-findReasonToAvoidAnomalyFromMemory : BotDecisionContext -> { anomalyID : String } -> Maybe ReasonToAvoidAnomaly
+findReasonToAvoidAnomalyFromMemory : AnomalyChoiceContext -> { anomalyID : String } -> Maybe ReasonToAvoidAnomaly
 findReasonToAvoidAnomalyFromMemory context { anomalyID } =
-    case memoryOfAnomalyWithID anomalyID context.memory of
+    case Dict.get anomalyID context.visitedAnomalies of
         Nothing ->
             Nothing
 
@@ -1028,7 +1117,7 @@ findReasonToAvoidAnomalyFromMemory context { anomalyID } =
                 [] ->
                     let
                         ratsToAvoidSeen =
-                            getRatsToAvoidSeenInAnomaly context.eventContext.botSettings memoryOfAnomaly
+                            getRatsToAvoidSeenInAnomaly context.botSettings memoryOfAnomaly
                     in
                     case ratsToAvoidSeen |> Set.toList of
                         ratToAvoid :: _ ->
@@ -4454,7 +4543,7 @@ decideNextActionWhenInSpace : BotDecisionContext -> SeeUndockingComplete -> Deci
 decideNextActionWhenInSpace context seeUndockingComplete =
     clearStrayContextMenu context
         |> Maybe.withDefault
-            (if seeUndockingComplete.shipUI |> shipUIIndicatesShipIsWarpingOrJumping then
+            (if shipIsWarpingOrJumping context.readingFromGameClient then
                 describeBranch "HOOOOONK in warp"
                     (returnDronesToBay context waitForProgressInGame)
 
@@ -4496,20 +4585,10 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                             Nothing ->
                                 let
                                     pickAnotherAnomalyOrLeaveViaScanResults =
-                                        let
-                                            scanResultsWithReasonToIgnore =
-                                                probeScannerWindow.scanResults
-                                                    |> List.map
-                                                        (\scanResult ->
-                                                            ( scanResult
-                                                            , findReasonToIgnoreProbeScanResult context scanResult
-                                                            )
-                                                        )
-                                        in
                                         case
-                                            scanResultsWithReasonToIgnore
-                                                |> List.filter (Tuple.second >> (==) Nothing)
-                                                |> List.map Tuple.first
+                                            anomaliesWorthHunting
+                                                (anomalyChoiceFromDecisionContext context)
+                                                context.readingFromGameClient
                                                 |> listElementAtWrappedIndex (context.randomIntegers |> List.head |> Maybe.withDefault 0)
                                         of
                                             Nothing ->
@@ -4551,11 +4630,7 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                 -- warping away drops the lock as a side effect without
                                 -- ever running the unlock cascade, so check for one
                                 -- here too rather than only inside decideActionInAnomaly.
-                                if
-                                    anyAttackableInOverview (namesOfRecentAttackers context.memory.incomingDamage) context.readingFromGameClient
-                                        || anyNotableWreckInOverview context.readingFromGameClient
-                                        || (targetsToUnlockFromReadingFromGameClient context.readingFromGameClient |> List.isEmpty |> not)
-                                then
+                                if gridStillHasSomethingToDo context.memory.incomingDamage context.readingFromGameClient then
                                     describeBranch "The anomaly no longer shows on the scanner, but there is still something to attack or loot here."
                                         (decideActionInAnomaly
                                             { arrivalInAnomalyAgeSeconds = arrivalInAnomalyAgeSecondsFromMemory context }
@@ -4603,7 +4678,7 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                                                 (context.eventContext.timeInMilliseconds - memoryOfAnomaly.arrivalTime.milliseconds) // 1000
                                                         in
                                                         describeBranch ("We are in anomaly '" ++ anomalyID ++ "' since " ++ String.fromInt arrivalInAnomalyAgeSeconds ++ " seconds.")
-                                                            (case findReasonToAvoidAnomalyFromMemory context { anomalyID = anomalyID } of
+                                                            (case findReasonToAvoidAnomalyFromMemory (anomalyChoiceFromDecisionContext context) { anomalyID = anomalyID } of
                                                                 Just reasonToAvoidAnomaly ->
                                                                     describeBranch
                                                                         ("Found a reason to avoid this anomaly: "
@@ -5375,7 +5450,7 @@ enterAnomaly { ifNoAcceptableAnomalyAvailable } context =
                         |> List.map
                             (\scanResult ->
                                 ( scanResult
-                                , findReasonToIgnoreProbeScanResult context scanResult
+                                , findReasonToIgnoreProbeScanResult (anomalyChoiceFromDecisionContext context) scanResult
                                 )
                             )
 
@@ -13030,21 +13105,55 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             }
 
         standingInADeadEnd =
-            -- Asks the panel the same question the decision asks it. It used to
-            -- test the marker pip while `jumpToNextSystem` tested the panel's
-            -- words, and with a real route beside a stale `No Destination` the
-            -- two disagreed in the worst available direction: the decision asked
-            -- the host for a route on every reading, and this counter -- the
-            -- only thing bounding that asking -- stayed at 0 because the pip was
-            -- there. Run 31 asked 2,494 times in 48 minutes and reported
-            -- `0/20 readings` on every one of them, so `routeAskGiveUpReadings`
-            -- could never fire. One reading of the panel, used by both.
+            -- Asks the panel and the scanner the same questions the decision
+            -- asks them, which is twice something this counter got wrong.
+            --
+            -- It used to test the marker pip while `jumpToNextSystem` tested the
+            -- panel's words, and with a real route beside a stale
+            -- `No Destination` the two disagreed in the worst available
+            -- direction: the decision asked the host for a route on every
+            -- reading, and this counter -- the only thing bounding that asking
+            -- -- stayed at 0 because the pip was there. Run 31 asked 2,494 times
+            -- in 48 minutes and reported `0/20 readings` on every one of them.
+            --
+            -- #273 is the same shape one clause along. This read "nothing at all
+            -- on the probe scanner" while the ask fires on "no anomaly matching
+            -- the settings", and with a narrow `anomaly-name` beside two
+            -- signatures that do not match it, *every* reading took the other
+            -- branch and reset the counter. Across the 411 readings the recorded
+            -- runs ever printed an ask on, 397 carry a count of 0 or 1 and the
+            -- highest any of them carries is 16 against a bound of 20 -- so the
+            -- give-up has never once been reached while this bot was asking.
+            -- `anomaliesWorthHunting` is now the one filter both sides read.
             (context.readingFromGameClient.shipUI /= Nothing)
+                && not (shipIsWarpingOrJumping context.readingFromGameClient)
                 && not (routePanelShowsARoute context.readingFromGameClient)
-                && (context.readingFromGameClient.probeScannerWindow
-                        |> Maybe.map (.scanResults >> List.isEmpty)
-                        |> Maybe.withDefault True
-                   )
+                && List.isEmpty
+                    (anomaliesWorthHunting
+                        { botSettings = context.botSettings
+                        , visitedAnomalies = visitedAnomalies
+                        }
+                        context.readingFromGameClient
+                    )
+                && not (gridStillHasSomethingToDo incomingDamageNow context.readingFromGameClient)
+
+        destinationAskedForNow =
+            -- What the decision branch is asking for, named by the *same* picker
+            -- it uses. Forgotten the moment a route exists, so arriving and
+            -- going dry again asks afresh rather than reading as already asked.
+            --
+            -- `Nothing` where the circuit has nowhere to send the ship, which is
+            -- the answer `setRouteToNextHuntingGround` tethers on rather than
+            -- asking (#262). That is why the counter below is keyed on this
+            -- value and not on `standingInADeadEnd`: runs 12, 26 and 27 latched
+            -- the give-up having issued no ask at all, two of them with no
+            -- `hunt-system` configured, because the counter ran while nothing
+            -- was being asked for.
+            if standingInADeadEnd then
+                nextHuntingGroundFrom context.botSettings botMemoryBefore.huntSystemIndex context.readingFromGameClient
+
+            else
+                Nothing
 
         dronesInSpaceCountNow =
             context.readingFromGameClient.dronesWindow
@@ -13439,32 +13548,36 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
                 else
                     botMemoryBefore.fleetBroadcastFollowed
-    , destinationAskedFor =
-        -- What the decision branch is asking for, named by the *same* picker it
-        -- uses. Forgotten the moment a route exists, so arriving and going dry
-        -- again asks afresh rather than reading as already asked.
-        --
-        -- Tracked only while the ship is in space with no route and nothing at
-        -- all on the probe scanner -- which is narrower than the condition the
-        -- ask itself fires on (that one is "no anomaly *matching the
-        -- settings*"). Narrower is the safe direction and the same one
-        -- `noProbeScanResultsAndNoRouteLastTimeInSpace` above argues for: the
-        -- counter advances only in a state where the branch is certainly
-        -- asking, so it can under-count and delay the give-up, and can never
-        -- run up while the bot is happily fighting in a system it has anomalies
-        -- in. Counting that would be issue #11's mistake again -- a counter
-        -- measuring something other than the thing it bounds.
-        if standingInADeadEnd then
-            nextHuntingGroundFrom context.botSettings botMemoryBefore.huntSystemIndex context.readingFromGameClient
-
-        else
-            Nothing
+    , destinationAskedFor = destinationAskedForNow
     , destinationAskReadings =
-        if standingInADeadEnd then
-            botMemoryBefore.destinationAskReadings + 1
+        -- Counts the readings the branch is asking on, which is what
+        -- `routeAskGiveUpReadings` is a bound on. `destinationAskedForNow` is
+        -- the whole condition: it is `Just` exactly when the ship is in a dead
+        -- end and the circuit has somewhere to send it, so the counter and the
+        -- ask cannot disagree about whether an ask is happening or about which
+        -- system it is for.
+        --
+        -- **The comment this replaces reasoned correctly and priced it wrong.**
+        -- It said counting a narrower state "can under-count and delay the
+        -- give-up", which would be tolerable. Narrowing to an *empty* probe
+        -- scanner does not delay the give-up, it removes it: a non-empty
+        -- scanner is the steady state in the very situation the ask exists for,
+        -- so the counter reset on every reading and the bound was unreachable.
+        -- #273, and it is #11's own mistake in the shape that comment cites
+        -- while walking into it -- a counter measuring something other than the
+        -- thing it bounds.
+        --
+        -- The fear behind the narrowing is answered by the ask's own condition
+        -- rather than by a second one: `standingInADeadEnd` already requires
+        -- that no anomaly on the scanner is worth hunting, and the one thing it
+        -- does not imply -- a fight still going on with the site's signature
+        -- gone -- is `gridStillHasSomethingToDo`, which the decision reads at
+        -- the same site through the same declaration.
+        if destinationAskedForNow == Nothing then
+            0
 
         else
-            0
+            botMemoryBefore.destinationAskReadings + 1
     , routeSettingGivenUp =
         -- Latched for the session. A host with no ESI credentials, or one that
         -- does not read the directive at all, will never answer -- and a bot
