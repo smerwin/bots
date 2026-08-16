@@ -701,6 +701,87 @@ of the lock-range ratchet in issue #206.
   Name the expected commit — `--force-with-lease=<branch>:<sha>` — rather than
   reaching for `--force`.
 
+### Settings have to travel in a file, not in arguments
+
+`Start-Process -ArgumentList` flattens its array into one command line with
+naive quoting, so a settings value containing a space is split. The first run
+that tried it died at startup on
+
+```
+botlab_host.py: error: unrecognized arguments: Bistot
+```
+
+from `accept-fleet-invite-from=Gal Bistot`. Write the settings to a file and
+have a shim read it and hand the host one string. This is also why the launcher
+here cannot be a thin wrapper the way `run_saxrat.sh` is on macOS.
+
+**And a console settings POST is runtime-only.** `/api/settings` changes the
+running session and does **not** write the settings file, so the next launch
+silently reverts to whatever is on disk. A run started at a corrected threshold
+of 1000 came back at 900 with a removed setting live again, and followed a fleet
+broadcast across the map before it was caught. Change the file *and* the
+session, every time.
+
+### Restarting a run costs about three seconds, not minutes
+
+Measured on this box, kill to first decision. CLAUDE.md's warning — run 7's ship
+lost in a four-minute gap — is about a **cold dependency fetch**
+(`Verifying dependencies 0/17`), not about every cycle. With a warm build,
+cycling mid-fight is far cheaper here than that note implies, so the thing to
+check before restarting is the damage window rather than the clock.
+
+**A session cannot be extended without one** (#230): the host parses
+`@host extend-session` and the mission runner writes it, but saxrat never does,
+and the console's only commands are `pause`, `resume` and `stop`.
+
+### Never ask the circuit for a route to the system the ship is in
+
+Asking for a destination the ship already occupies returns `Route 0 Jumps` with
+no marker, which `routePanelSaysNoDestination` correctly reads as no route. The
+ask can therefore never be satisfied, and after `routeAskGiveUpReadings` the bot
+concludes **the host** is broken and latches route-setting off for the whole
+session:
+
+```
+Asked for a destination for more than 20 readings and no route ever appeared
+-- this host does not set destinations, so stop asking and wait where it is safe.
+```
+
+486 of those in one run, while the host's own stderr said
+`# ESI: destination 'Hamse' set (30003547)` — it worked, and the two are never
+compared. The run spent its last three hours confined to one system: one kill in
+45 minutes, against 82 in the first 115. Filed as #262; until it lands, seed the
+destination to a system the ship is **not** in before starting.
+
+### `eve_repl` has two dead ends worth knowing before relying on it
+
+- **`KEYS` has ten entries and `s` is not one of them**, so `eve.key("ctrl","s")`
+  raises `KeyError` and the autopilot is simply unreachable from the repl. The
+  letters all exist in the separate `KEYCODE` table, so the two tables disagree
+  about which keys exist.
+- **This client's `ALL` overview preset carries no stargate rows.** `eve.jump`,
+  `warp_to` and `dock` all act on an overview row by name, so none of them can
+  resolve a gate here — an hour went into trying to fly a route by hand before
+  that was established. Travel by letting the bot follow a route instead.
+
+### `engagement_watch.py` is the screenshot tool, and it does not post input
+
+`screencapture` does not exist here. `tools/windows-host/engagement_watch.py`
+follows a live run log and grabs the client on anomaly **arrival** and on the
+**first lock** inside it — one of each per site, so a four-hundred-reading site
+costs two pictures rather than four hundred.
+
+It deliberately posts nothing: the host stands down for five seconds after any
+human mouse or keyboard event and `GetLastInputInfo` cannot tell a synthetic
+key from a real one, so the ALT press that beats the foreground lock would idle
+the bot on every screenshot. It records which window was foreground in the
+filename instead, because a `BitBlt` of an occluded window copies whatever was
+really on top and that picture looks exactly like a good one.
+
+Its `sys.path.insert` points at a checkout that need not exist; run it from its
+own directory. And **the client pid and window handle both change on every
+relaunch** — re-resolve both, never carry either across a restart.
+
 ## Running it
 
 ```bash
