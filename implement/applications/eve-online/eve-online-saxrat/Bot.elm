@@ -644,6 +644,11 @@ type alias BotMemory =
     -- `CombatStalemate`.
     , combatStalemate : CombatStalemate
 
+    -- What this ship's own guns achieved, off the half of the combat channel
+    -- this bot has never read. An instrument: nothing decides on it. See
+    -- `OutgoingFireMemory` and `outgoingFireAfterReading`.
+    , outgoingFire : OutgoingFireMemory
+
     -- What the client has answered about how many targets this ship can hold at
     -- once: the maximum it stated in its own game log, and the most the target
     -- bar has actually carried. `maxTargetsLastChange` holds a sentence only on
@@ -847,6 +852,43 @@ type alias IncomingDamageSample =
     -- several, so the set is accumulated across readings rather than widened
     -- host-side into a list.
     , attacker : Maybe String
+    }
+
+
+{-| What this ship's own shots did, as the client counted them.
+
+**The other half of the channel, which this bot has never read.** The host has
+summed `outgoingDamageSinceLastReading` per target per reading since #90, and
+PR #271 put `misses` beside `hits` on it in all six vendored parser copies --
+and `outgoingDamage` appeared **zero times** in this file before this change.
+So every shot this bot has ever fired was counted, decoded and thrown away, on
+every reading of every recorded run. `incomingDamage` is the same channel read
+in the other direction and is the shape this follows.
+
+**Nothing decides anything on it**, and that is the whole of the change rather
+than a stage it is passing through. See `outgoingFireAfterReading` for what the
+corpus says about the rule somebody would want to write here, which is that
+there is no threshold to write it at.
+
+`hostCarriesTheChannel` keeps the distinction the parser's `Maybe` carries:
+`Nothing` is "this host has no game log" and `Just []` is "the client reported
+no shot landing this reading". Both produce `hits = 0, misses = 0` and only the
+first may ever be read as not knowing.
+
+`hits` and `misses` are kept apart here for the reason the parser's own doc
+comment gives: a landed shot for zero says the guns cannot hurt this object, a
+miss says they cannot hit it, and summing them is the one mistake to avoid.
+This record never adds them; `describeOutgoingFire` prints both.
+
+-}
+type alias OutgoingFireMemory =
+    { hostCarriesTheChannel : Bool
+    , hits : Int
+    , misses : Int
+    , readingsEveryShotMissed : Int
+    , longestRunEveryShotMissed : Int
+    , sessionHits : Int
+    , sessionMisses : Int
     }
 
 
@@ -3598,6 +3640,133 @@ describeIncomingDamage context =
                )
 
 
+{-| This ship's own fire after one more reading, and the run of readings on
+which every shot of it missed.
+
+Advanced in `updateMemoryForNewReadingFromGame`, which is #102's and #126's
+placement rule and the only thing that runs unconditionally on every reading --
+so this count cannot be frozen by a branch that stops being reached, the way the
+mission runner's abandonment deadline was.
+
+**A reading with no shot in it holds the run rather than clearing it.** That is
+`gateWithinReachTicks`' hold, for its reason: resetting on a reading that
+carries no evidence either way is the shape that pinned `gunsSilencedTicks` at 1
+forever, and a reload, a target dying or a menu cascade all produce readings a
+firing ship put no shot into. A reading the host could not answer for at all
+holds it too, and for the stronger reason -- an absent channel is not a quiet
+grid.
+
+**Any landed shot clears the run, including one that landed for zero.** The run
+is about the guns being unable to _hit_, which is what a miss says; a shot that
+lands and achieves nothing is the other failure and is #90's, whose tally is
+kept separately in the mission runner and is deliberately not duplicated here.
+
+
+# There is no threshold to put on this, and that is a measurement
+
+The rule somebody would want to write -- "lots of misses, so swap ammo or
+manoeuvre" -- has no number, and the client's own logs are what say so. Measured
+over the 40 sessions carrying outgoing fire in `~/Documents/EVE/logs/Gamelogs`
+(207,313 shots), cut at every `(bounty)` line, which is the only thing in this
+corpus that states a rat died:
+
+  - **The worst miss share on a stretch of fighting that then produced a kill is
+    100%**, and the interval below it is a 467-shot, 456-second stretch at
+    **99.1%** that killed its rat afterwards. **No stretch that never produced a
+    kill missed more than that.** The two populations do not separate at any
+    share, at any length, in either direction.
+  - Read the other way round, the fights that miss most are the ones being
+    _won_: over 30-second windows the median miss share is 5% where a rat died
+    and 2% where none did. A rule keyed on missing would fire hardest on the
+    grids that were paying.
+  - The stalls PR #272 bounds are **low-miss** stalls. That is its own finding
+    restated from this side -- "the guns were landing and the repairs were
+    faster" -- so a miss signal could not have caught run 48 however it was
+    tuned, and `combatStalemate` is not made faster or more specific by one.
+
+The 702-consecutive-miss run the parser's doc comment warns about is real and is
+in this corpus, on a `Hunter Alvi`: 702 shots, 2,650 seconds, not one landing.
+What it is _not_ is a target the guns went on to kill. That reading comes from a
+name-keyed fold -- the same _name_ had been hurt earlier in the session, on a
+different rat -- and scored against the client's own kill signal the run
+produced nothing and ran to the end of the session. So the hazard is worse than
+recorded, not better: the one episode that looks like the signal working is
+indistinguishable, by share and by length, from the 99.1% stretch that recovered.
+
+`test_saxrat_outgoing_fire.py` recomputes every one of those as relations, so a
+corpus that grows cannot make a true claim red -- and if it ever stops holding,
+that file is what goes red and the threshold becomes writable.
+
+-}
+outgoingFireAfterReading :
+    { before : OutgoingFireMemory
+    , summaries : Maybe (List EveOnline.ParseUserInterface.OutgoingDamageToTarget)
+    }
+    -> OutgoingFireMemory
+outgoingFireAfterReading { before, summaries } =
+    case summaries of
+        Nothing ->
+            { before | hostCarriesTheChannel = False, hits = 0, misses = 0 }
+
+        Just targets ->
+            let
+                hits =
+                    targets |> List.map .hits |> List.sum
+
+                misses =
+                    targets |> List.map .misses |> List.sum
+
+                run =
+                    if 0 < hits then
+                        0
+
+                    else if 0 < misses then
+                        before.readingsEveryShotMissed + 1
+
+                    else
+                        before.readingsEveryShotMissed
+            in
+            { hostCarriesTheChannel = True
+            , hits = hits
+            , misses = misses
+            , readingsEveryShotMissed = run
+            , longestRunEveryShotMissed = max before.longestRunEveryShotMissed run
+            , sessionHits = before.sessionHits + hits
+            , sessionMisses = before.sessionMisses + misses
+            }
+
+
+{-| What the guns are achieving, in the words an operator can act on.
+
+Printed on every reading and read by no decision, which is PR #130's posture for
+`quickMessage` and #135's for `attritionIsUnguarded`: an instrument earns the
+right to drive a rule once a run has shown it reads sanely, and this one has
+never been printed at all. A run that fights and never leaves `NO COMBAT LOG` is
+a host not carrying the channel; a run whose landed and missed counts both stay
+at zero while the guns cycle is the summary not reaching the bot.
+
+-}
+describeOutgoingFire : OutgoingFireMemory -> String
+describeOutgoingFire memory =
+    if not memory.hostCarriesTheChannel then
+        "Outgoing fire: NO COMBAT LOG -- this host does not carry what the guns are doing."
+
+    else
+        "Outgoing fire: "
+            ++ String.fromInt memory.hits
+            ++ " landed / "
+            ++ String.fromInt memory.misses
+            ++ " missed this reading, "
+            ++ String.fromInt memory.readingsEveryShotMissed
+            ++ " reading(s) running with every shot missed (worst "
+            ++ String.fromInt memory.longestRunEveryShotMissed
+            ++ " this session; session "
+            ++ String.fromInt memory.sessionHits
+            ++ " landed / "
+            ++ String.fromInt memory.sessionMisses
+            ++ " missed). Nothing decides on this."
+
+
 {-| The client never announces the ship's destruction -- there is no such line
 anywhere in the recorded logs. It states the _consequence_ instead, and only
 when something asks the capsule to lock.
@@ -4225,6 +4394,14 @@ deleted, for the reason the mission runner kept its copy when it dropped the sam
 clause: it encodes which UI nodes carry combat text and how to read them, which
 is the expensive part to rediscover, and any future in-decision use of combat
 state wants exactly that.
+
+**Both directions of the channel are printed now**, which is the one sentence in
+this argument that has moved. #190 recorded the outgoing half as genuinely
+unreported here and said adding it would be a separate change with its own
+evidence; that change is `describeOutgoingFire`, and its evidence is in
+`outgoingFireAfterReading`. So the summary this removal pointed at as its
+replacement is now the whole summary rather than half of one, and neither half
+is a display buffer that can outlive the fight.
 
 -}
 combatFeedIsReportedByTheHostGameLog : ()
@@ -7911,6 +8088,15 @@ initBotMemory =
     , lockBatchLastChange = Nothing
     , targetsCountLastReading = 0
     , combatStalemate = { readings = 0, ratsInOverview = 0 }
+    , outgoingFire =
+        { hostCarriesTheChannel = False
+        , hits = 0
+        , misses = 0
+        , readingsEveryShotMissed = 0
+        , longestRunEveryShotMissed = 0
+        , sessionHits = 0
+        , sessionMisses = 0
+        }
     , maxTargetsStatedByClient = Nothing
     , maxTargetsHeldAtOnce = Nothing
     , maxTargetsLastChange = Nothing
@@ -10223,6 +10409,11 @@ statusTextFromState context =
                 ++ describeTopRowModuleDictState readingFromGameClient
                 ++ "\n"
                 ++ describeIncomingDamage context
+                -- Beside the incoming half, because they are the two directions
+                -- of one channel and a reading that carries neither is a host
+                -- with no game log rather than a quiet grid.
+                ++ " "
+                ++ describeOutgoingFire context.memory.outgoingFire
                 ++ " "
                 -- Beside the damage window rather than beside the gauges,
                 -- because what it says is that the window is the only guard
@@ -13481,6 +13672,11 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             { before = botMemoryBefore.combatStalemate
             , fightIsUnderway = combatFightIsUnderway context.readingFromGameClient
             , ratsInOverview = namesOfRatsInOverview |> List.length
+            }
+    , outgoingFire =
+        outgoingFireAfterReading
+            { before = botMemoryBefore.outgoingFire
+            , summaries = context.readingFromGameClient.outgoingDamageSinceLastReading
             }
     , lockAttempt = lockRangeLearning.attempt
     , lockRangeStatedMeters =
