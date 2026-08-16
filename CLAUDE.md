@@ -5756,6 +5756,95 @@ other route is an acceleration gate, which changes pocket without a warp. The
 observation covers the consequences of both, since it watches arrivals rather
 than departures; what it does not do is stop either.
 
+### The mission runner's warp half was the dead half, and two consumers were waiting on it
+
+Issue #205, and it is #194's condition found in this bot rather than a new
+defect. `weJustFinishedWarping` read
+
+```elm
+(botMemoryBefore.shipWarpingInLastReading == Just True) && (shipIsWarping == Just False)
+```
+
+and `shipIsWarping` is a `Maybe` over the manoeuvre the client **names**. At the
+end of a warp the client names none, so the transition is `Just True -> Nothing`
+and that condition could not answer `True` at the end of a warp in any recorded
+run. The argument, the captured indication container and the replacement are all
+#194's — see "The on-arrival pilot check could not fire" above.
+`shipWarpingFromReading` and `warpJustEnded` are ported byte-identical, so all
+four apps now carry one rule.
+
+**Which is why this was a behaviour change and #233 deferred it rather than
+overlooking it.** Two live consumers read that value here, and neither had ever
+seen it answer `True`:
+
+- **`droneAbandonmentAfterReading`'s `shipLeftThisReading`** is
+  `weJustFinishedWarping || (dockedNow && not dockedInLastReading)`. Only the
+  docking half worked, so drones left in space were noticed when the ship docked
+  and **never when it warped out of a pocket** — which is the case the rule's own
+  comment says it exists for. It now records the count and the *sighting's*
+  place on the arrival and drops the sighting, so the warp home and the dock
+  that follows it are one event rather than two. **Nothing acts on it**: the
+  verdict is read by `missionBotDecisionRoot`'s one-line change report and by
+  the status line, and by no decision. That was cheap to hold while the half was
+  dead and is pinned now that it is live.
+- **#154's per-warp ammo-swap give-up retry**, through
+  `ammoSwapGiveUpAfterReading`. A `GunsDidNotComeBack` verdict is cleared on the
+  next warp and was never cleared at all, so a swap that failed once stayed
+  given up for the session — **while the status line said `off until the next
+  warp` on every reading of it**, which is a promise the bot could not keep. It
+  can now: the abandonment clears `gunsSilencedTicks` on the reading after the
+  budget expires, so the cleared verdict cannot re-latch on the reading it was
+  cleared on. The other two verdicts still survive a warp, and
+  `NoCrossoverDistance` surviving is #157's argument rather than an oversight —
+  #106 already spends the warp boundary at the *evidence*, one hover per warp,
+  so retrying the verdict would re-latch it immediately and buy nothing but the
+  long sentence reprinted once a warp. That is the tooltip/optimal-range hover
+  family, which is mission-runner-only on purpose and is untouched here.
+
+**The ship-UI clause is load-bearing here in a way it is not in the anomaly
+bots.** `Nothing` is equally what a reading with no ship UI answers, and this
+bot **docks** — so a fix written as `/= Just True` and nothing else would make
+every docking reading a warp ending, and `shipLeftThisReading` would fire twice
+for one departure.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_mission_runner_warp_end_trigger.py` (25 cases). The
+transition is executed through the real `Bot.elm` in `elm repl` against readings
+built by the real `EveOnline.ParseUserInterface` from the shape captured during
+saxrat run 29, reusing `test_arrival_pilot_window.py`'s own `WARP_READINGS`; and
+**both consumers are folded over the same readings twice**, once through the
+shipped trigger and once through the condition it replaces, so what separates
+the two answers is the trigger and not the fixture. Confirmed by mutation,
+twelve of them, each failing a named case, listed in that file — including the
+ship-UI clause dropped, which fails once on the trigger and again on the docking
+reading the drone rule would then double-count; `ammoSwapGiveUpSurvivesAWarp`
+flipped for `GunsDidNotComeBack` and, separately, for `NoCrossoverDistance`,
+which is the hover family being pulled across; and a decision starting to
+consult `dronesLeftBehind`.
+
+**`TheMissionRunnerIsUntouched` was PR #233's deferral marker and is replaced
+rather than deleted.** It asserted this bot **still had** the dead condition, so
+it collides with the change that fixes it — which this repo has now been bitten
+by twice. What replaces it,
+`test_wingus_warp_end_trigger.TheFourAppsCarryTheSameWorkingTrigger`, keeps what
+was worth keeping: four apps carry one rule that is app-specific in no part of
+it, so it compares all four byte for byte and refuses the dead shape in any of
+them. A future divergence is then a decision somebody argues for rather than one
+the suite lets happen.
+
+**Unverified: any of it running.** No run has been flown, and by construction
+neither consumer has ever fired on the warp half in a recorded run. What to
+watch on the first run that warps out of a pocket with drones in space is
+`Left drones behind:` in the decision log and then `LEFT BEHIND N at ...` in the
+status line — this bot has not abandoned drones since run 1, so a quiet run
+proves nothing either way. On the first run whose swap reaches
+`GunsDidNotComeBack`, the give-up saying `off until the next warp` and then
+**going away** on the next warp with a fresh `wants short-range for N
+reading(s)` after it; that give-up has fired twice in 37 runs and #157 narrowed
+it further, so it may be a long wait. The failure to watch for is a
+`Left drones behind:` line on a reading the ship merely docked, which would mean
+the ship-UI clause is not doing its work.
+
 ## What saxrat has of this, and what it does not
 
 Almost everything above is about *the client and the ship* rather than about
@@ -8178,13 +8267,18 @@ apps derived `shipIsWarping` inline in two different shapes, a pipeline and a
 `case`. Six declarations are byte-identical across the two and a case compares
 them rather than merely checking both are present.
 
-**`eve-online-mission-runner` and `eve-online-wingus` still carry the dead
-trigger**, and that is #205 rather than this change. Wingus has #194 verbatim —
-the same single-reading snapshot on the same unreachable condition. The mission
-runner has no arrival snapshot, but the same condition gates its drone
-abandonment (`shipLeftThisReading`, whose other half — undocking — does work) and
-#154's per-warp ammo-swap retry, so the fix is the same three lines with two
-different consequences that each need their own argument and their own cases.
+**`eve-online-mission-runner` and `eve-online-wingus` carried the dead trigger
+too, and that was #205 rather than this change.** Both have it now — wingus in
+#233 and the mission runner in #205 — so all four apps carry
+`shipWarpingFromReading` and `warpJustEnded` byte for byte, which
+`test_wingus_warp_end_trigger.TheFourAppsCarryTheSameWorkingTrigger` compares
+rather than leaving to be assumed. Wingus had #194 verbatim: the same
+single-reading snapshot on the same unreachable condition. The mission runner
+has no arrival snapshot, but the same condition gated its drone abandonment
+(`shipLeftThisReading`, whose other half — docking — does work) and #154's
+per-warp ammo-swap retry, which is why it was a behaviour change to two live
+consumers rather than a third copy of this one — see "The mission runner's warp
+half was the dead half, and two consumers were waiting on it" below.
 
 **Verified without a live client**, in
 `tools/macos-host/tests/test_arrival_pilot_window.py` (43 cases against **both**
