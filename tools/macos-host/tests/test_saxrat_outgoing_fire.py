@@ -530,6 +530,14 @@ class TheCorpusHasNoThresholdTest(unittest.TestCase):
         interval that then produced a kill is at least as high as the worst on
         an interval that never produced one. The two populations do not
         separate, so no threshold on a miss rate can tell them apart.
+
+        **The `never` population is thin and this case says so rather than
+        leaning on it.** Every interval but the last of a session is closed by a
+        kill, so what is left is one stretch per session and its composition is
+        an artefact of where the log stops. The argument does not rest here:
+        `test_a_long_hard_miss_run_recovered_on_its_own` carries it on the
+        recovered side alone, where the sample is thousands. This case is the
+        cheap tripwire for a corpus that grows a real stall population.
         """
         intervals = kill_free_intervals()
         recovered = [i["share"] for i in intervals if i["ends_in_kill"]]
@@ -545,9 +553,13 @@ class TheCorpusHasNoThresholdTest(unittest.TestCase):
     def test_a_long_hard_miss_run_recovered_on_its_own(self):
         """The 702-hazard, from the side that makes it a hazard.
 
-        The corpus holds an interval that missed nearly every shot for hundreds
-        of consecutive shots and then killed its rat. A rule that acted on a
-        miss rate would have broken that fight off.
+        **This is the case the whole change rests on, and it needs one
+        population rather than two.** The corpus holds an interval that missed
+        nearly every shot for hundreds of consecutive shots and then killed its
+        rat. Any threshold on a miss rate below that share fires on it and
+        breaks off a fight that was being won -- which is true whatever the
+        stretches that killed nothing look like, and is why nothing here has to
+        argue from the thin side of the split.
         """
         recovered = [i for i in kill_free_intervals() if i["ends_in_kill"]]
         punishing = [i for i in recovered
@@ -582,6 +594,9 @@ class TheCorpusHasNoThresholdTest(unittest.TestCase):
         stretches of fighting that killed nothing are mostly stretches in which
         the guns were *landing*. Asserted as the relation -- most kill-free
         intervals sit below a high miss share -- rather than as a count.
+
+        Same thin population as above, and the same posture: this is corroboration
+        for PR #272's own reading of run 48 rather than the load-bearing half.
         """
         never = [i["share"] for i in kill_free_intervals()
                  if not i["ends_in_kill"]]
