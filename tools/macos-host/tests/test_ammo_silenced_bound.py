@@ -689,16 +689,31 @@ class TheWarpTheSwapIsRetriedAcross(unittest.TestCase):
             "botMemoryBefore.ammoSwap", update)
 
     def test_the_warp_is_the_one_already_defined(self):
-        # One definition of "a site ended", shared with the drone abandonment,
-        # so the two cannot come to disagree about it -- and so a second,
-        # subtly different warp test cannot be introduced here without somebody
-        # noticing.
+        """One definition of "a site ended", and it is the shared rule now.
+
+        The property this protects is #154's and is unchanged: the retry uses
+        the warp notion that already exists rather than defining a second,
+        subtly different one, so it and the drone abandonment cannot come to
+        disagree about when a site ended. What changed is *which* notion that
+        is. This quoted #194's condition, because when #154 was written that
+        was the only shape available -- and #205 then established it could
+        never answer `True` at the end of a warp, so the retry was reading a
+        value that never moved.
+
+        Re-pointed rather than relaxed. A substring that would pass against
+        either shape would stop catching the thing the case is named for, and
+        the property is worth more now than it was: `warpJustEnded` is shared
+        across four apps, so a second definition introduced here would be a
+        divergence from all of them rather than from one binding. Same text
+        `test_saxrat_ammo_swap` asserts of saxrat's copy, which #201 re-pointed
+        for the same reason.
+        """
         update = collapsed(without_comments(
             declaration("updateMemoryForNewReadingFromGame", self.source)))
         self.assertIn(
-            "weJustFinishedWarping = "
-            "(botMemoryBefore.shipWarpingInLastReading == Just True) "
-            "&& (shipIsWarping == Just False)", update)
+            "weJustFinishedWarping = warpJustEnded "
+            "{ warpingLastReading = botMemoryBefore.shipWarpingInLastReading "
+            ", readingNow = context.readingFromGameClient }", update)
         self.assertEqual(
             code_only(self.source).count("weJustFinishedWarping ="), 1,
             "one definition, read by both the drone bookkeeping and the swap")

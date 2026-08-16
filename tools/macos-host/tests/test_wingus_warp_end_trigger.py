@@ -48,13 +48,15 @@ single reading anyway). Wingus's snapshot already runs on exactly the reading
 `weJustFinishedWarping` answers `True` for, which is what a window of zero
 readings would do too -- so only the trigger moves, not the shape around it.
 
-**Scope: wingus only.** `eve-online-mission-runner` carries the identical
-`(shipIsWarping == Just False)` shape for two *different* readers --
-`droneAbandonmentAfterReading`'s `shipLeftThisReading`, and #154's per-warp
-ammo-swap give-up retry -- and #205 keeps those separate deliberately: they are
-behaviour changes with their own blast radius, and each needs its own argument
-and its own cases. `TheMissionRunnerIsUntouched` pins that this change left it
-exactly as it was.
+**Scope when this file was written: wingus only.** `eve-online-mission-runner`
+carried the identical `(shipIsWarping == Just False)` shape for two *different*
+readers -- `droneAbandonmentAfterReading`'s `shipLeftThisReading`, and #154's
+per-warp ammo-swap give-up retry -- and PR #233 kept those separate
+deliberately: they are behaviour changes with their own blast radius, and each
+needed its own argument and its own cases. **That work has since been done**,
+which retired `TheMissionRunnerIsUntouched` -- see
+`TheFourAppsCarryTheSameWorkingTrigger`, which replaces it, and
+`test_mission_runner_warp_end_trigger.py` for the argument and the cases.
 
 **Verified without a live client.** The transition is executed through the
 real `Bot.elm` in `elm repl`, with readings built from the shape captured off
@@ -91,6 +93,7 @@ import unittest
 from prerequisites import REPO_DIR, open_repl
 from test_saxrat_ported_guards import SAXRAT_BOT_ELM, SaxratRepl, source_of
 from test_arrival_pilot_window import (
+    COMBAT_ANOMALY_BOT_ELM,
     WARP_READINGS,
     body_of_declaration,
     indented_binding,
@@ -108,10 +111,20 @@ MISSION_RUNNER_BOT_ELM = os.path.join(
 # The two declarations #201 built and #205 asks wingus to take whole.
 SHARED_DECLARATIONS = ("shipWarpingFromReading", "warpJustEnded")
 
-# The exact shape of the dead condition, quoted from the issue and from the
-# source both apps carried it in. Used both to confirm wingus no longer has it
-# and that the mission runner -- deliberately out of scope -- still does.
-OLD_CONDITION = "(shipIsWarping == Just False)"
+# The dead condition, quoted from the issue and from the source every app
+# carried it in. Matched without its parentheses, because two apps quote the
+# shape in a doc comment and the code is what this is about -- the callers
+# below strip block comments first.
+OLD_CONDITION = "shipIsWarping == Just False"
+
+# Every app that carries the working trigger, once #205 finished the sweep
+# #194 started. The order is the order they took it.
+APPS_WITH_THE_RULE = (
+    ("saxrat", SAXRAT_BOT_ELM),
+    ("combat anomaly bot", COMBAT_ANOMALY_BOT_ELM),
+    ("wingus", WINGUS_BOT_ELM),
+    ("mission runner", MISSION_RUNNER_BOT_ELM),
+)
 
 
 class WingusRepl(SaxratRepl):
@@ -340,24 +353,56 @@ class TheTransitionIsSeenOnTheClientsOwnShape(unittest.TestCase):
             "warped, which makes every reading an arrival")
 
 
-class TheMissionRunnerIsUntouched(unittest.TestCase):
-    """#205's own scope line, pinned rather than left to be assumed.
+class TheFourAppsCarryTheSameWorkingTrigger(unittest.TestCase):
+    """What `TheMissionRunnerIsUntouched` became once #205 was finished.
 
-    The mission runner carries the identical dead condition for two different
-    readers -- `droneAbandonmentAfterReading`'s `shipLeftThisReading`, and
-    #154's per-warp ammo-swap give-up retry -- and #205 keeps those separate
-    deliberately: each is a behaviour change with its own blast radius. This
-    change touches wingus and nothing else, and this case is what would notice
-    if that stopped being true.
+    That case asserted the mission runner **still had** the dead condition. It
+    was PR #233's own scope line pinned rather than assumed: wingus was fixed,
+    the mission runner deliberately was not, and the case is what would have
+    noticed if that stopped being true silently. It has now stopped being true
+    on purpose -- issue #205 is exactly that work, and
+    `test_mission_runner_warp_end_trigger.py` carries its argument and its
+    cases -- so a case recording the defect would be colliding with the change
+    that fixes it, which this repo has now been bitten by twice.
+
+    **Deleting it would drop something worth keeping, so it is replaced rather
+    than removed.** What was worth noticing was never "the mission runner is
+    behind"; it is that four apps carry one rule that is app-specific in no
+    part of it, and that a copy which drifts still compiles and still answers.
+    So all four are compared byte for byte here, and none of them may carry the
+    shape #194 found dead. A fifth app growing its own copy, or one of the four
+    drifting from the rest, goes red -- which makes a future divergence a
+    decision somebody argues for rather than one the suite lets happen.
     """
 
-    def test_the_mission_runner_still_carries_the_dead_condition(self):
-        self.assertIn(
-            OLD_CONDITION, source_of(MISSION_RUNNER_BOT_ELM),
-            "the mission runner's weJustFinishedWarping no longer matches "
-            "the shape #205 deliberately leaves alone here -- if it was "
-            "fixed, that was a different change; if this file drifted, the "
-            "claim above is stale")
+    def test_all_four_apps_carry_the_same_two_declarations(self):
+        for name in SHARED_DECLARATIONS:
+            texts = {app: declaration(path, name)
+                     for app, path in APPS_WITH_THE_RULE}
+            self.assertEqual(
+                len(set(texts.values())), 1,
+                "%s is not the same declaration in all four apps -- every one "
+                "of them compiles and answers either way, so the drift is "
+                "silent. Lengths by app: %r"
+                % (name, {app: len(text) for app, text in texts.items()}))
+
+    def test_no_app_still_carries_the_dead_condition(self):
+        """Block comments stripped, because two of the four quote the shape.
+
+        saxrat and the combat anomaly bot explain #194 in a doc comment by
+        writing the condition out, so a search over the raw source finds the
+        prose rather than the code -- and would go on passing with the code
+        reverted in an app that carries no such comment.
+        """
+        for app, path in APPS_WITH_THE_RULE:
+            # `assertNotIn` would print the whole `Bot.elm` as the container,
+            # which is tens of thousands of lines of failure output for a
+            # one-line finding.
+            self.assertFalse(
+                OLD_CONDITION in without_block_comments(source_of(path)),
+                "%s carries #194's unreachable condition in code again -- it "
+                "cannot answer True at the end of a warp, and every case "
+                "downstream of it passes while it is there" % app)
 
 
 if __name__ == "__main__":
