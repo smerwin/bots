@@ -3164,6 +3164,71 @@ runAwayIfLowHealth context _ =
         Nothing
 
 
+{-| Is nothing watching for the ship being ground down?
+
+The mission runner's #129, ported because saxrat's shipped configuration **is**
+the state this names: both percentage thresholds default to `-1`, so a run
+started without settings has the damage window armed and neither gauge guard
+able to see an attrition. The damage window bounds a _burst_ -- it reports gross
+incoming damage where survival is governed by net, and a hull that repairs
+reads a smaller window while dying than while healthy.
+
+The bound is read off `runAwayIfLowHealth`'s own `hitpointsLowWaterMark <
+threshold` rather than off the `-1` convention, so a threshold of `0` -- a
+keystroke away, and equally unable to fire, since a percentage never goes below
+zero -- reads as uncovered too. The two cannot drift apart.
+
+**Read by the status line and by no decision.** `runAwayIfLowHealth` is
+untouched: a run that was covered before is covered identically now, and one
+that was not is not. What changes is that it says so on every reading rather
+than leaving it to be reconstructed from a log afterwards.
+
+-}
+attritionIsUnguarded : { shieldThresholdPercent : Int, armorThresholdPercent : Int } -> Bool
+attritionIsUnguarded coverCase =
+    (coverCase.shieldThresholdPercent <= 0) && (coverCase.armorThresholdPercent <= 0)
+
+
+{-| Whether anything is watching the ship's health, in the status line.
+
+**The mission runner's clause prints the low-water marks too and this one does
+not**, because saxrat already carries them --
+`describeMenuAndSettlingCounters` prints `retreat is going by shield N%, armor
+M%` off `hitpointsLowWaterMark`. Two clauses for one pair of numbers is two
+places to disagree about them.
+
+**That clause is conditional where the mission runner's is not**, and the gap is
+stated rather than papered over: saxrat prints the marks only on readings where
+the gauge has withheld something, so a run whose gauge behaves never shows them
+at all. Widening it is a change to a clause this one does not own, and it wants
+its own evidence.
+
+Printed on the guarded case as well, in saxrat's own register, rather than only
+when it fires. A clause that appeared only under the warning would leave "the
+thresholds are armed" and "this bot does not carry the clause" grepping the
+same, which is `describeClearing`'s rule and the reason the corpus could not
+answer #265's question about saxrat in the first place.
+
+-}
+describeRetreatCover : { shieldThresholdPercent : Int, armorThresholdPercent : Int } -> String
+describeRetreatCover coverCase =
+    let
+        thresholds =
+            " (shield "
+                ++ (coverCase.shieldThresholdPercent |> String.fromInt)
+                ++ " armor "
+                ++ (coverCase.armorThresholdPercent |> String.fromInt)
+                ++ ")"
+    in
+    if attritionIsUnguarded coverCase then
+        "attrition UNGUARDED"
+            ++ thresholds
+            ++ " -- the damage window only bounds a burst; set run-away-armor-hitpoints-threshold-percent."
+
+    else
+        "attrition guarded" ++ thresholds ++ "."
+
+
 plausibleHitpointsPercent : Int -> Maybe Int
 plausibleHitpointsPercent value =
     if value < 0 || 100 < value then
@@ -9910,8 +9975,18 @@ statusTextFromState context =
                 ++ (context.memory.lootedWreckIds |> List.length |> String.fromInt)
                 ++ " | "
                 ++ describeModulesToActivateAlways readingFromGameClient
+                ++ " | "
+                ++ describeTopRowModuleDictState readingFromGameClient
                 ++ "\n"
                 ++ describeIncomingDamage context
+                ++ " "
+                -- Beside the damage window rather than beside the gauges,
+                -- because what it says is that the window is the only guard
+                -- left. The marks themselves are already printed further down.
+                ++ describeRetreatCover
+                    { shieldThresholdPercent = context.eventContext.botSettings.runAwayShieldHitpointsThresholdPercent
+                    , armorThresholdPercent = context.eventContext.botSettings.runAwayArmorHitpointsThresholdPercent
+                    }
                 ++ " "
                 ++ describeDroneRecall context
                 ++ " "
@@ -10061,10 +10136,14 @@ statusTextFromState context =
                                             (activeTargetHitpointsPercent readingFromGameClient)
                                         ++ "."
                     in
+                    -- The hints get a line of their own: they are absent on
+                    -- most readings and long when present, so folding them in
+                    -- would make the row line jump between short and unwieldy.
                     [ [ describeShip ]
                     , [ describeDrones ]
                     , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
                     , [ describeRatsInOverview, describeCurrentTarget ]
+                    , [ describeOverviewIndicationHints readingFromGameClient ]
                     ]
                         |> List.map (String.join " ")
     in
@@ -10177,6 +10256,68 @@ combatPriorityTier entry =
 
     else
         2
+
+
+{-| The EWAR hints the client has written on the rendered overview rows.
+
+**saxrat reads these hints and has never once shown them.** `combatPriorityTier`
+above consumes two of the five literals the corpus holds, off
+`commonIndications`, which the parser derives from exactly the strings printed
+here -- so the bot acts on this evidence and prints none of it. Across saxrat's
+227,749 recorded readings there is no `Overview indications:` line and no
+equivalent, because the mission runner's clause was never ported. #265 is what
+that costs: saxrat chose an out-of-range overview row on 13,918 readings and the
+corpus cannot say what was on any of them.
+
+The webifier's and the target painter's literals are parsed and read by no rule
+in this bot. Printing them is how the evidence for a rule about them
+accumulates, which is how #231's two literals were cut out of a log rather than
+guessed at -- and is the same move `describeQuickMessage` made before anything
+matched on a quick message.
+
+Capped and deduplicated: distinct strings across **rendered** rows only, since a
+virtualised row's contents belong to whatever was recycled into its place. The
+count is taken before the cap, so a reading carrying more than
+`overviewIndicationHintsShown` says so by the number exceeding the strings.
+
+-}
+describeOverviewIndicationHints : ReadingFromGameClient -> String
+describeOverviewIndicationHints readingFromGameClient =
+    let
+        hints =
+            readingFromGameClient.overviewWindows
+                |> List.concatMap .entries
+                |> List.filter overviewEntryIsDisplayed
+                |> List.concatMap .rightAlignedIconsHints
+                |> Common.Basics.listUnique
+    in
+    case hints of
+        [] ->
+            "hints 0."
+
+        _ ->
+            "hints "
+                ++ (hints |> List.length |> String.fromInt)
+                ++ " ("
+                ++ (hints
+                        |> List.take overviewIndicationHintsShown
+                        |> List.map (\hint -> "'" ++ hint ++ "'")
+                        |> String.join " "
+                   )
+                ++ ")."
+
+
+{-| How many distinct overview hints the status line spells out.
+
+A bound rather than a policy: the strings are the client's own sentences and a
+grid under several kinds of EWAR would otherwise put a paragraph on every
+reading. The count beside them is not capped, so a reading past this bound is
+still visible as one.
+
+-}
+overviewIndicationHintsShown : Int
+overviewIndicationHintsShown =
+    8
 
 
 {-| Whatever the client says is shooting this ship is a valid target.
@@ -13520,6 +13661,85 @@ describeModulesToActivateAlways readingFromGameClient =
                         ++ ", keep-active ["
                         ++ (rest |> List.map describeOne |> String.join ", ")
                         ++ "]."
+
+
+{-| What the weapons' own dict entries say, per module, every reading.
+
+The mission runner's clause, ported because saxrat's own Unverified note for
+#154 asks for exactly this reading and cannot get it: that run could not say
+whether the guns came back, and `switchOffUndoneByClient` is a latch derived
+from `isInActiveState` with nothing printing the field it derives from. The
+parser has carried all twelve entries in this app since they were added; nothing
+here has ever printed one.
+
+`isInActiveState` is printed beside `ramp_active` rather than instead of it,
+because it is what makes `ramp_active` readable at all: `False` there means
+"between cycles" while the gun is on and "not running" once it is off, and only
+the switched-on flag separates those two. The switch-off leg is exactly where
+they disagree, and that leg is what #154 could not see.
+
+`-` is an entry **absent from the tree**, printed differently from `0` and `F`
+on purpose. Absent and `False` are different facts and both were seen live: no
+module carried `ramp_active` for the first ~60s of the mission runner's sample,
+and `waitingForActiveTarget` appeared on all four modules at once at 141s. A
+format collapsing them would drop the transition worth recording. (An entry
+present but undecodable also prints `-`.)
+
+Sorted by position rather than taken in list order, for
+`describeModulesToActivateAlways`' reason: the row is not a stable index space,
+so two readings taken in list order can put one gun's values in another's
+column.
+
+**Read by the status line and by no decision**, which is the whole of its
+placement -- `weaponIsSwitchedOn` and the ammo swap's own mapping are the only
+things in this bot that read a dict entry, and both go through
+`moduleReadsSwitchedOn` / `moduleReadsSwitchedOff` rather than naming a field.
+
+-}
+describeTopRowModuleDictState : ReadingFromGameClient -> String
+describeTopRowModuleDictState readingFromGameClient =
+    let
+        describeFlag maybeFlag =
+            case maybeFlag of
+                Just True ->
+                    "T"
+
+                Just False ->
+                    "F"
+
+                Nothing ->
+                    "-"
+
+        describeNumber maybeNumber =
+            case maybeNumber of
+                Just number ->
+                    String.fromInt number
+
+                Nothing ->
+                    "-"
+
+        describeOne moduleButton =
+            [ describeFlag moduleButton.stateFromDictEntries.ramp_active
+            , describeFlag moduleButton.stateFromDictEntries.isInActiveState
+            , describeFlag moduleButton.stateFromDictEntries.isDeactivating
+            , describeNumber moduleButton.stateFromDictEntries.effect_activating
+            , describeNumber moduleButton.stateFromDictEntries.waitingForActiveTarget
+            ]
+                |> String.join "/"
+    in
+    case readingFromGameClient.shipUI of
+        Nothing ->
+            "topmods no ship UI."
+
+        Just shipUI ->
+            case shipUI.moduleButtonsRows.top |> List.sortBy (.uiNode >> .totalDisplayRegion >> .x) of
+                [] ->
+                    "topmods none."
+
+                topRowModules ->
+                    "topmods (ramp_active/isInActiveState/isDeactivating/effect_activating/waitingForActiveTarget) "
+                        ++ (topRowModules |> List.map describeOne |> String.join " ")
+                        ++ "."
 
 
 nothingFromIntIfGreaterThan : Int -> Int -> Maybe Int
