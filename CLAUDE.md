@@ -1511,6 +1511,14 @@ that — the same warning `defaultRunAwayIncomingDamageThreshold` carries.
 problem and giving up is not the answer to it — without that, a gun firing out
 of range would give up on everything it could not reach.
 
+**This rule is mission-runner-only by design rather than merely unported**, and
+the operator's own account of it is what settles that: it exists to catch *a
+mis-locked invulnerable object*, which is why every object it has ever fired on
+is an asteroid, a gate or a structure and why the by-name latch is correct
+there. saxrat fights rats, which die; it has no population for this rule to act
+on, and #267's own measurement over the rat corpus found none. Porting it would
+be porting a rule to a bot whose grid never produces its input.
+
 **The verdict is latched in `BotMemory.zeroDamage` and kept for the session**,
 the way `missionNamesAbandoned` is. A reading's summary is gone by the next one,
 so a branch that read the zero and wrote nothing down would see it once and go
@@ -7641,6 +7649,63 @@ is indistinguishable by share and by length from the 99.1% stretch that
 recovered. The hazard is that the two cannot be told apart, not that long miss
 runs are usually benign.
 
+#### The range-conditioned form was measured too, and it does not separate either
+
+The answer offered to "the pooled miss rate has no threshold" is that a miss only
+means *the ammo is wrong* when the range says so too — the loaded charge on the
+wrong side of the `ammo-swap-range` crossover for the current target distance. So
+the fire is partitioned on exactly that and the kill question asked inside each
+half.
+
+**This needs saxrat's own run logs rather than the client's**, because only they
+carry the loaded charge and the target distance beside the shots — and they echo
+the client's `(combat)` and `(bounty)` lines, so the same independent kill signal
+is available. Counted in **readings**, folded at real reading boundaries:
+`# [N.M]` is reading N, *step* M, and folding on the whole marker counts steps,
+which is the confusion that has already cost `stall_watch.py` two calibrations,
+#141 a retreat measurement and #164 an issue's whole diagnosis. 29 runs,
+**18,644 appropriate readings against 5,520 mismatched**, 40,468 shots.
+
+**The mechanism the hypothesis rests on is not there.** Pooled over every
+classifiable reading:
+
+| partition | shots | missed | miss share |
+|---|---:|---:|---:|
+| charge **appropriate** for the range | 30,281 | 3,494 | **11.5%** |
+| charge **mismatched** | 10,187 | 895 | **8.8%** |
+
+A charge on the wrong side of the crossover misses **no more** than one on the
+right side — slightly less — and the same holds band by band when the comparison
+is controlled for distance. That is what a crossover *is*: it is about damage at
+range, not about tracking, and what makes a shot miss is the target's angular
+velocity. So the proposed condition is not selecting fights where the guns cannot
+hit, because there is no such population to select.
+
+**And the partition does not separate the kill question.** Inside the mismatched
+half, with a lookahead of even **ten readings**, the stretches that produced a
+kill reach a **100%** miss share while the ones that produced none top out at
+17%, 4% and 0% — and at a shot floor of 40 there are **zero** barren mismatched
+stretches left at all. Conditioning removes the barren population rather than
+sharpening it.
+
+**Scored with no lookahead it appears to separate, and that gap is one stretch
+at every shot floor.** That stretch is run 36's: the guns hold a short-range
+charge while the target drifts from 19 km out past 30 km against a 15 km
+crossover, and miss every shot — 59 shots, 395 steps, no kill. It is scored
+barren only because the class changed before the kill landed. **Three rats die
+in the sixty readings immediately after it.** So the one stretch carrying the
+apparent gap is a boundary artefact, which is the same trap that made the pooled
+window measurement look separated at one window length and not at another.
+
+**The dead band is excluded rather than assigned**, because inside it the swap
+itself declines to decide — and run 48's deadlock is exactly a target parked in
+that band, so the readings a careless classification would misfile are the ones
+the question is about. The charge is the bot's *believed* one, which its own
+clause marks `assumed from the load, not read back`; that is deliberate rather
+than a compromise, since a trigger could only ever act on the belief, so
+measuring on the belief measures exactly the input the proposed rule would have
+had.
+
 #### Why neither actuator was wired
 
 - **The manoeuvre half is expressible and was not widened.**
@@ -7690,7 +7755,7 @@ miss signal to trigger on in any case.
 
 #### Verified without a live client
 
-`tools/macos-host/tests/test_saxrat_outgoing_fire.py` (20 cases). The rule is
+`tools/macos-host/tests/test_saxrat_outgoing_fire.py` (26 cases). The rule is
 executed through the real `Bot.elm` in `elm repl` and folded over whole sessions
 rather than asked once, and the readings it is asked about carry the host's own
 `MacOsHostSyntheticOutgoingDamage` node — built by `botlab_host.py`'s emitter and
@@ -7715,6 +7780,15 @@ high-water mark following the live run down; the status clause dropping its
 "Nothing decides on this"; a decision reading the field; a second call site given
 to either manoeuvre verb; and the wanted charge given a second input.
 
+The range-conditioned measurement is graded the same way, on its own premises,
+since what it asserts is a finding rather than shipped behaviour: five
+mutations, each failing a named case -- the lookahead ignored, so a class
+boundary fakes a stall; the kill channel never read; every reading called
+appropriate, so the partition has one side; **the dead band classified instead
+of excluded**, which survived the first pass and is why
+`test_the_dead_band_is_excluded_rather_than_assigned` exists; and misses pooled
+into the landed count.
+
 #### Unverified
 
 **Any of it running.** No run has been flown; this was written with the corpus
@@ -7725,12 +7799,22 @@ channel; a run whose two counts stay at zero while the guns cycle is the summary
 not reaching the bot, which is the direction this fails silently in.
 
 **Whether a bot-side reading separates the populations where a client-side second
-does not.** Every number above is folded at the client's own second, which is
+does not.** The pooled numbers are folded at the client's own second, which is
 finer than a real reading (one to eight seconds) — the fold most favourable to a
-long run, and the same argument #271 makes. What no corpus can supply is the
-*bot's* view: saxrat has never printed an outgoing number, so there is no run in
-which the miss share sits beside the target, the range and the charge the bot
-believed it had. That is exactly what this clause makes the next run produce.
+long run, and the same argument #271 makes. The range-conditioned measurement
+*is* bot-side and folded at real reading boundaries, so that gap is closed for
+the partitioned question and open for the pooled one. What still has no reading
+anywhere is the miss share sitting beside the target's own hitpoints, which is
+the one instrument that would say whether a fight is being won rather than
+whether a rat happened to die in the window.
+
+**The charge the partition is built on is the bot's belief, not the gun's
+state.** Run 50's own give-ups are the case where those come apart, so a
+mismatch classified from `chargeLoaded` can be a mismatch that never existed.
+That weakens the partition toward noise rather than toward a false separation,
+and the mechanism result would need a very systematic error to flip — but it is
+not measured, and the clause this change ships is what would let a later run
+measure it.
 
 **Why run 50's menu did not offer the charge.** Whether the gun already carried
 it — in which case the menu is correct and `chargeLoaded` is wrong — or the menu

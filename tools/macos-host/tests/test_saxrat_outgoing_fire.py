@@ -38,7 +38,7 @@ import re
 import sys
 import unittest
 
-from prerequisites import MACOS_HOST_DIR, open_repl
+from prerequisites import EVE_BOT_LOGS, MACOS_HOST_DIR, open_repl
 from test_saxrat_ported_guards import (
     SAXRAT_BOT_ELM, SaxratRepl, body_of, collapsed, source_of)
 
@@ -209,6 +209,164 @@ def windows(length):
 def median(values):
     values = sorted(values)
     return values[len(values) // 2] if values else float("nan")
+
+
+# --------------------------------------------------------------------------
+# saxrat's own runs, which are the only corpus that carries the loaded charge
+# and the target distance *and* echoes the client's `(combat)` and `(bounty)`
+# lines. That combination is what the conditional hypothesis needs and the
+# client logs alone cannot supply.
+
+
+NO_SAXRAT_RUNS = ("no recorded saxrat runs in ~/eve-bot-logs, so what the "
+                  "loaded charge was at each range cannot be counted here")
+
+# `# [N.M]` is reading N, **step** M. Folding on the whole marker counts steps,
+# which is the confusion that has already cost `stall_watch.py` two threshold
+# calibrations, #141 a retreat measurement and #164 an issue's whole diagnosis.
+# Consecutive blocks sharing N are one reading.
+STEP_MARKER = re.compile(r"^# \[(\d+)\.\d+\]")
+GAME_LOG_ECHO = re.compile(r"^#\s+game log: (.*)$")
+AMMO_CLAUSE = re.compile(
+    r"Ammo swap: loaded charge reads (\S+?)(?: \(assumed[^)]*\))?, "
+    r"crossover (\d+) m \(\+/-(\d+)[^)]*\), target distance (\d+) m")
+
+_RUNS = {}
+
+
+def saxrat_runs():
+    """Every recorded saxrat run, folded to readings. Cached for the process."""
+    if _RUNS:
+        return _RUNS
+    paths = sorted(glob.glob(os.path.join(EVE_BOT_LOGS, "saxrat_run*.log")))
+    if not paths:
+        raise unittest.SkipTest(NO_SAXRAT_RUNS)
+    for path in paths:
+        rows = readings_in_run(path)
+        if any(row["ammo"] for row in rows):
+            _RUNS[path] = rows
+    if not _RUNS:
+        raise unittest.SkipTest(NO_SAXRAT_RUNS)
+    return _RUNS
+
+
+def readings_in_run(path):
+    """One entry per reading: its ammo clause and what the guns did.
+
+    The combat and bounty lines are read through the host's own matchers rather
+    than a regex here, exactly as the client-log reader above does, so both
+    corpora are measured with the shipped patterns.
+    """
+    out = []
+    current = None
+    index = None
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            line = raw.rstrip("\n")
+            marker = STEP_MARKER.match(line)
+            if marker:
+                number = int(marker.group(1))
+                if number != index:
+                    if current is not None:
+                        out.append(current)
+                    current = {"hits": 0, "misses": 0, "kills": 0, "ammo": None}
+                    index = number
+                continue
+            if current is None:
+                continue
+            clause = AMMO_CLAUSE.search(line)
+            if clause and current["ammo"] is None:
+                current["ammo"] = (clause.group(1), int(clause.group(2)),
+                                   int(clause.group(3)), int(clause.group(4)))
+                continue
+            echoed = GAME_LOG_ECHO.match(line)
+            if not echoed:
+                continue
+            text = " ".join(botlab_host._GAME_LOG_MARKUP.sub(
+                "", echoed.group(1)).split())
+            entry = botlab_host.parse_game_log_line(text)
+            if entry is None:
+                continue
+            if entry["channel"] == "bounty" and KILL_MARKER in entry["text"]:
+                current["kills"] += 1
+            elif botlab_host.parse_outgoing_damage(entry) is not None:
+                current["hits"] += 1
+            elif botlab_host.parse_outgoing_miss(entry) is not None:
+                current["misses"] += 1
+    if current is not None:
+        out.append(current)
+    return out
+
+
+def charge_matches_the_range(ammo):
+    """`appropriate`, `mismatched`, or None where the corpus cannot say.
+
+    **The dead band is excluded rather than assigned.** Inside it the swap
+    itself declines to decide, so calling the charge right or wrong there would
+    be this measurement inventing a verdict the bot never formed -- and run 48's
+    deadlock is precisely a target parked in that band.
+
+    The charge is the bot's *believed* one, which its own clause marks `assumed
+    from the load, not read back`. That is deliberate rather than a compromise:
+    a trigger could only ever act on the belief, so measuring on the belief
+    measures exactly the input the proposed rule would have had.
+    """
+    if ammo is None:
+        return None
+    loaded, crossover, deadband, distance = ammo
+    if loaded not in ("long-range", "short-range"):
+        return None
+    if distance > crossover + deadband:
+        wanted = "long-range"
+    elif distance < crossover - deadband:
+        wanted = "short-range"
+    else:
+        return None
+    return "appropriate" if loaded == wanted else "mismatched"
+
+
+def charge_stretches(rows, lookahead):
+    """Maximal runs of consecutive readings sharing one class.
+
+    `lookahead` readings past the end also count toward "a rat died", which is
+    what stops a class boundary faking a stall: the one stretch that made this
+    partition look separated is run 36's, and three rats die in the readings
+    immediately after it.
+    """
+    kills = [row["kills"] for row in rows]
+    out = []
+    start = None
+    for index in range(len(rows) + 1):
+        kind = (charge_matches_the_range(rows[index]["ammo"])
+                if index < len(rows) else None)
+        previous = (charge_matches_the_range(rows[start]["ammo"])
+                    if start is not None else None)
+        if start is not None and kind != previous:
+            span = rows[start:index]
+            hits = sum(row["hits"] for row in span)
+            misses = sum(row["misses"] for row in span)
+            died = (sum(row["kills"] for row in span)
+                    + sum(kills[index:index + lookahead]))
+            if hits + misses:
+                out.append({"kind": previous, "readings": len(span),
+                            "shots": hits + misses, "misses": misses,
+                            "kills": died})
+            start = None
+        if kind is not None and start is None:
+            start = index
+    return out
+
+
+def all_charge_stretches(lookahead, floor):
+    out = []
+    for rows in saxrat_runs().values():
+        out += [s for s in charge_stretches(rows, lookahead)
+                if s["shots"] >= floor]
+    return out
+
+
+def miss_share(stretch):
+    return 100.0 * stretch["misses"] / stretch["shots"]
 
 
 # --------------------------------------------------------------------------
@@ -626,3 +784,174 @@ class TheCorpusHasNoThresholdTest(unittest.TestCase):
                            "the two populations now order the same way at every "
                            "window length, so the instability this rests on has "
                            "gone")
+
+
+class TheRangeConditionedHypothesisTest(unittest.TestCase):
+    """The refined proposal: misses only mean "wrong ammo" if the range agrees.
+
+    The unconditional rule has no threshold, and the answer offered to that was
+    that a miss is only evidence when the loaded charge is on the wrong side of
+    the `ammo-swap-range` crossover for the current target distance. So the fire
+    is partitioned on exactly that and the kill question asked inside each half.
+
+    This needs saxrat's own runs rather than the client's logs, because only
+    they carry the loaded charge and the target distance beside the shots.
+    Counted in **readings**, folded at real reading boundaries.
+
+    It does not separate, and the mechanism it assumes is not there either.
+    """
+
+    def test_the_dead_band_is_excluded_rather_than_assigned(self):
+        """The premise the partition is built on, held rather than stated.
+
+        Inside the crossover's dead band the swap itself declines to decide, so
+        calling the charge right or wrong there would be this measurement
+        inventing a verdict the bot never formed -- and run 48's deadlock is
+        exactly a target parked in that band, so the readings this would
+        misclassify are the ones the question is about. A mutation that
+        classified the band instead of skipping it survived every other case
+        here, which is why this one exists.
+        """
+        crossover, deadband = 20000, 3000
+        for distance in (crossover - deadband, crossover, crossover + deadband):
+            for loaded in ("short-range", "long-range"):
+                self.assertIsNone(
+                    charge_matches_the_range(
+                        (loaded, crossover, deadband, distance)),
+                    "a reading %d m from a %d m crossover is inside the dead "
+                    "band and must be classified as neither" % (distance, crossover))
+        # And just outside it, both directions resolve the way the swap would.
+        self.assertEqual(charge_matches_the_range(
+            ("long-range", crossover, deadband, crossover + deadband + 1)),
+            "appropriate")
+        self.assertEqual(charge_matches_the_range(
+            ("short-range", crossover, deadband, crossover + deadband + 1)),
+            "mismatched")
+        self.assertEqual(charge_matches_the_range(
+            ("short-range", crossover, deadband, crossover - deadband - 1)),
+            "appropriate")
+        self.assertEqual(charge_matches_the_range(
+            ("long-range", crossover, deadband, crossover - deadband - 1)),
+            "mismatched")
+        # An unread charge is not a verdict either.
+        self.assertIsNone(charge_matches_the_range(
+            ("unknown", crossover, deadband, 50000)))
+
+    def test_the_corpus_holds_both_halves_of_the_partition(self):
+        """The control: a partition with nothing on one side proves nothing."""
+        pooled = collections.Counter()
+        for rows in saxrat_runs().values():
+            for row in rows:
+                kind = charge_matches_the_range(row["ammo"])
+                if kind:
+                    pooled[kind] += row["hits"] + row["misses"]
+        self.assertGreater(pooled["appropriate"], 2000, pooled)
+        self.assertGreater(pooled["mismatched"], 2000, pooled)
+
+    def test_a_charge_on_the_wrong_side_of_the_crossover_does_not_miss_more(self):
+        """The mechanism the hypothesis rests on is not in the corpus.
+
+        Pooled over every classifiable reading, the charge the swap would call
+        wrong for the range misses **no more** than the one it would call right.
+        That is what a crossover is: it is about damage at range, not about
+        tracking, and what makes a shot miss is the target's angular velocity.
+        So the proposed condition is not selecting fights where the guns cannot
+        hit -- there is no such population to select.
+
+        Asserted as the relation rather than as the two percentages, with a
+        margin, so ordinary drift cannot turn a true claim red.
+        """
+        pooled = collections.defaultdict(lambda: [0, 0])
+        for rows in saxrat_runs().values():
+            for row in rows:
+                kind = charge_matches_the_range(row["ammo"])
+                if kind:
+                    pooled[kind][0] += row["hits"] + row["misses"]
+                    pooled[kind][1] += row["misses"]
+        shares = {kind: 100.0 * missed / shots
+                  for kind, (shots, missed) in pooled.items()}
+        self.assertLessEqual(
+            shares["mismatched"], shares["appropriate"] * 1.5,
+            "a mismatched charge now misses half again as much as an "
+            "appropriate one (%r), so the mechanism the range-conditioned "
+            "trigger assumes may have appeared" % shares)
+
+    def test_the_mismatched_partition_does_not_separate_either(self):
+        """The finding: conditioning on the range does not rescue the signal.
+
+        Inside the mismatched half, the stretches that produced a kill reach a
+        **100%** miss share -- so any threshold fires on a fight that was being
+        won, exactly as it does in the pooled data. Conditioning removes the
+        barren population rather than sharpening it.
+
+        A lookahead is used because without one a class boundary fakes a stall;
+        see the case below, which is the whole reason this reads differently
+        from the first pass.
+        """
+        for floor in (10, 20, 40):
+            stretches = [s for s in all_charge_stretches(lookahead=10, floor=floor)
+                         if s["kind"] == "mismatched"]
+            killed = [miss_share(s) for s in stretches if s["kills"]]
+            barren = [miss_share(s) for s in stretches if not s["kills"]]
+            self.assertGreater(len(killed), 20,
+                               "too few mismatched stretches at floor %d" % floor)
+            self.assertGreaterEqual(
+                max(killed), max(barren) if barren else 0.0,
+                "at shot floor %d a mismatched stretch that never produced a "
+                "kill now misses harder than any that did -- the range-"
+                "conditioned trigger may have become writable" % floor)
+
+    def test_the_apparent_gap_is_one_stretch_and_a_class_boundary(self):
+        """Why the first pass looked like it separated, and why it does not.
+
+        Scored with no lookahead the mismatched half shows a gap -- and it rests
+        on exactly **one** stretch at every shot floor. That stretch is run 36's:
+        the guns hold a short-range charge while the target drifts from 19 km out
+        past 30 km against a 15 km crossover, and miss every shot. It is scored
+        barren only because the class changed before the kill landed; rats die in
+        the readings immediately after it.
+
+        So the case asserts both halves -- that the unguarded gap is one stretch
+        wide, and that a lookahead of ten readings dissolves it.
+        """
+        for floor in (10, 20, 40):
+            unguarded = [s for s in all_charge_stretches(lookahead=0, floor=floor)
+                         if s["kind"] == "mismatched"]
+            killed = [miss_share(s) for s in unguarded if s["kills"]]
+            above = [miss_share(s) for s in unguarded
+                     if not s["kills"] and miss_share(s) > max(killed)]
+            self.assertLessEqual(
+                len(above), 2,
+                "the unguarded gap at floor %d now rests on %d stretches rather "
+                "than one or two, which is enough to be worth arguing about"
+                % (floor, len(above)))
+
+        guarded = [s for s in all_charge_stretches(lookahead=10, floor=20)
+                   if s["kind"] == "mismatched"]
+        killed = [miss_share(s) for s in guarded if s["kills"]]
+        barren = [miss_share(s) for s in guarded if not s["kills"]]
+        self.assertTrue(
+            not barren or max(barren) <= max(killed),
+            "ten readings of lookahead no longer dissolve the gap")
+
+    def test_the_separation_does_not_survive_a_change_of_lookahead(self):
+        """The same instability that exposed the pooled signal as noise.
+
+        A finding that holds only at one lookahead is a finding about the
+        boundary. Here the verdict flips between no lookahead and any lookahead
+        at all, which is the evidence against the threshold rather than a
+        caveat on it.
+        """
+        verdicts = set()
+        for lookahead in (0, 10, 20, 40):
+            stretches = [s for s in all_charge_stretches(lookahead, floor=20)
+                         if s["kind"] == "mismatched"]
+            killed = [miss_share(s) for s in stretches if s["kills"]]
+            barren = [miss_share(s) for s in stretches if not s["kills"]]
+            if not killed:
+                continue
+            verdicts.add(bool(barren) and max(barren) > max(killed))
+        self.assertGreater(
+            len(verdicts), 1,
+            "the mismatched partition now orders the same way at every "
+            "lookahead, so the instability this rests on has gone")
