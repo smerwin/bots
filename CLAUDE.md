@@ -1357,7 +1357,21 @@ in `elm repl` and the overview rows they are asked about come from the **real**
 the restatement. The discriminating case for the spelling is the plainest one:
 the corpus literal fed in byte for byte, since `is sensor damping me` is no
 substring of `Pilot is sensor dampening me` and a misspelled matcher answers
-`False`. The corpus is recounted as **relations** — tracking disruption dwarfs
+`False`. ```
+python3 -m unittest, module by module, NO_COLOR=1
+  clean origin/main   108 modules, 2844 cases, 0 skipped, 10 failures
+  this branch         109 modules, 2870 cases, 0 skipped, 10 failures
+```
+
+The two failure sets are identical name for name: ten corpus-reading cases
+across `test_retreat_latency`, `test_retreat_not_executing`,
+`test_saxrat_ammo_swap`, `test_saxrat_message_box_standoff` and
+`test_saxrat_undock_settling`, all of which fail on a pristine export of
+`origin/main` and skip in CI. That set is **not** the one #271 recorded a week
+earlier — it reported one failure and there are now ten — which is why it is
+measured per change rather than inherited.
+
+The corpus is recounted as **relations** — tracking disruption dwarfs
 warp disruption, the misspelling occurs nowhere, `is jamming me` occurs nowhere,
 lines exceed readings — so a growing corpus cannot turn a true claim red.
 
