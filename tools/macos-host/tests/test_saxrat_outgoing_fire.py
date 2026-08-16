@@ -38,12 +38,20 @@ import re
 import sys
 import unittest
 
-from prerequisites import EVE_BOT_LOGS, MACOS_HOST_DIR, open_repl
+from prerequisites import EVE_BOT_LOGS, open_repl
 from test_saxrat_ported_guards import (
     SAXRAT_BOT_ELM, SaxratRepl, body_of, collapsed, source_of)
 
-sys.path.insert(0, MACOS_HOST_DIR)
-from botlab_host import botlab_host  # noqa: E402
+# The host's own directory on the path, then the module by its plain name --
+# `tools/macos-host/botlab_host/` carries no `__init__.py`, so it is not a
+# package and `from botlab_host import botlab_host` only resolves where an
+# implicit namespace package happens to win. That is the idiom every other file
+# here uses, and the one that survives being collected from the repo root.
+HERE = os.path.dirname(os.path.abspath(__file__))
+MACOS_HOST_DIR = os.path.dirname(HERE)
+sys.path.insert(0, os.path.join(MACOS_HOST_DIR, "botlab_host"))
+
+import botlab_host  # noqa: E402
 
 GAMELOGS_GLOB = os.path.join(
     os.path.expanduser("~"), "Documents", "EVE", "logs", "Gamelogs", "*.txt")
