@@ -14327,14 +14327,20 @@ lockTargetsFromOverviewEntries overviewEntries =
 
 {-| How many rows from the **front** of the candidate list the ship can reach.
 
-**A prefix, not a count, and that is where this bot differs from saxrat's copy
-of the same rule.** There the candidate list is sorted by distance alone, so the
-rows in range are always a prefix of it and filtering could not reorder
-anything. Here `everythingWorthAttacking` puts a warp-disrupting entry at the
-**front, ahead of the distance order** -- so a scrambler out of reach can sit in
-front of rats that are in reach, and a batch built by _filtering_ would silently
-skip the one row the bot most wants, lock the rats behind it, and never approach
-the scrambler at all.
+**A prefix, not a count, because the candidate list is not in distance order.**
+`everythingWorthAttacking` puts a warp-disrupting entry at the **front, ahead of
+the distance order** -- so a scrambler out of reach can sit in front of rats that
+are in reach, and a batch built by _filtering_ would silently skip the one row the
+bot most wants, lock the rats behind it, and never approach the scrambler at all.
+
+**This is no longer a difference between the two bots**, and the paragraph that
+stood here said it was: it argued saxrat's copy could filter safely, on the
+ground that its candidate list carried no ordering above the distance one. PR
+#253 put `List.sortBy combatPriorityTier` above that ordering in **both** apps,
+and saxrat's `overviewEntriesToLock` derives from the sorted list exactly as this
+one does, so the ground went away. Nothing failed when it did -- the paragraph
+went on reading correctly, in the file the reordering had just falsified. saxrat
+counts the prefix now, from its own copy of this declaration.
 
 Counting the prefix instead makes that impossible: a head the ship cannot reach
 answers 0, which drops the batch to one row and hands the reading back to
