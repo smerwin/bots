@@ -19,7 +19,7 @@ does not transfer at all.
 
 ```
 cd tools/macos-host
-./cycle_run.sh --status                  # bot running? which log?
+BOT_LOG_PREFIX=saxrat_run ./cycle_run.sh --status   # bot running? which log?
 pgrep -f "SharedCache/tq/EVE.app" | head -1   # client pid, never `pgrep -fl`
 ls -lt ~/eve-bot-logs | head -3          # runs, newest first
 gh issue list --repo smerwin/bots --state open
@@ -27,6 +27,25 @@ gh issue list --repo smerwin/bots --state open
 
 `--status` is answered without touching a running session. `--help` on the
 launchers likewise.
+
+**Pass `BOT_LOG_PREFIX` or `--status` names the wrong log.** It defaults to
+`mission_run`, so a saxrat session is reported as whatever stale `mission_runN`
+happens to be newest -- which reads exactly like a run that has stopped writing.
+The same variable is needed on every `cycle_run.sh` call for that session, not
+just this one.
+
+**Check which character is logged in before doing anything else**, because the
+settings are per hull and the wrong ones are dangerous rather than merely
+useless:
+
+```zsh
+./window_probe/window_probe --all 2>/dev/null | grep -o 'name="EVE - [^"]*"' | sort -u
+```
+
+A cruiser's `run-away-incoming-damage-threshold=3500` on a destroyer never fires
+-- the Coercer that died peaked at 2,580 -- and a destroyer's `900` on a cruiser
+retreats from nothing. `Multifrequency M` will not load into small turrets, and
+the ammo swap then latches off for the session with one line about it.
 
 **Never print the client's command line.** It carries `/ssoToken=` and
 `/refreshToken=`. `pgrep -f` without `-l` matches without printing; `python3
@@ -37,7 +56,11 @@ eve_read.py pid` resolves it from the bundle id.
 The launcher's own defaults are good and are calibrated per hull. Two rules keep
 them that way:
 
-**Rebuild the settings string from `run_mission.sh`, never from a saved copy.**
+For saxrat the launcher is `run_saxrat.sh` and every `cycle_run.sh` call needs
+`BOT_LOG_PREFIX=saxrat_run`, or the run writes to `saxrat_runN.log` while
+`--status` reads `mission_runN.log`.
+
+**Rebuild the settings string from the launcher, never from a saved copy.**
 `--settings` replaces the defaults *wholesale*, so a stale file silently
 reinstates old values -- this is how a corrected `run-away-shield-hitpoints-threshold-percent`
 came back as `-1` after being fixed, and how it could come back as `25` now that
@@ -159,6 +182,17 @@ python3 -u stall_watch.py ~/eve-bot-logs/mission_runN.log \
 
 and a process watch for the bot or client disappearing.
 
+**Re-arm both after a client restart.** The pid changes, and a watchdog holding
+the old one is silently blind while the run itself carries on perfectly well --
+the host re-discovers the new process, so the bot survives a client restart that
+its monitors do not. A run whose watchdog is watching a dead pid looks exactly
+like a healthy one.
+
+**`pgrep -f 'botlab_host\.py'` matches other things.** A shell command that
+merely contains that string -- another agent's monitoring loop, for instance --
+answers as a running bot. Match `botlab_host/botlab_host\.py` to mean the host
+itself.
+
 **The trap, hit repeatedly: do not match a string the bot prints every
 reading.** `Head for a station and dock` is both a retreat *and* ordinary
 wind-down; `get out get out` prints once per reading for as long as a retreat
@@ -169,6 +203,54 @@ re-reports the same line until it scrolls away).
 Filter the known-benign signatures rather than lowering `stall_watch`'s
 threshold -- it is calibrated against 55 runs and catches pathologies that
 repeated thousands of times.
+
+## The run looks busy and is doing nothing
+
+Three sessions were lost to this in one week and none of them raised a useful
+alarm. In each the *decision* was correct and the *dispatch* was not: the guard
+fired, the branch was right, and the gesture the client received either did
+nothing or undid the one before it.
+
+| run | what the log showed | what was happening |
+|---|---|---|
+| 20 | `Undock` alternating with `Abort Undock` | two clicks dispatched per tick; the second cancelled the first |
+| 41 | `Object is not in range (2266000 m away). Approach.` | a double click at 2,266 km, which the client discards |
+| 42 | `No stargate on the overview is named for 'X'` | ship parked among wrecks, no gate on the overview at all |
+
+A decision repeated thousands of times is **normal** -- the bot re-derives its
+whole path several times per reading. So the count says nothing. What separates
+the three cases above from a healthy run is all outside the decision text:
+
+**Count dispatches against ticks, not decisions.** One tick should dispatch at
+most one input sequence:
+
+```zsh
+python3 - <<'EOF'
+import re
+tick=None; per={}
+for line in open("/Users/smerwin/eve-bot-logs/saxrat_runN.log", errors="replace"):
+    m=re.match(r"^# \[(\d+)\.", line)
+    if m: tick=m.group(1); per.setdefault(tick,0)
+    elif "send-effects" in line and tick: per[tick]+=1
+worst=sorted(per.items(), key=lambda kv:-kv[1])[:5]
+print("dispatches per tick, worst:", worst)
+EOF
+```
+
+More than one on most ticks means the client is being given a second gesture
+before it has shown the result of the first, which is how a toggle gets undone.
+
+**Ask the client what it thinks happened.** `~/Documents/EVE/logs/Gamelogs/` is
+the second source and it is often decisive. Run 20's loop is in it verbatim
+(`Can't do that while undocking`), and so is the damage curve that killed run
+35. Note a *click* usually writes nothing -- what writes a line is the thing the
+click starts, so look for the consequence rather than the input.
+
+**Check the ship actually moved.** `Already on the way` is the tell: run 41
+decided to approach 13,541 times and that clause never appeared once.
+
+**Then attach and look.** `eve_read.py` drives no input. Run 42's cause took one
+live read of the overview -- no stargate on it at all -- and no reasoning.
 
 ## Triage: is this real?
 
@@ -428,5 +510,16 @@ Waiting also lets the mission in progress pay out instead of being thrown away;
 run 21 banked 13 kills and 115k ISK in the minutes between "we should move" and
 a safe stop.
 
+**Quitting the client is not a way to stop a run.** Read as "quit and restart
+EVE", the phrase *relaunch the client* once took down a client whose ship was in
+an anomaly under fire -- logging off in space with aggression leaves the ship
+sitting there. The ship survived and that was luck. Stop the bot first, get the
+ship somewhere safe, and quit the client only when it is the client you mean.
+
 Say plainly in the handover: what is running, which log, what is open on GitHub,
 and anything corrected live through the console that is not yet in a file.
+
+`HANDOFF.md` is where that goes. It is what `.gitignore` actually ignores
+(line 23), so it never travels with a branch and never conflicts -- rewrite it
+rather than appending, and pin it to a commit and a run number so the next reader
+can tell at a glance how stale it is.
