@@ -759,10 +759,16 @@ destination to a system the ship is **not** in before starting.
   raises `KeyError` and the autopilot is simply unreachable from the repl. The
   letters all exist in the separate `KEYCODE` table, so the two tables disagree
   about which keys exist.
-- **This client's `ALL` overview preset carries no stargate rows.** `eve.jump`,
-  `warp_to` and `dock` all act on an overview row by name, so none of them can
-  resolve a gate here — an hour went into trying to fly a route by hand before
-  that was established. Travel by letting the bot follow a route instead.
+- **`eve.jump`, `warp_to` and `dock` act on an overview row by name, so they
+  cannot resolve anything that is not on the grid the ship is on.** In a
+  deadspace pocket — an anomaly or an escalation site — there are no stargates
+  on grid at all, so none of them can take the ship out of one; warp to a
+  celestial first, or let the bot travel the route. **This is about the pocket
+  and not about the client.** An hour went into concluding the overview preset
+  itself carried no stargate rows, which is wrong: from ordinary space
+  `eve.jump("Hamse")` resolved the gate and flew it in a single call, with four
+  stargates on the overview at the time. The earlier reading was taken inside a
+  pocket and generalised.
 
 ### `engagement_watch.py` is the screenshot tool, and it does not post input
 
