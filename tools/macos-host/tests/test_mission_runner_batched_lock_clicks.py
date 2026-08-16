@@ -201,14 +201,16 @@ class SharedRepl(unittest.TestCase):
 
 
 class TheBatchNeverReachesPastARowItCannotLock(SharedRepl):
-    """The one rule this bot needed that saxrat did not.
+    """`everythingWorthAttacking` puts a warp-disrupting entry at the front
+    ahead of the distance order, so a scrambler out of reach can sit in front of
+    rats that are in reach -- and a batch built by filtering would skip the row
+    the bot most wants and never approach it.
 
-    saxrat's candidate list is sorted by distance alone, so the rows in range
-    are a prefix of it and filtering could not reorder anything. Here
-    `everythingWorthAttacking` puts a warp-disrupting entry at the front ahead
-    of the distance order, so a scrambler out of reach can sit in front of rats
-    that are in reach -- and a batch built by filtering would skip the row the
-    bot most wants and never approach it.
+    **This is no longer a rule this bot needed and saxrat did not**, which is
+    what this docstring used to say. PR #253 put the same tier sort above the
+    distance order in saxrat, and it went on filtering until #265 --
+    `test_saxrat_lock_batch_prefix.py` is where that half is argued and where
+    the two files' corrected comments are pinned.
     """
 
     def test_a_head_the_ship_cannot_reach_answers_zero(self):

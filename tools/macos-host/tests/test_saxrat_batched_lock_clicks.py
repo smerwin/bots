@@ -796,16 +796,29 @@ class TheDecisionSiteIsWiredToTheRuleTest(unittest.TestCase):
         self.source = source_of(SAXRAT_BOT_ELM)
 
     def test_the_batch_is_taken_from_the_rows_the_ship_can_reach(self):
+        """The in-range **prefix** of the candidate list since #265, not a
+        filter of it: the tier sort PR #253 put above the distance order means a
+        row out of reach can lead the list, and filtering promotes the rows
+        behind it. `test_saxrat_lock_batch_prefix.py` is where that is argued
+        and where the two apps' corrected comments are pinned; what is kept here
+        is that the batch is still bounded by rows the ship can lock now.
+        """
         binding = collapsed(indented_block(
             anomaly_decision_source(), "overviewEntriesToLockInOneStep",
             indent="        "))
-        self.assertIn("overviewEntriesToLockInRange |> List.take", binding,
-                      "the batch is built from rows the ship may have to fly "
-                      "at first, so an approach would be batched with locks")
+        self.assertIn("overviewEntriesToLock |> List.take", binding,
+                      "the batch is taken from something other than the front "
+                      "of the candidate list")
         self.assertIn("lockBatchSize", binding,
                       "the batch size is no longer the rule's answer")
-        self.assertIn("rowsLockableNow = overviewEntriesToLockInRange", binding,
-                      "the rule is told about rows the ship cannot reach")
+        self.assertIn("rowsLockableNow", binding,
+                      "the rule is no longer told how far down the list the "
+                      "ship can reach, so an approach would be batched with "
+                      "locks")
+        self.assertIn("lockBatchRowsInReach", binding,
+                      "the rule is told a count of everything in range rather "
+                      "than the prefix, so a row the ship cannot reach no "
+                      "longer stops the batch")
 
     def test_the_memory_update_folds_the_accounting_in(self):
         binding = collapsed(indented_block(

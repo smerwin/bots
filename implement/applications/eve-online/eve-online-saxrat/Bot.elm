@@ -4706,20 +4706,20 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                     overviewEntriesToLock |> List.head
 
         -- The rows one step asks the client to lock, when it asks for more than
-        -- one. Taken from the in-range candidates rather than from
-        -- `overviewEntriesToLock`, because a row out of range is answered by
-        -- approaching it and an approach cannot be batched with anything -- and
-        -- because both lists are sorted by distance, so where the nearest row is
-        -- in range this batch begins with exactly the row a single lock would
-        -- have clicked. Where it is not, `lockBatchSize` sees no lockable row
-        -- and the single path approaches it, as ever.
+        -- one. Taken as the in-range **prefix** of the candidate list rather
+        -- than by filtering it, because `overviewEntriesToAttack` above sorts a
+        -- warp-disrupting entry to the front ahead of the distance order -- see
+        -- `lockBatchRowsInReach`, which is where that argument lives.
         overviewEntriesToLockInOneStep : List OverviewWindowEntry
         overviewEntriesToLockInOneStep =
-            overviewEntriesToLockInRange
+            overviewEntriesToLock
                 |> List.take
                     (lockBatchSize
                         (lockBatchSituationFrom context
-                            { rowsLockableNow = overviewEntriesToLockInRange |> List.length
+                            { rowsLockableNow =
+                                overviewEntriesToLock
+                                    |> List.map (overviewEntryIsWithinLockRange context)
+                                    |> lockBatchRowsInReach
                             , probe = maxTargetsProbeNow
                             }
                         )
@@ -5903,13 +5903,48 @@ lockTargetsFromOverviewEntries overviewEntries =
     decideActionForCurrentStep (overviewEntries |> List.concatMap lockChordForOverviewEntry)
 
 
+{-| How many rows from the **front** of the candidate list the ship can reach.
+
+**A prefix, not a count, because the candidate list is not in distance order.**
+`decideActionInAnomaly` sorts by `combatPriorityTier` ahead of the distance order
+the helper returns rows in, so a warp-disrupting entry out of reach can sit in
+front of rats that are in reach -- and a batch built by _filtering_ would silently
+skip the one row the bot most wants, lock the rats behind it, and never approach
+the scrambler at all.
+
+**This bot filtered until now, on a premise that had already expired.** The
+comment at the batch site defended the filter on the ground that both lists ran
+in the same distance order -- true when it was written, and false from the moment
+PR #253 put the tier sort above that order. Nothing failed when it did: the
+sentence went on reading correctly beside code the reordering had falsified.
+
+Counting the prefix instead makes the skip impossible: a head the ship cannot
+reach answers 0, which drops the batch to one row and hands the reading back to
+`lockTargetFromOverviewEntry`, whose out-of-range branch approaches it exactly as
+before. A batch therefore always begins with the row the single lock would have
+clicked and never reaches past a row it skipped.
+
+Takes the reachability of each row rather than the rows themselves, so a case can
+execute it on plain booleans.
+
+-}
+lockBatchRowsInReach : List Bool -> Int
+lockBatchRowsInReach rowsAreInReach =
+    case rowsAreInReach of
+        True :: rest ->
+            1 + lockBatchRowsInReach rest
+
+        _ ->
+            0
+
+
 {-| Everything the batch size is a function of.
 
 `rowsToTake` is `maxTargetsRowsToTake`'s answer rather than the ceiling, so the
 batch and `Enough locked targets.` cannot come to disagree about whether there
-is room; `rowsLockableNow` counts only rows the ship can lock from where it is
-standing, since a row out of range is answered by approaching and an approach
-cannot be batched with anything.
+is room; `rowsLockableNow` is `lockBatchRowsInReach`'s prefix rather than a
+count of everything in range, since a row out of range is answered by
+approaching and an approach cannot be batched with anything.
 
 -}
 type alias LockBatchSituation =

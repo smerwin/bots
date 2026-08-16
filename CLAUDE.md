@@ -6109,9 +6109,9 @@ same way — the `dispatch=` field on the `send-effects` line, which reproduces
 **1.271 s** against this bot's 1.304 s. The comparison was an artifact of two
 different derivations, so only this bot's own numbers are stated now.
 
-**The one rule this bot needed that saxrat did not.** saxrat's candidate list is
-sorted by distance alone, so the rows in range are a prefix of it and filtering
-could not reorder anything. Here `everythingWorthAttacking` puts a
+**The one rule this bot needed that saxrat did not, until #253 made saxrat need
+it too — see "saxrat filtered where it had to take a prefix, and the comment
+saying otherwise had expired" below.** `everythingWorthAttacking` puts a
 warp-disrupting entry at the **front, ahead of the distance order** — so a
 scrambler out of reach can sit in front of rats that are in reach, and a batch
 built by *filtering* would silently skip the one row the bot most wants, lock
@@ -6174,6 +6174,154 @@ full `lockBatchReadingsBeforeVerdict`, but no run has shown the distribution
 between those. What to watch is the same pair as saxrat's — `Lock more targets.
 Asking for 3 locks in this one step`, then `Lock batch: ... asked N and the bar
 answered N` with the two numbers tracking each other.
+
+### saxrat filtered where it had to take a prefix, and the comment saying otherwise had expired
+
+saxrat's `overviewEntriesToLockInOneStep` was a `List.filter` down to the rows in
+lock range. That is safe only while the candidate list is in distance order, so
+that the rows in range are a prefix of it and filtering can reorder nothing —
+and the comment at the site said exactly that, in those words.
+
+**It stopped being true when #253 landed.** `decideActionInAnomaly` now puts
+`|> List.sortBy combatPriorityTier` ahead of the distance order the helper
+returns rows in, and `overviewEntriesToLock` derives from that sorted list. So a
+warp-disrupting row the ship cannot reach can lead the list, filtering drops it,
+and the batch locks the rats behind it — never approaching the one row the tier
+exists to put first. That is precisely the failure the mission runner's own
+`lockBatchRowsInReach` doc comment describes while asserting saxrat could not
+suffer it.
+
+**Nothing failed when the premise expired**, which is the reusable half. Both
+comments went on reading correctly — one defending a filter the reordering had
+just made unsafe, the other asserting a divergence the reordering had just
+closed — and a reordering is not the kind of change anybody re-reads a batch
+comment for. Both are corrected here, in both files, and
+`TheExpiredJustificationIsCorrectedInBothFiles` refuses the three sentences that
+carried the claim, in `Bot.elm` rather than in a PR body.
+
+`lockBatchRowsInReach` is ported whole and the two bodies are compared byte for
+byte; the doc comments are deliberately **not**, because each argues from its own
+app's history. `overviewEntriesToLockInRange` stays exactly where it was — #150's
+probe is a measurement and may only be made with a row the ship can already lock,
+so `rowsToSpare` is still a count of everything in range. The prefix is about the
+*batch*, which is a different question about the same list.
+
+#### Whether this has happened is not answerable from the corpus, and the reason is structural
+
+Counted per *reading* (`RequestToVolatileProcess`, one per reading) over all 90
+logs in `~/eve-bot-logs` — 311,406 readings — because the status line is
+reprinted under every decision:
+
+| | saxrat | mission runner |
+|---|---:|---:|
+| runs | 51 | 39 |
+| readings | 227,749 | 83,350 |
+| readings carrying `Overview indications:` | **0** | 46,536 |
+| readings the lock site chose a row out of lock range on | 13,918 | 866 |
+| readings carrying a tier-0 or tier-1 hint | **0** | 1,815 |
+| both at once | **0** | **7** |
+| both at once, tier 0 (`is warp disrupting me`) | **0** | **0** |
+
+**saxrat has never printed the EWAR hints at all.** `describeOverviewIndicationHints`
+is #130's and is mission-runner-only, so the bot that has the defect cannot say
+whether it ever met the situation — 227,749 readings of silence, which is an
+absent instrument rather than an absent event. The 866-to-13,918 split in the
+other row is the same asymmetry from the other side: saxrat meets an out-of-reach
+head constantly and can say nothing about what was on it.
+
+**And the 7 are not instances.** That clause reports *distinct strings across
+rendered rows*, deduplicated, naming no row and carrying no distance, so a
+reading where some row was under EWAR and some row was out of reach does not say
+they were the same row. They are a necessary condition, in the app that already
+counts the prefix, and all 7 are tier 1. **No reading in the corpus carries a
+tier-0 hint beside an out-of-reach head at all.**
+
+**So this change rests on the expired premise and not on observed harm**, and the
+two are different reasons. What makes it worth making anyway is that the
+reachability is a property of the code rather than a guess — the tier sort is
+above the distance order, the filter reads the sorted list, and
+`test_a_scrambler_out_of_reach_is_no_longer_skipped` runs both constructions over
+the same really-parsed rows and shows the old one skipping the scrambler. The
+frequency is unmeasured and stays unmeasured.
+
+#### What the bot does in the new edge case
+
+A head the ship cannot reach makes `lockBatchRowsInReach` answer 0,
+`lockBatchSize` answer `max 1 0` = 1, and the batch **one row — never zero**. The
+call site's `1 < List.length` guard therefore declines to batch and hands the
+reading to `lockTargetFromOverviewEntry`, whose out-of-range branch double-clicks
+the row inside `approachRangeLimitMeters` and warps to it beyond. So the reading
+is spent closing distance rather than declined.
+
+That is asserted rather than described, because a batch coming back empty where
+it used to come back non-empty is PR #257's shape — a step on a hot path that can
+decline forever, which blocked the bot for 108 minutes.
+`TheShortBatchIsStillAnAnswer` pins the batch never being empty (over the whole
+grid of `lockBatchSize` inputs, since `max 1` is what makes it true) and pins the
+branch it falls through to acting rather than waiting.
+
+**The cost is stated rather than hidden**: where the head is out of reach and two
+or more rows behind it are in reach, saxrat used to dispatch a batch and now
+dispatches a single approach. It batches strictly less often, in exactly the
+state where batching was locking the wrong rows.
+
+#### Verified without a live client
+
+`tools/macos-host/tests/test_saxrat_lock_batch_prefix.py` (16 cases). The prefix
+rule and both batch constructions are executed through the real `Bot.elm` in
+`elm repl`, and the rows they are asked about come from the real
+`EveOnline.ParseUserInterface` through the real
+`overviewEntriesToAttackFromReadingFromGameClient` and the real
+`List.sortBy combatPriorityTier` — so the out-of-reach head is at the head
+because the tier put it there, on the furthest row on the grid. `inReach` is the
+one thing restated rather than reached for, because
+`overviewEntryIsWithinLockRange` takes a whole `BotDecisionContext` while
+`lockRangeThresholdInMeters` under it takes a record; it is defined once and
+handed to **both** constructions, so what separates them is the change and not
+two notions of reach. Two controls ride along — a reachable head, where the two
+constructions agree, and a grid with no priority row at all — so the case is
+about the situation rather than about the fixture.
+
+**Two cases are weaker than the rest and say so.** `oldBatch` and `newBatch` are
+written in the case rather than reached through `decideActionInAnomaly`, which
+takes a whole `BotDecisionContext` — so the executable comparison shows what the
+two constructions *do* and cannot notice the site being reverted to the filter.
+What pins the site is the source read beside it, and
+`test_saxrat_batched_lock_clicks`' own wiring case reads it too. That is the same
+shape #231's `test_the_sort_puts_them_in_that_order` records, and the mutations
+below are what establish the division of labour rather than assuming it.
+
+Confirmed by mutation, **eleven** of them, each failing a named case: the binding
+reverted to `overviewEntriesToLockInRange |> List.take`, and `rowsLockableNow`
+reverted to a count of everything in range while the take stays on the candidate
+list — the half-revert, which is the shape that batches past the head, and both
+caught by the source read and by nothing else; the prefix rule made to count
+rather than stop (`List.filter identity >> List.length`), which fails five cases
+including the scrambler one; `lockBatchSize`'s `max 1` dropped, which is the
+empty-batch hazard and fails four; the tier sort removed from saxrat, which
+falsifies the premise the whole change rests on; the probe's `rowsToSpare`
+pointed at the candidate list, which is a measurement made with a row the ship
+would have to fly at first; an expired sentence restored in each file; `#253`
+dropped from a doc comment, so the reordering that made the rule necessary is
+unfindable from the file; the mission runner's copy of the prefix rule drifted
+from saxrat's; and the out-of-range branch made to wait rather than approach,
+which is the short batch becoming a reading spent on nothing.
+
+#### Unverified
+
+**Any of it running.** No saxrat run has been flown since, and no run of either
+bot has ever recorded the situation. What to watch on the first run that meets a
+scrambler out of lock range is `Lock more targets.` followed by
+`Object is not in range (N m away). Approach.` naming the warp-disrupting row —
+rather than `Asking for N locks in this one step` naming the rats behind it. A
+run that meets one and still batches means the sort is not reaching the lock
+site, which is the direction this fails silently in.
+
+**How often it happens.** Unmeasured, and unmeasurable from saxrat's logs as they
+stand. The cheap thing that would make it measurable is #130's
+`Overview indications:` clause in saxrat's status line, which is one line and
+would turn the next run into the evidence a frequency claim would need. It is
+deliberately not in this change.
 
 ### saxrat swaps ammo at a distance it is told, not one it works out
 
