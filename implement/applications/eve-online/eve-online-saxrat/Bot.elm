@@ -2466,7 +2466,30 @@ huntSystemAtIndex botSettings index =
             |> List.head
 
 
-{-| Where to go next, or `Nothing` if there is nowhere configured.
+{-| The solar system the ship is in, as the client's own panel names it.
+
+Three places have to agree about this: the picker below skips a hunting ground
+the ship is already standing in, `updateMemoryForNewReadingFromGame` names the
+destination the decision will ask for, and the status line prints it. Three
+copies of the same two `Maybe.andThen`s would drift, and a guard that read the
+panel differently from the pointer's own advance would skip systems the
+rotation never moves past.
+
+Trimmed here because the parser does not trim it: only the older
+`alt='Current Solar System'` variant does, and the branch this client takes
+(`headerLabelSystemName`, observed 2024-05-26) hands the label over as the
+client drew it.
+
+-}
+currentSolarSystemNameFromReading : ReadingFromGameClient -> Maybe String
+currentSolarSystemNameFromReading readingFromGameClient =
+    readingFromGameClient.infoPanelContainer
+        |> Maybe.andThen .infoPanelLocationInfo
+        |> Maybe.andThen .currentSolarSystemName
+        |> Maybe.map String.trim
+
+
+{-| Where to go next, or `Nothing` if there is nowhere left to ask for.
 
 The circuit first, then `home-system` once every name on it has been visited.
 "Visited" needs no record of its own: `huntSystemIndex` is advanced by the
@@ -2476,10 +2499,10 @@ full lap has happened exactly when the index has passed the end of the list.
 -}
 nextHuntingGround : BotDecisionContext -> Maybe String
 nextHuntingGround context =
-    nextHuntingGroundFrom context.eventContext.botSettings context.memory.huntSystemIndex
+    nextHuntingGroundFrom context.eventContext.botSettings context.memory.huntSystemIndex context.readingFromGameClient
 
 
-{-| The picker itself, over the two things it actually needs.
+{-| The picker itself, over the three things it actually needs.
 
 Split out because `updateMemoryForNewReadingFromGame` has to name the same
 destination the decision will ask for, and it has the settings and the index
@@ -2487,16 +2510,52 @@ but no `BotDecisionContext`. Two copies of this choice would drift, and the
 memory would then be counting readings against a system the bot was not asking
 for.
 
+**A hunting ground equal to the system the ship is in is skipped rather than
+asked for** (#262). A destination in the current system is `Route 0 Jumps` with
+no marker, which `routePanelSaysNoDestination` reads -- correctly -- as no
+route, so the ask can never be satisfied and `routeAskGiveUpReadings` turns it
+into `routeSettingGivenUp`, latched for the session. The lap fallback is what
+makes that reachable without anything misreading: once a lap is complete this
+answers `home-system` at _every_ index, and the pointer goes on advancing while
+the ship stands in a system the circuit names, so a ship parked in its own
+staging system asks for the system it is in on every reading.
+
+The reading is also what keeps the two callers agreeing. The framework hands
+the decision the memory this update has already written, so on the reading the
+ship arrives the two are called with indices one apart -- and skipping "here"
+is exactly what makes that step invisible, since the first candidate that is
+not the current system is the same one from either index. Recorded in the
+corpus as `Sys Hamse -> Lashkai asked 'Hamse' 1/20`.
+
+`Nothing` where every candidate is the system the ship is in, which
+`setRouteToNextHuntingGround` already has an answer for: there is nowhere to
+ask for, so it tethers and goes on hunting whatever spawns, rather than asking
+for a route the client cannot give.
+
 -}
-nextHuntingGroundFrom : BotSettings -> Int -> Maybe String
-nextHuntingGroundFrom botSettings huntSystemIndex =
+nextHuntingGroundFrom : BotSettings -> Int -> ReadingFromGameClient -> Maybe String
+nextHuntingGroundFrom botSettings huntSystemIndex readingFromGameClient =
+    let
+        currentSolarSystemName =
+            currentSolarSystemNameFromReading readingFromGameClient
+    in
+    List.range huntSystemIndex (huntSystemIndex + List.length botSettings.huntSystemNames)
+        |> List.filterMap (huntingGroundAtIndex botSettings)
+        |> List.filter (\systemName -> Just systemName /= currentSolarSystemName)
+        |> List.head
+
+
+{-| The name the circuit points at, before the guard above has had its say.
+-}
+huntingGroundAtIndex : BotSettings -> Int -> Maybe String
+huntingGroundAtIndex botSettings index =
     let
         lapsCompleted =
             if List.isEmpty botSettings.huntSystemNames then
                 0
 
             else
-                huntSystemIndex // List.length botSettings.huntSystemNames
+                index // List.length botSettings.huntSystemNames
     in
     if 0 < lapsCompleted then
         case botSettings.homeSystemName of
@@ -2504,10 +2563,10 @@ nextHuntingGroundFrom botSettings huntSystemIndex =
                 Just homeSystem
 
             Nothing ->
-                huntSystemAtIndex botSettings huntSystemIndex
+                huntSystemAtIndex botSettings index
 
     else
-        huntSystemAtIndex botSettings huntSystemIndex
+        huntSystemAtIndex botSettings index
 
 
 {-| Ask the host to set the autopilot destination, when there is nowhere to go.
@@ -2537,7 +2596,7 @@ setRouteToNextHuntingGround context =
         case nextHuntingGround context of
             Nothing ->
                 describeBranch
-                    "Nothing left to hunt here and no route set. No 'hunt-system' is configured, so there is nowhere to ask for."
+                    "Nothing left to hunt here and no route set. Nowhere to ask for: either no 'hunt-system' is configured, or every system on the circuit is the one this ship is already in."
                     (tetherAtStructure context)
 
             Just systemName ->
@@ -5650,10 +5709,7 @@ describeHuntCircuit : BotDecisionContext -> String
 describeHuntCircuit context =
     let
         currentSystem =
-            context.readingFromGameClient.infoPanelContainer
-                |> Maybe.andThen .infoPanelLocationInfo
-                |> Maybe.andThen .currentSolarSystemName
-                |> Maybe.map String.trim
+            currentSolarSystemNameFromReading context.readingFromGameClient
                 |> Maybe.withDefault "?"
     in
     if List.isEmpty context.eventContext.botSettings.huntSystemNames then
@@ -12559,10 +12615,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 |> Maybe.map (\target -> (target.barAndImageCont |> Maybe.withDefault target.uiNode).totalDisplayRegion)
 
         currentSolarSystemName =
-            context.readingFromGameClient.infoPanelContainer
-                |> Maybe.andThen .infoPanelLocationInfo
-                |> Maybe.andThen .currentSolarSystemName
-                |> Maybe.map String.trim
+            currentSolarSystemNameFromReading context.readingFromGameClient
 
         currentStationNameFromInfoPanel =
             context.readingFromGameClient.infoPanelContainer
@@ -12895,10 +12948,15 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- Advance when the ship is standing in the system the circuit
         -- currently points at. That is the whole rotation, and it needs no
         -- record of which systems were dry: arriving somewhere is what moves
-        -- the pointer past it, so the picker below can never name the system
-        -- the ship is already in. A simple "first name that is not here"
-        -- would ping-pong between the first two entries and never reach the
-        -- third.
+        -- the pointer past it. A simple "first name that is not here" would
+        -- ping-pong between the first two entries and never reach the third.
+        --
+        -- This used to claim the picker could therefore never name the system
+        -- the ship is already in, and #262 is what that cost: once a lap is
+        -- complete the picker answers `home-system` whatever the index does,
+        -- so a ship parked in its staging system asked for the system it was
+        -- standing in. `nextHuntingGroundFrom` skips it now; the rotation is
+        -- unchanged.
         case currentSolarSystemName of
             Nothing ->
                 botMemoryBefore.huntSystemIndex
@@ -12947,7 +13005,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- in. Counting that would be issue #11's mistake again -- a counter
         -- measuring something other than the thing it bounds.
         if standingInADeadEnd then
-            nextHuntingGroundFrom context.botSettings botMemoryBefore.huntSystemIndex
+            nextHuntingGroundFrom context.botSettings botMemoryBefore.huntSystemIndex context.readingFromGameClient
 
         else
             Nothing
