@@ -906,13 +906,17 @@ class TheRangeConditionedHypothesisTest(unittest.TestCase):
 
         Scored with no lookahead the mismatched half shows a gap -- and it rests
         on exactly **one** stretch at every shot floor. That stretch is run 36's:
-        the guns hold a short-range charge while the target drifts from 19 km out
-        past 30 km against a 15 km crossover, and miss every shot. It is scored
-        barren only because the class changed before the kill landed; rats die in
-        the readings immediately after it.
+        a short-range charge held while the target drifts from 19 km out to 34 km
+        against a 15 km crossover, missing every shot -- 58 shots over 133
+        readings, no kill. It is scored barren only because the charge class
+        changed before the kill landed. **Three rats die in the very next ten
+        readings**, on three landed shots and no misses at all.
 
         So the case asserts both halves -- that the unguarded gap is one stretch
-        wide, and that a lookahead of ten readings dissolves it.
+        wide, and that a lookahead of ten readings dissolves it. The count is
+        allowed a little slack rather than pinned at one, so a corpus that grows
+        another such stretch reports the finding rather than a red suite; two is
+        still "one anomaly", and three would be worth arguing about.
         """
         for floor in (10, 20, 40):
             unguarded = [s for s in all_charge_stretches(lookahead=0, floor=floor)

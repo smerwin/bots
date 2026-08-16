@@ -7690,10 +7690,10 @@ sharpening it.
 
 **Scored with no lookahead it appears to separate, and that gap is one stretch
 at every shot floor.** That stretch is run 36's: the guns hold a short-range
-charge while the target drifts from 19 km out past 30 km against a 15 km
-crossover, and miss every shot — 59 shots, 395 steps, no kill. It is scored
-barren only because the class changed before the kill landed. **Three rats die
-in the sixty readings immediately after it.** So the one stretch carrying the
+charge while the target drifts from 19 km out to 34 km against a 15 km
+crossover, and miss every shot — **58 shots over 133 readings, no kill**. It is
+scored barren only because the class changed before the kill landed. **Three rats
+die in the very next ten readings**, on three landed shots and no misses at all. So the one stretch carrying the
 apparent gap is a boundary artefact, which is the same trap that made the pooled
 window measurement look separated at one window length and not at another.
 
