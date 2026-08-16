@@ -1549,9 +1549,12 @@ the client's own count -- these shots are achieving nothing. Unlock it
 (Ctrl+Shift+Click) and leave it alone for the rest of the session.
 ```
 
-and the status line carries `shots landing for zero: 'X' 3/8` every reading, so
-a target climbing towards the threshold and one that never climbs are
-distinguishable while watching a run.
+and the status line carries
+`shots achieving nothing: 'X' 3/8 (3 landed for zero, 0 missed)` every reading,
+so a target climbing towards the threshold and one that never climbs are
+distinguishable while watching a run. (The clause was `shots landing for zero:`
+until #267 gave a miss a way to join a tally; the two halves are printed because
+the sum alone cannot say which kind of evidence a case rests on.)
 
 **No `never-attack` setting was added.** `attack-object` is a positive list and
 this bot still has no negative one — the scope matters, because read as a claim
@@ -1567,7 +1570,7 @@ restart.
 **Untested against a live client.** The rule is executed through the real
 `Bot.elm` in `elm repl` and the threshold is checked against the client's own
 recorded lines, but no run has given up on anything. What to watch on the first
-one: the status line's `shots landing for zero:` clause appearing at all — if it
+one: the status line's `shots achieving nothing:` clause appearing at all — if it
 never does on a run that fights, the outgoing summary is not reaching the bot —
 then the unlock line above, then `GIVEN UP ON` for the rest of the session with
 the object never locked again. The failure to watch for is a lock/unlock

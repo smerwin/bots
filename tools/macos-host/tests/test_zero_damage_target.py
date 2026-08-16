@@ -95,15 +95,33 @@ INCOMING = [
     "[ 2026.08.03 04:26:59 ] (combat) 74 from Centum Fiend - Mjolnir Heavy Missile - Hits",
 ]
 
-# Free, in both directions, and deliberately not damage. A miss costs nothing
-# and counting it as a landed hit of zero would build a case for immunity out of
-# a range problem -- which is the one way this guard could fire on a target the
-# guns simply cannot reach.
-MISSES = [
-    "[ 2026.07.31 18:20:09 ] (combat) Your Hobgoblin II misses Vigilant Sentry Tower "
-    "completely - Hobgoblin II",
-    "[ 2026.08.03 04:26:55 ] (combat) Centior Misshape misses you completely",
+# Shots of ours that did not land, in the client's own two wordings -- with the
+# weapon named before "misses" and again after "completely - ", which is what
+# the matcher requires to agree.
+#
+# Deliberately not damage, and since issue #267 deliberately not nothing either.
+# A miss is carried as its own count, and the rule that reads it may only add one
+# to a case a landed zero has already opened. Counting a miss as a landed hit of
+# zero would build the case for immunity out of a range problem, which is the one
+# way this guard could fire on a target the guns simply cannot reach.
+OUTGOING_MISSES = [
+    ("[ 2026.07.31 18:20:09 ] (combat) Your Hobgoblin II misses Vigilant Sentry Tower "
+     "completely - Hobgoblin II", "Vigilant Sentry Tower"),
+    ("[ 2026.08.03 12:11:11 ] (combat) Your group of Focused Modulated Medium Energy "
+     "Beam I misses Centii Plague completely - Focused Modulated Medium Energy Beam I",
+     "Centii Plague"),
 ]
+
+# Misses *at* this ship. The client puts the attacker's name first and never
+# writes "Your", which is the whole of what keeps these out: there are 139,578 of
+# them against 19,894 of the above, so reading one as a shot of ours would build
+# a case for immunity out of a rat that cannot hit us.
+INCOMING_MISSES = [
+    "[ 2026.08.03 04:26:55 ] (combat) Centior Misshape misses you completely",
+    "[ 2026.08.03 04:26:57 ] (combat) Centus Black Ops Veteran misses you completely",
+]
+
+MISSES = [line for line, _ in OUTGOING_MISSES] + INCOMING_MISSES
 
 # The two `(combat)` shapes that would match a looser outgoing pattern. The
 # first begins with a digit and is not damage (19 across the corpus); the second
@@ -178,6 +196,104 @@ def outgoing_damage_in_recorded_logs():
             for path, amount, target, _ in recorded_outgoing_damage()]
 
 
+_RECORDED_SHOTS = []
+
+
+def recorded_outgoing_shots():
+    """Every shot of ours the client wrote, landed or missed.
+
+    `(path, kind, target, timestamp)` with `kind` in `{"hit", "miss"}` and the
+    amount folded away, because what issue #267's measurement needs is the
+    order of the two kinds against one target rather than the numbers.
+
+    Read through the host's own two matchers rather than a third regex here, so
+    what these cases measure is the shipped pattern and not a restatement of it.
+    """
+    if _RECORDED_SHOTS:
+        return _RECORDED_SHOTS
+    paths = sorted(glob.glob(GAMELOGS_GLOB))
+    if not paths:
+        raise unittest.SkipTest(NO_GAMELOGS)
+    for path in paths:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                line = " ".join(botlab_host._GAME_LOG_MARKUP.sub("", raw).split())
+                entry = botlab_host.parse_game_log_line(line)
+                dealt = botlab_host.parse_outgoing_damage(entry)
+                if dealt is not None:
+                    _RECORDED_SHOTS.append(
+                        (path, "hit" if dealt[0] else "zero", dealt[1],
+                         entry["timestamp"]))
+                    continue
+                missed = botlab_host.parse_outgoing_miss(entry)
+                if missed is not None:
+                    _RECORDED_SHOTS.append((path, "miss", missed, entry["timestamp"]))
+    if not _RECORDED_SHOTS:
+        raise unittest.SkipTest(NO_GAMELOGS)
+    return _RECORDED_SHOTS
+
+
+def episodes_the_rule_would_have_seen(misses):
+    """Every episode in the corpus, tallied under one of three readings of a miss.
+
+    An *episode* is what `zeroDamageMemoryAfterReading` accumulates: shots at
+    one target that achieved nothing, ended by that target taking any damage at
+    all. Returned as `(target, shots, ever_hurt_in_this_session)`.
+
+    Folded at the client's own second, which is finer than any real reading (one
+    to eight seconds) and is therefore the fold most favourable to a zero
+    standing alone -- so a separation that holds here holds at every real
+    reading length. The host sums per target per reading, so a second carrying
+    both a zero and a real hit on one target is handed over as damage, which
+    ends the episode rather than extending it. That is issue #158's own overlap
+    and is why this is folded rather than counted per line.
+
+    `misses` is the question issue #267 had to answer, and the three answers are
+    what the cases below compare:
+
+      "ignored"   -- the rule as it shipped before #267.
+      "pooled"    -- every shot counts equally, the unqualified reading of "a
+                     miss should count". The cases show it has no threshold.
+      "gated"     -- what shipped: a miss counts only against a target that has
+                     already landed a shot for zero in this same episode.
+    """
+    assert misses in ("ignored", "pooled", "gated"), misses
+    folded = collections.OrderedDict()
+    for path, kind, target, timestamp in recorded_outgoing_shots():
+        key = (path, target, timestamp)
+        cell = folded.setdefault(key, {"hits": 0, "damage": 0, "misses": 0})
+        if kind == "hit":
+            cell["hits"] += 1
+            cell["damage"] += 1
+        elif kind == "zero":
+            cell["hits"] += 1
+        else:
+            cell["misses"] += 1
+
+    landed = collections.Counter()
+    running = collections.Counter()
+    hurt = collections.defaultdict(set)
+    finished = []
+    for (path, target, _), cell in folded.items():
+        key = (path, target)
+        if cell["damage"]:
+            hurt[path].add(target)
+            if running[key]:
+                finished.append((path, target, running[key]))
+            running[key] = landed[key] = 0
+            continue
+        landed[key] += cell["hits"]
+        shots = cell["hits"]
+        if misses == "pooled" or (misses == "gated" and landed[key]):
+            shots += cell["misses"]
+        if shots:
+            running[key] += shots
+    for (path, target), shots in running.items():
+        if shots:
+            finished.append((path, target, shots))
+    return [(target, shots, target in hurt[path]) for path, target, shots in finished]
+
+
 def targets_that_ever_took_damage():
     return {target for _, amount, target in outgoing_damage_in_recorded_logs()
             if amount != 0}
@@ -245,6 +361,10 @@ class OutgoingDamageMatchingTest(unittest.TestCase):
             self.assertIsNone(botlab_host.parse_incoming_damage(self.entry(line)), line)
 
     def test_a_miss_is_not_a_landed_hit(self):
+        # Unchanged by issue #267 and load-bearing because of it: a miss now
+        # reaches the bot, and the moment it reaches it as a *hit* the two stop
+        # being distinguishable and the rule downstream can be fooled by a
+        # target the guns cannot reach.
         for line in MISSES:
             self.assertIsNone(botlab_host.parse_outgoing_damage(self.entry(line)), line)
 
@@ -258,6 +378,130 @@ class OutgoingDamageMatchingTest(unittest.TestCase):
 
     def test_a_line_that_does_not_parse_is_not_damage_dealt(self):
         self.assertIsNone(botlab_host.parse_outgoing_damage(None))
+
+
+class OutgoingMissMatchingTest(unittest.TestCase):
+    """Issue #267: a shot of ours that did not land, matched at last.
+
+    Before this the host matched a miss nowhere, so no field in any reading said
+    the guns were missing and the give-up's own documentation said "a miss builds
+    no case, because the host never counts one".
+
+    The danger in reading them is the *other* direction of the same channel. The
+    client writes 139,578 misses at this ship against 19,894 by it, seven to one,
+    and a matcher that took either would have the bot conclude an object is
+    immune because a rat keeps missing us.
+    """
+
+    def entry(self, line):
+        return botlab_host.parse_game_log_line(line)
+
+    def test_a_miss_of_ours_is_recognised_with_its_target(self):
+        for line, target in OUTGOING_MISSES:
+            self.assertEqual(botlab_host.parse_outgoing_miss(self.entry(line)),
+                             target, line)
+
+    def test_a_miss_at_us_is_not_a_miss_of_ours(self):
+        # The seven-to-one direction, and the whole reason the pattern is
+        # anchored on "Your" rather than on the word "misses".
+        for line in INCOMING_MISSES:
+            self.assertIsNone(botlab_host.parse_outgoing_miss(self.entry(line)), line)
+
+    def test_a_landed_shot_is_not_a_miss(self):
+        for line, _, _ in OUTGOING:
+            self.assertIsNone(botlab_host.parse_outgoing_miss(self.entry(line)), line)
+
+    def test_damage_taken_is_not_a_miss(self):
+        for line in INCOMING:
+            self.assertIsNone(botlab_host.parse_outgoing_miss(self.entry(line)), line)
+
+    def test_the_weapon_must_agree_at_both_ends(self):
+        """The backreference, which is what keeps the cut in the right place.
+
+        The client names the weapon twice and the pattern requires the two to
+        match, so a name carrying " misses " or " completely " cannot slide the
+        split and take part of the weapon into the target. Doctored here rather
+        than found, because the corpus holds no such line -- which is the point:
+        the property is asserted before something writes one.
+        """
+        line, target = OUTGOING_MISSES[0]
+        self.assertEqual(botlab_host.parse_outgoing_miss(self.entry(line)), target)
+        doctored = line.replace("completely - Hobgoblin II",
+                                "completely - Warrior II")
+        self.assertIsNone(botlab_host.parse_outgoing_miss(self.entry(doctored)),
+                          doctored)
+
+    def test_the_other_combat_shapes_are_not_misses(self):
+        for line in NOT_OUTGOING_DAMAGE:
+            self.assertIsNone(botlab_host.parse_outgoing_miss(self.entry(line)), line)
+
+    def test_other_channels_are_never_a_miss(self):
+        for line in NON_COMBAT:
+            self.assertIsNone(botlab_host.parse_outgoing_miss(self.entry(line)), line)
+
+    def test_a_line_that_does_not_parse_is_not_a_miss(self):
+        self.assertIsNone(botlab_host.parse_outgoing_miss(None))
+
+    def test_the_matcher_reads_every_miss_the_client_wrote(self):
+        """The corpus, as relations rather than as counts.
+
+        Every `(combat)` line naming a miss is one of exactly two things, and
+        each has to land in exactly one place: a miss of ours reaches the
+        matcher, a miss at us reaches neither matcher. A line that is neither
+        would be a third shape nobody has read, and there is none.
+        """
+        paths = sorted(glob.glob(GAMELOGS_GLOB))
+        if not paths:
+            self.skipTest(NO_GAMELOGS)
+        ours, at_us, unread = 0, 0, []
+        targets = set()
+        for path in paths:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                for raw in handle:
+                    line = " ".join(botlab_host._GAME_LOG_MARKUP.sub("", raw).split())
+                    entry = botlab_host.parse_game_log_line(line)
+                    if entry is None or entry["channel"] != "combat":
+                        continue
+                    if " misses " not in entry["text"]:
+                        continue
+                    missed = botlab_host.parse_outgoing_miss(entry)
+                    if missed is not None:
+                        ours += 1
+                        targets.add(missed)
+                    elif entry["text"].endswith("misses you completely"):
+                        at_us += 1
+                    else:
+                        unread.append(entry["text"])
+        self.assertFalse(unread[:5], "a miss shape nothing reads: %r" % unread[:5])
+        self.assertGreater(ours, 1000, "too few misses of ours to say anything")
+        self.assertGreater(at_us, ours,
+                           "misses at this ship should dwarf misses by it")
+        self.assertGreater(len(targets), 50, sorted(targets)[:10])
+
+    def test_no_target_name_is_taken_from_an_incoming_miss(self):
+        """The attacker names, which must never appear as targets of ours.
+
+        A pattern that dropped the "Your" anchor would read every one of the
+        139,578 incoming misses as a shot of ours, and the tell would be the
+        attacker's name arriving as a target. Asserted as the relation rather
+        than by counting: the two sets are read the same way and compared.
+        """
+        paths = sorted(glob.glob(GAMELOGS_GLOB))
+        if not paths:
+            self.skipTest(NO_GAMELOGS)
+        attackers = set()
+        for path in paths:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                for raw in handle:
+                    line = " ".join(botlab_host._GAME_LOG_MARKUP.sub("", raw).split())
+                    entry = botlab_host.parse_game_log_line(line)
+                    if entry is None or entry["channel"] != "combat":
+                        continue
+                    text = entry["text"]
+                    if text.endswith(" misses you completely"):
+                        attackers.add(text[: -len(" misses you completely")])
+                        self.assertIsNone(botlab_host.parse_outgoing_miss(entry), text)
+        self.assertGreater(len(attackers), 20, sorted(attackers)[:10])
 
 
 class TailFanOutTest(unittest.TestCase):
@@ -355,8 +599,35 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual((by_name["Mercenary Commander"]["hits"],
                           by_name["Mercenary Commander"]["damage"]), (2, 47))
 
-    def test_misses_reach_no_target(self):
-        self.assertEqual(self.summarise(MISSES + NON_COMBAT), [])
+    def test_a_miss_of_ours_reaches_its_target_and_lands_no_hit(self):
+        """Issue #267's whole host-side change, in one summary.
+
+        This case is where the previous `test_misses_reach_no_target` was, and
+        it is the pin that had to be confronted rather than deleted: the summary
+        used to answer `[]` for a reading of nothing but misses, so the bot could
+        not tell "nothing was shot" from "everything missed".
+        """
+        summary = self.summarise([line for line, _ in OUTGOING_MISSES] + NON_COMBAT)
+        self.assertEqual(
+            {t["name"]: (t["hits"], t["damage"], t["misses"]) for t in summary},
+            {"Vigilant Sentry Tower": (0, 0, 1), "Centii Plague": (0, 0, 1)})
+
+    def test_a_miss_at_this_ship_still_reaches_no_target(self):
+        # The half that must not change: an incoming miss is not this ship
+        # shooting, so it names no target of ours at all.
+        self.assertEqual(self.summarise(INCOMING_MISSES + NON_COMBAT), [])
+
+    def test_landed_shots_and_misses_are_summed_on_one_target(self):
+        # Both kinds against one object in one reading, which is the shape the
+        # rule reads: the tally opens on the landed zero and the miss joins it.
+        summary = self.summarise([OUTGOING[3][0], OUTGOING[3][0],
+                                  OUTGOING_MISSES[0][0]])
+        by_name = {t["name"]: t for t in summary}
+        self.assertEqual((by_name["Infested Asteroid"]["hits"],
+                          by_name["Infested Asteroid"]["damage"],
+                          by_name["Infested Asteroid"]["misses"]), (2, 0, 0))
+        self.assertEqual((by_name["Vigilant Sentry Tower"]["hits"],
+                          by_name["Vigilant Sentry Tower"]["misses"]), (0, 1))
 
     def test_the_order_is_stable(self):
         # Two identical readings must produce two identical nodes, or a
@@ -377,7 +648,7 @@ class SyntheticNodeTest(unittest.TestCase):
         # With no region, `asUITreeNodeWithInheritedOffset` files it as a
         # `ChildWithoutRegion` and every parser that navigates by region walks
         # straight past it.
-        node = self.node([{"name": "Infested Asteroid", "hits": 12, "damage": 0}])
+        node = self.node([{"name": "Infested Asteroid", "hits": 12, "damage": 0, "misses": 0}])
         for entries in [node["dictEntriesOfInterest"]] + [
                 child["dictEntriesOfInterest"] for child in node["children"]]:
             for key in ("_displayX", "_displayY", "_displayWidth", "_displayHeight"):
@@ -388,7 +659,7 @@ class SyntheticNodeTest(unittest.TestCase):
         # filtering, and the mission runner asks it whether the whole reading
         # contains "No room for more". A target's name arriving in that answer
         # would be a dialog the client never showed.
-        node = self.node([{"name": "No room for more", "hits": 1, "damage": 0}])
+        node = self.node([{"name": "No room for more", "hits": 1, "damage": 0, "misses": 0}])
         for child in node["children"]:
             for key in ("_setText", "_text"):
                 self.assertNotIn(key, child["dictEntriesOfInterest"])
@@ -476,14 +747,26 @@ class VendoredParserTest(unittest.TestCase):
 
     def test_the_parser_reads_the_keys_the_host_writes(self):
         node = botlab_host.synthetic_outgoing_damage_node(
-            [{"name": "Infested Asteroid", "hits": 12, "damage": 0}])
+            [{"name": "Infested Asteroid", "hits": 12, "damage": 0, "misses": 3}])
         self.assertEqual(set(node["children"][0]["dictEntriesOfInterest"]),
-                         {"name", "hits", "damage"})
+                         {"name", "hits", "damage", "misses"})
         for path, source in self.sources.items():
             block = self.block(source)
-            for key in ("hits", "damage"):
+            for key in ("hits", "damage", "misses"):
                 self.assertIn(f'getIntPropertyFromDictEntries "{key}"', block, path)
             self.assertIn('getStringPropertyFromDictEntries "name"', block, path)
+
+    def test_a_node_cannot_be_built_without_the_miss_count(self):
+        """Read strictly, so a forgotten key is an error and not a fabricated zero.
+
+        A `.get("misses", 0)` here would have the host emit "no shots missed" for
+        a caller that simply did not supply the number, which the rule downstream
+        would then act on. The parser's own default is at the other end, where it
+        means something true: this host predates issue #267.
+        """
+        with self.assertRaises(KeyError):
+            botlab_host.synthetic_outgoing_damage_node(
+                [{"name": "Infested Asteroid", "hits": 12, "damage": 0}])
 
 
 class ThresholdCalibrationTest(unittest.TestCase):
@@ -592,6 +875,95 @@ class ThresholdCalibrationTest(unittest.TestCase):
     def test_the_tally_list_is_bounded(self):
         self.assertGreater(self.constant("zeroDamageTalliesTracked"), 0)
 
+    def test_counting_every_shot_equally_has_no_threshold_at_all(self):
+        """Issue #267's central measurement, and the reason the rule has a gate.
+
+        "A miss should count toward giving up" read without qualification means
+        every shot counts, and the corpus says there is no number that works.
+        Folded into readings and separated by the only discriminator available --
+        did the guns ever hurt this target in this session -- the two
+        distributions **overlap by an order of magnitude**: the objects worth
+        giving up on top out where targets that were being killed are still
+        being missed.
+
+        Asserted as the relation rather than as the numbers, so a growing corpus
+        cannot turn it red: the worst run of shots at a target the guns went on
+        to hurt is *larger* than the largest episode worth catching, and it is
+        not close. If that ever stops being true the pooled rule becomes
+        arguable and somebody should be looking.
+        """
+        pooled = episodes_the_rule_would_have_seen("pooled")
+        hurt = [shots for _, shots, was_hurt in pooled if was_hurt]
+        cold = [shots for _, shots, was_hurt in pooled if not was_hurt]
+        self.assertTrue(hurt and cold, "the corpus separates into nothing")
+        self.assertGreater(max(hurt), max(cold),
+                           "pooled: %r vs %r" % (sorted(hurt)[-5:], sorted(cold)[-5:]))
+        self.assertGreater(max(hurt), 4 * max(cold),
+                           "pooled: %r vs %r" % (sorted(hurt)[-5:], sorted(cold)[-5:]))
+
+    def test_the_pooled_rule_would_fire_on_targets_the_guns_were_killing(self):
+        """What that overlap costs, priced at the shipped threshold.
+
+        Not "there is no gap" in the abstract: at eight, the pooled rule gives up
+        on *dozens* of targets in this corpus that the guns went on to hurt --
+        which is a permanent, name-keyed blacklist entry for each of them. The
+        shipped rule fires on none, at any threshold, because the gate is not a
+        threshold.
+        """
+        threshold = self.constant("defaultZeroDamageHitsBeforeGivingUp")
+        pooled = [target for target, shots, was_hurt
+                  in episodes_the_rule_would_have_seen("pooled")
+                  if was_hurt and shots >= threshold]
+        gated = [target for target, shots, was_hurt
+                 in episodes_the_rule_would_have_seen("gated")
+                 if was_hurt and shots >= threshold]
+        self.assertGreater(len(pooled), 20, sorted(set(pooled))[:10])
+        self.assertEqual(gated, [], sorted(set(gated))[:10])
+
+    def test_the_gate_keeps_the_threshold_in_a_measured_gap(self):
+        """Eight, re-derived against the rule as shipped rather than inherited.
+
+        With misses counted behind the gate, the episodes worth catching are the
+        same ones and two of them are a little longer -- the shortest that does
+        not end on its own is still ten, and the longest that does is now seven
+        rather than five. Eight is still between them, with one value of slack
+        instead of three, and that narrowing is the whole cost of the change.
+        """
+        threshold = self.constant("defaultZeroDamageHitsBeforeGivingUp")
+        gated = sorted(shots for _, shots, was_hurt
+                       in episodes_the_rule_would_have_seen("gated") if not was_hurt)
+        long_ones = [shots for shots in gated if shots >= 10]
+        short_ones = [shots for shots in gated if shots < 10]
+        self.assertTrue(long_ones, "the corpus holds no episode worth catching")
+        self.assertTrue(short_ones, "the corpus holds no episode that ended on its own")
+        self.assertLessEqual(threshold, min(long_ones), repr(gated))
+        self.assertGreater(threshold, max(short_ones), repr(gated))
+
+    def test_every_object_it_has_ever_fired_on_is_a_structure(self):
+        """The hazard, measured rather than argued.
+
+        The verdict latches by name and never releases, so giving up on a rat
+        blacklists every rat of that name for the session -- and an anomaly is a
+        pocket of identically named rats. What the corpus says is that the rule
+        has never fired on one: every episode it would have caught is an
+        asteroid, a gate, a wreck-like structure or a ship that is scenery, and
+        those are objects whose *name* really does predict the next one.
+
+        Asserted by the property that makes them scenery rather than by a list of
+        names, which a new mission would break: every one of them is a target the
+        guns landed shots on and never once hurt, in a session where they were
+        hurting other things.
+        """
+        threshold = self.constant("defaultZeroDamageHitsBeforeGivingUp")
+        caught = {target for target, shots, was_hurt
+                  in episodes_the_rule_would_have_seen("gated")
+                  if not was_hurt and shots >= threshold}
+        self.assertTrue(caught, "nothing in this corpus reaches the threshold")
+        hurt = targets_that_ever_took_damage()
+        self.assertEqual(caught & hurt, set(),
+                         "an object it fires on was hurt elsewhere: %r"
+                         % sorted(caught & hurt))
+
 
 class ZeroDamageRuleTest(unittest.TestCase):
     """The accumulation rule, executed rather than restated.
@@ -614,7 +986,14 @@ class ZeroDamageRuleTest(unittest.TestCase):
         "hostCarriesTheChannel = False }",
         "step t o m = zeroDamageMemoryAfterReading t o m",
         "run t os = List.foldl (\\o m -> step t (Just o) m) empty os",
-        'rock n = { name = "Infested Asteroid", hits = n, damage = 0 }',
+        'rock n = { name = "Infested Asteroid", hits = n, damage = 0, misses = 0 }',
+        # The same object, missed rather than hit. Issue #267's fixtures are
+        # named for what they are evidence of rather than for what they are:
+        # a rock that is hit for nothing is immune, a rat that is missed is not.
+        'rockMissed n = { name = "Infested Asteroid", hits = 0, damage = 0, misses = n }',
+        'rat n = { name = "Centii Loyal Enslaver", hits = 0, damage = 0, misses = n }',
+        'ratHit = { name = "Centii Loyal Enslaver", hits = 1, damage = 55, misses = 0 }',
+        'rockHit = { name = "Infested Asteroid", hits = 1, damage = 5, misses = 0 }',
     )
 
     def given_up(self, expressions):
@@ -686,12 +1065,12 @@ class ZeroDamageRuleTest(unittest.TestCase):
         threshold = bot_constant("defaultZeroDamageHitsBeforeGivingUp")
         peak_definition = (
             "peak t os = List.foldl (\\o ( m, best ) -> let next = step t"
-            " (Just o) m in ( next, max best (List.sum (List.map .hits"
+            " (Just o) m in ( next, max best (List.sum (List.map zeroDamageShotsSpent"
             " next.landedHitsAtZero)) )) ( empty, 0 ) os |> Tuple.second",)
         for (path, target), summaries in sessions:
             def fold(damage_of):
                 return ", ".join(
-                    "[ { name = %s, hits = %d, damage = %d } ]"
+                    "[ { name = %s, hits = %d, damage = %d, misses = 0 } ]"
                     % (json.dumps(target), summary["hits"], damage_of(summary))
                     for summary in summaries)
 
@@ -719,31 +1098,127 @@ class ZeroDamageRuleTest(unittest.TestCase):
         """
         tanked, = self.given_up([
             '(run 8 (List.repeat 40 '
-            '[ { name = "Tough Rat", hits = 1, damage = 1 } ])).namesGivenUpOn',
+            '[ { name = "Tough Rat", hits = 1, damage = 1, misses = 0 } ])).namesGivenUpOn',
         ])
         self.assertEqual(tanked, "")
 
     def test_damage_partway_through_clears_the_evidence(self):
         cleared, = self.repl.values(
             ["(run 8 (List.repeat 4 [ rock 1 ] "
-             '++ [ [ { name = "Infested Asteroid", hits = 1, damage = 5 } ] ] '
+             '++ [ [ { name = "Infested Asteroid", hits = 1, damage = 5, misses = 0 } ] ] '
              "++ List.repeat 3 [ rock 1 ])).landedHitsAtZero"],
             r"hits = (\d+)", definitions=self.DEFINITIONS)
         self.assertEqual(cleared, "3")
 
-    def test_a_miss_builds_no_case(self):
+    def test_a_miss_alone_never_opens_a_case(self):
         """Missing is a range problem, and giving up is not the answer to it.
 
-        The host never counts a miss, because the client writes no damage number
-        for one -- so a reading of nothing but misses reaches this with `hits =
-        0` and must add nothing. Without that, a gun firing out of range would
-        give up on everything it could not reach.
+        This is where `test_a_miss_builds_no_case` was, and issue #267 is the
+        change it had to be confronted by rather than deleted. The host counts a
+        miss now, so the reading reaching this rule carries `misses = 40` where
+        it used to carry nothing at all -- and the answer has to be the same.
+
+        A gun firing out of range misses everything, and a rule that read that
+        as evidence would give up on every object it could not reach. The corpus
+        says so too, at a scale nobody would guess: targets the guns went on to
+        hurt absorbed 702 consecutive misses first.
         """
-        missing, = self.given_up([
-            '(run 8 (List.repeat 40 '
-            '[ { name = "Out Of Range", hits = 0, damage = 0 } ])).namesGivenUpOn',
+        verdict, = self.given_up(["(run 8 (List.repeat 40 [ rat 3 ])).namesGivenUpOn"])
+        self.assertEqual(verdict, "")
+        # And no tally is opened either, so 120 misses cost neither a verdict
+        # nor a slot in a list `zeroDamageTalliesTracked` bounds.
+        opened, = self.repl.values(
+            ["List.length (run 8 (List.repeat 40 [ rat 3 ])).landedHitsAtZero"],
+            r"(\d+)\s*: Int", definitions=self.DEFINITIONS)
+        self.assertEqual(opened, "0")
+
+    def test_a_miss_counts_once_a_shot_has_landed_for_zero(self):
+        """The half of issue #267 that is a change rather than a refusal.
+
+        One shot landing for zero is what opens the case; the seven misses that
+        follow carry it to the threshold, where before they would have counted
+        nothing and the object would have gone on being shot. Both sides of the
+        boundary, so a rule that counted misses twice or not at all fails here.
+        """
+        fires, holds = self.given_up([
+            "(run 8 ([ rock 1 ] :: List.repeat 7 [ rockMissed 1 ])).namesGivenUpOn",
+            "(run 8 ([ rock 1 ] :: List.repeat 6 [ rockMissed 1 ])).namesGivenUpOn",
         ])
-        self.assertEqual(missing, "")
+        self.assertEqual(fires, '"Infested Asteroid"')
+        self.assertEqual(holds, "")
+
+    def test_the_misses_counted_are_the_ones_after_the_case_opened(self):
+        """The arithmetic, so an off-by-one in either component is visible.
+
+        One landed zero and three misses is four shots spent. Three misses with
+        nothing landed is zero, because there is no tally for them to join.
+        """
+        opened, unopened = self.repl.values(
+            ["List.sum (List.map zeroDamageShotsSpent "
+             "(run 8 [ [ rock 1 ], [ rockMissed 3 ] ]).landedHitsAtZero)",
+             "List.sum (List.map zeroDamageShotsSpent "
+             "(run 8 [ [ rockMissed 3 ] ]).landedHitsAtZero)"],
+            r"(\d+)\s*: Int", definitions=self.DEFINITIONS)
+        self.assertEqual(opened, "4")
+        self.assertEqual(unopened, "0")
+
+    def test_damage_shuts_the_gate_as_well_as_clearing_the_count(self):
+        """One real hit ends the episode whatever it was built out of.
+
+        The gate is "has a shot landed for zero *in this episode*", not "ever",
+        so a target that reads zero once and is then hurt starts again with
+        nothing -- and the forty misses that follow count for nothing, because
+        there is no longer an open case for them to join. Without that clause a
+        single early zero would arm an object for the rest of the session and
+        every later miss would build against it, which is the slow version of
+        the failure this rule refuses outright.
+
+        The control beside it is the same forty misses with the hit removed,
+        which *does* reach the verdict: so what saves the target here is the
+        damage and not some other reason the fold answered nothing.
+        """
+        cleared, control = self.given_up([
+            "(run 8 ([ rock 1 ] :: [ rockHit ] "
+            ":: List.repeat 40 [ rockMissed 1 ])).namesGivenUpOn",
+            "(run 8 ([ rock 1 ] "
+            ":: List.repeat 40 [ rockMissed 1 ])).namesGivenUpOn",
+        ])
+        self.assertEqual(cleared, "")
+        self.assertEqual(control, '"Infested Asteroid"')
+
+    def test_damage_on_a_neighbour_does_not_shut_this_targets_gate(self):
+        """Run 27's shape again, with misses in it.
+
+        The drones landing real damage on a rat must not clear the rock's case,
+        or the guard is silent for exactly the readings it exists for. That was
+        already true of landed zeros and has to stay true now the case can be
+        carried by misses.
+        """
+        rock, = self.given_up([
+            "(run 8 ([ rock 1 ] :: [ ratHit ] "
+            ":: List.repeat 7 [ rockMissed 1 ])).namesGivenUpOn",
+        ])
+        self.assertEqual(rock, '"Infested Asteroid"')
+
+    def test_a_rat_that_is_merely_missed_is_never_blacklisted(self):
+        """The hazard, named: the verdict latches by name and never releases.
+
+        `namesGivenUpAsImmune` is matched against every overview row, so giving
+        up on a `Centii Loyal Enslaver` refuses every one of them for the rest of
+        the session -- and an anomaly is a pocket of identically named rats. A
+        rule that let misses open a case would put a rat that is fast, or under a
+        tracking disruptor, into that list for good.
+
+        What stops it is the gate rather than the threshold, which is why this is
+        asserted at a scale no threshold could survive: 500 readings, three
+        misses each, 1,500 shots against a threshold of 8. The corpus agrees that
+        this is the real shape -- every object the rule has ever fired on in the
+        recordings is an asteroid, a gate or a structure, and never a rat.
+        """
+        blacklisted, = self.given_up([
+            "(run 8 (List.repeat 500 [ rat 3 ])).namesGivenUpOn",
+        ])
+        self.assertEqual(blacklisted, "")
 
     def test_the_run_27_reading_shape_still_reaches_the_verdict(self):
         """Guns on the rock, drones landing real damage on a rat beside it.
@@ -754,7 +1229,7 @@ class ZeroDamageRuleTest(unittest.TestCase):
         """
         both, = self.given_up([
             "(run 8 (List.repeat 20 [ rock 1, "
-            '{ name = "Mammon Apis", hits = 3, damage = 104 } ])).namesGivenUpOn',
+            '{ name = "Mammon Apis", hits = 3, damage = 104, misses = 0 } ])).namesGivenUpOn',
         ])
         self.assertEqual(both, '"Infested Asteroid"')
 
@@ -795,7 +1270,7 @@ class ZeroDamageRuleTest(unittest.TestCase):
         still, = self.given_up([
             "(List.foldl (\\o m -> step 8 (Just o) m) "
             "(run 8 (List.repeat 8 [ rock 1 ])) (List.repeat 5 "
-            '[ { name = "Infested Asteroid", hits = 4, damage = 400 } ]'
+            '[ { name = "Infested Asteroid", hits = 4, damage = 400, misses = 0 } ]'
             ")).namesGivenUpOn",
         ])
         self.assertEqual(still, '"Infested Asteroid"')
@@ -811,13 +1286,42 @@ class ZeroDamageRuleTest(unittest.TestCase):
         # many can appear.
         length, = self.repl.values(
             ["(run 8 (List.map (\\i -> "
-             '[ { name = "Rat " ++ String.fromInt i, hits = 1, damage = 0 } ]) '
+             '[ { name = "Rat " ++ String.fromInt i, hits = 1, damage = 0, misses = 0 } ]) '
              "(List.range 1 200))).landedHitsAtZero |> List.length"],
             r"(\d+) : Int", definitions=self.DEFINITIONS)
         with open(MISSION_RUNNER_BOT_ELM, encoding="utf-8") as handle:
             cap = int(re.search(r"^zeroDamageTalliesTracked =\n    (\d+)$",
                                 handle.read(), re.MULTILINE).group(1))
         self.assertEqual(int(length), cap)
+
+    def test_the_cap_drops_the_targets_with_the_least_evidence_against_them(self):
+        """Which sixteen survive, when the list has to be cut.
+
+        `zeroDamageTalliesTracked` keeps the strongest cases and drops the
+        weakest, and since issue #267 the strength of a case is its shots rather
+        than its landed zeros -- so an object with one landed zero and twenty
+        misses outranks one with a single zero and nothing else. Ordering by the
+        old measure looks right and silently throws away the case closest to
+        firing.
+
+        The object under test is put **last** in the reading, so a sort by
+        landed zeros -- which are all equal here -- leaves it at the end of a
+        stable order and off the end of the cut. Its seven shots are one short
+        of the threshold, so what is being measured is which tally survives the
+        cut rather than which name reaches the verdict: a target that had
+        already fired would have left the list by the other door.
+        """
+        rats = ", ".join(
+            '{ name = "Rat %d", hits = 1, damage = 0, misses = 0 }' % i
+            for i in range(1, 20))
+        loud = '{ name = "Loud Rock", hits = 1, damage = 0, misses = 6 }'
+        kept, verdict = self.repl.values(
+            ["(run 8 [ [ %s, %s ] ]).landedHitsAtZero "
+             '|> List.map .name |> List.member "Loud Rock"' % (rats, loud),
+             "(run 8 [ [ %s, %s ] ]).namesGivenUpOn |> List.isEmpty" % (rats, loud)],
+            r"(True|False) : Bool", definitions=self.DEFINITIONS)
+        self.assertEqual(kept, "True")
+        self.assertEqual(verdict, "True", "the fixture fired instead of being kept")
 
     def test_the_name_is_matched_exactly(self):
         """Exact, trimmed, case-insensitive -- never as a substring.
@@ -906,7 +1410,10 @@ class MissionRunnerWiringTest(unittest.TestCase):
         branch = self.source[self.source.index("if activeTargetGivenUpAsImmune"):]
         branch = " ".join(branch[:2500].split())
         self.assertIn("ctrlShiftClickUiElement", branch)
-        self.assertIn("these shots are achieving nothing", branch)
+        # The wording moved in #267 -- it can no longer say every shot landed --
+        # and what this pins is that the branch still says the shots achieved
+        # nothing rather than merely doing the unlock in silence.
+        self.assertIn("has achieved nothing", branch)
 
     def test_the_unlock_reads_the_whole_overview(self):
         # Giving up removes the row from `overviewEntriesToAttack`, so looking
@@ -932,6 +1439,53 @@ class MissionRunnerWiringTest(unittest.TestCase):
         self.assertIn("zeroDamageHitsBeforeGivingUp = hits", self.collapsed)
         # The header section `bot_help.py` reports from.
         self.assertIn("+ `give-up-after-zero-damage-hits`", self.source)
+
+    def test_the_setting_no_longer_says_a_miss_does_not_count(self):
+        """The pin the change had to confront, in the text `--help` prints.
+
+        That paragraph said "Misses do not count -- the client writes no damage
+        number for one", which was true of the host rather than of the game and
+        stopped being true at all with issue #267. An operator reading it would
+        conclude the guard could never fire on something being missed, which is
+        still the right conclusion and now for a different reason -- so the
+        paragraph has to give the reason that actually holds.
+        """
+        start = self.source.index("+ `give-up-after-zero-damage-hits`")
+        paragraph = self.source[start:start + 900]
+        self.assertNotIn("Misses do not count", paragraph)
+        self.assertIn("miss counts too", paragraph)
+        self.assertIn("already landed a shot for zero", paragraph)
+
+    def test_the_status_line_prints_both_halves_of_a_tally(self):
+        """A sum alone cannot say which kind of evidence a case rests on.
+
+        `8/8` reads the same whether eight shots landed for zero or one did and
+        seven missed, and those are the two facts the rule is built to tell
+        apart. An operator watching a run has no other instrument for it, so the
+        clause carries both numbers and is executed rather than asserted by
+        substring -- a clause that prints nothing satisfies a substring check on
+        the branch above it, which is how #109's own status case once passed.
+        """
+        start = self.source.index("describeZeroDamage context =")
+        body = self.source[start:start + 2000]
+        self.assertIn("landed for zero", body)
+        self.assertIn("missed", body)
+        self.assertIn("zeroDamageShotsSpent tally", body)
+
+    def test_the_give_up_line_does_not_claim_every_shot_landed(self):
+        """The sentence an operator reads on the one reading this fires.
+
+        It said "Every shot that has landed ... did zero damage, 8 of them",
+        which stops being true the moment a miss can be one of the eight. It now
+        says what is provable: at least the threshold's worth of shots achieved
+        nothing, by landing for zero or missing, and shots have landed.
+        """
+        self.assertIn("has achieved nothing -- at least", self.collapsed)
+        self.assertIn("landing for zero damage or missing outright", self.collapsed)
+        # Scoped to the branch: "did zero damage" is ordinary prose elsewhere in
+        # this file, and a whole-file assertion would be measuring that instead.
+        start = self.collapsed.index("Every shot at '")
+        self.assertNotIn("did zero damage,", self.collapsed[start:start + 600])
 
 
 if __name__ == "__main__":

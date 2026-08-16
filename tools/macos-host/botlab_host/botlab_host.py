@@ -1167,17 +1167,28 @@ def synthetic_outgoing_damage_node(targets):
     landed shot reads `104 to Mammon Apis - Hits`, and a landed shot that
     achieved nothing reads `0 to Infested Asteroid - Hits`.
 
+    **All three are carried, and the third is not the first.** Until issue #267
+    a miss reached no field of any reading, so the bot could not tell an object
+    it cannot hurt from one it cannot hit. Both now travel, in separate counts,
+    because the corpus says they mean opposite things -- see
+    `parse_outgoing_miss`.
+
     **Per target rather than one total**, unlike the incoming node, because the
     question is about one object. Guns and drones routinely engage different
     things in the same reading -- run 27's own log has the drones landing real
     damage on a `Mercenary Commander` in the very readings the guns were
     achieving nothing on the asteroid -- so a single sum would have read as
     "our damage is fine" throughout the incident this exists to catch. One child
-    per target name, each carrying `name`, `hits` and `damage`.
+    per target name, each carrying `name`, `hits`, `damage` and `misses`.
 
     **A target with `hits > 0` and `damage = 0` is the whole signal**, and it is
     still not a verdict: the bot requires several of them before concluding
     anything. See `zeroDamageHitsBeforeGivingUp` in the mission runner.
+
+    **A target with `hits = 0` and `misses > 0` is not that signal**, and issue
+    #267 is why it is carried anyway: the bot could not previously see a miss at
+    all, so it could not tell an object it cannot hurt from one it cannot hit.
+    The rule reading these is built so a miss can never open a case on its own.
 
     **Present-with-nothing and absent are different answers**, as everywhere
     else on this channel. The node is emitted on every reading a game log exists
@@ -1199,6 +1210,12 @@ def synthetic_outgoing_damage_node(targets):
                     "name": target["name"],
                     "hits": target["hits"],
                     "damage": target["damage"],
+                    # Read strictly rather than with a default, because a caller
+                    # that forgot this key would emit a node saying "no shots
+                    # missed" -- a fabricated fact, and one the rule downstream
+                    # would act on. The parser's own default belongs at the
+                    # other end, where it means "this host is older than #267".
+                    "misses": target["misses"],
                 },
                 "children": [],
             }
@@ -2697,9 +2714,38 @@ _INCOMING_DAMAGE_LINE = re.compile(r"^(?P<amount>\d+) from (?P<attacker>.+)$")
 # - Sleepless Outguard` begins with a digit and is not damage (19 of them across
 # the corpus), and every `Warp disruption attempt from X - to Y` line -- which
 # is the only other place " to " appears on this channel -- begins with a word.
-# A miss carries no number at all and so cannot match, which is the point: a
-# miss costs nothing and is not evidence that a target is immune.
+# A miss carries no number at all and so cannot match. It is matched separately,
+# by the pattern below, because a miss and a landed shot for zero are different
+# facts about a target and the bot has to be able to tell them apart.
 _OUTGOING_DAMAGE_LINE = re.compile(r"^(?P<amount>\d+) to (?P<target>.+)$")
+
+# A shot of ours that missed, in the client's own two wordings:
+#   "Your Hobgoblin II misses Vigilant Sentry Tower completely - Hobgoblin II"
+#   "Your group of Small Focused Beam Laser II misses Hunter Alvi completely -
+#    Small Focused Beam Laser II"
+#
+# **Three things about this pattern were measured before it was written**, over
+# the 410,023 `(combat)` lines in `~/Documents/EVE/logs/Gamelogs`.
+#
+# It is anchored on `^Your `, which is what keeps the 139,578 *incoming* misses
+# out: the client writes those as "Centior Monster misses you completely", with
+# the attacker's name first and no "Your". Reading one as a shot of ours would
+# build a case for immunity out of a rat that cannot hit us.
+#
+# The weapon is required to appear **twice** -- once before "misses" and once
+# after "completely - ", matched by backreference -- rather than taking the
+# target as whatever sits between the two words. The client repeats it, so the
+# repetition is free evidence that the line was cut in the right place, and a
+# weapon or target name that happened to contain " misses " cannot slide the
+# split. All 19,894 outgoing misses in that corpus match this pattern and
+# nothing else does, which is what makes the backreference a measurement rather
+# than caution: 211 distinct target names, including ones carrying apostrophes
+# ("Sansha's Spy") and quotes ("'Integrated' Acolyte" as the weapon).
+#
+# `group of` is optional because the client writes it for a grouped weapon and
+# omits it for a drone; both shapes occur in the thousands.
+_OUTGOING_MISS_LINE = re.compile(
+    r"^Your (?:group of )?(?P<weapon>.+) misses (?P<target>.+) completely - (?P=weapon)$")
 
 # A backstop on each queue, not a policy. Both are drained once per reading, so
 # reaching either means nothing drained for a long time (a paused session, or a
@@ -2833,7 +2879,8 @@ def parse_outgoing_damage(entry):
     landed and achieved nothing, and it is the single most informative line on
     this channel -- discarding it as "no damage" would throw away the whole
     signal issue #90 is about. A miss still returns `None`, because it carries
-    no number and never reaches this pattern.
+    no number and never reaches this pattern; `parse_outgoing_miss` is what
+    reads one, and the two must not come to read each other's lines.
     """
     if entry is None or entry["channel"] != "combat":
         return None
@@ -2844,6 +2891,37 @@ def parse_outgoing_damage(entry):
     if not target:
         return None
     return int(match.group("amount")), target
+
+
+def parse_outgoing_miss(entry):
+    """The target of a shot of ours that missed, else None.
+
+    Issue #267. Until it, a miss was matched nowhere: `parse_outgoing_damage`
+    declines one by construction, so the bot could not tell "I am hitting this
+    and achieving nothing" from "I cannot hit this at all". Those are different
+    facts and only the first is evidence of immunity -- see
+    `zeroDamageMemoryAfterReading` in the mission runner, which is the only
+    consumer and which counts a miss **only against a target that has already
+    landed a shot for zero damage**.
+
+    **Kept as its own count rather than folded into `hits`.** Adding a miss to
+    the landed-hit count would make the two indistinguishable downstream, and
+    the corpus says they must not be: across 5,631 episodes in the client's own
+    logs, no target that ever landed a shot for zero was later hurt, while a
+    target the guns went on to hurt absorbed **702 consecutive misses** first.
+    A miss predicts nothing; a landed zero predicts immunity.
+
+    The target is taken whole rather than cut at the first " - " as the damage
+    lines are, because this line's tail is the weapon the pattern has already
+    matched by backreference -- there is no weapon suffix left on the name.
+    """
+    if entry is None or entry["channel"] != "combat":
+        return None
+    match = _OUTGOING_MISS_LINE.match(entry["text"])
+    if match is None:
+        return None
+    target = match.group("target").strip()
+    return target or None
 
 
 class GameLogTail:
@@ -2867,12 +2945,17 @@ class GameLogTail:
     **Four readers, one file offset.** This used to serve the stderr echo
     alone, and that echo consuming the lines is precisely what kept them from
     the bot (issue #28). `_poll` is now the only thing that moves the offset,
-    and it fans each line out to four independent queues -- so
+    and it fans each line out to five independent queues -- so
     `lines_for_echo`, `entries_for_reading`, `incoming_damage_for_reading` and
     `outgoing_damage_for_reading` each see every line exactly once and none can
     eat another's. Adding a second caller of a single-cursor tail would have
     given whichever ran first that cycle's lines and the others nothing,
     intermittently and without a word.
+
+    Five queues and four readers: `outgoing_damage_for_reading` drains two of
+    them, the landed shots and the misses issue #267 added, because both are
+    facts about the same reading's shooting and a consumer that got one without
+    the other would be reading half a summary.
 
     Both damage queues are fed from the `(combat)` lines that the reading queue
     deliberately drops (issues #32 and #90): withholding the channel from the
@@ -2901,6 +2984,12 @@ class GameLogTail:
         self._reading_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
         self._damage_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
         self._outgoing_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
+        # Misses ride in a queue of their own rather than in `_outgoing_queue`
+        # with a sentinel amount, because a miss has no amount and inventing one
+        # is how the two stop being distinguishable. Both are drained by
+        # `outgoing_damage_for_reading`, which is the one reader of either, so
+        # this is a fifth queue on the same offset rather than a fifth reader.
+        self._outgoing_miss_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
 
     def _newest_file(self):
         try:
@@ -2968,6 +3057,9 @@ class GameLogTail:
             dealt = parse_outgoing_damage(entry)
             if dealt is not None:
                 self._outgoing_queue.append(dealt)
+            missed = parse_outgoing_miss(entry)
+            if missed is not None:
+                self._outgoing_miss_queue.append(missed)
 
     def lines_for_echo(self, limit=25):
         """The stderr/web-console echo: whole lines, capped for readability."""
@@ -3031,35 +3123,54 @@ class GameLogTail:
     def outgoing_damage_for_reading(self):
         """What this ship's shots achieved since the last reading, per target.
 
-        A list of `{"name": …, "hits": N, "damage": N}`, one entry per target
-        the client named, ordered by hits and then by name so two identical
-        readings produce two identical nodes.
+        A list of `{"name": …, "hits": N, "damage": N, "misses": N}`, one entry
+        per target the client named, ordered by shots and then by name so two
+        identical readings produce two identical nodes.
 
         **`hits` counts shots that landed, and a landed shot for zero damage is
-        counted.** That is the distinction the whole of issue #90 rests on: a
-        miss writes no number and never gets here, so `hits > 0` with
-        `damage = 0` means the guns are hitting an object they cannot hurt,
-        which is what run 27 did for roughly 290 readings while the mission
-        objective was already finished.
+        counted.** That is the distinction the whole of issue #90 rests on: so
+        `hits > 0` with `damage = 0` means the guns are hitting an object they
+        cannot hurt, which is what run 27 did for roughly 290 readings while the
+        mission objective was already finished.
 
-        An empty list is an answer -- the client reported nothing landing this
-        reading -- and the caller turns it into a node all the same. "Nothing is
-        reporting" lives in whether the node exists at all, the same rule the
-        rest of this channel follows, and here reading the second as the first
-        would have a bot conclude every target is immune on a host that simply
-        has no game log.
+        **`misses` counts shots that did not land, and is a separate number for
+        a measured reason** (issue #267). Summing the two would make the bot
+        unable to tell an object it cannot hurt from one it cannot hit, and the
+        corpus says those are opposite signals: no target in it that landed a
+        shot for zero was ever hurt afterwards, while targets the guns went on
+        to kill absorbed runs of up to 702 consecutive misses first. A miss is
+        therefore carried so a decision *can* read it, and the only rule that
+        does counts one only against a target already landing zeros.
+
+        A target may appear with `hits = 0` and `misses > 0`: a reading in which
+        every shot at it missed. That is an answer and not an absence, and the
+        rule that reads it declines to build any case on it.
+
+        An empty list is an answer -- the client reported nothing landing and
+        nothing missing this reading -- and the caller turns it into a node all
+        the same. "Nothing is reporting" lives in whether the node exists at
+        all, the same rule the rest of this channel follows, and here reading
+        the second as the first would have a bot conclude every target is immune
+        on a host that simply has no game log.
         """
         self._poll()
         events = list(self._outgoing_queue)
         self._outgoing_queue.clear()
+        missed = list(self._outgoing_miss_queue)
+        self._outgoing_miss_queue.clear()
         hits = collections.Counter()
         damage = collections.Counter()
+        misses = collections.Counter()
         for amount, target in events:
             hits[target] += 1
             damage[target] += amount
+        for target in missed:
+            misses[target] += 1
+        names = set(hits) | set(misses)
         return [
-            {"name": name, "hits": count, "damage": damage[name]}
-            for name, count in sorted(hits.items(), key=lambda pair: (-pair[1], pair[0]))
+            {"name": name, "hits": hits[name], "damage": damage[name],
+             "misses": misses[name]}
+            for name in sorted(names, key=lambda name: (-(hits[name] + misses[name]), name))
         ]
 
 

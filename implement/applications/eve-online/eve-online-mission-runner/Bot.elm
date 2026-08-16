@@ -271,15 +271,16 @@
         not the guard for that and no value of it would be -- see
         `attritionIsUnguarded` for why, and set an armour threshold above.
       + `give-up-after-zero-damage-hits`: Stop shooting an object once this many
-        shots have *landed* on it for zero total damage, unlock it, and leave it
-        alone for the rest of the session. Defaults to 8 and `-1` disables it.
-        Misses do not count -- the client writes no damage number for one -- and
-        any damage at all resets the count, so a merely well-tanked target never
-        trips it. Calibrated from 77,316 recorded outgoing damage lines, in which
-        no target that ever took damage produced a single zero; see
-        `defaultZeroDamageHitsBeforeGivingUp`. Needs a host that carries the game
-        log: without one the guard is unarmed and the bot keeps shooting, which
-        is the safe direction.
+        shots have achieved nothing against it, unlock it, and leave it alone for
+        the rest of the session. Defaults to 8 and `-1` disables it. Any damage
+        at all resets the count, so a merely well-tanked target never trips it.
+        A shot counts if it *landed* for zero damage, and a miss counts too --
+        but only against an object that has already landed a shot for zero, so
+        an object the guns cannot hit can never be given up on however long they
+        keep missing it. Calibrated from the client's own recorded combat lines;
+        see `defaultZeroDamageHitsBeforeGivingUp`. Needs a host that carries the
+        game log: without one the guard is unarmed and the bot keeps shooting,
+        which is the safe direction.
 
       When using more than one setting, start a new line for each setting in the
       text input field. Here is an example of a complete settings string:
@@ -1134,11 +1135,16 @@ nothing down would see it once and go straight back to shooting the same rock,
 which is the failure `loadRefusedByClient` documents.
 
 `landedHitsAtZero` is the evidence being gathered: per target name, how many
-shots have landed on it for a running total of zero. Any damage at all clears
-that name's tally outright, so a merely well-tanked target -- one taking small
-but real damage -- never accumulates. It is capped by
-`zeroDamageTalliesTracked`, oldest activity dropped first, because the names
+shots have landed on it for a running total of zero, and -- since issue #267 --
+how many have missed it since the first of those landed. Any damage at all
+clears that name's tally outright, so a merely well-tanked target -- one taking
+small but real damage -- never accumulates. It is capped by
+`zeroDamageTalliesTracked`, the least evidence dropped first, because the names
 come from the client and nothing else bounds how many there can be.
+
+**A target with only misses against it has no tally at all**, which is what
+keeps the cap and the verdict alike out of reach of a rat the guns are merely
+unable to hit -- see `zeroDamageMemoryAfterReading`.
 
 `namesGivenUpOn` is the verdict, latched for the session the way
 `missionNamesAbandoned` is, and for the same reason: unlocking without
@@ -1164,7 +1170,24 @@ type alias ZeroDamageMemory =
 type alias ZeroDamageTally =
     { name : String
     , hits : Int
+    , misses : Int
     }
+
+
+{-| What the threshold is compared against: every shot this episode counts.
+
+`hits` are shots that landed for zero and `misses` are shots that did not land,
+and they are kept apart in the record for the reason
+`parseOutgoingDamageToTarget`'s own comment gives -- they mean opposite things
+and only one of them may open a case. What the give-up asks is how many shots
+have been spent on an object that is provably not being hurt, which is their
+sum, and `zeroDamageMemoryAfterReading` is the only thing that decides which
+misses got into `misses` in the first place.
+
+-}
+zeroDamageShotsSpent : ZeroDamageTally -> Int
+zeroDamageShotsSpent tally =
+    tally.hits + tally.misses
 
 
 {-| A lock the bot has asked the client for and that the client has not
@@ -10020,11 +10043,11 @@ decideActionInCombat context seeUndockingComplete continueIfCombatComplete =
                                     case context.readingFromGameClient.targets |> List.filter .isActiveTarget |> List.head of
                                         Just activeTarget ->
                                             describeBranch
-                                                ("Every shot that has landed on '"
+                                                ("Every shot at '"
                                                     ++ (activeTargetGivenUpAsImmune |> Maybe.withDefault "the active target")
-                                                    ++ "' did zero damage, "
+                                                    ++ "' has achieved nothing -- at least "
                                                     ++ (context.eventContext.botSettings.zeroDamageHitsBeforeGivingUp |> String.fromInt)
-                                                    ++ " of them by the client's own count -- these shots are achieving nothing. Unlock it (Ctrl+Shift+Click) and leave it alone for the rest of the session."
+                                                    ++ " of them by the client's own count, landing for zero damage or missing outright. Unlock it (Ctrl+Shift+Click) and leave it alone for the rest of the session."
                                                 )
                                                 (ctrlShiftClickUiElement
                                                     (activeTarget.barAndImageCont
@@ -19844,28 +19867,42 @@ incomingDamageSampleLimit =
     200
 
 
-{-| How many landed shots must achieve nothing before an object is given up on.
+{-| How many shots must achieve nothing before an object is given up on.
 
 **One zero is not evidence, and this is the number that says how much is.** The
-client's own combat log is the whole corpus behind it -- 77,316 outgoing damage
-lines across 139 recorded sessions, naming 294 distinct targets.
+corpus behind it is the client's own combat log -- both the 40 sessions in
+`~/Documents/EVE/logs/Gamelogs` and the 74 recorded bot runs that carry outgoing
+combat, where the readings can be cut at their real boundaries because the
+framework issues exactly one memory read per reading.
 
-What the corpus says is a cleaner separation than the issue expects. Of those
-294 targets, **eight ever produced a zero and none of those eight ever produced
-a nonzero**; the other 286 took damage on every one of their lines and never
-once read zero. So resists and glancing hits do _not_ round to zero here -- a
-glancing hit reads `15 to Mercenary Commander - Acolyte I - Glances Off` -- and
-the largest run of zeros anywhere that was later broken by a real hit on the
-same target is **zero**. Any threshold at all would have produced no false
-positive in that data, so the number is chosen for margin rather than to clear
-an observed overlap.
+**Re-derived for issue #267 rather than inherited**, because counting misses
+changes what the number is compared against and a threshold carried across such
+a change is a threshold with no evidence behind it. Two measurements, and the
+first is what decides the shape of the rule rather than the size of the number.
 
-Eight is the largest value that still catches every episode worth catching. The
-eight zero-only episodes ran 3, 3, 10, 28, 74, 86, 101 and 108 landed hits; the
-two three-hit ones ended on their own inside eight seconds and are nothing to
-fix, and eight sits below the ten of the smallest one that did not. Measured
-against the client's own timestamps, it fires 20 to 75 seconds into each of the
-six it catches, in place of the 41 to 414 seconds those episodes actually ran.
+**Pooling every shot has no threshold at all.** Counting a miss the same as a
+landed zero, the targets the guns were demonstrably hurting reach runs of 702,
+382, 218, 201 and 154 shots before a hit lands, while the objects that are shot
+and never hurt top out at 108. A threshold of 8 would then fire on 101 episodes
+in the bot runs alone where the guns went on to hurt the target, against 2 worth
+catching. There is no number in that overlap and none is invented here: see
+`zeroDamageMemoryAfterReading`, where a miss counts only against an object that
+has already landed a shot for zero.
+
+**With that gate, the separation is the one #158 measured and eight still sits
+in it.** No episode in either corpus has a target that landed a shot for zero
+and was hurt afterwards -- 5,631 episodes, no counterexample -- so the rule
+cannot fire on a target the guns are hurting at any threshold, and what the
+number has to clear is only the short episodes not worth acting on. Counted as
+shots, those episodes run 3, 3, 7, 10, 32, 74, 86, 101 and 108. Eight sits
+between the 7 that ends on its own and the 10 that does not, catching every
+episode worth catching and none of the rest.
+
+**The gap narrowed and the number did not move**, which is worth stating rather
+than leaving to be rediscovered. Before misses counted, that same list read 3,
+3, 5, 10, ... and eight had 5 below it; the 5 is a 7 now, because two misses on
+that object join its tally. Eight is still in the gap and there is one value of
+slack left rather than three.
 
 **It is a number about this ship's guns, not about the game.** A fit whose shots
 are small enough to round to zero against a heavily resisted target would
@@ -20324,19 +20361,30 @@ describeZeroDamage context =
         -- ever reaches a decision line.
         (case memory.landedHitsAtZero of
             [] ->
-                "shots landing for zero: none"
+                "shots achieving nothing: none"
 
             tallies ->
-                "shots landing for zero: "
+                -- Both halves are printed rather than the sum alone, because
+                -- they are the two different facts the rule is built on and an
+                -- operator watching a run has no other way to tell an object
+                -- the guns cannot hurt from one they are also missing. A tally
+                -- reading `8/8 (1 landed, 7 missed)` is a case that rests on
+                -- one landed zero, which is worth seeing.
+                "shots achieving nothing: "
                     ++ (tallies
                             |> List.map
                                 (\tally ->
                                     "'"
                                         ++ tally.name
                                         ++ "' "
-                                        ++ String.fromInt tally.hits
+                                        ++ String.fromInt (zeroDamageShotsSpent tally)
                                         ++ "/"
                                         ++ String.fromInt threshold
+                                        ++ " ("
+                                        ++ String.fromInt tally.hits
+                                        ++ " landed for zero, "
+                                        ++ String.fromInt tally.misses
+                                        ++ " missed)"
                                 )
                             |> String.join ", "
                        )
@@ -20692,11 +20740,51 @@ taking _some_ damage, so its count never climbs, and a target that starts taking
 damage after a few unlucky readings goes back to zero evidence rather than
 carrying it. Only `hits > 0` with `damage == 0` adds.
 
-**A miss adds nothing**, because the host never counts one: the client writes no
-damage number for a miss, so it cannot reach `hits`. A gun that is out of range
-and missing everything therefore accumulates no evidence against its target,
-which is right -- missing is a range problem and the answer to it is not to give
-up on the object.
+**A miss counts, but it can never open a case.** Issue #267: until it, the host
+matched a miss nowhere at all, so the bot could not tell an object it cannot
+hurt from one it cannot hit and the give-up's own documentation said "a miss
+builds no case, because the host never counts one". The host counts one now, and
+what this rule does with it was measured rather than chosen.
+
+A miss adds to a target's tally **only once that target has landed a shot for
+zero damage in this same episode**. So the gate is a landed zero, and a miss can
+only ever make an existing case arrive sooner.
+
+The unqualified form -- every shot counting, landed or not -- was measured and
+does not work. Folded into readings at their real boundaries across 94 recorded
+runs and 40 client sessions, the targets the guns were demonstrably hurting
+absorb runs of **702, 382, 218, 201 and 154 consecutive misses** before a shot
+lands, while the whole point of this guard -- the objects that are shot and
+never hurt -- tops out at **108**. There is no threshold between those, and one
+placed anywhere below 108 would give up on dozens of targets the corpus shows
+being killed. What separates them is not how many shots but which kind: across
+5,631 episodes not one target that landed a shot for zero was hurt afterwards,
+and the objects this has ever fired on are asteroids, gates and structures
+rather than rats.
+
+**That is also what stops a rat being blacklisted for being hard to hit**, which
+is the hazard the latch below carries: a target that is only ever missed has no
+landed zero, so its tally is never opened, so `namesGivenUpOn` cannot reach it
+however long the guns keep missing. It is a property of the rule rather than of
+the threshold, and `zeroDamageTalliesTracked` never fills with rats for the same
+reason.
+
+**What it costs is stated rather than hidden, and it is a weakening.** One
+landed zero and seven misses now reach the verdict where eight landed zeros were
+needed before, so an object that reads zero _once_ is given up on far sooner than
+it was. On this corpus that costs nothing -- no episode in it fires that did not
+fire before, at the same reading -- because a landed zero occurs on nothing that
+is ever hurt. The fit `defaultZeroDamageHitsBeforeGivingUp` warns about is where
+it would bite: one whose shots round to zero against a heavily resisted target
+would previously have needed eight of those readings and now needs one plus a
+bad run of tracking. The gate is one landed zero because that is what the corpus
+separates on, and a gate of two would be a second threshold with no evidence
+under it.
+
+**The episode is the unit of the gate, not the session.** Any damage clears the
+tally outright, which shuts the gate as well as zeroing the count -- so a target
+that reads zero once and is then hurt is back to needing fresh evidence, and its
+later misses build nothing.
 
 **The verdict latches for the session.** Once a name is in `namesGivenUpOn` it
 stays, and its tally is dropped so nothing keeps counting. Unlatching on later
@@ -20741,12 +20829,27 @@ zeroDamageMemoryAfterReading threshold outgoingDamage memoryBefore =
                         |> List.map .hits
                         |> List.sum
 
+                -- Read off every target the summary names rather than off
+                -- `landedThisReading`, because a reading in which every shot at
+                -- an object missed carries it with `hits = 0` and that is
+                -- precisely the reading these have to be taken from.
+                missesFor name =
+                    targets
+                        |> List.filter (\target -> target.name == name)
+                        |> List.map .misses
+                        |> List.sum
+
                 tookDamage name =
                     landedThisReading
                         |> List.any (\target -> target.name == name && 0 < target.damage)
 
+                -- Every target the summary names, including one that was only
+                -- missed, so that the gate below is the single place a miss is
+                -- turned away. Filtering them out here as well would state the
+                -- same rule twice, and a rule stated twice is one that survives
+                -- being broken in either place.
                 namesSeen =
-                    (landedThisReading |> List.map .name)
+                    (targets |> List.map .name)
                         ++ (memoryBefore.landedHitsAtZero |> List.map .name)
                         |> Common.Basics.listUnique
                         |> List.filter
@@ -20764,17 +20867,33 @@ zeroDamageMemoryAfterReading threshold outgoingDamage memoryBefore =
                                         before =
                                             memoryBefore.landedHitsAtZero
                                                 |> List.filter (\tally -> tally.name == name)
-                                                |> List.map .hits
-                                                |> List.sum
-                                    in
-                                    case before + hitsAtZeroFor name of
-                                        0 ->
-                                            Nothing
 
-                                        hits ->
-                                            Just { name = name, hits = hits }
+                                        hits =
+                                            (before |> List.map .hits |> List.sum)
+                                                + hitsAtZeroFor name
+                                    in
+                                    if hits <= 0 then
+                                        -- **The gate, and the only one.** No
+                                        -- shot has landed on this object for
+                                        -- zero in this episode, so its misses
+                                        -- are evidence of nothing: no tally
+                                        -- opens, nothing accumulates, and
+                                        -- `namesGivenUpOn` can never reach it.
+                                        -- A target the guns merely cannot hit
+                                        -- leaves this reading exactly as it
+                                        -- entered it.
+                                        Nothing
+
+                                    else
+                                        Just
+                                            { name = name
+                                            , hits = hits
+                                            , misses =
+                                                (before |> List.map .misses |> List.sum)
+                                                    + missesFor name
+                                            }
                             )
-                        |> List.sortBy (.hits >> negate)
+                        |> List.sortBy (zeroDamageShotsSpent >> negate)
                         |> List.take zeroDamageTalliesTracked
 
                 givingUpNow =
@@ -20783,7 +20902,8 @@ zeroDamageMemoryAfterReading threshold outgoingDamage memoryBefore =
 
                     else
                         tallied
-                            |> List.filter (\tally -> threshold <= tally.hits)
+                            |> List.filter
+                                (\tally -> threshold <= zeroDamageShotsSpent tally)
                             |> List.map .name
             in
             { landedHitsAtZero =

@@ -691,12 +691,14 @@ class RecordedRunTest(unittest.TestCase):
         self.assertLess(changed, len(self.entries) / 100)
 
     def test_the_damage_summaries_read_exactly_what_they_read_before(self):
-        # Both are host-side consumers of this entry's text, and #32's retreat
-        # and #90's zero-damage verdict are built on their numbers. Nothing
-        # wraps on `(combat)`, so the two summaries have to be identical
-        # before and after -- not merely close.
+        # All three are host-side consumers of this entry's text, and #32's
+        # retreat and #90's zero-damage verdict are built on their numbers.
+        # Nothing wraps on `(combat)`, so the summaries have to be identical
+        # before and after -- not merely close. `parse_outgoing_miss` joined
+        # them in #267 and is held to the same standard.
         for parse in (botlab_host.parse_incoming_damage,
-                      botlab_host.parse_outgoing_damage):
+                      botlab_host.parse_outgoing_damage,
+                      botlab_host.parse_outgoing_miss):
             before = [parse(botlab_host.parse_game_log_line(line))
                       for line in self.lines
                       if botlab_host.parse_game_log_line(line) is not None]
