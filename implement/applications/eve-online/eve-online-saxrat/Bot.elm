@@ -640,6 +640,10 @@ type alias BotMemory =
     -- the reading after them.
     , targetsCountLastReading : Int
 
+    -- How long the guns have been busy with nothing dying, in readings. See
+    -- `CombatStalemate`.
+    , combatStalemate : CombatStalemate
+
     -- What the client has answered about how many targets this ship can hold at
     -- once: the maximum it stated in its own game log, and the most the target
     -- bar has actually carried. `maxTargetsLastChange` holds a sentence only on
@@ -756,6 +760,51 @@ type alias MemoryOfAnomaly =
     { arrivalTime : { milliseconds : Int }
     , otherPilotsFoundOnArrival : List String
     , ratsSeen : Set.Set String
+    }
+
+
+{-| How long the guns have been busy with nothing dying, in readings.
+
+**Run 48 is what this exists to end.** The bot sat in anomaly `OTC-000` printing
+`All locked up; bounce?` on 1,563 consecutive readings and answering "wait" to
+every one of them -- the anomaly's own age clause reached **4,759 seconds**, and
+the run was still being written when the incident was reported at 3,883. Three
+rats the whole time, none of them dying, a `Centii Loyal Enslaver`
+out-regenerating the guns from a hull the bot had already taken down to 12%, no
+drones left to launch, and the ship in no danger at all. Nothing below that
+branch could act, so nothing did.
+
+**`ratsInOverview` is the whole progress signal, and the hitpoint ring is
+deliberately not part of it.** The obvious reading of run 48 -- a shield climbing
+while the guns fire -- does not survive the log. Over the longest stretch of that
+stall with a readable ring, 821 consecutive readings, the target's triple rises
+on 154 of them, holds on 642 and **falls on 24**: the damage was landing and the
+repairs were faster. What that costs a rule keyed on the ring is the run length
+rather than the share -- the longest stretch inside that stall with no fall in it
+is **113 readings**, so a counter reset by the triple never reaches the bound
+below and the incident repeats. The one thing that stayed true for all 1,563
+readings is that the overview still showed three rats.
+
+Measured across the twenty-two recorded saxrat logs whose status line carries a
+reading index, the longest a fight went between kills and still produced one is
+**130 readings**; the three recorded stalls ran **932, 1443 and 1582**. The
+bounds below sit in that gap, which is a sevenfold separation against the ring's
+1.8x.
+
+**Nothing here is keyed on a rat's name.** An anomaly is a pocket of identically
+named rats, so a verdict latched by name would blacklist every `Centii Loyal
+Enslaver` for the session -- which is why the mission runner's zero-damage rule
+was not ported here. This is a count of rows and a count of readings, and it is
+cleared by the fight moving rather than by anything being remembered.
+
+`ratsInOverview` is the previous reading's count, written down for the same
+reason `targetsCountLastReading` is: the comparison is against the reading
+_before_ this one, and the memory update only ever sees the reading after.
+
+-}
+type alias CombatStalemate =
+    { readings : Int
+    , ratsInOverview : Int
     }
 
 
@@ -4682,6 +4731,139 @@ undockClickedStepsAgo previousStepsEffects undockButtonRegion =
         |> Maybe.map (Tuple.first >> (+) 1)
 
 
+{-| Readings a fight may go nowhere for before the bot closes the range on it.
+
+**Derived from the corpus rather than picked.** Replayed over the twenty-two
+recorded saxrat logs whose status line carries a reading index -- runs 31 through
+50, counting _readings_ and not decision lines, since the status text is
+reprinted under every decision -- the two populations are:
+
+  - stretches of a fight that ended in a kill: the longest went **130** readings
+    between kills (run 36's `QRH-534`, itself an ammo-swap deadlock that broke on
+    its own), then 55, 43, 34 and 27, with the other 440 of 445 at 19 or below;
+  - stretches that never produced a kill: 73 at the top of the ordinary ones --
+    fights the bot broke off by leaving the anomaly -- and then **932, 1443 and
+    1582**, which are run 48's `OTC-000` and run 43's own stall.
+
+So the gap between "a fight that was still going to win" and "a fight that was
+never going to" is 130 to 932, and it is empty. This sits inside it with margin
+both ways: half again as long as the longest fight the guns ever won from here,
+and less than a quarter of the shortest stall on record.
+
+The reading before this one is what makes the number cheap to be wrong about in
+the _early_ direction: what happens at this bound is an approach, and approaching
+a rat the guns are already killing costs the fight nothing. `combatStalemateLeaveReadings`
+is the expensive one and is argued separately.
+
+-}
+combatStalemateApproachReadings : Int
+combatStalemateApproachReadings =
+    200
+
+
+{-| Readings a fight may go nowhere for before the bot gives the grid up.
+
+A hundred readings after the approach, which is what closing the range is given
+to work. Run 48's target sat at 20,000 m, exactly on the ammo swap's crossover
+and inside its dead band, so the swap could not decide and the guns held a
+long-range charge at knife range. Measured on the readings the corpus records the
+ship actually approaching on, it closes **1,000 m per reading** -- so leaving the
+dead band takes three or four readings and crossing the whole 20 km takes twenty.
+A hundred is five times the second and twenty-five times the first.
+
+Still inside the measured gap: 300 is well under the 932 of the shortest recorded
+stall, and more than twice the 130 of the longest fight the guns ever won from
+this branch.
+
+-}
+combatStalemateLeaveReadings : Int
+combatStalemateLeaveReadings =
+    300
+
+
+{-| What to do about a fight that has stopped killing anything.
+
+Three rungs rather than two, because the cheap answer and the expensive one are
+not the same answer. Closing the range costs the fight nothing and is very likely
+the fix -- run 48's deadlock is the target parked on the ammo swap's crossover --
+while leaving abandons a fight the bot may still win, and is only right once
+closing the range has been tried and has not helped.
+
+-}
+type CombatStalemateVerdict
+    = FightIsStillGettingSomewhere
+    | CloseTheRangeOnTheTarget
+    | LeaveThisGrid
+
+
+combatStalemateVerdict : Int -> CombatStalemateVerdict
+combatStalemateVerdict readings =
+    if readings < combatStalemateApproachReadings then
+        FightIsStillGettingSomewhere
+
+    else if readings < combatStalemateLeaveReadings then
+        CloseTheRangeOnTheTarget
+
+    else
+        LeaveThisGrid
+
+
+{-| Whether this reading is one a stalemate could even be accumulating on.
+
+The target bar is not empty and the overview still shows a rat: the guns have
+something to shoot and something to shoot at. Everything else -- travelling,
+warping, docked, a cleared grid -- is not a fight and clears the count rather
+than carrying it into the next anomaly, which is what would let a bound fire on
+arrival somewhere it had never been.
+
+-}
+combatFightIsUnderway : ReadingFromGameClient -> Bool
+combatFightIsUnderway readingFromGameClient =
+    not (List.isEmpty readingFromGameClient.targets)
+        && not (List.isEmpty (getNamesOfRatsInOverview readingFromGameClient))
+
+
+{-| The stalemate count after one more reading.
+
+Advanced in `updateMemoryForNewReadingFromGame` and nowhere else, which is #102's
+and #126's placement rule and the reason this can be a count of readings at all:
+that is the one thing running unconditionally on every reading, so a branch that
+stops being reached cannot freeze the count that is supposed to bound it. The
+mission runner's message-box standoff records what the other placement costs.
+
+The count only ever rises while the fight stands still, so the bound is crossed
+once and stays crossed -- the branch does not fall back to waiting on the reading
+after it acts.
+
+-}
+combatStalemateAfterReading :
+    { before : CombatStalemate
+    , fightIsUnderway : Bool
+    , ratsInOverview : Int
+    }
+    -> CombatStalemate
+combatStalemateAfterReading { before, fightIsUnderway, ratsInOverview } =
+    if not fightIsUnderway then
+        { readings = 0, ratsInOverview = ratsInOverview }
+
+    else if ratsInOverview < before.ratsInOverview then
+        { readings = 0, ratsInOverview = ratsInOverview }
+
+    else
+        { readings = before.readings + 1, ratsInOverview = ratsInOverview }
+
+
+describeCombatStalemate : CombatStalemate -> String
+describeCombatStalemate stalemate =
+    "stalemate "
+        ++ String.fromInt stalemate.readings
+        ++ " readings, "
+        ++ String.fromInt combatStalemateApproachReadings
+        ++ " to close in and "
+        ++ String.fromInt combatStalemateLeaveReadings
+        ++ " to leave"
+
+
 decideActionInAnomaly :
     { arrivalInAnomalyAgeSeconds : Int }
     -> BotDecisionContext
@@ -4846,10 +5028,69 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
         lootWreckTimeRemainingSeconds =
             (context.eventContext.botSettings.anomalyWaitTimeSeconds + 120) - arrivalInAnomalyAgeSeconds
 
+        -- What every give-up in this function means by leaving: bring the
+        -- drones in, then hand the reading to whatever the caller does about a
+        -- finished grid. All three call sites pass something that acts -- pick
+        -- another anomaly, follow a site's own progression, or jump -- so this
+        -- can neither decline nor come back here.
+        leaveThisGrid =
+            returnDronesToBay context
+                (describeBranch "No drones to return." continueIfCombatComplete)
+
+        -- The row the guns are already pointed at, where the ship could
+        -- actually reach it. Inside `approachRangeLimitMeters` rather than
+        -- around it: past 150 km the client discards the gesture, and run 41
+        -- double-clicked a row 2,266 km away 13,541 times over three hours with
+        -- the ship never moving. A row this cannot answer for is not a range
+        -- the bot can close, so the stalemate escalates instead of asking
+        -- anyway.
+        rowToCloseTheRangeOn : Maybe OverviewWindowEntry
+        rowToCloseTheRangeOn =
+            overviewEntriesToAttack
+                |> List.filter overviewEntryIsActiveTarget
+                |> List.filter overviewEntryIsDisplayed
+                |> List.filter
+                    (\entry ->
+                        entry.objectDistanceInMeters
+                            |> Result.map (\distanceInMeters -> distanceInMeters <= approachRangeLimitMeters)
+                            |> Result.withDefault False
+                    )
+                |> List.head
+
+        -- The branch that used to answer "wait" to its own question. See
+        -- `CombatStalemate` for what the count means and
+        -- `combatStalemateApproachReadings` for where the two bounds come from.
+        breakTheCombatStalemate =
+            case combatStalemateVerdict context.memory.combatStalemate.readings of
+                FightIsStillGettingSomewhere ->
+                    waitForProgressInGame
+
+                CloseTheRangeOnTheTarget ->
+                    case rowToCloseTheRangeOn of
+                        Just entry ->
+                            unlessAlreadyClosingIn context
+                                (describeCombatStalemate context.memory.combatStalemate
+                                    ++ ". Close the range on the target: at the ammo swap's crossover it cannot decide which charge the fight wants, and the guns hold the wrong one."
+                                )
+                                (doubleClickUiElement entry.uiNode)
+
+                        Nothing ->
+                            describeBranch
+                                (describeCombatStalemate context.memory.combatStalemate
+                                    ++ ". Nothing on the overview is both the active target and near enough to approach, so there is no range to close -- leave instead."
+                                )
+                                leaveThisGrid
+
+                LeaveThisGrid ->
+                    describeBranch
+                        (describeCombatStalemate context.memory.combatStalemate
+                            ++ ". Closing the range did not help either -- leave this grid."
+                        )
+                        leaveThisGrid
+
         decisionAfterLootingNotableWrecks =
             if waitTimeRemainingSeconds <= 0 then
-                returnDronesToBay context
-                    (describeBranch "No drones to return." continueIfCombatComplete)
+                leaveThisGrid
 
             else
                 describeBranch
@@ -5071,15 +5312,13 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                                                              else
                                                                 case nextOverviewEntryToLockOrProbe of
                                                                     Nothing ->
-                                                                        -- Ditto above
-                                                                        -- describeBranch "All locked up; bounce?" (tetherAtStructure context)
                                                                         revealEntryToLock
                                                                             |> Maybe.withDefault
                                                                                 (describeBranch
                                                                                     (describeMaxTargetsNothingToLock maxTargetsProbeNow
                                                                                         "All locked up; bounce?"
                                                                                     )
-                                                                                    waitForProgressInGame
+                                                                                    breakTheCombatStalemate
                                                                                 )
 
                                                                     Just nextOverviewEntryToLock ->
@@ -7671,6 +7910,7 @@ initBotMemory =
     , lockBatchClicksAnswered = 0
     , lockBatchLastChange = Nothing
     , targetsCountLastReading = 0
+    , combatStalemate = { readings = 0, ratsInOverview = 0 }
     , maxTargetsStatedByClient = Nothing
     , maxTargetsHeldAtOnce = Nothing
     , maxTargetsLastChange = Nothing
@@ -9954,6 +10194,10 @@ statusTextFromState context =
                    )
                 ++ " | approach "
                 ++ (context.memory.shipApproachingTicks |> String.fromInt)
+                -- Beside the approach counter, because the first thing this
+                -- count reaches for is an approach.
+                ++ " | "
+                ++ describeCombatStalemate context.memory.combatStalemate
                 ++ " | "
                 ++ describeGateActivationAsk
                     { asked = askingAnAccelerationGateToOpen readingFromGameClient
@@ -13232,6 +13476,12 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     , lockBatchClicksAnswered = lockBatchAccounting.clicksAnswered
     , lockBatchLastChange = lockBatchAccounting.change
     , targetsCountLastReading = context.readingFromGameClient.targets |> List.length
+    , combatStalemate =
+        combatStalemateAfterReading
+            { before = botMemoryBefore.combatStalemate
+            , fightIsUnderway = combatFightIsUnderway context.readingFromGameClient
+            , ratsInOverview = namesOfRatsInOverview |> List.length
+            }
     , lockAttempt = lockRangeLearning.attempt
     , lockRangeStatedMeters =
         -- Overwritten rather than narrowed: the ceiling is not a constant even
