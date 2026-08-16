@@ -828,11 +828,29 @@ Scoped to the reading by the host, which drains its queue as it builds the tree,
 so this is what the shots since the previous read achieved rather than a running
 total.
 
+**`hits` and `misses` are separate counts and summing them is the one mistake to
+avoid here.** A landed shot for zero damage says the guns cannot hurt this
+object; a miss says they cannot hit it, which is a range or tracking problem and
+resolves on its own. Issue #267 measured the difference rather than assuming it:
+across 5,631 episodes in the client's own logs, no target that ever landed a
+shot for zero was hurt afterwards, while targets the guns went on to kill
+absorbed runs of up to 702 consecutive misses first. So a rule may read both,
+and no rule may treat one as the other.
+
+`misses` defaults to zero rather than to `Nothing`, which is the one place this
+record takes a default instead of reporting absence. A host older than #267
+writes no such key, and reading that as "no shots missed" is exactly the
+behaviour those hosts already had -- so the default degrades to the previous
+rule rather than inventing evidence. The distinction that must not be lost, "is
+this channel here at all", is carried by the `Maybe` around the whole list and
+is untouched.
+
 -}
 type alias OutgoingDamageToTarget =
     { name : String
     , hits : Int
     , damage : Int
+    , misses : Int
     }
 
 
@@ -863,6 +881,7 @@ parseOutgoingDamageToTarget targetNode =
                 { name = name
                 , hits = targetNode |> getIntPropertyFromDictEntries "hits" |> Maybe.withDefault 0
                 , damage = targetNode |> getIntPropertyFromDictEntries "damage" |> Maybe.withDefault 0
+                , misses = targetNode |> getIntPropertyFromDictEntries "misses" |> Maybe.withDefault 0
                 }
 
 
