@@ -1357,7 +1357,21 @@ in `elm repl` and the overview rows they are asked about come from the **real**
 the restatement. The discriminating case for the spelling is the plainest one:
 the corpus literal fed in byte for byte, since `is sensor damping me` is no
 substring of `Pilot is sensor dampening me` and a misspelled matcher answers
-`False`. The corpus is recounted as **relations** — tracking disruption dwarfs
+`False`. ```
+python3 -m unittest, module by module, NO_COLOR=1
+  clean origin/main   108 modules, 2844 cases, 0 skipped, 10 failures
+  this branch         109 modules, 2870 cases, 0 skipped, 10 failures
+```
+
+The two failure sets are identical name for name: ten corpus-reading cases
+across `test_retreat_latency`, `test_retreat_not_executing`,
+`test_saxrat_ammo_swap`, `test_saxrat_message_box_standoff` and
+`test_saxrat_undock_settling`, all of which fail on a pristine export of
+`origin/main` and skip in CI. That set is **not** the one #271 recorded a week
+earlier — it reported one failure and there are now ten — which is why it is
+measured per change rather than inherited.
+
+The corpus is recounted as **relations** — tracking disruption dwarfs
 warp disruption, the misspelling occurs nowhere, `is jamming me` occurs nowhere,
 lines exceed readings — so a growing corpus cannot turn a true claim red.
 
@@ -1510,6 +1524,14 @@ that — the same warning `defaultRunAwayIncomingDamageThreshold` carries.
 **A miss builds no case**, because the host never counts one. Missing is a range
 problem and giving up is not the answer to it — without that, a gun firing out
 of range would give up on everything it could not reach.
+
+**This rule is mission-runner-only by design rather than merely unported**, and
+the operator's own account of it is what settles that: it exists to catch *a
+mis-locked invulnerable object*, which is why every object it has ever fired on
+is an asteroid, a gate or a structure and why the by-name latch is correct
+there. saxrat fights rats, which die; it has no population for this rule to act
+on, and #267's own measurement over the rat corpus found none. Porting it would
+be porting a rule to a bot whose grid never produces its input.
 
 **The verdict is latched in `BotMemory.zeroDamage` and kept for the session**,
 the way `missionNamesAbandoned` is. A reading's summary is gone by the next one,
@@ -5876,6 +5898,7 @@ shipped configuration rather than edge cases:
 | leaving an anomaly somebody was already sitting in (#194) | reachable code that could not fire: `weJustFinishedWarping` demanded `shipIsWarping == Just False`, which the client only ever answers while some **other** manoeuvre is named — a warp ending answers `Nothing` — so the trigger was unreachable and `FoundOtherPilotOnArrival` has never been constructed in a recorded run | `warpJustEnded`, on `Just True` followed by anything that is not `Just True`, with the ship UI's presence read separately so a reading that could not see the ship is not an arrival; "arrival" stays the landing reading, which is what the corpus measures — see the section below |
 | the overview's EWAR hints (#267) | read and never shown: `combatPriorityTier` acts on two of the five literals the corpus holds, through `commonIndications`, which the parser derives from exactly these strings — and across saxrat's 227,749 recorded readings there is no `Overview indications:` line or equivalent, because that clause was mission-runner-only | `describeOverviewIndicationHints`, in saxrat's own words (`hints 2 ('…' '…')`): distinct strings from rendered rows only, capped at eight with the count taken before the cap |
 | nothing watching the ship's health (#267) | `attritionIsUnguarded` was mission-runner-only, and saxrat's shipped defaults are exactly the state it names — both hitpoint thresholds at `-1`, so a run started without settings had the damage window armed and neither gauge guard able to see a grind, and said so nowhere | the rule byte for byte as the mission runner has it, and `describeRetreatCover` **without** its low-water-mark half, which saxrat already prints beside the withheld-readings count |
+| what its own guns achieved | `outgoingDamageSinceLastReading` read in **zero** places: every shot the bot ever fired was summed by the host, decoded by the parser and thrown away, on every reading of every recorded run | `OutgoingFireMemory` and `describeOutgoingFire`, both halves of the channel printed beside each other. An instrument: nothing decides on it, and the corpus says there is no threshold to decide on — see the section below |
 | the weapons' own dict entries (#267) | parsed on every reading, printed on none — which is why #154's Unverified note asks for exactly this reading and could not get it: `switchOffUndoneByClient` is a latch derived from `isInActiveState` with nothing printing the field it derives from | `describeTopRowModuleDictState`, five entries a module, `-` for absent against `F` and `0` |
 
 Two things about the port are worth keeping in view.
@@ -7612,10 +7635,13 @@ whose whole problem is the log's size. `test_the_channel_is_still_reported` is w
 goes red if that clause is ever dropped, since dropping it is what would turn
 this removal into a loss.
 
-**The outgoing half is genuinely unreported here**, and adding it is a separate
-change with its own evidence: saxrat reads `outgoingDamageSinceLastReading`
-nowhere, so a clause for it is a new instrument rather than a replacement for a
-removed one.
+**The outgoing half was genuinely unreported here**, and adding it was a
+separate change with its own evidence: saxrat read
+`outgoingDamageSinceLastReading` nowhere, so a clause for it is a new instrument
+rather than a replacement for a removed one. That change has since landed — see
+"saxrat reads what its own guns achieved, and there is no threshold to put on
+it" below — so both directions of the channel are printed now, and this
+removal's replacement is the whole summary rather than half of one.
 
 **`visibleCombatMessages` is kept, unused**, which is the mission runner's own
 answer to the same question — its `combatFeedIsReportedByTheHostGameLog` marker
@@ -7666,6 +7692,249 @@ matcher, and the status line simply stops carrying a clause. What a run would
 show is negative: `Combat feed` no longer appearing, and `dmg N/T (45s, Nrd)`
 appearing exactly as before. A run whose log still carries the feed is one flying
 an older tree, which is what `# bot version:` is for.
+
+### saxrat reads what its own guns achieved, and there is no threshold to put on it
+
+The ask was *"if we see lots of missed shots from us, we swap ammo and/or
+manoeuvre class"*. PR #271 made a miss reach the bot for the first time —
+`misses` sits beside `hits` on `OutgoingDamageToTarget` in all six vendored
+parser copies — so the signal was available with no host or parser work.
+
+**What ships is the instrument and not the trigger.** The rule has no threshold,
+and the client's own logs are what say so rather than caution about saying so.
+
+**First, the gap that was already there.** saxrat read
+`outgoingDamageSinceLastReading` in **zero** places. Every shot this bot has ever
+fired was counted by the host, decoded by the parser and thrown away, on every
+reading of every recorded run — the same shape as `quickMessage` before #123 and
+`avoidRats` before #125, and the worse kind: evidence that arrived and was
+discarded. `OutgoingFireMemory` folds it per reading and `describeOutgoingFire`
+prints it, beside `describeIncomingDamage`, which is the same channel in the
+other direction.
+
+#### The measurement, against the client's own kill signal
+
+Over the 40 sessions carrying outgoing fire in `~/Documents/EVE/logs/Gamelogs`
+(207,313 shots), cut at every `(bounty)` line — the only thing in this corpus
+that states a rat died, and a channel the bot is deliberately not given, so it is
+genuinely independent of anything the bot decided:
+
+| | miss share |
+|---|---|
+| worst kill-free stretch that then **produced a kill** | **100%** |
+| the next one down | **99.1%**, over 467 shots and 456 seconds |
+| worst stretch that **never** produced a kill | no higher than either |
+
+**The top row does the work and needs no second population.** A stretch that
+missed nearly every shot for 456 seconds went on to kill its rat, so any
+threshold on a miss rate below 100% fires on that fight and breaks it off. The
+"never produced a kill" group is thin — seven stretches, each the last of its
+session — and nothing here rests on it.
+
+**The two populations do not separate, at any share, at any length.** And read
+the other way round they separate *backwards*: over 30-second windows the median
+miss share is **5% where a rat died and 2% where none did**. A rule keyed on
+missing would fire hardest on the grids that were paying.
+
+**Whether they appear to separate at all depends on how the corpus is cut**,
+which is itself the evidence. At a 30-second window the two look separated at
+82% against 90%; at 45 and 60 seconds the population that produced kills reaches
+100% as well and the gap is gone. A gap that moves with the window length is an
+artefact of the window.
+
+**The stalls this bot actually suffers are low-miss stalls**, which is PR #272's
+own finding restated from this side: *"the guns were landing and the repairs were
+faster"*. Most kill-free fighting in the corpus sits below a 50% miss share. So a
+miss signal could not have caught run 48 however it was tuned, and
+`combatStalemate` is not made faster or more specific by one.
+
+#### The 702-consecutive-miss hazard is worse than recorded, not better
+
+`parse_outgoing_miss`' doc comment reads it as *"a target the guns went on to
+hurt absorbed 702 consecutive misses first"*. Located in the corpus, that run is
+a `Hunter Alvi` in `20260814_161640`: **702 shots, 2,650 seconds, not one
+landing**, at a steady 32 shots per two minutes to the end of the session, with
+zero kills in the whole stretch.
+
+**It was never a fight that recovered.** That reading comes from a name-keyed
+fold — the same *name* had been hurt earlier in the session, on a different rat —
+and scored against the bounty channel the run produced nothing at all. So the one
+episode that looks like the signal working is a genuine unwinnable stall, and it
+is indistinguishable by share and by length from the 99.1% stretch that
+recovered. The hazard is that the two cannot be told apart, not that long miss
+runs are usually benign.
+
+#### The range-conditioned form was measured too, and it does not separate either
+
+The answer offered to "the pooled miss rate has no threshold" is that a miss only
+means *the ammo is wrong* when the range says so too — the loaded charge on the
+wrong side of the `ammo-swap-range` crossover for the current target distance. So
+the fire is partitioned on exactly that and the kill question asked inside each
+half.
+
+**This needs saxrat's own run logs rather than the client's**, because only they
+carry the loaded charge and the target distance beside the shots — and they echo
+the client's `(combat)` and `(bounty)` lines, so the same independent kill signal
+is available. Counted in **readings**, folded at real reading boundaries:
+`# [N.M]` is reading N, *step* M, and folding on the whole marker counts steps,
+which is the confusion that has already cost `stall_watch.py` two calibrations,
+#141 a retreat measurement and #164 an issue's whole diagnosis. 29 runs,
+**18,644 appropriate readings against 5,520 mismatched**, 40,468 shots.
+
+**The mechanism the hypothesis rests on is not there.** Pooled over every
+classifiable reading:
+
+| partition | shots | missed | miss share |
+|---|---:|---:|---:|
+| charge **appropriate** for the range | 30,281 | 3,494 | **11.5%** |
+| charge **mismatched** | 10,187 | 895 | **8.8%** |
+
+A charge on the wrong side of the crossover misses **no more** than one on the
+right side — slightly less — and the same holds band by band when the comparison
+is controlled for distance. That is what a crossover *is*: it is about damage at
+range, not about tracking, and what makes a shot miss is the target's angular
+velocity. So the proposed condition is not selecting fights where the guns cannot
+hit, because there is no such population to select.
+
+**And the partition does not separate the kill question.** Inside the mismatched
+half, with a lookahead of even **ten readings**, the stretches that produced a
+kill reach a **100%** miss share while the ones that produced none top out at
+17%, 4% and 0% — and at a shot floor of 40 there are **zero** barren mismatched
+stretches left at all. Conditioning removes the barren population rather than
+sharpening it.
+
+**Scored with no lookahead it appears to separate, and that gap is one stretch
+at every shot floor.** That stretch is run 36's: the guns hold a short-range
+charge while the target drifts from 19 km out to 34 km against a 15 km
+crossover, and miss every shot — **58 shots over 133 readings, no kill**. It is
+scored barren only because the class changed before the kill landed. **Three rats
+die in the very next ten readings**, on three landed shots and no misses at all. So the one stretch carrying the
+apparent gap is a boundary artefact, which is the same trap that made the pooled
+window measurement look separated at one window length and not at another.
+
+**The dead band is excluded rather than assigned**, because inside it the swap
+itself declines to decide — and run 48's deadlock is exactly a target parked in
+that band, so the readings a careless classification would misfile are the ones
+the question is about. The charge is the bot's *believed* one, which its own
+clause marks `assumed from the load, not read back`; that is deliberate rather
+than a compromise, since a trigger could only ever act on the belief, so
+measuring on the belief measures exactly the input the proposed rule would have
+had.
+
+#### Why neither actuator was wired
+
+- **The manoeuvre half is expressible and was not widened.**
+  `ensureShipIsKeepingRange` holds `vkey_E` and `ensureShipIsOrbiting` holds
+  `vkey_W` over a click, and they are the last two key-wrapped clicks on the hot
+  path — PR #243 removed the third (`vkey_Q` on approach) because a posted key
+  inherits the session's modifiers, and with the Fn bit set the bot pressed
+  macOS Quick Note at itself 241 times in one run. They are also the *outermost*
+  dispatch in `decideActionInAnomaly` and re-issue on every reading until the
+  client reports the manoeuvre, so changing class more often makes them fire
+  more often on a path that has no bound of its own. **They should be converted
+  the way PR #249 converted the approach before anything drives them harder**;
+  that is a prerequisite rather than a nicety, and it is not this change.
+- **The ammo half is fed by a distance and by nothing else.** `rangeVerdict` is
+  a pure function of the active target's distance and the configured crossover,
+  so "swap because we are missing" would need a second input to a rule that has
+  one. And the actuator does not finish what it starts — see below.
+
+#### The ammo swap abandons the attempts it already starts, and why
+
+Run 50 carries **127 `Gave up on loading` lines**, 79 abandoning
+`Multifrequency M` and 48 abandoning `Radio M`. Counted as *attempts* rather than
+as lines those are **6 attempts**, against 26 started — 13 of which completed and
+7 of which were dropped when the target went away. Two causes, and neither is the
+disarm bound being too short:
+
+- **The weapon's context menu does not offer the wanted charge.** `Could not find
+  menu entry with text containing 'Radio M'` appears 100 times and the
+  `Multifrequency M` form 14, and the cascade then waits until
+  `clearStrayContextMenu` clears the menu and the budget expires. The menu omits
+  the charge *already loaded*, so this is the swap asking for a charge the gun
+  may already carry while `chargeLoaded` reads `(assumed from the load, not read
+  back)` — which is #154's own open question, now with a run behind it.
+- **The guns never go quiet.** The other four attempts spend the budget on
+  `Stop this weapon before loading` (8 to 23 times each), `Told the guns to stop
+  3 of 3 readings ago and none has yet read switched off`, and the disarm gate
+  deferring under incoming fire. That is #76's territory — a switch-off click
+  that does not land — and nothing here addresses it.
+
+**The client refuses nothing**: `cannot load or unload` appears **zero** times in
+run 50, so the guns are being stopped properly when they are stopped at all.
+
+So the swap completes 13 of the 19 attempts that get an answer and abandons the
+other 6, bounded and retried at the next change of range. **Triggering more swaps
+on a miss signal would make the bot worse rather than better**, and there is no
+miss signal to trigger on in any case.
+
+#### Verified without a live client
+
+`tools/macos-host/tests/test_saxrat_outgoing_fire.py` (26 cases). The rule is
+executed through the real `Bot.elm` in `elm repl` and folded over whole sessions
+rather than asked once, and the readings it is asked about carry the host's own
+`MacOsHostSyntheticOutgoingDamage` node — built by `botlab_host.py`'s emitter and
+decoded by the real `EveOnline.ParseUserInterface`, so the `misses` key the host
+writes strictly is the one under test. The corpus is recomputed as **relations**
+rather than as the numbers above, so a corpus that grows cannot turn a true claim
+red — and if one of them ever fails, the finding has changed and the trigger has
+become writable, which is what that file exists to make visible.
+
+The hazard case is the one to keep: **a thousand readings of nothing but misses**
+folded through the rule leave `combatStalemateVerdict` exactly where it was,
+because the two do not share an input. That is what "nothing decides on this"
+means operationally rather than as a claim about occurrences.
+
+Confirmed by mutation, ten of them, each failing a named case: the run advanced
+on a landed zero, so #90's failure and this one collapse; the run reset on a
+reading with no shot in it, which is `gunsSilencedTicks` pinned at 1 again; an
+absent channel counted as a reading that missed nothing; `hits` and `misses`
+summed, which is the one mistake the parser's doc comment names; the ship-wide
+run advanced by a reading that hit one target and missed another; the worst-run
+high-water mark following the live run down; the status clause dropping its
+"Nothing decides on this"; a decision reading the field; a second call site given
+to either manoeuvre verb; and the wanted charge given a second input.
+
+The range-conditioned measurement is graded the same way, on its own premises,
+since what it asserts is a finding rather than shipped behaviour: five
+mutations, each failing a named case -- the lookahead ignored, so a class
+boundary fakes a stall; the kill channel never read; every reading called
+appropriate, so the partition has one side; **the dead band classified instead
+of excluded**, which survived the first pass and is why
+`test_the_dead_band_is_excluded_rather_than_assigned` exists; and misses pooled
+into the landed count.
+
+#### Unverified
+
+**Any of it running.** No run has been flown; this was written with the corpus
+and the repl. What to watch on the first one is `Outgoing fire:` on every
+reading, with the landed and missed counts *moving* while the guns fire. A run
+that fights and reads `NO COMBAT LOG` throughout is a host not carrying the
+channel; a run whose two counts stay at zero while the guns cycle is the summary
+not reaching the bot, which is the direction this fails silently in.
+
+**Whether a bot-side reading separates the populations where a client-side second
+does not.** The pooled numbers are folded at the client's own second, which is
+finer than a real reading (one to eight seconds) — the fold most favourable to a
+long run, and the same argument #271 makes. The range-conditioned measurement
+*is* bot-side and folded at real reading boundaries, so that gap is closed for
+the partitioned question and open for the pooled one. What still has no reading
+anywhere is the miss share sitting beside the target's own hitpoints, which is
+the one instrument that would say whether a fight is being won rather than
+whether a rat happened to die in the window.
+
+**The charge the partition is built on is the bot's belief, not the gun's
+state.** Run 50's own give-ups are the case where those come apart, so a
+mismatch classified from `chargeLoaded` can be a mismatch that never existed.
+That weakens the partition toward noise rather than toward a false separation,
+and the mechanism result would need a very systematic error to flip — but it is
+not measured, and the clause this change ships is what would let a later run
+measure it.
+
+**Why run 50's menu did not offer the charge.** Whether the gun already carried
+it — in which case the menu is correct and `chargeLoaded` is wrong — or the menu
+was attributed to the wrong module is still not established, and nothing here
+claims those attempts would have succeeded.
 
 ### An in-range acceleration gate is opened from the panel here too
 
