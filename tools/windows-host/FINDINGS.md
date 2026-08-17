@@ -467,14 +467,38 @@ them in was mostly deletion:
   run and CLAUDE.md's open comma question is unanswerable at any corpus size.
   A closed scanner and an empty one are given different words, deliberately.
 
-**Unverified: `scan_results.py`'s populated branch.** Only the
-no-`ProbeScannerWindow` path has run — correctly, naming the eight scanner-ish
-types that were open instead — because the run it was written during is an
-escalation tour flown with the scanner deliberately shut. The row-shaped-node
-heuristic is a guess until a live scanner is read. `raise_window.py`'s raise
-path is the scratchpad original's, proven on the launcher; the CLI wrapper
-around it has only been run as `--help`, since raising a window out from under
-a working bot is the one thing its own docstring says not to do.
+### Both branches have now run, and the Name cell has been read for the first time
+
+The no-`ProbeScannerWindow` path ran first and reported correctly, naming the
+eight scanner-ish types that were open instead. The populated path ran an hour
+later, when run 48's hour-one hedge opened the scanner:
+
+```
+ScanResults     ['Signal', 'Distance', 'ID', 'Name', 'Group',
+                 '32 km', 'EGC-528', 'Sansha Refuge', 'Combat Site',
+                 '<center>No signatures or anomalies in current system</center>']
+ScanResultNew   ['32 km', 'EGC-528', 'Sansha Refuge', 'Combat Site']
+```
+
+**That is the first reading of the scanner's Name cell this project has.**
+CLAUDE.md's §197 records that neither bot has ever logged it — a run prints the
+*ID* (`We are in anomaly 'EGC-528'`), never the name — so the site words the
+launcher itself asks for occur zero times across every recorded run, and no
+corpus of any size can answer what that column may contain. `Sansha Refuge`
+carries no comma, which is one data point against the open question rather than
+an answer to it: one name is not a distribution, and the `Dread Assault: Blood
+Raider Temple` already on record shows the column takes punctuation.
+
+Note the last cell. The window carries `No signatures or anomalies in current
+system` **while a result is in it** — a placeholder the client leaves in the
+tree rather than removes, so anything reading the window's joined text would
+conclude the system is empty while a Sansha Refuge sits 32 km away. Read the
+row nodes, not the window's text.
+
+**Still unverified: `raise_window.py`'s CLI wrapper**, run only as `--help`. Its
+raise path is the scratchpad original's, proven on the launcher; raising a
+window out from under a working bot is the one thing its own docstring says not
+to do.
 
 `botlab_host.py` itself gains one guarded early return per platform-bound
 function and nothing else. On macOS it is the code it was, reached the same way,
