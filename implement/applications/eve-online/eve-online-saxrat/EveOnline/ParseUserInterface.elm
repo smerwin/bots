@@ -60,6 +60,7 @@ type alias ParsedUserInterface =
     , gameLogEntriesSinceLastReading : Maybe (List GameLogEntry)
     , incomingDamageSinceLastReading : Maybe IncomingDamage
     , outgoingDamageSinceLastReading : Maybe (List OutgoingDamageToTarget)
+    , killsSinceLastReading : Maybe Int
     }
 
 
@@ -684,6 +685,7 @@ parseUserInterfaceFromUITree uiTree =
     , gameLogEntriesSinceLastReading = parseGameLogEntriesSinceLastReadingFromUITreeRoot uiTree
     , incomingDamageSinceLastReading = parseIncomingDamageSinceLastReadingFromUITreeRoot uiTree
     , outgoingDamageSinceLastReading = parseOutgoingDamageSinceLastReadingFromUITreeRoot uiTree
+    , killsSinceLastReading = parseKillsSinceLastReadingFromUITreeRoot uiTree
     }
 
 
@@ -923,6 +925,49 @@ parseOutgoingDamageToTarget targetNode =
 syntheticOutgoingDamageNodeTypeName : String
 syntheticOutgoingDamageNodeTypeName =
     "MacOsHostSyntheticOutgoingDamage"
+
+
+{-| How many rats the client paid a bounty for since the last reading.
+
+The fourth of the host's synthetic nodes, and the one that carries the least:
+one number, because the `(bounty)` channel it is summed from says nothing else.
+Across the 17,388 bounty lines in the recorded client sessions there are two
+wordings and neither names a target, so this count can never be split per rat,
+per name or per anomaly -- which is a property rather than a shortfall, since
+an anomaly is a pocket of identically named rats and a name-keyed fold over one
+is what PR #274 found reporting a stall on a rat that was never in it.
+
+**What it counts is what the client paid, not what this ship killed.** A rat a
+fleetmate finished that this ship damaged still pays and is counted; a rat this
+ship killed whose bounty went elsewhere is not; and anything with no bounty --
+a structure, a wreck -- writes no line however thoroughly it is destroyed. No
+rule may read this as "kills by this ship".
+
+**`Nothing` is "this host does not carry the channel" and `Just 0` is "the
+client reported nothing dying this reading"**, which is the same distinction the
+other three synthetic nodes keep and the same one that must never be collapsed:
+a session that killed nothing and a session nobody counted read identically
+otherwise.
+
+The count is read **strictly**, with no default. A node present without the key
+is a host disagreeing with this parser about the node's own shape, and the safe
+answer to that is "we do not know" rather than a fabricated zero -- a defaulted
+count is one that reports a quiet grid for a broken channel.
+
+-}
+parseKillsSinceLastReadingFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe Int
+parseKillsSinceLastReadingFromUITreeRoot uiTreeRoot =
+    uiTreeRoot.uiNode.children
+        |> Maybe.withDefault []
+        |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
+        |> List.filter (.pythonObjectTypeName >> (==) syntheticKillsNodeTypeName)
+        |> List.head
+        |> Maybe.andThen (getIntPropertyFromDictEntries "kills")
+
+
+syntheticKillsNodeTypeName : String
+syntheticKillsNodeTypeName =
+    "MacOsHostSyntheticKills"
 
 
 asUITreeNodeWithDisplayRegion :
