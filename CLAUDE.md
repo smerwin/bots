@@ -230,7 +230,7 @@ silently dropped for being unfamiliar is this repo's signature failure.
 
 **Both of those have since had their totals carried anyway, and the distinction
 is the lines against the summary.** The `(combat)` half is the two paragraphs
-below, and #278 does the same for `(bounty)`: the count rides a fourth synthetic
+below, and #284 does the same for `(bounty)`: the count rides a fourth synthetic
 node while the lines stay withheld exactly as they are. The
 second-source-of-truth objection above is answered rather than overruled —
 `web_console.BOUNTY_TEXT_RE` is the console's own pattern, imported by the host
@@ -9795,7 +9795,7 @@ exists.
   `OPEN` after each warp and then `closed`, and escalate on a pilot named there
   who warped in during a fight.
 
-  And since #278 it **says the whole run on one line, and knows whether anything
+  And since #284 it **says the whole run on one line, and knows whether anything
   is dying**. The status text now opens with a header — `Amarr AIC-176 Centii
   Devourer [10/100/100] 5 rats 273 kills 12 anoms | ship 58/100 | dmg
   604/3500` — carrying the six fields the operator asked for plus the ship's

@@ -609,7 +609,7 @@ class TheFieldIsAnInstrumentAndNothingActsOnIt(unittest.TestCase):
     def test_only_the_status_line_reads_the_two_rules(self):
         """The two rules are the status line's and nothing else's.
 
-        **saxrat's status line is two declarations since #278**, and this counts
+        **saxrat's status line is two declarations since #284**, and this counts
         both. `describeStatusHeader` is the header row -- the one line the host
         prints on every decision -- and it names the target and its condition
         because that is the question the operator asked the header to answer. It

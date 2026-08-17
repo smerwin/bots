@@ -10660,7 +10660,7 @@ describeStatusHeader context =
 
 **The first row is the header and the rest are diagnostics, and the order is
 what decides which a clause is.** The host prints the first line of this text
-beside the decision marker and the rest below it, and since #278 it prints that
+beside the decision marker and the rest below it, and since #284 it prints that
 rest only when it has changed since the last decision it printed -- so a clause
 in the first row is seen on every one of a run's sixteen thousand decisions and
 a clause below it is seen on the readings it moves. Nothing here is deleted or
