@@ -451,14 +451,19 @@ class LockClickAttributionTest(unittest.TestCase):
         cls.repl.close()
 
     def test_only_the_lock_chord_yields_a_location(self):
-        """saxrat presses Ctrl in three places and only one is a lock.
+        """The gestures that are not a lock, and why each is declined.
 
-        `ctrlShiftClickUiElement` is the unlock and holds Shift as well; the
-        loot window's Ctrl+W carries no mouse effect at all, so there is no
-        `MouseMoveTo` to take. The approach chord presses `vkey_E` and no Ctrl.
-        Each of the three must answer `Nothing`, and the mission runner's own
-        argument ("the only place that presses Ctrl without Shift") is *not*
-        true here, which is why both conditions are checked.
+        `ctrlShiftClickUiElement` is the unlock and holds Shift as well. The
+        approach chord presses `vkey_E` and no Ctrl. A keys-only chord carries
+        no `MouseMoveTo` at all, so there is nothing to take -- the loot window
+        pressed `Ctrl+W` until #285 and presses `Alt+C` now, and both are asked
+        about here: what has to stay true of the rule is that a chord with no
+        mouse in it yields no location, whether or not any branch still builds
+        that particular one.
+
+        The mission runner's own argument ("the only place that presses Ctrl
+        without Shift") was not true here while the loot window pressed Ctrl,
+        which is why both conditions are checked rather than only the first.
         """
         unlock = ("[ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL"
                   ", EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT"
@@ -471,6 +476,10 @@ class LockClickAttributionTest(unittest.TestCase):
                       ", EffectOnWindow.KeyDown EffectOnWindow.vkey_W"
                       ", EffectOnWindow.KeyUp EffectOnWindow.vkey_W"
                       ", EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]")
+        close_loot_now = ("[ EffectOnWindow.KeyDown EffectOnWindow.vkey_MENU"
+                          ", EffectOnWindow.KeyDown EffectOnWindow.vkey_C"
+                          ", EffectOnWindow.KeyUp EffectOnWindow.vkey_C"
+                          ", EffectOnWindow.KeyUp EffectOnWindow.vkey_MENU ]")
         approach = ("[ EffectOnWindow.KeyDown EffectOnWindow.vkey_E"
                     ", EffectOnWindow.MouseMoveTo { x = 300, y = 40 }"
                     ", EffectOnWindow.ButtonDown EffectOnWindow.MouseButtonLeft"
@@ -481,11 +490,12 @@ class LockClickAttributionTest(unittest.TestCase):
              " == [ { x = 300, y = 40 } ]",
              "lockClickLocationsFromStepEffects %s == []" % unlock,
              "lockClickLocationsFromStepEffects %s == []" % close_loot,
+             "lockClickLocationsFromStepEffects %s == []" % close_loot_now,
              "lockClickLocationsFromStepEffects %s == []" % approach,
              "lockClickLocationsFromStepEffects [] == []"],
             definitions=self.repl.with_helpers([]))
         self.assertEqual(
-            answers, [True] * 5,
+            answers, [True] * 6,
             "a gesture that is not a lock was read as one, or the lock chord "
             "stopped being recognised")
 
