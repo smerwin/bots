@@ -228,6 +228,16 @@ a second source of truth for the same statistic. Everything else is carried,
 including channels never seen here — the list is a deny-list, because a channel
 silently dropped for being unfamiliar is this repo's signature failure.
 
+**Both of those have since had their totals carried anyway, and the distinction
+is the lines against the summary.** The `(combat)` half is the two paragraphs
+below, and #284 does the same for `(bounty)`: the count rides a fourth synthetic
+node while the lines stay withheld exactly as they are. The
+second-source-of-truth objection above is answered rather than overruled —
+`web_console.BOUNTY_TEXT_RE` is the console's own pattern, imported by the host
+rather than restated, so the bot's number and the console's come off one literal
+by construction and a case runs both over every bounty line in the recorded
+corpus and requires the same number. Nothing about this list changed.
+
 **The combat lines are withheld; their total is not.** Issue #32 wanted a
 retreat that does not depend on the ship's HUD, and the only instrument that can
 give it is the one channel the bot could not see. Both halves of that turn out
@@ -259,6 +269,32 @@ than one total, unlike the incoming node, because the question it answers is
 about one object — see "What the bot gives up on: shots that land and achieve
 nothing". Its `Nothing` points the opposite way from the retreat's: a host that
 cannot answer must not read as "everything is immune".
+
+**And the kill count is a fourth.** `MacOsHostSyntheticKills` carries one
+number, `kills` since the last reading, lifted into
+`ParsedUserInterface.killsSinceLastReading : Maybe Int` in all six vendored
+copies. It is the client's own statement that a rat died, which is the only
+thing in this system that says so — every other combat instrument here reports
+*effort*, and `combatStalemate` had to infer "nothing is dying" from the guns
+being busy.
+
+**It names nothing, and that is why it is safe.** The client writes no target on
+this channel — 17,388 lines across the recorded sessions and not one carries a
+name — so the count can never be split per rat, per name or per anomaly. That
+matters because an anomaly is a pocket of identically named rats and PR #274
+found a name-keyed fold reporting "702 consecutive misses on a target the guns
+went on to hurt" for what was the same *name* on a different rat. A count that
+never attributes cannot mis-attribute.
+
+**What it counts is what the client paid, not what this ship killed**, and no
+rule may read it otherwise: a fleetmate's rat this ship damaged pays and is
+counted, a rat this ship killed whose bounty went elsewhere is not, and anything
+with no bounty writes no line however thoroughly it is destroyed. Read strictly
+rather than defaulted, so a node whose key this parser does not recognise
+answers `Nothing` — "we do not know" — instead of a fabricated zero. `Nothing`
+and `Just 0` keep the same distinction they keep everywhere else on this
+channel: a session that killed nothing and a session nobody counted must not
+read alike.
 
 **A reading's entries are gone by the next reading, and that shapes every
 consumer.** A branch that reads them and writes nothing down sees a refusal once
@@ -5900,6 +5936,8 @@ shipped configuration rather than edge cases:
 | nothing watching the ship's health (#267) | `attritionIsUnguarded` was mission-runner-only, and saxrat's shipped defaults are exactly the state it names — both hitpoint thresholds at `-1`, so a run started without settings had the damage window armed and neither gauge guard able to see a grind, and said so nowhere | the rule byte for byte as the mission runner has it, and `describeRetreatCover` **without** its low-water-mark half, which saxrat already prints beside the withheld-readings count |
 | what its own guns achieved | `outgoingDamageSinceLastReading` read in **zero** places: every shot the bot ever fired was summed by the host, decoded by the parser and thrown away, on every reading of every recorded run | `OutgoingFireMemory` and `describeOutgoingFire`, both halves of the channel printed beside each other. An instrument: nothing decides on it, and the corpus says there is no threshold to decide on — see the section below |
 | the weapons' own dict entries (#267) | parsed on every reading, printed on none — which is why #154's Unverified note asks for exactly this reading and could not get it: `switchOffUndoneByClient` is a latch derived from `isInActiveState` with nothing printing the field it derives from | `describeTopRowModuleDictState`, five entries a module, `-` for absent against `F` and `0` |
+| whether anything is dying | **no kill count anywhere in the repository** — every occurrence of "kills" in the Elm source was prose in a doc comment, and `combatStalemate` had to infer "nothing is dying" from the guns being busy | `KillCountMemory`, off a fourth synthetic node summing the client's `(bounty)` lines. A session total that names nothing, and nothing decides on it — see the section below |
+| the status line | twelve lines under no header, reprinted in full under every decision: **79.8% of run 52's 27.7 MB log**, four decisions in five byte-identical to the one before | a one-line header on every decision, the twelve diagnostics unchanged and printed on change — see the section below |
 
 Two things about the port are worth keeping in view.
 
@@ -7936,6 +7974,154 @@ it — in which case the menu is correct and `chargeLoaded` is wrong — or the 
 was attributed to the wrong module is still not established, and nothing here
 claims those attempts would have succeeded.
 
+### The whole run on one line, and the repetition ended where it was made
+
+The operator's ask: *"our Status text could be much more brief and informative.
+I'm imagining a header that'd read `Amarr YYZ-123 Centium Devourer 10/100/100 5
+rats 273 kills 12 anoms` … and anything else you think is important enough for a
+single status line brief. Let's reduce the verbosity of all the rest of it."*
+
+Three things, and they are one thing.
+
+#### The header
+
+```
+Amarr AIC-176 Centii Devourer [10/100/100] 5 rats 273 kills 12 anoms | ship 58/100 | dmg 604/3500
+```
+
+The six fields asked for, in that order and those words, and two more. Run 48
+sat in one anomaly for 3,883 seconds and the first question anybody asked was
+whether the ship was in trouble; **the answer that settled it was a shield at
+0%, an armour that was not moving and incoming damage far below the retreat
+threshold** — three numbers that were all in the log and took a replay to find,
+because they were spread across three separate diagnostic lines.
+
+Four things about the rendering are decisions rather than layout.
+
+- **`ship` is the *believed* pair, not the live gauge.** That is what every
+  guard here goes by: `plausibleHitpointsPercent` rejects the impossible
+  readings and `believed` withholds a fall a second reading has not confirmed,
+  and this hull produced values from -213% to 40,028,800% on one recorded run. A
+  header reading the live value would print numbers no rule acts on. A gauge
+  that has not answered yet reads `?`, never a number.
+- **The target's condition is `describeTargetHitpoints`, called rather than
+  copied.** PR #244 pinned that clause as deliberately unshared between saxrat
+  and the mission runner, and a header spelling the triple out again would be a
+  third rendering for two apps to drift between. `activeTargetNameFromReading`
+  was extracted for the same reason, since the header and the row below it both
+  want it.
+- **The second field has three states and no fourth is invented.** Warping, an
+  anomaly the probe scanner names, and in station. `DEADSPACE` is deliberately
+  absent: a pocket reached through an acceleration gate has no scan-result row,
+  so the scanner names nothing and the honest answer is `-`. The docked test is
+  asked *first*, because a docked reading has no ship UI and
+  `shipWarpingFromReading` answers `Nothing` there.
+- **`no kill log` rather than `0 kills`** where the host does not carry the
+  channel, which is `describeOutgoingFire`'s `NO COMBAT LOG` for its reason.
+
+#### The kill count, which is new capability
+
+There was no kill count anywhere in this repository — every occurrence of
+"kills" in the Elm source was prose in a doc comment. See the Architecture
+section for the fourth synthetic node, what it counts and the three things it
+cannot claim. `KillCountMemory` accumulates the session total in
+`updateMemoryForNewReadingFromGame`, which is the only thing that runs
+unconditionally on every reading, and **nothing decides on it** — PR #130's
+posture for `quickMessage`, and here with the extra reason that what a bounty
+counts is not what a combat rule would want it to mean.
+
+#### The verbosity, ended at the layer that was making it
+
+**The repetition is the host's, not the bot's**, and that placement is the
+finding rather than a convenience. A bot emits one status text per decision;
+`log_decision` printed all of it every time. Measured over saxrat run 52 — 27.7
+MB, 5,102 readings, 16,742 decisions — **79.8% of the whole log is status
+text**, of which the diagnostic lines under the header are 77.2% and the header
+itself 2.6%. Fixing that in an Elm status function would have been fixing the
+wrong layer, and would have needed the bot to know which decision of a reading
+it was on, which it cannot.
+
+`decision_log_lines` prints the first line every time and each line below it
+only when that line differs from the last line *printed* in its place.
+
+**Per line rather than per body, and the difference is a factor of two.** The
+first version of this suppressed the body only where the whole of it repeated,
+which removes **26.8%** of run 52's log: the body is byte-identical to the
+previous decision's on only about a third of them, because some counter or other
+moves on two decisions in three and drags all eleven steady lines through with
+it. Per line it is **61.5%**. Both numbers were recomputed from the run rather
+than inferred from the per-clause change rates that made the first version look
+adequate, which is the mistake that version was.
+
+Three properties:
+
+- **Nothing is deleted or made conditional.** All 54 `describe*` clauses are
+  where they were, in the words they were in. `describeOverviewIndicationHints`
+  (#267's `hints`, 702 readings of `Pilot is tracking disrupting me` in run 52),
+  `describeTopRowModuleDictState`, `attritionIsUnguarded` and
+  `describeOutgoingFire` are all untouched.
+- **The comparison is against what was printed, never against a reading count**,
+  so the "changed but not shown" case does not exist. A line that differs from
+  the last line printed at its position is printed however the bot happens to be
+  stepping. A *position* is not a clause — a docked reading's status text is
+  shorter — and the invariant is deliberately about the position, which is what
+  makes it one line to state and one line to check.
+- **It says how many it suppressed**, one short line
+  (`#   (11 status line(s) unchanged)`), because a log that prints a clause less
+  often without saying so is a log whose counts have quietly changed meaning.
+
+**What that costs, stated rather than left to be found.** Anything counting a
+status clause's occurrences in a *future* recorded run is now counting the
+decisions that clause *moved* on rather than every decision. Counting
+**readings** is unaffected — that has always been done on
+`RequestToVolatileProcess` — and the intra-reading duplication the suppression
+removes is duplication those counters never wanted. What is genuinely lost is
+per clause: a clause carrying a per-reading counter still prints on nearly every
+reading, and a steady one now prints once. So a ratio between two things the
+*same* clause counts survives; an absolute count of a clause's occurrences does
+not, and neither does a comparison between a steady clause and a moving one. Existing recorded logs are unchanged, so no corpus case goes red
+today; the ones to watch on a future run are `test_saxrat_combat_stalemate`'s
+per-reading regexes and `test_arrival_pilot_window`'s, both of which sample
+readings out of the status body.
+
+**One trap found while doing it, worth keeping.** A comment placed between
+`statusTextFromState`'s `in` and its list does not fail
+`test_quick_message_logged`'s placement pin — that pin locates the outer list by
+splitting the collapsed declaration on `in [ `, so removing that occurrence makes
+it read the whole function and pass on anything. `Bot.elm` says so where the
+comment would go, and `test_saxrat_kill_counter` has the case.
+
+#### Verified without a live client
+
+`tools/macos-host/tests/test_saxrat_kill_counter.py`, **46 cases**. The rules are
+executed through the real `Bot.elm` in `elm repl` and the readings they are asked
+about carry the host's own synthetic node, decoded by the real
+`EveOnline.ParseUserInterface` — so the `kills` key the host writes is the one
+under test rather than a record shaped by hand. The rule is *folded* over
+sessions rather than asked once, since a counter that is right for one reading
+and wrong across a session is the defect that shape prevents. The corpus is
+recounted as **relations**: the status text is most of a recorded log, the body
+dwarfs the header, most decisions reprint a body byte for byte, and the two
+bounty readers agree on every recorded line.
+
+Run against a pristine export of `origin/main` with only the test file copied
+in, **42 of the 46 fail**. The four that pass are the three corpus measurements
+— statements about the world rather than about the code — and
+`test_the_bounty_lines_still_do_not_reach_the_bot`, whose job is to refuse a
+*future* widening rather than to discriminate this change.
+
+**Unverified: any of it running.** No run has been flown. What to watch on the
+first one is the header on every decision with `N kills` *climbing* while rats
+die, and `#   (N status line(s) unchanged)` appearing between decisions of one
+reading. A run that fights and reads `no kill log` throughout is a host not
+carrying the channel; a run whose kill count stays at 0 while the bounty lines
+scroll past in the echo is the node not reaching the bot, which is the direction
+this fails silently in. And **whether a bounty line is one rat is measured off
+the client's logs rather than observed**: only 0.25% of them are byte-identical
+to another in the same session and none occurs more than twice, which is not
+what a channel duplicating its own output looks like — but nobody has counted
+rats on a grid and compared.
+
 ### An in-range acceleration gate is opened from the panel here too
 
 Issue #145 is `activateGateOnOverviewEntry` in `eve-online-saxrat`: an in-range
@@ -9608,6 +9794,24 @@ exists.
   has never run at all; watch the status line's `Arrival window:` clause going
   `OPEN` after each warp and then `closed`, and escalate on a pilot named there
   who warped in during a fight.
+
+  And since #284 it **says the whole run on one line, and knows whether anything
+  is dying**. The status text now opens with a header — `Amarr AIC-176 Centii
+  Devourer [10/100/100] 5 rats 273 kills 12 anoms | ship 58/100 | dmg
+  604/3500` — carrying the six fields the operator asked for plus the ship's
+  believed gauges and the incoming-damage window against its threshold, which
+  are the three numbers run 48's 3,883-second stall took a replay to find. The
+  kill count is **new capability**: there was none anywhere in the repository,
+  and it comes off the client's `(bounty)` channel through a fourth synthetic
+  node and all six vendored parsers. It counts bounty payouts to this character
+  rather than kills by this ship, it names nothing and cannot be split, and
+  nothing decides on it. The verbosity is reduced **in the host** rather than in
+  the bot, because that is where the repetition was made: `decision_log_lines`
+  prints the header every decision and the diagnostics only when they changed,
+  and says so when it suppresses. No clause was deleted or reworded. See "The
+  whole run on one line, and the repetition ended where it was made" above.
+  **Untested against a live client**; watch `N kills` climbing while rats die,
+  and escalate on a run that fights and reads `no kill log` throughout.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
