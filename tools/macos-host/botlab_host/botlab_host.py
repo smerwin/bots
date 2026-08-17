@@ -665,7 +665,14 @@ def host_interface_of_bot(bot_dir):
     import says which one its botMain is actually typed against.
     """
     bot_elm = os.path.join(bot_dir, "Bot.elm")
-    with open(bot_elm) as f:
+    # Encoding stated rather than defaulted. Python's default is the locale's,
+    # which on Windows is cp1252, and a `Bot.elm` carrying any byte outside it
+    # raises `UnicodeDecodeError` before the bot can start at all -- which is
+    # how `eve-online-warp-to-0-autopilot` refused to launch on this machine
+    # while running fine on macOS, where the default is already UTF-8. `errors`
+    # is deliberate too: this only ever reads the import line, so a byte it
+    # cannot decode must not stop the launch.
+    with open(bot_elm, encoding="utf-8", errors="replace") as f:
         for line in f:
             m = re.match(r"\s*import\s+(BotLab\.BotInterface_To_Host_\w+)", line)
             if m:
@@ -678,13 +685,17 @@ def prepare_build_dir(bot_dir, workdir):
     shutil.copytree(bot_dir, build_dir)
 
     elm_json_path = os.path.join(build_dir, "elm.json")
-    with open(elm_json_path) as f:
+    # UTF-8 stated for the same reason as `host_interface_of_bot` above:
+    # the default is the locale's, cp1252 on Windows, and this file is both
+    # read and rewritten -- so a defaulted encoding can corrupt on the way
+    # out as well as raise on the way in.
+    with open(elm_json_path, encoding="utf-8") as f:
         elm_json = json.load(f)
     real_version = installed_elm_version()
     if elm_json.get("elm-version") != real_version:
         print(f"# patching elm.json elm-version {elm_json.get('elm-version')!r} -> {real_version!r}", file=sys.stderr)
         elm_json["elm-version"] = real_version
-        with open(elm_json_path, "w") as f:
+        with open(elm_json_path, "w", encoding="utf-8") as f:
             json.dump(elm_json, f, indent=4)
 
     interface = host_interface_of_bot(build_dir)
@@ -1474,7 +1485,7 @@ class VolatileHost:
         process, or the client relaunched into the same pid) gives a node with
         no _displayWidth, and we fall through to the slow path."""
         try:
-            with open(self.UI_ROOT_CACHE_PATH) as cache_file:
+            with open(self.UI_ROOT_CACHE_PATH, encoding="utf-8") as cache_file:
                 entry = json.load(cache_file)
         except (OSError, ValueError):
             return None
@@ -1493,7 +1504,7 @@ class VolatileHost:
 
     def _store_ui_root_cache(self, process_id, root, metatype, str_type):
         try:
-            with open(self.UI_ROOT_CACHE_PATH, "w") as cache_file:
+            with open(self.UI_ROOT_CACHE_PATH, "w", encoding="utf-8") as cache_file:
                 json.dump({"pid": process_id, "root": root,
                            "metatype": metatype, "str_type": str_type}, cache_file)
         except OSError:
