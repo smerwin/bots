@@ -350,6 +350,45 @@ the same hazard CLAUDE.md documents for computed empty space, and it will sit
 over the UI swallowing later clicks. Cancel it before continuing. Aim
 right-clicks at a node's own centre from the tree, never at a guessed point.
 
+### Setting the engagement distance, which is a client setting and not a bot one
+
+**No bot setting carries an engagement distance.** `keep-at-range` and
+`orbit-in-combat` are `YesOrNo` and only choose *which* manoeuvre; the bot then
+presses the hotkey (`vkey_E` for keep-at-range) and the client uses **its own
+default distance**. So a ship can be told to keep at range all session and still
+sit on top of the rats.
+
+This client shipped that default at **7,500 m**, which is suicidal on anything
+whose guns reach tens of kilometres -- an Omen Navy Issue with a 54 km lock was
+fighting a Sansha escalation from 7.5 km, inside every rat's optimal and inside a
+Tower Sentry's. Check it before a run on a new hull, and match it to the fit's
+optimal rather than to the lock range.
+
+**The procedure, and it is a right-click on the *button*:**
+
+1. Select any object in space, so the Selected Item panel populates.
+2. **Right-click** the panel's `selectedItemKeepAtRange` button.
+3. The flyout has exactly one entry: `Set Default "Keep at Range" Distance`.
+4. Click it. A modal opens carrying `edit_qty` (a `SingleLineEditInteger`),
+   `ok_dialog_button` and `cancel_dialog_button`.
+5. Clear the field, type the distance **in metres** (`25000`), and press OK.
+6. Verify: right-click any object and read the context-menu entry, which now
+   says `Keep at Range (25 km)`. The `Orbit (N km)` entry beside it is a
+   separate default and is not changed by this.
+
+**Do not try to drive the other path from a script.** Right-clicking an object
+and hovering the context menu's own `Keep at Range (7,500 m)` entry raises a
+distance flyout (500 m ... 30 km, plus a `Set Default` toggle), and that flyout
+is a hover-triggered Photon menu: gliding the cursor to one of its entries passes
+through the parent and collapses it, so the click lands on whatever is underneath
+-- in one attempt that was `Show Info`, which opened a Database Information
+window. The button right-click above needs no sustained hover and is the reliable
+path. A human can drive the flyout in two seconds; the input path cannot.
+
+The setting lives in the **client**, not the ship, so it survives losing the hull
+and applies to whatever is boarded next -- which also means it needs re-checking
+when the new hull's optimal is different.
+
 ## On Windows
 
 The Windows machine runs `eve-online-saxrat` against the native client. There is
