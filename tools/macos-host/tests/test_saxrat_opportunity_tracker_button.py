@@ -92,6 +92,12 @@ ENTER_WIDGET_TYPE = "TravelStateButtonTaskWidget"
 # What the entering row was drawn with in that capture.
 ENTER_LABEL = "Warp to Site"
 
+# The chain's progress bar. Read off the live client in Nosodnis during run 48,
+# it carries the **same** `_name` as the travelling button and is listed above
+# it -- which is what made `List.head` answer a widget nobody can press.
+PROGRESS_WIDGET_TYPE = "ProgressBarTaskWidget"
+PROGRESS_LABEL = "8 jumps | 0.6 Andabiar"
+
 SITE_NAME = "Sansha's Command Relay Outpost"
 
 # Every label anybody has read off this slot, sorted the way the branch sorts
@@ -228,6 +234,20 @@ def enter_button(text=ENTER_LABEL, **kwargs):
     """
     kwargs.setdefault("type_name", ENTER_WIDGET_TYPE)
     kwargs.setdefault("task_name", ENTER_TASK_NAME)
+    return travel_button(text, **kwargs)
+
+
+def progress_bar(text=PROGRESS_LABEL, **kwargs):
+    """The travelling row's progress bar, which is not a button.
+
+    It shares `objective_task_travel_to_location` with the button beside it, so
+    the `_name` half of the selector admits it. Built through `travel_button`
+    rather than beside it so that the only difference between this and a real
+    button is the type name -- if they diverged in some other way the cases
+    below would be about the fixture instead of about the selector.
+    """
+    kwargs.setdefault("type_name", PROGRESS_WIDGET_TYPE)
+    kwargs.setdefault("task_name", TRAVEL_TASK_NAME)
     return travel_button(text, **kwargs)
 
 
@@ -1214,3 +1234,118 @@ class TheRecordedSaxratRunsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheProgressBarSharesTheNameAndIsNotTheButtonTest(unittest.TestCase):
+    """#280's `_name` fallback admitted a widget nobody can press.
+
+    `BothRowsDisplayedAtOnce` above records what happens when the chain shows
+    two *buttons*, which is still unread. This is the shape that **was** read,
+    off the live client in Nosodnis during run 48 with an escalation eight jumps
+    out, and it is not two buttons -- it is a button and the row's progress bar:
+
+        ProgressBarTaskWidget             _name=objective_task_travel_to_location  '8 jumps | 0.6 Andabiar'
+        TravelToLocationButtonTaskWidget  _name=objective_task_travel_to_location  'Set Destination'
+
+    Neither carries `_display`, so both read as shown, and the bar is listed
+    first. `List.head` therefore answered the bar, whose label `8 jumps` is
+    readable text and not one of `COMMAND_LABELS` -- so `escalationIsBeingWorked`
+    stood the bot down for the escalation while `opportunityTravelStep` had
+    nothing to press. Run 48 did that 234 times and pressed the tracker's button
+    zero times across three hours.
+
+    **It is a regression from #280's own fix.** Matching by `_name` was added so
+    the enter-dungeon row's `Warp to Site` would be reachable at all; that name
+    turns out to be shared with the bar, so widening the matcher to reach one
+    button made a different one unreachable. Run 38, before it, pressed `Jump`
+    1,989 times and `Set Destination` 257.
+
+    The fix prefers a **button** among the candidates and keeps `List.head` as
+    the fallback, so it is strictly wider than what it replaces: every reading
+    that yielded a button still yields the same one.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(TrackerRepl)
+
+    def entry_field(self, children, field):
+        return TheParserReadsTheTrackersOwnButton.entry_field(
+            self, children, field)
+
+    def travel_label(self, children):
+        return TheParserReadsTheTrackersOwnButton.travel_label(self, children)
+
+    def test_the_bar_listed_first_does_not_win(self):
+        """Run 48's own shape, and the case the fix exists for."""
+        children = [tracker([capture_entry([
+            progress_bar(),
+            travel_button("Set Destination"),
+        ])])]
+        self.assertEqual(self.travel_label(children), "Set Destination")
+
+    def test_the_label_it_used_to_answer_is_not_a_command(self):
+        """Why the wrong pick was silent rather than loud.
+
+        `8 jumps` is readable text, so every guard that asks only whether the
+        client wrote something a person could read was satisfied by it.
+        """
+        self.assertNotIn(PROGRESS_LABEL, COMMAND_LABELS)
+        self.assertNotIn(PROGRESS_LABEL, STATE_LABELS)
+
+    def test_the_bar_wins_when_there_is_no_button_at_all(self):
+        """The fallback, which is what keeps this strictly wider.
+
+        Nobody has read a chain drawing a bar and no button, and if one exists
+        the parser answers exactly what it answered before this change rather
+        than `Nothing`.
+        """
+        children = [tracker([capture_entry([progress_bar()])])]
+        self.assertEqual(self.travel_label(children), PROGRESS_LABEL)
+
+    def test_the_bar_does_not_hide_the_entering_row(self):
+        """#280's own case, with the bar in front of it."""
+        children = [tracker([capture_entry([
+            progress_bar(),
+            enter_button(ENTER_LABEL),
+        ])])]
+        self.assertEqual(self.travel_label(children), ENTER_LABEL)
+
+    def test_a_hidden_button_behind_the_bar_is_still_declined(self):
+        """The display filter runs first and is not weakened by preferring a button.
+
+        A hidden button must not be preferred over a shown bar -- that would
+        trade one wrong answer for a worse one, since the chain hides the tasks
+        that are not available rather than removing them.
+        """
+        children = [tracker([capture_entry([
+            progress_bar(),
+            travel_button("Set Destination", displayed=False),
+        ])])]
+        self.assertEqual(self.travel_label(children), PROGRESS_LABEL)
+
+    def test_the_two_buttons_case_is_unchanged(self):
+        """`BothRowsDisplayedAtOnce`'s subject, re-asserted from this side.
+
+        Both candidates are buttons, so preferring a button cannot reorder
+        them and the client's own order still decides.
+        """
+        for order, expected in ((("travel", "enter"), "Jump"),
+                                (("enter", "travel"), ENTER_LABEL)):
+            with self.subTest(order=order):
+                buttons = {"travel": travel_button("Jump"),
+                           "enter": enter_button(ENTER_LABEL)}
+                children = [tracker([capture_entry(
+                    [buttons[which] for which in order])])]
+                self.assertEqual(self.travel_label(children), expected)
+
+    def test_the_marker_separates_the_two_buttons_from_the_bar(self):
+        """Read out of the parser, because it is what the preference turns on."""
+        source = collapsed(source_of(SAXRAT_PARSER_ELM))
+        marker = re.search(
+            r'opportunityTravelButtonTypeMarker = "([^"]+)"', source)
+        self.assertIsNotNone(marker, "the marker is gone")
+        marker = marker.group(1)
+        for button_type in (TRAVEL_WIDGET_TYPES[0], ENTER_WIDGET_TYPE):
+            self.assertIn(marker, button_type)
+        self.assertNotIn(marker, PROGRESS_WIDGET_TYPE)
