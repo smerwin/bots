@@ -3387,21 +3387,52 @@ parseOpportunityInfoPanelEntry entryNode =
         -- then discards -- which is the same stall by a longer road. Run 14 on
         -- the other bot sat docked for 750 readings on exactly that.
         --
-        -- **`List.head` over the displayed candidates is the one thing here
-        -- that is not argued from an observation.** Every capture of this chain
-        -- shows exactly one task row displayed at a time, so nothing has ever
-        -- had to choose; if both were ever shown at once this takes whichever
-        -- the client lists first, and `opportunityStepArrivingFirst` in
-        -- `Bot.elm` -- which prefers an arriving label over a travelling one --
-        -- never sees the other. Making that preference reach inside one entry
-        -- means carrying both buttons here, which is a change to the field this
-        -- type exposes and to the decision that reads it. Deliberately not done
-        -- on a shape nobody has read.
-        travelButtonNode =
+        -- **`List.head` over the displayed candidates used to be the one thing
+        -- here that was not argued from an observation, and the observation
+        -- arrived and refuted it.** That paragraph said every capture of this
+        -- chain shows exactly one task row displayed at a time, so nothing had
+        -- ever had to choose. Read off the live client in Nosodnis during run
+        -- 48, with an escalation eight jumps out, the chain shows **two**, and
+        -- they share the `_name` the matcher above admits them by:
+        --
+        --     ProgressBarTaskWidget             _name=objective_task_travel_to_location  '8 jumps | 0.6 Andabiar'
+        --     TravelToLocationButtonTaskWidget  _name=objective_task_travel_to_location  'Set Destination'
+        --
+        -- Neither carries `_display`, so both read as shown, and the progress
+        -- bar is listed first. `List.head` therefore answered the *progress
+        -- bar*, whose label is `8 jumps` -- readable text, and not one of
+        -- `opportunityTravelCommandLabels`. So `escalationIsBeingWorked` saw a
+        -- readable label and stood the bot down for the escalation, while
+        -- `opportunityTravelStep` saw no command and offered nothing to press.
+        -- Run 48 did that **234 times and pressed the tracker's button zero
+        -- times** across three hours.
+        --
+        -- **It is a regression from #280's own fix**, which is why the shape is
+        -- worth stating rather than just correcting. Matching by `_name` was
+        -- added so the enter-dungeon row's `Warp to Site` -- on a
+        -- `TravelStateButtonTaskWidget`, which the type prefix cannot reach --
+        -- would be found at all. The name it matches on turns out to be shared
+        -- with the row's progress bar, so widening the matcher to reach one
+        -- button made a different one unreachable. Run 38, before that fix,
+        -- pressed `Jump` 1,989 times and `Set Destination` 257.
+        --
+        -- So a **button** is preferred over anything else the matcher admits,
+        -- and `List.head` survives only as the fallback for the case that
+        -- paragraph was written about -- no button among the candidates -- where
+        -- it behaves exactly as it does today. That keeps this strictly wider
+        -- than before: every reading that yielded a button still yields one.
+        travelTaskNodes =
             descendants
                 |> List.filter (.uiNode >> uiNodeIsOpportunityTravelTask)
                 |> List.filter (.uiNode >> nodeIsDisplayedFromDictEntries)
-                |> List.head
+
+        travelButtonNode =
+            case travelTaskNodes |> List.filter (.uiNode >> uiNodeIsOpportunityTravelButton) of
+                button :: _ ->
+                    Just button
+
+                [] ->
+                    travelTaskNodes |> List.head
     in
     { uiNode = entryNode
     , siteName =
@@ -3556,6 +3587,37 @@ uiNodeIsOpportunityTravelTask uiNode =
 opportunityTravelTaskTypePrefix : String
 opportunityTravelTaskTypePrefix =
     "TravelToLocationButtonTask"
+
+
+{-| Whether one of the task rows the matcher admits is the pressable one.
+
+The chain's two travel tasks and their progress bar all carry the same `_name`,
+so the name that makes the enter-dungeon button reachable also admits a widget
+that is not a button at all. What separates them is the type: both buttons are
+`...ButtonTaskWidget` (`TravelToLocationButtonTaskWidget` and
+`TravelStateButtonTaskWidget`) and the bar is `ProgressBarTaskWidget`.
+
+Matched as a substring rather than a prefix, deliberately: the two buttons do
+not share a prefix -- reaching both is the whole reason `_name` was added -- and
+the thing they do share sits in the middle of the name. Scoped by the caller,
+which only ever asks this of nodes already inside a `DungeonInfoPanelEntry` and
+already admitted by `uiNodeIsOpportunityTravelTask`, so this never has to be a
+test about the tree at large.
+
+-}
+uiNodeIsOpportunityTravelButton : EveOnline.MemoryReading.UITreeNode -> Bool
+uiNodeIsOpportunityTravelButton uiNode =
+    uiNode.pythonObjectTypeName
+        |> String.contains opportunityTravelButtonTypeMarker
+
+
+{-| What both of the chain's pressable travel widgets carry and its progress bar
+does not. `ProgressBarTaskWidget` ends in `TaskWidget` too, so the marker has to
+be the longer one.
+-}
+opportunityTravelButtonTypeMarker : String
+opportunityTravelButtonTypeMarker =
+    "ButtonTask"
 
 
 {-| The client's own `_name` for each of the objective chain's two travel tasks.
