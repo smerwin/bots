@@ -75,7 +75,7 @@ from test_saxrat_opportunity_needs_the_probe_window_closed import (
     probe_scanner_window)
 from test_saxrat_opportunity_shadow import let_binding_of, without_line_comments
 from test_saxrat_opportunity_tracker_button import (
-    TrackerRepl, expanded_entry, tracker, travel_button)
+    TrackerRepl, expanded_entry, progress_bar, tracker, travel_button)
 from test_saxrat_ported_guards import (
     SAXRAT_BOT_ELM, body_of, collapsed, source_of)
 
@@ -129,7 +129,12 @@ def tracker_offering(labels):
     """
     entries = []
     for index, text in enumerate(labels):
-        entry = expanded_entry([travel_button(text)])
+        # The progress bar rides along because the client always draws one
+        # beside the button, and since the 0.5 gate it is where the trip's
+        # destination is read from -- an entry without one has no readable
+        # security and is refused, which would make every case here about the
+        # gate rather than about the ordering it is testing.
+        entry = expanded_entry([progress_bar(), travel_button(text)])
         entry["dictEntriesOfInterest"]["_name"] = (
             "escalation_sites:%d" % (50791 + index))
         entries.append(entry)
@@ -428,7 +433,13 @@ class TheWiringExecutedTest(unittest.TestCase):
             without_line_comments(
                 body_of(source_of(SAXRAT_BOT_ELM), "siteProgressStepOrElse")),
             "arrivalIsOffered")
-        cls.expression = binding.replace("context.readingFromGameClient", "r")
+        # Two substitutions now: the reading, and the settings the destination
+        # gate is asked against. `defaultBotSettings` rather than a literal so
+        # the cases run at the shipped 0.5 rather than at a number written here.
+        cls.expression = (
+            binding
+            .replace("context.eventContext.botSettings", "defaultBotSettings")
+            .replace("context.readingFromGameClient", "r"))
 
     def offered_for(self, children):
         return self.repl.evaluate(
@@ -494,8 +505,13 @@ class TheWiringTest(unittest.TestCase):
         binding = let_binding_of(
             without_line_comments(body_of(self.source, "siteProgressStepOrElse")),
             "arrivalIsOffered")
-        self.assertIn("opportunityTravelStep context.readingFromGameClient",
-                      binding)
+        # Narrowed since the 0.5 gate, and it has to be the *same* narrowing
+        # the click gets or the tier and the press disagree about which entry
+        # the panel is offering -- which is the whole point of this case.
+        self.assertIn(
+            "opportunityTravelStep (escalationEntriesPermitted"
+            " context.eventContext.botSettings context.readingFromGameClient)",
+            binding)
         self.assertIn("opportunityLabelArrivesAtTheSite", binding)
 
     def test_it_is_the_arrival_rule_rather_than_the_command_rule(self):

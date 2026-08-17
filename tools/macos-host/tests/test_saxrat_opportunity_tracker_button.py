@@ -109,10 +109,17 @@ ENTER_LABEL = "Warp to Site"
 # button and is listed ahead of it. It is not a button and nothing can press it.
 BAR_WIDGET_TYPE = "ProgressBarTaskWidget"
 
-# What run 48 read on it, byte for byte. `travelLabelIsACommand` refuses it and
-# `travelLabelIsReadableText` accepts it, which is the whole of why the failure
-# was a stand-down rather than a wrong click.
-BAR_LABEL = "8 jumps | 0.6 Andabiar"
+# The bar's two cells, as the client draws them -- **separate labels** under one
+# widget. `eve_repl` prints them joined by ` | `, and a fixture built from that
+# line carries the join rather than the structure: the destination parse matches
+# each cell on its own shape and reads nothing from a single string.
+BAR_JUMPS = "8 jumps"
+BAR_DESTINATION = "0.6 Andabiar"
+
+# What run 48 read on it, as the repl joined it. `travelLabelIsACommand` refuses
+# it and `travelLabelIsReadableText` accepts it, which is the whole of why the
+# failure was a stand-down rather than a wrong click.
+BAR_LABEL = "%s | %s" % (BAR_JUMPS, BAR_DESTINATION)
 
 SITE_NAME = "Sansha's Command Relay Outpost"
 
@@ -282,17 +289,32 @@ def enter_button(text=ENTER_LABEL, **kwargs):
     return travel_button(text, **kwargs)
 
 
-def progress_bar(text=BAR_LABEL, **kwargs):
+def progress_bar(jumps=BAR_JUMPS, destination=BAR_DESTINATION,
+                 task_name=TRAVEL_TASK_NAME, displayed=True):
     """The travelling row's progress bar, under the button's own `_name`.
 
-    #291's whole subject. It is built exactly as the button is -- same nesting,
-    same label child, **no `_display` key**, since run 48's capture shows
-    `_display=None` on both -- so the only thing separating the two fixtures is
-    the widget's type name, which is what the selection now reads.
+    #291's whole subject: admitted by the `_name` half of the selector, listed
+    ahead of the button, and nothing can press it.
+
+    **Two labels, not one string**, which is the correction this fixture took
+    when the 0.5 destination gate started reading it. The live capture prints
+    `8 jumps | 0.6 Andabiar` and that pipe is `eve_repl` joining two separate
+    texts rather than anything the client wrote. Built with one label the
+    fixture is a tree the client never produces, and the destination parse --
+    matching each cell on its own shape -- correctly reads nothing from it.
+
+    No `_display` key on either this or the button, since run 48's capture shows
+    `_display=None` on both, so the only thing separating the two fixtures is
+    the widget's type name -- which is what the selection reads.
     """
-    kwargs.setdefault("type_name", BAR_WIDGET_TYPE)
-    kwargs.setdefault("task_name", TRAVEL_TASK_NAME)
-    return travel_button(text, **kwargs)
+    entries = {"_name": task_name} if task_name is not None else {}
+    if not displayed:
+        entries["_display"] = False
+    cells = [text for text in (jumps, destination) if text is not None]
+    return node(BAR_WIDGET_TYPE, entries,
+                [node("EveLabelMedium", {"_setText": text},
+                      region=(99, 460, 120, 16)) for text in cells],
+                region=(99, 460, 217, 21))
 
 
 def capture_entry(buttons, site_name=SITE_NAME,
@@ -812,7 +834,10 @@ class TheGateStillOutranksTheTracker(unittest.TestCase):
         self.assertIn("case siteProgressStep {", binding)
         self.assertIn(
             "opportunityWarpStep = warpToOpportunitySiteIfAvailable"
-            " context.readingFromGameClient", collapsed(self.source))
+            " (escalationEntriesPermitted context.eventContext.botSettings"
+            " context.readingFromGameClient)", collapsed(self.source),
+            "the warp step no longer narrows the reading first, so a lowsec "
+            "escalation reaches the ordering")
         self.assertIn(
             "gateWithinReach = accelerationGateIsWithinReach"
             " context.readingFromGameClient", binding)
@@ -1253,7 +1278,7 @@ class TheProgressBarSharesTheButtonsName(unittest.TestCase):
         being offered.
         """
         children = [tracker([capture_entry([progress_bar()])])]
-        self.assertEqual(self.travel_label(children), BAR_LABEL)
+        self.assertEqual(self.travel_label(children), BAR_JUMPS)
         self.assertFalse(self.offers_a_step(children))
 
     def test_a_hidden_button_beside_a_shown_bar_is_still_not_taken(self):
@@ -1268,7 +1293,7 @@ class TheProgressBarSharesTheButtonsName(unittest.TestCase):
             progress_bar(),
             travel_button("Set Destination", displayed=False),
         ])])]
-        self.assertEqual(self.travel_label(children), BAR_LABEL)
+        self.assertEqual(self.travel_label(children), BAR_JUMPS)
         self.assertFalse(self.offers_a_step(children))
 
     def test_a_reading_that_yielded_a_button_yields_the_same_one(self):
@@ -1492,15 +1517,31 @@ class TheRecordedSaxratRunsTest(unittest.TestCase):
         arriving = sorted({label for label in offered
                            if label.strip().lower()
                            in {"warp to site", "warp to location", "dock"}})
-        self.assertEqual(
-            arriving, [],
-            "an arriving label is in the corpus after all: %s -- #280's "
-            "premise has changed and the counts behind it want re-reading"
-            % arriving)
-        travelling = sorted({label for label in offered})
+        # Until run 49 this asserted `arriving == []`, and that was true of
+        # every run this machine had: the tracker's button was unreachable
+        # (#291), so no bot had ever pressed one and no corpus could hold an
+        # arriving label. Run 49 pressed `Set Destination`, nine `Jump`s and
+        # then `Warp to Site`, entered eight sites and looted six commanders --
+        # so the premise `opportunityStepArrivingFirst` (#256) and the
+        # arrival-outranks-the-gate ordering (#261) were both built without is
+        # finally in the recordings.
+        #
+        # Kept as a case rather than deleted, inverted: what it now refuses is
+        # the corpus going *back* to holding no arriving label, which would mean
+        # the button had become unreachable again.
+        self.assertIn(
+            "Warp to Site", arriving,
+            "no recorded run offers an arriving label any more -- #291's fix "
+            "has regressed and the tracker's button is unreachable again")
+        # The whole vocabulary the tracker has ever been *seen* offering here.
+        # `Warp to Location` and `Dock` are in `COMMAND_LABELS` on the mission
+        # runner's evidence rather than this bot's, and neither has been read
+        # off an escalation -- so a label outside this set is the client saying
+        # something nobody has designed for, which is worth a red case whichever
+        # label it is.
         self.assertTrue(
-            set(travelling) <= {"Jump", "Set Destination"},
-            "the tracker offered something new: %s" % travelling)
+            set(offered) <= {"Jump", "Set Destination", "Warp to Site"},
+            "the tracker offered something new: %s" % sorted(set(offered)))
 
     def test_the_old_search_never_matched_the_other_labels(self):
         """Which is the defect: three of four labels were invisible to it.
@@ -1519,3 +1560,146 @@ class TheRecordedSaxratRunsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TheEscalationDestinationIsReadAndBoundedTest(unittest.TestCase):
+    """An escalation may not send this bot below the empire line.
+
+    The client writes the trip's destination on the objective chain's progress
+    bar -- `8 jumps`, `0.6 Andabiar` -- and until #291 that row was the thing
+    being mistaken for the travel button. Now that a button is preferred over
+    it, the bar is read for what it does carry, and the security status is
+    finally in the bot's hands.
+
+    **Paid for once.** An escalation fourteen jumps into `0.3 Arodan` sat in the
+    queue from the first minute of a session; the bot took it, and the ship was
+    killed there by a pilot with 19,739 kills flying a Succubus. Warp scrambled,
+    so the retreat could not have worked either -- the only defence available
+    against a player is not to be there.
+
+    **Both readers are gated, and that is the load-bearing half.** Refusing the
+    destination in `opportunityTravelStep` alone would leave
+    `escalationIsBeingWorked` true, and the stand-down would then hold every dry
+    grid for forty readings waiting for a step the bot had already decided never
+    to take -- which is #291's own defect rebuilt from the other side.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(
+            TrackerRepl,
+            preamble=list(PREAMBLE) + ["import EveOnline.ParseUserInterface as P"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def destination(self, cells):
+        listing = "[" + ", ".join('"%s"' % c for c in cells) + "]"
+        return self.repl.strings(
+            ["Debug.toString (P.parseOpportunityDestination %s)" % listing])[0]
+
+    def test_the_security_and_system_are_read(self):
+        self.assertIn("security = Just 0.6", self.destination(["8 jumps", "0.6 Andabiar"]))
+        self.assertIn('systemName = Just "Andabiar"', self.destination(["8 jumps", "0.6 Andabiar"]))
+
+    def test_the_jumps_cell_is_not_read_as_the_security(self):
+        """`8 jumps` is the same shape as `0.6 Andabiar` and is listed first.
+
+        The first version of this answered `security = Just 8` for a system
+        called `jumps`, and only running it said so -- the types are identical.
+        """
+        said = self.destination(["8 jumps", "0.6 Andabiar"])
+        self.assertNotIn("security = Just 8", said)
+        self.assertNotIn('systemName = Just "jumps"', said)
+
+    def test_the_order_of_the_cells_does_not_decide(self):
+        forwards = self.destination(["14 jumps", "0.3 Arodan"])
+        backwards = self.destination(["0.3 Arodan", "14 jumps"])
+        self.assertEqual(forwards, backwards)
+        self.assertIn("security = Just 0.3", forwards)
+
+    def test_a_negative_security_is_read_rather_than_refused(self):
+        """Nullsec is a real answer and must reach the rule as one."""
+        self.assertIn("security = Just -1",
+                      self.destination(["9 jumps", "-1.0 J155416"]))
+
+    def test_a_cell_that_does_not_parse_yields_nothing_not_a_default(self):
+        """A fabricated `0.0` would read as nullsec -- the worst answer there is."""
+        said = self.destination(["Set Destination"])
+        self.assertIn("security = Nothing", said)
+        self.assertNotIn("security = Just 0", said)
+
+    def test_the_threshold_is_the_empire_line(self):
+        self.assertEqual(
+            self.repl.strings(["Debug.toString Bot.defaultEscalationMinimumSecurity"])[0],
+            "0.5",
+            "the default is no longer 0.5, which is where CONCORD stops "
+            "answering rather than a number somebody tuned")
+
+    def permits(self, minimum, security):
+        return self.repl.evaluate(
+            ["Bot.securityIsPermitted %s %s" % (minimum, security)])[0]
+
+    def test_an_unreadable_security_refuses_the_trip(self):
+        """The one place in this file where absent must read as dangerous.
+
+        Declining an escalation costs ISK; accepting one that turns out to be
+        lowsec costs the hull, the loot and the implants. Executed rather than
+        read, because a substring test over the branch passes for any body that
+        merely mentions the words.
+        """
+        self.assertFalse(self.permits("0.5", "Nothing"))
+
+    def test_the_line_is_at_the_threshold_and_both_sides_of_it(self):
+        self.assertTrue(self.permits("0.5", "(Just 0.5)"))
+        self.assertTrue(self.permits("0.5", "(Just 0.6)"))
+        self.assertFalse(self.permits("0.5", "(Just 0.4)"))
+        self.assertFalse(self.permits("0.5", "(Just 0.3)"))
+        self.assertFalse(self.permits("0.5", "(Just -1.0)"))
+
+    def test_an_operator_can_lower_it_but_has_to_say_so(self):
+        """`escalation-minimum-security=0` allows anything, deliberately."""
+        self.assertTrue(self.permits("0", "(Just 0.3)"))
+        self.assertTrue(self.permits("0", "(Just 0.0)"))
+        self.assertFalse(self.permits("0", "Nothing"),
+                         "an unreadable security is still refused however low "
+                         "the threshold is set")
+
+    def test_every_site_that_acts_on_an_escalation_narrows_first(self):
+        """The permission is applied where the bot acts, not inside the readers.
+
+        `opportunityTravelStep`, `warpToOpportunitySiteIfAvailable` and
+        `escalationIsBeingWorked` keep their single-argument signatures -- some
+        ninety-five cases in this file ask them what the tracker is offering,
+        and that is a question about the panel rather than about settings. So
+        the *reading* is narrowed at each site that decides on one, and this is
+        what stops a fifth site being added without it.
+
+        The stand-down reader matters as much as the travel one. Gating only the
+        travel step would leave `escalationIsBeingWorked` true for a lowsec
+        escalation, and the bot would hold every dry grid for forty readings
+        waiting for a step it had already refused -- #291's defect rebuilt from
+        the other side.
+        """
+        source = collapsed(source_of(SAXRAT_BOT_ELM))
+        acting = re.findall(
+            r"(?:warpToOpportunitySiteIfAvailable|escalationIsBeingWorked|"
+            r"opportunityTravelStep)\s*\(?\s*(escalationEntriesPermitted|"
+            r"context\.readingFromGameClient|readingFromGameClient)",
+            source)
+        bare = [a for a in acting if a != "escalationEntriesPermitted"]
+        narrowed = [a for a in acting if a == "escalationEntriesPermitted"]
+        self.assertGreaterEqual(
+            len(narrowed), 4,
+            "fewer call sites narrow the reading than this change wired: %r" % acting)
+        self.assertEqual(
+            [b for b in bare if b.startswith("context.")], [],
+            "a decision site passes the whole reading to an escalation reader "
+            "without narrowing it first, so a lowsec escalation reaches it")
+
+    def test_the_narrowing_is_what_applies_the_permission(self):
+        """One expression serves both readers, so they cannot drift apart."""
+        source = collapsed(source_of(SAXRAT_BOT_ELM))
+        body = source[source.index("escalationEntriesPermitted botSettings readingFromGameClient ="):][:400]
+        self.assertIn("escalationDestinationIsPermitted", body)
+        self.assertIn("List.filter", body)

@@ -1081,9 +1081,14 @@ class TheWiringTest(unittest.TestCase):
             body_of(cls.source, "escalationIsBeingWorked")))
 
     def test_the_rule_is_told_about_the_reading_and_the_count(self):
+        # Narrowed since the 0.5 gate: the reading handed to the stand-down
+        # reader is the one with lowsec escalations already removed, so this
+        # and the travel step cannot disagree about whether an escalation is
+        # worth holding the grid for.
         self.assertIn(
             "escalationIsBeingWorked = escalationIsBeingWorked"
-            " context.readingFromGameClient", self.branch)
+            " (escalationEntriesPermitted context.eventContext.botSettings"
+            " context.readingFromGameClient)", self.branch)
         self.assertIn(
             "standDownReadings = context.memory.escalationStandDownReadings",
             self.branch)
