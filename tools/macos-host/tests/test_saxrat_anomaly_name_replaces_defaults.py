@@ -180,7 +180,16 @@ class TheReadSiteHasNoSecondOpinionTest(unittest.TestCase):
         cls.source = open(SAXRAT_BOT_ELM).read()
 
     def test_the_filter_asks_the_rule_rather_than_the_field(self):
-        self.assertIn("anomalyNamesInEffect context.eventContext.botSettings",
+        """#273 narrowed what the filter is handed and not what it asks.
+
+        `findReasonToIgnoreProbeScanResult` takes an `AnomalyChoiceContext`
+        rather than a whole `BotDecisionContext`, because the memory update has
+        to run the same filter and never sees a decision -- so the settings
+        arrive as `context.botSettings`. What is pinned here is unchanged: one
+        rule decides what is hunted, and the filter asks it rather than reading
+        the field.
+        """
+        self.assertIn("anomalyNamesInEffect context.botSettings",
                       re.sub(r"\s+", " ", self.source))
 
     def test_nothing_else_reads_the_field(self):

@@ -5936,11 +5936,29 @@ an *index* advanced when the ship is standing in the system it points at, not a
 "first name that is not here" rule — that one ping-pongs between the first two
 entries and never reaches the third. `routeAskGiveUpReadings` (20) bounds the
 asking and **latches**, because a host with no ESI credentials will never
-answer. And the counter behind it advances only while the ship is in space with
-no route and an empty probe scanner — narrower than the condition the ask
-itself fires on, deliberately, so it can never run up while the bot is happily
-fighting in a system that still has anomalies. Counting that would be #11's
-mistake a third time.
+answer. And the counter behind it advances on the readings the branch is
+**asking** on, which is #273 and is what this paragraph used to get wrong.
+
+It used to say the counter advanced "only while the ship is in space with no
+route and an empty probe scanner — narrower than the condition the ask itself
+fires on, deliberately", on the ground that narrower could only delay the
+give-up. **That prices a systematically absent condition as a late one.** The
+ask fires on *no anomaly matching the settings*; a non-empty scanner is the
+steady state in exactly that situation, so with a narrow `anomaly-name` beside
+signatures that do not match it every reading reset the counter and the bound
+was unreachable. Across the 411 readings the recorded saxrat runs ever printed
+an ask on, 397 carry a count of 0 or 1 and none reaches the bound. Not late,
+never — #11's own mistake in the shape the argument cites while walking into it.
+
+`anomaliesWorthHunting` is the one filter both sides read now, and the counter
+is keyed on `destinationAskedFor` rather than on the dead end, so a bot with
+nowhere to ask for spends no budget — which is the same defect from the other
+side, and what runs 12, 26 and 27 latched the give-up on having issued no ask at
+all. The fear the narrowing was for is answered by two declarations the decision
+reads too: `gridStillHasSomethingToDo` (a fight still going with the site's own
+signature already off the scanner, which is the one state the ask's condition
+does not exclude) and `shipIsWarpingOrJumping`. See "The route ask is bounded by
+the readings it fires on" below.
 
 `home-system` is consulted only once the circuit has been walked once. With no
 `hunt-system` at all the bot names nowhere and parks exactly as before, so an
@@ -5960,6 +5978,89 @@ on the first run: `Hunt circuit: A -> B -> C, next B` in the status line, then
 Destination` and `jumpToNextSystem` taking over. `Asked for 'B' N/20 readings
 ago with no route yet` climbing to `ROUTE SETTING GIVEN UP` is the host not
 answering, and its own log says why.
+
+### The route ask is bounded by the readings it fires on
+
+Issue #273, and the paragraph above is the argument it overturns.
+`destinationAskReadings` is what `routeAskGiveUpReadings` is compared against,
+and it advanced only while `standingInADeadEnd` — which demanded an **empty**
+probe scanner, where `setRouteToNextHuntingGround` fires whenever no anomaly
+matches the settings. With a narrow `anomaly-name` beside two non-matching
+signatures, every reading took the counter's `else` branch. The counter
+oscillated 0 → 1 → 0, `routeAskGiveUpReadings < destinationAskReadings` could
+never be true, and the ask was unbounded.
+
+**The corpus carries the pinning rather than the incident.** Across the 411
+readings the recorded saxrat runs ever printed an ask on, 397 (97%) carry a
+count of 0 or 1 and the highest any of them carries is 16 against a bound of 20
+— so no recorded run has ever asked with the counter anywhere near the bound.
+The run #273 itself quotes — 439 asks across a session's last 47,000 log lines —
+is **not on this machine**; the busiest recorded run asks on 35 readings.
+`TheRunTheIssueQuotesIsNotHere` says so as a case, because the issue reads as
+though a recording here shows it.
+
+**One filter, read by both sides.** `anomaliesWorthHunting` answers "is there
+anything here this bot would hunt", and both the decision that picks an anomaly
+and the memory update that bounds the ask call it.
+`findReasonToIgnoreProbeScanResult` therefore takes an `AnomalyChoiceContext`
+(`{ botSettings, visitedAnomalies }`) rather than a whole `BotDecisionContext` —
+the same split `nextHuntingGroundFrom` was made for, and for the same reason:
+the memory update never sees a decision.
+
+**Two guards are shared rather than restated**, because two spellings of one
+idea is the drift the issue is about. `gridStillHasSomethingToDo` is the
+three-way disjunction `decideNextActionWhenInSpace` used to spell inline — an
+attackable row, a notable wreck, a target to unlock — and it is the one state
+the ask's own condition does *not* imply, since the site's signature drops off
+the scanner while the fight goes on. That is exactly the "happily fighting" case
+the replaced argument narrowed for. `shipIsWarpingOrJumping` is the reading
+`HOOOOONK in warp` is printed on; a warp across a system runs longer than 20
+readings at this bot's step delay, so counting through one would have latched
+the give-up on a bot that was travelling perfectly well.
+
+**And the counter is keyed on the ask rather than on the dead end.**
+`destinationAskedFor` is `Just` only when the circuit has somewhere to send the
+ship, and the counter reads that, so a reading `setRouteToNextHuntingGround`
+answers by tethering spends no budget. #263's own recount found that half from
+the other side: runs 12, 26 and 27 latched the give-up having issued **no ask at
+all**, two of them with no `hunt-system` configured.
+
+**What the bot does once it fires** is tether, on that reading and every reading
+after: the latch is `botMemoryBefore.routeSettingGivenUp || …` and the branch
+tests it before the picker, so it is a hot path rather than a one-off — PR
+#257's shape, and both halves are asserted.
+
+**No bounded retry, and rotation is not here either.** `run_bot` acts only when
+the asked-for name changes, so a standing ask is one authenticated ESI call.
+Retrying it is not the recovery: the issue's own evidence is that ESI answered
+`destination 'Shumam' set` twice while the client's route panel read
+`No Destination` throughout, so the call is not what failed. Rotating the
+circuit past an entry the client will not route to is the recovery that could
+work, and it is a change to what the give-up *does* rather than to when it
+fires. It is deliberately not in this change: the bound has never fired while a
+bot was asking, so nobody has seen a reachable give-up, and designing the
+recovery before the first live firing would be calibrating against nothing.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_route_ask_bound.py`. The counter is folded
+through the real `updateMemoryForNewReadingFromGame` in `elm repl` over readings
+the real `EveOnline.ParseUserInterface` produced, and the condition it replaces
+is folded over the **same** readings beside it — without that control a session
+reaching the bound says nothing, since any counter that only rises reaches any
+bound. #263's two-callers-agree property is executed against the memory the fold
+produced rather than only read at the picker's call site.
+
+**Unverified: any of it running.** No run has been flown, and by construction
+nobody has watched a give-up fire while the bot was asking. What to watch on the
+first run that goes dry in a system with signatures on the scanner:
+`Asking the host to set the destination to 'X' (N/20 readings)` with **N
+climbing** rather than reading 0, then the give-up once, then tethering. Also
+unverified: a ship held at an acceleration gate is not excluded from the counter
+— `siteProgressStepOrElse` needs a whole `BotDecisionContext`, so that read
+cannot be shared the way the other two are — and 20 consecutive such readings
+with nothing on the grid would latch the give-up early. No recorded run shows
+that shape and the outcome is what the give-up does anyway, but it is the
+direction this widening could be wrong in.
 
 ### The lock range is learned here too, and the "no evidence" branch is the common one
 
