@@ -974,7 +974,15 @@ class TheCountIsAdvancedWhereNothingCanStarveIt(unittest.TestCase):
 READING_INDEX = re.compile(
     r"Arrival window: (?:OPEN|closed), (\d+) of \d+ readings since the last "
     r"warp ended")
-ANOMALY = re.compile(r"^Current anomaly: (\S+?)\.")
+# Both spellings, for `RATS_OLD`'s reason. Runs flown before #197 was acted on
+# wrote `Current anomaly: EGC-528.`; runs flown since write
+# `Current anomaly: 'EGC-528' 'Sansha Refuge' (Combat Site).` The ID is what is
+# captured either way, so the two eras group identically -- and the optional
+# quotes matter more than they look: the old pattern required a `.` directly
+# after a run of non-space, which the new line does not have, so it would have
+# matched nothing on every future run while reporting a corpus that simply
+# never named an anomaly.
+ANOMALY = re.compile(r"^Current anomaly: '?([^'\s.]+)'?")
 RATS = re.compile(r"^rats (\d+)\. (.*)$")
 RATS_OLD = re.compile(r"^Rats in overview: (\d+)\. (.*)$")
 TARGET_HITPOINTS = re.compile(r"^target .+? \[(\d+|\?)/(\d+|\?)/(\d+|\?)\]\.$")

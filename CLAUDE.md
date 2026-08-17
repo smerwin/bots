@@ -8904,15 +8904,39 @@ would otherwise pass: a corpus of letters and spaces says nothing about whether
 a comma is possible, so `test_the_column_does_carry_other_punctuation` is what
 stops the finding resting on a narrow sample.
 
-**`anomaly-name` is not answered, and the corpus is structurally unable to answer
-it.** Neither bot ever logs the probe scanner's Name cell. `Dict.get "Name"`
-occurs once in saxrat's `Bot.elm`, inside `matchesAnomalyNameFromSettings`, where
-it is folded into a `Bool` and dropped; what a run prints about an anomaly is the
-**ID** the scanner gives it (`We are in anomaly 'AIC-176'`). So the site words
-`run_saxrat.sh` itself asks for -- `Hideaway`, `Refuge`, `Burrow`, `Rally Point`,
-`Sanctum`, `Haven`, `Forsaken`, `Forlorn` -- occur across all 86 recorded runs
-**zero** times. There is no reading to go back to, and no amount of corpus makes
-one.
+**`anomaly-name` was not answerable, and the fix was to start writing the column
+down.** Neither bot ever logged the probe scanner's Name cell: `Dict.get "Name"`
+occurred once in saxrat's `Bot.elm`, inside `matchesAnomalyNameFromSettings`,
+where it was folded into a `Bool` and dropped, and what a run printed about an
+anomaly was the **ID** the scanner gives it (`We are in anomaly 'AIC-176'`). So
+the site words `run_saxrat.sh` itself asks for -- `Hideaway`, `Refuge`, `Burrow`,
+`Rally Point`, `Sanctum`, `Haven`, `Forsaken`, `Forlorn` -- occur across all 86
+recorded runs **zero** times. There was no reading to go back to, and no amount
+of corpus made one.
+
+**`describeAnomalyIdentity` now prints the Name and Group beside the ID**, on the
+decision line, the `Current anomaly:` clause and the one-line header, so a run
+flown from here writes the column down. The 86 runs behind the counts above are
+unchanged and still cannot answer it; what changed is that the next corpus can.
+**Logging it is not knowing it** -- six names is not a distribution, and the
+question stays open until a corpus of them exists.
+
+Two things that had to hold, and are asserted rather than assumed. The ID stays
+the **first single-quoted token** on the line, because `engagement_watch.py`
+names every screenshot it takes from `We are in anomaly '([^']+)'` and takes the
+first group -- a name put in front would silently rename every screenshot of
+every run while the watcher went on looking healthy. And **nothing keys on the
+name**: `visitedAnomalies` is still filed under the ID, since a Name is shared by
+every site of a kind and a memory keyed on `Sansha Refuge` would confuse the one
+just cleared with the next one.
+
+**A corpus reader broke on it, silently, which is the shape to expect from this
+change.** `test_saxrat_combat_stalemate.ANOMALY` was
+`^Current anomaly: (\S+?)\.` -- a run of non-space followed directly by a full
+stop, which the new line does not have. It would have matched **nothing** on
+every future run while reporting a corpus that simply never named an anomaly. It
+takes both spellings now, capturing the ID either way, which is `RATS_OLD`'s own
+precedent one line below it.
 
 **The five names anybody has written down are the whole of the direct evidence,
 and one of them is the useful one.** `test_saxrat_anomaly_name_wildcard.py` keeps
