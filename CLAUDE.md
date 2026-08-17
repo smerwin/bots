@@ -2790,16 +2790,13 @@ that gave run 21 **zero** — whether a run catches a gun mid-cycle at the momen
 a verdict comes due is luck. A run that never swaps and a run that swaps
 sometimes look like different bugs and are the same one.
 
-`isInActiveState` is the entry that means *switched on*, and it backs three
-things: since #50, whether the ammo swap's switch-off landed; since #72, a report
-of the client having taken the guns back; and since #76, whether a gun needs
-stopping before a load. That third one is the **positive** direction, which #50
-had ruled out — a considered departure, and the reason it is safe is that the
-claim is unchanged. Run 11 showed `True` for eighteen readings on a gun that
-fired nothing at all, so it is still not evidence the module is doing its job;
-what it is evidence of is the toggle being on, which is precisely the condition
-the client's own refusal names (`while it is active`). Reading it as "the guns
-are working" would be #12 and #34 a third time and nothing does.
+`isInActiveState` backs three things: since #50, whether the ammo swap's
+switch-off landed; since #72, a report of the client having taken the guns back;
+and since #76, whether a gun needs stopping before a load. All three read it as
+*switched on*. **That reading is wrong, and the corpus the status line has been
+collecting since #267 is what says so** — see "`isInActiveState` is not the
+toggle; it is the deactivation transient" below, which is #286 and which is the
+first thing to read before touching any of the three.
 
 The keep-active filter and `decisionToKillRats` still consult `isActive`, which
 #39 refused to rewire on one sample and #76 still refuses.
@@ -2811,6 +2808,14 @@ carried `ramp_active`, and it then appeared per module as each first cycled
 `ShipModuleButtonRamps` widget being created when cycling starts. Treating
 `Nothing` as off is still the right default, but it conflates "off" with "has
 never run", so never store it as a defaulted `Bool`.
+
+**The widget is destroyed when the module stops, too, which #286 measured and
+this paragraph did not know.** Absence is not only a session-start state: run 52
+has thirteen separate absence episodes, twelve of them 32 to 78 readings long,
+falling on travel between anomalies and on being docked. So "has never run" is
+the narrower reading and "is not running now" is the wider one — which makes
+absence the *strongest* of the three ramp values about the module being idle,
+and it is what the section below leans on.
 
 ### The sprites really are missing; the state is somewhere else
 
@@ -2838,7 +2843,7 @@ What the same 240s sample says about the rest:
 
 | entry | observed | reading |
 |---|---|---|
-| `isInActiveState` | `True` on all four modules, all 92 samples | **switched on** — the flag `isActive` should have been |
+| `isInActiveState` | `True` on all four modules, all 92 samples | read here as **switched on**, which #286 measured to be wrong — it is `not isDeactivating`, see below |
 | `isDeactivating` | `False` throughout that sample; **`True` in run 11**, on every reading a swap had a gun switched off | switching off, cycle not yet finished — see below |
 | `effect_activating` | `0`, except a single `1` at 175.3s, 2.6s before a cycle began | a brief pulse at **activation** |
 | `waitingForActiveTarget` | absent until 141.3s, then `0` on all four at once | `0` = not waiting; appears late, needs more observation |
@@ -2866,15 +2871,20 @@ together, with `ramp_active` still `True` because the gun is finishing its cycle
 **The switch-off lands, first time, in one reading**, which is the observation #35
 and #39 both asked for and neither had.
 
-Two readings later the column becomes `F/T/F` and stays there. The guns are
-switched back **on**, and **not by anything in the bot** — see "The switch-off
-does not hold" below, where #72 read the dispatched effects across that window
-and found no press of the button in either recorded run. This file used to
-attribute it to `decisionToKillRats`; that was wrong, and it was wrong in the
-direction that made the swap's own failure look like correct behaviour by its
-intended owner. What is true either way is that the swap kept going: its
-`gunsSilencedTicks` counter consults nothing the module says (deliberately, #38)
-so it counted to its bound of 20 while the guns had been back on since reading 3.
+Two readings later the column becomes `F/T/F` and stays there. This file read
+that as the guns being switched back **on** by the client, and **#286 measured
+that it is not** — the gun neither cycles nor fires across any of those windows;
+what returned to `True` is a flag that is `False` only while the deactivation is
+in progress. See "`isInActiveState` is not the toggle" below. #72's other half
+survives and is what makes the correction findable: it read the dispatched
+effects across that window and found no press of the button in either recorded
+run, which is exactly what an unpressed, switched-off gun looks like. This file
+used to attribute the re-arm to `decisionToKillRats`; that was wrong too, and it
+was wrong in the direction that made the swap's own failure look like correct
+behaviour by its intended owner. What is true through all three readings is
+that the swap kept going: its `gunsSilencedTicks` counter consults nothing the
+module says (deliberately, #38), so it counted to its bound of 20 — and, on
+#286's reading, the guns had been off rather than back on for all of it.
 
 **`isInActiveState` is decisive about the switch-off and says nothing about the
 guns working.** In that same window the weapon fired *not once* — all 33 outgoing
@@ -2897,6 +2907,154 @@ which is what keeps #38's deadline independent of a signal that could stall it.
 A module button is a **toggle**, so a click repeated before the client has shown
 its result switches the module back off. `moduleButtonClickSettlingSteps` gives a
 click 5 steps to appear in a reading first.
+
+### `isInActiveState` is not the toggle; it is the deactivation transient
+
+Issue #286, and it is the instrument #267 added answering the question nobody
+could ask when the three rules were written. A live read of an Omen Navy Issue
+found four `ModuleButton` nodes all reading `isInActiveState=True` while, by
+the operator's own account of the client, only the afterburner was running —
+and the disproof was a state change rather than a snapshot, since pressing the
+armour repairer's and the sensor booster's hotkeys moved them from
+`ramp_active=None` to `ramp_active=True`. A module button is a toggle, so a
+press that switched them **on** is a press made while they were **off**.
+
+**The corpus settles what the field is instead, and it is one bit shared with
+`isDeactivating`.** `describeTopRowModuleDictState` has been printing five
+entries per top-row module on every reading since #267. Read back over every
+log in `~/eve-bot-logs` that carries the clause — **34 runs, 55,921 readings,
+61,948 module observations**, counted per reading rather than per decision line
+— `isInActiveState` and `isDeactivating` are exact complements with **no
+exceptions at all**:
+
+| `ramp_active` | `isInActiveState` | `isDeactivating` | observations |
+|---|---|---|---:|
+| `-` | `T` | `F` | 20,095 |
+| `F` | `T` | `F` | 24,669 |
+| `T` | `T` | `F` | 17,011 |
+| `T` | `F` | `T` | 125 |
+| `F` | `F` | `T` | 48 |
+
+Not one observation reads `F`/`F` or `T`/`T`. They are separate dictionary keys
+read by separate `Dict.get`s in the parser, so the agreement is the client's
+and not an artefact of the read. One counterexample anywhere would break it and
+there is none, which is the same standard #76's own table was held to.
+
+So `isInActiveState = Just False` means **this module is in the act of shutting
+down** — not that it is off. It is `True` for a module that is running and
+`True` for a module that is off and idle, and the only thing it distinguishes
+is the transient in between. Those transients are short: 85 episodes across the
+corpus, median **2** readings, longest **7**, and 40 of them one reading wide.
+A reading is one to eight seconds, so a switch-off whose transient falls
+between two readings leaves no trace at all.
+
+**Three independent readings say the same thing, and the last one has ground
+truth under it.**
+
+- **A module whose ramp widget does not exist reads `True`.** On the 20,095
+  observations where `ramp_active` is *absent from the tree* — the
+  `ShipModuleButtonRamps` widget does not exist, so the module is not running —
+  `isInActiveState` reads `True` on **100.00%** of them. That absence is not
+  only a session-start state, which is how this file has read it since #35: run
+  52 has thirteen separate absence episodes, twelve of them 32 to 78 readings
+  long, and they land on travel between anomalies and on being docked. So the
+  widget is destroyed when the module stops as well as created when it starts.
+- **Four whole sessions of it.** `saxrat_escalation_trip`,
+  `saxrat_uchat_arrival`, `saxrat_escalation_probe` and run 51 — the 2026-08-16
+  Uchat runs, the same ship and evening as the live read #286 was filed on —
+  carry `-/T/F/-/-` on **every one of their 354 readings** and **zero**
+  outgoing combat lines. The guns were never on all session and the field read
+  `True` throughout.
+- **The swap's own disarm, with the client's combat log as the witness.**
+  `switchOffUndoneByClient` has been set in **35** windows across **eight
+  runs** and **both bots** — saxrat's status clause says `a gun has been
+  switched back on` and the mission runner's says `the client switched a gun
+  back on by itself … the guns are firing`. Over the ten readings before each
+  swap started, the guns fired **0.177 lines a reading** with `ramp_active`
+  reading `T` on **37.7%** of readings; over the ten readings after each window
+  cleared, **0.224** and **40.6%**. Over the 191 readings *inside* the windows:
+  **zero** gun lines and `ramp_active` `T` on **zero** readings.
+
+  Two things keep that from being an absence of evidence. The client names the
+  weapon on every outgoing line, so a gun shot and a drone shot are separable
+  without attributing anything — and 146 *drone* lines were written inside
+  those same windows, so the channel was live and the guns contributed none of
+  it. saxrat run 52, which contributes nine of the windows, flies no drones at
+  all, and its windows are empty of both.
+
+**`switchOffUndoneByClient` is therefore a phantom, and the "client re-arms the
+guns on every swap" finding it rests on is the same misreading.** The gun was
+switched off, stayed off, and the flag came back to `True` because the
+deactivation finished. That the bot dispatched no press in the window — #72's
+own measurement — is the corroboration rather than the mystery.
+
+**What each entry appears to mean, and how much of it is measured:**
+
+| entry | reading | confidence |
+|---|---|---|
+| `ramp_active` | the duty cycle, and the best "is it running" the client offers. A reading carries a gun line on 0.9% of the readings it is absent, 5.7% where it is `False`, and 48.6% where it is `True` | high; #35's original measurement plus the corpus |
+| `isInActiveState` | `not isDeactivating`. `False` **only** during the deactivation transient | high; 61,948 observations, zero exceptions |
+| `isDeactivating` | the same bit, positively. The client accepted a switch-off and is shutting the module down | high |
+| `effect_activating` | an activation pulse. A reading carries a gun line on 64.0% of the readings it reads `1`, against 21.4% for `0` and 0.5% where it is absent | medium |
+| `waitingForActiveTarget` | mostly `0` or absent; nothing here reads it | low, unchanged since #39 |
+
+### What the three rules read, and what it costs each of them
+
+Nothing is changed on this evidence — the rules sit on the path that disarms
+the ship, and #34 is what acting on a field's assumed meaning costs. What
+follows is the reading, so the fix is somebody's decision rather than a drift.
+
+- **#76 `weaponIsSwitchedOn`** is `isInActiveState == Just True`, which is
+  `not isDeactivating`, which is true on **99.7%** of all observations. It is
+  close to a constant. So the entry gate opens on a ship whose guns are idle,
+  and the switch-off is pressed on a gun that may already be off — and the
+  button is a toggle, so such a press turns it **on**. That last step is a
+  mechanism and **not an observation**: the fight presses the weapon hotkey on
+  the same readings, and nothing in a log attributes a cycle to one of the two
+  presses. What #76 is still right about is the one thing it fixed — it does
+  not read the duty cycle, which is what made run 21 skip the switch-off on
+  nine readings in ten.
+- **#50 `moduleReadsSwitchedOff`** is *sufficient* and not *necessary*. `Just
+  False` really is the client saying the switch-off landed; what it cannot say
+  is that a switch-off did **not** land, because the transient is short —
+  median two readings, longest seven — and a reading that misses it reports the
+  same thing as a click that never arrived. That is the shape of `none has yet
+  read switched off`.
+- **#154 `switchOffUndoneByClient`** is measured false above. It latches on
+  the deactivation ending, and what it does with that is make
+  `ammoSwapDisarmEndsTheSession` decline to fire — so the guard that exists
+  because *a disarmed ship is worse than the wrong charge* is switched off by a
+  report that the ship is armed, taken on a ship that is not.
+
+**Is this the root cause of the swap's "the guns never go quiet"?** Partly, and
+the corpus is specific about how much. Over the 66 `none has yet read switched
+off` waits the clause has ever printed, counted in readings: on **34** of them
+the client's combat log records **no gun line at all** for the whole wait, so
+the guns were quiet and the swap could not tell; on the other **32** the guns
+were still firing, which is #76's territory — a switch-off click that did not
+land, and nothing here addresses it. Half, not all.
+
+**What would close the rest**, and it is still the read #286 asked for: a live
+sample of a module that is **online but switched off**, with the client's own
+state known to the operator. Two things stop the corpus supplying it.
+`describeTopRowModuleDictState` prints `moduleButtonsRows.top` only, so the
+repairer and the booster the issue's disproof actually used are in no log; and
+`online` is parsed on every reading and printed on none, so "online but
+switched off" and "offline" read the same in every recorded run. Extending that
+clause to the other rows and adding `online` is one function and would make the
+next live read checkable against the log — it is deliberately not in #286,
+which changes no behaviour at all.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_module_active_state_meaning.py`. The corpus is
+recomputed as *relations* rather than as the numbers above — the two flags
+never agree, a ramp-absent module never reads switched off, the swap's own
+disarm windows carry no fire — so a corpus that grows cannot turn a true claim
+red, and **the day a run contradicts one of them the case goes red**, which is
+what makes this a finding that can stop being true rather than a paragraph. The
+three rules are *executed* through the real `Bot.elm` in `elm repl` over the
+five module states the corpus actually contains, in both apps, so what each
+rule answers for a real client state is run rather than read.
 
 **Module tooltips cannot be read the framework's way here.**
 `getModuleButtonTooltipFromModuleButton` looks up a dictionary that
