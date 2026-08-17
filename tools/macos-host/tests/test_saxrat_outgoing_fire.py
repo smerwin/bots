@@ -649,7 +649,9 @@ class NothingDecidesOnItTest(unittest.TestCase):
                 "definition and one call -- this change widened a key-wrapped "
                 "click" % (verb, len(uses)))
         # And the chords themselves are still pressed in exactly those two
-        # places: `vkey_E` once, `vkey_W` once beyond the loot window's Ctrl+W.
+        # places: `vkey_E` once and `vkey_W` once. Since #285 the loot window's
+        # escape is `Alt+C` rather than `Ctrl+W`, so `vkey_W` no longer has a
+        # second site here.
         self.assertEqual(len(re.findall(r"\bvkey_E\b", code)), 2, "vkey_E moved")
 
     def test_the_ammo_swap_still_decides_on_the_target_distance_alone(self):

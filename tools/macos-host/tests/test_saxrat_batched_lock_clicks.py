@@ -237,8 +237,9 @@ class TheStepCarriesEveryLockClickTest(unittest.TestCase):
     def test_a_lock_click_still_needs_ctrl_without_shift(self):
         """The batch must not widen what counts as a lock.
 
-        The unlock holds Shift as well and the loot window's Ctrl+W carries no
-        mouse effect, so neither may contribute a point to a batch's count.
+        The unlock holds Shift as well, and a keys-only chord -- the loot
+        window's, `Ctrl+W` until #285 and `Alt+C` since -- carries no mouse
+        effect, so neither may contribute a point to a batch's count.
         """
         unlock = ("[ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL"
                   ", EffectOnWindow.KeyDown EffectOnWindow.vkey_SHIFT"

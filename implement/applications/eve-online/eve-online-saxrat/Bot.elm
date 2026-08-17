@@ -1900,12 +1900,15 @@ messageBoxStandoffGiveUpReadings =
 ticks. A message box that has not closed in sixty readings is the same shape.
 
 **Ctrl+W is deliberately not in the ladder**, though it is the client's own
-"close the active window". It acts on the _focused_ window, and the mission
-runner's loot window paid for that lesson already -- a version that pressed it
-at an unfocused window managed 650 presses in one run and closed nothing, and
-the live recovery needed the window's title bar clicked first. Clicking an
-unidentified modal to focus it is a click into a dialog nobody has read, which
-is the one thing `closeMessageBoxByDeclining` refuses to do.
+"close the active window". It acts on the _focused_ window, and the loot window
+paid for that lesson twice -- 650 presses at an unfocused window in one run and
+919 decision lines in another, closing nothing either time; see
+`lootWindowCloseRung`, which presses `Alt+C` instead. Clicking an unidentified
+modal to focus it is a click into a dialog nobody has read, which is the one
+thing `closeMessageBoxByDeclining` refuses to do -- and the loot window says a
+focus click was not what was missing anyway, since one unfocused `Alt+C` shut
+it. There is no equivalent toggle for a message box, which is why this ladder
+escalates with Escape rather than with a key of its own.
 
 **A naked Escape can open the client's own pause menu**, which
 `closeSystemSettingsMenu` records happening live in this very file from exactly
@@ -5714,6 +5717,58 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                     ("Wait before considering the anomaly finished: " ++ String.fromInt waitTimeRemainingSeconds ++ " seconds")
                     (tetherAtStructure context)
 
+        -- The wreck path taken when no loot window is in the reading -- and,
+        -- since the loot window's own escalation is bounded, the branch that
+        -- one stands aside into once its bound expires. It always acts: it
+        -- opens the next notable wreck, scrolls one into view, or leaves the
+        -- grid. Nothing here waits.
+        lootAnotherWreckOrLeaveTheGrid =
+            case notableWreckEntries of
+                wreckToLoot :: _ ->
+                    if lootWreckTimeRemainingSeconds <= 0 then
+                        describeBranch "Giving up on looting commander/overseer wreck(s) -- out of time."
+                            decisionAfterLootingNotableWrecks
+
+                    else
+                        -- The same command whether the wreck is
+                        -- alongside or across the pocket: the client
+                        -- flies the ship there and opens it on
+                        -- arrival. Routed through
+                        -- `closeInOnOverviewEntry` for its approach
+                        -- guard, which this branch never had -- it
+                        -- re-ran the whole cascade every tick while
+                        -- the ship was still on its way, restarting
+                        -- the approach each time.
+                        -- Double click rather than the
+                        -- right-click cascade: the client reads it
+                        -- as Open Cargo directly, and from outside
+                        -- looting range it closes the distance
+                        -- first, so one step replaces both the
+                        -- cascade and the separate approach.
+                        openCargoOnOverviewEntry context
+                            "Open commander/overseer wreck's cargo before leaving."
+                            wreckToLoot
+
+                [] ->
+                    -- Nothing to loot on screen, but a wreck worth
+                    -- opening can be scrolled out of the overview.
+                    -- Under the same time budget as looting itself,
+                    -- so a scroll that never lands cannot hold the
+                    -- bot in the anomaly forever.
+                    case
+                        if lootWreckTimeRemainingSeconds <= 0 then
+                            Nothing
+
+                        else
+                            scrollOverviewToReveal context
+                                (\entry -> isNotableWreck entry && notAlreadyEmptied context entry)
+                    of
+                        Just scrollToWreck ->
+                            scrollToWreck
+
+                        Nothing ->
+                            decisionAfterLootingNotableWrecks
+
         decisionIfNoEnemyToAttack =
             if overviewEntriesToAttack |> List.isEmpty then
                 case context.readingFromGameClient |> wreckLootWindowsFromReadingFromGameClient |> List.head of
@@ -5729,87 +5784,85 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                         -- Feedback: this window sometimes fails to close
                         -- after clicking its own "Loot All"/close button
                         -- (button click not registering, or the button
-                        -- not found) and just sits open forever. Once it
-                        -- has stayed open for more than two ticks past
-                        -- when we would have clicked "Loot All", force it
-                        -- shut with Ctrl+W (EVE's own close-active-window
-                        -- hotkey) instead of continuing to poke at the
-                        -- window's own controls.
-                        if context.memory.lootWindowOpenTicks > 2 then
-                            describeBranch "Loot window did not close on its own -- force it shut (Ctrl+W)."
-                                (decideActionForCurrentStep
-                                    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL
-                                    , EffectOnWindow.KeyDown EffectOnWindow.vkey_W
-                                    , EffectOnWindow.KeyUp EffectOnWindow.vkey_W
-                                    , EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL
-                                    ]
-                                )
+                        -- not found) and just sits open forever. See
+                        -- `lootWindowCloseRung` for the ladder over that,
+                        -- for why the escalation is Alt+C rather than the
+                        -- Ctrl+W this used to press at an unfocused window,
+                        -- and for what the bound falls through to.
+                        let
+                            closeControl =
+                                openInventoryWindow.uiNode
+                                    |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
+                                    |> Maybe.andThen .closeButton
 
-                        else
-                            case openInventoryWindow.uiNode |> findUiElementWithText "Loot All" of
-                                Just lootAllButton ->
-                                    describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
+                            forceItShutWithTheInventoryToggle =
+                                describeBranch
+                                    "Loot window did not close on its own -- force it shut (Alt+C, the inventory toggle, which needs no focus)."
+                                    (decideActionForCurrentStep pressInventoryToggleEffects)
+                        in
+                        case
+                            lootWindowCloseRung
+                                { readingsOpen = context.memory.lootWindowOpenTicks
+                                , closeControlIsInTheReading = closeControl /= Nothing
+                                , togglePressedRecently =
+                                    context.previousStepsEffects
+                                        |> List.take EveOnline.BotFrameworkSeparatingMemory.moduleButtonClickSettlingSteps
+                                        |> List.any doEffectsPressInventoryToggle
+                                }
+                        of
+                            LeaveTheLootWindowAlone ->
+                                describeBranch
+                                    ("Loot window has been open for "
+                                        ++ String.fromInt context.memory.lootWindowOpenTicks
+                                        ++ " readings and neither its own controls nor Alt+C shut it, which is past "
+                                        ++ String.fromInt lootWindowForceCloseGiveUpReadings
+                                        ++ " -- leave it open and get on with the rest of the grid."
+                                    )
+                                    lootAnotherWreckOrLeaveTheGrid
 
-                                Nothing ->
-                                    case
-                                        openInventoryWindow.uiNode
-                                            |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
-                                            |> Maybe.andThen .closeButton
-                                    of
-                                        Just closeButton ->
-                                            describeBranch "Nothing left to loot. Close the wreck's cargo window."
+                            PressTheInventoryToggle ->
+                                forceItShutWithTheInventoryToggle
+
+                            ClickTheWindowsCloseControl ->
+                                -- `closeControl` is what the rung was told
+                                -- about, so this cannot be reached without one.
+                                -- The fall-back is the keystroke rather than a
+                                -- wait, for the reason the rung's own comment
+                                -- gives.
+                                closeControl
+                                    |> Maybe.map
+                                        (\closeButton ->
+                                            describeBranch "Loot window did not close on its own -- click its own Close control."
                                                 (clickUiElement closeButton)
+                                        )
+                                    |> Maybe.withDefault forceItShutWithTheInventoryToggle
 
-                                        Nothing ->
-                                            describeBranch "I do not see a way to close this inventory window."
-                                                askForHelpToGetUnstuck
-
-                    Nothing ->
-                        case notableWreckEntries of
-                            wreckToLoot :: _ ->
-                                if lootWreckTimeRemainingSeconds <= 0 then
-                                    describeBranch "Giving up on looting commander/overseer wreck(s) -- out of time."
-                                        decisionAfterLootingNotableWrecks
-
-                                else
-                                    -- The same command whether the wreck is
-                                    -- alongside or across the pocket: the client
-                                    -- flies the ship there and opens it on
-                                    -- arrival. Routed through
-                                    -- `closeInOnOverviewEntry` for its approach
-                                    -- guard, which this branch never had -- it
-                                    -- re-ran the whole cascade every tick while
-                                    -- the ship was still on its way, restarting
-                                    -- the approach each time.
-                                    -- Double click rather than the
-                                    -- right-click cascade: the client reads it
-                                    -- as Open Cargo directly, and from outside
-                                    -- looting range it closes the distance
-                                    -- first, so one step replaces both the
-                                    -- cascade and the separate approach.
-                                    openCargoOnOverviewEntry context
-                                        "Open commander/overseer wreck's cargo before leaving."
-                                        wreckToLoot
-
-                            [] ->
-                                -- Nothing to loot on screen, but a wreck worth
-                                -- opening can be scrolled out of the overview.
-                                -- Under the same time budget as looting itself,
-                                -- so a scroll that never lands cannot hold the
-                                -- bot in the anomaly forever.
-                                case
-                                    if lootWreckTimeRemainingSeconds <= 0 then
-                                        Nothing
-
-                                    else
-                                        scrollOverviewToReveal context
-                                            (\entry -> isNotableWreck entry && notAlreadyEmptied context entry)
-                                of
-                                    Just scrollToWreck ->
-                                        scrollToWreck
+                            UseTheWindowsOwnControls ->
+                                case openInventoryWindow.uiNode |> findUiElementWithText "Loot All" of
+                                    Just lootAllButton ->
+                                        describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
 
                                     Nothing ->
-                                        decisionAfterLootingNotableWrecks
+                                        -- Unreachable while
+                                        -- `wreckLootWindowsFromReadingFromGameClient`
+                                        -- selects a window by this very text,
+                                        -- and it is where that filter widening
+                                        -- should land: the close controls above,
+                                        -- never `askForHelpToGetUnstuck`, which
+                                        -- is what used to sit here and which a
+                                        -- bounded ladder must not reach for.
+                                        describeBranch "Nothing left to loot in this window."
+                                            (closeControl
+                                                |> Maybe.map
+                                                    (\closeButton ->
+                                                        describeBranch "Close the wreck's cargo window."
+                                                            (clickUiElement closeButton)
+                                                    )
+                                                |> Maybe.withDefault forceItShutWithTheInventoryToggle
+                                            )
+
+                    Nothing ->
+                        lootAnotherWreckOrLeaveTheGrid
 
             else
                 describeBranch "Locking..."
@@ -6589,8 +6642,8 @@ droneRecallAskedLookbackSteps =
 Read out of the effects rather than the decision, because
 `updateMemoryForNewReadingFromGame` is the only place that can write memory and
 it never sees the decision. `vkey_R` is used for nothing else in this bot --
-`vkey_E` is the keep-at-range and `vkey_W` the orbit and the loot window's
-Ctrl+W -- so the chord is unambiguous. It used to be `vkey_Q` that carried the
+`vkey_E` is the keep-at-range, `vkey_W` the orbit and `vkey_C` the loot
+window's Alt+C -- so the chord is unambiguous. It used to be `vkey_Q` that carried the
 approach; that is a double click on the row now and presses no key at all, so
 this argument has one fewer key to be unambiguous against rather than one more.
 
@@ -7127,12 +7180,14 @@ overviewEntryLockHandle allEntries entry =
 {-| The screen points the lock clicks of one step went to, in dispatch order.
 
 The lock chord is Ctrl held over a plain left click
-(`lockChordForOverviewEntry`). Ctrl is pressed in two other places here and
-neither can be mistaken for it: `ctrlShiftClickUiElement`, the unlock, holds
-Shift as well, and the loot window's Ctrl+W carries no mouse effect at all, so
-there is no `MouseMoveTo` for this to take. Both conditions are checked rather
-than only the first -- the Ctrl+W case is a saxrat-only chord, and a bot that
-grew a third one should fail to attribute rather than attribute wrongly.
+(`lockChordForOverviewEntry`). Ctrl is pressed in one other place here and it
+cannot be mistaken for this one: `ctrlShiftClickUiElement`, the unlock, holds
+Shift as well. Both conditions are still checked rather than only the first,
+because the second used to be load-bearing and the reason it stopped is a
+change to a different branch: the loot window pressed a keys-only `Ctrl+W`
+until #285, which carried no `MouseMoveTo` for this to take. Its `Alt+C`
+presses no Ctrl at all, so a bot that grows another keys-only chord should
+fail to attribute rather than attribute wrongly.
 
 **Every point rather than the first**, which is what makes a batched step
 distinguishable from a single lock at all. A reader answering `Maybe` cannot
@@ -11017,8 +11072,15 @@ statusTextFromState context =
                 ++ (context.memory.routeFirstMarkerUnchangedTicks |> String.fromInt)
                 ++ " | unlock "
                 ++ (context.memory.targetToUnlockUnchangedTicks |> String.fromInt)
-                ++ " | loot "
-                ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
+                ++ " | "
+                ++ describeLootWindowStandoff
+                    { readingsOpen = context.memory.lootWindowOpenTicks
+                    , lootWindowOpen =
+                        readingFromGameClient
+                            |> wreckLootWindowsFromReadingFromGameClient
+                            |> List.isEmpty
+                            |> not
+                    }
                 ++ " | dead-end "
                 ++ (if context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace then
                         "yes"
@@ -11511,7 +11573,7 @@ this (same gap noted at the "Loot All" text-search call site), and
 `readingFromGameClient.inventoryWindows |> List.head` used to just grab
 the window unconditionally -- since it's _always_ present, that meant the
 looting logic thought a wreck was open even when nothing had ever been
-opened at all, forcing it to Ctrl+W-close a window the player never
+opened at all, forcing it to force-close a window the player never
 wanted closed (stuck 650+ seconds live with zero rats and zero commander
 wrecks anywhere in the overview).
 
@@ -11543,6 +11605,194 @@ wreckLootWindowsFromReadingFromGameClient : ReadingFromGameClient -> List EveOnl
 wreckLootWindowsFromReadingFromGameClient readingFromGameClient =
     readingFromGameClient.inventoryWindows
         |> List.filter (.uiNode >> findUiElementWithText "Loot All" >> (/=) Nothing)
+
+
+{-| Readings a loot window gets to close through its own controls before the
+escalation starts.
+
+Above the whole recorded distribution of windows that closed, rather than a
+number picked to feel patient: across the recorded saxrat runs that carry the
+`loot N` status counter, every stretch with a loot window in the reading peaks
+at exactly 2 and there are no others, so a window still open on the third
+reading is one that outlasted every close this corpus has ever watched work.
+
+-}
+lootWindowOwnControlsReadings : Int
+lootWindowOwnControlsReadings =
+    2
+
+
+{-| Readings a loot window gets the window's own **Close** control before the
+keystroke is tried.
+
+The mission runner reached this rung and this bot never could -- see
+`lootWindowCloseRung`. Three times the rung above, so a Close control the client
+draws gets several clicks before anything else is tried.
+
+-}
+lootWindowCloseControlReadings : Int
+lootWindowCloseControlReadings =
+    lootWindowOwnControlsReadings * 3
+
+
+{-| Readings a loot window is worked at all before the bot leaves it open and
+gets on with the rest of the tree.
+
+Written as a multiple so the argument cannot drift away from the number: eight
+times the rung that closes every loot window the corpus records closing. That
+is enough for several clicks on the Close control and several `Alt+C` presses at
+the settling window below, and it sits under the shortest escalation any
+recorded run ever ran -- the five saxrat runs that reached the force-close spent
+2, 3, 23, 29 and 303 consecutive readings in it, none of them closing anything.
+The recorded `loot N` peaks are 1, 2 and 301 and nothing lies between, so this
+is placed in a gap rather than cut through a distribution.
+
+-}
+lootWindowForceCloseGiveUpReadings : Int
+lootWindowForceCloseGiveUpReadings =
+    lootWindowOwnControlsReadings * 8
+
+
+{-| What to do about a loot window that is in this reading.
+-}
+type LootWindowCloseRung
+    = UseTheWindowsOwnControls
+    | ClickTheWindowsCloseControl
+    | PressTheInventoryToggle
+    | LeaveTheLootWindowAlone
+
+
+{-| The ladder over a loot window, and the bound on it.
+
+`readingsOpen` is `BotMemory.lootWindowOpenTicks`, which is derived from the
+window being in the reading rather than accumulated across windows -- it is
+zero on any reading with no wreck loot window in it. So a close that lands ends
+the escalation by itself and the next wreck starts from the first rung, which
+is why nothing here has to be reset on success.
+
+The rungs, in order:
+
+  - "Loot All", the window's own control for the thing the window is open to do,
+    for `lootWindowOwnControlsReadings` readings;
+  - the window's own **Close** control, to
+    `lootWindowCloseControlReadings`. **This bot could never reach that click**,
+    and that is a defect of its own rather than a rung being added for symmetry:
+    `wreckLootWindowsFromReadingFromGameClient` selects a window _by_ its
+    carrying "Loot All", and the close-button lookup sat under a `Nothing`
+    branch of a second lookup for that same text on the same node -- so it, and
+    the `askForHelpToGetUnstuck` under it, were unreachable by construction. The
+    mission runner reached the equivalent click and its comment records what
+    happened: "Confirmed live on a window that had been stuck open for hours:
+    Ctrl+W alone left it open, clicking its title bar first then Ctrl+W closed
+    it, and clicking Close closed it with no focus step at all";
+  - `Alt+C`, EVE's inventory toggle, which needs no focus. This replaces
+    `Ctrl+W`, which is the client's _close the active window_ and therefore
+    needs the window focused: measured live on 2026-08-16 at an escalation room
+    in Uchat, 919 `force it shut (Ctrl+W)` decision lines across 303 readings
+    closed nothing at all, and one `Alt+C` pressed by hand at the same client
+    took the tree from `['InventoryPrimary']` to `[]`. That is the second
+    recorded instance of the same keystroke failing the same way; `CLAUDE.md`
+    had the first, and the mission runner acted on it while this bot did not.
+    It is also what a reading with no Close control in it falls to, so a window
+    the parser cannot find controls on is not a reading spent waiting;
+  - then nothing. Past `lootWindowForceCloseGiveUpReadings` the branch stands
+    aside and the caller goes on looting the next wreck or leaves the grid, with
+    the window still on the screen. A loot window nobody can close is worth
+    strictly less than a bot that goes on ratting, which is
+    `closeMessageBox`'s own answer to the same shape.
+
+`togglePressedRecently` is the settling window, and it falls back to the rung
+below rather than to a wait: `Alt+C` is a _toggle_, so pressing it again before
+the client has shown the result re-opens what the last press closed --
+`moduleButtonClickSettlingSteps`' problem, at a window rather than at a module
+button. The live measurement says the propagation is not instant, so a press
+per reading is a press into an answer that has not arrived.
+
+-}
+lootWindowCloseRung :
+    { readingsOpen : Int
+    , closeControlIsInTheReading : Bool
+    , togglePressedRecently : Bool
+    }
+    -> LootWindowCloseRung
+lootWindowCloseRung { readingsOpen, closeControlIsInTheReading, togglePressedRecently } =
+    if readingsOpen > lootWindowForceCloseGiveUpReadings then
+        LeaveTheLootWindowAlone
+
+    else if readingsOpen <= lootWindowOwnControlsReadings then
+        UseTheWindowsOwnControls
+
+    else if readingsOpen <= lootWindowCloseControlReadings && closeControlIsInTheReading then
+        ClickTheWindowsCloseControl
+
+    else if togglePressedRecently then
+        UseTheWindowsOwnControls
+
+    else
+        PressTheInventoryToggle
+
+
+{-| The `Alt+C` chord, built the way every other modifier chord in this app is.
+
+`cg_input` stamps each posted event with the modifiers _this process_ is
+holding, which is what PR #241 fixed -- so the modifier has to be pressed and
+released as its own effect rather than assumed, exactly as `Alt+F1` does for
+the propulsion module. `vkey_MENU` maps to Option and `vkey_C` to `C` in the
+host's own `_VK_TO_CGKEYCODE`.
+
+-}
+pressInventoryToggleEffects : List EffectOnWindow.EffectOnWindowStruct
+pressInventoryToggleEffects =
+    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_MENU
+    , EffectOnWindow.KeyDown EffectOnWindow.vkey_C
+    , EffectOnWindow.KeyUp EffectOnWindow.vkey_C
+    , EffectOnWindow.KeyUp EffectOnWindow.vkey_MENU
+    ]
+
+
+{-| Both KeyDowns, so this cannot be satisfied by the plain `C` of some other
+chord or by the `Alt` of `Alt+F1` -- `doEffectsDeactivatePropulsionModule`'s
+arrangement, for its reason.
+-}
+doEffectsPressInventoryToggle : List EffectOnWindow.EffectOnWindowStruct -> Bool
+doEffectsPressInventoryToggle effects =
+    doEffectsPressKey EffectOnWindow.vkey_MENU effects
+        && doEffectsPressKey EffectOnWindow.vkey_C effects
+
+
+{-| What the status line says about a loot window, on every reading one is open.
+
+The decision line goes away on the reading the branch stands aside -- that is
+what standing aside means -- so this is the only thing on a later reading that
+says a window is still there and is being left alone. `describeMessageBoxStandoff`'s
+mechanism, for its reason.
+
+-}
+describeLootWindowStandoff : { readingsOpen : Int, lootWindowOpen : Bool } -> String
+describeLootWindowStandoff { readingsOpen, lootWindowOpen } =
+    if not lootWindowOpen then
+        "loot 0"
+
+    else
+        "loot "
+            ++ String.fromInt readingsOpen
+            ++ "/"
+            ++ String.fromInt lootWindowForceCloseGiveUpReadings
+            ++ (if readingsOpen > lootWindowForceCloseGiveUpReadings then
+                    " (GIVEN UP ON, still open)"
+
+                else if readingsOpen > lootWindowCloseControlReadings then
+                    " (pressing Alt+C at it)"
+
+                else if readingsOpen > lootWindowOwnControlsReadings then
+                    -- Both, because the count is all this clause has: which of
+                    -- the two the reading takes turns on whether the parser
+                    -- found a Close control on it, and that is not a number.
+                    " (clicking its Close control, or Alt+C if it has none)"
+
+                else
+                    ""
+               )
 
 
 {-| Whether a row is loot rather than something to shoot.

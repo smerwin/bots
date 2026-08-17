@@ -922,12 +922,36 @@ producing an endless open/close flap that looks like hard failure.
 **In-game hotkeys, preferred over a cascade wherever one exists** (this account's
 bindings): `Shift+F` launches drones, `F` engages the current target, `Shift+R`
 recalls, `Alt+F1` toggles the propulsion module, `F1`–`F4` are weapon slots 1-4,
-`Ctrl+W` closes the active window — all confirmed live. `Alt+C` for the inventory
-is EVE's default and is used by the courier-pickup path, but has not yet fired in
-a real run.
+`Alt+C` toggles the inventory — all confirmed live.
 A keypress is one effect where a cascade is a multi-tick right-click → hover →
 click with its own retry logic. Note `Alt+F1` is a *toggle*, not a "deactivate" —
-press it only when the module reads active.
+press it only when the module reads active, and the same is true of `Alt+C`.
+
+**`Ctrl+W` needs the window focused and `Alt+C` does not**, which is the whole
+of why two versions of the loot-window escape pressed the first at a window
+nobody had focused and closed nothing. `Ctrl+W` is the client's *close the
+active window*; the bot never focuses the window it is trying to shut, so the
+key goes to whatever is active instead. Measured twice, a year apart, on the
+same branch: 650 presses in one run closing nothing, then **919 decision lines
+across 303 readings** at an escalation room in Uchat on 2026-08-16
+(`saxrat_uchat_escalation_2026-08-16.log`), again closing nothing, with the
+bot's own `lootWindowOpenTicks` reaching **301** and 302 of those 303 readings
+carrying no other decision at all.
+
+**`Alt+C` closes it and needs no focus**, read off the stuck client either side
+of one press by hand — `windows before: ['InventoryPrimary']`, `pressed Alt-C`,
+`windows after : []` — after which the Ctrl+W count froze and the bot took an
+acceleration gate and engaged the next room. `lootWindowCloseRung` presses that
+instead, and it is a **toggle**, so it may only be pressed at a reading that
+already carries the window and only with a settling window between presses:
+pressed at no inventory it *opens* one, which would manufacture the very window
+the branch exists to remove.
+
+The first of those two measurements was written down here and never acted on,
+and it is why this paragraph now records the mechanism rather than the symptom:
+a finding kept as prose that no test executes is how one survived a year and
+became two. What executes it is
+`tools/macos-host/tests/test_saxrat_loot_window_close.py`.
 
 **Window resolution must pick the largest window by area** for a pid, not the
 first over a width threshold: a fullscreen game window has a smaller same-width
@@ -2512,11 +2536,14 @@ in succession, so the real separation is wider still.
 confirmed live as the client's own "close the active window". Escape is what
 this codebase already escalates with — `beginCascade` presses it rather than
 right-clicking a computed empty point, `clearStrayContextMenu` presses it at a
-menu that has not advanced in three ticks — and it needs no focus. Ctrl+W does:
-`lootWindowRefusesToCloseTicks` records a version that pressed it at an
-unfocused window 650 times in one run and closed nothing, and the live recovery
-needed the title bar clicked first. Clicking an unidentified modal to focus it
-is a click into a dialog nobody has read. A naked Escape can open the client's
+menu that has not advanced in three ticks — and it needs no focus. Ctrl+W does,
+and the loot-window escape is where that has been paid for twice: it pressed
+Ctrl+W at a window nobody had focused, 650 times in one run and 919 decision
+lines in another, closing nothing either time (see "In-game hotkeys" above,
+and `lootWindowCloseRung` for what it presses now). Clicking an unidentified
+modal to focus it is a click into a dialog nobody has read — and the loot
+window's own recovery says a focus click is not what was missing anyway, since
+one unfocused `Alt+C` shut it. A naked Escape can open the client's
 own pause menu — `closeSystemSettingsMenu` records that happening live from
 exactly this key — and that is covered rather than risked, since that branch is
 the entry *before* this one in the same list.
@@ -6286,11 +6313,15 @@ by reading it".
 
 **One premise of the mission runner's is not true here and is not relied on.**
 Its `lockClickLocationFromStepEffects` argues that the lock chord "is the only
-place in this bot that presses Ctrl without Shift". saxrat presses Ctrl in three
-places: the lock, `ctrlShiftClickUiElement` (which holds Shift too), and the loot
-window's Ctrl+W. The third has no mouse effect at all, so there is no
-`MouseMoveTo` for the rule to take — both conditions are load-bearing here where
-one was there, and a case asks each of the three.
+place in this bot that presses Ctrl without Shift". saxrat pressed Ctrl in three
+places when this was written: the lock, `ctrlShiftClickUiElement` (which holds
+Shift too), and the loot window's Ctrl+W. The third has no mouse effect at all,
+so there was no `MouseMoveTo` for the rule to take — both conditions are
+load-bearing here where one was there. **The loot window presses Alt+C now**, so
+that third case is a chord this bot no longer builds; the case still asks about
+it, because what has to stay true of the rule is that a keys-only chord yields
+no location whether or not any branch still emits one, and it asks about Alt+C
+beside it.
 
 **What the refusal costs more of here.** Only the first lock of an engagement can
 ever teach a refusal, because the evidence needs the target bar empty at both
@@ -8280,6 +8311,148 @@ to another in the same session and none occurs more than twice, which is not
 what a channel duplicating its own output looks like — but nobody has counted
 rats on a grid and compared.
 
+### The loot window's escape pressed a key that needs focus, and pressed it forever
+
+Issue #285, and it is the second recorded instance of one defect.
+`decisionIfNoEnemyToAttack`'s loot-window escape fired at
+`lootWindowOpenTicks > 2` and pressed **Ctrl+W** at a window it had never
+focused — with **no upper bound**, so once the trigger was crossed it was the
+only thing the bot did for as long as the window stayed in the reading.
+Measured live on 2026-08-16, an escalation room in Uchat with the site cleared:
+**919** `force it shut (Ctrl+W)` decision lines and **zero** windows closed.
+`Alt+C` pressed by hand at the same client shut it — `['InventoryPrimary']`
+before, `[]` after — the Ctrl+W count froze, and the bot went on to take an
+acceleration gate.
+
+**The run is `saxrat_uchat_escalation_2026-08-16.log` and it is on this Mac**,
+which matters because the first pass at this measurement globbed
+`saxrat_run*.log`, missed the incident entirely, and reported a clean corpus.
+Recounted from it: the 919 lines fall on **303** readings at three lines a
+reading, the bot's own `lootWindowOpenTicks` peaks at **301**, and 302 of those
+303 readings carry no decision but this one. The issue's own "roughly 190
+readings" is an estimate off the line count and understates the episode by half.
+
+**Both halves are fixed and the second one is the more important.** Swapping the
+keystroke alone would leave the branch unbounded, and a *working* keystroke that
+fails for some other reason takes every reading forever exactly as the broken
+one did. This is the family PR #257 (a step on a hot path that could act forever
+without progressing, 108 minutes) and PR #272 (8,770 readings at a branch that
+asked "bounce?" and never bounced) are already in.
+
+**The click this bot could never reach.** Found while writing the ladder, and it
+is why the mission runner never had this incident:
+`wreckLootWindowsFromReadingFromGameClient` selects a window **by** its carrying
+"Loot All", and the close-button lookup sat under the `Nothing` branch of a
+second lookup for that same text on the same node — so the Close click, and the
+`askForHelpToGetUnstuck` beneath it, were unreachable by construction. The
+escalation was therefore the only thing after "Loot All". The mission runner
+reached the equivalent click and its own comment records what happened:
+*"Confirmed live on a window that had been stuck open for hours: Ctrl+W alone
+left it open, clicking its title bar first then Ctrl+W closed it, and clicking
+Close closed it with no focus step at all."* That bot also bounds the wait, at
+`lootWindowRefusesToCloseTicks` (30). **So the finding was acted on in one bot
+and not the other**, which is the sharper version of "recorded and never acted
+on".
+
+**The ladder, and what the bound falls through to.** `lootWindowCloseRung` is a
+pure rule over `{ readingsOpen, closeControlIsInTheReading, togglePressedRecently }`:
+
+  - up to `lootWindowOwnControlsReadings` (2), "Loot All" — the control for the
+    thing the window is open to do;
+  - to `lootWindowCloseControlReadings` (6), the window's own **Close** control,
+    where the reading carries one;
+  - past that, or on any reading whose controls the parser cannot find, `Alt+C`;
+  - past `lootWindowForceCloseGiveUpReadings` (16), **nothing**: the branch says
+    so once and hands the reading to `lootAnotherWreckOrLeaveTheGrid`, which is
+    the same expression the no-loot-window case takes. On the reading the bound
+    expires and on every reading after, the bot opens the next notable wreck,
+    scrolls one into view, or leaves the grid — it acts, and it never returns
+    to the loot window while that window stays open. A loot window nobody can
+    close is worth strictly less than a bot that goes on ratting, which is
+    `closeMessageBox`'s own answer to the same shape.
+
+**`> 2` is the right trigger and nothing has to be reset on a close**, both
+measured rather than kept. `lootWindowOpenTicks` is derived from the window
+being *in the reading* — zero on any reading with no wreck loot window — so a
+close that lands ends the escalation by itself and the next wreck starts from
+the first rung. And every stretch the counter records in a run where the window
+closed peaks at exactly **2** (ten of them across five runs, plus one of 1 in
+the incident run after the window was shut by hand), so the trigger sits above
+the whole recorded distribution of closes that worked.
+
+**16 is a multiple rather than a number**, eight times that rung, and it is
+placed in a gap rather than cut through a distribution — the recorded peaks are
+1, 2 and **301**, and nothing lies between. It is enough for several clicks on
+the Close control and several presses at the settling window, and under the
+shortest escalation any recorded run ran: the five saxrat runs that ever reached
+the force-close spent **2, 3, 23, 29 and 303** consecutive readings in it and
+closed nothing in any of them.
+
+**Alt+C is a toggle, so the press is conditioned twice.** It is only reachable
+from a reading that already carries the window — pressed at no inventory it
+*opens* one, manufacturing the window the branch exists to remove — and it gets
+`moduleButtonClickSettlingSteps`' window between presses, because pressing a
+toggle before the client has shown the result re-opens what the last press
+closed. The live measurement says the propagation is not instant. The settle
+falls through to a rung that *clicks something* rather than to a wait — "Loot
+All" — and it does not displace the Close control, since it is the keystroke
+being settled for and not the mouse.
+
+**No focus click, and that is a conclusion rather than an omission.** The
+earlier recovery needed a title bar clicked because the key being pressed was
+Ctrl+W; Alt+C needs no focus and was verified unfocused. The two rungs below
+already click *into* the window, so if focus were what was missing those clicks
+would have supplied it, and clicking a window at a computed point is what
+`beginCascade` records costing a real route an accidental "Clear All Waypoints".
+
+**The chord is built the way the fixed input path expects.** `Alt+C` is
+`KeyDown vkey_MENU, KeyDown vkey_C, KeyUp vkey_C, KeyUp vkey_MENU` — the shape
+`Alt+F1` already uses in this file — because `cg_input` stamps each posted event
+with the modifiers *this process is holding*, which is PR #241's fix. Checked
+against the host rather than assumed: `vkey_MENU` (0x12) maps to Option and
+`vkey_C` (0x43) to `C` in `_VK_TO_CGKEYCODE`, and `cgi_flag_for_key` holds
+`CGI_FLAG_OPTION | CGI_DEVICE_LOPTION` for Option in both halves, so the `C`
+keydown that follows carries it.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_loot_window_close.py`. The rung, the chord's
+round trip and the status clause are executed through the real `Bot.elm` in
+`elm repl`, and the readings the branch is asked about are built by the **real**
+`EveOnline.ParseUserInterface` — so what `wreckLootWindowsFromReadingFromGameClient`
+matches is the parser's own answer rather than a hand-written record. The
+counter is folded over whole sessions rather than asked once, so "a close resets
+it" is run rather than read. The corpus is recounted as *relations* — every
+recorded stretch that closed is at or below the first rung, the runs that
+reached the escalation spent many times that in it, and the decision lines
+outnumber the readings — so a growing corpus cannot turn a true claim red.
+
+**Unverified: any of it running.** No run has been flown since. Whether `Alt+C`
+closes a *genuinely separate* loot or secondary window is not established: what
+closed by hand was `InventoryPrimary`, and the stuck tree held only that node and no
+`LootWindow`, so `wreckLootWindowsFromReadingFromGameClient` was matching the
+primary inventory. That is the case the branch is nominally about, and the
+bound is what covers it being wrong. What to watch on the first run that meets
+one: `loot N/16` in the status line climbing at all — on a healthy run it
+appears at 1 or 2 and vanishes — then the Close-control line, then
+`(pressing Alt+C at it)` for a reading or two, then the clause gone.
+`(GIVEN UP ON, still open)` standing while ordinary decisions resume is the
+bound doing its job; the same clause on a run where windows are closing normally
+would mean the settle is swallowing the presses. **The Close click has never
+run on this bot at all** — it was unreachable until now — so a run that reaches
+`loot 3/16` and prints `click its own Close control` is the first evidence
+anyone will have of it here.
+
+**How often that control is findable at all is the other open question.** saxrat
+asks `parseWindowControlsFromWindow |> .closeButton`, a texture match, where the
+mission runner keeps a second question beside it — a descendant whose `_name` is
+`CloseButtonIcon` — and records why: before that parser learned this client's
+`system_icons/close_16px`, "across 112 logged runs the loot window's own close
+arm matched it zero times and missed 77". saxrat's vendored parser does carry
+the macOS texture, so the standard parse should work here, but nothing has
+watched it. The failure direction is the safe one — a reading with no control
+found goes straight to `Alt+C` rather than waiting — and porting
+`closeControlOfWindow`'s fallback is the follow-up.
+
 ### An in-range acceleration gate is opened from the panel here too
 
 Issue #145 is `activateGateOnOverviewEntry` in `eve-online-saxrat`: an in-range
@@ -9970,6 +10143,29 @@ exists.
   whole run on one line, and the repetition ended where it was made" above.
   **Untested against a live client**; watch `N kills` climbing while rats die,
   and escalate on a run that fights and reads `no kill log` throughout.
+
+  And since #285 its **loot-window escape presses a key that works, and stops
+  pressing it**. It pressed `Ctrl+W` — the client's *close the active window* —
+  at a window it had never focused, with no upper bound, so once
+  `lootWindowOpenTicks > 2` that was the only thing the bot did for as long as
+  the window stayed in the reading: 919 decision lines across **303** readings
+  and zero windows closed, measured live, and the **second** recorded instance
+  of the same defect after the 650 this file already carried.
+  `Alt+C` is the inventory toggle and needs no focus, and one press by hand shut
+  the stuck window. Both halves are fixed: the keystroke, and a bound at sixteen
+  readings after which the branch says so once and hands the reading to the same
+  wreck path the no-loot-window case takes — open the next wreck, scroll one
+  into view, or leave the grid — with the window still on the screen. A third
+  thing came out of it: the window's own **Close** control, which this bot could
+  never click, because the lookup for it sat under a `Nothing` branch of a test
+  for the very text the window is selected by. That click is the mission
+  runner's own answer to this defect and is now a rung of its own. See "The loot
+  window's escape pressed a key that needs focus, and pressed it forever" above,
+  including why no focus click is kept, why the trigger and the reset are left
+  as they are, and the recount that puts the incident at 303 readings rather
+  than the issue's 190. **Untested against a live client**; watch `loot N/16` in
+  the status line, `(pressing Alt+C at it)` for a reading or two, and then the
+  clause gone.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and
