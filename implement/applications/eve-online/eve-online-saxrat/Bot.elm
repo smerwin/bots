@@ -193,6 +193,7 @@ defaultBotSettings =
     -- much, where `hitpointsPercent` is a float scraped out of a widget the
     -- client is concurrently mutating.
     , runAwayIncomingDamageThreshold = defaultRunAwayIncomingDamageThreshold
+    , escalationMinimumSecurity = defaultEscalationMinimumSecurity
 
     -- No circuit by default, which is what keeps this change free for an
     -- existing settings string: with no `hunt-system` the bot never asks for a
@@ -274,6 +275,12 @@ parseBotSettings =
            )
          , ( "run-away-incoming-damage-threshold"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayIncomingDamageThreshold = threshold })
+           )
+         , ( "escalation-minimum-security"
+           , AppSettings.valueTypeInteger
+                (\tenths settings ->
+                    { settings | escalationMinimumSecurity = toFloat tenths / 10 }
+                )
            )
          , ( "anomaly-name"
            , AppSettings.valueTypeString
@@ -514,6 +521,7 @@ type alias BotSettings =
     , warpAt : Int
     , targetingRangeMeters : Int
     , runAwayIncomingDamageThreshold : Int
+    , escalationMinimumSecurity : Float
     , huntSystemNames : List String
     , homeSystemName : Maybe String
     , shortRangeAmmoName : Maybe String
@@ -1604,6 +1612,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                                                             -- tether/dock) pick it up once genuinely
                                                             -- in space.
                                                             && (context.readingFromGameClient
+                                                                    |> escalationEntriesPermitted context.eventContext.botSettings
                                                                     |> warpToOpportunitySiteIfAvailable
                                                                     |> (==) Nothing
                                                                )
@@ -2833,6 +2842,72 @@ huntingGroundAtIndex botSettings index =
         huntSystemAtIndex botSettings index
 
 
+{-| Whether an escalation's destination is somewhere this bot may be sent.
+
+The client writes the security status of the trip's end on the objective
+chain's progress bar -- `0.6 Andabiar` -- and until it was lifted into
+`OpportunityDestination` nothing read it. What that cost: an escalation
+fourteen jumps into `0.3 Arodan` sat in the queue from the first minute of the
+session, the bot eventually took it, and the ship was killed there by a pilot
+with nineteen thousand kills and a 94% efficiency. Eleven million ISK of
+escalation loot went with it. Everything the bot has is calibrated against
+rats -- `isObjectShootingAtUs` would have added that Succubus to the _target
+list_ -- so the only defence available is not to go.
+
+**An unreadable security refuses the trip.** `Nothing` from the parser is the
+client not saying, and this is the one place in this file where absent must
+read as dangerous rather than as unknown-so-carry-on: the cost of declining an
+escalation is some ISK, and the cost of accepting one that turns out to be
+lowsec is the hull, the loot and the implants. `loadRefusalFromGameLog`'s
+register inverted, deliberately, and said out loud because the rest of the file
+argues the other way.
+
+-}
+escalationDestinationIsPermitted : BotSettings -> EveOnline.ParseUserInterface.OpportunityInfoPanelEntry -> Bool
+escalationDestinationIsPermitted botSettings entry =
+    entry.destination
+        |> Maybe.andThen .security
+        |> securityIsPermitted botSettings.escalationMinimumSecurity
+
+
+{-| The reading with escalations this bot may not be sent to removed.
+
+Applied to the _reading_ rather than pushed into `opportunityTravelStep`,
+because that function is asked about by some ninety-five existing cases and
+widening its signature would have rewritten every one of them to prove
+something none of them is about. Narrowing the entries first says the same
+thing and leaves "what is the tracker offering" a question anybody can still
+ask without a settings record.
+
+-}
+escalationEntriesPermitted : BotSettings -> ReadingFromGameClient -> ReadingFromGameClient
+escalationEntriesPermitted botSettings readingFromGameClient =
+    { readingFromGameClient
+        | opportunityInfoPanelEntries =
+            readingFromGameClient.opportunityInfoPanelEntries
+                |> List.filter (escalationDestinationIsPermitted botSettings)
+    }
+
+
+{-| The decision itself, over the two numbers, so a case can run it.
+
+Split out from `escalationDestinationIsPermitted` because that one takes a
+parsed panel entry and a whole settings record, and a rule reachable only
+through those is a rule checked by reading rather than by running -- which is
+what #106 records the cost of, and what let the first version of the
+destination parse ship reading `8 jumps` as a security status.
+
+-}
+securityIsPermitted : Float -> Maybe Float -> Bool
+securityIsPermitted minimumSecurity security =
+    case security of
+        Just value ->
+            value >= minimumSecurity
+
+        Nothing ->
+            False
+
+
 {-| Whether the Opportunities tracker is working an escalation on this reading.
 
 **The tracker holding an escalation is something having said where to go**, which
@@ -2873,6 +2948,15 @@ saxrat runs that reached space, the scanner is open on 160,171 in-space readings
 against 1,862 shut -- 1.15% -- and 36 of the 53 never shut it once, so this reads
 the same switch #260 does and fires in the same 1% of readings. If that gate is
 ever dropped, this clause has to be looked at with it.
+
+**Gated on the same permission as the travel step, and that is the whole
+point.** #291 is what an escalation the bot can see and cannot act on costs:
+the stand-down held every dry grid for forty readings waiting for a step that
+never came, 234 times in three hours. Refusing a lowsec destination in
+`opportunityTravelStep` alone would rebuild exactly that -- the bot would stand
+down for an escalation it had already decided never to travel to. So both
+readers ask the same question, and an escalation below the threshold is simply
+not an escalation as far as this bot is concerned.
 
 -}
 escalationIsBeingWorked : ReadingFromGameClient -> Bool
@@ -3046,7 +3130,9 @@ setRouteToNextHuntingGround : BotDecisionContext -> DecisionPathNode
 setRouteToNextHuntingGround context =
     case
         huntCircuitStep
-            { escalationIsBeingWorked = escalationIsBeingWorked context.readingFromGameClient
+            { escalationIsBeingWorked =
+                escalationIsBeingWorked
+                    (escalationEntriesPermitted context.eventContext.botSettings context.readingFromGameClient)
             , standDownReadings = context.memory.escalationStandDownReadings
             , routeSettingGivenUp = context.memory.routeSettingGivenUp
             , nextHuntingGround = nextHuntingGround context
@@ -3892,6 +3978,32 @@ not about the game**.
 defaultRunAwayIncomingDamageThreshold : Int
 defaultRunAwayIncomingDamageThreshold =
     3500
+
+
+{-| The lowest security status an escalation may send this bot to.
+
+**0.5 is the empire line**, not a tuning parameter: at 0.5 and above CONCORD
+answers an aggression, and below it nobody does. That is the whole of the
+argument, which is why this is a constant with a name rather than a number
+somebody picked -- every guard in this file is calibrated against rats, and
+below 0.5 the thing that kills this ship is not a rat.
+
+Paid for once. An escalation fourteen jumps into `0.3 Arodan` was in the queue
+from the first minute of a session; the bot took it, and the ship was killed
+there by a pilot with 19,739 kills and 94% efficiency, flying a Succubus --
+warp scrambled, so the retreat could not have worked either. Eleven million ISK
+of escalation loot went with the hull.
+
+`escalation-minimum-security` overrides it, in **tenths**, because
+`AppSettings` has no float reader and inventing one for this is more surface
+than the setting is worth: `escalation-minimum-security=5` is 0.5, `=0` allows
+anything including nullsec. An operator who wants the bot in lowsec has to say
+so in a number.
+
+-}
+defaultEscalationMinimumSecurity : Float
+defaultEscalationMinimumSecurity =
+    0.5
 
 
 incomingDamageSampleLimit : Int
@@ -13011,10 +13123,12 @@ siteProgressStepOrElse context ifNeither =
             activateAccelerationGateIfPresent context
 
         opportunityWarpStep =
-            warpToOpportunitySiteIfAvailable context.readingFromGameClient
+            warpToOpportunitySiteIfAvailable
+                (escalationEntriesPermitted context.eventContext.botSettings context.readingFromGameClient)
 
         arrivalIsOffered =
-            opportunityTravelStep context.readingFromGameClient
+            opportunityTravelStep
+                (escalationEntriesPermitted context.eventContext.botSettings context.readingFromGameClient)
                 |> Maybe.map (.label >> opportunityLabelArrivesAtTheSite)
                 |> Maybe.withDefault False
     in
@@ -13940,7 +14054,9 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             -- would hold again -- a duty cycle of forty held readings and one
             -- ask, forever, rather than a give-up. That is `gunsSilencedTicks`
             -- pinned at 1 by a reset the thing it was waiting on could trigger.
-            standingInADeadEnd && escalationIsBeingWorked context.readingFromGameClient
+            standingInADeadEnd
+                && escalationIsBeingWorked
+                    (escalationEntriesPermitted context.botSettings context.readingFromGameClient)
 
         standingDownForAnEscalationNow =
             -- The reading the decision holds the grid on, re-derived here
