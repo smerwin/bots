@@ -10852,11 +10852,24 @@ ammoSwapDisarmCaseForStatus context =
 
 {-| Does the client say this module is switched off?
 
-`isInActiveState` is the entry that means switched on, measured rather than
-assumed: across the 92 samples of #35's 240 s window it held `True` on all four
-modules while `ramp_active` oscillated fourteen times underneath it, so
-`ramp_active` is the duty cycle and this is the state. `isActive`, which reads
+**`isInActiveState` is not the toggle, and #286 is the measurement.** Over every
+log carrying `describeTopRowModuleDictState` -- 34 runs, 55,921 readings, 61,948
+module observations -- it is the exact complement of `isDeactivating`, with no
+exceptions at all, and the two are separate dictionary keys read by separate
+`Dict.get`s. So `Just False` means _this module is in the act of shutting down_,
+not that it is off: on the 20,095 observations where `ramp_active` is absent from
+the tree entirely -- the ramp widget does not exist, so the module is not running
+-- this entry reads `True` on 100% of them. `isActive`, which reads
 `ramp_active`, is what #34 hung on, and nothing here reads it.
+
+What that costs **this** predicate is bounded, which is why #286 left it alone.
+`Just False` really is the client saying the switch-off landed, so this is a
+sound _positive_ signal; what it cannot say is that a switch-off did not land,
+because the transient is short -- median two readings, longest seven -- and a
+reading that misses it is indistinguishable from a click that never arrived.
+That is the shape of `none has yet read switched off`. See CLAUDE.md,
+"`isInActiveState` is not the toggle; it is the deactivation transient", before
+repointing anything here.
 
 **Three answers, not two.** An entry that did not decode is `Nothing`, and a
 module that says nothing about itself is not a module saying it is off -- that
@@ -10898,10 +10911,28 @@ were a drone launch, an overview click, and the swap's own right-click; not one
 was a press of the button. See CLAUDE.md's "The switch-off does not hold" for
 the columns and the dispatched effects beside them.
 
-So the client re-arms the gun by itself, on every swap, one to three readings
-after the switch-off lands. A rule that abandons on that is not detecting a
-pathology -- it is a guarantee that no swap can ever finish, which is what
-runs 11 and 18 both did.
+A rule that abandons on that is not detecting a pathology -- it is a guarantee
+that no swap can ever finish, which is what runs 11 and 18 both did.
+
+**What that paragraph concluded next -- that the client re-arms the gun by
+itself, on every swap -- is measured false, and this predicate is where it
+enters.** #286: over the 35 windows in which this latch has ever been set, across
+eight runs and both bots, the client's combat log records **zero** gun lines and
+`ramp_active` reads `True` on **zero** of the 191 readings -- against 0.177 gun
+lines a reading and 37.7% `ramp_active` in the ten readings before the swap
+started, and 0.224 and 40.6% in the ten after the window cleared. 146 _drone_
+lines were written inside those same windows, so the channel was live and the
+guns contributed none of it. The gun was switched off, stayed off, and
+`isInActiveState` came back to `True` because the deactivation _finished_ (see
+`moduleReadsSwitchedOff`). The dispatched effects above are the corroboration
+rather than the mystery: nothing pressed the button because nothing needed to.
+
+Nothing is changed on that measurement, deliberately: what this latch does is
+make `ammoSwapDisarmEndsTheSession` decline, and repointing it is a behaviour
+change on the path that disarms the ship. What it means today is that the guard
+which exists because _a disarmed ship is worse than the wrong charge_ is stood
+down by a report of guns that did not come back. CLAUDE.md carries the argument
+and the numbers.
 
 **What replaces abandoning is nothing**, and the invariant is what makes that
 safe rather than merely permissive. This predicate is true exactly when the guns
@@ -11471,10 +11502,18 @@ because `Just True` is not evidence the gun is _working_: run 11 and run 18 both
 show a weapon firing nothing at all while reading `True`, every outgoing combat
 line in those windows belonging to a drone. Nothing here claims otherwise. The
 question this function asks is not whether the gun is doing its job but whether
-its toggle is on, which is what the entry measurably means and is exactly the
-condition the client's own refusal names: `while it is active`. Treating
-`Just True` as "the guns are working" would be #12 and #34 a third time; treating
-it as "the toggle is on" is what #35 measured it to be.
+its toggle is on -- and **the entry does not answer that either.** #286 measured
+it to be `not isDeactivating`, which is true on 99.7% of every module observation
+in the corpus, so this predicate is close to a constant. What that costs is an
+entry gate that opens on a ship whose guns are idle, and a switch-off pressed at
+a module that may already be off -- and the button is a toggle, so such a press
+turns it **on**. That last step is a mechanism rather than an observation: the
+fight presses the weapon hotkey on the same readings, and no log attributes a
+cycle to one of the two. Not repointed here: see `moduleReadsSwitchedOff` and
+CLAUDE.md.
+What the entry still is not is the duty cycle, which is the whole of what #76
+fixed, and treating `Just True` as "the guns are working" would be #12 and #34 a
+third time.
 
 **`Nothing` is not `False`.** An entry that did not decode answers `False` here,
 as it did before, so a build that does not carry it behaves exactly as it does
