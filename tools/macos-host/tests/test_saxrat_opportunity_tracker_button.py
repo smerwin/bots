@@ -32,6 +32,18 @@ failure:
     available rather than removing them, and run 14 on the other bot sat docked
     for 750 readings because a rule could not see the one that was.
 
+**#280: the tracker draws two task rows and the type-name prefix reached one.**
+The chain's `task_container_travel_to_location` row carries `Set Destination` and
+`Jump` on a `TravelToLocationButtonTask...` widget; the row that gets the ship
+*into* the site carries `Warp to Site` on a `TravelStateButtonTaskWidget`, which
+does not start with that prefix, so `travelButton` was `Nothing` for it on every
+reading while the client drew the button. The selector is a union now -- the same
+prefix, plus the client's own `_name` for each of the two objective tasks -- and
+`TheEnteringRowIsReadToo` is where the cases that fail against the unchanged
+parser live. `TheSelectorIsReadOutOfTheParser` is what refuses the widening the
+issue rules out, and `BothRowsDisplayedAtOnce` records the one shape nobody has
+read rather than guessing at it.
+
 **#147's ordering is untouched and is asserted here as well as next door**: an
 acceleration gate in reach still outranks the tracker button, because a gate is
 progress inside the site and the button is how the ship reaches the next one.
@@ -49,7 +61,7 @@ import unittest
 
 from prerequisites import open_repl
 from test_saxrat_gate_panel_button import (
-    read_log, reading, saxrat_runs, selected_item_window)
+    EVE_BOT_LOGS, read_log, reading, saxrat_runs, selected_item_window)
 from test_saxrat_ported_guards import (
     PREAMBLE, SAXRAT_BOT_ELM, SAXRAT_DIR, SaxratRepl, body_of, collapsed,
     node, source_of)
@@ -66,6 +78,19 @@ ENTRY_TYPE = "DungeonInfoPanelEntry"
 # prefix rather than either literal.
 TRAVEL_WIDGET_TYPES = ("TravelToLocationButtonTaskWidget",
                        "TravelToLocationButtonTask")
+
+# The client's own `_name` for each of the objective chain's two travel tasks,
+# and the widget type each has been read on. Both come from #280's capture of
+# the live client during run `saxrat_20260816-173606`.
+TRAVEL_TASK_NAME = "objective_task_travel_to_location"
+ENTER_TASK_NAME = "objective_task_enter_dungeon"
+
+# The type the *entering* row carries. It does not begin with
+# `TravelToLocationButtonTask`, which is the whole of #280.
+ENTER_WIDGET_TYPE = "TravelStateButtonTaskWidget"
+
+# What the entering row was drawn with in that capture.
+ENTER_LABEL = "Warp to Site"
 
 SITE_NAME = "Sansha's Command Relay Outpost"
 
@@ -103,6 +128,40 @@ OLD_OPPORTUNITY_LINE = "opportunity -- warp there"
 STARGATE_JUMP_LINE = "Jump through"
 
 
+def every_saxrat_run():
+    """Every recorded saxrat run this machine has, by number.
+
+    Globbed rather than listed, so a run 53 is read without an edit -- the
+    relation below is about what the corpus can and cannot say, and pinning it
+    to run numbers is how a growing corpus turns a true claim red.
+    """
+    try:
+        names = os.listdir(EVE_BOT_LOGS)
+    except OSError:
+        names = []
+    numbers = sorted(int(match.group(1)) for match in
+                     (re.match(r"saxrat_run(\d+)\.log$", name)
+                      for name in names) if match)
+    return saxrat_runs(*numbers)
+
+
+def tracker_offers(path):
+    """Every label the tracker's own decision line named, streamed.
+
+    Streamed rather than read whole because this reads the entire saxrat corpus
+    and the largest single log on this machine is measured in hundreds of
+    megabytes.
+    """
+    pattern = re.compile(r"The Opportunities tracker offers '([^']*)'")
+    labels = []
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            match = pattern.search(line)
+            if match:
+                labels.append(match.group(1))
+    return labels
+
+
 def string_from_codepoints(codepoints):
     """A label a string literal cannot carry, rebuilt inside Elm.
 
@@ -114,14 +173,20 @@ def string_from_codepoints(codepoints):
 
 
 def travel_button(text, type_name=TRAVEL_WIDGET_TYPES[0], displayed=True,
-                  named_label=True, with_region=True):
+                  named_label=True, with_region=True,
+                  task_name=TRAVEL_TASK_NAME):
     """The tracker's travel widget, as the client draws it.
 
     `_display` False **with** a region is the case worth building: a widget the
     parser's region walk drops on its own proves nothing about the display
     filter, so the hidden fixtures here keep their region.
+
+    `task_name` is the client's own `_name` for the objective task the widget
+    belongs to. `None` builds one carrying no name at all, which is what makes
+    "the type-name prefix still carries the travelling row on its own" a claim
+    a case can put rather than one the fixture satisfies twice over.
     """
-    entries = {"_name": "objective_task_travel_to_location"}
+    entries = {} if task_name is None else {"_name": task_name}
     if not displayed:
         entries["_display"] = False
     label_entries = {"_setText": text}
@@ -151,6 +216,68 @@ def expanded_entry(buttons, site_name=SITE_NAME):
             ], region=(79, 330, 231, 91)),
         ], region=(79, 330, 231, 91)))
     return node(ENTRY_TYPE, {"_name": "escalation_sites:50791"}, children,
+                region=(79, 298, 231, 123))
+
+
+def enter_button(text=ENTER_LABEL, **kwargs):
+    """The row that enters the site: a `TravelStateButtonTaskWidget`.
+
+    #280's whole subject. Its type name does not begin with
+    `TravelToLocationButtonTask`, so the prefix that reached the travelling row
+    answered `Nothing` for this one on every reading.
+    """
+    kwargs.setdefault("type_name", ENTER_WIDGET_TYPE)
+    kwargs.setdefault("task_name", ENTER_TASK_NAME)
+    return travel_button(text, **kwargs)
+
+
+def capture_entry(buttons, site_name=SITE_NAME,
+                  title="Travel to Location", task_containers=True):
+    """The escalation exactly as #280 read it off the live client.
+
+    Nested as the capture is rather than as `expanded_entry` flattens it --
+    `content_container`, the chain, the objective, `task_container` and its
+    three children, the buttons under the last of them. The two empty
+    `task_container_*` rows are carried because they are what the client's own
+    names for the two tasks are read from, and because a selector keyed on the
+    *container* names rather than on the widgets' would pass without them.
+
+    Note the entry's own title reads `Travel to Location` while the live button
+    is the enter-dungeon one, which is why nothing here picks a task by title.
+    """
+    chain_children = []
+    if title is not None:
+        chain_children.append(
+            node("EveLabelLarge", {"_name": "title", "_setText": title},
+                 region=(86, 350, 200, 18)))
+    containers = []
+    if task_containers:
+        containers = [
+            node("ContainerAutoSize",
+                 {"_name": "task_container_travel_to_location"}, [],
+                 region=(86, 370, 217, 1)),
+            node("ContainerAutoSize",
+                 {"_name": "task_container_enter_dungeon"}, [],
+                 region=(86, 371, 217, 1)),
+        ]
+    chain_children.append(
+        node("ContainerAutoSize", {"_name": "task_container"},
+             containers + [
+                 node("ContainerAutoSize", {"_name": "buttons_container"},
+                      buttons, region=(86, 389, 217, 25)),
+             ], region=(86, 370, 217, 45)))
+    children = []
+    if site_name is not None:
+        children.append(node("EveLabelLarge", {"_setText": site_name},
+                             region=(91, 376, 200, 18)))
+    children.append(
+        node("ContainerAutoSize", {"_name": "content_container"}, [
+            node("ObjectiveChainEntry", {"_name": "objective_chain_55"}, [
+                node("ObjectiveEntry", {"_name": "objective_enter_dungeon"},
+                     chain_children, region=(79, 330, 231, 91)),
+            ], region=(79, 330, 231, 91)),
+        ], region=(79, 320, 231, 101)))
+    return node(ENTRY_TYPE, {"_name": "escalation_sites:50839662"}, children,
                 region=(79, 298, 231, 123))
 
 
@@ -667,11 +794,23 @@ class TheWholeTreeSearchIsGone(unittest.TestCase):
         self.assertEqual(len(re.findall(r'"', listed)), 2 * len(COMMAND_LABELS),
                          "the command list has grown or shrunk: %s" % listed)
 
-    def test_the_parser_matches_the_widget_by_type_name(self):
-        """Which is what scopes it to the tracker and away from #170's button."""
+    def test_the_parser_matches_the_widget_by_type_name_or_task_name(self):
+        """Which is what scopes it to the tracker and away from #170's button.
+
+        This case pinned the bare `String.startsWith` inside the parse until
+        #280, and the prefix on its own is what could not see the entering row.
+        The selector moved into `uiNodeIsOpportunityTravelTask`, so the pin
+        follows it there rather than being deleted -- what must not come back is
+        a match that reaches the Selected Item panel.
+        """
         parse = collapsed(body_of(self.parser, "parseOpportunityInfoPanelEntry"))
-        self.assertIn('String.startsWith "TravelToLocationButtonTask"', parse)
+        self.assertIn("uiNodeIsOpportunityTravelTask", parse)
         self.assertIn("nodeIsDisplayedFromDictEntries", parse)
+        selector = collapsed(
+            body_of(self.parser, "uiNodeIsOpportunityTravelTask"))
+        self.assertIn("String.startsWith opportunityTravelTaskTypePrefix",
+                      selector)
+        self.assertIn("List.member name opportunityTravelTaskNames", selector)
 
     def test_the_parser_finds_entries_by_the_clients_own_type_name(self):
         finder = collapsed(
@@ -685,6 +824,263 @@ class TheWholeTreeSearchIsGone(unittest.TestCase):
             self.parser, re.S)
         self.assertIsNotNone(helper)
         self.assertEqual("True", helper.group(1))
+
+
+class TheEnteringRowIsReadToo(unittest.TestCase):
+    """#280: the row that gets the ship into the site, through the real parser.
+
+    Every fixture here is the capture's own nesting -- `content_container`, the
+    chain, the objective, `task_container` with its three children -- and the
+    labels are the ones the client wrote. What separates these cases from the
+    ones above is the widget's **type**: `TravelStateButtonTaskWidget` does not
+    begin with `TravelToLocationButtonTask`, so before this change the parser
+    answered `Nothing` for it however plainly the client drew it.
+
+    The counts behind that are one run's: 62 travel steps taken off the first
+    row and zero off this one, over a session that crossed six systems to reach
+    a site it then never entered. That run is not on this machine, so nothing
+    here recounts it; what the local corpus can say is in
+    `TheRecordedSaxratRunsTest`.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(TrackerRepl)
+
+    def travel_label(self, children):
+        return TheParserReadsTheTrackersOwnButton.travel_label(self, children)
+
+    def entry_field(self, children, field):
+        return TheParserReadsTheTrackersOwnButton.entry_field(
+            self, children, field)
+
+    def offers_a_step(self, children):
+        return TheBranchActsOnWhatTheTrackerOffers.offers_a_step(self, children)
+
+    def test_the_warp_to_site_button_is_found_where_it_was_not(self):
+        """The capture in its own nesting. `Nothing` before #280."""
+        self.assertEqual(
+            self.travel_label([tracker([capture_entry([enter_button()])])]),
+            ENTER_LABEL)
+
+    def test_the_branch_takes_it(self):
+        """`warpToOpportunitySiteIfAvailable` answered `Nothing` for this."""
+        self.assertTrue(
+            self.offers_a_step([tracker([capture_entry([enter_button()])])]),
+            "the tracker drew 'Warp to Site' and the branch declined it")
+
+    def test_the_travelling_row_is_still_found(self):
+        """The half that must not be traded away.
+
+        Built with **no** `_name` at all, so only the type-name prefix can admit
+        it -- a selector that had dropped the prefix and kept the two task names
+        would pass a fixture carrying both and fail here.
+        """
+        for type_name in TRAVEL_WIDGET_TYPES:
+            with self.subTest(type_name=type_name):
+                self.assertEqual(
+                    self.travel_label([tracker([capture_entry([travel_button(
+                        "Jump", type_name=type_name, task_name=None)])])]),
+                    "Jump")
+
+    def test_the_travelling_row_is_still_taken(self):
+        for text in ["Set Destination", "Jump"]:
+            with self.subTest(label=text):
+                self.assertTrue(
+                    self.offers_a_step([tracker([capture_entry(
+                        [travel_button(text, task_name=None)])])]),
+                    "the travelling row stopped being a step")
+
+    def test_a_hidden_entering_row_is_not_offered(self):
+        """The issue's own negative case.
+
+        The chain hides the tasks that are not available rather than removing
+        them, so a hidden `Warp to Site` is the client saying the ship cannot
+        take it yet. `_display` False **with** a region, so the region walk is
+        not what drops it.
+        """
+        self.assertEqual(
+            self.travel_label([tracker([capture_entry(
+                [enter_button(displayed=False)])])]),
+            "<none>")
+        self.assertFalse(self.offers_a_step(
+            [tracker([capture_entry([enter_button(displayed=False)])])]))
+
+    def test_the_entering_row_is_admitted_by_name_and_not_by_its_type(self):
+        """What the selector excludes, asked where it would be easiest to widen.
+
+        A rule keyed on `TravelStateButtonTaskWidget` -- or on
+        `endsWith "ButtonTaskWidget"`, which the mission runner uses and which
+        would have matched the warp button -- admits every sibling the chain
+        grows next. The same widget type under a task name nobody has read is
+        declined.
+        """
+        self.assertEqual(
+            self.travel_label([tracker([capture_entry([travel_button(
+                ENTER_LABEL, type_name=ENTER_WIDGET_TYPE,
+                task_name="objective_task_call_for_backup")])])]),
+            "<none>")
+
+    def test_a_conversation_button_beside_it_is_not_a_travel_step(self):
+        """The sibling the mission runner's wider rule exists for.
+
+        Its panel has a conversation button to press at hand-in, and
+        `endsWith "ButtonTaskWidget"` is what reaches it there. Nothing says
+        this chain will not grow one, and this is the case that says it would
+        not be taken as a trip.
+        """
+        children = [tracker([capture_entry([
+            travel_button("Start Conversation", type_name="ButtonTaskWidget",
+                          task_name="objective_task_talk_to_agent"),
+        ])])]
+        self.assertEqual(self.travel_label(children), "<none>")
+        self.assertFalse(self.offers_a_step(children))
+
+    def test_the_entering_row_wins_nothing_the_allow_list_refuses(self):
+        """Widening the parser must not widen `travelLabelIsACommand` by a word.
+
+        Asked over the state labels only. **`Undock` is deliberately not among
+        them**, and that is a correction rather than an omission: #280 lists it
+        under "Not this" as a state read while the ship was undocking, and PR
+        #282 read it off the live client as what this widget renders while the
+        ship is **docked in the escalation's own system** -- a command, and the
+        one that gets the ship out of a station it parked in. Whether a label is
+        a command is `Bot.elm`'s answer and #282 is changing it; a case here
+        asserting the old answer would go red on a change that is right.
+        """
+        for text in STATE_LABELS:
+            with self.subTest(label=text):
+                self.assertEqual(
+                    self.travel_label(
+                        [tracker([capture_entry([enter_button(text)])])]),
+                    text,
+                    "the parser stopped reading the label at all")
+                self.assertFalse(
+                    self.offers_a_step(
+                        [tracker([capture_entry([enter_button(text)])])]),
+                    "the branch acted on %r off the entering row" % text)
+
+    def test_the_escalations_name_is_still_read_from_the_captures_shape(self):
+        """The deeper nesting must not lose the site name the log line uses."""
+        self.assertEqual(
+            TheParserReadsTheTrackersOwnButton.site_names(
+                self, [tracker([capture_entry([enter_button()])])]),
+            SITE_NAME)
+
+    def test_the_entrys_own_title_is_not_what_picks_the_task(self):
+        """The capture's title reads `Travel to Location` beside a warp button.
+
+        So a rule that had gone by the objective's title would have taken the
+        wrong row, or none: the title is not a reliable guide to which button
+        the chain is showing, and nothing here reads it.
+        """
+        self.assertEqual(
+            self.travel_label([tracker([capture_entry(
+                [enter_button()], title="Travel to Location")])]),
+            ENTER_LABEL)
+
+
+class BothRowsDisplayedAtOnce(unittest.TestCase):
+    """The shape nobody has read, pinned as what the parser does rather than as
+    what it should do.
+
+    Every capture of this chain shows one task row displayed and the other
+    hidden. If both were ever shown, `OpportunityInfoPanelEntry.travelButton` is
+    one button and the parser takes whichever the client lists first -- so
+    `opportunityStepArrivingFirst`, which prefers an arriving label over a
+    travelling one **between** entries, never sees the second button and cannot
+    apply within one.
+
+    Carrying both would need the field to become a list and the decision that
+    reads it to fold over it, which is a change in `Bot.elm`. It is deliberately
+    not made here: this PR is scoped to the parser, and the shape it would serve
+    is unobserved. These cases exist so that the behaviour is recorded and a
+    later change is one somebody argues for.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(TrackerRepl)
+
+    def entry_field(self, children, field):
+        return TheParserReadsTheTrackersOwnButton.entry_field(
+            self, children, field)
+
+    def travel_label(self, children):
+        return TheParserReadsTheTrackersOwnButton.travel_label(self, children)
+
+    def both_displayed(self, order):
+        buttons = {"travel": travel_button("Jump"),
+                   "enter": enter_button(ENTER_LABEL)}
+        return [tracker([capture_entry([buttons[which] for which in order])])]
+
+    def test_exactly_one_button_is_surfaced_and_it_is_one_of_the_two(self):
+        for order in [("travel", "enter"), ("enter", "travel")]:
+            with self.subTest(order=order):
+                self.assertIn(self.travel_label(self.both_displayed(order)),
+                              ["Jump", ENTER_LABEL])
+
+    def test_it_is_the_one_the_client_lists_first(self):
+        """Which is the whole of the limitation, stated as the behaviour.
+
+        Not an endorsement: with both rows live this takes the travelling step
+        wherever the client draws it first, and the arrival preference #256
+        built is not consulted. The tell on a flown run is the tracker offering
+        `Jump` on a reading whose site the ship is already in.
+        """
+        self.assertEqual(self.travel_label(
+            self.both_displayed(("travel", "enter"))), "Jump")
+        self.assertEqual(self.travel_label(
+            self.both_displayed(("enter", "travel"))), ENTER_LABEL)
+
+    def test_one_displayed_beside_one_hidden_is_unambiguous(self):
+        """Which is the shape the client has actually been read drawing."""
+        children = [tracker([capture_entry([
+            travel_button("Jump", displayed=False),
+            enter_button(ENTER_LABEL),
+        ])])]
+        self.assertEqual(self.travel_label(children), ENTER_LABEL)
+        children = [tracker([capture_entry([
+            travel_button("Jump"),
+            enter_button(ENTER_LABEL, displayed=False),
+        ])])]
+        self.assertEqual(self.travel_label(children), "Jump")
+
+
+class TheSelectorIsReadOutOfTheParser(unittest.TestCase):
+    """The boundary, where an absence is not an expression."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.parser = source_of(SAXRAT_PARSER_ELM)
+
+    def test_the_prefix_still_covers_both_spellings_of_the_travelling_row(self):
+        prefix = collapsed(
+            body_of(self.parser, "opportunityTravelTaskTypePrefix"))
+        self.assertIn('"TravelToLocationButtonTask"', prefix)
+        for type_name in TRAVEL_WIDGET_TYPES:
+            self.assertTrue(type_name.startswith("TravelToLocationButtonTask"),
+                            type_name)
+
+    def test_the_named_tasks_are_the_clients_two_and_no_more(self):
+        listed = collapsed(body_of(self.parser, "opportunityTravelTaskNames"))
+        for name in (TRAVEL_TASK_NAME, ENTER_TASK_NAME):
+            self.assertIn('"%s"' % name, listed)
+        self.assertEqual(len(re.findall(r'"', listed)), 4,
+                         "the task-name list has grown or shrunk: %s" % listed)
+
+    def test_the_parse_does_not_widen_to_the_whole_widget_family(self):
+        """`endsWith "ButtonTaskWidget"` is the mission runner's, not this one.
+
+        It would have matched the warp button, which is why the issue names it;
+        it also admits every sibling in `buttons_container` sight-unseen.
+        """
+        self.assertNotIn('String.endsWith "ButtonTaskWidget"',
+                         collapsed(self.parser))
+
+    def test_nothing_here_matches_the_state_widget_by_type(self):
+        """So the entering row is admitted by the client's name for its task."""
+        self.assertNotIn('"%s"' % ENTER_WIDGET_TYPE, self.parser)
 
 
 class TheVendoredParserPolicyIsUnbroken(unittest.TestCase):
@@ -765,6 +1161,41 @@ class TheRecordedSaxratRunsTest(unittest.TestCase):
                 "removes is no longer recorded here" % (name, tracker_uses))
             asked = True
         self.assertTrue(asked, "no recorded run to consult")
+
+    def test_the_tracker_has_only_ever_offered_a_travelling_label_here(self):
+        """#280's shape, as much of it as this machine's corpus can carry.
+
+        The run the issue quotes -- `saxrat_20260816-173606` -- is not here; the
+        project also flies on two Windows hosts with their own logs. What is
+        here is every saxrat run that has taken a tracker step since #252 made
+        the step readable at all, and across all of them the tracker's own
+        decision line names **only** the travelling row's labels. Not one
+        arriving label, on any reading, in any run.
+
+        Asserted as that relation rather than as a count, and it is exactly what
+        `opportunityStepArrivingFirst` (#256) and the arrival-outranks-the-gate
+        ordering (#261) have had to work with: neither has ever had an arriving
+        label to prefer.
+        """
+        offered = []
+        for path in every_saxrat_run():
+            offered.extend(tracker_offers(path))
+        self.assertTrue(
+            offered,
+            "no recorded run ever took a tracker step, so this corpus cannot "
+            "say what the tracker has offered")
+        arriving = sorted({label for label in offered
+                           if label.strip().lower()
+                           in {"warp to site", "warp to location", "dock"}})
+        self.assertEqual(
+            arriving, [],
+            "an arriving label is in the corpus after all: %s -- #280's "
+            "premise has changed and the counts behind it want re-reading"
+            % arriving)
+        travelling = sorted({label for label in offered})
+        self.assertTrue(
+            set(travelling) <= {"Jump", "Set Destination"},
+            "the tracker offered something new: %s" % travelling)
 
     def test_the_old_search_never_matched_the_other_labels(self):
         """Which is the defect: three of four labels were invisible to it.
