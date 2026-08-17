@@ -3245,7 +3245,7 @@ several ships in the same hangar.
 -}
 openDroneBayFromShipCard : BotDecisionContext -> DecisionPathNode
 openDroneBayFromShipCard context =
-    case context.readingFromGameClient.shipItemCards |> List.head of
+    case shipItemCardsOnScreen context.readingFromGameClient |> List.head of
         Just shipCard ->
             describeBranch
                 ("Maintenance: the drone bay is empty -- open it from the ship's own card ("
@@ -3289,12 +3289,66 @@ openDroneBayFromShipCard context =
                         waitForProgressInGame
 
 
-{-| The tab to click to bring the ship cards into view: "Ships" if the panel is
-already showing that far, otherwise "Hangars" to get to it.
+{-| The ship cards this reading can actually be acted on.
+
+The station panel keeps the Ships tab's cards in the UI tree while a different
+tab is showing: display regions intact, no `_display` to say otherwise. That is
+the overview's virtualised-row shape in a second widget, and it has the same
+consequence -- right-clicking one lands on whatever the *visible* tab has put in
+that place. Watched live: with the Agents tab selected, the right-click aimed at
+card 0 (an Omen Navy Issue) opened an agent's menu instead, offering "Start
+Conversation" and "Remove from Addressbook", and the cascade then failed to find
+"Open Drone Bay" for as long as the window lasted.
+
+The bot puts itself into that state. `surveyAgentsInStation` selects the Agents
+tab and nothing ever puts it back, so a session that surveys leaves the *next*
+session's restock right-clicking agents -- which is why this is keyed on the
+tab rather than on anything about the cards. The cards say nothing that
+distinguishes the two states.
+
+Answering with an empty list rather than a flag is what makes the existing
+recovery fire: `openDroneBayFromShipCard` already treats "no card in this
+reading" as "open the tab that has them", and that is exactly the right
+response here. What had to change beside it is *which* tab it clicks -- see
+`shipHangarTabToOpen`.
+
+-}
+shipItemCardsOnScreen : ReadingFromGameClient -> List EveOnline.ParseUserInterface.ShipItemCard
+shipItemCardsOnScreen readingFromGameClient =
+    case readingFromGameClient.stationWindow |> Maybe.andThen .agentsTab of
+        Just agentsTab ->
+            if agentsTab.isSelected then
+                []
+
+            else
+                readingFromGameClient.shipItemCards
+
+        Nothing ->
+            readingFromGameClient.shipItemCards
+
+
+{-| The tab to click to bring the ship cards into view.
+
+"Ships" while the panel is already showing the hangars, "Hangars" to get that
+far -- and "Hangars" *only* when the cards are in the tree but off screen,
+because in that state the "Ships" strip is hidden in the same way the cards are
+and clicking it would land on the visible tab's own rows.
+
 -}
 shipHangarTabToOpen : ReadingFromGameClient -> Maybe ( String, EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion )
 shipHangarTabToOpen readingFromGameClient =
-    [ "Ships", "Hangars" ]
+    (if shipItemCardsOnScreen readingFromGameClient == [] && readingFromGameClient.shipItemCards /= [] then
+        -- The cards are in the tree and not on screen, so another tab is
+        -- showing -- and the "Ships" strip is the Hangars tab's own content,
+        -- hidden-but-present in exactly the same way. Clicking it would land
+        -- on a row belonging to the visible tab, which is the failure this
+        -- whole path is recovering from. "Hangars" is in the top-level strip,
+        -- which stays visible whichever tab is selected.
+        [ "Hangars" ]
+
+     else
+        [ "Ships", "Hangars" ]
+    )
         |> List.filterMap
             (\tabName ->
                 readingFromGameClient
