@@ -150,11 +150,18 @@ class TheLaunchersCallIt(unittest.TestCase):
                 % launcher)
 
     def test_the_build_runs_before_the_one_bot_guard(self):
-        """A failed build must not have already killed the running session."""
+        """A failed build must not have already killed the running session.
+
+        Anchored on the invocation, not on the first mention. The comment above
+        the call names the script and sits above the guard, so a version that
+        moved the call below the guard and left the comment where it was would
+        satisfy a first-mention comparison -- which is the ordering this case
+        exists to pin.
+        """
         for launcher in LAUNCHERS:
             body = source_of(os.path.join(MACOS_HOST, launcher))
             self.assertLess(
-                body.index("build_tools.sh"),
+                body.index('"${SCRIPT_DIR}/build_tools.sh"'),
                 body.index("Guard: one bot at a time"),
                 "%s kills the running bot before finding out whether the new "
                 "one can be built" % launcher)
