@@ -656,6 +656,12 @@ type alias BotMemory =
     -- `OutgoingFireMemory` and `outgoingFireAfterReading`.
     , outgoingFire : OutgoingFireMemory
 
+    -- How many rats the client has paid a bounty for this session, off the
+    -- `(bounty)` channel the host sums. An instrument: nothing decides on it.
+    -- See `KillCountMemory` and `killCountAfterReading` for what the number may
+    -- and may not be read as.
+    , kills : KillCountMemory
+
     -- What the client has answered about how many targets this ship can hold at
     -- once: the maximum it stated in its own game log, and the most the target
     -- bar has actually carried. `maxTargetsLastChange` holds a sentence only on
@@ -4131,6 +4137,88 @@ describeOutgoingFire memory =
             ++ " landed / "
             ++ String.fromInt memory.sessionMisses
             ++ " missed). Nothing decides on this."
+
+
+{-| How many rats the client has paid this character a bounty for.
+
+**The first thing this bot has ever known about whether it is killing
+anything.** Every other combat instrument here reports effort -- shots landed,
+shots missed, readings spent on a target, damage taken -- and
+`combatStalemate` had to infer "nothing is dying" from the guns being busy,
+because no field of any reading said whether anything died. The client says it
+outright, once per rat, on `(bounty)`.
+
+**What it counts and what it cannot claim**, stated here rather than left to a
+reader of the header:
+
+  - It counts **bounty payouts to this character**, not kills by this ship. A
+    rat a fleetmate finished that this ship damaged still pays, and is counted.
+    A rat this ship killed whose bounty went entirely elsewhere is not. Anything
+    with no bounty -- a structure, an asteroid, a wreck -- writes no line at all,
+    however thoroughly it is destroyed.
+  - It is a **session total and cannot be split**. The client writes no target
+    name on this channel, so no rule can ever ask "how many of these were
+    `Centii Loyal Enslaver`", or attribute one to an anomaly, or to a fight.
+
+**That second point is the design rather than a shortfall**, and PR #274 is why
+it is worth stating. An anomaly is a pocket of identically named rats, and a
+fold keyed on the name reported "702 consecutive misses on a target the guns
+went on to hurt" for what was in fact the same name on a different rat. A count
+that never attributes cannot mis-attribute. An approximate total that says what
+it is beats a per-rat figure that is quietly wrong.
+
+**`Nothing` is not zero.** A host that does not carry the channel leaves
+`hostCarriesTheChannel` false and the session total wherever it was, and the
+header says `no kill log` rather than `0 kills` -- because a run that killed
+nothing and a run nobody counted read identically otherwise, which is the
+collapse this file keeps a section on.
+
+Advanced in `updateMemoryForNewReadingFromGame`, which is #102's and #126's
+placement rule and the only thing that runs unconditionally on every reading, so
+this total cannot be frozen by a branch that stops being reached.
+
+-}
+type alias KillCountMemory =
+    { hostCarriesTheChannel : Bool
+    , thisReading : Int
+    , session : Int
+    }
+
+
+killCountAfterReading :
+    { before : KillCountMemory
+    , kills : Maybe Int
+    }
+    -> KillCountMemory
+killCountAfterReading { before, kills } =
+    case kills of
+        Nothing ->
+            -- The session total is *kept* rather than cleared. A host that
+            -- stops answering has not un-killed anything, and a total that
+            -- fell back to zero would report a three-hour run as a fresh one.
+            { before | hostCarriesTheChannel = False, thisReading = 0 }
+
+        Just count ->
+            { hostCarriesTheChannel = True
+            , thisReading = count
+            , session = before.session + count
+            }
+
+
+{-| The kill count as the header prints it, in saxrat's own abbreviated idiom.
+
+`no kill log` rather than a number when the host does not carry the channel, for
+`describeOutgoingFire`'s reason: a bot that printed `0 kills` there would be
+reporting a quiet grid for an absent instrument.
+
+-}
+describeKillCount : KillCountMemory -> String
+describeKillCount memory =
+    if not memory.hostCarriesTheChannel then
+        "no kill log"
+
+    else
+        String.fromInt memory.session ++ " kills"
 
 
 {-| The client never announces the ship's destruction -- there is no such line
@@ -8450,6 +8538,12 @@ initBotMemory =
         , sessionHits = 0
         , sessionMisses = 0
         }
+
+    -- Assumed absent until a reading says otherwise, so a host that never
+    -- carries the channel is reported as unarmed rather than as a session that
+    -- killed nothing -- `incomingDamage.hostCarriesTheChannel`'s rule, for its
+    -- reason.
+    , kills = { hostCarriesTheChannel = False, thisReading = 0, session = 0 }
     , maxTargetsStatedByClient = Nothing
     , maxTargetsHeldAtOnce = Nothing
     , maxTargetsLastChange = Nothing
@@ -9258,10 +9352,22 @@ describeWhyTheSwapMayNotDisarm disarmCase =
 
 {-| Does the client say this module is switched off?
 
-`isInActiveState` is the entry that means switched on, measured rather than
-assumed: across 92 samples of a 240 s window it held `True` on all four modules
-while `ramp_active` oscillated fourteen times underneath it, so `ramp_active` is
-the duty cycle and this is the state.
+**`isInActiveState` is not the toggle, and #286 is the measurement.** Over every
+log carrying `describeTopRowModuleDictState` -- 34 runs, 55,921 readings, 61,948
+module observations -- it is the exact complement of `isDeactivating`, with no
+exceptions at all, and the two are separate dictionary keys read by separate
+`Dict.get`s. So `Just False` means _this module is in the act of shutting down_,
+not that it is off: on the 20,095 observations where `ramp_active` is absent from
+the tree entirely -- the ramp widget does not exist, so the module is not running
+-- this entry reads `True` on 100% of them.
+
+What that costs **this** predicate is bounded, which is why #286 left it alone.
+`Just False` really is the client saying the switch-off landed, so this is a
+sound _positive_ signal; what it cannot say is that a switch-off did not land,
+because the transient is short -- median two readings, longest seven -- and a
+reading that misses it is indistinguishable from a click that never arrived. That is the shape of
+`none has yet read switched off`. See CLAUDE.md, "`isInActiveState` is not the
+toggle; it is the deactivation transient", before repointing anything here.
 
 **Three answers, not two.** An entry that did not decode is `Nothing`, and a
 module that says nothing about itself is not a module saying it is off. Both of
@@ -9291,11 +9397,28 @@ is no undoing to detect, whatever the modules read.
 **This is a report, not a verdict.** Having it abandon the attempt was the
 mission runner's issue #72: across four swaps in two runs the only effects
 dispatched between the confirmation and the re-arm were a drone launch, an
-overview click and the swap's own right-click, so the client re-arms the gun by
-itself, and a rule that abandons on that is a guarantee that no swap can ever
-finish. What replaces abandoning is nothing, and the invariant is what makes that
-safe: this is true exactly when the guns are back on, which is the moment the
-swap stops costing anything the deadlines exist to protect.
+overview click and the swap's own right-click, so nothing in the bot pressed the
+button, and a rule that abandons on that is a guarantee that no swap can ever
+finish.
+
+**What #72 read as the client re-arming the gun is measured false, and this
+predicate is where it enters.** #286: over the 35 windows in which this latch has
+ever been set, across eight runs and both bots, the client's combat log records
+**zero** gun lines and `ramp_active` reads `True` on **zero** of the 191
+readings -- against 0.177 gun lines a reading and 37.7% `ramp_active` in the ten
+readings before the swap started, and 0.224 and 40.6% in the ten after the
+window cleared. 146 _drone_ lines were written inside those same windows, so the
+channel was live and the guns contributed none of it. The gun was
+switched off, stayed off, and `isInActiveState` came back to `True` because the
+deactivation _finished_ (see `moduleReadsSwitchedOff`). That nothing in the bot
+pressed the button is the corroboration rather than the mystery.
+
+Nothing is changed on that measurement, deliberately: what this latch does is
+make `ammoSwapDisarmEndsTheSession` decline, and repointing it is a behaviour
+change on the path that disarms the ship. What it means today is that the guard
+which exists because _a disarmed ship is worse than the wrong charge_ is stood
+down by a report of guns that did not come back. CLAUDE.md carries the argument
+and the numbers.
 
 **Both halves of the test are load-bearing.** Requiring that nothing reads
 switched off keeps a reading whose entries simply did not decode from being read
@@ -9324,10 +9447,16 @@ firing, skipped the switch-off and opened a menu on a running gun. `GUNS OFF`
 appears zero times in that run.
 
 The question this asks is not whether the gun is doing its job but whether its
-toggle is on, which is what the entry measurably means and is exactly the
-condition the client's own refusal names: `while it is active`. Reading
-`Just True` as "the guns are working" would be the mistake `ramp_active` has
-already cost twice.
+toggle is on, and **the entry does not answer that either** -- #286 measured it
+to be `not isDeactivating`, which is true on 99.7% of every module observation in
+the corpus, so this predicate is close to a constant. What that costs is an entry
+gate that opens on a ship whose guns are idle, and a switch-off pressed at a
+module that may already be off -- and the button is a toggle, so such a press
+turns it **on**. That last step is a mechanism rather than an observation: the
+fight presses the weapon hotkey on the same readings, and no log attributes a
+cycle to one of the two. Not repointed here: see `moduleReadsSwitchedOff` and
+CLAUDE.md. What the entry still is not is the duty cycle, which is the whole of
+what #76 fixed.
 
 **`Nothing` is not `False`.** An entry that did not decode answers `False` here,
 so a build that does not carry it never opens the entry gate and the swap never
@@ -10695,6 +10824,172 @@ describeAmmoSwapState context =
                         ++ "."
 
 
+{-| The name of whatever EVE currently calls the active target.
+
+One declaration because two now want it -- the header row and the row that
+names the target's condition below it -- and two copies of "which overview row
+is the active one" is the drift this file has paid for elsewhere. It is the
+_name_ that is shared; the condition beside it is `describeTargetHitpoints`,
+which is deliberately unshared between this bot and the mission runner and is
+called by both readers rather than reimplemented by either.
+
+-}
+activeTargetNameFromReading : ReadingFromGameClient -> Maybe String
+activeTargetNameFromReading readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsActiveTarget
+        |> List.head
+        |> Maybe.andThen .objectName
+
+
+{-| Where the ship is, in the one field that can answer it.
+
+Three states this reading can actually distinguish, and no fourth invented:
+warping, standing in an anomaly the probe scanner names, and neither. A reading
+with no ship UI is in station, which is a different answer again and is worth
+one word since every counter below behaves differently there.
+
+`DEADSPACE` is deliberately **not** a fourth case. A deadspace pocket entered
+through an acceleration gate has no scan-result row of its own, so the scanner
+names nothing and this answers `-` -- which is the truthful "the client is not
+telling me where I am" rather than a guess dressed as a reading.
+
+-}
+describeWhereTheShipIs : ReadingFromGameClient -> String
+describeWhereTheShipIs readingFromGameClient =
+    if readingFromGameClient.shipUI == Nothing then
+        "DOCKED"
+
+    else if shipWarpingFromReading readingFromGameClient == Just True then
+        "IN WARP"
+
+    else
+        case getCurrentAnomalyIDAsSeenInProbeScanner readingFromGameClient of
+            Just anomalyID ->
+                anomalyID
+
+            Nothing ->
+                "-"
+
+
+{-| The whole run on one line, and the only line the log carries every time.
+
+The status text is recomputed for every decision, and the host prints this line
+under every one of them while printing each line below it only when that line
+moved. So what an operator reads thousands of times a run is whatever this
+function puts first, and everything else is read when it changes. Measured over
+saxrat run 52 -- 27.7 MB, 5,102 readings, 16,742 decisions -- **79.8% of the log
+was status text**, of which this line was 2.6% and the twelve diagnostic lines
+under it were the rest. So the question this answers is not "what else could be
+printed" but "what is worth printing on every one of sixteen thousand
+decisions".
+
+The six fields the operator asked for, in their order and their words:
+
+    Amarr AIC-176 Centii Devourer [10/100/100] 5 rats 273 kills 12 anoms | ship 58/100 | dmg 604/3500
+
+and two more, because run 48 sat in one anomaly for 3,883 seconds and the first
+question anybody asked was whether the ship was in trouble. **The answer that
+settled it was a shield at 0%, an armour that was not moving, and incoming
+damage far below the retreat threshold** -- three numbers that were in the log
+and took a replay to find, because they were spread across three of the
+diagnostic lines below.
+
+`ship` is the **believed** pair, not the live gauge, so the header says what the
+guards are going by: `plausibleHitpointsPercent` rejects the impossible readings
+and `believed` withholds a fall a second reading has not confirmed, and this
+hull's gauge produced values from -213% to 40,028,800% on one recorded run. A
+gauge that has not answered yet reads `?`, never a number.
+
+`dmg` is `describeIncomingDamage`'s own two numbers rather than a second copy of
+them, for the reason `describeTargetHitpoints` is reused below rather than
+reimplemented: two renderings of one measurement drift, and this file has paid
+for that twice.
+
+**The target's condition is `describeTargetHitpoints`, called rather than
+copied.** PR #244 pinned that clause as deliberately unshared between this bot
+and the mission runner -- saxrat's is the abbreviated `[10/100/100]` and the
+mission runner's the spelled-out one -- and a header that spelled the triple out
+again here would be a third rendering for two apps to drift between.
+
+-}
+describeStatusHeader : BotDecisionContext -> String
+describeStatusHeader context =
+    let
+        readingFromGameClient =
+            context.readingFromGameClient
+
+        gauge =
+            Maybe.map String.fromInt >> Maybe.withDefault "?"
+
+        target =
+            activeTargetNameFromReading readingFromGameClient
+                |> Maybe.map
+                    (\name ->
+                        name
+                            ++ " "
+                            ++ describeTargetHitpoints
+                                (activeTargetHitpointsPercent readingFromGameClient)
+                    )
+                |> Maybe.withDefault "no target"
+
+        incomingDamage =
+            context.memory.incomingDamage
+    in
+    String.join " "
+        [ currentSolarSystemNameFromReading readingFromGameClient
+            |> Maybe.withDefault "?"
+        , describeWhereTheShipIs readingFromGameClient
+        , target
+        , (readingFromGameClient |> getNamesOfRatsInOverview |> List.length |> String.fromInt)
+            ++ " rats"
+        , describeKillCount context.memory.kills
+        , (context.memory.visitedAnomalies |> Dict.size |> String.fromInt) ++ " anoms"
+        , "| ship "
+            ++ gauge context.memory.hitpoints.shield.believed
+            ++ "/"
+            ++ gauge context.memory.hitpoints.armor.believed
+        , "| "
+            ++ (if not incomingDamage.hostCarriesTheChannel then
+                    "dmg NO COMBAT LOG"
+
+                else
+                    "dmg "
+                        ++ (incomingDamageInWindow incomingDamage |> String.fromInt)
+                        ++ "/"
+                        ++ (if context.eventContext.botSettings.runAwayIncomingDamageThreshold < 0 then
+                                "off"
+
+                            else
+                                String.fromInt
+                                    context.eventContext.botSettings.runAwayIncomingDamageThreshold
+                           )
+               )
+        ]
+
+
+{-| Everything an operator reads, with the header first and the rest below it.
+
+**The first row is the header and the rest are diagnostics, and the order is
+what decides which a clause is.** The host prints the first line of this text
+beside the decision marker and the rest below it, and since #284 it prints that
+rest only when it has changed since the last decision it printed -- so a clause
+in the first row is seen on every one of a run's sixteen thousand decisions and
+a clause below it is seen on the readings it moves. Nothing here is deleted or
+made conditional; what changed is that the repetition ended at the layer that
+was creating it.
+
+Two structural constraints, both of which cases hold and one of which this
+change nearly broke. `describeQuickMessage` is a row of the outer list rather
+than part of `describeCurrentReading`, because that binding is only built for a
+reading with a ship UI and a docked reading is exactly where an unread client
+notice sits. And **no comment may sit between this function's `in` and its
+list**: `test_quick_message_logged` locates the outer list by splitting the
+collapsed source on `in [`, so a comment there does not fail that case -- it
+makes it pass having read the whole function instead, which is worse.
+
+-}
 statusTextFromState : BotDecisionContext -> String
 statusTextFromState context =
     let
@@ -10870,11 +11165,7 @@ statusTextFromState context =
                             getNamesOfRatsInOverview readingFromGameClient
 
                         currentTargetName =
-                            readingFromGameClient.overviewWindows
-                                |> List.concatMap .entries
-                                |> List.filter overviewEntryIsActiveTarget
-                                |> List.head
-                                |> Maybe.andThen .objectName
+                            activeTargetNameFromReading readingFromGameClient
 
                         describeAnomaly =
                             "Current anomaly: "
@@ -10935,7 +11226,8 @@ statusTextFromState context =
                     ]
                         |> List.map (String.join " ")
     in
-    [ [ describePerformance ]
+    [ [ describeStatusHeader context ]
+    , [ describePerformance ]
     , [ describeMenuAndSettlingCounters ]
 
     -- Ahead of `describeCurrentReading`, which is only built when there is a
@@ -14115,6 +14407,11 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         outgoingFireAfterReading
             { before = botMemoryBefore.outgoingFire
             , summaries = context.readingFromGameClient.outgoingDamageSinceLastReading
+            }
+    , kills =
+        killCountAfterReading
+            { before = botMemoryBefore.kills
+            , kills = context.readingFromGameClient.killsSinceLastReading
             }
     , lockAttempt = lockRangeLearning.attempt
     , lockRangeStatedMeters =

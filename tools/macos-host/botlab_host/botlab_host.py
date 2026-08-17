@@ -1060,6 +1060,7 @@ SYNTHETIC_GAME_LOG_ENTRY_TYPE_NAME = "MacOsHostSyntheticGameLogEntry"
 SYNTHETIC_INCOMING_DAMAGE_TYPE_NAME = "MacOsHostSyntheticIncomingDamage"
 SYNTHETIC_OUTGOING_DAMAGE_TYPE_NAME = "MacOsHostSyntheticOutgoingDamage"
 SYNTHETIC_OUTGOING_DAMAGE_TARGET_TYPE_NAME = "MacOsHostSyntheticOutgoingDamageTarget"
+SYNTHETIC_KILLS_TYPE_NAME = "MacOsHostSyntheticKills"
 
 
 def synthetic_game_log_node(entries):
@@ -1221,6 +1222,147 @@ def synthetic_outgoing_damage_node(targets):
             }
             for index, target in enumerate(targets)
         ],
+    }
+
+
+STATUS_LINES_UNCHANGED_LINE = "#   (%d status line(s) unchanged)"
+
+# Matching the status text, less its first line, against what was printed last.
+# Both sides are the bot's own bytes, so this is a comparison and not a parse.
+STATUS_TEXT_LOG_BUDGET = 4000
+
+
+def decision_log_lines(status_text, marker, last_lines):
+    """What one decision puts in the log, and the lines to compare next against.
+
+    **The status text's first line every time; each line below it only when it
+    changed.**
+
+    The repetition this ends is the *host's* rather than the bot's, which is why
+    the fix is here and not in an Elm status function. A bot emits one status
+    text per decision; this loop printed all of it every time, several times per
+    reading, for as long as the run lasted. Measured over saxrat run 52 -- 27.7
+    MB, 5,102 readings, 16,742 decisions -- **79.8% of the whole log was status
+    text**, of which the diagnostic lines under the header were 77.2% and the
+    header itself 2.6%.
+
+    The first line is the bot's header -- for saxrat, `describeStatusHeader`,
+    the one line an operator reads -- and it is printed on every decision so
+    that "where is the ship, what is it shooting, is it in trouble" is
+    answerable at any point in the log. Everything below it is a diagnostic
+    whose value is the moment it changes.
+
+    **Per line rather than per body, and the difference is a factor of two.**
+    Suppressing the body only where the *whole* of it repeats removes 26.8% of
+    that log: some counter or other moves on two decisions in three and drags
+    all eleven other lines through with it. Suppressing each line against the
+    last line printed in its place removes **61.5%** -- the diagnostics that
+    genuinely are steady stop being reprinted by the ones that are not.
+
+    **Judged against what was last printed, never against a reading count**,
+    which is what makes suppression safe rather than merely cheap. A line that
+    differs from the last line printed at its position is printed, whatever
+    produced the difference and however many decisions a reading happens to
+    take, so the "changed but not shown" case does not exist. Nothing is
+    dropped; it is only not repeated.
+
+    A *position* is not a clause -- a docked reading's status text is shorter
+    than an in-space one's, so one index can hold different clauses at different
+    moments. That costs nothing, because the invariant is about the position
+    rather than the clause: whatever stands at index N is printed unless it is
+    byte-identical to the last thing printed at index N. A clause returning to a
+    position something else has since used differs from what was printed there,
+    so it prints.
+
+    **It says how many it suppressed**, because a log that silently prints a
+    clause less often is a log whose counts have quietly changed meaning.
+    Anything counting a status clause's occurrences in a recorded run is now
+    counting the decisions that clause *moved* on rather than every decision,
+    and this marker is what lets a reader tell that from a clause that stopped
+    being printed at all. Counting readings is unaffected either way: that has
+    always been done on `RequestToVolatileProcess`, not on status lines.
+
+    The whole text is truncated before it is split, so the budget an over-long
+    status text is held to is the one it was always held to rather than one per
+    line.
+    """
+    status = (status_text or "")[:STATUS_TEXT_LOG_BUDGET]
+    header, _, body = status.partition("\n")
+    lines = [marker + header]
+    if not body:
+        return lines, last_lines
+    remembered = list(last_lines or [])
+    unchanged = 0
+    for index, line in enumerate(body.split("\n")):
+        if index < len(remembered) and remembered[index] == line:
+            unchanged += 1
+            continue
+        while len(remembered) <= index:
+            remembered.append(None)
+        remembered[index] = line
+        lines.append(line)
+    if unchanged:
+        lines.append(STATUS_LINES_UNCHANGED_LINE % unchanged)
+    return lines, remembered
+
+
+def synthetic_kills_node(kills):
+    """A UI-tree node carrying how many rats the client paid a bounty for.
+
+    The fourth synthetic node, with the same four safety properties as the other
+    three: a type name that says in full that the client never wrote this, no
+    display region, nothing under `_setText`/`_text`, and an absent node meaning
+    something different from a zero.
+
+    **This is `(combat)`'s argument applied to `(bounty)`, and the deny-list
+    comment on `GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT` is what it has to
+    answer.** That comment gives two reasons for withholding a channel and only
+    one of them is about the lines: combat is withheld because it is per-shot
+    noise, and bounty because "a second reader of those lines would be a second
+    source of truth for the same statistic". The *lines* stay withheld here, as
+    combat's do -- nothing about `entries_for_reading` changes. What travels is
+    the count, and it travels through the console's own
+    `BOUNTY_TEXT_RE`, so the bot's number and the console's number come off one
+    pattern by construction rather than off two that could drift.
+
+    **What it counts is what the client paid, which is not the same as what this
+    ship killed**, and the difference is stated here rather than left for a
+    later reader to assume:
+
+    - A rat killed by a fleetmate that this ship contributed damage to still
+      pays a bounty, so it is counted.
+    - A rat this ship killed whose bounty went entirely elsewhere writes no
+      line here, so it is not counted.
+    - Structures, wrecks and anything with no bounty write no line at all,
+      however thoroughly they are destroyed.
+
+    So the honest reading of the number is "rats the client paid this character
+    a bounty for since this run started", and no rule may read it as "kills by
+    this ship".
+
+    **It names nothing, and that is the point rather than a limitation.** The
+    client writes no target name on this channel -- 17,388 lines across the
+    recorded sessions and not one carries one -- so this count can never be
+    split per rat, per name or per anomaly. PR #274 established what a
+    name-keyed fold costs on this grid: a "702 consecutive misses on a target
+    the guns went on to hurt" reading that turned out to be the same *name* on a
+    different rat, because an anomaly is a pocket of identically named rats. A
+    session total off a channel that names nothing cannot mis-attribute, because
+    it never attributes.
+
+    **Per reading rather than a running total**, like both damage nodes, so the
+    session total is the bot's own memory and a later rule can still ask "did
+    anything die on this reading". A reading during which nothing died carries
+    `kills = 0`, which is an answer; the node's absence is "this host does not
+    carry the channel", which is the only thing that may be read as "we do not
+    know". A bot that collapsed those two would report a session that killed
+    nothing as one whose kills nobody counted.
+    """
+    return {
+        "pythonObjectAddress": "macos-host-synthetic-kills",
+        "pythonObjectTypeName": SYNTHETIC_KILLS_TYPE_NAME,
+        "dictEntriesOfInterest": {"kills": kills},
+        "children": [],
     }
 
 
@@ -1523,6 +1665,16 @@ class VolatileHost:
             # assumed, in `TailFanOutTest`.
             tree["children"].append(
                 synthetic_outgoing_damage_node(self.game_log.outgoing_damage_for_reading())
+            )
+            # A fourth sibling, on the same argument as the second and third:
+            # how many rats died is a different question from how hard this ship
+            # is being hit or whether its shots are landing, and a consumer of
+            # any of them must be able to find the others absent. Its queue is
+            # independent of the other five, so the order of these four calls
+            # does not matter -- asserted in `TailFanOutTest` rather than
+            # assumed.
+            tree["children"].append(
+                synthetic_kills_node(self.game_log.kills_for_reading())
             )
         return {
             "Completed": {
@@ -2456,6 +2608,11 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
     # standing ask is not a route set on every tick. `None` while it is not
     # asking, which is what lets the same station be asked for again later.
     last_requested_destination = None
+    # The status text's lines below its first, as they were last *printed*, one
+    # entry per position. Compared against rather than counted per reading, so a
+    # line that changed can never be suppressed however the bot happens to be
+    # stepping -- see `decision_log_lines`.
+    last_status_lines = [None]
 
     def log_decision(cont, decision_seq):
         # Every ContinueSession response carries its own freshly computed
@@ -2471,7 +2628,11 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         # under the same outer tick N so the burst is still visually
         # grouped.
         elapsed = time.monotonic() - tick_start
-        print(f"# [{tick}.{decision_seq}] ({elapsed:.3f}s) {cont['statusText'][:4000]}", file=sys.stderr)
+        lines, last_status_lines[0] = decision_log_lines(
+            cont["statusText"], f"# [{tick}.{decision_seq}] ({elapsed:.3f}s) ",
+            last_status_lines[0])
+        for line in lines:
+            print(line, file=sys.stderr)
         if console is not None:
             console.note_decision(tick, cont["statusText"])
         if game_log is not None:
@@ -2691,6 +2852,16 @@ _GAME_LOG_LINE = re.compile(r"^\[ (?P<timestamp>[^\]]+?) \] \((?P<channel>[^)]*)
 # truth for the same statistic. Everything else is carried, including channels
 # never seen here: a channel silently dropped for being unfamiliar is this
 # repo's signature failure, so the list is a deny-list rather than an allow-list.
+#
+# **Both withheld channels have since had their totals carried anyway, and the
+# distinction is the lines against the summary.** `(combat)` was first: the
+# lines are noise no decision uses and the totals are what #32 and #90 needed,
+# so they ride `synthetic_incoming_damage_node` and
+# `synthetic_outgoing_damage_node`. `(bounty)` is the same shape -- the count
+# rides `synthetic_kills_node`, off the console's own `BOUNTY_TEXT_RE`, so the
+# second-source-of-truth objection above is answered by there being one pattern
+# rather than by the bot going without a kill count. Nothing about *this* list
+# changes: neither channel's lines reach `entries_for_reading`.
 GAME_LOG_CHANNELS_WITHHELD_FROM_THE_BOT = frozenset({"combat", "bounty"})
 
 # Incoming damage, after the markup above has been stripped:
@@ -2924,6 +3095,31 @@ def parse_outgoing_miss(entry):
     return target or None
 
 
+def entry_is_a_bounty_payout(entry):
+    """Whether this entry is the client saying a rat it paid for has died.
+
+    One line per rat, on `(bounty)`, and the channel is checked as well as the
+    wording: the same words could in principle be said on another channel, and
+    a kill count built on a phrase rather than on the client's own channel
+    marker is a count anything could inflate.
+
+    **The pattern is the web console's**, imported rather than restated, because
+    that console has counted kills off these lines since before the bot could
+    see them and two patterns for one statistic is precisely what CLAUDE.md
+    gives as the reason for withholding this channel. See `BOUNTY_TEXT_RE`.
+
+    **A line is a kill, and that was measured rather than assumed.** Over the
+    17,388 bounty lines in `~/Documents/EVE/logs/Gamelogs`, only 44 pairs are
+    byte-identical to another line in the same file -- 0.25%, which is two rats
+    of one type dying inside one second rather than the client writing a line
+    twice. Nothing repeats more than twice. A channel that duplicated its own
+    lines would show that at a very different rate.
+    """
+    if entry is None or entry["channel"] != "bounty":
+        return False
+    return web_console.BOUNTY_TEXT_RE.match(entry["text"]) is not None
+
+
 class GameLogTail:
     """Follow EVE's own game log, the only timestamped record in this system.
 
@@ -2942,17 +3138,17 @@ class GameLogTail:
     we start at its end: the point is what happened since the last decision, not
     a replay of the session so far.
 
-    **Four readers, one file offset.** This used to serve the stderr echo
+    **Five readers, one file offset.** This used to serve the stderr echo
     alone, and that echo consuming the lines is precisely what kept them from
     the bot (issue #28). `_poll` is now the only thing that moves the offset,
-    and it fans each line out to five independent queues -- so
-    `lines_for_echo`, `entries_for_reading`, `incoming_damage_for_reading` and
-    `outgoing_damage_for_reading` each see every line exactly once and none can
-    eat another's. Adding a second caller of a single-cursor tail would have
-    given whichever ran first that cycle's lines and the others nothing,
-    intermittently and without a word.
+    and it fans each line out to six independent queues -- so
+    `lines_for_echo`, `entries_for_reading`, `incoming_damage_for_reading`,
+    `outgoing_damage_for_reading` and `kills_for_reading` each see every line
+    exactly once and none can eat another's. Adding a second caller of a
+    single-cursor tail would have given whichever ran first that cycle's lines
+    and the others nothing, intermittently and without a word.
 
-    Five queues and four readers: `outgoing_damage_for_reading` drains two of
+    Six queues and five readers: `outgoing_damage_for_reading` drains two of
     them, the landed shots and the misses issue #267 added, because both are
     facts about the same reading's shooting and a consumer that got one without
     the other would be reading half a summary.
@@ -2964,6 +3160,12 @@ class GameLogTail:
     rather than one because they answer opposite questions -- how hard this ship
     is being hit, and whether its own shots are achieving anything -- and a
     consumer of either must be able to find the other absent.
+
+    The kill queue is fed the same way from the `(bounty)` lines that queue also
+    drops, and for the same reason: withholding that channel was right about the
+    lines and says nothing about the count. It is a third question again -- how
+    many rats died -- and must be findable absent independently of the other
+    two.
     """
 
     def __init__(self, directory):
@@ -2990,6 +3192,11 @@ class GameLogTail:
         # `outgoing_damage_for_reading`, which is the one reader of either, so
         # this is a fifth queue on the same offset rather than a fifth reader.
         self._outgoing_miss_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
+        # A sixth queue on the same offset, for the `(bounty)` lines the reading
+        # queue drops. It holds nothing but a count -- the client names no
+        # target on this channel -- so this is a deque of `True` rather than of
+        # anything a consumer could be tempted to attribute.
+        self._kill_queue = collections.deque(maxlen=GAME_LOG_QUEUE_LIMIT)
 
     def _newest_file(self):
         try:
@@ -3060,6 +3267,8 @@ class GameLogTail:
             missed = parse_outgoing_miss(entry)
             if missed is not None:
                 self._outgoing_miss_queue.append(missed)
+            if entry_is_a_bounty_payout(entry):
+                self._kill_queue.append(True)
 
     def lines_for_echo(self, limit=25):
         """The stderr/web-console echo: whole lines, capped for readability."""
@@ -3172,6 +3381,26 @@ class GameLogTail:
              "misses": misses[name]}
             for name in sorted(names, key=lambda name: (-(hits[name] + misses[name]), name))
         ]
+
+    def kills_for_reading(self):
+        """How many rats the client paid a bounty for since the last reading.
+
+        One number and nothing else, because the channel says nothing else --
+        see `synthetic_kills_node` for what the number may and may not be read
+        as. Zero is an answer, not an absence, and the caller turns it into a
+        node all the same; "nothing is reporting" lives in whether the node
+        exists at all, which is the rule every other reader of this file
+        follows.
+
+        The ISK is deliberately not carried. The console already reports it off
+        the same lines and a bot that carried it would have a second field
+        nothing decides on, on a channel this repo withheld precisely to avoid a
+        second source of truth for one statistic.
+        """
+        self._poll()
+        kills = len(self._kill_queue)
+        self._kill_queue.clear()
+        return kills
 
 
 def main():
