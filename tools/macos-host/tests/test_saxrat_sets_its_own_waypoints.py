@@ -211,19 +211,37 @@ class TheCircuitRotates(unittest.TestCase):
             "a completed lap does not reach the staging system, or an absent "
             "staging system stops the circuit instead of wrapping it")
 
-    def test_no_circuit_configured_names_nowhere(self):
+    def test_no_circuit_and_nothing_else_configured_names_nowhere(self):
         answers = self.repl.evaluate(
             ["%s == Nothing" % pick(self.repl.settings(), 0, "elsewhere"),
-             # A staging system alone is not a circuit: with nothing to
-             # exhaust, there is no lap to complete.
-             "%s == Nothing"
-             % pick(self.repl.settings(home="Jita"), 0, "elsewhere"),
              "huntSystemAtIndex %s 7 == Nothing" % self.repl.settings()],
             self.repl.elsewhere())
         self.assertEqual(
-            answers, [True] * 3,
-            "a bot with no 'hunt-system' must name nowhere, so it parks "
-            "exactly as it did before this feature existed")
+            answers, [True] * 2,
+            "a bot with no 'hunt-system' and nothing else configured must name "
+            "nowhere, so it parks exactly as it did before this feature "
+            "existed")
+
+    def test_an_empty_circuit_falls_back_to_the_staging_system(self):
+        """**A reversal, and the comment it replaces is the finding.**
+
+        This case read "a staging system alone is not a circuit: with nothing to
+        exhaust, there is no lap to complete" -- true of the arithmetic, and the
+        reason `home-system` could not be reached at all with `hunt-system`
+        empty. `huntingGroundAtIndex` consults it only once a lap is complete
+        and computed the lap count by dividing by the circuit's length, so an
+        empty list pinned it at zero and the fallback was code nothing could
+        run. #279's follow-up: an empty circuit is a circuit already walked.
+
+        `huntSystemAtIndex` itself is untouched -- it still names nothing from
+        an empty list, which is the case above -- so what changed is which arm
+        of `huntingGroundAtIndex` an empty circuit takes.
+        """
+        answers = self.repl.strings(
+            ["%s |> Maybe.withDefault \"nowhere\""
+             % pick(self.repl.settings(home="Jita"), 0, "elsewhere")],
+            self.repl.elsewhere())
+        self.assertEqual(answers, ["Jita"])
 
     def test_the_index_is_taken_modulo_rather_than_running_off_the_end(self):
         settings = self.repl.settings(hunt=SYSTEMS)
