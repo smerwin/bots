@@ -24,23 +24,17 @@ Reading the log is incremental -- these files reach tens of megabytes and
 re-parsing per poll would cost more than the screenshots.
 """
 import argparse
-import ctypes
 import os
 import re
-import struct
 import sys
 import time
-import zlib
-from ctypes import wintypes
 
 sys.path.insert(0, r"C:\botlab\smerwin-bots\tools\windows-host")
 from eve_mem import find_client_pid  # noqa: E402
+from window_capture import capture_window  # noqa: E402
 from window_probe import declare_dpi_awareness, windows_of_process  # noqa: E402
 
 declare_dpi_awareness()
-user32 = ctypes.WinDLL("user32", use_last_error=True)
-gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
-SRCCOPY, HALFTONE = 0x00CC0020, 4
 
 # The bot names the site it is in on every reading; the id is what makes an
 # arrival distinguishable from the four hundred readings that follow it.
@@ -53,6 +47,18 @@ LOCKING = re.compile(rb"Lock target from overview entry '([^']+)'|"
 # the log was read, and it would have contributed nothing while looking like a
 # second source of arrivals. `We are in anomaly '<id>'` is the line that names
 # the site, and it is what arrivals are taken from.
+#
+# It is, however, exactly the right marker for a *departure*, which is why it is
+# matched below without reaching for an id. Leaving is only knowable after the
+# fact from the log -- by the time the site id changes the ship is already
+# somewhere else and a frame captured then shows the next site, not the last one
+# -- so what is captured instead is the reading the bot decides it is done here
+# and picks the next site. Measured over run 45: `Found matching anomaly`
+# precedes **31 of 31** site transitions, as does `HOOOOONK in warp`; the warp
+# line was rejected because the ship is already gone by then and the frame is a
+# warp tunnel. The id is taken from `current` -- the site being left -- rather
+# than from this line, which carries none.
+LEAVING = re.compile(rb"Found matching anomaly")
 
 
 def client_window(pid):
@@ -61,59 +67,6 @@ def client_window(pid):
     if not wins:
         return None
     return max(wins, key=lambda w: w.width * w.height)
-
-
-def capture(win, path, scale):
-    """The window region to a PNG, downscaled. Returns whether it was frontmost."""
-    frontmost = user32.GetForegroundWindow() == win.hwnd
-    sw, sh = win.width, win.height
-    dw, dh = max(1, sw // scale), max(1, sh // scale)
-    srcdc = user32.GetDC(None)
-    memdc = gdi32.CreateCompatibleDC(srcdc)
-    bitmap = gdi32.CreateCompatibleBitmap(srcdc, dw, dh)
-    gdi32.SelectObject(memdc, bitmap)
-    gdi32.SetStretchBltMode(memdc, HALFTONE)
-    gdi32.StretchBlt(memdc, 0, 0, dw, dh, srcdc, win.x, win.y, sw, sh, SRCCOPY)
-
-    class BITMAPINFOHEADER(ctypes.Structure):
-        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", ctypes.c_long),
-                    ("biHeight", ctypes.c_long), ("biPlanes", wintypes.WORD),
-                    ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
-                    ("biSizeImage", wintypes.DWORD),
-                    ("biXPelsPerMeter", ctypes.c_long),
-                    ("biYPelsPerMeter", ctypes.c_long),
-                    ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
-
-    header = BITMAPINFOHEADER()
-    header.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-    header.biWidth, header.biHeight = dw, -dh
-    header.biPlanes, header.biBitCount, header.biCompression = 1, 24, 0
-    stride = ((dw * 3 + 3) // 4) * 4
-    buffer = ctypes.create_string_buffer(stride * dh)
-    gdi32.GetDIBits(memdc, bitmap, 0, dh, buffer, ctypes.byref(header), 0)
-
-    raw = bytearray()
-    for row in range(dh):
-        raw += b"\x00"
-        line = bytearray(buffer[row * stride:row * stride + dw * 3])
-        line[0::3], line[2::3] = line[2::3], line[0::3]
-        raw += line
-
-    def chunk(kind, data):
-        body = struct.pack(">I", len(data)) + kind + data
-        return body + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
-
-    png = (b"\x89PNG\r\n\x1a\n"
-           + chunk(b"IHDR", struct.pack(">IIBBBBB", dw, dh, 8, 2, 0, 0, 0))
-           + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
-           + chunk(b"IEND", b""))
-    with open(path, "wb") as handle:
-        handle.write(png)
-
-    gdi32.DeleteObject(bitmap)
-    gdi32.DeleteDC(memdc)
-    user32.ReleaseDC(None, srcdc)
-    return frontmost
 
 
 def main():
@@ -136,19 +89,23 @@ def main():
     # from a quiet run, which is this project's signature failure. Prove them
     # against a log known to contain the events before following a live one.
     if args.patterns_proven_by:
-        arrivals = engagements = 0
+        arrivals = engagements = departures = 0
         with open(args.patterns_proven_by, "rb") as fh:
             for line in fh:
                 if IN_ANOMALY.search(line):
                     arrivals += 1
                 if LOCKING.search(line):
                     engagements += 1
-        print("patterns against %s: %d arrival lines, %d lock lines"
-              % (os.path.basename(args.patterns_proven_by), arrivals, engagements))
-        if not arrivals or not engagements:
+                if LEAVING.search(line):
+                    departures += 1
+        print("patterns against %s: %d arrival lines, %d lock lines, "
+              "%d departure lines"
+              % (os.path.basename(args.patterns_proven_by), arrivals,
+                 engagements, departures))
+        if not arrivals or not engagements or not departures:
             sys.exit("a pattern matched nothing in a log that should contain "
-                     "both -- the bot's wording has changed and this watcher "
-                     "would have captured nothing while looking healthy")
+                     "all three -- the bot's wording has changed and this "
+                     "watcher would have captured nothing while looking healthy")
 
     os.makedirs(args.out, exist_ok=True)
     pid = find_client_pid()
@@ -156,7 +113,7 @@ def main():
         sys.exit("no EVE client running")
     print("client pid %d -> %s" % (pid, args.out), flush=True)
 
-    seen_arrival, seen_engagement = set(), set()
+    seen_arrival, seen_engagement, seen_departure = set(), set(), set()
     current = None
     shots = 0
     capped = False
@@ -178,7 +135,10 @@ def main():
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", tag)[:40]
         name = "%s_%s_%s.png" % (time.strftime("%H%M%S"), kind, safe)
         path = os.path.join(args.out, name)
-        frontmost = capture(win, path, args.scale)
+        # raise_first stays off: the synthetic ALT a raise needs is
+        # indistinguishable from a person at the keyboard, and would stand the
+        # bot down for five seconds on every screenshot. See the module docstring.
+        frontmost = capture_window(win, path, scale=args.scale)
         if not frontmost:
             base, ext = os.path.splitext(path)
             os.replace(path, base + "_NOTFRONTMOST" + ext)
@@ -215,6 +175,14 @@ def main():
                 if LOCKING.search(line) and current and current not in seen_engagement:
                     seen_engagement.add(current)
                     shoot("engage", current)
+                    continue
+                # The site being left is `current`, not anything this line
+                # names -- it carries no id. One shot per site: the decision is
+                # re-derived every reading, so without the set this would fire
+                # for as long as the bot took to get away.
+                if LEAVING.search(line) and current and current not in seen_departure:
+                    seen_departure.add(current)
+                    shoot("depart", current)
         time.sleep(args.poll)
 
 
