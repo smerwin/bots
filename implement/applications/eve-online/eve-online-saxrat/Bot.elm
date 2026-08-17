@@ -411,17 +411,30 @@ stops (`R.S. Officer`), hyphens, brackets and a slash (`Gas/Storage Silo`). The
 client's own game logs say it again independently -- 348 distinct actors across
 360,788 `(combat)` lines in 40 sessions, no comma.
 
-**`anomaly-name`: still unread, and the corpus cannot read it.** Nothing here
-ever logs the scanner's Name cell -- `We are in anomaly '...'` prints the ID the
-scanner gives -- so no recorded run carries one, and the site words the launcher
-itself asks for (`Hideaway`, `Refuge`, `Burrow`, `Rally Point`, ...) occur in all
-86 runs exactly **zero** times. The only probe-scanner names anybody has written
-down are the five read off a live scanner for #188 and kept in
-`test_saxrat_anomaly_name_wildcard.py`, and one of them is
-`Dread Assault: Blood Raider Temple` -- a colon, so this column is not restricted
-to the letters and spaces the other four suggest. The cost is stated rather than
-hidden: an anomaly whose name carries a comma is unmatchable here, and what would
-settle whether one exists is a live read of the scanner nobody has taken.
+**`anomaly-name`: now logged, so the next corpus can read it.** Until #197 was
+acted on, nothing here ever logged the scanner's Name cell -- the cell was read
+once, folded into a `Bool` and dropped, and `We are in anomaly '...'` printed the
+ID the scanner gives. So no recorded run carried a site name, and the words the
+launcher itself asks for (`Hideaway`, `Refuge`, `Burrow`, `Rally Point`, ...)
+occur in all 86 runs exactly **zero** times -- which made the question
+unanswerable from recordings rather than merely unanswered.
+
+`describeAnomalyIdentity` now prints the Name and Group beside the ID on every
+reading that names a site, so a run flown from here writes the column down. The
+86 runs behind this file still cannot answer it, and nothing about the counts
+above changes; what changes is that run 49 onwards can.
+
+The only probe-scanner names anybody had written down before were the five read
+off a live scanner for #188 and kept in `test_saxrat_anomaly_name_wildcard.py`,
+one of them `Dread Assault: Blood Raider Temple` -- a colon, so this column is
+not restricted to the letters and spaces the other four suggest. A sixth was
+read off the live scanner during run 48, `Sansha Refuge`, carrying no comma.
+
+The cost is unchanged and still stated rather than hidden: an anomaly whose name
+carries a comma is unmatchable here, because `splitSettingIntoNames` splits every
+setting value on commas. Six names are not a distribution and none of this says
+no such name exists -- it says the instrument that would find one is finally
+running.
 
 Splitting these three at all is issue #182. The two fleet settings split and
 these did not, so a comma-separated value parsed with no complaint into **one**
@@ -5219,7 +5232,17 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                                             arrivalInAnomalyAgeSeconds =
                                                                 (context.eventContext.timeInMilliseconds - memoryOfAnomaly.arrivalTime.milliseconds) // 1000
                                                         in
-                                                        describeBranch ("We are in anomaly '" ++ anomalyID ++ "' since " ++ String.fromInt arrivalInAnomalyAgeSeconds ++ " seconds.")
+                                                        describeBranch
+                                                            ("We are in anomaly "
+                                                                ++ (context.readingFromGameClient
+                                                                        |> getCurrentAnomalyIdentityAsSeenInProbeScanner
+                                                                        |> Maybe.withDefault { id = anomalyID, name = Nothing, group = Nothing }
+                                                                        |> describeAnomalyIdentity
+                                                                   )
+                                                                ++ " since "
+                                                                ++ String.fromInt arrivalInAnomalyAgeSeconds
+                                                                ++ " seconds."
+                                                            )
                                                             (case findReasonToAvoidAnomalyFromMemory (anomalyChoiceFromDecisionContext context) { anomalyID = anomalyID } of
                                                                 Just reasonToAvoidAnomaly ->
                                                                     describeBranch
@@ -10865,9 +10888,9 @@ describeWhereTheShipIs readingFromGameClient =
         "IN WARP"
 
     else
-        case getCurrentAnomalyIDAsSeenInProbeScanner readingFromGameClient of
-            Just anomalyID ->
-                anomalyID
+        case getCurrentAnomalyIdentityAsSeenInProbeScanner readingFromGameClient of
+            Just anomaly ->
+                describeAnomalyIdentityForHeader anomaly
 
             Nothing ->
                 "-"
@@ -11169,7 +11192,10 @@ statusTextFromState context =
 
                         describeAnomaly =
                             "Current anomaly: "
-                                ++ (getCurrentAnomalyIDAsSeenInProbeScanner readingFromGameClient |> Maybe.withDefault "None")
+                                ++ (getCurrentAnomalyIdentityAsSeenInProbeScanner readingFromGameClient
+                                        |> Maybe.map describeAnomalyIdentity
+                                        |> Maybe.withDefault "None"
+                                   )
                                 ++ "."
 
                         describeArrivalWindowClause =
@@ -14454,11 +14480,93 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
 getCurrentAnomalyIDAsSeenInProbeScanner : ReadingFromGameClient -> Maybe String
 getCurrentAnomalyIDAsSeenInProbeScanner =
+    getCurrentAnomalyIdentityAsSeenInProbeScanner >> Maybe.map .id
+
+
+{-| The scanner's own words for the site the ship is in: its ID, Name and Group.
+
+**Nothing keys on this.** `visitedAnomalies` is filed under the ID and stays
+that way, because the ID is what the client gives uniquely per site on this grid
+while a Name is shared by every site of a kind -- an anomaly memory keyed on
+`Sansha Refuge` would confuse the one just cleared with the next one. This is
+for _saying_ which site that is, in the client's own words.
+
+The three cells come off the **same** scan-result row rather than from three
+lookups, so they cannot be answered from different rows if the scanner re-sorts
+between reads. That is not a hypothetical tidiness: the overview's own re-sort
+between a read and a click is documented here as having locked the wrong object
+and shot an asteroid for 290 readings.
+
+`Nothing` for a cell is the scanner not giving one, and it is not an empty name.
+The renderer says so in words for the same reason `loadRefusalFromGameLog` does:
+a fabricated blank reads as a site the client declined to name, which is a
+different fact from one nobody read.
+
+Reading it at all is #197. `anomaly-name` is matched against the Name cell, and
+until now that cell was read once, folded into a `Bool` and dropped -- so what a
+run recorded was the ID, no recorded run carried a site name, and the question of
+what that column may contain was unanswerable from the corpus at any size rather
+than merely unanswered.
+
+-}
+type alias AnomalyIdentity =
+    { id : String
+    , name : Maybe String
+    , group : Maybe String
+    }
+
+
+getCurrentAnomalyIdentityAsSeenInProbeScanner : ReadingFromGameClient -> Maybe AnomalyIdentity
+getCurrentAnomalyIdentityAsSeenInProbeScanner =
     .probeScannerWindow
         >> Maybe.map getScanResultsForSitesOnGrid
         >> Maybe.withDefault []
         >> List.head
-        >> Maybe.andThen (.cellsTexts >> Dict.get "ID")
+        >> Maybe.andThen
+            (\scanResult ->
+                scanResult.cellsTexts
+                    |> Dict.get "ID"
+                    |> Maybe.map
+                        (\id ->
+                            { id = id
+                            , name = scanResult.cellsTexts |> Dict.get "Name"
+                            , group = scanResult.cellsTexts |> Dict.get "Group"
+                            }
+                        )
+            )
+
+
+{-| `'EGC-528' 'Sansha Refuge' (Combat Site)`, for the lines a run is read back from.
+
+**The ID stays first and stays single-quoted.** `engagement_watch.py` names every
+screenshot it takes from `We are in anomaly '([^']+)'`, which takes the first
+quoted group out of the line -- so a name appended after the ID is invisible to
+it, and a name put in front would silently rename every screenshot of every run
+while the watcher went on looking healthy.
+
+-}
+describeAnomalyIdentity : AnomalyIdentity -> String
+describeAnomalyIdentity anomaly =
+    "'"
+        ++ anomaly.id
+        ++ "' "
+        ++ (anomaly.name |> Maybe.map (\name -> "'" ++ name ++ "'") |> Maybe.withDefault "(name unread)")
+        ++ " "
+        ++ (anomaly.group |> Maybe.map (\group -> "(" ++ group ++ ")") |> Maybe.withDefault "(group unread)")
+
+
+{-| `EGC-528/Sansha Refuge`, for the one-line header printed on every decision.
+
+Joined by a slash rather than a space because the header's next field is the
+active target's name, and two bare names running together read as one. The Group
+is left out: it is `Combat Site` for everything this bot hunts, so in the line
+printed most often it would be a column of one repeated word.
+
+-}
+describeAnomalyIdentityForHeader : AnomalyIdentity -> String
+describeAnomalyIdentityForHeader anomaly =
+    anomaly.id
+        ++ (anomaly.name |> Maybe.map (\name -> "/" ++ name) |> Maybe.withDefault "")
 
 
 getScanResultsForSitesOnGrid : EveOnline.ParseUserInterface.ProbeScannerWindow -> List EveOnline.ParseUserInterface.ProbeScanResult
