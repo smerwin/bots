@@ -533,6 +533,14 @@ a `View Details` row and nothing that can be acted on. That is what answers
 "which escalation" without picking by position -- the client has already chosen,
 and a button belonging to a collapsed entry is not in the tree to be clicked.
 
+**One button per entry, which is what the client has been observed drawing.**
+The expanded entry's objective chain holds two task rows -- travel to the
+location, and enter the site -- and every capture of it shows exactly one of
+them displayed at a time, the other hidden rather than removed. So this field is
+the task the client is showing. What it cannot express is both rows shown at
+once: see `parseOpportunityInfoPanelEntry` for what is taken then and for why
+carrying a list instead is not done on a shape nobody has read.
+
 -}
 type alias OpportunityInfoPanelEntry =
     { uiNode : UITreeNodeWithDisplayRegion
@@ -3356,35 +3364,42 @@ parseOpportunityInfoPanelEntry entryNode =
                 |> List.filterMap (.uiNode >> getDisplayText)
                 |> List.filter (String.trim >> String.isEmpty >> not)
 
-        -- Matched on the widget's own **type** name, which is what scopes this
-        -- to the tracker. The label the client puts on it is a word like `Jump`
-        -- that the Selected Item panel also carries on a button of its own, so
-        -- a text search over the tree cannot tell the two apart, while a type
-        -- name reached only from inside a `DungeonInfoPanelEntry` cannot reach
-        -- the panel at all.
+        -- Matched on the widget's own **type** name, or on the client's own
+        -- `_name` for the objective task it belongs to. Either is what scopes
+        -- this to the tracker: the label the client puts on the button is a
+        -- word like `Jump` that the Selected Item panel also carries on a
+        -- button of its own, so a text search over the tree cannot tell the two
+        -- apart, while a node reached only from inside a
+        -- `DungeonInfoPanelEntry` cannot reach that panel at all.
         --
-        -- `startsWith` rather than an equality, because the widget has been
-        -- read under two spellings on this client: `TravelToLocation
-        -- ButtonTaskWidget` while run 26 was flying, and
-        -- `TravelToLocationButtonTask` on a later read. Whether that is a
-        -- client change or a second node in the same chain is unresolved, and
-        -- the prefix covers both without admitting the sibling task widgets --
-        -- narrower than the mission runner's `endsWith "ButtonTaskWidget"`,
-        -- which is wider there because that panel also has a conversation
-        -- button to press at hand-in and this one has no such step.
+        -- **The chain has two task rows and the type name reaches only one of
+        -- them**, which is what `opportunityTravelTaskNames` is for. See that
+        -- declaration for the whole argument -- the short of it is that
+        -- `TravelToLocationButtonTask` is the row carrying `Set Destination`
+        -- and `Jump`, that the row which *enters* the site carries
+        -- `Warp to Site` on a `TravelStateButtonTaskWidget` the prefix cannot
+        -- reach, and that naming the two tasks admits the second without
+        -- admitting whatever the chain grows next.
         --
         -- **The display filter is the selection, not a safety net.** The chain
         -- hides the tasks that are not currently available rather than removing
         -- them, and picking a hidden one yields a button whose label a decision
         -- then discards -- which is the same stall by a longer road. Run 14 on
         -- the other bot sat docked for 750 readings on exactly that.
+        --
+        -- **`List.head` over the displayed candidates is the one thing here
+        -- that is not argued from an observation.** Every capture of this chain
+        -- shows exactly one task row displayed at a time, so nothing has ever
+        -- had to choose; if both were ever shown at once this takes whichever
+        -- the client lists first, and `opportunityStepArrivingFirst` in
+        -- `Bot.elm` -- which prefers an arriving label over a travelling one --
+        -- never sees the other. Making that preference reach inside one entry
+        -- means carrying both buttons here, which is a change to the field this
+        -- type exposes and to the decision that reads it. Deliberately not done
+        -- on a shape nobody has read.
         travelButtonNode =
             descendants
-                |> List.filter
-                    (.uiNode
-                        >> .pythonObjectTypeName
-                        >> String.startsWith "TravelToLocationButtonTask"
-                    )
+                |> List.filter (.uiNode >> uiNodeIsOpportunityTravelTask)
                 |> List.filter (.uiNode >> nodeIsDisplayedFromDictEntries)
                 |> List.head
     in
@@ -3429,6 +3444,125 @@ parseOpportunityInfoPanelEntry entryNode =
                     }
                 )
     }
+
+
+{-| Whether a node inside an escalation's objective chain is one of the task
+rows that move the ship.
+
+**The client models the trip as two tasks and this used to see one of them.**
+Read off the live client during run `saxrat_20260816-173606`, in Ahrosseas, with
+the escalation on screen and the button plainly drawn:
+
+    DungeonInfoPanelEntry            name=escalation_sites:50839662
+      ContainerAutoSize              name=content_container
+        ObjectiveChainEntry          name=objective_chain_55
+          ObjectiveEntry             name=objective_enter_dungeon
+            EveLabelLarge            name=title    'Travel to Location'
+            ContainerAutoSize        name=task_container
+              ContainerAutoSize      name=task_container_travel_to_location
+              ContainerAutoSize      name=task_container_enter_dungeon
+              ContainerAutoSize      name=buttons_container
+                TravelStateButtonTaskWidget  name=objective_task_enter_dungeon
+                  EveLabelMedium             name=label   'Warp to Site'
+
+`task_container_travel_to_location` is the row that carries `Set Destination`
+and `Jump` on a `TravelToLocationButtonTask...` widget, and it is the one the
+type-name prefix reaches. `task_container_enter_dungeon` is the row that gets
+the ship _into_ the site, it carries `Warp to Site`, and its widget is a
+`TravelStateButtonTaskWidget` -- which does not start with
+`TravelToLocationButtonTask`, so the prefix alone answered `Nothing` for it on
+every reading. In that run the ship crossed six systems from Amarr to Ahrosseas
+entirely on the first row, 62 travel steps taken, and entered the site **zero**
+times with the button on screen.
+
+**The prefix stays, and it stays a prefix.** The widget has been read under two
+spellings on this client -- `TravelToLocation ButtonTaskWidget` while run 26 was
+flying, and `TravelToLocationButtonTask` on a later read -- so an equality would
+lose one of them, and every tracker step in every recorded run on this machine
+came through it.
+
+**The second row is admitted by name rather than by widening the type match**,
+and that is the deliberate part. `objective_task_enter_dungeon` and
+`objective_task_travel_to_location` are the client's own names for these two
+steps, so a rule keyed on them cannot drift onto whatever task widget the chain
+grows next. The mission runner's `endsWith "ButtonTaskWidget"` _would_ have
+matched the warp button and is still not what is written here: it admits every
+sibling in `buttons_container` sight-unseen, which is the failure the narrow
+prefix was written to avoid -- that panel has a conversation button to press at
+hand-in, and nothing says this chain will not grow one -- and this issue is
+evidence that guessing at that family is expensive in both directions. It is
+also **narrower** than the prefix in one place, which is easy to miss:
+`TravelToLocationButtonTask`, the later of the two spellings, does not end with
+`ButtonTaskWidget` at all, so swapping one rule for the other would have lost a
+row it can read today.
+
+So what this admits is: any widget whose type name begins with
+`TravelToLocationButtonTask`, whatever the client names it; and any widget the
+client names as one of these two objective tasks, whatever its type. What it
+excludes is every other sibling in `buttons_container`, every `ButtonTaskWidget`
+that is not one of these two tasks, and anything outside a
+`DungeonInfoPanelEntry` at all.
+
+**Nothing here decides whether a label is worth clicking**, and that separation
+is doing real work rather than being tidy. `travelLabelIsACommand` in `Bot.elm`
+is what sorts a label, and widening this selector does not widen that allow-list
+by one word. `Undock` is the worked example: it was carried as a state, and PR
+#282 read it off the live client as what this widget renders while the ship is
+**docked in the escalation's own system**, which is a command and the one that
+gets the ship out of a station it parked in. The vocabulary has now surprised
+this file twice, so the parser's job is to surface whatever the client wrote and
+let the rule that has the evidence decide.
+
+**This selector can only widen what the old one found**, which is what makes the
+docked case safe without a second capture. It is a union with the prefix rather
+than a replacement for it, so every node the prefix admitted is still admitted;
+the docked reading #282 measured is one where the label reached
+`travelLabelIsACommand` and was refused there, so the parser was already finding
+that button and still is.
+
+**Unverified, and it is #147's shape: what this widget does after the ship has
+arrived.** The capture above is from before arrival, and no recorded run on this
+machine has ever reached this row at all -- the tracker's own decision line names
+`Jump` and `Set Destination` and nothing else, in every run. PR #282 sharpens
+the question rather than answering it: if this button renders `Undock` while
+docked and `Warp to Site` while in space, the label really is a function of the
+ship's state, which makes both answers plausible. If the client keeps
+drawing an _enabled_ `Warp to Site` once the ship is inside the site, then since
+#261 an arriving label outranks the acceleration gate, and the branch would
+shadow gate work the way the whole-tree search shadowed it for 3,458 readings in
+run 5. Two things make that less likely than it sounds and neither settles it:
+the travelling row's own labels cycle into states (`Warping` was read on it
+during run 26), which `travelLabelIsACommand` refuses; and run 5's persistent
+`Warp to Site` came through `findUiElementWithText`, which filtered on no
+`_display` at all, so it is equally consistent with a _hidden_ node in a chain
+that hides what is unavailable. The tell on the first flown run is
+`offers 'Warp to Site'` continuing on readings where the ship is already inside
+the site, with acceleration-gate decisions disappearing on those readings.
+
+-}
+uiNodeIsOpportunityTravelTask : EveOnline.MemoryReading.UITreeNode -> Bool
+uiNodeIsOpportunityTravelTask uiNode =
+    (uiNode.pythonObjectTypeName
+        |> String.startsWith opportunityTravelTaskTypePrefix
+    )
+        || (getNameFromDictEntries uiNode
+                |> Maybe.map (\name -> List.member name opportunityTravelTaskNames)
+                |> Maybe.withDefault False
+           )
+
+
+{-| The type-name prefix covering both spellings of the travel-to-location row.
+-}
+opportunityTravelTaskTypePrefix : String
+opportunityTravelTaskTypePrefix =
+    "TravelToLocationButtonTask"
+
+
+{-| The client's own `_name` for each of the objective chain's two travel tasks.
+-}
+opportunityTravelTaskNames : List String
+opportunityTravelTaskNames =
+    [ "objective_task_travel_to_location", "objective_task_enter_dungeon" ]
 
 
 stripHtmlTags : String -> String
