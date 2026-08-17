@@ -74,7 +74,14 @@ SITE_NAME = "Sansha's Command Relay Outpost"
 # vocabulary for the same widget type; `Dock` has never been read off the
 # tracker and is carried on that separation rather than on an observation here.
 COMMAND_LABELS = ["Set Destination", "Jump", "Warp to Site",
-                  "Warp to Location", "Dock"]
+                  "Warp to Location", "Dock", "Undock"]
+
+# `Undock` is the one of these that was read off the live client rather than
+# argued for, and the only one whose absence deadlocked a run: the ship arrived
+# in the escalation's own system, found no step it could read, parked by
+# docking -- and docking is what makes the tracker render `Undock`. See
+# `travelLabelIsACommand`'s doc comment.
+LABEL_READ_WHILE_DOCKED_IN_THE_SITES_SYSTEM = "Undock"
 
 # The states. Clicking one re-commands a trip already under way.
 STATE_LABELS = ["Warping", "Jumping", "Docking", "Preparing", "Undocking",
@@ -415,6 +422,41 @@ class TheLabelRuleSeparatesCommandsFromStates(unittest.TestCase):
                      "Set Destination and Undock", "Warp to Site 2"]:
             with self.subTest(label=text):
                 self.assertEqual(self.is_command([self.literal(text)]), [False])
+
+    def test_undock_is_a_step_and_undocking_is_not(self):
+        """The pair the equality has to keep apart, and the deadlock behind it.
+
+        `Undock` is the command the client renders on this widget when the ship
+        is docked in the escalation's own system -- read live, and the label
+        whose absence from the allow-list meant a run that had travelled eight
+        jumps could never leave the station it parked in. `Undocking` is the
+        trip already under way, and clicking it re-commands a manoeuvre, which
+        is #99.
+
+        Asked as one pair rather than two cases, because what matters is that
+        they answer *differently*: a substring test would take `undock` out of
+        `undocking` and collapse them, and that is the shape the equality
+        exists to refuse.
+        """
+        answers = self.is_command(
+            [self.literal("Undock"), self.literal("Undocking")])
+        self.assertEqual(
+            answers, [True, False],
+            "Undock/Undocking did not separate -- %r" % (answers,))
+
+    def test_undocking_is_not_an_arrival(self):
+        """`Undock` gets the ship *out*; it must not count as reaching the site.
+
+        `opportunityStepArrivingFirst` prefers an arrival label over a
+        travelling one, so an `Undock` sorted as an arrival would outrank a real
+        `Warp to Site` on the same reading.
+        """
+        arrives, = self.repl.evaluate(
+            ['opportunityLabelArrivesAtTheSite %s'
+             % self.literal(LABEL_READ_WHILE_DOCKED_IN_THE_SITES_SYSTEM)])
+        self.assertFalse(
+            arrives,
+            "Undock is sorted as an arrival, so it would outrank Warp to Site")
 
     def test_the_client_may_change_its_capitalisation_or_padding(self):
         for text in ["  Jump  ", "jump", "JUMP", "Warp To Site"]:

@@ -12042,11 +12042,29 @@ label nobody has read leaves the bot behaving exactly as it did before this
 change, which is a route-panel stargate cascade rather than a click into a panel
 listing several escalations.
 
-The five words are the ones the mission runner's own `missionTravelStep` sorts as
-commands -- `Set Destination`, `Jump`, `Warp to Location`, `Dock` -- plus
+Five of the six are the ones the mission runner's own `missionTravelStep` sorts
+as commands -- `Set Destination`, `Jump`, `Warp to Location`, `Dock` -- plus
 `Warp to Site`, which is what this branch has been matching all along. `Dock` has
 never been read off _this_ widget and is carried on the strength of that
 separation rather than on an observation here.
+
+**`Undock` is the sixth, and leaving it out deadlocked a run.** Read off the
+live client with the ship docked in Uchat and the escalation for *that system*
+expanded: the widget rendered `Undock`, not `Warp to Site`. Nothing else in the
+list matches it, and the comparison is an equality, so the label was refused --
+which is a deadlock rather than a missed step, because docking is exactly what
+the bot does when it sees nothing to do. It arrived after eight jumps, found no
+step it could read, parked by docking, and docking is what makes the tracker
+offer `Undock`. Thirty-four readings of "no route set, stay docked" and it could
+never have left.
+
+The irony is worth keeping: `Dock` was carried here on an argument, having never
+been seen, while `Undock` -- which the client actually writes -- was absent. A
+substring test would have matched `dock` inside `undock` and worked by accident;
+the equality that makes this list safe is what made it fail.
+
+`Undocking` and `Abort Undock` stay states, and the equality is what keeps them
+apart from this.
 
 Compared case-insensitively on the trimmed label, so a client that changes its
 capitalisation does not switch the branch off; the comparison is still an
@@ -12064,7 +12082,7 @@ travelLabelIsACommand label =
 
 opportunityTravelCommandLabels : List String
 opportunityTravelCommandLabels =
-    [ "set destination", "jump", "warp to site", "warp to location", "dock" ]
+    [ "set destination", "jump", "warp to site", "warp to location", "dock", "undock" ]
 
 
 {-| Of the steps the tracker is offering, the one that gets the ship _into_ a
