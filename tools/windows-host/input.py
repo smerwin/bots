@@ -428,12 +428,21 @@ def _k32_tick() -> int:
 # Foreground
 # --------------------------------------------------------------------------
 
+_VK_MENU = 0x12  # ALT, for the foreground-lock escalation below only
+_HWND_TOP = 0
+_SWP_NOSIZE, _SWP_NOMOVE, _SWP_SHOWWINDOW = 0x0001, 0x0002, 0x0040
+
 
 def window_is_foreground(hwnd: int) -> bool:
     return int(_user32.GetForegroundWindow()) == int(hwnd)
 
 
-def bring_window_to_foreground(hwnd: int, retries: int = 4, delay: float = 0.2) -> bool:
+def bring_window_to_foreground(
+    hwnd: int,
+    retries: int = 4,
+    delay: float = 0.2,
+    allow_synthetic_alt: bool = False,
+) -> bool:
     """Focus a window, working around Windows' foreground lock.
 
     ``SetForegroundWindow`` is not a command, it is a request, and Windows
@@ -447,6 +456,28 @@ def bring_window_to_foreground(hwnd: int, retries: int = 4, delay: float = 0.2) 
     sequence, so the overwhelmingly common case is that it is already there.
     Paying an unconditional attach-and-sleep per click was the real source of
     felt sluggishness on macOS.
+
+    **The attach is not always enough**, and the EVE launcher is the case that
+    proves it: Windows keeps a foreground *lock* that the attach alone does not
+    clear, so this returned ``False`` for it while the window stayed buried.
+    Pressing and releasing ALT is the other half -- a synthetic ALT tells the
+    shell an input transition happened, which drops the lock for the next
+    ``SetForegroundWindow``.  Cost of not having it, measured live: an
+    avatar press-and-hold aimed at correct screen coordinates landed on
+    whatever was on top instead, and ``launch_character.py`` reported only
+    that no client appeared in 300 s.
+
+    **It is opt-in and must stay opt-in.**  ``GetLastInputInfo`` cannot tell a
+    synthetic key from a real one, and the host reads it before every input
+    sequence to stand down for ``HUMAN_INPUT_STAND_DOWN_SECONDS`` after a
+    person touches the machine.  Since the framework asks for this on every
+    sequence, defaulting the ALT on would have the bot press ALT at itself and
+    then idle five seconds for the human it just imitated -- forever.  So the
+    bot's own path leaves it off and pays a failed raise; tools that are not
+    the bot (``raise_window.py``, launching the client, grabbing a screenshot
+    of a window that is behind another) pass ``allow_synthetic_alt=True``.
+    ``engagement_watch.py`` deliberately raises nothing at all for this reason
+    and records what was frontmost instead.
     """
     if window_is_foreground(hwnd):
         return True
@@ -460,8 +491,18 @@ def bring_window_to_foreground(hwnd: int, retries: int = 4, delay: float = 0.2) 
         if their_thread and their_thread != our_thread:
             attached = bool(_user32.AttachThreadInput(their_thread, our_thread, True))
         try:
+            if allow_synthetic_alt:
+                # Press and release ALT to drop the foreground lock.  Before the
+                # attach, so the transition is in effect for the request below.
+                _user32.keybd_event(_VK_MENU, 0, 0, 0)
+                _user32.keybd_event(_VK_MENU, 0, KEYEVENTF_KEYUP, 0)
             _user32.ShowWindow(wintypes.HWND(hwnd), 9)  # SW_RESTORE, in case minimised
+            _user32.SetWindowPos(
+                wintypes.HWND(hwnd), wintypes.HWND(_HWND_TOP), 0, 0, 0, 0,
+                _SWP_NOMOVE | _SWP_NOSIZE | _SWP_SHOWWINDOW,
+            )
             _user32.SetForegroundWindow(wintypes.HWND(hwnd))
+            _user32.BringWindowToTop(wintypes.HWND(hwnd))
             _user32.SetActiveWindow(wintypes.HWND(hwnd))
         finally:
             if attached:
@@ -470,6 +511,22 @@ def bring_window_to_foreground(hwnd: int, retries: int = 4, delay: float = 0.2) 
         if window_is_foreground(hwnd):
             return True
     return False
+
+
+def foreground_window_title() -> str:
+    """What is actually in front, for a caller that has just failed to get there.
+
+    A raise that did not work and a raise that did are the same ``False`` and
+    the same screenshot; naming the window that won is the difference between
+    a diagnosis and a guess.
+    """
+    hwnd = _user32.GetForegroundWindow()
+    if not hwnd:
+        return ""
+    length = _user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(length + 1)
+    _user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value
 
 
 # --------------------------------------------------------------------------
