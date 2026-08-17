@@ -44,6 +44,19 @@ parser live. `TheSelectorIsReadOutOfTheParser` is what refuses the widening the
 issue rules out, and `BothRowsDisplayedAtOnce` records the one shape nobody has
 read rather than guessing at it.
 
+**#291: that name is the row's progress bar's too, and the bar sorts first.**
+Widening the selector to reach the enter-dungeon row's button made the
+travelling row's unreachable -- run 48 read
+`ProgressBarTaskWidget _name=objective_task_travel_to_location
+'8 jumps | 0.6 Andabiar'` ahead of the button carrying `Set Destination`,
+neither with `_display`, so `List.head` took the bar. The parse prefers a
+button among the admitted candidates now and keeps `List.head` for the
+no-button case. `TheProgressBarSharesTheButtonsName` is where the cases that
+fail against the unchanged parser live, and it is also the correction to
+`BothRowsDisplayedAtOnce`: that class was the guard for "two candidates at
+once" and anticipated two *buttons*, where the ambiguity that arrived is a
+button and a widget nobody can press.
+
 **#147's ordering is untouched and is asserted here as well as next door**: an
 acceleration gate in reach still outranks the tracker button, because a gate is
 progress inside the site and the button is how the ship reaches the next one.
@@ -91,6 +104,15 @@ ENTER_WIDGET_TYPE = "TravelStateButtonTaskWidget"
 
 # What the entering row was drawn with in that capture.
 ENTER_LABEL = "Warp to Site"
+
+# #291: the widget that shares `TRAVEL_TASK_NAME` with the travelling row's
+# button and is listed ahead of it. It is not a button and nothing can press it.
+BAR_WIDGET_TYPE = "ProgressBarTaskWidget"
+
+# What run 48 read on it, byte for byte. `travelLabelIsACommand` refuses it and
+# `travelLabelIsReadableText` accepts it, which is the whole of why the failure
+# was a stand-down rather than a wrong click.
+BAR_LABEL = "8 jumps | 0.6 Andabiar"
 
 SITE_NAME = "Sansha's Command Relay Outpost"
 
@@ -162,6 +184,35 @@ def tracker_offers(path):
     return labels
 
 
+def let_binding_by_indentation(source, declaration_name, name):
+    """One `let` binding of a declaration, sliced by indentation.
+
+    A reader that ends at the next ` <name> = ` stops inside a `case` or a
+    record literal, and #291's own binding is a `case`, so an assertion about
+    its second branch would read text that stopped at the first. This takes the
+    line the binding opens on and ends at the next non-blank line indented no
+    further -- the correction PRs #147, #156 and #159 each made once.
+
+    Comments are dropped before anything is asserted on the result: the doc
+    comment over this binding names every identifier the cases below look for,
+    so a version that had deleted the code and kept the paragraph would pass.
+    """
+    lines = body_of(source, declaration_name).splitlines()
+    opens = [index for index, line in enumerate(lines)
+             if re.match(r"^(\s*)%s =(\s|$)" % re.escape(name), line)]
+    assert opens, "no let binding named %r" % name
+    start = opens[0]
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            end = index
+            break
+    without_comments = [re.sub(r"--.*$", "", line) for line in lines[start:end]]
+    return collapsed("\n".join(without_comments))
+
+
 def string_from_codepoints(codepoints):
     """A label a string literal cannot carry, rebuilt inside Elm.
 
@@ -228,6 +279,19 @@ def enter_button(text=ENTER_LABEL, **kwargs):
     """
     kwargs.setdefault("type_name", ENTER_WIDGET_TYPE)
     kwargs.setdefault("task_name", ENTER_TASK_NAME)
+    return travel_button(text, **kwargs)
+
+
+def progress_bar(text=BAR_LABEL, **kwargs):
+    """The travelling row's progress bar, under the button's own `_name`.
+
+    #291's whole subject. It is built exactly as the button is -- same nesting,
+    same label child, **no `_display` key**, since run 48's capture shows
+    `_display=None` on both -- so the only thing separating the two fixtures is
+    the widget's type name, which is what the selection now reads.
+    """
+    kwargs.setdefault("type_name", BAR_WIDGET_TYPE)
+    kwargs.setdefault("task_name", TRAVEL_TASK_NAME)
     return travel_button(text, **kwargs)
 
 
@@ -981,10 +1045,10 @@ class TheEnteringRowIsReadToo(unittest.TestCase):
 
 
 class BothRowsDisplayedAtOnce(unittest.TestCase):
-    """The shape nobody has read, pinned as what the parser does rather than as
-    what it should do.
+    """Two **buttons** displayed at once: still the shape nobody has read, and
+    pinned as what the parser does rather than as what it should do.
 
-    Every capture of this chain shows one task row displayed and the other
+    Every capture of this chain shows one task *row* displayed and the other
     hidden. If both were ever shown, `OpportunityInfoPanelEntry.travelButton` is
     one button and the parser takes whichever the client lists first -- so
     `opportunityStepArrivingFirst`, which prefers an arriving label over a
@@ -996,6 +1060,17 @@ class BothRowsDisplayedAtOnce(unittest.TestCase):
     not made here: this PR is scoped to the parser, and the shape it would serve
     is unobserved. These cases exist so that the behaviour is recorded and a
     later change is one somebody argues for.
+
+    **#291 is the ambiguity that did arrive, and it is not this one.** This
+    class was written as the guard for "two candidates displayed at once" and
+    anticipated the wrong pair: run 48 read a button beside the row's own
+    **progress bar**, which nothing can press, sharing the button's `_name` and
+    listed ahead of it. A guard that anticipates the wrong ambiguity reads as
+    cover for the one that happens, so `TheProgressBarSharesTheButtonsName` is
+    the case for the observed shape and this one keeps only the unobserved one.
+    Nothing here changed with that fix -- both fixtures are buttons, so the
+    preference cannot separate them and the client's order still decides -- and
+    that unchangedness is asserted next door as well as here.
     """
 
     @classmethod
@@ -1047,6 +1122,195 @@ class BothRowsDisplayedAtOnce(unittest.TestCase):
         self.assertEqual(self.travel_label(children), "Jump")
 
 
+class TheProgressBarSharesTheButtonsName(unittest.TestCase):
+    """#291, in the shape run 48 read it: the bar is admitted and sorts first.
+
+    The two nodes the client drew, in the panel's own order:
+
+        ProgressBarTaskWidget             _name=objective_task_travel_to_location  _display=None  '8 jumps | 0.6 Andabiar'
+        TravelToLocationButtonTaskWidget  _name=objective_task_travel_to_location  _display=None  'Set Destination'
+
+    `uiNodeIsOpportunityTravelTask` admits a node by type prefix **or** by the
+    client's own `_name` for the objective task, and the bar carries that name,
+    so the name half admits it. Neither node carries `_display`, so the display
+    filter -- which is the selection everywhere else in this file -- separates
+    nothing here. The bar is listed first, `travelButton.label` was
+    `8 jumps | 0.6 Andabiar`, and the branch could not press a button plainly
+    on screen.
+
+    **The failure was silent, which is why the cases below ask two questions of
+    one reading.** `escalationIsBeingWorked` asks only whether the label is
+    readable text; `8 jumps` is, so the bot stood down for the escalation --
+    correctly, by that rule -- while `travelLabelIsACommand` refused the same
+    label and `opportunityTravelStep` answered `Nothing`. Run 48 stood down 234
+    times and pressed the button zero times across three hours with nothing in
+    the log saying a button had been missed. The two clauses **agreeing** is
+    what the fix restores, and it is asserted rather than left implied.
+
+    Every fixture here is the capture's own nesting and goes through the real
+    `EveOnline.ParseUserInterface`, so the bar is admitted because that selector
+    admits it rather than because a record was written by hand.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(TrackerRepl)
+
+    def entry_field(self, children, field):
+        return TheParserReadsTheTrackersOwnButton.entry_field(
+            self, children, field)
+
+    def travel_label(self, children):
+        return TheParserReadsTheTrackersOwnButton.travel_label(self, children)
+
+    def offers_a_step(self, children):
+        return TheBranchActsOnWhatTheTrackerOffers.offers_a_step(self, children)
+
+    def reads_as_being_worked(self, children):
+        return self.repl.evaluate([
+            "reading |> Maybe.map escalationIsBeingWorked"
+            " |> Maybe.withDefault False"],
+            definitions=[TrackerRepl.reading_binding("reading", children)])[0]
+
+    @staticmethod
+    def the_capture(order=("bar", "button"), label="Set Destination"):
+        """Run 48's two nodes, in whichever order a case wants to ask about."""
+        nodes = {"bar": progress_bar(), "button": travel_button(label)}
+        return [tracker([capture_entry([nodes[which] for which in order])])]
+
+    def test_the_button_is_taken_beside_the_bar_that_sorts_first(self):
+        """The reading run 48 took, and the label it produced was the bar's."""
+        self.assertEqual(self.travel_label(self.the_capture()), "Set Destination")
+
+    def test_the_branch_takes_it(self):
+        """`opportunityTravelStep` answered `Nothing` on this reading."""
+        self.assertTrue(
+            self.offers_a_step(self.the_capture()),
+            "the tracker drew 'Set Destination' beside a progress bar and the"
+            " branch declined it")
+
+    def test_the_stand_down_and_the_step_agree_on_this_reading(self):
+        """The silence, asked as the two clauses answering the same question.
+
+        A reading the bot stands down for and cannot take a step on is run 48:
+        the escalation is being worked and nothing is being done about it. That
+        `escalationIsBeingWorked` accepts any readable label is its own rule and
+        is deliberately untouched here -- what this asserts is that the label it
+        is now given is one `travelLabelIsACommand` accepts too.
+        """
+        children = self.the_capture()
+        self.assertTrue(self.reads_as_being_worked(children),
+                        "the escalation stopped reading as one being worked")
+        self.assertTrue(self.offers_a_step(children),
+                        "stood down for an escalation with no step to take")
+
+    def test_the_bars_own_label_is_never_what_is_offered(self):
+        """Whatever the client writes on the bar, and wherever it is listed."""
+        for order in [("bar", "button"), ("button", "bar")]:
+            for label in ["8 jumps | 0.6 Andabiar", "0.6 Andabiar", "3 jumps"]:
+                with self.subTest(order=order, bar=label):
+                    nodes = {"bar": progress_bar(label),
+                             "button": travel_button("Set Destination")}
+                    children = [tracker([capture_entry(
+                        [nodes[which] for which in order])])]
+                    self.assertEqual(self.travel_label(children),
+                                     "Set Destination")
+
+    def test_the_entering_rows_button_is_taken_beside_a_bar_too(self):
+        """The same shape with the widget #280 was filed about.
+
+        `TravelStateButtonTaskWidget` does not end with `ButtonTaskWidget`'s
+        family in the same way the travelling row does, so a rule keyed on the
+        wrong part of the type name would separate one of these pairs and not
+        the other.
+        """
+        for order in [("bar", "button"), ("button", "bar")]:
+            with self.subTest(order=order):
+                nodes = {"bar": progress_bar(), "button": enter_button()}
+                children = [tracker([capture_entry(
+                    [nodes[which] for which in order])])]
+                self.assertEqual(self.travel_label(children), ENTER_LABEL)
+                self.assertTrue(self.offers_a_step(children))
+
+    def test_both_spellings_of_the_travelling_row_win_over_the_bar(self):
+        """`TravelToLocationButtonTask` is the spelling a suffix test loses."""
+        for type_name in TRAVEL_WIDGET_TYPES:
+            with self.subTest(type_name=type_name):
+                children = [tracker([capture_entry([
+                    progress_bar(),
+                    travel_button("Jump", type_name=type_name),
+                ])])]
+                self.assertEqual(self.travel_label(children), "Jump")
+
+    def test_a_bar_on_its_own_is_still_what_the_fallback_takes(self):
+        """`List.head` is kept for the no-button case rather than replaced.
+
+        A reading whose only admitted candidate is the bar has no button to
+        prefer, so the entry offers the bar exactly as it did before -- and the
+        label rule declines it, which is where a reading with no command has
+        always ended. Asserting it is what makes the change a *preference*
+        rather than a second filter: nothing that used to be offered stopped
+        being offered.
+        """
+        children = [tracker([capture_entry([progress_bar()])])]
+        self.assertEqual(self.travel_label(children), BAR_LABEL)
+        self.assertFalse(self.offers_a_step(children))
+
+    def test_a_hidden_button_beside_a_shown_bar_is_still_not_taken(self):
+        """The display filter is untouched and still outranks the preference.
+
+        The chain hides the tasks that are not available, so a hidden button is
+        the client saying the ship cannot take it -- and preferring a button
+        must not reach past that. `_display` False **with** a region, so the
+        region walk is not what drops it.
+        """
+        children = [tracker([capture_entry([
+            progress_bar(),
+            travel_button("Set Destination", displayed=False),
+        ])])]
+        self.assertEqual(self.travel_label(children), BAR_LABEL)
+        self.assertFalse(self.offers_a_step(children))
+
+    def test_a_reading_that_yielded_a_button_yields_the_same_one(self):
+        """The property the fix is claimed on, over every single-button shape.
+
+        A preference among candidates can only change a reading whose chosen
+        candidate was not a button, so every reading in this file that already
+        produced one has to produce **the same** one. These are the fixtures the
+        other classes assert on, gathered here so the claim is one case rather
+        than an inference across five.
+        """
+        unchanged = [
+            ("the capture's travelling row",
+             [tracker([capture_entry([travel_button("Set Destination")])])],
+             "Set Destination"),
+            ("the capture's entering row",
+             [tracker([capture_entry([enter_button()])])], ENTER_LABEL),
+            ("the flattened entry",
+             [tracker([expanded_entry([travel_button("Jump")])])], "Jump"),
+            ("the second spelling",
+             [tracker([capture_entry([travel_button(
+                 "Jump", type_name=TRAVEL_WIDGET_TYPES[1],
+                 task_name=None)])])], "Jump"),
+            ("a button the client did not name",
+             [tracker([expanded_entry([travel_button(
+                 "Jump", named_label=False)])])], "Jump"),
+            ("a displayed button beside a hidden one",
+             [tracker([expanded_entry([
+                 travel_button("Set Destination", displayed=False),
+                 travel_button("Jump")])])], "Jump"),
+            ("two buttons, the client's order",
+             [tracker([capture_entry([
+                 travel_button("Jump"), enter_button()])])], "Jump"),
+            ("two buttons, the other order",
+             [tracker([capture_entry([
+                 enter_button(), travel_button("Jump")])])], ENTER_LABEL),
+        ]
+        for name, children, expected in unchanged:
+            with self.subTest(reading=name):
+                self.assertEqual(self.travel_label(children), expected)
+
+
 class TheSelectorIsReadOutOfTheParser(unittest.TestCase):
     """The boundary, where an absence is not an expression."""
 
@@ -1081,6 +1345,47 @@ class TheSelectorIsReadOutOfTheParser(unittest.TestCase):
     def test_nothing_here_matches_the_state_widget_by_type(self):
         """So the entering row is admitted by the client's name for its task."""
         self.assertNotIn('"%s"' % ENTER_WIDGET_TYPE, self.parser)
+
+    def test_the_button_preference_is_the_substring_both_buttons_carry(self):
+        """#291's separator, checked against the three type names it sorts.
+
+        A suffix would have been the obvious spelling and is wrong for the same
+        reason the selector above is a prefix: `TravelToLocationButtonTask`,
+        the later of the two spellings, does not end with `ButtonTaskWidget`.
+        """
+        infix = collapsed(body_of(
+            self.parser, "opportunityTravelTaskButtonTypeInfix"))
+        self.assertIn('"ButtonTask"', infix)
+        for type_name in tuple(TRAVEL_WIDGET_TYPES) + (ENTER_WIDGET_TYPE,):
+            self.assertIn("ButtonTask", type_name,
+                          "%s stopped reading as pressable" % type_name)
+        self.assertNotIn("ButtonTask", BAR_WIDGET_TYPE)
+        rule = collapsed(body_of(
+            self.parser, "uiNodeIsOpportunityTravelTaskButton"))
+        self.assertIn("String.contains opportunityTravelTaskButtonTypeInfix",
+                      rule)
+
+    def test_the_preference_reorders_what_the_selector_already_admitted(self):
+        """It is a preference and not a second filter, read out of the parse.
+
+        The candidates are still whatever `uiNodeIsOpportunityTravelTask` and
+        the display filter agree on; the button rule is applied to that list,
+        and `List.head` over the same list is what answers where no candidate
+        is a button. A version that filtered the candidates down to buttons
+        would make a bar-only reading offer nothing, which is a narrowing --
+        `test_a_bar_on_its_own_is_still_what_the_fallback_takes` is that half.
+        """
+        candidates = let_binding_by_indentation(
+            self.parser, "parseOpportunityInfoPanelEntry",
+            "displayedTravelTaskNodes")
+        self.assertIn("uiNodeIsOpportunityTravelTask", candidates)
+        self.assertIn("nodeIsDisplayedFromDictEntries", candidates)
+        self.assertNotIn("uiNodeIsOpportunityTravelTaskButton", candidates)
+
+        chosen = let_binding_by_indentation(
+            self.parser, "parseOpportunityInfoPanelEntry", "travelButtonNode")
+        self.assertIn("uiNodeIsOpportunityTravelTaskButton", chosen)
+        self.assertIn("displayedTravelTaskNodes |> List.head", chosen)
 
 
 class TheVendoredParserPolicyIsUnbroken(unittest.TestCase):
