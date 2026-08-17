@@ -7,14 +7,17 @@
 only stands down for *input*, and this takes one memory read (~0.4 s).
 
 Why this exists.  `anomaly-name` is matched against the probe scanner's **Name**
-column, and neither bot has ever logged that cell -- what a run prints about an
-anomaly is the *ID* the scanner gives it (`We are in anomaly 'AIC-176'`).  So
-across every recorded run the site words the launcher itself asks for
-(`Hideaway`, `Refuge`, `Rally Point`, `Sanctum`, ...) occur exactly **zero**
-times, and CLAUDE.md's open question -- whether an anomaly's name can contain a
-comma, which `splitSettingIntoNames` would silently cut in half -- is not
-answerable from the corpus at any size.  One reading of a live scanner settles
-it.  This is that reading.
+column, and for a long time neither bot logged that cell -- what a run printed
+about an anomaly was the *ID* the scanner gives it (`We are in anomaly
+'AIC-176'`), so across every run recorded before #197 was acted on the site
+words the launcher itself asks for (`Hideaway`, `Refuge`, `Rally Point`,
+`Sanctum`, ...) occur exactly **zero** times.  saxrat now prints the Name and
+Group beside the ID, so runs flown since write the column down by themselves.
+
+This is still the instrument for reading it *directly*, which the log cannot be:
+it answers on demand rather than only when the ship happens to be in a site, it
+shows the header cells and every row rather than the one the bot is in, and it
+works while a run is stopped.
 
 **An absent window is reported, not printed as emptiness.**  A scanner that is
 closed and a scanner holding nothing are the same silence otherwise, and this

@@ -480,14 +480,17 @@ ScanResults     ['Signal', 'Distance', 'ID', 'Name', 'Group',
 ScanResultNew   ['32 km', 'EGC-528', 'Sansha Refuge', 'Combat Site']
 ```
 
-**That is the first reading of the scanner's Name cell this project has.**
-CLAUDE.md's §197 records that neither bot has ever logged it — a run prints the
-*ID* (`We are in anomaly 'EGC-528'`), never the name — so the site words the
-launcher itself asks for occur zero times across every recorded run, and no
-corpus of any size can answer what that column may contain. `Sansha Refuge`
-carries no comma, which is one data point against the open question rather than
-an answer to it: one name is not a distribution, and the `Dread Assault: Blood
-Raider Temple` already on record shows the column takes punctuation.
+**That was the first reading of the scanner's Name cell this project had**, and
+it is what prompted saxrat to start logging the column itself. Before that, a
+run printed the *ID* (`We are in anomaly 'EGC-528'`) and never the name, so the
+site words the launcher asks for occur zero times across every run recorded up
+to run 48, and no corpus of any size could answer what that column may contain.
+`describeAnomalyIdentity` now prints Name and Group beside the ID on every
+reading that names a site, so run 49 onwards writes it down without anyone
+running this tool. `Sansha Refuge` carries no comma, which is one data point
+against the open question rather than an answer to it: one name is not a
+distribution, and the `Dread Assault: Blood Raider Temple` already on record
+shows the column takes punctuation.
 
 Note the last cell. The window carries `No signatures or anomalies in current
 system` **while a result is in it** — a placeholder the client leaves in the

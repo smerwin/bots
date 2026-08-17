@@ -676,11 +676,21 @@ class TheHeaderTest(unittest.TestCase):
         `DEADSPACE` is deliberately not a fourth case: a pocket reached through
         an acceleration gate has no scan-result row, so the scanner names
         nothing and the honest answer is that the client is not saying.
+
+        Since #197 the anomaly state carries the scanner's Name cell as well as
+        its ID, so the reader named here is the identity one. **The header uses
+        its own renderer**, and that is the half worth pinning rather than
+        merely updating: `describeAnomalyIdentity` renders
+        `'ID' 'Name' (Group)` for the lines a run is read back from, and putting
+        that in the header would print the group -- one repeated word,
+        `Combat Site`, on every line this bot ever writes -- and leave two
+        quoted names running together beside the target's own.
         """
         rule = collapsed(body_of(source(), "describeWhereTheShipIs"))
         self.assertIn('"DOCKED"', rule)
         self.assertIn('"IN WARP"', rule)
-        self.assertIn("getCurrentAnomalyIDAsSeenInProbeScanner", rule)
+        self.assertIn("getCurrentAnomalyIdentityAsSeenInProbeScanner", rule)
+        self.assertIn("describeAnomalyIdentityForHeader", rule)
         self.assertIn('"-"', rule)
         self.assertNotIn("DEADSPACE", rule)
         # The docked test is asked first, because a docked reading has no ship
