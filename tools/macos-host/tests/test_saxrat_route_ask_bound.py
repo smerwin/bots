@@ -754,8 +754,12 @@ class TheTwoCallersStillNameTheSameDestination(unittest.TestCase):
         return self.repl.strings(
             ["(memoryOver %s %s).destinationAskedFor"
              " |> Maybe.withDefault \"nowhere\"" % (settings, session(pairs)),
-             "(%s |> Maybe.andThen (nextHuntingGroundFrom %s"
-             " (memoryOver %s %s).huntSystemIndex))"
+             # The station the ship last undocked from is the picker's last
+             # rung since #279, and it is `Nothing` here for the same reason it
+             # is in the memory this case compares against: these sessions never
+             # dock, so neither caller has one to name.
+             "(%s |> Maybe.andThen (\\reading -> nextHuntingGroundFrom %s"
+             " (memoryOver %s %s).huntSystemIndex reading Nothing))"
              " |> Maybe.withDefault \"nowhere\""
              % (reading_name, settings, settings, session(pairs))],
             readings())
@@ -888,9 +892,12 @@ class TheGiveUpActsRatherThanWaits(unittest.TestCase):
         return body[:body.index("jumpToNextSystem :")]
 
     def given_up_arm(self):
+        # #279 turned this branch's `if/case` into a dispatch on
+        # `huntCircuitStep`, so the latch's arm is named by a constructor
+        # instead of by an `if`. What the cases below assert is unchanged.
         arm = self.branch()
-        arm = arm[arm.index("if context.memory.routeSettingGivenUp then"):]
-        return arm[:arm.index("else")]
+        arm = arm[arm.index("StopAskingForARoute ->"):]
+        return arm[:arm.index("NowhereToAskFor ->")]
 
     def test_the_given_up_arm_tethers(self):
         self.assertIn("tetherAtStructure context", self.given_up_arm())
@@ -901,15 +908,20 @@ class TheGiveUpActsRatherThanWaits(unittest.TestCase):
             "the give-up defers instead of acting, on a branch it now reaches "
             "on every reading for the rest of the session -- which is #257")
 
-    def test_the_latch_is_tested_before_anything_else_in_the_branch(self):
+    def test_the_latch_is_tested_before_the_picker(self):
         """So it applies on every reading after, including ones the picker
         would have answered `Nothing` on and ones it would have named a system
-        on."""
-        branch = self.branch()
+        on.
+
+        Read out of `huntCircuitStep` since #279, because that is where the
+        ordering moved. Reading it off the branch would now be reading the
+        order of a record's fields, which decides nothing.
+        """
+        rule = collapsed(body_of(source_of(SAXRAT_BOT_ELM), "huntCircuitStep"))
         self.assertLess(
-            branch.index("context.memory.routeSettingGivenUp"),
-            branch.index("nextHuntingGround context"),
-            "the branch consults the picker before the give-up, so what the "
+            rule.index("circuitCase.routeSettingGivenUp"),
+            rule.index("circuitCase.nextHuntingGround"),
+            "the rule consults the picker before the give-up, so what the "
             "bot does after the bound fires depends on the circuit again")
 
     def test_the_operator_is_told_the_asking_has_stopped(self):

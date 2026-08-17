@@ -612,6 +612,13 @@ type alias BotMemory =
     , destinationAskReadings : Int
     , routeSettingGivenUp : Bool
 
+    -- Readings in a row the hunt circuit has stood down on for an escalation the
+    -- Opportunities tracker is working (#279). Advanced on exactly the readings
+    -- `setRouteToNextHuntingGround` holds the grid on, through the same
+    -- `standingDownForATrackedEscalation` the decision asks, so the counter and
+    -- the bound it feeds cannot come to be about different things.
+    , escalationStandDownReadings : Int
+
     -- What the client has answered about how far this ship can lock, and the
     -- lock still waiting for an answer. Both bounds move one way only, so no
     -- oscillation is possible; `lockRangeLastChange` holds a sentence only on
@@ -2688,7 +2695,10 @@ full lap has happened exactly when the index has passed the end of the list.
 -}
 nextHuntingGround : BotDecisionContext -> Maybe String
 nextHuntingGround context =
-    nextHuntingGroundFrom context.eventContext.botSettings context.memory.huntSystemIndex context.readingFromGameClient
+    nextHuntingGroundFrom context.eventContext.botSettings
+        context.memory.huntSystemIndex
+        context.readingFromGameClient
+        context.memory.lastDockedStationNameFromInfoPanel
 
 
 {-| The picker itself, over the three things it actually needs.
@@ -2716,22 +2726,70 @@ is exactly what makes that step invisible, since the first candidate that is
 not the current system is the same one from either index. Recorded in the
 corpus as `Sys Hamse -> Lashkai asked 'Hamse' 1/20`.
 
-`Nothing` where every candidate is the system the ship is in, which
-`setRouteToNextHuntingGround` already has an answer for: there is nowhere to
-ask for, so it tethers and goes on hunting whatever spawns, rather than asking
-for a route the client cannot give.
+**The station the ship last undocked from is the last rung**, below the circuit
+and below `home-system`, which is the preference the operator asked for. It
+needs no record of its own: `lastDockedStationNameFromInfoPanel` is already in
+`BotMemory` and already read by the pod recovery. Two things about it a reader
+should not have to derive. It is the most recent station the _info panel named
+while docked_, which equals "where the ship undocked from" only because nothing
+but a docked reading can write it -- a station passed through in space never
+lands there. And it is `Nothing` for a session that began in space and has not
+docked since, which is a perfectly ordinary state and simply leaves this rung
+empty. The host's ESI resolver takes a station name as readily as a system name,
+which is what makes a station usable as a destination at all.
+
+**A station in the system the ship is already in is declined**, which is #262's
+guard for #262's reason and is the one thing the equality above cannot do for
+it: a station name is not a system name, so `Just stationName /=
+currentSolarSystemName` is true of the station the ship is standing at. Asking
+for that is `Route 0 Jumps` with no marker, the ask can never be satisfied, and
+the give-up latches for the session.
+
+The test is `containsWords`, the same word-boundary match #170 uses to name a
+stargate's system, and **it is deliberately loose rather than an exact match.**
+A false skip falls through to `tetherAtStructure`, which is what this bot did
+before there was a fallback at all, so being wrong that way costs the trip home
+and cannot cost a session; being wrong the other way costs the session. Anything
+that tightened this into an equality would be trading the cheap failure for the
+expensive one, on a comparison between two kinds of name that do not have to
+agree in the first place.
+
+`Nothing` where every candidate is the system the ship is in and nothing else is
+configured, which `setRouteToNextHuntingGround` already has an answer for: there
+is nowhere to ask for, so it tethers and goes on hunting whatever spawns, rather
+than asking for a route the client cannot give.
 
 -}
-nextHuntingGroundFrom : BotSettings -> Int -> ReadingFromGameClient -> Maybe String
-nextHuntingGroundFrom botSettings huntSystemIndex readingFromGameClient =
+nextHuntingGroundFrom : BotSettings -> Int -> ReadingFromGameClient -> Maybe String -> Maybe String
+nextHuntingGroundFrom botSettings huntSystemIndex readingFromGameClient lastDockedStationName =
     let
         currentSolarSystemName =
             currentSolarSystemNameFromReading readingFromGameClient
+
+        stationIsSomewhereElse stationName =
+            currentSolarSystemName
+                |> Maybe.map (\here -> not (containsWords here stationName))
+                |> Maybe.withDefault True
     in
-    List.range huntSystemIndex (huntSystemIndex + List.length botSettings.huntSystemNames)
-        |> List.filterMap (huntingGroundAtIndex botSettings)
-        |> List.filter (\systemName -> Just systemName /= currentSolarSystemName)
-        |> List.head
+    case
+        List.range huntSystemIndex (huntSystemIndex + List.length botSettings.huntSystemNames)
+            |> List.filterMap (huntingGroundAtIndex botSettings)
+            |> List.filter (\systemName -> Just systemName /= currentSolarSystemName)
+            |> List.head
+    of
+        Just systemName ->
+            Just systemName
+
+        Nothing ->
+            lastDockedStationName
+                |> Maybe.andThen
+                    (\stationName ->
+                        if stationIsSomewhereElse stationName then
+                            Just stationName
+
+                        else
+                            Nothing
+                    )
 
 
 {-| The name the circuit points at, before the guard above has had its say.
@@ -2740,8 +2798,15 @@ huntingGroundAtIndex : BotSettings -> Int -> Maybe String
 huntingGroundAtIndex botSettings index =
     let
         lapsCompleted =
+            -- **An empty circuit is a circuit already walked**, which is what
+            -- makes `home-system` reachable at all when no `hunt-system` is
+            -- configured. Written as 0 here, the division below is the only
+            -- thing that could ever raise the lap count, so an empty list
+            -- pinned it at zero and the `home-system` fallback was code nothing
+            -- could reach in the one configuration an operator most obviously
+            -- wants it in: no circuit, one place to come back to.
             if List.isEmpty botSettings.huntSystemNames then
-                0
+                1
 
             else
                 index // List.length botSettings.huntSystemNames
@@ -2758,6 +2823,176 @@ huntingGroundAtIndex botSettings index =
         huntSystemAtIndex botSettings index
 
 
+{-| Whether the Opportunities tracker is working an escalation on this reading.
+
+**The tracker holding an escalation is something having said where to go**, which
+is the whole of #279: an empty `hunt-system` is not "go nowhere", it is "nobody
+has configured a circuit", and a tracked escalation is somebody answering the
+same question the circuit exists to answer.
+
+**Read off the entries rather than off the step the branch would press.**
+`opportunityTravelStep` refuses a label that is a state -- `Warping`, `Jumping`
+and `Docking` are the client saying the trip is already happening, and clicking
+one re-commands a manoeuvre already under way -- but a reading it refuses is
+still a reading with a trip in progress, and it is exactly the reading the floor
+owns. Keying on the button's presence rather than on its wording is what makes
+this true across the whole trip instead of only on the readings the panel
+happens to be offering a command.
+
+**So this deliberately does not consult `travelLabelIsACommand`**, and that
+independence is worth keeping rather than being an accident of how it was
+written. The allow-list is about whether a label may be _clicked_, which is a
+question about one button; this is about whether anything has answered where to
+go, which is a question about the trip. The two have already moved apart once --
+the list was carrying `Dock`, which nobody had read off this widget, while
+lacking a word the client really writes -- so a signal that inherited its
+verdicts would move with it for reasons that have nothing to do with the
+circuit.
+
+**The label still has to be text the client rendered** (`travelLabelIsReadableText`).
+Run 11 on the mission runner drew a travel step as six C0 control characters and
+run 22 as a distance wrapped in NULs, and a button whose label the client failed
+to draw is not evidence of anything. Declining there leaves the bot behaving
+exactly as it did before this change, which is the fail-closed direction.
+
+**Scoped to a shut probe scanner, which is #260's switch and not a second one.**
+With the window open, `siteProgressStep` declines the tracker's step outright, so
+the bot is not working the escalation at all and holding it in the system would
+be holding it away from the hunt it _is_ doing. Recounted over this machine's 53
+saxrat runs that reached space, the scanner is open on 160,171 in-space readings
+against 1,862 shut -- 1.15% -- and 36 of the 53 never shut it once, so this reads
+the same switch #260 does and fires in the same 1% of readings. If that gate is
+ever dropped, this clause has to be looked at with it.
+
+-}
+escalationIsBeingWorked : ReadingFromGameClient -> Bool
+escalationIsBeingWorked readingFromGameClient =
+    (readingFromGameClient.probeScannerWindow == Nothing)
+        && (readingFromGameClient.opportunityInfoPanelEntries
+                |> List.any
+                    (\entry ->
+                        entry.travelButton
+                            |> Maybe.andThen .label
+                            |> Maybe.map travelLabelIsReadableText
+                            |> Maybe.withDefault False
+                    )
+           )
+
+
+{-| How long the bot holds a grid for an escalation the tracker is not yet
+offering a step for.
+
+**An unbounded hold is PR #257's shape**, which shipped green and blocked the bot
+for 108 minutes because something on a hot decision path could decline forever
+with nothing else able to act, and #272's, which waited 8,770 readings at a branch
+that asked "bounce?" and never bounced. So the hold is bounded, and past the bound
+the hunt circuit is consulted exactly as it is today -- the change can cost at
+most this many readings against the behaviour it replaces.
+
+**The number is placed in a gap the corpus draws.** Counted in readings rather
+than decision lines, over the four recorded saxrat runs that ever took a step
+from the tracker (43, 44, 46 and 52), there are 307 gaps between two consecutive
+readings on which the panel offered a pressable command, and **every one of them
+is 30 readings or fewer** -- median 1, p95 20, largest 30, and nothing at all
+between 31 and the end of a run. Against that, #279's run held the floor for 414
+consecutive readings. So a legitimate tracker-led leg has never gone more than 30
+readings without a command, and the failure it has to be told apart from is an
+order of magnitude past that.
+
+Written as a multiple of `routeAskGiveUpReadings` rather than as a bare 40 so the
+argument cannot drift away from the number, and because the two coincide: the
+thing this hold displaces is the circuit's own ask, which gets 20 readings before
+it gives up for the session, and a hold shorter than that could be out-waited by
+the branch it is standing in for.
+
+**Those 307 gaps are measured on the travel-to-location row only**, because #280
+is the enter-dungeon row's `Warp to Site` being invisible to the parser -- so
+once that lands the panel offers a command on _more_ readings and the gaps can
+only shrink. That is the safe direction for a bound placed above them.
+
+-}
+escalationStandDownGiveUpReadings : Int
+escalationStandDownGiveUpReadings =
+    routeAskGiveUpReadings * 2
+
+
+{-| Whether this reading is one the bot stands down on for the tracker.
+
+Split out from `huntCircuitStep` because `updateMemoryForNewReadingFromGame` has
+to advance the counter on exactly the readings the decision holds on, and it
+never sees the decision. Two copies of this comparison would drift, and the
+counter would then be bounding something other than the thing it counts -- which
+is #145's `gateWithinReachTicks` and #11's `dronesInSpaceTicks`, twice each.
+
+-}
+standingDownForATrackedEscalation : { escalationIsBeingWorked : Bool, standDownReadings : Int } -> Bool
+standingDownForATrackedEscalation standDownCase =
+    standDownCase.escalationIsBeingWorked
+        && (standDownCase.standDownReadings < escalationStandDownGiveUpReadings)
+
+
+{-| What the hunt circuit should do with a reading, which is not always to ask.
+
+**The circuit is a second opinion about a question a tracked escalation has
+already answered**, and #279's contention half is what that costs. Run 46 is the
+recorded shape, counted in readings: the circuit asks the host for `Shumam`, the
+tracker's own `Set Destination` puts the escalation back, the ship jumps for
+eighteen readings, and the circuit asks for `Shumam` again -- four complete
+cycles, 25 ask readings interleaved into 123 opportunity readings, every one of
+them naming `Sansha's Command Relay Outpost`. Runs 43 and 44 carry the same
+shape. Two controllers, two destinations, each overwriting the other's.
+
+**`StandDownForATrackedEscalation` is asked first, above the give-up**, because
+the give-up's own answer is `tetherAtStructure` and docking is precisely what
+must not happen beside a live escalation -- see the branch below.
+
+**#279 names two decisions and they are one clause, which is worth recording
+because the first has no content on its own.** _Whether the floor may ask at all
+when the circuit is empty_ changes nothing by itself: with no `hunt-system`
+configured, `nextHuntingGround` is already `Nothing`, so the floor never asks --
+it goes straight to `NowhereToAskFor` and tethers. Removing the ask removes
+nothing. What parks the ship is what the ask falls through to. So the load-bearing
+decision is the second one -- _whether an escalation in progress suppresses the
+circuit outright_ -- and the first is satisfied by it: an existing route is still
+travelled by `jumpToNextSystem`, which this function is only reached from when
+there is none.
+
+-}
+type HuntCircuitStep
+    = StandDownForATrackedEscalation
+    | StopAskingForARoute
+    | AskForTheHuntingGround String
+    | NowhereToAskFor
+
+
+huntCircuitStep :
+    { escalationIsBeingWorked : Bool
+    , standDownReadings : Int
+    , routeSettingGivenUp : Bool
+    , nextHuntingGround : Maybe String
+    }
+    -> HuntCircuitStep
+huntCircuitStep circuitCase =
+    if
+        standingDownForATrackedEscalation
+            { escalationIsBeingWorked = circuitCase.escalationIsBeingWorked
+            , standDownReadings = circuitCase.standDownReadings
+            }
+    then
+        StandDownForATrackedEscalation
+
+    else if circuitCase.routeSettingGivenUp then
+        StopAskingForARoute
+
+    else
+        case circuitCase.nextHuntingGround of
+            Just systemName ->
+                AskForTheHuntingGround systemName
+
+            Nothing ->
+                NowhereToAskFor
+
+
 {-| Ask the host to set the autopilot destination, when there is nowhere to go.
 
 This is the one branch that lets the bot originate a route. Everything else it
@@ -2770,36 +3005,78 @@ because the channel is unacknowledged: there is no reply to wait for, and the
 client's own route panel is the confirmation. `routeAskGiveUpReadings` bounds
 it, and the give-up latches for the session.
 
+**Beside an escalation the tracker is working, neither of those answers is
+right, and the tether is the worse of the two.** `tetherAtStructure` docks --
+`Dock` is the first entry in its own menu priority -- so the reading that meant
+"nothing to do here" takes the ship off the grid it crossed six systems to reach,
+the docked branch undocks it again on the next reading because the tracker is
+still offering something, and the pair repeats. #279's run spent 414 readings and
+three hours in exactly that cycle, dock and undock, beside two tracked
+`Sansha's Command Relay Outpost` escalations.
+
+**What the bot does instead is hold the grid, and it says so with a count on
+every reading it does it.** That is the property both #257 and #272 lacked: a
+branch that declines silently is indistinguishable from a bot that is working.
+Nothing above this is suppressed -- the two retreats, the pod recovery, the
+message-box ladder, the fight and the loot all still run, and the tracker's own
+step outranks this by two tiers, so the very reading the panel offers a command
+is a reading this branch is never reached on. And the hold is bounded: at
+`escalationStandDownGiveUpReadings` the circuit is consulted exactly as it is
+today.
+
+**How much of #279's run this fixes is small, and saying so is the point.** The
+414 readings are #280's -- `Warp to Site` lives on a second task widget the
+parser's type-name prefix does not match, so the arriving step was invisible and
+`siteProgressStep` had nothing to press. With that fixed the tracker offers a
+command on those readings and this branch is not reached at all. What is left
+here is the contention, which #280 does not touch, and a guard on the tether.
+
 -}
 setRouteToNextHuntingGround : BotDecisionContext -> DecisionPathNode
 setRouteToNextHuntingGround context =
-    if context.memory.routeSettingGivenUp then
-        describeBranch
-            ("Asked for a destination for more than "
-                ++ String.fromInt routeAskGiveUpReadings
-                ++ " readings and no route ever appeared -- this host does not set destinations, so stop asking and wait where it is safe."
-            )
-            (tetherAtStructure context)
+    case
+        huntCircuitStep
+            { escalationIsBeingWorked = escalationIsBeingWorked context.readingFromGameClient
+            , standDownReadings = context.memory.escalationStandDownReadings
+            , routeSettingGivenUp = context.memory.routeSettingGivenUp
+            , nextHuntingGround = nextHuntingGround context
+            }
+    of
+        StandDownForATrackedEscalation ->
+            describeBranch
+                ("Nothing left to hunt here and no route set, but the Opportunities tracker is working an escalation -- where to go is already answered, so not asking the hunt circuit and not docking ("
+                    ++ String.fromInt context.memory.escalationStandDownReadings
+                    ++ "/"
+                    ++ String.fromInt escalationStandDownGiveUpReadings
+                    ++ " readings). Holding this grid so the tracker's own step can be taken as soon as it offers one."
+                )
+                waitForProgressInGame
 
-    else
-        case nextHuntingGround context of
-            Nothing ->
-                describeBranch
-                    "Nothing left to hunt here and no route set. Nowhere to ask for: either no 'hunt-system' is configured, or every system on the circuit is the one this ship is already in."
-                    (tetherAtStructure context)
+        StopAskingForARoute ->
+            describeBranch
+                ("Asked for a destination for more than "
+                    ++ String.fromInt routeAskGiveUpReadings
+                    ++ " readings and no route ever appeared -- this host does not set destinations, so stop asking and wait where it is safe."
+                )
+                (tetherAtStructure context)
 
-            Just systemName ->
-                describeBranch
-                    ("Nothing left to hunt here and no route set. Asking the host to set the destination to '"
-                        ++ systemName
-                        ++ "' ("
-                        ++ String.fromInt context.memory.destinationAskReadings
-                        ++ "/"
-                        ++ String.fromInt routeAskGiveUpReadings
-                        ++ " readings). "
-                        ++ hostDirectiveSetDestination systemName
-                    )
-                    waitForProgressInGame
+        NowhereToAskFor ->
+            describeBranch
+                "Nothing left to hunt here and no route set. Nowhere to ask for: either no 'hunt-system' is configured, or every system on the circuit is the one this ship is already in."
+                (tetherAtStructure context)
+
+        AskForTheHuntingGround systemName ->
+            describeBranch
+                ("Nothing left to hunt here and no route set. Asking the host to set the destination to '"
+                    ++ systemName
+                    ++ "' ("
+                    ++ String.fromInt context.memory.destinationAskReadings
+                    ++ "/"
+                    ++ String.fromInt routeAskGiveUpReadings
+                    ++ " readings). "
+                    ++ hostDirectiveSetDestination systemName
+                )
+                waitForProgressInGame
 
 
 jumpToNextSystem : BotDecisionContext -> DecisionPathNode
@@ -8290,6 +8567,7 @@ initBotMemory =
     , fleetBroadcastSeen = Nothing
     , destinationAskReadings = 0
     , routeSettingGivenUp = False
+    , escalationStandDownReadings = 0
     , lockAttempt = Nothing
 
     -- No evidence yet, in both directions -- which is a different fact from
@@ -13870,6 +14148,33 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     )
                 && not (gridStillHasSomethingToDo incomingDamageNow context.readingFromGameClient)
 
+        anEscalationIsBeingWorkedInADeadEnd =
+            -- What the counter advances on, which is deliberately the hold's
+            -- condition *without* its bound. Conjoined with `standingInADeadEnd`
+            -- for the reason the ask below is: that is the condition under which
+            -- `setRouteToNextHuntingGround` is reached at all, so counting
+            -- anything wider would spend the bound on readings the branch never
+            -- ran on -- #145's `gateWithinReachTicks` and #11's
+            -- `dronesInSpaceTicks`, which each counted the ship being *near*
+            -- something rather than the branch asking for it.
+            --
+            -- **Leaving the bound out here is what makes it a bound.** Advancing
+            -- on `standingDownForATrackedEscalation` instead would reset the
+            -- count on the very reading the hold expired, so the next reading
+            -- would hold again -- a duty cycle of forty held readings and one
+            -- ask, forever, rather than a give-up. That is `gunsSilencedTicks`
+            -- pinned at 1 by a reset the thing it was waiting on could trigger.
+            standingInADeadEnd && escalationIsBeingWorked context.readingFromGameClient
+
+        standingDownForAnEscalationNow =
+            -- The reading the decision holds the grid on, re-derived here
+            -- because the memory update never sees the decision.
+            anEscalationIsBeingWorkedInADeadEnd
+                && standingDownForATrackedEscalation
+                    { escalationIsBeingWorked = True
+                    , standDownReadings = botMemoryBefore.escalationStandDownReadings
+                    }
+
         destinationAskedForNow =
             -- What the decision branch is asking for, named by the *same* picker
             -- it uses. Forgotten the moment a route exists, so arriving and
@@ -13882,8 +14187,17 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             -- the give-up having issued no ask at all, two of them with no
             -- `hunt-system` configured, because the counter ran while nothing
             -- was being asked for.
-            if standingInADeadEnd then
-                nextHuntingGroundFrom context.botSettings botMemoryBefore.huntSystemIndex context.readingFromGameClient
+            --
+            -- `Nothing` while the circuit is standing down for a tracked
+            -- escalation (#279), for that same reason and it is the same
+            -- defect: no ask goes out on those readings, so a counter that ran
+            -- through them would latch `routeSettingGivenUp` for the session
+            -- against asks nobody made.
+            if standingInADeadEnd && not standingDownForAnEscalationNow then
+                nextHuntingGroundFrom context.botSettings
+                    botMemoryBefore.huntSystemIndex
+                    context.readingFromGameClient
+                    botMemoryBefore.lastDockedStationNameFromInfoPanel
 
             else
                 Nothing
@@ -14317,6 +14631,17 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- that keeps asking is one that never goes back to hunting.
         botMemoryBefore.routeSettingGivenUp
             || (routeAskGiveUpReadings < botMemoryBefore.destinationAskReadings)
+    , escalationStandDownReadings =
+        -- Resets on any reading the hold does not apply to -- a route
+        -- appearing, the escalation leaving the tracker, the ship docking, an
+        -- anomaly worth hunting turning up, or anything left to do on the grid
+        -- -- so the bound measures one uninterrupted hold rather than a
+        -- session's worth of them.
+        if anEscalationIsBeingWorkedInADeadEnd then
+            botMemoryBefore.escalationStandDownReadings + 1
+
+        else
+            0
     , lockBatch = lockBatchAccounting.dispatch
     , lockBatchClicksAsked = lockBatchAccounting.clicksAsked
     , lockBatchClicksAnswered = lockBatchAccounting.clicksAnswered

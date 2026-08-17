@@ -118,15 +118,22 @@ def location_panel(systemName):
     ], region=(0, 0, 200, 44))
 
 
-def pick(settings, index, reading):
+def pick(settings, index, reading, station="Nothing"):
     """`nextHuntingGroundFrom` over a reading the binding holds as a `Maybe`.
 
-    The reading is the picker's last argument, so the partial application is
-    what `Maybe.andThen` wants and nothing has to unwrap a
-    `ParsedUserInterface` this suite deliberately never builds by hand.
+    Nothing has to unwrap a `ParsedUserInterface`, which this suite deliberately
+    never builds by hand.
+
+    `station` is the station the ship last undocked from, which #279 added as
+    the picker's last rung. It is `Nothing` here because every case in this file
+    is about the circuit and its `home-system` fallback, and a station would
+    answer where those are meant to answer nothing --
+    `test_saxrat_escalation_outranks_the_hunt_circuit` is where that rung is
+    exercised.
     """
-    return "(%s |> Maybe.andThen (nextHuntingGroundFrom %s %d))" % (
-        reading, settings, index)
+    return "(%s |> Maybe.andThen (\\reading ->" \
+           " nextHuntingGroundFrom %s %d reading (%s)))" % (
+               reading, settings, index, station)
 
 
 def saxrat_runs(*numbers):
@@ -328,17 +335,36 @@ class AHuntingGroundEqualToThisSystemIsSkippedTest(unittest.TestCase):
             [self.repl.reading_binding("padded", [location_panel("  Hamse ")])])
         self.assertEqual(asked, "Lashkai")
 
-    def test_no_circuit_configured_still_names_nowhere(self):
-        """With no `hunt-system` the bot parks exactly as it did before the
-        circuit existed, guard or no guard."""
+    def test_no_circuit_and_nothing_else_configured_still_names_nowhere(self):
+        """With no `hunt-system`, no `home-system` and nowhere docked, the bot
+        parks exactly as it did before the circuit existed, guard or no
+        guard."""
         answers = self.repl.picked(
             [pick(self.repl.settings(), 0, "inHamse"),
-             pick(self.repl.settings(), 0, "elsewhere"),
-             # A staging system alone is not a circuit: with nothing to
-             # exhaust, there is no lap to complete.
-             pick(self.repl.settings(home="Hamse"), 0, "elsewhere")],
+             pick(self.repl.settings(), 0, "elsewhere")],
             self.readings())
-        self.assertEqual(answers, ["nowhere"] * 3)
+        self.assertEqual(answers, ["nowhere"] * 2)
+
+    def test_an_empty_circuit_now_names_the_home_system(self):
+        """**This case is a reversal, and the sentence it replaces is why.**
+
+        It read "a staging system alone is not a circuit: with nothing to
+        exhaust, there is no lap to complete" -- correct about the arithmetic
+        and, as #279's follow-up found, the reason `home-system` was
+        unreachable in the one configuration an operator most obviously wants
+        it in. `huntingGroundAtIndex` reaches the home fallback only once a lap
+        is complete and computed the lap count by dividing by the circuit's
+        length, so an empty circuit pinned it at zero.
+
+        An empty circuit is now a circuit already walked. The guard this file is
+        about is untouched: a `home-system` equal to the system the ship is in
+        is still skipped, which is the second answer here.
+        """
+        answers = self.repl.picked(
+            [pick(self.repl.settings(home="Hamse"), 0, "elsewhere"),
+             pick(self.repl.settings(home="Hamse"), 0, "inHamse")],
+            self.readings())
+        self.assertEqual(answers, ["Hamse", "nowhere"])
 
 
 class TheTwoCallersNameTheSameDestinationTest(unittest.TestCase):
@@ -435,8 +461,11 @@ class TheSkipEndsSomewhereSafeTest(unittest.TestCase):
                                        "setRouteToNextHuntingGround"))
 
     def test_naming_nowhere_tethers_rather_than_waits(self):
-        nowhere = self.branch[self.branch.index("Nothing ->"):]
-        nowhere = nowhere[:nowhere.index("Just systemName ->")]
+        # #279 turned this branch's `if/case` into a dispatch on
+        # `huntCircuitStep`, so the arm is named by a constructor rather than
+        # by the picker's own `Nothing`. What the case asserts is unchanged.
+        nowhere = self.branch[self.branch.index("NowhereToAskFor ->"):]
+        nowhere = nowhere[:nowhere.index("AskForTheHuntingGround systemName ->")]
         self.assertIn("tetherAtStructure context", nowhere)
         self.assertNotIn(
             "waitForProgressInGame", nowhere,
