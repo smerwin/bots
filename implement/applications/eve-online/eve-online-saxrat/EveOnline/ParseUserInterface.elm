@@ -3387,21 +3387,56 @@ parseOpportunityInfoPanelEntry entryNode =
         -- then discards -- which is the same stall by a longer road. Run 14 on
         -- the other bot sat docked for 750 readings on exactly that.
         --
-        -- **`List.head` over the displayed candidates is the one thing here
-        -- that is not argued from an observation.** Every capture of this chain
-        -- shows exactly one task row displayed at a time, so nothing has ever
-        -- had to choose; if both were ever shown at once this takes whichever
-        -- the client lists first, and `opportunityStepArrivingFirst` in
-        -- `Bot.elm` -- which prefers an arriving label over a travelling one --
-        -- never sees the other. Making that preference reach inside one entry
-        -- means carrying both buttons here, which is a change to the field this
-        -- type exposes and to the decision that reads it. Deliberately not done
-        -- on a shape nobody has read.
-        travelButtonNode =
+        -- **`List.head` over the displayed candidates was the one thing here
+        -- that was not argued from an observation, and the observation has
+        -- arrived.** It was recorded as "every capture of this chain shows
+        -- exactly one task row displayed at a time, so nothing has ever had to
+        -- choose". Run 48 read this, on the enter-dungeon row in Nosodnis:
+        --
+        --     ProgressBarTaskWidget             _name=objective_task_travel_to_location  '8 jumps | 0.6 Andabiar'
+        --     TravelToLocationButtonTaskWidget  _name=objective_task_travel_to_location  'Set Destination'
+        --
+        -- **Two candidates are displayed at once, and they are not the two this
+        -- paragraph anticipated.** It is a button and the row's own progress
+        -- bar, which carries the same `_name` and so is admitted by the name
+        -- half of the selector; neither carries `_display`, so both read as
+        -- shown, and the bar sorts first. `travelButton.label` was therefore
+        -- `8 jumps | 0.6 Andabiar` -- readable text, so
+        -- `escalationIsBeingWorked` stood the bot down for the escalation,
+        -- while `travelLabelIsACommand` refused the label and
+        -- `opportunityTravelStep` answered `Nothing`. 234 stand-downs and zero
+        -- presses across three hours, with nothing in the log saying a button
+        -- had been missed.
+        --
+        -- **So a pressable candidate wins, and `List.head` is kept for the
+        -- no-button case.** `ButtonTask` is what separates them -- see
+        -- `uiNodeIsOpportunityTravelTaskButton`, which is a preference among
+        -- nodes `uiNodeIsOpportunityTravelTask` has already admitted rather
+        -- than a widening of what is admitted. It is strictly wider than the
+        -- `List.head` it replaces: every reading that yielded a button still
+        -- yields the same one, since a button is preferred only over things
+        -- that are not buttons and the client's order still decides among the
+        -- buttons themselves.
+        --
+        -- **Two buttons displayed at once is still the unread shape**, and this
+        -- leaves it exactly where it was: both are candidates, both are
+        -- buttons, and the client's order picks. `opportunityStepArrivingFirst`
+        -- in `Bot.elm` -- which prefers an arriving label over a travelling one
+        -- -- still never sees the second, because carrying both would be a
+        -- change to the field this type exposes and to the decision that reads
+        -- it. Deliberately not done on a shape nobody has read.
+        displayedTravelTaskNodes =
             descendants
                 |> List.filter (.uiNode >> uiNodeIsOpportunityTravelTask)
                 |> List.filter (.uiNode >> nodeIsDisplayedFromDictEntries)
-                |> List.head
+
+        travelButtonNode =
+            case displayedTravelTaskNodes |> List.filter (.uiNode >> uiNodeIsOpportunityTravelTaskButton) of
+                firstButton :: _ ->
+                    Just firstButton
+
+                [] ->
+                    displayedTravelTaskNodes |> List.head
     in
     { uiNode = entryNode
     , siteName =
@@ -3563,6 +3598,43 @@ opportunityTravelTaskTypePrefix =
 opportunityTravelTaskNames : List String
 opportunityTravelTaskNames =
     [ "objective_task_travel_to_location", "objective_task_enter_dungeon" ]
+
+
+{-| Whether a node the selector above admitted is one the bot can press.
+
+**The travel-to-location row's progress bar carries the same `_name` as its
+button**, so admitting the row by name admits both -- and the bar is listed
+first, which is what made the button unreachable. See
+`parseOpportunityInfoPanelEntry` for the reading and for what it cost. The two
+pressable widgets are `TravelToLocationButtonTask...` and the enter-dungeon
+row's state widget; the bar is a `ProgressBarTaskWidget`, so `ButtonTask` is a
+substring exactly one side of that carries.
+
+**A substring rather than a suffix**, for the reason the prefix above is a
+prefix: `TravelToLocationButtonTask` is one of the two spellings read on this
+client and does not end with `ButtonTaskWidget` at all, so a suffix test would
+lose a row the parser reads today.
+
+**This says nothing about what is admitted**, which is the distinction that
+keeps it clear of the `endsWith "ButtonTaskWidget"` its neighbour refuses by
+name: it is only ever asked about nodes `uiNodeIsOpportunityTravelTask` has
+already returned `True` for, so it cannot reach a sibling in
+`buttons_container` that selector declined, and it can only reorder candidates
+rather than add one.
+
+-}
+uiNodeIsOpportunityTravelTaskButton : EveOnline.MemoryReading.UITreeNode -> Bool
+uiNodeIsOpportunityTravelTaskButton uiNode =
+    uiNode.pythonObjectTypeName
+        |> String.contains opportunityTravelTaskButtonTypeInfix
+
+
+{-| The part of a type name both pressable task widgets carry and the row's
+progress bar does not.
+-}
+opportunityTravelTaskButtonTypeInfix : String
+opportunityTravelTaskButtonTypeInfix =
+    "ButtonTask"
 
 
 stripHtmlTags : String -> String
