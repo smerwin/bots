@@ -193,6 +193,7 @@ defaultBotSettings =
     -- much, where `hitpointsPercent` is a float scraped out of a widget the
     -- client is concurrently mutating.
     , runAwayIncomingDamageThreshold = defaultRunAwayIncomingDamageThreshold
+    , escalationMinimumSecurity = defaultEscalationMinimumSecurity
 
     -- No circuit by default, which is what keeps this change free for an
     -- existing settings string: with no `hunt-system` the bot never asks for a
@@ -274,6 +275,12 @@ parseBotSettings =
            )
          , ( "run-away-incoming-damage-threshold"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayIncomingDamageThreshold = threshold })
+           )
+         , ( "escalation-minimum-security"
+           , AppSettings.valueTypeInteger
+                (\tenths settings ->
+                    { settings | escalationMinimumSecurity = toFloat tenths / 10 }
+                )
            )
          , ( "anomaly-name"
            , AppSettings.valueTypeString
@@ -411,17 +418,30 @@ stops (`R.S. Officer`), hyphens, brackets and a slash (`Gas/Storage Silo`). The
 client's own game logs say it again independently -- 348 distinct actors across
 360,788 `(combat)` lines in 40 sessions, no comma.
 
-**`anomaly-name`: still unread, and the corpus cannot read it.** Nothing here
-ever logs the scanner's Name cell -- `We are in anomaly '...'` prints the ID the
-scanner gives -- so no recorded run carries one, and the site words the launcher
-itself asks for (`Hideaway`, `Refuge`, `Burrow`, `Rally Point`, ...) occur in all
-86 runs exactly **zero** times. The only probe-scanner names anybody has written
-down are the five read off a live scanner for #188 and kept in
-`test_saxrat_anomaly_name_wildcard.py`, and one of them is
-`Dread Assault: Blood Raider Temple` -- a colon, so this column is not restricted
-to the letters and spaces the other four suggest. The cost is stated rather than
-hidden: an anomaly whose name carries a comma is unmatchable here, and what would
-settle whether one exists is a live read of the scanner nobody has taken.
+**`anomaly-name`: now logged, so the next corpus can read it.** Until #197 was
+acted on, nothing here ever logged the scanner's Name cell -- the cell was read
+once, folded into a `Bool` and dropped, and `We are in anomaly '...'` printed the
+ID the scanner gives. So no recorded run carried a site name, and the words the
+launcher itself asks for (`Hideaway`, `Refuge`, `Burrow`, `Rally Point`, ...)
+occur in all 86 runs exactly **zero** times -- which made the question
+unanswerable from recordings rather than merely unanswered.
+
+`describeAnomalyIdentity` now prints the Name and Group beside the ID on every
+reading that names a site, so a run flown from here writes the column down. The
+86 runs behind this file still cannot answer it, and nothing about the counts
+above changes; what changes is that run 49 onwards can.
+
+The only probe-scanner names anybody had written down before were the five read
+off a live scanner for #188 and kept in `test_saxrat_anomaly_name_wildcard.py`,
+one of them `Dread Assault: Blood Raider Temple` -- a colon, so this column is
+not restricted to the letters and spaces the other four suggest. A sixth was
+read off the live scanner during run 48, `Sansha Refuge`, carrying no comma.
+
+The cost is unchanged and still stated rather than hidden: an anomaly whose name
+carries a comma is unmatchable here, because `splitSettingIntoNames` splits every
+setting value on commas. Six names are not a distribution and none of this says
+no such name exists -- it says the instrument that would find one is finally
+running.
 
 Splitting these three at all is issue #182. The two fleet settings split and
 these did not, so a comma-separated value parsed with no complaint into **one**
@@ -501,6 +521,7 @@ type alias BotSettings =
     , warpAt : Int
     , targetingRangeMeters : Int
     , runAwayIncomingDamageThreshold : Int
+    , escalationMinimumSecurity : Float
     , huntSystemNames : List String
     , homeSystemName : Maybe String
     , shortRangeAmmoName : Maybe String
@@ -1591,6 +1612,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                                                             -- tether/dock) pick it up once genuinely
                                                             -- in space.
                                                             && (context.readingFromGameClient
+                                                                    |> escalationEntriesPermitted context.eventContext.botSettings
                                                                     |> warpToOpportunitySiteIfAvailable
                                                                     |> (==) Nothing
                                                                )
@@ -2823,6 +2845,72 @@ huntingGroundAtIndex botSettings index =
         huntSystemAtIndex botSettings index
 
 
+{-| Whether an escalation's destination is somewhere this bot may be sent.
+
+The client writes the security status of the trip's end on the objective
+chain's progress bar -- `0.6 Andabiar` -- and until it was lifted into
+`OpportunityDestination` nothing read it. What that cost: an escalation
+fourteen jumps into `0.3 Arodan` sat in the queue from the first minute of the
+session, the bot eventually took it, and the ship was killed there by a pilot
+with nineteen thousand kills and a 94% efficiency. Eleven million ISK of
+escalation loot went with it. Everything the bot has is calibrated against
+rats -- `isObjectShootingAtUs` would have added that Succubus to the _target
+list_ -- so the only defence available is not to go.
+
+**An unreadable security refuses the trip.** `Nothing` from the parser is the
+client not saying, and this is the one place in this file where absent must
+read as dangerous rather than as unknown-so-carry-on: the cost of declining an
+escalation is some ISK, and the cost of accepting one that turns out to be
+lowsec is the hull, the loot and the implants. `loadRefusalFromGameLog`'s
+register inverted, deliberately, and said out loud because the rest of the file
+argues the other way.
+
+-}
+escalationDestinationIsPermitted : BotSettings -> EveOnline.ParseUserInterface.OpportunityInfoPanelEntry -> Bool
+escalationDestinationIsPermitted botSettings entry =
+    entry.destination
+        |> Maybe.andThen .security
+        |> securityIsPermitted botSettings.escalationMinimumSecurity
+
+
+{-| The reading with escalations this bot may not be sent to removed.
+
+Applied to the _reading_ rather than pushed into `opportunityTravelStep`,
+because that function is asked about by some ninety-five existing cases and
+widening its signature would have rewritten every one of them to prove
+something none of them is about. Narrowing the entries first says the same
+thing and leaves "what is the tracker offering" a question anybody can still
+ask without a settings record.
+
+-}
+escalationEntriesPermitted : BotSettings -> ReadingFromGameClient -> ReadingFromGameClient
+escalationEntriesPermitted botSettings readingFromGameClient =
+    { readingFromGameClient
+        | opportunityInfoPanelEntries =
+            readingFromGameClient.opportunityInfoPanelEntries
+                |> List.filter (escalationDestinationIsPermitted botSettings)
+    }
+
+
+{-| The decision itself, over the two numbers, so a case can run it.
+
+Split out from `escalationDestinationIsPermitted` because that one takes a
+parsed panel entry and a whole settings record, and a rule reachable only
+through those is a rule checked by reading rather than by running -- which is
+what #106 records the cost of, and what let the first version of the
+destination parse ship reading `8 jumps` as a security status.
+
+-}
+securityIsPermitted : Float -> Maybe Float -> Bool
+securityIsPermitted minimumSecurity security =
+    case security of
+        Just value ->
+            value >= minimumSecurity
+
+        Nothing ->
+            False
+
+
 {-| Whether the Opportunities tracker is working an escalation on this reading.
 
 **The tracker holding an escalation is something having said where to go**, which
@@ -2863,6 +2951,15 @@ saxrat runs that reached space, the scanner is open on 160,171 in-space readings
 against 1,862 shut -- 1.15% -- and 36 of the 53 never shut it once, so this reads
 the same switch #260 does and fires in the same 1% of readings. If that gate is
 ever dropped, this clause has to be looked at with it.
+
+**Gated on the same permission as the travel step, and that is the whole
+point.** #291 is what an escalation the bot can see and cannot act on costs:
+the stand-down held every dry grid for forty readings waiting for a step that
+never came, 234 times in three hours. Refusing a lowsec destination in
+`opportunityTravelStep` alone would rebuild exactly that -- the bot would stand
+down for an escalation it had already decided never to travel to. So both
+readers ask the same question, and an escalation below the threshold is simply
+not an escalation as far as this bot is concerned.
 
 -}
 escalationIsBeingWorked : ReadingFromGameClient -> Bool
@@ -3036,7 +3133,9 @@ setRouteToNextHuntingGround : BotDecisionContext -> DecisionPathNode
 setRouteToNextHuntingGround context =
     case
         huntCircuitStep
-            { escalationIsBeingWorked = escalationIsBeingWorked context.readingFromGameClient
+            { escalationIsBeingWorked =
+                escalationIsBeingWorked
+                    (escalationEntriesPermitted context.eventContext.botSettings context.readingFromGameClient)
             , standDownReadings = context.memory.escalationStandDownReadings
             , routeSettingGivenUp = context.memory.routeSettingGivenUp
             , nextHuntingGround = nextHuntingGround context
@@ -3882,6 +3981,32 @@ not about the game**.
 defaultRunAwayIncomingDamageThreshold : Int
 defaultRunAwayIncomingDamageThreshold =
     3500
+
+
+{-| The lowest security status an escalation may send this bot to.
+
+**0.5 is the empire line**, not a tuning parameter: at 0.5 and above CONCORD
+answers an aggression, and below it nobody does. That is the whole of the
+argument, which is why this is a constant with a name rather than a number
+somebody picked -- every guard in this file is calibrated against rats, and
+below 0.5 the thing that kills this ship is not a rat.
+
+Paid for once. An escalation fourteen jumps into `0.3 Arodan` was in the queue
+from the first minute of a session; the bot took it, and the ship was killed
+there by a pilot with 19,739 kills and 94% efficiency, flying a Succubus --
+warp scrambled, so the retreat could not have worked either. Eleven million ISK
+of escalation loot went with the hull.
+
+`escalation-minimum-security` overrides it, in **tenths**, because
+`AppSettings` has no float reader and inventing one for this is more surface
+than the setting is worth: `escalation-minimum-security=5` is 0.5, `=0` allows
+anything including nullsec. An operator who wants the bot in lowsec has to say
+so in a number.
+
+-}
+defaultEscalationMinimumSecurity : Float
+defaultEscalationMinimumSecurity =
+    0.5
 
 
 incomingDamageSampleLimit : Int
@@ -5222,7 +5347,17 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                                             arrivalInAnomalyAgeSeconds =
                                                                 (context.eventContext.timeInMilliseconds - memoryOfAnomaly.arrivalTime.milliseconds) // 1000
                                                         in
-                                                        describeBranch ("We are in anomaly '" ++ anomalyID ++ "' since " ++ String.fromInt arrivalInAnomalyAgeSeconds ++ " seconds.")
+                                                        describeBranch
+                                                            ("We are in anomaly "
+                                                                ++ (context.readingFromGameClient
+                                                                        |> getCurrentAnomalyIdentityAsSeenInProbeScanner
+                                                                        |> Maybe.withDefault { id = anomalyID, name = Nothing, group = Nothing }
+                                                                        |> describeAnomalyIdentity
+                                                                   )
+                                                                ++ " since "
+                                                                ++ String.fromInt arrivalInAnomalyAgeSeconds
+                                                                ++ " seconds."
+                                                            )
                                                             (case findReasonToAvoidAnomalyFromMemory (anomalyChoiceFromDecisionContext context) { anomalyID = anomalyID } of
                                                                 Just reasonToAvoidAnomaly ->
                                                                     describeBranch
@@ -10920,9 +11055,9 @@ describeWhereTheShipIs readingFromGameClient =
         "IN WARP"
 
     else
-        case getCurrentAnomalyIDAsSeenInProbeScanner readingFromGameClient of
-            Just anomalyID ->
-                anomalyID
+        case getCurrentAnomalyIdentityAsSeenInProbeScanner readingFromGameClient of
+            Just anomaly ->
+                describeAnomalyIdentityForHeader anomaly
 
             Nothing ->
                 "-"
@@ -11231,7 +11366,10 @@ statusTextFromState context =
 
                         describeAnomaly =
                             "Current anomaly: "
-                                ++ (getCurrentAnomalyIDAsSeenInProbeScanner readingFromGameClient |> Maybe.withDefault "None")
+                                ++ (getCurrentAnomalyIdentityAsSeenInProbeScanner readingFromGameClient
+                                        |> Maybe.map describeAnomalyIdentity
+                                        |> Maybe.withDefault "None"
+                                   )
                                 ++ "."
 
                         describeArrivalWindowClause =
@@ -13235,10 +13373,12 @@ siteProgressStepOrElse context ifNeither =
             activateAccelerationGateIfPresent context
 
         opportunityWarpStep =
-            warpToOpportunitySiteIfAvailable context.readingFromGameClient
+            warpToOpportunitySiteIfAvailable
+                (escalationEntriesPermitted context.eventContext.botSettings context.readingFromGameClient)
 
         arrivalIsOffered =
-            opportunityTravelStep context.readingFromGameClient
+            opportunityTravelStep
+                (escalationEntriesPermitted context.eventContext.botSettings context.readingFromGameClient)
                 |> Maybe.map (.label >> opportunityLabelArrivesAtTheSite)
                 |> Maybe.withDefault False
     in
@@ -14164,7 +14304,9 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             -- would hold again -- a duty cycle of forty held readings and one
             -- ask, forever, rather than a give-up. That is `gunsSilencedTicks`
             -- pinned at 1 by a reset the thing it was waiting on could trigger.
-            standingInADeadEnd && escalationIsBeingWorked context.readingFromGameClient
+            standingInADeadEnd
+                && escalationIsBeingWorked
+                    (escalationEntriesPermitted context.botSettings context.readingFromGameClient)
 
         standingDownForAnEscalationNow =
             -- The reading the decision holds the grid on, re-derived here
@@ -14704,11 +14846,93 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
 getCurrentAnomalyIDAsSeenInProbeScanner : ReadingFromGameClient -> Maybe String
 getCurrentAnomalyIDAsSeenInProbeScanner =
+    getCurrentAnomalyIdentityAsSeenInProbeScanner >> Maybe.map .id
+
+
+{-| The scanner's own words for the site the ship is in: its ID, Name and Group.
+
+**Nothing keys on this.** `visitedAnomalies` is filed under the ID and stays
+that way, because the ID is what the client gives uniquely per site on this grid
+while a Name is shared by every site of a kind -- an anomaly memory keyed on
+`Sansha Refuge` would confuse the one just cleared with the next one. This is
+for _saying_ which site that is, in the client's own words.
+
+The three cells come off the **same** scan-result row rather than from three
+lookups, so they cannot be answered from different rows if the scanner re-sorts
+between reads. That is not a hypothetical tidiness: the overview's own re-sort
+between a read and a click is documented here as having locked the wrong object
+and shot an asteroid for 290 readings.
+
+`Nothing` for a cell is the scanner not giving one, and it is not an empty name.
+The renderer says so in words for the same reason `loadRefusalFromGameLog` does:
+a fabricated blank reads as a site the client declined to name, which is a
+different fact from one nobody read.
+
+Reading it at all is #197. `anomaly-name` is matched against the Name cell, and
+until now that cell was read once, folded into a `Bool` and dropped -- so what a
+run recorded was the ID, no recorded run carried a site name, and the question of
+what that column may contain was unanswerable from the corpus at any size rather
+than merely unanswered.
+
+-}
+type alias AnomalyIdentity =
+    { id : String
+    , name : Maybe String
+    , group : Maybe String
+    }
+
+
+getCurrentAnomalyIdentityAsSeenInProbeScanner : ReadingFromGameClient -> Maybe AnomalyIdentity
+getCurrentAnomalyIdentityAsSeenInProbeScanner =
     .probeScannerWindow
         >> Maybe.map getScanResultsForSitesOnGrid
         >> Maybe.withDefault []
         >> List.head
-        >> Maybe.andThen (.cellsTexts >> Dict.get "ID")
+        >> Maybe.andThen
+            (\scanResult ->
+                scanResult.cellsTexts
+                    |> Dict.get "ID"
+                    |> Maybe.map
+                        (\id ->
+                            { id = id
+                            , name = scanResult.cellsTexts |> Dict.get "Name"
+                            , group = scanResult.cellsTexts |> Dict.get "Group"
+                            }
+                        )
+            )
+
+
+{-| `'EGC-528' 'Sansha Refuge' (Combat Site)`, for the lines a run is read back from.
+
+**The ID stays first and stays single-quoted.** `engagement_watch.py` names every
+screenshot it takes from `We are in anomaly '([^']+)'`, which takes the first
+quoted group out of the line -- so a name appended after the ID is invisible to
+it, and a name put in front would silently rename every screenshot of every run
+while the watcher went on looking healthy.
+
+-}
+describeAnomalyIdentity : AnomalyIdentity -> String
+describeAnomalyIdentity anomaly =
+    "'"
+        ++ anomaly.id
+        ++ "' "
+        ++ (anomaly.name |> Maybe.map (\name -> "'" ++ name ++ "'") |> Maybe.withDefault "(name unread)")
+        ++ " "
+        ++ (anomaly.group |> Maybe.map (\group -> "(" ++ group ++ ")") |> Maybe.withDefault "(group unread)")
+
+
+{-| `EGC-528/Sansha Refuge`, for the one-line header printed on every decision.
+
+Joined by a slash rather than a space because the header's next field is the
+active target's name, and two bare names running together read as one. The Group
+is left out: it is `Combat Site` for everything this bot hunts, so in the line
+printed most often it would be a column of one repeated word.
+
+-}
+describeAnomalyIdentityForHeader : AnomalyIdentity -> String
+describeAnomalyIdentityForHeader anomaly =
+    anomaly.id
+        ++ (anomaly.name |> Maybe.map (\name -> "/" ++ name) |> Maybe.withDefault "")
 
 
 getScanResultsForSitesOnGrid : EveOnline.ParseUserInterface.ProbeScannerWindow -> List EveOnline.ParseUserInterface.ProbeScanResult

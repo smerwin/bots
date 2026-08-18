@@ -349,16 +349,23 @@ class TheCommaIsUnconditionalTest(unittest.TestCase):
     def test_the_doc_comment_says_which_half_is_read_and_which_is_not(self):
         """#197's answer, where the next reader of the splitter meets it.
 
-        The sentence this replaces said neither column had been established.
-        One of them now has been, and saying so without saying the other has
-        not would be the more expensive half of the cost going quiet.
+        Two rewrites now. The first sentence said neither column had been
+        established; the second said `avoid-rat` had been measured and
+        `anomaly-name` could not be. Acting on #197 makes the second half
+        answerable but does **not** answer it, and the doc comment has to keep
+        that distinction: a reader who takes "now logged" for "now known" would
+        conclude the comma question is settled by six names.
         """
         source = collapsed(source_of(SAXRAT_BOT_ELM))
         self.assertIn("`avoid-rat`: measured, and no name carries a comma",
                       source)
         self.assertIn(
-            "`anomaly-name`: still unread, and the corpus cannot read it",
+            "`anomaly-name`: now logged, so the next corpus can read it",
             source)
+        self.assertIn(
+            "Six names are not a distribution", source,
+            "the doc comment reads as though logging the column answered the "
+            "question, rather than making it answerable")
 
 
 class AnEmptyValueAddsNoEntryTest(unittest.TestCase):
@@ -849,49 +856,145 @@ class TheClientsOwnLogsSayTheSameTest(unittest.TestCase):
             "apostrophe, so they cannot say a comma is unusual")
 
 
-class TheScannerNameColumnIsNeverWrittenDownTest(unittest.TestCase):
-    """Issue #197's second half: the corpus cannot answer it, and why.
+SCANNER_NAME_IN_A_RUN = re.compile(rb"We are in anomaly '[^']+' '([^']+)'")
 
-    `anomaly-name` is matched against the probe scanner's Name cell, and
-    **nothing in either bot ever logs that cell.** The one thing printed about
-    an anomaly is the ID the scanner gives it (`We are in anomaly 'AIC-176'`),
-    which is what makes this unanswerable from recordings rather than merely
-    unanswered: there is no reading to go back to.
 
-    Two halves, and the second is what would announce the day it changes. The
-    source says the cell is read into a `Bool` and nowhere else; the corpus says
-    no site name the launcher itself asks for occurs in it. A run that started
-    printing one would fail the second, which is exactly the run whose log could
-    settle the question.
+def scanner_names_the_recordings_carry():
+    """Every anomaly Name cell any recorded run wrote down.
+
+    Empty for every run flown before #197 was acted on, which is the whole
+    corpus this file was written against: the cell was read into a `Bool` and
+    dropped, so there is nothing in those logs to find. A run flown since writes
+    one on every reading that names a site.
+    """
+    names = set()
+    for path in sorted(glob.glob(os.path.join(EVE_BOT_LOGS, "*.log"))):
+        with open(path, "rb") as handle:
+            for line in handle:
+                match = SCANNER_NAME_IN_A_RUN.search(line)
+                if match:
+                    names.add(decoded(match.group(1)))
+    return names
+
+
+class TheScannerNameColumnIsLoggedNowTest(unittest.TestCase):
+    """Issue #197's second half, acted on: the Name cell is written down.
+
+    This replaces `TheScannerNameColumnIsNeverWrittenDownTest`, whose own
+    docstring said that a run which started printing a name "would fail the
+    second, which is exactly the run whose log could settle the question". That
+    run is now every run flown from here.
+
+    **Replaced rather than deleted.** A marker merely removed takes its argument
+    with it, and this repo has twice been bitten by a deferral marker colliding
+    with the change that spends it -- `TheMissionRunnerIsUntouched` and
+    `TheMissionRunnerStillLocksOnePerStep` are both recorded as having been
+    replaced for exactly this reason.
+
+    Two things the old class asserted, both now deliberately false: that the
+    Name cell was read exactly once and only into a `Bool`, and that
+    `"We are in anomaly '" ++ anomalyID` was the whole of what a run says about
+    a site.
+
+    What it keeps is the half still open. **Logging the column does not answer
+    whether a name can carry a comma** -- it makes the question answerable. The
+    last case goes red the day a run writes such a name, because
+    `splitSettingIntoNames` splits every setting value on commas, so
+    `anomaly-name` could never be configured to match it.
     """
 
-    def test_the_name_cell_is_read_once_and_only_into_a_verdict(self):
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(SaxratRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_the_name_cell_reaches_more_than_a_verdict(self):
         source = source_of(SAXRAT_BOT_ELM)
-        self.assertEqual(
-            source.count('Dict.get "Name"'), 1,
-            "the scanner's Name cell is read somewhere new -- if that place "
-            "logs it, the corpus can answer #197 and this file should say so")
-        binding = collapsed(let_binding(source, "matchesAnomalyNameFromSettings"))
-        self.assertIn('Dict.get "Name"', binding)
-        self.assertIn("anomalyNameMatches", binding)
-        self.assertIn("Maybe.withDefault False", binding,
-                      "the name reaches something other than a Bool")
+        self.assertGreaterEqual(
+            source.count('Dict.get "Name"'), 2,
+            "the Name cell is read in one place again -- if that place is the "
+            "settings match, the column has stopped being logged and #197's "
+            "second half is unanswerable from the corpus once more")
+        verdict = collapsed(let_binding(source, "matchesAnomalyNameFromSettings"))
+        self.assertIn('Dict.get "Name"', verdict)
+        self.assertIn("anomalyNameMatches", verdict)
 
-    def test_the_anomaly_a_run_names_is_the_id_and_not_the_name(self):
+    def test_the_three_cells_come_off_one_scan_result_row(self):
+        """Not three lookups, so a re-sort cannot answer them from three rows."""
         source = collapsed(source_of(SAXRAT_BOT_ELM))
-        self.assertIn('"We are in anomaly \'" ++ anomalyID', source)
-
-    def test_no_recorded_run_carries_a_scanner_site_name(self):
-        found = names_the_recordings_carry()
-        if not found["runs"]:
-            raise unittest.SkipTest(
-                "no recorded runs in ~/eve-bot-logs, so what they do and do "
-                "not name cannot be consulted here")
+        start = source.index("getCurrentAnomalyIdentityAsSeenInProbeScanner =")
+        body = source[start:start + 700]
+        for cell in ('Dict.get "ID"', 'Dict.get "Name"', 'Dict.get "Group"'):
+            self.assertIn(cell, body)
         self.assertEqual(
-            found["site_word_hits"], 0,
-            "a recorded run names an anomaly site, so the scanner's Name "
-            "column is being written down after all and #197's second half is "
-            "answerable from the corpus")
+            body.count("List.head"), 1,
+            "the identity takes the head row more than once, so its cells can "
+            "come from different rows")
+
+    def test_the_id_is_still_the_first_quoted_token(self):
+        """`engagement_watch.py` names every screenshot from the first group."""
+        rendered = self.repl.strings([
+            'Bot.describeAnomalyIdentity '
+            '{ id = "EGC-528", name = Just "Sansha Refuge", group = Just "Combat Site" }',
+        ])[0]
+        self.assertTrue(
+            rendered.startswith("'EGC-528'"),
+            "the ID is no longer the first quoted token, so the watcher would "
+            "name every screenshot after the site instead: %r" % rendered)
+        self.assertIn("Sansha Refuge", rendered)
+        self.assertIn("Combat Site", rendered)
+
+    def test_an_unread_cell_says_so_rather_than_reading_blank(self):
+        rendered = self.repl.strings([
+            'Bot.describeAnomalyIdentity { id = "EGC-528", name = Nothing, group = Nothing }',
+        ])[0]
+        self.assertIn("name unread", rendered)
+        self.assertIn("group unread", rendered)
+        self.assertNotIn("''", rendered,
+                         "an unread name renders as an empty one, which reads "
+                         "as a site the client declined to name")
+
+    def test_the_header_keeps_the_two_names_apart(self):
+        """The header's next field is the target's name; two bare names read as one."""
+        with_name, without = self.repl.strings([
+            'Bot.describeAnomalyIdentityForHeader '
+            '{ id = "RYR-093", name = Just "Sansha Refuge", group = Just "Combat Site" }',
+            'Bot.describeAnomalyIdentityForHeader '
+            '{ id = "RYR-093", name = Nothing, group = Nothing }',
+        ])
+        self.assertEqual(with_name, "RYR-093/Sansha Refuge")
+        self.assertEqual(without, "RYR-093")
+        self.assertNotIn("Combat Site", with_name,
+                         "the group is in the header, where it is one repeated "
+                         "word on every line this bot ever prints")
+
+    def test_nothing_keys_on_the_name(self):
+        """`visitedAnomalies` stays filed under the ID, which is unique per site."""
+        source = collapsed(source_of(SAXRAT_BOT_ELM))
+        binding = collapsed(let_binding(source_of(SAXRAT_BOT_ELM), "visitedAnomalies"))
+        self.assertIn("getCurrentAnomalyIDAsSeenInProbeScanner", binding)
+        self.assertNotIn("getCurrentAnomalyIdentityAsSeenInProbeScanner", binding)
+        self.assertNotIn(".name", binding,
+                         "an anomaly memory keyed on the name would confuse the "
+                         "Sansha Refuge just cleared with the next one")
+
+    def test_no_recorded_scanner_name_carries_a_comma(self):
+        names = scanner_names_the_recordings_carry()
+        if not names:
+            raise unittest.SkipTest(
+                "no recorded run carries a scanner Name cell yet -- every run "
+                "in ~/eve-bot-logs predates #197 being acted on, so there is "
+                "nothing to check. The first run flown from here supplies it.")
+        offenders = sorted(name for name in names if "," in name)
+        self.assertEqual(
+            offenders, [],
+            "an anomaly name carries a comma, so `splitSettingIntoNames` cuts "
+            "it in half and `anomaly-name` can never be configured to match "
+            "it. This is #197's open question answered, and it is a defect: %r"
+            % offenders)
 
 
 class TheOnlyScannerNamesAnybodyHasWrittenDownTest(unittest.TestCase):

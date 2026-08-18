@@ -279,7 +279,8 @@ class TheWiringTest(unittest.TestCase):
             let_block)
         self.assertIn(
             "opportunityWarpStep = warpToOpportunitySiteIfAvailable"
-            " context.readingFromGameClient", let_block)
+            " (escalationEntriesPermitted context.eventContext.botSettings"
+            " context.readingFromGameClient)", let_block)
 
     def test_the_reach_input_is_the_shared_rule(self):
         """One definition of "a gate is close enough to use", not a second one.

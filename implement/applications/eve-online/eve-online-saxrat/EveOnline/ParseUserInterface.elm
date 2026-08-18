@@ -546,6 +546,29 @@ type alias OpportunityInfoPanelEntry =
     { uiNode : UITreeNodeWithDisplayRegion
     , siteName : Maybe String
     , travelButton : Maybe OpportunityTravelButton
+    , destination : Maybe OpportunityDestination
+    }
+
+
+{-| Where the escalation's trip ends, as the chain's progress bar states it.
+
+Read off the **same** row the travel button was being confused with: the bar
+carries `8 jumps` and `0.6 Andabiar`, and until this was lifted the security
+status of an escalation's destination was in the tree on every reading and
+read by nothing. What that cost is on record -- a ship was flown fourteen jumps
+into `0.3 Arodan`, killed there by a pilot with nineteen thousand kills, and
+eleven million ISK of escalation loot went with it. The number that would have
+declined the trip was on screen the whole time.
+
+`Nothing` is the client not saying, and it is not `0.0`. A destination whose
+security cannot be read must not be treated as dangerous _or_ as safe by this
+field -- that is the caller's decision, and `Bot.elm` states which way it fails.
+
+-}
+type alias OpportunityDestination =
+    { security : Maybe Float
+    , systemName : Maybe String
+    , jumps : Maybe Int
     }
 
 
@@ -3430,6 +3453,21 @@ parseOpportunityInfoPanelEntry entryNode =
                 |> List.filter (.uiNode >> uiNodeIsOpportunityTravelTask)
                 |> List.filter (.uiNode >> nodeIsDisplayedFromDictEntries)
 
+        -- The bar the button preference below exists to step over. It is not
+        -- pressable and it is where the destination is written, so the same
+        -- node that had to stop being mistaken for a button is now read for
+        -- what it does carry.
+        --
+        -- Asked through `uiNodeIsOpportunityTravelTaskButton` rather than a
+        -- second type test of its own, so "which of these is the button" has
+        -- one answer here. A separate predicate would be a second place for
+        -- the chain's next widget to be classified, and they would drift.
+        destinationTexts =
+            displayedTravelTaskNodes
+                |> List.filter (.uiNode >> uiNodeIsOpportunityTravelTaskButton >> not)
+                |> List.concatMap listDescendantsWithDisplayRegion
+                |> textsOf
+
         travelButtonNode =
             case displayedTravelTaskNodes |> List.filter (.uiNode >> uiNodeIsOpportunityTravelTaskButton) of
                 firstButton :: _ ->
@@ -3478,7 +3516,76 @@ parseOpportunityInfoPanelEntry entryNode =
                             namedLabelTexts |> List.head
                     }
                 )
+    , destination = parseOpportunityDestination destinationTexts
     }
+
+
+{-| `['8 jumps', '0.6 Andabiar']` -> the trip's length and where it ends.
+
+Each cell is matched on its own shape rather than by position, because the bar
+has been read carrying them in one order and nothing says it always will. The
+security cell is `<number> <system name>`, which is how the client writes it
+everywhere it writes a system.
+
+**Every part is a `Maybe` and a cell that does not parse yields `Nothing`
+rather than a default.** A `0.0` invented here would read as null security --
+the most dangerous answer there is -- for a client that simply phrased
+something differently.
+
+-}
+parseOpportunityDestination : List String -> Maybe OpportunityDestination
+parseOpportunityDestination texts =
+    let
+        jumpsFrom text =
+            if String.contains "jump" (String.toLower text) then
+                text |> String.split " " |> List.head |> Maybe.andThen String.toInt
+
+            else
+                Nothing
+
+        -- `8 jumps` is the same shape as `0.6 Andabiar` -- a number, a space,
+        -- a word -- and it is listed first, so without a test that separates
+        -- them the trip's *length* is read as its security and the destination
+        -- becomes a system called "jumps". That is not hypothetical: it is what
+        -- the first version of this did, and only running it said so.
+        --
+        -- Two independent exclusions, because either alone would be a matcher
+        -- resting on one observation. A security status is bounded by
+        -- [-1.0, 1.0] and no route is one jump long in that range's units; and
+        -- the jumps cell says `jump` in words, which no system name here does.
+        securityFrom text =
+            if String.contains "jump" (String.toLower text) then
+                Nothing
+
+            else
+                case text |> String.trim |> String.split " " of
+                    first :: rest ->
+                        case String.toFloat first of
+                            Just security ->
+                                if List.isEmpty rest || security > 1 || security < -1 then
+                                    Nothing
+
+                                else
+                                    Just ( security, String.join " " rest )
+
+                            Nothing ->
+                                Nothing
+
+                    [] ->
+                        Nothing
+
+        found =
+            texts |> List.filterMap securityFrom |> List.head
+    in
+    if List.isEmpty texts then
+        Nothing
+
+    else
+        Just
+            { security = found |> Maybe.map Tuple.first
+            , systemName = found |> Maybe.map Tuple.second
+            , jumps = texts |> List.filterMap jumpsFrom |> List.head
+            }
 
 
 {-| Whether a node inside an escalation's objective chain is one of the task
