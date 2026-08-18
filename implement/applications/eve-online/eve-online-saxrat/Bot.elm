@@ -1689,10 +1689,14 @@ guard does.
 
 **This whole list is evaluated above the docked-or-in-space split**, so anything
 in it that can repeat forever freezes the entire bot rather than one branch.
-That is #101 in the mission runner and #138 here. `closeMessageBox` is the one
-entry with a bound of its own and may not lose it; the other two are unbounded,
-which is why `endSessionOnAnExpiredBound` is asked above this list rather than
-below it.
+That is #101 in the mission runner and #138 here. Two of the three now carry a
+bound of their own and may not lose it: `closeMessageBox` gives up on a box
+nothing closes, and `ensureInfoPanelLocationInfoIsExpanded` answers `Nothing`
+while its own repair click settles rather than waiting on it (#297, where the
+two halves of that repair alternated and held the tree for 364 readings of one
+recorded run). `closeSystemSettingsMenu` is the one left unbounded, which is why
+`endSessionOnAnExpiredBound` is still asked above this list rather than below
+it.
 
 -}
 generalSetupInUserInterface :

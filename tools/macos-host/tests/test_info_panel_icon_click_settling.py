@@ -26,6 +26,21 @@ branch. Deliberately not added: a bound or a give-up on the branch -- one click
 that lands ought to be enough, and if it demonstrably is not, that is a separate
 finding.
 
+**#297 was that finding, and two things in here moved with it.** It demonstrably
+was not enough: the branch next door -- "the panel is in the tree but drawn
+collapsed" -- had no guard at all, the two alternated because each one's click
+produces the other's precondition, and the pair held the whole decision tree
+below `generalSetupInUserInterface` for 364 readings of one recorded run. So the
+settling window is now read once for the declaration and keyed on
+`infoPanelContainer`, which both branches' clicks land inside, rather than per
+branch on an element that is missing from the tree on the reading the other
+branch clicks; and while a click is settling the declaration answers `Nothing`
+rather than `waitForProgressInGame`, so it stands aside instead of holding the
+tree. The cases below that used to assert the wait now assert the stand-aside,
+and the step-count wording ("I clicked this icon 3 step(s) ago") is gone from
+the log with the branch that printed it. `test_info_panel_repair_deadlock.py`
+carries that change's own reasoning and its fold over the alternation.
+
 **The change lands in `EveOnline/BotFrameworkSeparatingMemory.elm` in all six
 vendored copies**, but the six copies are not one file with six names -- they
 have already diverged into three shapes, and the fix is written once per shape
@@ -120,19 +135,6 @@ SIX_VENDORED_FRAMEWORKS = {
     "wingus": os.path.join(
         WINGUS_DIR, "EveOnline", "BotFrameworkSeparatingMemory.elm"),
 }
-
-# The old, unguarded shape the issue was filed on. Present in none of the six
-# after this change, in either of the two wordings the vendored copies used
-# ("case mouseClickOnUIElement ... of" for the four on the newer host
-# interface, a bare pipe into `mouseClickOnUIElement` for the 2023-interface
-# pair) immediately followed by a click with nothing between it and the "Just
-# iconLocationInfoPanel ->" branch above it.
-OLD_UNGUARDED_MARKERS = (
-    "Just iconLocationInfoPanel ->\n                            case "
-    "mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft "
-    "iconLocationInfoPanel of",
-)
-
 
 def info_panel_container(icon_region):
     """An `InfoPanelContainer` with the location-info icon and no panel.
@@ -251,43 +253,48 @@ class TheIconClicksWhenNothingHasClickedItYet(BothAppsRepl, unittest.TestCase):
                 "%s: %s" % (app, answer))
 
 
-class TheIconWaitsAfterItsOwnClick(BothAppsRepl, unittest.TestCase):
+class TheIconIsNotClickedAgainAfterItsOwnClick(
+        BothAppsRepl, unittest.TestCase):
     """The whole point of this change.
 
-    A click on the icon one reading ago must be waited out, not repeated --
-    repeating it is exactly the toggle-back mechanism issue #227 is about.
-    Mutating the guard away (reverting to the pre-fix bare
-    `decideActionForCurrentStep clickEffect`) makes this fail: the icon is
-    clicked again immediately instead of waiting.
+    A click on the icon one reading ago must not be repeated -- repeating it is
+    exactly the toggle-back mechanism issue #227 is about. Mutating the guard
+    away (reverting to the pre-fix bare `decideActionForCurrentStep
+    clickEffect`) makes this fail: the icon is clicked again immediately.
+
+    **What the settling case answers changed with #297**, and these cases
+    changed with it. It used to be `waitForProgressInGame` under a branch naming
+    the step count; it is now `Nothing`, so the repair stands aside and the rest
+    of the decision tree gets the reading. The reason is in
+    `test_info_panel_repair_deadlock.py`: this declaration is reached from
+    `generalSetupInUserInterface`, above the retreat, so a wait here is the
+    retreat unreachable, and #227's own "deliberately not added: a bound or a
+    give-up" is what #297 came back to overturn. The step count went with the
+    branch -- a cost, and a real one for reading a log.
     """
 
-    def test_one_step_ago_still_waits(self):
+    def test_one_step_ago_does_not_click_again(self):
         for app, (answer,) in self.each(["resultText [ clickEffects ]"]):
-            self.assertIn("I clicked this icon 1 step(s) ago", answer, app)
-            self.assertIn(
-                "wait rather than click it again, which would toggle it "
-                "back.", answer, app)
-            self.assertNotIn(
-                "Click on the icon to enable the info panel.", answer, app)
+            self.assertEqual("NOTHING", answer, app)
 
-    def test_two_steps_ago_still_waits_and_says_two(self):
+    def test_two_steps_ago_does_not_click_again_either(self):
         for app, (answer,) in self.each(
                 ["resultText [ [], clickEffects ]"]):
-            self.assertIn("I clicked this icon 2 step(s) ago", answer, app)
+            self.assertEqual("NOTHING", answer, app)
 
 
 class TheSettlingWindowIsFiveSteps(BothAppsRepl, unittest.TestCase):
     """`moduleButtonClickSettlingSteps`, reused rather than re-derived.
 
     Both sides of the boundary: a click five steps back is still inside
-    `List.take moduleButtonClickSettlingSteps` and is waited out; one six
+    `List.take moduleButtonClickSettlingSteps` and is stood aside for; one six
     steps back has aged out of the window, and the icon is clicked again.
     """
 
-    def test_five_steps_ago_still_waits(self):
+    def test_five_steps_ago_still_stands_aside(self):
         for app, (answer,) in self.each(
                 ["resultText (List.repeat 4 [] ++ [ clickEffects ])"]):
-            self.assertIn("I clicked this icon 5 step(s) ago", answer, app)
+            self.assertEqual("NOTHING", answer, app)
 
     def test_six_steps_ago_clicks_again(self):
         for app, (answer,) in self.each(
@@ -363,36 +370,52 @@ class TheGuardHoldsOnTheOlderHostInterfaceToo(
             self.assertIn(
                 "Click on the icon to enable the info panel.", answer, app)
 
-    def test_last_steps_click_is_waited_out(self):
+    def test_last_steps_click_is_not_repeated(self):
         for app, (answer,) in self.each(["resultText clickEffects"]):
-            self.assertIn(
-                "I clicked this icon last step and the client has not shown "
-                "the change yet", answer, app)
-            self.assertIn(
-                "wait rather than click it again, which would toggle it "
-                "back.", answer, app)
+            self.assertEqual("NOTHING", answer, app)
 
 
-class TheOldUnguardedShapeIsGoneFromAllSixTest(unittest.TestCase):
-    """The bug itself: a click reachable from `Ok clickEffect ->` with
-    nothing between it and the branch above -- gone from every vendored copy.
+class NoClickIsReachableWithoutTheSharedGuardTest(unittest.TestCase):
+    """The bug itself, restated for where the guard now lives.
+
+    #227 put a settling check *inside* the branch that clicks, and this case
+    used to refuse the shape that lacked it: `Just iconLocationInfoPanel ->`
+    followed straight by a click. #297 moved the check above both branches,
+    because the branch that has to notice a click is not the branch that made
+    it -- so that literal shape is back in four of the copies and is no longer
+    the thing to refuse.
+
+    What is refused instead is the property both revisions were after: a click
+    this declaration can reach without the settling guard having answered first.
     """
 
-    def test_none_of_the_six_still_has_it(self):
+    def test_the_guard_comes_before_every_click_in_every_copy(self):
         for app, path in SIX_VENDORED_FRAMEWORKS.items():
-            source = source_of(path)
-            for marker in OLD_UNGUARDED_MARKERS:
-                self.assertNotIn(
-                    marker, source,
-                    "%s still has the unguarded click at %s" % (app, path))
+            block = collapsed(
+                body_of(source_of(path),
+                        "ensureInfoPanelLocationInfoIsExpanded"))
+            guard = block.find("infoPanelRepairClickIsSettling")
+            self.assertNotEqual(
+                -1, guard,
+                "%s: the declaration does not consult a settling guard at "
+                "all, which is the state #227 was filed on" % app)
+            click = block.find("decideActionForCurrentStep")
+            self.assertNotEqual(-1, click, "%s: no click left to guard" % app)
+            self.assertLess(
+                guard, click,
+                "%s: a click is reachable before the settling guard is "
+                "asked" % app)
 
 
 class EachCopyNamesItsOwnSettlingCheckTest(unittest.TestCase):
-    """`ensureInfoPanelLocationInfoIsExpanded`'s own block, per copy.
+    """The settling guard's own block, per copy.
 
     Read through `body_of`'s type-annotation-to-blank-line-pair slice rather
     than searched for anywhere in the file, so a settling check that landed in
-    the wrong function would not satisfy this.
+    the wrong function would not satisfy this. #297 moved the check out of
+    `ensureInfoPanelLocationInfoIsExpanded` and into a declaration of its own,
+    so that is the block asked here; that the rule then consults it is
+    `NoClickIsReachableWithoutTheSharedGuardTest` above.
     """
 
     # Which marker each copy's guard is built from, keyed the same way as
@@ -409,7 +432,7 @@ class EachCopyNamesItsOwnSettlingCheckTest(unittest.TestCase):
     def test_each_block_names_its_guard(self):
         for app, path in SIX_VENDORED_FRAMEWORKS.items():
             block = collapsed(
-                body_of(source_of(path), "ensureInfoPanelLocationInfoIsExpanded"))
+                body_of(source_of(path), "infoPanelRepairClickIsSettling"))
             self.assertIn(
                 self.EXPECTED_MARKER[app], block,
                 "%s: settling guard not found in its own function" % app)

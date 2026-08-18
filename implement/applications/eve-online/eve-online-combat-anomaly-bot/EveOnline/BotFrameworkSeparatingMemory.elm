@@ -819,74 +819,131 @@ doEffectsClickUIElement uiElement =
         >> List.any (\location -> regionsAimedAt |> List.any (\region -> isPointInRectangle region location))
 
 
+{-| Whether a repair click on the info panel is still waiting to show its effect.
+
+One settling window for both of `ensureInfoPanelLocationInfoIsExpanded`'s repair
+branches, keyed on `infoPanelContainer` rather than on whichever element that
+branch clicks. That choice is #297's fix and is the whole of it.
+
+#227 gave the "panel absent" branch a settling guard, for a reason written on
+the branch: the icon it clicks is a toggle. The "panel collapsed" branch next to
+it kept clicking once per reading with no guard at all, and the two then
+alternated -- the icon click makes the panel appear in the tree but drawn
+collapsed, which stops the first branch matching and starts the second; the
+second's click at `(x + 8, y + 8)` takes the panel back out of the tree, which
+stops the second matching and starts the first.
+
+A second guard, per branch, would not have stopped that: **each branch's element
+is missing from the tree on exactly the reading the other branch clicks**, so
+neither guard can be asked about the click it needs to see. The container is the
+one element in the tree on both readings, and both clicks land inside it -- the
+icon is a descendant of it, and so is the panel whose corner the other click is
+offset from.
+
+-}
+infoPanelRepairClickIsSettling :
+    List (List Common.EffectOnWindow.EffectOnWindowStruct)
+    -> ReadingFromGameClient
+    -> Bool
+infoPanelRepairClickIsSettling previousStepsEffects readingFromGameClient =
+    case readingFromGameClient.infoPanelContainer of
+        Nothing ->
+            False
+
+        Just infoPanelContainer ->
+            previousStepsEffects
+                |> List.take moduleButtonClickSettlingSteps
+                |> List.any (doEffectsClickUIElement infoPanelContainer.uiNode)
+
+
+{-| Gets the location info panel back when the client is not showing it.
+
+**While a repair click is settling this answers `Nothing`, not
+`waitForProgressInGame`, and that is the second half of #297.** This function is
+reached from `generalSetupInUserInterface`, which sits above the pod recovery
+and above `branchDependingOnDockedOrInSpace` -- so every `Just` here is the
+whole tree below held for that reading, `runAwayIfLowHealth` included. #227
+deliberately left a give-up out of the branch it fixed ("one click that lands
+ought to be enough, and if it demonstrably is not, that is a separate finding");
+#297 is that finding -- it counts the pair on 22 of the 27 runs it read, one of
+them 240 minutes into a 180 minute session with the wind-down never reached.
+
+So the repair still clicks -- once per `moduleButtonClickSettlingSteps` readings,
+which is as often as a toggle can usefully be clicked -- and on every other
+reading it stands aside and lets the rest of the tree run. That bounds what this
+branch can cost at one reading in `moduleButtonClickSettlingSteps + 1`, whatever
+the client does with the clicks, which is the property #101 and #133 are about:
+an entry in this list that can repeat forever freezes the bot rather than one
+branch of it.
+
+**What standing aside costs.** The readings it gives back are readings on which
+the location info panel is absent or collapsed, so everything below that reads
+it -- the surroundings button, the station name, the system name -- does not
+match and does not fire on them. That is the trade, taken deliberately: a bot
+that cannot name the system it is in is worth strictly more than a bot that
+cannot retreat out of it.
+
+The one wait left here is for a container with no icons in it at all, which is
+the client still drawing its UI. No click of ours produces that state, so the
+alternation above cannot reach it.
+
+-}
 ensureInfoPanelLocationInfoIsExpanded :
     List (List Common.EffectOnWindow.EffectOnWindowStruct)
     -> ReadingFromGameClient
     -> Maybe DecisionPathNode
 ensureInfoPanelLocationInfoIsExpanded previousStepsEffects readingFromGameClient =
-    case readingFromGameClient.infoPanelContainer |> Maybe.andThen .infoPanelLocationInfo of
-        Nothing ->
-            Just
-                (Common.DecisionPath.describeBranch "I do not see the location info panel. Enable the info panel."
-                    (case readingFromGameClient.infoPanelContainer |> Maybe.andThen .icons |> Maybe.andThen .locationInfo of
-                        Nothing ->
-                            Common.DecisionPath.describeBranch "I do not see the icon for the location info panel." askForHelpToGetUnstuck
+    if infoPanelRepairClickIsSettling previousStepsEffects readingFromGameClient then
+        Nothing
 
-                        Just iconLocationInfoPanel ->
-                            -- The icon is a toggle, and clicking it here used to
-                            -- carry no settling guard at all -- a bare
-                            -- `decideActionForCurrentStep`, fired once per reading
-                            -- for as long as the panel stayed absent. Because the
-                            -- icon is a toggle, roughly every second click in a
-                            -- stretch like that turns the panel back off; one
-                            -- recorded run held that stretch for 184 consecutive
-                            -- readings. Give the click the same settling window
-                            -- `clickModuleButtonButWaitIfClickedInPreviousStep`
-                            -- already gives a module button, rather than
-                            -- inventing a second way to wait for one.
-                            case
-                                previousStepsEffects
-                                    |> List.take moduleButtonClickSettlingSteps
-                                    |> List.Extra.findIndex (doEffectsClickUIElement iconLocationInfoPanel)
-                            of
-                                Just stepsAgo ->
-                                    Common.DecisionPath.describeBranch
-                                        ("I clicked this icon "
-                                            ++ String.fromInt (stepsAgo + 1)
-                                            ++ " step(s) ago and the client has not shown the change yet -- wait rather than click it again, which would toggle it back."
-                                        )
-                                        waitForProgressInGame
-
-                                Nothing ->
-                                    case mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft iconLocationInfoPanel of
-                                        Err _ ->
-                                            Common.DecisionPath.describeBranch "Failed to click the icon to enable the info panel."
-                                                askForHelpToGetUnstuck
-
-                                        Ok clickEffect ->
-                                            Common.DecisionPath.describeBranch
-                                                "Click on the icon to enable the info panel."
-                                                (decideActionForCurrentStep clickEffect)
-                    )
-                )
-
-        Just infoPanelLocationInfo ->
-            if 35 < infoPanelLocationInfo.uiNode.totalDisplayRegion.height then
-                Nothing
-
-            else
+    else
+        case readingFromGameClient.infoPanelContainer |> Maybe.andThen .infoPanelLocationInfo of
+            Nothing ->
                 Just
-                    (Common.DecisionPath.describeBranch "Location info panel seems collapsed."
-                        (Common.DecisionPath.describeBranch "Click to expand the info panel."
-                            ({ x = infoPanelLocationInfo.uiNode.totalDisplayRegion.x + 8
-                             , y = infoPanelLocationInfo.uiNode.totalDisplayRegion.y + 8
-                             }
-                                |> Common.EffectOnWindow.effectsMouseClickAtLocation
-                                    Common.EffectOnWindow.MouseButtonLeft
-                                |> decideActionForCurrentStep
-                            )
+                    (Common.DecisionPath.describeBranch "I do not see the location info panel. Enable the info panel."
+                        (case readingFromGameClient.infoPanelContainer |> Maybe.andThen .icons |> Maybe.andThen .locationInfo of
+                            Nothing ->
+                                Common.DecisionPath.describeBranch "I do not see the icon for the location info panel." askForHelpToGetUnstuck
+
+                            Just iconLocationInfoPanel ->
+                                case mouseClickOnUIElement Common.EffectOnWindow.MouseButtonLeft iconLocationInfoPanel of
+                                    Err _ ->
+                                        Common.DecisionPath.describeBranch "Failed to click the icon to enable the info panel."
+                                            askForHelpToGetUnstuck
+
+                                    Ok clickEffect ->
+                                        Common.DecisionPath.describeBranch
+                                            "Click on the icon to enable the info panel."
+                                            (decideActionForCurrentStep clickEffect)
                         )
                     )
+
+            Just infoPanelLocationInfo ->
+                if 35 < infoPanelLocationInfo.uiNode.totalDisplayRegion.height then
+                    Nothing
+
+                else
+                    -- `(x + 8, y + 8)` is unchanged and **unverified**. #297 reads
+                    -- it as the panel's own header corner, which on this client
+                    -- toggles the panel rather than expanding it -- that is the
+                    -- issue's account of why the panel leaves the tree after this
+                    -- click. Nothing in the recorded corpus or in the parser names
+                    -- an expander control to aim at instead, and no reading of a
+                    -- collapsed panel's subtree has been captured, so the target
+                    -- stays where it was and is guarded rather than moved. Moving
+                    -- it needs a live client with the panel collapsed.
+                    Just
+                        (Common.DecisionPath.describeBranch "Location info panel seems collapsed."
+                            (Common.DecisionPath.describeBranch "Click to expand the info panel."
+                                ({ x = infoPanelLocationInfo.uiNode.totalDisplayRegion.x + 8
+                                 , y = infoPanelLocationInfo.uiNode.totalDisplayRegion.y + 8
+                                 }
+                                    |> Common.EffectOnWindow.effectsMouseClickAtLocation
+                                        Common.EffectOnWindow.MouseButtonLeft
+                                    |> decideActionForCurrentStep
+                                )
+                            )
+                        )
 
 
 ensureOverviewsSorted :

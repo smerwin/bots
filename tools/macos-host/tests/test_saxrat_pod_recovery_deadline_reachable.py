@@ -434,14 +434,15 @@ class WhatSaxratHasAgainstAMessageBoxStandoffTest(unittest.TestCase):
 
     def test_the_ladder_bounds_one_starver_and_not_the_list(self):
         # What the hoist is still for. `closeMessageBox` is one of three entries
-        # in `generalSetupInUserInterface`, and the other two carry no bound of
-        # their own -- so the list can still repeat forever in a way the ladder
-        # says nothing about.
+        # in `generalSetupInUserInterface`, and #297 has since given a second
+        # one -- `ensureInfoPanelLocationInfoIsExpanded` -- a bound of its own.
+        # `closeSystemSettingsMenu` still has none, so the list can still repeat
+        # forever in a way this ladder says nothing about, and the hoist is owed
+        # for exactly the entries that have not been dealt with one at a time.
         setup = declaration("generalSetupInUserInterface", self.saxrat)
-        self.assertIn("closeMessageBox", setup)
-        for unbounded in ("closeSystemSettingsMenu",
-                          "ensureInfoPanelLocationInfoIsExpanded"):
-            self.assertIn(unbounded, setup)
+        for entry in ("closeMessageBox", "closeSystemSettingsMenu",
+                      "ensureInfoPanelLocationInfoIsExpanded"):
+            self.assertIn(entry, setup)
         root = declaration("anomalyBotDecisionRootBeforeApplyingSettings",
                            self.saxrat)
         self.assertLess(root.index("generalSetupInUserInterface"),
