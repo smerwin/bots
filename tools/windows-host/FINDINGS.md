@@ -418,6 +418,87 @@ Two things are established about that and a third is not:
 | `win_platform.py` | the Windows side of `botlab_host.py`'s dispatch — issue step 4 |
 | `measure_cost.py` | section 5 |
 | `verify/VerifyTree.elm`, `verify/verify_tree.py` | runs a captured tree through the **real** `EveOnline.ParseUserInterface` |
+| `run_saxrat.sh`, `stop_bots.ps1` | start one run, refusing if a host is still alive — see section 8 |
+| `launch_character.py` | press-and-hold a character's avatar in the launcher, and wait for the client to reach the game |
+| `engagement_watch.py` | screenshot the client on each anomaly arrival, first lock and departure |
+| `window_capture.py` | one BitBlt-and-PNG, shared; reports whether the window was frontmost |
+| `raise_window.py` | raise a window past the foreground lock, by hand, verified afterwards |
+| `scan_results.py` | read the probe scanner's own rows, so `anomaly-name` is a reading rather than a guess |
+
+### These four came out of the session scratchpad, and two of them are merges
+
+`raise_window.py`, `window_capture.py`, `scan_results.py` and the two run
+scripts were written ad hoc while operating runs and lived in a temp directory,
+which is a poor place for the only copy of the thing that starts a run. Folding
+them in was mostly deletion:
+
+- **The foreground lock had one workaround and needed two.**
+  `input.bring_window_to_foreground` does the documented `AttachThreadInput`
+  dance and *still* returned `False` for the EVE launcher — Windows keeps a
+  foreground **lock** the attach alone does not clear, and a synthetic ALT is
+  what drops it. So the escalation moved into that one function rather than
+  beside it, as **`allow_synthetic_alt`, defaulting off**. It must stay off by
+  default: `GetLastInputInfo` cannot tell a synthetic key from a person, the
+  host reads it to stand down for five seconds after human input, and
+  `BotFramework.elm` prepends `BringWindowToForeground` to *every* input
+  sequence — so a default-on ALT would have the bot press ALT at itself and
+  then idle for the human it just imitated, forever. The bot pays a failed
+  raise; tools that are not the bot pass the flag.
+
+  What it cost while missing: a press-and-hold aimed at correct screen
+  coordinates landed on whatever was on top instead, and `launch_character.py`
+  reported only that no client appeared within 300 s. The capture taken to
+  diagnose it showed the terminal that was covering the launcher.
+
+- **There were two BitBlt-and-PNG encoders.** `engagement_watch.py` had a
+  `StretchBlt` downscale with row-sliced BGR→RGB; the scratchpad's `shot.py` had
+  a full-size grab and a per-pixel Python loop — 3.8 million iterations on this
+  client for an identical picture. `window_capture.py` is the one that survived,
+  and `engagement_watch.py` now imports it.
+
+  The property worth keeping is that `capture_window` returns **`frontmost`**.
+  `BitBlt` from the desktop DC copies whatever is actually on top, so a covered
+  window yields a flawless screenshot of the wrong application — and that
+  picture is indistinguishable from a good one.
+
+- **`scan_results.py` answers a question the corpus cannot.** `anomaly-name`
+  matches the probe scanner's **Name** cell and no bot has ever logged it, so
+  the site words the launcher asks for appear zero times across every recorded
+  run and CLAUDE.md's open comma question is unanswerable at any corpus size.
+  A closed scanner and an empty one are given different words, deliberately.
+
+### Both branches have now run, and the Name cell has been read for the first time
+
+The no-`ProbeScannerWindow` path ran first and reported correctly, naming the
+eight scanner-ish types that were open instead. The populated path ran an hour
+later, when run 48's hour-one hedge opened the scanner:
+
+```
+ScanResults     ['Signal', 'Distance', 'ID', 'Name', 'Group',
+                 '32 km', 'EGC-528', 'Sansha Refuge', 'Combat Site',
+                 '<center>No signatures or anomalies in current system</center>']
+ScanResultNew   ['32 km', 'EGC-528', 'Sansha Refuge', 'Combat Site']
+```
+
+**That is the first reading of the scanner's Name cell this project has.**
+CLAUDE.md's §197 records that neither bot has ever logged it — a run prints the
+*ID* (`We are in anomaly 'EGC-528'`), never the name — so the site words the
+launcher itself asks for occur zero times across every recorded run, and no
+corpus of any size can answer what that column may contain. `Sansha Refuge`
+carries no comma, which is one data point against the open question rather than
+an answer to it: one name is not a distribution, and the `Dread Assault: Blood
+Raider Temple` already on record shows the column takes punctuation.
+
+Note the last cell. The window carries `No signatures or anomalies in current
+system` **while a result is in it** — a placeholder the client leaves in the
+tree rather than removes, so anything reading the window's joined text would
+conclude the system is empty while a Sansha Refuge sits 32 km away. Read the
+row nodes, not the window's text.
+
+**Still unverified: `raise_window.py`'s CLI wrapper**, run only as `--help`. Its
+raise path is the scratchpad original's, proven on the launcher; raising a
+window out from under a working bot is the one thing its own docstring says not
+to do.
 
 `botlab_host.py` itself gains one guarded early return per platform-bound
 function and nothing else. On macOS it is the code it was, reached the same way,
