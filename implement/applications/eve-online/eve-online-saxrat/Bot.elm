@@ -193,6 +193,7 @@ defaultBotSettings =
     -- much, where `hitpointsPercent` is a float scraped out of a widget the
     -- client is concurrently mutating.
     , runAwayIncomingDamageThreshold = defaultRunAwayIncomingDamageThreshold
+    , escalationMinimumSecurity = defaultEscalationMinimumSecurity
 
     -- No circuit by default, which is what keeps this change free for an
     -- existing settings string: with no `hunt-system` the bot never asks for a
@@ -274,6 +275,12 @@ parseBotSettings =
            )
          , ( "run-away-incoming-damage-threshold"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayIncomingDamageThreshold = threshold })
+           )
+         , ( "escalation-minimum-security"
+           , AppSettings.valueTypeInteger
+                (\tenths settings ->
+                    { settings | escalationMinimumSecurity = toFloat tenths / 10 }
+                )
            )
          , ( "anomaly-name"
            , AppSettings.valueTypeString
@@ -411,17 +418,30 @@ stops (`R.S. Officer`), hyphens, brackets and a slash (`Gas/Storage Silo`). The
 client's own game logs say it again independently -- 348 distinct actors across
 360,788 `(combat)` lines in 40 sessions, no comma.
 
-**`anomaly-name`: still unread, and the corpus cannot read it.** Nothing here
-ever logs the scanner's Name cell -- `We are in anomaly '...'` prints the ID the
-scanner gives -- so no recorded run carries one, and the site words the launcher
-itself asks for (`Hideaway`, `Refuge`, `Burrow`, `Rally Point`, ...) occur in all
-86 runs exactly **zero** times. The only probe-scanner names anybody has written
-down are the five read off a live scanner for #188 and kept in
-`test_saxrat_anomaly_name_wildcard.py`, and one of them is
-`Dread Assault: Blood Raider Temple` -- a colon, so this column is not restricted
-to the letters and spaces the other four suggest. The cost is stated rather than
-hidden: an anomaly whose name carries a comma is unmatchable here, and what would
-settle whether one exists is a live read of the scanner nobody has taken.
+**`anomaly-name`: now logged, so the next corpus can read it.** Until #197 was
+acted on, nothing here ever logged the scanner's Name cell -- the cell was read
+once, folded into a `Bool` and dropped, and `We are in anomaly '...'` printed the
+ID the scanner gives. So no recorded run carried a site name, and the words the
+launcher itself asks for (`Hideaway`, `Refuge`, `Burrow`, `Rally Point`, ...)
+occur in all 86 runs exactly **zero** times -- which made the question
+unanswerable from recordings rather than merely unanswered.
+
+`describeAnomalyIdentity` now prints the Name and Group beside the ID on every
+reading that names a site, so a run flown from here writes the column down. The
+86 runs behind this file still cannot answer it, and nothing about the counts
+above changes; what changes is that run 49 onwards can.
+
+The only probe-scanner names anybody had written down before were the five read
+off a live scanner for #188 and kept in `test_saxrat_anomaly_name_wildcard.py`,
+one of them `Dread Assault: Blood Raider Temple` -- a colon, so this column is
+not restricted to the letters and spaces the other four suggest. A sixth was
+read off the live scanner during run 48, `Sansha Refuge`, carrying no comma.
+
+The cost is unchanged and still stated rather than hidden: an anomaly whose name
+carries a comma is unmatchable here, because `splitSettingIntoNames` splits every
+setting value on commas. Six names are not a distribution and none of this says
+no such name exists -- it says the instrument that would find one is finally
+running.
 
 Splitting these three at all is issue #182. The two fleet settings split and
 these did not, so a comma-separated value parsed with no complaint into **one**
@@ -501,6 +521,7 @@ type alias BotSettings =
     , warpAt : Int
     , targetingRangeMeters : Int
     , runAwayIncomingDamageThreshold : Int
+    , escalationMinimumSecurity : Float
     , huntSystemNames : List String
     , homeSystemName : Maybe String
     , shortRangeAmmoName : Maybe String
@@ -612,6 +633,13 @@ type alias BotMemory =
     , destinationAskReadings : Int
     , routeSettingGivenUp : Bool
 
+    -- Readings in a row the hunt circuit has stood down on for an escalation the
+    -- Opportunities tracker is working (#279). Advanced on exactly the readings
+    -- `setRouteToNextHuntingGround` holds the grid on, through the same
+    -- `standingDownForATrackedEscalation` the decision asks, so the counter and
+    -- the bound it feeds cannot come to be about different things.
+    , escalationStandDownReadings : Int
+
     -- What the client has answered about how far this ship can lock, and the
     -- lock still waiting for an answer. Both bounds move one way only, so no
     -- oscillation is possible; `lockRangeLastChange` holds a sentence only on
@@ -639,6 +667,21 @@ type alias BotMemory =
     -- *before* the clicks it is judging, and the memory update only ever sees
     -- the reading after them.
     , targetsCountLastReading : Int
+
+    -- How long the guns have been busy with nothing dying, in readings. See
+    -- `CombatStalemate`.
+    , combatStalemate : CombatStalemate
+
+    -- What this ship's own guns achieved, off the half of the combat channel
+    -- this bot has never read. An instrument: nothing decides on it. See
+    -- `OutgoingFireMemory` and `outgoingFireAfterReading`.
+    , outgoingFire : OutgoingFireMemory
+
+    -- How many rats the client has paid a bounty for this session, off the
+    -- `(bounty)` channel the host sums. An instrument: nothing decides on it.
+    -- See `KillCountMemory` and `killCountAfterReading` for what the number may
+    -- and may not be read as.
+    , kills : KillCountMemory
 
     -- What the client has answered about how many targets this ship can hold at
     -- once: the maximum it stated in its own game log, and the most the target
@@ -759,6 +802,51 @@ type alias MemoryOfAnomaly =
     }
 
 
+{-| How long the guns have been busy with nothing dying, in readings.
+
+**Run 48 is what this exists to end.** The bot sat in anomaly `OTC-000` printing
+`All locked up; bounce?` on 1,563 consecutive readings and answering "wait" to
+every one of them -- the anomaly's own age clause reached **4,759 seconds**, and
+the run was still being written when the incident was reported at 3,883. Three
+rats the whole time, none of them dying, a `Centii Loyal Enslaver`
+out-regenerating the guns from a hull the bot had already taken down to 12%, no
+drones left to launch, and the ship in no danger at all. Nothing below that
+branch could act, so nothing did.
+
+**`ratsInOverview` is the whole progress signal, and the hitpoint ring is
+deliberately not part of it.** The obvious reading of run 48 -- a shield climbing
+while the guns fire -- does not survive the log. Over the longest stretch of that
+stall with a readable ring, 821 consecutive readings, the target's triple rises
+on 154 of them, holds on 642 and **falls on 24**: the damage was landing and the
+repairs were faster. What that costs a rule keyed on the ring is the run length
+rather than the share -- the longest stretch inside that stall with no fall in it
+is **113 readings**, so a counter reset by the triple never reaches the bound
+below and the incident repeats. The one thing that stayed true for all 1,563
+readings is that the overview still showed three rats.
+
+Measured across the twenty-two recorded saxrat logs whose status line carries a
+reading index, the longest a fight went between kills and still produced one is
+**130 readings**; the three recorded stalls ran **932, 1443 and 1582**. The
+bounds below sit in that gap, which is a sevenfold separation against the ring's
+1.8x.
+
+**Nothing here is keyed on a rat's name.** An anomaly is a pocket of identically
+named rats, so a verdict latched by name would blacklist every `Centii Loyal
+Enslaver` for the session -- which is why the mission runner's zero-damage rule
+was not ported here. This is a count of rows and a count of readings, and it is
+cleared by the fight moving rather than by anything being remembered.
+
+`ratsInOverview` is the previous reading's count, written down for the same
+reason `targetsCountLastReading` is: the comparison is against the reading
+_before_ this one, and the memory update only ever sees the reading after.
+
+-}
+type alias CombatStalemate =
+    { readings : Int
+    , ratsInOverview : Int
+    }
+
+
 type alias HitpointsMemory =
     { shield : HitpointsGaugeMemory
     , armor : HitpointsGaugeMemory
@@ -798,6 +886,43 @@ type alias IncomingDamageSample =
     -- several, so the set is accumulated across readings rather than widened
     -- host-side into a list.
     , attacker : Maybe String
+    }
+
+
+{-| What this ship's own shots did, as the client counted them.
+
+**The other half of the channel, which this bot has never read.** The host has
+summed `outgoingDamageSinceLastReading` per target per reading since #90, and
+PR #271 put `misses` beside `hits` on it in all six vendored parser copies --
+and `outgoingDamage` appeared **zero times** in this file before this change.
+So every shot this bot has ever fired was counted, decoded and thrown away, on
+every reading of every recorded run. `incomingDamage` is the same channel read
+in the other direction and is the shape this follows.
+
+**Nothing decides anything on it**, and that is the whole of the change rather
+than a stage it is passing through. See `outgoingFireAfterReading` for what the
+corpus says about the rule somebody would want to write here, which is that
+there is no threshold to write it at.
+
+`hostCarriesTheChannel` keeps the distinction the parser's `Maybe` carries:
+`Nothing` is "this host has no game log" and `Just []` is "the client reported
+no shot landing this reading". Both produce `hits = 0, misses = 0` and only the
+first may ever be read as not knowing.
+
+`hits` and `misses` are kept apart here for the reason the parser's own doc
+comment gives: a landed shot for zero says the guns cannot hurt this object, a
+miss says they cannot hit it, and summing them is the one mistake to avoid.
+This record never adds them; `describeOutgoingFire` prints both.
+
+-}
+type alias OutgoingFireMemory =
+    { hostCarriesTheChannel : Bool
+    , hits : Int
+    , misses : Int
+    , readingsEveryShotMissed : Int
+    , longestRunEveryShotMissed : Int
+    , sessionHits : Int
+    , sessionMisses : Int
     }
 
 
@@ -867,6 +992,27 @@ type alias BotDecisionContext =
     EveOnline.BotFrameworkSeparatingMemory.StepDecisionContext BotSettings BotMemory
 
 
+{-| The two things "would this bot hunt that anomaly" depends on.
+
+Named rather than taken as a `BotDecisionContext` because
+`updateMemoryForNewReadingFromGame` has to ask the same question and never sees
+a decision -- the same split `nextHuntingGroundFrom` was made for, and for the
+same reason: the counter that bounds the route ask has to measure the state the
+ask fires on, and it cannot do that through a rule only the decision can call.
+
+**Both callers hand it the same two things**, which is what keeps them from
+drifting apart the way #263's two pickers could. `visitedAnomalies` is the
+freshly written value in the memory update rather than `botMemoryBefore`'s, so
+the decision -- which the framework hands the memory this update has already
+written -- is asking about the same set.
+
+-}
+type alias AnomalyChoiceContext =
+    { botSettings : BotSettings
+    , visitedAnomalies : Dict.Dict String MemoryOfAnomaly
+    }
+
+
 type ReasonToIgnoreProbeScanResult
     = ScanResultHasNoID
     | AvoidAnomaly ReasonToAvoidAnomaly
@@ -905,7 +1051,75 @@ describeReasonToAvoidAnomaly reason =
 --     case fleetWindow.fleetMembers
 
 
-findReasonToIgnoreProbeScanResult : BotDecisionContext -> EveOnline.ParseUserInterface.ProbeScanResult -> Maybe ReasonToIgnoreProbeScanResult
+{-| The scan results this bot would go and hunt, out of everything on the scanner.
+
+One filter, read by the decision that picks an anomaly and by the memory update
+that bounds the ask for a route out of a system with none. Before #273 the
+memory update asked a _different_ question -- "is the probe scanner empty" --
+and with a narrow `anomaly-name` beside two signatures that do not match it, the
+two answers disagree on every reading: the decision asks for a route and the
+counter meant to bound that asking resets to zero. 442 readings of zero against
+3 of one, in one run.
+
+An absent scanner window answers `[]` rather than `Nothing`, deliberately: the
+decision's own no-scanner arm falls through to leaving the system, so a reading
+with no window is a reading the ask can fire on.
+
+-}
+anomaliesWorthHunting :
+    AnomalyChoiceContext
+    -> ReadingFromGameClient
+    -> List EveOnline.ParseUserInterface.ProbeScanResult
+anomaliesWorthHunting anomalyChoice readingFromGameClient =
+    readingFromGameClient.probeScannerWindow
+        |> Maybe.map .scanResults
+        |> Maybe.withDefault []
+        |> List.filter (findReasonToIgnoreProbeScanResult anomalyChoice >> (==) Nothing)
+
+
+anomalyChoiceFromDecisionContext : BotDecisionContext -> AnomalyChoiceContext
+anomalyChoiceFromDecisionContext context =
+    { botSettings = context.eventContext.botSettings
+    , visitedAnomalies = context.memory.visitedAnomalies
+    }
+
+
+{-| The framework's warp-or-jump indication, over a whole reading.
+
+`decideNextActionWhenInSpace` answers `HOOOOONK in warp` before it can reach the
+route ask, so the counter that bounds that ask has to decline the same readings.
+A ship crossing a system takes longer than `routeAskGiveUpReadings` at this
+bot's step delay, so counting through a warp would latch the give-up on a bot
+that was travelling perfectly well.
+
+-}
+shipIsWarpingOrJumping : ReadingFromGameClient -> Bool
+shipIsWarpingOrJumping readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.map shipUIIndicatesShipIsWarpingOrJumping
+        |> Maybe.withDefault False
+
+
+{-| Something on this grid to shoot, loot or unlock right now.
+
+The anomaly's own signature drops off the probe scanner while rats are still
+alive and wrecks are still on the overview, so `decideNextActionWhenInSpace`
+asks this before it will consider leaving. The counter that bounds the route ask
+asks it too, and that shared use is the whole reason it is a declaration: it is
+the guard the ask's own condition does _not_ imply, so a counter keyed on "no
+anomaly worth hunting" alone would run up through exactly the good fight #273's
+predecessor comment feared -- and two copies of it would be the drift that issue
+is about.
+
+-}
+gridStillHasSomethingToDo : IncomingDamageMemory -> ReadingFromGameClient -> Bool
+gridStillHasSomethingToDo incomingDamage readingFromGameClient =
+    anyAttackableInOverview (namesOfRecentAttackers incomingDamage) readingFromGameClient
+        || anyNotableWreckInOverview readingFromGameClient
+        || (targetsToUnlockFromReadingFromGameClient readingFromGameClient |> List.isEmpty |> not)
+
+
+findReasonToIgnoreProbeScanResult : AnomalyChoiceContext -> EveOnline.ParseUserInterface.ProbeScanResult -> Maybe ReasonToIgnoreProbeScanResult
 findReasonToIgnoreProbeScanResult context probeScanResult =
     case probeScanResult.cellsTexts |> Dict.get "ID" of
         Nothing ->
@@ -946,7 +1160,7 @@ findReasonToIgnoreProbeScanResult context probeScanResult =
                         |> Dict.get "Name"
                         |> Maybe.map
                             (\name ->
-                                anomalyNamesInEffect context.eventContext.botSettings
+                                anomalyNamesInEffect context.botSettings
                                     |> List.any (anomalyNameMatches name)
                             )
                         |> Maybe.withDefault False
@@ -965,9 +1179,9 @@ findReasonToIgnoreProbeScanResult context probeScanResult =
                     |> Maybe.map AvoidAnomaly
 
 
-findReasonToAvoidAnomalyFromMemory : BotDecisionContext -> { anomalyID : String } -> Maybe ReasonToAvoidAnomaly
+findReasonToAvoidAnomalyFromMemory : AnomalyChoiceContext -> { anomalyID : String } -> Maybe ReasonToAvoidAnomaly
 findReasonToAvoidAnomalyFromMemory context { anomalyID } =
-    case memoryOfAnomalyWithID anomalyID context.memory of
+    case Dict.get anomalyID context.visitedAnomalies of
         Nothing ->
             Nothing
 
@@ -979,7 +1193,7 @@ findReasonToAvoidAnomalyFromMemory context { anomalyID } =
                 [] ->
                     let
                         ratsToAvoidSeen =
-                            getRatsToAvoidSeenInAnomaly context.eventContext.botSettings memoryOfAnomaly
+                            getRatsToAvoidSeenInAnomaly context.botSettings memoryOfAnomaly
                     in
                     case ratsToAvoidSeen |> Set.toList of
                         ratToAvoid :: _ ->
@@ -1398,6 +1612,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                                                             -- tether/dock) pick it up once genuinely
                                                             -- in space.
                                                             && (context.readingFromGameClient
+                                                                    |> escalationEntriesPermitted context.eventContext.botSettings
                                                                     |> warpToOpportunitySiteIfAvailable
                                                                     |> (==) Nothing
                                                                )
@@ -1496,10 +1711,14 @@ guard does.
 
 **This whole list is evaluated above the docked-or-in-space split**, so anything
 in it that can repeat forever freezes the entire bot rather than one branch.
-That is #101 in the mission runner and #138 here. `closeMessageBox` is the one
-entry with a bound of its own and may not lose it; the other two are unbounded,
-which is why `endSessionOnAnExpiredBound` is asked above this list rather than
-below it.
+That is #101 in the mission runner and #138 here. Two of the three now carry a
+bound of their own and may not lose it: `closeMessageBox` gives up on a box
+nothing closes, and `ensureInfoPanelLocationInfoIsExpanded` answers `Nothing`
+while its own repair click settles rather than waiting on it (#297, where the
+two halves of that repair alternated and held the tree for 364 readings of one
+recorded run). `closeSystemSettingsMenu` is the one left unbounded, which is why
+`endSessionOnAnExpiredBound` is still asked above this list rather than below
+it.
 
 -}
 generalSetupInUserInterface :
@@ -1707,12 +1926,15 @@ messageBoxStandoffGiveUpReadings =
 ticks. A message box that has not closed in sixty readings is the same shape.
 
 **Ctrl+W is deliberately not in the ladder**, though it is the client's own
-"close the active window". It acts on the _focused_ window, and the mission
-runner's loot window paid for that lesson already -- a version that pressed it
-at an unfocused window managed 650 presses in one run and closed nothing, and
-the live recovery needed the window's title bar clicked first. Clicking an
-unidentified modal to focus it is a click into a dialog nobody has read, which
-is the one thing `closeMessageBoxByDeclining` refuses to do.
+"close the active window". It acts on the _focused_ window, and the loot window
+paid for that lesson twice -- 650 presses at an unfocused window in one run and
+919 decision lines in another, closing nothing either time; see
+`lootWindowCloseRung`, which presses `Alt+C` instead. Clicking an unidentified
+modal to focus it is a click into a dialog nobody has read, which is the one
+thing `closeMessageBoxByDeclining` refuses to do -- and the loot window says a
+focus click was not what was missing anyway, since one unfocused `Alt+C` shut
+it. There is no equivalent toggle for a message box, which is why this ladder
+escalates with Escape rather than with a key of its own.
 
 **A naked Escape can open the client's own pause menu**, which
 `closeSystemSettingsMenu` records happening live in this very file from exactly
@@ -2499,7 +2721,10 @@ full lap has happened exactly when the index has passed the end of the list.
 -}
 nextHuntingGround : BotDecisionContext -> Maybe String
 nextHuntingGround context =
-    nextHuntingGroundFrom context.eventContext.botSettings context.memory.huntSystemIndex context.readingFromGameClient
+    nextHuntingGroundFrom context.eventContext.botSettings
+        context.memory.huntSystemIndex
+        context.readingFromGameClient
+        context.memory.lastDockedStationNameFromInfoPanel
 
 
 {-| The picker itself, over the three things it actually needs.
@@ -2527,22 +2752,70 @@ is exactly what makes that step invisible, since the first candidate that is
 not the current system is the same one from either index. Recorded in the
 corpus as `Sys Hamse -> Lashkai asked 'Hamse' 1/20`.
 
-`Nothing` where every candidate is the system the ship is in, which
-`setRouteToNextHuntingGround` already has an answer for: there is nowhere to
-ask for, so it tethers and goes on hunting whatever spawns, rather than asking
-for a route the client cannot give.
+**The station the ship last undocked from is the last rung**, below the circuit
+and below `home-system`, which is the preference the operator asked for. It
+needs no record of its own: `lastDockedStationNameFromInfoPanel` is already in
+`BotMemory` and already read by the pod recovery. Two things about it a reader
+should not have to derive. It is the most recent station the _info panel named
+while docked_, which equals "where the ship undocked from" only because nothing
+but a docked reading can write it -- a station passed through in space never
+lands there. And it is `Nothing` for a session that began in space and has not
+docked since, which is a perfectly ordinary state and simply leaves this rung
+empty. The host's ESI resolver takes a station name as readily as a system name,
+which is what makes a station usable as a destination at all.
+
+**A station in the system the ship is already in is declined**, which is #262's
+guard for #262's reason and is the one thing the equality above cannot do for
+it: a station name is not a system name, so `Just stationName /=
+currentSolarSystemName` is true of the station the ship is standing at. Asking
+for that is `Route 0 Jumps` with no marker, the ask can never be satisfied, and
+the give-up latches for the session.
+
+The test is `containsWords`, the same word-boundary match #170 uses to name a
+stargate's system, and **it is deliberately loose rather than an exact match.**
+A false skip falls through to `tetherAtStructure`, which is what this bot did
+before there was a fallback at all, so being wrong that way costs the trip home
+and cannot cost a session; being wrong the other way costs the session. Anything
+that tightened this into an equality would be trading the cheap failure for the
+expensive one, on a comparison between two kinds of name that do not have to
+agree in the first place.
+
+`Nothing` where every candidate is the system the ship is in and nothing else is
+configured, which `setRouteToNextHuntingGround` already has an answer for: there
+is nowhere to ask for, so it tethers and goes on hunting whatever spawns, rather
+than asking for a route the client cannot give.
 
 -}
-nextHuntingGroundFrom : BotSettings -> Int -> ReadingFromGameClient -> Maybe String
-nextHuntingGroundFrom botSettings huntSystemIndex readingFromGameClient =
+nextHuntingGroundFrom : BotSettings -> Int -> ReadingFromGameClient -> Maybe String -> Maybe String
+nextHuntingGroundFrom botSettings huntSystemIndex readingFromGameClient lastDockedStationName =
     let
         currentSolarSystemName =
             currentSolarSystemNameFromReading readingFromGameClient
+
+        stationIsSomewhereElse stationName =
+            currentSolarSystemName
+                |> Maybe.map (\here -> not (containsWords here stationName))
+                |> Maybe.withDefault True
     in
-    List.range huntSystemIndex (huntSystemIndex + List.length botSettings.huntSystemNames)
-        |> List.filterMap (huntingGroundAtIndex botSettings)
-        |> List.filter (\systemName -> Just systemName /= currentSolarSystemName)
-        |> List.head
+    case
+        List.range huntSystemIndex (huntSystemIndex + List.length botSettings.huntSystemNames)
+            |> List.filterMap (huntingGroundAtIndex botSettings)
+            |> List.filter (\systemName -> Just systemName /= currentSolarSystemName)
+            |> List.head
+    of
+        Just systemName ->
+            Just systemName
+
+        Nothing ->
+            lastDockedStationName
+                |> Maybe.andThen
+                    (\stationName ->
+                        if stationIsSomewhereElse stationName then
+                            Just stationName
+
+                        else
+                            Nothing
+                    )
 
 
 {-| The name the circuit points at, before the guard above has had its say.
@@ -2551,8 +2824,15 @@ huntingGroundAtIndex : BotSettings -> Int -> Maybe String
 huntingGroundAtIndex botSettings index =
     let
         lapsCompleted =
+            -- **An empty circuit is a circuit already walked**, which is what
+            -- makes `home-system` reachable at all when no `hunt-system` is
+            -- configured. Written as 0 here, the division below is the only
+            -- thing that could ever raise the lap count, so an empty list
+            -- pinned it at zero and the `home-system` fallback was code nothing
+            -- could reach in the one configuration an operator most obviously
+            -- wants it in: no circuit, one place to come back to.
             if List.isEmpty botSettings.huntSystemNames then
-                0
+                1
 
             else
                 index // List.length botSettings.huntSystemNames
@@ -2569,6 +2849,251 @@ huntingGroundAtIndex botSettings index =
         huntSystemAtIndex botSettings index
 
 
+{-| Whether an escalation's destination is somewhere this bot may be sent.
+
+The client writes the security status of the trip's end on the objective
+chain's progress bar -- `0.6 Andabiar` -- and until it was lifted into
+`OpportunityDestination` nothing read it. What that cost: an escalation
+fourteen jumps into `0.3 Arodan` sat in the queue from the first minute of the
+session, the bot eventually took it, and the ship was killed there by a pilot
+with nineteen thousand kills and a 94% efficiency. Eleven million ISK of
+escalation loot went with it. Everything the bot has is calibrated against
+rats -- `isObjectShootingAtUs` would have added that Succubus to the _target
+list_ -- so the only defence available is not to go.
+
+**An unreadable security refuses the trip.** `Nothing` from the parser is the
+client not saying, and this is the one place in this file where absent must
+read as dangerous rather than as unknown-so-carry-on: the cost of declining an
+escalation is some ISK, and the cost of accepting one that turns out to be
+lowsec is the hull, the loot and the implants. `loadRefusalFromGameLog`'s
+register inverted, deliberately, and said out loud because the rest of the file
+argues the other way.
+
+-}
+escalationDestinationIsPermitted : BotSettings -> EveOnline.ParseUserInterface.OpportunityInfoPanelEntry -> Bool
+escalationDestinationIsPermitted botSettings entry =
+    entry.destination
+        |> Maybe.andThen .security
+        |> securityIsPermitted botSettings.escalationMinimumSecurity
+
+
+{-| The reading with escalations this bot may not be sent to removed.
+
+Applied to the _reading_ rather than pushed into `opportunityTravelStep`,
+because that function is asked about by some ninety-five existing cases and
+widening its signature would have rewritten every one of them to prove
+something none of them is about. Narrowing the entries first says the same
+thing and leaves "what is the tracker offering" a question anybody can still
+ask without a settings record.
+
+-}
+escalationEntriesPermitted : BotSettings -> ReadingFromGameClient -> ReadingFromGameClient
+escalationEntriesPermitted botSettings readingFromGameClient =
+    { readingFromGameClient
+        | opportunityInfoPanelEntries =
+            readingFromGameClient.opportunityInfoPanelEntries
+                |> List.filter (escalationDestinationIsPermitted botSettings)
+    }
+
+
+{-| The decision itself, over the two numbers, so a case can run it.
+
+Split out from `escalationDestinationIsPermitted` because that one takes a
+parsed panel entry and a whole settings record, and a rule reachable only
+through those is a rule checked by reading rather than by running -- which is
+what #106 records the cost of, and what let the first version of the
+destination parse ship reading `8 jumps` as a security status.
+
+-}
+securityIsPermitted : Float -> Maybe Float -> Bool
+securityIsPermitted minimumSecurity security =
+    case security of
+        Just value ->
+            value >= minimumSecurity
+
+        Nothing ->
+            False
+
+
+{-| Whether the Opportunities tracker is working an escalation on this reading.
+
+**The tracker holding an escalation is something having said where to go**, which
+is the whole of #279: an empty `hunt-system` is not "go nowhere", it is "nobody
+has configured a circuit", and a tracked escalation is somebody answering the
+same question the circuit exists to answer.
+
+**Read off the entries rather than off the step the branch would press.**
+`opportunityTravelStep` refuses a label that is a state -- `Warping`, `Jumping`
+and `Docking` are the client saying the trip is already happening, and clicking
+one re-commands a manoeuvre already under way -- but a reading it refuses is
+still a reading with a trip in progress, and it is exactly the reading the floor
+owns. Keying on the button's presence rather than on its wording is what makes
+this true across the whole trip instead of only on the readings the panel
+happens to be offering a command.
+
+**So this deliberately does not consult `travelLabelIsACommand`**, and that
+independence is worth keeping rather than being an accident of how it was
+written. The allow-list is about whether a label may be _clicked_, which is a
+question about one button; this is about whether anything has answered where to
+go, which is a question about the trip. The two have already moved apart once --
+the list was carrying `Dock`, which nobody had read off this widget, while
+lacking a word the client really writes -- so a signal that inherited its
+verdicts would move with it for reasons that have nothing to do with the
+circuit.
+
+**The label still has to be text the client rendered** (`travelLabelIsReadableText`).
+Run 11 on the mission runner drew a travel step as six C0 control characters and
+run 22 as a distance wrapped in NULs, and a button whose label the client failed
+to draw is not evidence of anything. Declining there leaves the bot behaving
+exactly as it did before this change, which is the fail-closed direction.
+
+**Scoped to a shut probe scanner, which is #260's switch and not a second one.**
+With the window open, `siteProgressStep` declines the tracker's step outright, so
+the bot is not working the escalation at all and holding it in the system would
+be holding it away from the hunt it _is_ doing. Recounted over this machine's 53
+saxrat runs that reached space, the scanner is open on 160,171 in-space readings
+against 1,862 shut -- 1.15% -- and 36 of the 53 never shut it once, so this reads
+the same switch #260 does and fires in the same 1% of readings. If that gate is
+ever dropped, this clause has to be looked at with it.
+
+**Gated on the same permission as the travel step, and that is the whole
+point.** #291 is what an escalation the bot can see and cannot act on costs:
+the stand-down held every dry grid for forty readings waiting for a step that
+never came, 234 times in three hours. Refusing a lowsec destination in
+`opportunityTravelStep` alone would rebuild exactly that -- the bot would stand
+down for an escalation it had already decided never to travel to. So both
+readers ask the same question, and an escalation below the threshold is simply
+not an escalation as far as this bot is concerned.
+
+-}
+escalationIsBeingWorked : ReadingFromGameClient -> Bool
+escalationIsBeingWorked readingFromGameClient =
+    (readingFromGameClient.probeScannerWindow == Nothing)
+        && (readingFromGameClient.opportunityInfoPanelEntries
+                |> List.any
+                    (\entry ->
+                        entry.travelButton
+                            |> Maybe.andThen .label
+                            |> Maybe.map travelLabelIsReadableText
+                            |> Maybe.withDefault False
+                    )
+           )
+
+
+{-| How long the bot holds a grid for an escalation the tracker is not yet
+offering a step for.
+
+**An unbounded hold is PR #257's shape**, which shipped green and blocked the bot
+for 108 minutes because something on a hot decision path could decline forever
+with nothing else able to act, and #272's, which waited 8,770 readings at a branch
+that asked "bounce?" and never bounced. So the hold is bounded, and past the bound
+the hunt circuit is consulted exactly as it is today -- the change can cost at
+most this many readings against the behaviour it replaces.
+
+**The number is placed in a gap the corpus draws.** Counted in readings rather
+than decision lines, over the four recorded saxrat runs that ever took a step
+from the tracker (43, 44, 46 and 52), there are 307 gaps between two consecutive
+readings on which the panel offered a pressable command, and **every one of them
+is 30 readings or fewer** -- median 1, p95 20, largest 30, and nothing at all
+between 31 and the end of a run. Against that, #279's run held the floor for 414
+consecutive readings. So a legitimate tracker-led leg has never gone more than 30
+readings without a command, and the failure it has to be told apart from is an
+order of magnitude past that.
+
+Written as a multiple of `routeAskGiveUpReadings` rather than as a bare 40 so the
+argument cannot drift away from the number, and because the two coincide: the
+thing this hold displaces is the circuit's own ask, which gets 20 readings before
+it gives up for the session, and a hold shorter than that could be out-waited by
+the branch it is standing in for.
+
+**Those 307 gaps are measured on the travel-to-location row only**, because #280
+is the enter-dungeon row's `Warp to Site` being invisible to the parser -- so
+once that lands the panel offers a command on _more_ readings and the gaps can
+only shrink. That is the safe direction for a bound placed above them.
+
+-}
+escalationStandDownGiveUpReadings : Int
+escalationStandDownGiveUpReadings =
+    routeAskGiveUpReadings * 2
+
+
+{-| Whether this reading is one the bot stands down on for the tracker.
+
+Split out from `huntCircuitStep` because `updateMemoryForNewReadingFromGame` has
+to advance the counter on exactly the readings the decision holds on, and it
+never sees the decision. Two copies of this comparison would drift, and the
+counter would then be bounding something other than the thing it counts -- which
+is #145's `gateWithinReachTicks` and #11's `dronesInSpaceTicks`, twice each.
+
+-}
+standingDownForATrackedEscalation : { escalationIsBeingWorked : Bool, standDownReadings : Int } -> Bool
+standingDownForATrackedEscalation standDownCase =
+    standDownCase.escalationIsBeingWorked
+        && (standDownCase.standDownReadings < escalationStandDownGiveUpReadings)
+
+
+{-| What the hunt circuit should do with a reading, which is not always to ask.
+
+**The circuit is a second opinion about a question a tracked escalation has
+already answered**, and #279's contention half is what that costs. Run 46 is the
+recorded shape, counted in readings: the circuit asks the host for `Shumam`, the
+tracker's own `Set Destination` puts the escalation back, the ship jumps for
+eighteen readings, and the circuit asks for `Shumam` again -- four complete
+cycles, 25 ask readings interleaved into 123 opportunity readings, every one of
+them naming `Sansha's Command Relay Outpost`. Runs 43 and 44 carry the same
+shape. Two controllers, two destinations, each overwriting the other's.
+
+**`StandDownForATrackedEscalation` is asked first, above the give-up**, because
+the give-up's own answer is `tetherAtStructure` and docking is precisely what
+must not happen beside a live escalation -- see the branch below.
+
+**#279 names two decisions and they are one clause, which is worth recording
+because the first has no content on its own.** _Whether the floor may ask at all
+when the circuit is empty_ changes nothing by itself: with no `hunt-system`
+configured, `nextHuntingGround` is already `Nothing`, so the floor never asks --
+it goes straight to `NowhereToAskFor` and tethers. Removing the ask removes
+nothing. What parks the ship is what the ask falls through to. So the load-bearing
+decision is the second one -- _whether an escalation in progress suppresses the
+circuit outright_ -- and the first is satisfied by it: an existing route is still
+travelled by `jumpToNextSystem`, which this function is only reached from when
+there is none.
+
+-}
+type HuntCircuitStep
+    = StandDownForATrackedEscalation
+    | StopAskingForARoute
+    | AskForTheHuntingGround String
+    | NowhereToAskFor
+
+
+huntCircuitStep :
+    { escalationIsBeingWorked : Bool
+    , standDownReadings : Int
+    , routeSettingGivenUp : Bool
+    , nextHuntingGround : Maybe String
+    }
+    -> HuntCircuitStep
+huntCircuitStep circuitCase =
+    if
+        standingDownForATrackedEscalation
+            { escalationIsBeingWorked = circuitCase.escalationIsBeingWorked
+            , standDownReadings = circuitCase.standDownReadings
+            }
+    then
+        StandDownForATrackedEscalation
+
+    else if circuitCase.routeSettingGivenUp then
+        StopAskingForARoute
+
+    else
+        case circuitCase.nextHuntingGround of
+            Just systemName ->
+                AskForTheHuntingGround systemName
+
+            Nothing ->
+                NowhereToAskFor
+
+
 {-| Ask the host to set the autopilot destination, when there is nowhere to go.
 
 This is the one branch that lets the bot originate a route. Everything else it
@@ -2581,36 +3106,80 @@ because the channel is unacknowledged: there is no reply to wait for, and the
 client's own route panel is the confirmation. `routeAskGiveUpReadings` bounds
 it, and the give-up latches for the session.
 
+**Beside an escalation the tracker is working, neither of those answers is
+right, and the tether is the worse of the two.** `tetherAtStructure` docks --
+`Dock` is the first entry in its own menu priority -- so the reading that meant
+"nothing to do here" takes the ship off the grid it crossed six systems to reach,
+the docked branch undocks it again on the next reading because the tracker is
+still offering something, and the pair repeats. #279's run spent 414 readings and
+three hours in exactly that cycle, dock and undock, beside two tracked
+`Sansha's Command Relay Outpost` escalations.
+
+**What the bot does instead is hold the grid, and it says so with a count on
+every reading it does it.** That is the property both #257 and #272 lacked: a
+branch that declines silently is indistinguishable from a bot that is working.
+Nothing above this is suppressed -- the two retreats, the pod recovery, the
+message-box ladder, the fight and the loot all still run, and the tracker's own
+step outranks this by two tiers, so the very reading the panel offers a command
+is a reading this branch is never reached on. And the hold is bounded: at
+`escalationStandDownGiveUpReadings` the circuit is consulted exactly as it is
+today.
+
+**How much of #279's run this fixes is small, and saying so is the point.** The
+414 readings are #280's -- `Warp to Site` lives on a second task widget the
+parser's type-name prefix does not match, so the arriving step was invisible and
+`siteProgressStep` had nothing to press. With that fixed the tracker offers a
+command on those readings and this branch is not reached at all. What is left
+here is the contention, which #280 does not touch, and a guard on the tether.
+
 -}
 setRouteToNextHuntingGround : BotDecisionContext -> DecisionPathNode
 setRouteToNextHuntingGround context =
-    if context.memory.routeSettingGivenUp then
-        describeBranch
-            ("Asked for a destination for more than "
-                ++ String.fromInt routeAskGiveUpReadings
-                ++ " readings and no route ever appeared -- this host does not set destinations, so stop asking and wait where it is safe."
-            )
-            (tetherAtStructure context)
+    case
+        huntCircuitStep
+            { escalationIsBeingWorked =
+                escalationIsBeingWorked
+                    (escalationEntriesPermitted context.eventContext.botSettings context.readingFromGameClient)
+            , standDownReadings = context.memory.escalationStandDownReadings
+            , routeSettingGivenUp = context.memory.routeSettingGivenUp
+            , nextHuntingGround = nextHuntingGround context
+            }
+    of
+        StandDownForATrackedEscalation ->
+            describeBranch
+                ("Nothing left to hunt here and no route set, but the Opportunities tracker is working an escalation -- where to go is already answered, so not asking the hunt circuit and not docking ("
+                    ++ String.fromInt context.memory.escalationStandDownReadings
+                    ++ "/"
+                    ++ String.fromInt escalationStandDownGiveUpReadings
+                    ++ " readings). Holding this grid so the tracker's own step can be taken as soon as it offers one."
+                )
+                waitForProgressInGame
 
-    else
-        case nextHuntingGround context of
-            Nothing ->
-                describeBranch
-                    "Nothing left to hunt here and no route set. Nowhere to ask for: either no 'hunt-system' is configured, or every system on the circuit is the one this ship is already in."
-                    (tetherAtStructure context)
+        StopAskingForARoute ->
+            describeBranch
+                ("Asked for a destination for more than "
+                    ++ String.fromInt routeAskGiveUpReadings
+                    ++ " readings and no route ever appeared -- this host does not set destinations, so stop asking and wait where it is safe."
+                )
+                (tetherAtStructure context)
 
-            Just systemName ->
-                describeBranch
-                    ("Nothing left to hunt here and no route set. Asking the host to set the destination to '"
-                        ++ systemName
-                        ++ "' ("
-                        ++ String.fromInt context.memory.destinationAskReadings
-                        ++ "/"
-                        ++ String.fromInt routeAskGiveUpReadings
-                        ++ " readings). "
-                        ++ hostDirectiveSetDestination systemName
-                    )
-                    waitForProgressInGame
+        NowhereToAskFor ->
+            describeBranch
+                "Nothing left to hunt here and no route set. Nowhere to ask for: either no 'hunt-system' is configured, or every system on the circuit is the one this ship is already in."
+                (tetherAtStructure context)
+
+        AskForTheHuntingGround systemName ->
+            describeBranch
+                ("Nothing left to hunt here and no route set. Asking the host to set the destination to '"
+                    ++ systemName
+                    ++ "' ("
+                    ++ String.fromInt context.memory.destinationAskReadings
+                    ++ "/"
+                    ++ String.fromInt routeAskGiveUpReadings
+                    ++ " readings). "
+                    ++ hostDirectiveSetDestination systemName
+                )
+                waitForProgressInGame
 
 
 jumpToNextSystem : BotDecisionContext -> DecisionPathNode
@@ -3418,6 +3987,32 @@ defaultRunAwayIncomingDamageThreshold =
     3500
 
 
+{-| The lowest security status an escalation may send this bot to.
+
+**0.5 is the empire line**, not a tuning parameter: at 0.5 and above CONCORD
+answers an aggression, and below it nobody does. That is the whole of the
+argument, which is why this is a constant with a name rather than a number
+somebody picked -- every guard in this file is calibrated against rats, and
+below 0.5 the thing that kills this ship is not a rat.
+
+Paid for once. An escalation fourteen jumps into `0.3 Arodan` was in the queue
+from the first minute of a session; the bot took it, and the ship was killed
+there by a pilot with 19,739 kills and 94% efficiency, flying a Succubus --
+warp scrambled, so the retreat could not have worked either. Eleven million ISK
+of escalation loot went with the hull.
+
+`escalation-minimum-security` overrides it, in **tenths**, because
+`AppSettings` has no float reader and inventing one for this is more surface
+than the setting is worth: `escalation-minimum-security=5` is 0.5, `=0` allows
+anything including nullsec. An operator who wants the bot in lowsec has to say
+so in a number.
+
+-}
+defaultEscalationMinimumSecurity : Float
+defaultEscalationMinimumSecurity =
+    0.5
+
+
 incomingDamageSampleLimit : Int
 incomingDamageSampleLimit =
     200
@@ -3547,6 +4142,215 @@ describeIncomingDamage context =
                             ++ (names |> List.map (\name -> "'" ++ name ++ "'") |> String.join ", ")
                             ++ " (any overview row with one of these names is a target)."
                )
+
+
+{-| This ship's own fire after one more reading, and the run of readings on
+which every shot of it missed.
+
+Advanced in `updateMemoryForNewReadingFromGame`, which is #102's and #126's
+placement rule and the only thing that runs unconditionally on every reading --
+so this count cannot be frozen by a branch that stops being reached, the way the
+mission runner's abandonment deadline was.
+
+**A reading with no shot in it holds the run rather than clearing it.** That is
+`gateWithinReachTicks`' hold, for its reason: resetting on a reading that
+carries no evidence either way is the shape that pinned `gunsSilencedTicks` at 1
+forever, and a reload, a target dying or a menu cascade all produce readings a
+firing ship put no shot into. A reading the host could not answer for at all
+holds it too, and for the stronger reason -- an absent channel is not a quiet
+grid.
+
+**Any landed shot clears the run, including one that landed for zero.** The run
+is about the guns being unable to _hit_, which is what a miss says; a shot that
+lands and achieves nothing is the other failure and is #90's, whose tally is
+kept separately in the mission runner and is deliberately not duplicated here.
+
+
+# There is no threshold to put on this, and that is a measurement
+
+The rule somebody would want to write -- "lots of misses, so swap ammo or
+manoeuvre" -- has no number, and the client's own logs are what say so. Measured
+over the 40 sessions carrying outgoing fire in `~/Documents/EVE/logs/Gamelogs`
+(207,313 shots), cut at every `(bounty)` line, which is the only thing in this
+corpus that states a rat died:
+
+  - **The worst miss share on a stretch of fighting that then produced a kill is
+    100%**, and the interval below it is a 467-shot, 456-second stretch at
+    **99.1%** that killed its rat afterwards. **No stretch that never produced a
+    kill missed more than that.** The two populations do not separate at any
+    share, at any length, in either direction.
+  - Read the other way round, the fights that miss most are the ones being
+    _won_: over 30-second windows the median miss share is 5% where a rat died
+    and 2% where none did. A rule keyed on missing would fire hardest on the
+    grids that were paying.
+  - The stalls PR #272 bounds are **low-miss** stalls. That is its own finding
+    restated from this side -- "the guns were landing and the repairs were
+    faster" -- so a miss signal could not have caught run 48 however it was
+    tuned, and `combatStalemate` is not made faster or more specific by one.
+
+The 702-consecutive-miss run the parser's doc comment warns about is real and is
+in this corpus, on a `Hunter Alvi`: 702 shots, 2,650 seconds, not one landing.
+What it is _not_ is a target the guns went on to kill. That reading comes from a
+name-keyed fold -- the same _name_ had been hurt earlier in the session, on a
+different rat -- and scored against the client's own kill signal the run
+produced nothing and ran to the end of the session. So the hazard is worse than
+recorded, not better: the one episode that looks like the signal working is
+indistinguishable, by share and by length, from the 99.1% stretch that recovered.
+
+`test_saxrat_outgoing_fire.py` recomputes every one of those as relations, so a
+corpus that grows cannot make a true claim red -- and if it ever stops holding,
+that file is what goes red and the threshold becomes writable.
+
+-}
+outgoingFireAfterReading :
+    { before : OutgoingFireMemory
+    , summaries : Maybe (List EveOnline.ParseUserInterface.OutgoingDamageToTarget)
+    }
+    -> OutgoingFireMemory
+outgoingFireAfterReading { before, summaries } =
+    case summaries of
+        Nothing ->
+            { before | hostCarriesTheChannel = False, hits = 0, misses = 0 }
+
+        Just targets ->
+            let
+                hits =
+                    targets |> List.map .hits |> List.sum
+
+                misses =
+                    targets |> List.map .misses |> List.sum
+
+                run =
+                    if 0 < hits then
+                        0
+
+                    else if 0 < misses then
+                        before.readingsEveryShotMissed + 1
+
+                    else
+                        before.readingsEveryShotMissed
+            in
+            { hostCarriesTheChannel = True
+            , hits = hits
+            , misses = misses
+            , readingsEveryShotMissed = run
+            , longestRunEveryShotMissed = max before.longestRunEveryShotMissed run
+            , sessionHits = before.sessionHits + hits
+            , sessionMisses = before.sessionMisses + misses
+            }
+
+
+{-| What the guns are achieving, in the words an operator can act on.
+
+Printed on every reading and read by no decision, which is PR #130's posture for
+`quickMessage` and #135's for `attritionIsUnguarded`: an instrument earns the
+right to drive a rule once a run has shown it reads sanely, and this one has
+never been printed at all. A run that fights and never leaves `NO COMBAT LOG` is
+a host not carrying the channel; a run whose landed and missed counts both stay
+at zero while the guns cycle is the summary not reaching the bot.
+
+-}
+describeOutgoingFire : OutgoingFireMemory -> String
+describeOutgoingFire memory =
+    if not memory.hostCarriesTheChannel then
+        "Outgoing fire: NO COMBAT LOG -- this host does not carry what the guns are doing."
+
+    else
+        "Outgoing fire: "
+            ++ String.fromInt memory.hits
+            ++ " landed / "
+            ++ String.fromInt memory.misses
+            ++ " missed this reading, "
+            ++ String.fromInt memory.readingsEveryShotMissed
+            ++ " reading(s) running with every shot missed (worst "
+            ++ String.fromInt memory.longestRunEveryShotMissed
+            ++ " this session; session "
+            ++ String.fromInt memory.sessionHits
+            ++ " landed / "
+            ++ String.fromInt memory.sessionMisses
+            ++ " missed). Nothing decides on this."
+
+
+{-| How many rats the client has paid this character a bounty for.
+
+**The first thing this bot has ever known about whether it is killing
+anything.** Every other combat instrument here reports effort -- shots landed,
+shots missed, readings spent on a target, damage taken -- and
+`combatStalemate` had to infer "nothing is dying" from the guns being busy,
+because no field of any reading said whether anything died. The client says it
+outright, once per rat, on `(bounty)`.
+
+**What it counts and what it cannot claim**, stated here rather than left to a
+reader of the header:
+
+  - It counts **bounty payouts to this character**, not kills by this ship. A
+    rat a fleetmate finished that this ship damaged still pays, and is counted.
+    A rat this ship killed whose bounty went entirely elsewhere is not. Anything
+    with no bounty -- a structure, an asteroid, a wreck -- writes no line at all,
+    however thoroughly it is destroyed.
+  - It is a **session total and cannot be split**. The client writes no target
+    name on this channel, so no rule can ever ask "how many of these were
+    `Centii Loyal Enslaver`", or attribute one to an anomaly, or to a fight.
+
+**That second point is the design rather than a shortfall**, and PR #274 is why
+it is worth stating. An anomaly is a pocket of identically named rats, and a
+fold keyed on the name reported "702 consecutive misses on a target the guns
+went on to hurt" for what was in fact the same name on a different rat. A count
+that never attributes cannot mis-attribute. An approximate total that says what
+it is beats a per-rat figure that is quietly wrong.
+
+**`Nothing` is not zero.** A host that does not carry the channel leaves
+`hostCarriesTheChannel` false and the session total wherever it was, and the
+header says `no kill log` rather than `0 kills` -- because a run that killed
+nothing and a run nobody counted read identically otherwise, which is the
+collapse this file keeps a section on.
+
+Advanced in `updateMemoryForNewReadingFromGame`, which is #102's and #126's
+placement rule and the only thing that runs unconditionally on every reading, so
+this total cannot be frozen by a branch that stops being reached.
+
+-}
+type alias KillCountMemory =
+    { hostCarriesTheChannel : Bool
+    , thisReading : Int
+    , session : Int
+    }
+
+
+killCountAfterReading :
+    { before : KillCountMemory
+    , kills : Maybe Int
+    }
+    -> KillCountMemory
+killCountAfterReading { before, kills } =
+    case kills of
+        Nothing ->
+            -- The session total is *kept* rather than cleared. A host that
+            -- stops answering has not un-killed anything, and a total that
+            -- fell back to zero would report a three-hour run as a fresh one.
+            { before | hostCarriesTheChannel = False, thisReading = 0 }
+
+        Just count ->
+            { hostCarriesTheChannel = True
+            , thisReading = count
+            , session = before.session + count
+            }
+
+
+{-| The kill count as the header prints it, in saxrat's own abbreviated idiom.
+
+`no kill log` rather than a number when the host does not carry the channel, for
+`describeOutgoingFire`'s reason: a bot that printed `0 kills` there would be
+reporting a quiet grid for an absent instrument.
+
+-}
+describeKillCount : KillCountMemory -> String
+describeKillCount memory =
+    if not memory.hostCarriesTheChannel then
+        "no kill log"
+
+    else
+        String.fromInt memory.session ++ " kills"
 
 
 {-| The client never announces the ship's destruction -- there is no such line
@@ -4177,6 +4981,14 @@ clause: it encodes which UI nodes carry combat text and how to read them, which
 is the expensive part to rediscover, and any future in-decision use of combat
 state wants exactly that.
 
+**Both directions of the channel are printed now**, which is the one sentence in
+this argument that has moved. #190 recorded the outgoing half as genuinely
+unreported here and said adding it would be a separate change with its own
+evidence; that change is `describeOutgoingFire`, and its evidence is in
+`outgoingFireAfterReading`. So the summary this removal pointed at as its
+replacement is now the whole summary rather than half of one, and neither half
+is a display buffer that can outlive the fight.
+
 -}
 combatFeedIsReportedByTheHostGameLog : ()
 combatFeedIsReportedByTheHostGameLog =
@@ -4405,7 +5217,7 @@ decideNextActionWhenInSpace : BotDecisionContext -> SeeUndockingComplete -> Deci
 decideNextActionWhenInSpace context seeUndockingComplete =
     clearStrayContextMenu context
         |> Maybe.withDefault
-            (if seeUndockingComplete.shipUI |> shipUIIndicatesShipIsWarpingOrJumping then
+            (if shipIsWarpingOrJumping context.readingFromGameClient then
                 describeBranch "HOOOOONK in warp"
                     (returnDronesToBay context waitForProgressInGame)
 
@@ -4447,20 +5259,10 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                             Nothing ->
                                 let
                                     pickAnotherAnomalyOrLeaveViaScanResults =
-                                        let
-                                            scanResultsWithReasonToIgnore =
-                                                probeScannerWindow.scanResults
-                                                    |> List.map
-                                                        (\scanResult ->
-                                                            ( scanResult
-                                                            , findReasonToIgnoreProbeScanResult context scanResult
-                                                            )
-                                                        )
-                                        in
                                         case
-                                            scanResultsWithReasonToIgnore
-                                                |> List.filter (Tuple.second >> (==) Nothing)
-                                                |> List.map Tuple.first
+                                            anomaliesWorthHunting
+                                                (anomalyChoiceFromDecisionContext context)
+                                                context.readingFromGameClient
                                                 |> listElementAtWrappedIndex (context.randomIntegers |> List.head |> Maybe.withDefault 0)
                                         of
                                             Nothing ->
@@ -4502,11 +5304,7 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                 -- warping away drops the lock as a side effect without
                                 -- ever running the unlock cascade, so check for one
                                 -- here too rather than only inside decideActionInAnomaly.
-                                if
-                                    anyAttackableInOverview (namesOfRecentAttackers context.memory.incomingDamage) context.readingFromGameClient
-                                        || anyNotableWreckInOverview context.readingFromGameClient
-                                        || (targetsToUnlockFromReadingFromGameClient context.readingFromGameClient |> List.isEmpty |> not)
-                                then
+                                if gridStillHasSomethingToDo context.memory.incomingDamage context.readingFromGameClient then
                                     describeBranch "The anomaly no longer shows on the scanner, but there is still something to attack or loot here."
                                         (decideActionInAnomaly
                                             { arrivalInAnomalyAgeSeconds = arrivalInAnomalyAgeSecondsFromMemory context }
@@ -4553,8 +5351,18 @@ decideNextActionWhenInSpace context seeUndockingComplete =
                                                             arrivalInAnomalyAgeSeconds =
                                                                 (context.eventContext.timeInMilliseconds - memoryOfAnomaly.arrivalTime.milliseconds) // 1000
                                                         in
-                                                        describeBranch ("We are in anomaly '" ++ anomalyID ++ "' since " ++ String.fromInt arrivalInAnomalyAgeSeconds ++ " seconds.")
-                                                            (case findReasonToAvoidAnomalyFromMemory context { anomalyID = anomalyID } of
+                                                        describeBranch
+                                                            ("We are in anomaly "
+                                                                ++ (context.readingFromGameClient
+                                                                        |> getCurrentAnomalyIdentityAsSeenInProbeScanner
+                                                                        |> Maybe.withDefault { id = anomalyID, name = Nothing, group = Nothing }
+                                                                        |> describeAnomalyIdentity
+                                                                   )
+                                                                ++ " since "
+                                                                ++ String.fromInt arrivalInAnomalyAgeSeconds
+                                                                ++ " seconds."
+                                                            )
+                                                            (case findReasonToAvoidAnomalyFromMemory (anomalyChoiceFromDecisionContext context) { anomalyID = anomalyID } of
                                                                 Just reasonToAvoidAnomaly ->
                                                                     describeBranch
                                                                         ("Found a reason to avoid this anomaly: "
@@ -4680,6 +5488,139 @@ undockClickedStepsAgo previousStepsEffects undockButtonRegion =
             )
         |> List.head
         |> Maybe.map (Tuple.first >> (+) 1)
+
+
+{-| Readings a fight may go nowhere for before the bot closes the range on it.
+
+**Derived from the corpus rather than picked.** Replayed over the twenty-two
+recorded saxrat logs whose status line carries a reading index -- runs 31 through
+50, counting _readings_ and not decision lines, since the status text is
+reprinted under every decision -- the two populations are:
+
+  - stretches of a fight that ended in a kill: the longest went **130** readings
+    between kills (run 36's `QRH-534`, itself an ammo-swap deadlock that broke on
+    its own), then 55, 43, 34 and 27, with the other 440 of 445 at 19 or below;
+  - stretches that never produced a kill: 73 at the top of the ordinary ones --
+    fights the bot broke off by leaving the anomaly -- and then **932, 1443 and
+    1582**, which are run 48's `OTC-000` and run 43's own stall.
+
+So the gap between "a fight that was still going to win" and "a fight that was
+never going to" is 130 to 932, and it is empty. This sits inside it with margin
+both ways: half again as long as the longest fight the guns ever won from here,
+and less than a quarter of the shortest stall on record.
+
+The reading before this one is what makes the number cheap to be wrong about in
+the _early_ direction: what happens at this bound is an approach, and approaching
+a rat the guns are already killing costs the fight nothing. `combatStalemateLeaveReadings`
+is the expensive one and is argued separately.
+
+-}
+combatStalemateApproachReadings : Int
+combatStalemateApproachReadings =
+    200
+
+
+{-| Readings a fight may go nowhere for before the bot gives the grid up.
+
+A hundred readings after the approach, which is what closing the range is given
+to work. Run 48's target sat at 20,000 m, exactly on the ammo swap's crossover
+and inside its dead band, so the swap could not decide and the guns held a
+long-range charge at knife range. Measured on the readings the corpus records the
+ship actually approaching on, it closes **1,000 m per reading** -- so leaving the
+dead band takes three or four readings and crossing the whole 20 km takes twenty.
+A hundred is five times the second and twenty-five times the first.
+
+Still inside the measured gap: 300 is well under the 932 of the shortest recorded
+stall, and more than twice the 130 of the longest fight the guns ever won from
+this branch.
+
+-}
+combatStalemateLeaveReadings : Int
+combatStalemateLeaveReadings =
+    300
+
+
+{-| What to do about a fight that has stopped killing anything.
+
+Three rungs rather than two, because the cheap answer and the expensive one are
+not the same answer. Closing the range costs the fight nothing and is very likely
+the fix -- run 48's deadlock is the target parked on the ammo swap's crossover --
+while leaving abandons a fight the bot may still win, and is only right once
+closing the range has been tried and has not helped.
+
+-}
+type CombatStalemateVerdict
+    = FightIsStillGettingSomewhere
+    | CloseTheRangeOnTheTarget
+    | LeaveThisGrid
+
+
+combatStalemateVerdict : Int -> CombatStalemateVerdict
+combatStalemateVerdict readings =
+    if readings < combatStalemateApproachReadings then
+        FightIsStillGettingSomewhere
+
+    else if readings < combatStalemateLeaveReadings then
+        CloseTheRangeOnTheTarget
+
+    else
+        LeaveThisGrid
+
+
+{-| Whether this reading is one a stalemate could even be accumulating on.
+
+The target bar is not empty and the overview still shows a rat: the guns have
+something to shoot and something to shoot at. Everything else -- travelling,
+warping, docked, a cleared grid -- is not a fight and clears the count rather
+than carrying it into the next anomaly, which is what would let a bound fire on
+arrival somewhere it had never been.
+
+-}
+combatFightIsUnderway : ReadingFromGameClient -> Bool
+combatFightIsUnderway readingFromGameClient =
+    not (List.isEmpty readingFromGameClient.targets)
+        && not (List.isEmpty (getNamesOfRatsInOverview readingFromGameClient))
+
+
+{-| The stalemate count after one more reading.
+
+Advanced in `updateMemoryForNewReadingFromGame` and nowhere else, which is #102's
+and #126's placement rule and the reason this can be a count of readings at all:
+that is the one thing running unconditionally on every reading, so a branch that
+stops being reached cannot freeze the count that is supposed to bound it. The
+mission runner's message-box standoff records what the other placement costs.
+
+The count only ever rises while the fight stands still, so the bound is crossed
+once and stays crossed -- the branch does not fall back to waiting on the reading
+after it acts.
+
+-}
+combatStalemateAfterReading :
+    { before : CombatStalemate
+    , fightIsUnderway : Bool
+    , ratsInOverview : Int
+    }
+    -> CombatStalemate
+combatStalemateAfterReading { before, fightIsUnderway, ratsInOverview } =
+    if not fightIsUnderway then
+        { readings = 0, ratsInOverview = ratsInOverview }
+
+    else if ratsInOverview < before.ratsInOverview then
+        { readings = 0, ratsInOverview = ratsInOverview }
+
+    else
+        { readings = before.readings + 1, ratsInOverview = ratsInOverview }
+
+
+describeCombatStalemate : CombatStalemate -> String
+describeCombatStalemate stalemate =
+    "stalemate "
+        ++ String.fromInt stalemate.readings
+        ++ " readings, "
+        ++ String.fromInt combatStalemateApproachReadings
+        ++ " to close in and "
+        ++ String.fromInt combatStalemateLeaveReadings
+        ++ " to leave"
 
 
 decideActionInAnomaly :
@@ -4846,15 +5787,126 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
         lootWreckTimeRemainingSeconds =
             (context.eventContext.botSettings.anomalyWaitTimeSeconds + 120) - arrivalInAnomalyAgeSeconds
 
+        -- What every give-up in this function means by leaving: bring the
+        -- drones in, then hand the reading to whatever the caller does about a
+        -- finished grid. All three call sites pass something that acts -- pick
+        -- another anomaly, follow a site's own progression, or jump -- so this
+        -- can neither decline nor come back here.
+        leaveThisGrid =
+            returnDronesToBay context
+                (describeBranch "No drones to return." continueIfCombatComplete)
+
+        -- The row the guns are already pointed at, where the ship could
+        -- actually reach it. Inside `approachRangeLimitMeters` rather than
+        -- around it: past 150 km the client discards the gesture, and run 41
+        -- double-clicked a row 2,266 km away 13,541 times over three hours with
+        -- the ship never moving. A row this cannot answer for is not a range
+        -- the bot can close, so the stalemate escalates instead of asking
+        -- anyway.
+        rowToCloseTheRangeOn : Maybe OverviewWindowEntry
+        rowToCloseTheRangeOn =
+            overviewEntriesToAttack
+                |> List.filter overviewEntryIsActiveTarget
+                |> List.filter overviewEntryIsDisplayed
+                |> List.filter
+                    (\entry ->
+                        entry.objectDistanceInMeters
+                            |> Result.map (\distanceInMeters -> distanceInMeters <= approachRangeLimitMeters)
+                            |> Result.withDefault False
+                    )
+                |> List.head
+
+        -- The branch that used to answer "wait" to its own question. See
+        -- `CombatStalemate` for what the count means and
+        -- `combatStalemateApproachReadings` for where the two bounds come from.
+        breakTheCombatStalemate =
+            case combatStalemateVerdict context.memory.combatStalemate.readings of
+                FightIsStillGettingSomewhere ->
+                    waitForProgressInGame
+
+                CloseTheRangeOnTheTarget ->
+                    case rowToCloseTheRangeOn of
+                        Just entry ->
+                            unlessAlreadyClosingIn context
+                                (describeCombatStalemate context.memory.combatStalemate
+                                    ++ ". Close the range on the target: at the ammo swap's crossover it cannot decide which charge the fight wants, and the guns hold the wrong one."
+                                )
+                                (doubleClickUiElement entry.uiNode)
+
+                        Nothing ->
+                            describeBranch
+                                (describeCombatStalemate context.memory.combatStalemate
+                                    ++ ". Nothing on the overview is both the active target and near enough to approach, so there is no range to close -- leave instead."
+                                )
+                                leaveThisGrid
+
+                LeaveThisGrid ->
+                    describeBranch
+                        (describeCombatStalemate context.memory.combatStalemate
+                            ++ ". Closing the range did not help either -- leave this grid."
+                        )
+                        leaveThisGrid
+
         decisionAfterLootingNotableWrecks =
             if waitTimeRemainingSeconds <= 0 then
-                returnDronesToBay context
-                    (describeBranch "No drones to return." continueIfCombatComplete)
+                leaveThisGrid
 
             else
                 describeBranch
                     ("Wait before considering the anomaly finished: " ++ String.fromInt waitTimeRemainingSeconds ++ " seconds")
                     (tetherAtStructure context)
+
+        -- The wreck path taken when no loot window is in the reading -- and,
+        -- since the loot window's own escalation is bounded, the branch that
+        -- one stands aside into once its bound expires. It always acts: it
+        -- opens the next notable wreck, scrolls one into view, or leaves the
+        -- grid. Nothing here waits.
+        lootAnotherWreckOrLeaveTheGrid =
+            case notableWreckEntries of
+                wreckToLoot :: _ ->
+                    if lootWreckTimeRemainingSeconds <= 0 then
+                        describeBranch "Giving up on looting commander/overseer wreck(s) -- out of time."
+                            decisionAfterLootingNotableWrecks
+
+                    else
+                        -- The same command whether the wreck is
+                        -- alongside or across the pocket: the client
+                        -- flies the ship there and opens it on
+                        -- arrival. Routed through
+                        -- `closeInOnOverviewEntry` for its approach
+                        -- guard, which this branch never had -- it
+                        -- re-ran the whole cascade every tick while
+                        -- the ship was still on its way, restarting
+                        -- the approach each time.
+                        -- Double click rather than the
+                        -- right-click cascade: the client reads it
+                        -- as Open Cargo directly, and from outside
+                        -- looting range it closes the distance
+                        -- first, so one step replaces both the
+                        -- cascade and the separate approach.
+                        openCargoOnOverviewEntry context
+                            "Open commander/overseer wreck's cargo before leaving."
+                            wreckToLoot
+
+                [] ->
+                    -- Nothing to loot on screen, but a wreck worth
+                    -- opening can be scrolled out of the overview.
+                    -- Under the same time budget as looting itself,
+                    -- so a scroll that never lands cannot hold the
+                    -- bot in the anomaly forever.
+                    case
+                        if lootWreckTimeRemainingSeconds <= 0 then
+                            Nothing
+
+                        else
+                            scrollOverviewToReveal context
+                                (\entry -> isNotableWreck entry && notAlreadyEmptied context entry)
+                    of
+                        Just scrollToWreck ->
+                            scrollToWreck
+
+                        Nothing ->
+                            decisionAfterLootingNotableWrecks
 
         decisionIfNoEnemyToAttack =
             if overviewEntriesToAttack |> List.isEmpty then
@@ -4871,87 +5923,85 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                         -- Feedback: this window sometimes fails to close
                         -- after clicking its own "Loot All"/close button
                         -- (button click not registering, or the button
-                        -- not found) and just sits open forever. Once it
-                        -- has stayed open for more than two ticks past
-                        -- when we would have clicked "Loot All", force it
-                        -- shut with Ctrl+W (EVE's own close-active-window
-                        -- hotkey) instead of continuing to poke at the
-                        -- window's own controls.
-                        if context.memory.lootWindowOpenTicks > 2 then
-                            describeBranch "Loot window did not close on its own -- force it shut (Ctrl+W)."
-                                (decideActionForCurrentStep
-                                    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL
-                                    , EffectOnWindow.KeyDown EffectOnWindow.vkey_W
-                                    , EffectOnWindow.KeyUp EffectOnWindow.vkey_W
-                                    , EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL
-                                    ]
-                                )
+                        -- not found) and just sits open forever. See
+                        -- `lootWindowCloseRung` for the ladder over that,
+                        -- for why the escalation is Alt+C rather than the
+                        -- Ctrl+W this used to press at an unfocused window,
+                        -- and for what the bound falls through to.
+                        let
+                            closeControl =
+                                openInventoryWindow.uiNode
+                                    |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
+                                    |> Maybe.andThen .closeButton
 
-                        else
-                            case openInventoryWindow.uiNode |> findUiElementWithText "Loot All" of
-                                Just lootAllButton ->
-                                    describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
+                            forceItShutWithTheInventoryToggle =
+                                describeBranch
+                                    "Loot window did not close on its own -- force it shut (Alt+C, the inventory toggle, which needs no focus)."
+                                    (decideActionForCurrentStep pressInventoryToggleEffects)
+                        in
+                        case
+                            lootWindowCloseRung
+                                { readingsOpen = context.memory.lootWindowOpenTicks
+                                , closeControlIsInTheReading = closeControl /= Nothing
+                                , togglePressedRecently =
+                                    context.previousStepsEffects
+                                        |> List.take EveOnline.BotFrameworkSeparatingMemory.moduleButtonClickSettlingSteps
+                                        |> List.any doEffectsPressInventoryToggle
+                                }
+                        of
+                            LeaveTheLootWindowAlone ->
+                                describeBranch
+                                    ("Loot window has been open for "
+                                        ++ String.fromInt context.memory.lootWindowOpenTicks
+                                        ++ " readings and neither its own controls nor Alt+C shut it, which is past "
+                                        ++ String.fromInt lootWindowForceCloseGiveUpReadings
+                                        ++ " -- leave it open and get on with the rest of the grid."
+                                    )
+                                    lootAnotherWreckOrLeaveTheGrid
 
-                                Nothing ->
-                                    case
-                                        openInventoryWindow.uiNode
-                                            |> EveOnline.ParseUserInterface.parseWindowControlsFromWindow
-                                            |> Maybe.andThen .closeButton
-                                    of
-                                        Just closeButton ->
-                                            describeBranch "Nothing left to loot. Close the wreck's cargo window."
+                            PressTheInventoryToggle ->
+                                forceItShutWithTheInventoryToggle
+
+                            ClickTheWindowsCloseControl ->
+                                -- `closeControl` is what the rung was told
+                                -- about, so this cannot be reached without one.
+                                -- The fall-back is the keystroke rather than a
+                                -- wait, for the reason the rung's own comment
+                                -- gives.
+                                closeControl
+                                    |> Maybe.map
+                                        (\closeButton ->
+                                            describeBranch "Loot window did not close on its own -- click its own Close control."
                                                 (clickUiElement closeButton)
+                                        )
+                                    |> Maybe.withDefault forceItShutWithTheInventoryToggle
 
-                                        Nothing ->
-                                            describeBranch "I do not see a way to close this inventory window."
-                                                askForHelpToGetUnstuck
-
-                    Nothing ->
-                        case notableWreckEntries of
-                            wreckToLoot :: _ ->
-                                if lootWreckTimeRemainingSeconds <= 0 then
-                                    describeBranch "Giving up on looting commander/overseer wreck(s) -- out of time."
-                                        decisionAfterLootingNotableWrecks
-
-                                else
-                                    -- The same command whether the wreck is
-                                    -- alongside or across the pocket: the client
-                                    -- flies the ship there and opens it on
-                                    -- arrival. Routed through
-                                    -- `closeInOnOverviewEntry` for its approach
-                                    -- guard, which this branch never had -- it
-                                    -- re-ran the whole cascade every tick while
-                                    -- the ship was still on its way, restarting
-                                    -- the approach each time.
-                                    -- Double click rather than the
-                                    -- right-click cascade: the client reads it
-                                    -- as Open Cargo directly, and from outside
-                                    -- looting range it closes the distance
-                                    -- first, so one step replaces both the
-                                    -- cascade and the separate approach.
-                                    openCargoOnOverviewEntry context
-                                        "Open commander/overseer wreck's cargo before leaving."
-                                        wreckToLoot
-
-                            [] ->
-                                -- Nothing to loot on screen, but a wreck worth
-                                -- opening can be scrolled out of the overview.
-                                -- Under the same time budget as looting itself,
-                                -- so a scroll that never lands cannot hold the
-                                -- bot in the anomaly forever.
-                                case
-                                    if lootWreckTimeRemainingSeconds <= 0 then
-                                        Nothing
-
-                                    else
-                                        scrollOverviewToReveal context
-                                            (\entry -> isNotableWreck entry && notAlreadyEmptied context entry)
-                                of
-                                    Just scrollToWreck ->
-                                        scrollToWreck
+                            UseTheWindowsOwnControls ->
+                                case openInventoryWindow.uiNode |> findUiElementWithText "Loot All" of
+                                    Just lootAllButton ->
+                                        describeBranch "Click 'Loot All'." (clickUiElement lootAllButton)
 
                                     Nothing ->
-                                        decisionAfterLootingNotableWrecks
+                                        -- Unreachable while
+                                        -- `wreckLootWindowsFromReadingFromGameClient`
+                                        -- selects a window by this very text,
+                                        -- and it is where that filter widening
+                                        -- should land: the close controls above,
+                                        -- never `askForHelpToGetUnstuck`, which
+                                        -- is what used to sit here and which a
+                                        -- bounded ladder must not reach for.
+                                        describeBranch "Nothing left to loot in this window."
+                                            (closeControl
+                                                |> Maybe.map
+                                                    (\closeButton ->
+                                                        describeBranch "Close the wreck's cargo window."
+                                                            (clickUiElement closeButton)
+                                                    )
+                                                |> Maybe.withDefault forceItShutWithTheInventoryToggle
+                                            )
+
+                    Nothing ->
+                        lootAnotherWreckOrLeaveTheGrid
 
             else
                 describeBranch "Locking..."
@@ -5071,15 +6121,13 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                                                              else
                                                                 case nextOverviewEntryToLockOrProbe of
                                                                     Nothing ->
-                                                                        -- Ditto above
-                                                                        -- describeBranch "All locked up; bounce?" (tetherAtStructure context)
                                                                         revealEntryToLock
                                                                             |> Maybe.withDefault
                                                                                 (describeBranch
                                                                                     (describeMaxTargetsNothingToLock maxTargetsProbeNow
                                                                                         "All locked up; bounce?"
                                                                                     )
-                                                                                    waitForProgressInGame
+                                                                                    breakTheCombatStalemate
                                                                                 )
 
                                                                     Just nextOverviewEntryToLock ->
@@ -5136,7 +6184,7 @@ enterAnomaly { ifNoAcceptableAnomalyAvailable } context =
                         |> List.map
                             (\scanResult ->
                                 ( scanResult
-                                , findReasonToIgnoreProbeScanResult context scanResult
+                                , findReasonToIgnoreProbeScanResult (anomalyChoiceFromDecisionContext context) scanResult
                                 )
                             )
 
@@ -5733,8 +6781,8 @@ droneRecallAskedLookbackSteps =
 Read out of the effects rather than the decision, because
 `updateMemoryForNewReadingFromGame` is the only place that can write memory and
 it never sees the decision. `vkey_R` is used for nothing else in this bot --
-`vkey_E` is the keep-at-range and `vkey_W` the orbit and the loot window's
-Ctrl+W -- so the chord is unambiguous. It used to be `vkey_Q` that carried the
+`vkey_E` is the keep-at-range, `vkey_W` the orbit and `vkey_C` the loot
+window's Alt+C -- so the chord is unambiguous. It used to be `vkey_Q` that carried the
 approach; that is a double click on the row now and presses no key at all, so
 this argument has one fewer key to be unambiguous against rather than one more.
 
@@ -6271,12 +7319,14 @@ overviewEntryLockHandle allEntries entry =
 {-| The screen points the lock clicks of one step went to, in dispatch order.
 
 The lock chord is Ctrl held over a plain left click
-(`lockChordForOverviewEntry`). Ctrl is pressed in two other places here and
-neither can be mistaken for it: `ctrlShiftClickUiElement`, the unlock, holds
-Shift as well, and the loot window's Ctrl+W carries no mouse effect at all, so
-there is no `MouseMoveTo` for this to take. Both conditions are checked rather
-than only the first -- the Ctrl+W case is a saxrat-only chord, and a bot that
-grew a third one should fail to attribute rather than attribute wrongly.
+(`lockChordForOverviewEntry`). Ctrl is pressed in one other place here and it
+cannot be mistaken for this one: `ctrlShiftClickUiElement`, the unlock, holds
+Shift as well. Both conditions are still checked rather than only the first,
+because the second used to be load-bearing and the reason it stopped is a
+change to a different branch: the loot window pressed a keys-only `Ctrl+W`
+until #285, which carried no `MouseMoveTo` for this to take. Its `Alt+C`
+presses no Ctrl at all, so a bot that grows another keys-only chord should
+fail to attribute rather than attribute wrongly.
 
 **Every point rather than the first**, which is what makes a batched step
 distinguishable from a single lock at all. A reader answering `Maybe` cannot
@@ -7656,6 +8706,7 @@ initBotMemory =
     , fleetBroadcastSeen = Nothing
     , destinationAskReadings = 0
     , routeSettingGivenUp = False
+    , escalationStandDownReadings = 0
     , lockAttempt = Nothing
 
     -- No evidence yet, in both directions -- which is a different fact from
@@ -7671,6 +8722,22 @@ initBotMemory =
     , lockBatchClicksAnswered = 0
     , lockBatchLastChange = Nothing
     , targetsCountLastReading = 0
+    , combatStalemate = { readings = 0, ratsInOverview = 0 }
+    , outgoingFire =
+        { hostCarriesTheChannel = False
+        , hits = 0
+        , misses = 0
+        , readingsEveryShotMissed = 0
+        , longestRunEveryShotMissed = 0
+        , sessionHits = 0
+        , sessionMisses = 0
+        }
+
+    -- Assumed absent until a reading says otherwise, so a host that never
+    -- carries the channel is reported as unarmed rather than as a session that
+    -- killed nothing -- `incomingDamage.hostCarriesTheChannel`'s rule, for its
+    -- reason.
+    , kills = { hostCarriesTheChannel = False, thisReading = 0, session = 0 }
     , maxTargetsStatedByClient = Nothing
     , maxTargetsHeldAtOnce = Nothing
     , maxTargetsLastChange = Nothing
@@ -8479,10 +9546,22 @@ describeWhyTheSwapMayNotDisarm disarmCase =
 
 {-| Does the client say this module is switched off?
 
-`isInActiveState` is the entry that means switched on, measured rather than
-assumed: across 92 samples of a 240 s window it held `True` on all four modules
-while `ramp_active` oscillated fourteen times underneath it, so `ramp_active` is
-the duty cycle and this is the state.
+**`isInActiveState` is not the toggle, and #286 is the measurement.** Over every
+log carrying `describeTopRowModuleDictState` -- 34 runs, 55,921 readings, 61,948
+module observations -- it is the exact complement of `isDeactivating`, with no
+exceptions at all, and the two are separate dictionary keys read by separate
+`Dict.get`s. So `Just False` means _this module is in the act of shutting down_,
+not that it is off: on the 20,095 observations where `ramp_active` is absent from
+the tree entirely -- the ramp widget does not exist, so the module is not running
+-- this entry reads `True` on 100% of them.
+
+What that costs **this** predicate is bounded, which is why #286 left it alone.
+`Just False` really is the client saying the switch-off landed, so this is a
+sound _positive_ signal; what it cannot say is that a switch-off did not land,
+because the transient is short -- median two readings, longest seven -- and a
+reading that misses it is indistinguishable from a click that never arrived. That is the shape of
+`none has yet read switched off`. See CLAUDE.md, "`isInActiveState` is not the
+toggle; it is the deactivation transient", before repointing anything here.
 
 **Three answers, not two.** An entry that did not decode is `Nothing`, and a
 module that says nothing about itself is not a module saying it is off. Both of
@@ -8512,11 +9591,28 @@ is no undoing to detect, whatever the modules read.
 **This is a report, not a verdict.** Having it abandon the attempt was the
 mission runner's issue #72: across four swaps in two runs the only effects
 dispatched between the confirmation and the re-arm were a drone launch, an
-overview click and the swap's own right-click, so the client re-arms the gun by
-itself, and a rule that abandons on that is a guarantee that no swap can ever
-finish. What replaces abandoning is nothing, and the invariant is what makes that
-safe: this is true exactly when the guns are back on, which is the moment the
-swap stops costing anything the deadlines exist to protect.
+overview click and the swap's own right-click, so nothing in the bot pressed the
+button, and a rule that abandons on that is a guarantee that no swap can ever
+finish.
+
+**What #72 read as the client re-arming the gun is measured false, and this
+predicate is where it enters.** #286: over the 35 windows in which this latch has
+ever been set, across eight runs and both bots, the client's combat log records
+**zero** gun lines and `ramp_active` reads `True` on **zero** of the 191
+readings -- against 0.177 gun lines a reading and 37.7% `ramp_active` in the ten
+readings before the swap started, and 0.224 and 40.6% in the ten after the
+window cleared. 146 _drone_ lines were written inside those same windows, so the
+channel was live and the guns contributed none of it. The gun was
+switched off, stayed off, and `isInActiveState` came back to `True` because the
+deactivation _finished_ (see `moduleReadsSwitchedOff`). That nothing in the bot
+pressed the button is the corroboration rather than the mystery.
+
+Nothing is changed on that measurement, deliberately: what this latch does is
+make `ammoSwapDisarmEndsTheSession` decline, and repointing it is a behaviour
+change on the path that disarms the ship. What it means today is that the guard
+which exists because _a disarmed ship is worse than the wrong charge_ is stood
+down by a report of guns that did not come back. CLAUDE.md carries the argument
+and the numbers.
 
 **Both halves of the test are load-bearing.** Requiring that nothing reads
 switched off keeps a reading whose entries simply did not decode from being read
@@ -8545,10 +9641,16 @@ firing, skipped the switch-off and opened a menu on a running gun. `GUNS OFF`
 appears zero times in that run.
 
 The question this asks is not whether the gun is doing its job but whether its
-toggle is on, which is what the entry measurably means and is exactly the
-condition the client's own refusal names: `while it is active`. Reading
-`Just True` as "the guns are working" would be the mistake `ramp_active` has
-already cost twice.
+toggle is on, and **the entry does not answer that either** -- #286 measured it
+to be `not isDeactivating`, which is true on 99.7% of every module observation in
+the corpus, so this predicate is close to a constant. What that costs is an entry
+gate that opens on a ship whose guns are idle, and a switch-off pressed at a
+module that may already be off -- and the button is a toggle, so such a press
+turns it **on**. That last step is a mechanism rather than an observation: the
+fight presses the weapon hotkey on the same readings, and no log attributes a
+cycle to one of the two. Not repointed here: see `moduleReadsSwitchedOff` and
+CLAUDE.md. What the entry still is not is the duty cycle, which is the whole of
+what #76 fixed.
 
 **`Nothing` is not `False`.** An entry that did not decode answers `False` here,
 so a build that does not carry it never opens the entry gate and the swap never
@@ -9916,6 +11018,172 @@ describeAmmoSwapState context =
                         ++ "."
 
 
+{-| The name of whatever EVE currently calls the active target.
+
+One declaration because two now want it -- the header row and the row that
+names the target's condition below it -- and two copies of "which overview row
+is the active one" is the drift this file has paid for elsewhere. It is the
+_name_ that is shared; the condition beside it is `describeTargetHitpoints`,
+which is deliberately unshared between this bot and the mission runner and is
+called by both readers rather than reimplemented by either.
+
+-}
+activeTargetNameFromReading : ReadingFromGameClient -> Maybe String
+activeTargetNameFromReading readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsActiveTarget
+        |> List.head
+        |> Maybe.andThen .objectName
+
+
+{-| Where the ship is, in the one field that can answer it.
+
+Three states this reading can actually distinguish, and no fourth invented:
+warping, standing in an anomaly the probe scanner names, and neither. A reading
+with no ship UI is in station, which is a different answer again and is worth
+one word since every counter below behaves differently there.
+
+`DEADSPACE` is deliberately **not** a fourth case. A deadspace pocket entered
+through an acceleration gate has no scan-result row of its own, so the scanner
+names nothing and this answers `-` -- which is the truthful "the client is not
+telling me where I am" rather than a guess dressed as a reading.
+
+-}
+describeWhereTheShipIs : ReadingFromGameClient -> String
+describeWhereTheShipIs readingFromGameClient =
+    if readingFromGameClient.shipUI == Nothing then
+        "DOCKED"
+
+    else if shipWarpingFromReading readingFromGameClient == Just True then
+        "IN WARP"
+
+    else
+        case getCurrentAnomalyIdentityAsSeenInProbeScanner readingFromGameClient of
+            Just anomaly ->
+                describeAnomalyIdentityForHeader anomaly
+
+            Nothing ->
+                "-"
+
+
+{-| The whole run on one line, and the only line the log carries every time.
+
+The status text is recomputed for every decision, and the host prints this line
+under every one of them while printing each line below it only when that line
+moved. So what an operator reads thousands of times a run is whatever this
+function puts first, and everything else is read when it changes. Measured over
+saxrat run 52 -- 27.7 MB, 5,102 readings, 16,742 decisions -- **79.8% of the log
+was status text**, of which this line was 2.6% and the twelve diagnostic lines
+under it were the rest. So the question this answers is not "what else could be
+printed" but "what is worth printing on every one of sixteen thousand
+decisions".
+
+The six fields the operator asked for, in their order and their words:
+
+    Amarr AIC-176 Centii Devourer [10/100/100] 5 rats 273 kills 12 anoms | ship 58/100 | dmg 604/3500
+
+and two more, because run 48 sat in one anomaly for 3,883 seconds and the first
+question anybody asked was whether the ship was in trouble. **The answer that
+settled it was a shield at 0%, an armour that was not moving, and incoming
+damage far below the retreat threshold** -- three numbers that were in the log
+and took a replay to find, because they were spread across three of the
+diagnostic lines below.
+
+`ship` is the **believed** pair, not the live gauge, so the header says what the
+guards are going by: `plausibleHitpointsPercent` rejects the impossible readings
+and `believed` withholds a fall a second reading has not confirmed, and this
+hull's gauge produced values from -213% to 40,028,800% on one recorded run. A
+gauge that has not answered yet reads `?`, never a number.
+
+`dmg` is `describeIncomingDamage`'s own two numbers rather than a second copy of
+them, for the reason `describeTargetHitpoints` is reused below rather than
+reimplemented: two renderings of one measurement drift, and this file has paid
+for that twice.
+
+**The target's condition is `describeTargetHitpoints`, called rather than
+copied.** PR #244 pinned that clause as deliberately unshared between this bot
+and the mission runner -- saxrat's is the abbreviated `[10/100/100]` and the
+mission runner's the spelled-out one -- and a header that spelled the triple out
+again here would be a third rendering for two apps to drift between.
+
+-}
+describeStatusHeader : BotDecisionContext -> String
+describeStatusHeader context =
+    let
+        readingFromGameClient =
+            context.readingFromGameClient
+
+        gauge =
+            Maybe.map String.fromInt >> Maybe.withDefault "?"
+
+        target =
+            activeTargetNameFromReading readingFromGameClient
+                |> Maybe.map
+                    (\name ->
+                        name
+                            ++ " "
+                            ++ describeTargetHitpoints
+                                (activeTargetHitpointsPercent readingFromGameClient)
+                    )
+                |> Maybe.withDefault "no target"
+
+        incomingDamage =
+            context.memory.incomingDamage
+    in
+    String.join " "
+        [ currentSolarSystemNameFromReading readingFromGameClient
+            |> Maybe.withDefault "?"
+        , describeWhereTheShipIs readingFromGameClient
+        , target
+        , (readingFromGameClient |> getNamesOfRatsInOverview |> List.length |> String.fromInt)
+            ++ " rats"
+        , describeKillCount context.memory.kills
+        , (context.memory.visitedAnomalies |> Dict.size |> String.fromInt) ++ " anoms"
+        , "| ship "
+            ++ gauge context.memory.hitpoints.shield.believed
+            ++ "/"
+            ++ gauge context.memory.hitpoints.armor.believed
+        , "| "
+            ++ (if not incomingDamage.hostCarriesTheChannel then
+                    "dmg NO COMBAT LOG"
+
+                else
+                    "dmg "
+                        ++ (incomingDamageInWindow incomingDamage |> String.fromInt)
+                        ++ "/"
+                        ++ (if context.eventContext.botSettings.runAwayIncomingDamageThreshold < 0 then
+                                "off"
+
+                            else
+                                String.fromInt
+                                    context.eventContext.botSettings.runAwayIncomingDamageThreshold
+                           )
+               )
+        ]
+
+
+{-| Everything an operator reads, with the header first and the rest below it.
+
+**The first row is the header and the rest are diagnostics, and the order is
+what decides which a clause is.** The host prints the first line of this text
+beside the decision marker and the rest below it, and since #284 it prints that
+rest only when it has changed since the last decision it printed -- so a clause
+in the first row is seen on every one of a run's sixteen thousand decisions and
+a clause below it is seen on the readings it moves. Nothing here is deleted or
+made conditional; what changed is that the repetition ended at the layer that
+was creating it.
+
+Two structural constraints, both of which cases hold and one of which this
+change nearly broke. `describeQuickMessage` is a row of the outer list rather
+than part of `describeCurrentReading`, because that binding is only built for a
+reading with a ship UI and a docked reading is exactly where an unread client
+notice sits. And **no comment may sit between this function's `in` and its
+list**: `test_quick_message_logged` locates the outer list by splitting the
+collapsed source on `in [`, so a comment there does not fail that case -- it
+makes it pass having read the whole function instead, which is worse.
+
+-}
 statusTextFromState : BotDecisionContext -> String
 statusTextFromState context =
     let
@@ -9943,8 +11211,15 @@ statusTextFromState context =
                 ++ (context.memory.routeFirstMarkerUnchangedTicks |> String.fromInt)
                 ++ " | unlock "
                 ++ (context.memory.targetToUnlockUnchangedTicks |> String.fromInt)
-                ++ " | loot "
-                ++ (context.memory.lootWindowOpenTicks |> String.fromInt)
+                ++ " | "
+                ++ describeLootWindowStandoff
+                    { readingsOpen = context.memory.lootWindowOpenTicks
+                    , lootWindowOpen =
+                        readingFromGameClient
+                            |> wreckLootWindowsFromReadingFromGameClient
+                            |> List.isEmpty
+                            |> not
+                    }
                 ++ " | dead-end "
                 ++ (if context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace then
                         "yes"
@@ -9954,6 +11229,10 @@ statusTextFromState context =
                    )
                 ++ " | approach "
                 ++ (context.memory.shipApproachingTicks |> String.fromInt)
+                -- Beside the approach counter, because the first thing this
+                -- count reaches for is an approach.
+                ++ " | "
+                ++ describeCombatStalemate context.memory.combatStalemate
                 ++ " | "
                 ++ describeGateActivationAsk
                     { asked = askingAnAccelerationGateToOpen readingFromGameClient
@@ -9979,6 +11258,11 @@ statusTextFromState context =
                 ++ describeTopRowModuleDictState readingFromGameClient
                 ++ "\n"
                 ++ describeIncomingDamage context
+                -- Beside the incoming half, because they are the two directions
+                -- of one channel and a reading that carries neither is a host
+                -- with no game log rather than a quiet grid.
+                ++ " "
+                ++ describeOutgoingFire context.memory.outgoingFire
                 ++ " "
                 -- Beside the damage window rather than beside the gauges,
                 -- because what it says is that the window is the only guard
@@ -10082,15 +11366,14 @@ statusTextFromState context =
                             getNamesOfRatsInOverview readingFromGameClient
 
                         currentTargetName =
-                            readingFromGameClient.overviewWindows
-                                |> List.concatMap .entries
-                                |> List.filter overviewEntryIsActiveTarget
-                                |> List.head
-                                |> Maybe.andThen .objectName
+                            activeTargetNameFromReading readingFromGameClient
 
                         describeAnomaly =
                             "Current anomaly: "
-                                ++ (getCurrentAnomalyIDAsSeenInProbeScanner readingFromGameClient |> Maybe.withDefault "None")
+                                ++ (getCurrentAnomalyIdentityAsSeenInProbeScanner readingFromGameClient
+                                        |> Maybe.map describeAnomalyIdentity
+                                        |> Maybe.withDefault "None"
+                                   )
                                 ++ "."
 
                         describeArrivalWindowClause =
@@ -10147,7 +11430,8 @@ statusTextFromState context =
                     ]
                         |> List.map (String.join " ")
     in
-    [ [ describePerformance ]
+    [ [ describeStatusHeader context ]
+    , [ describePerformance ]
     , [ describeMenuAndSettlingCounters ]
 
     -- Ahead of `describeCurrentReading`, which is only built when there is a
@@ -10431,7 +11715,7 @@ this (same gap noted at the "Loot All" text-search call site), and
 `readingFromGameClient.inventoryWindows |> List.head` used to just grab
 the window unconditionally -- since it's _always_ present, that meant the
 looting logic thought a wreck was open even when nothing had ever been
-opened at all, forcing it to Ctrl+W-close a window the player never
+opened at all, forcing it to force-close a window the player never
 wanted closed (stuck 650+ seconds live with zero rats and zero commander
 wrecks anywhere in the overview).
 
@@ -10463,6 +11747,194 @@ wreckLootWindowsFromReadingFromGameClient : ReadingFromGameClient -> List EveOnl
 wreckLootWindowsFromReadingFromGameClient readingFromGameClient =
     readingFromGameClient.inventoryWindows
         |> List.filter (.uiNode >> findUiElementWithText "Loot All" >> (/=) Nothing)
+
+
+{-| Readings a loot window gets to close through its own controls before the
+escalation starts.
+
+Above the whole recorded distribution of windows that closed, rather than a
+number picked to feel patient: across the recorded saxrat runs that carry the
+`loot N` status counter, every stretch with a loot window in the reading peaks
+at exactly 2 and there are no others, so a window still open on the third
+reading is one that outlasted every close this corpus has ever watched work.
+
+-}
+lootWindowOwnControlsReadings : Int
+lootWindowOwnControlsReadings =
+    2
+
+
+{-| Readings a loot window gets the window's own **Close** control before the
+keystroke is tried.
+
+The mission runner reached this rung and this bot never could -- see
+`lootWindowCloseRung`. Three times the rung above, so a Close control the client
+draws gets several clicks before anything else is tried.
+
+-}
+lootWindowCloseControlReadings : Int
+lootWindowCloseControlReadings =
+    lootWindowOwnControlsReadings * 3
+
+
+{-| Readings a loot window is worked at all before the bot leaves it open and
+gets on with the rest of the tree.
+
+Written as a multiple so the argument cannot drift away from the number: eight
+times the rung that closes every loot window the corpus records closing. That
+is enough for several clicks on the Close control and several `Alt+C` presses at
+the settling window below, and it sits under the shortest escalation any
+recorded run ever ran -- the five saxrat runs that reached the force-close spent
+2, 3, 23, 29 and 303 consecutive readings in it, none of them closing anything.
+The recorded `loot N` peaks are 1, 2 and 301 and nothing lies between, so this
+is placed in a gap rather than cut through a distribution.
+
+-}
+lootWindowForceCloseGiveUpReadings : Int
+lootWindowForceCloseGiveUpReadings =
+    lootWindowOwnControlsReadings * 8
+
+
+{-| What to do about a loot window that is in this reading.
+-}
+type LootWindowCloseRung
+    = UseTheWindowsOwnControls
+    | ClickTheWindowsCloseControl
+    | PressTheInventoryToggle
+    | LeaveTheLootWindowAlone
+
+
+{-| The ladder over a loot window, and the bound on it.
+
+`readingsOpen` is `BotMemory.lootWindowOpenTicks`, which is derived from the
+window being in the reading rather than accumulated across windows -- it is
+zero on any reading with no wreck loot window in it. So a close that lands ends
+the escalation by itself and the next wreck starts from the first rung, which
+is why nothing here has to be reset on success.
+
+The rungs, in order:
+
+  - "Loot All", the window's own control for the thing the window is open to do,
+    for `lootWindowOwnControlsReadings` readings;
+  - the window's own **Close** control, to
+    `lootWindowCloseControlReadings`. **This bot could never reach that click**,
+    and that is a defect of its own rather than a rung being added for symmetry:
+    `wreckLootWindowsFromReadingFromGameClient` selects a window _by_ its
+    carrying "Loot All", and the close-button lookup sat under a `Nothing`
+    branch of a second lookup for that same text on the same node -- so it, and
+    the `askForHelpToGetUnstuck` under it, were unreachable by construction. The
+    mission runner reached the equivalent click and its comment records what
+    happened: "Confirmed live on a window that had been stuck open for hours:
+    Ctrl+W alone left it open, clicking its title bar first then Ctrl+W closed
+    it, and clicking Close closed it with no focus step at all";
+  - `Alt+C`, EVE's inventory toggle, which needs no focus. This replaces
+    `Ctrl+W`, which is the client's _close the active window_ and therefore
+    needs the window focused: measured live on 2026-08-16 at an escalation room
+    in Uchat, 919 `force it shut (Ctrl+W)` decision lines across 303 readings
+    closed nothing at all, and one `Alt+C` pressed by hand at the same client
+    took the tree from `['InventoryPrimary']` to `[]`. That is the second
+    recorded instance of the same keystroke failing the same way; `CLAUDE.md`
+    had the first, and the mission runner acted on it while this bot did not.
+    It is also what a reading with no Close control in it falls to, so a window
+    the parser cannot find controls on is not a reading spent waiting;
+  - then nothing. Past `lootWindowForceCloseGiveUpReadings` the branch stands
+    aside and the caller goes on looting the next wreck or leaves the grid, with
+    the window still on the screen. A loot window nobody can close is worth
+    strictly less than a bot that goes on ratting, which is
+    `closeMessageBox`'s own answer to the same shape.
+
+`togglePressedRecently` is the settling window, and it falls back to the rung
+below rather than to a wait: `Alt+C` is a _toggle_, so pressing it again before
+the client has shown the result re-opens what the last press closed --
+`moduleButtonClickSettlingSteps`' problem, at a window rather than at a module
+button. The live measurement says the propagation is not instant, so a press
+per reading is a press into an answer that has not arrived.
+
+-}
+lootWindowCloseRung :
+    { readingsOpen : Int
+    , closeControlIsInTheReading : Bool
+    , togglePressedRecently : Bool
+    }
+    -> LootWindowCloseRung
+lootWindowCloseRung { readingsOpen, closeControlIsInTheReading, togglePressedRecently } =
+    if readingsOpen > lootWindowForceCloseGiveUpReadings then
+        LeaveTheLootWindowAlone
+
+    else if readingsOpen <= lootWindowOwnControlsReadings then
+        UseTheWindowsOwnControls
+
+    else if readingsOpen <= lootWindowCloseControlReadings && closeControlIsInTheReading then
+        ClickTheWindowsCloseControl
+
+    else if togglePressedRecently then
+        UseTheWindowsOwnControls
+
+    else
+        PressTheInventoryToggle
+
+
+{-| The `Alt+C` chord, built the way every other modifier chord in this app is.
+
+`cg_input` stamps each posted event with the modifiers _this process_ is
+holding, which is what PR #241 fixed -- so the modifier has to be pressed and
+released as its own effect rather than assumed, exactly as `Alt+F1` does for
+the propulsion module. `vkey_MENU` maps to Option and `vkey_C` to `C` in the
+host's own `_VK_TO_CGKEYCODE`.
+
+-}
+pressInventoryToggleEffects : List EffectOnWindow.EffectOnWindowStruct
+pressInventoryToggleEffects =
+    [ EffectOnWindow.KeyDown EffectOnWindow.vkey_MENU
+    , EffectOnWindow.KeyDown EffectOnWindow.vkey_C
+    , EffectOnWindow.KeyUp EffectOnWindow.vkey_C
+    , EffectOnWindow.KeyUp EffectOnWindow.vkey_MENU
+    ]
+
+
+{-| Both KeyDowns, so this cannot be satisfied by the plain `C` of some other
+chord or by the `Alt` of `Alt+F1` -- `doEffectsDeactivatePropulsionModule`'s
+arrangement, for its reason.
+-}
+doEffectsPressInventoryToggle : List EffectOnWindow.EffectOnWindowStruct -> Bool
+doEffectsPressInventoryToggle effects =
+    doEffectsPressKey EffectOnWindow.vkey_MENU effects
+        && doEffectsPressKey EffectOnWindow.vkey_C effects
+
+
+{-| What the status line says about a loot window, on every reading one is open.
+
+The decision line goes away on the reading the branch stands aside -- that is
+what standing aside means -- so this is the only thing on a later reading that
+says a window is still there and is being left alone. `describeMessageBoxStandoff`'s
+mechanism, for its reason.
+
+-}
+describeLootWindowStandoff : { readingsOpen : Int, lootWindowOpen : Bool } -> String
+describeLootWindowStandoff { readingsOpen, lootWindowOpen } =
+    if not lootWindowOpen then
+        "loot 0"
+
+    else
+        "loot "
+            ++ String.fromInt readingsOpen
+            ++ "/"
+            ++ String.fromInt lootWindowForceCloseGiveUpReadings
+            ++ (if readingsOpen > lootWindowForceCloseGiveUpReadings then
+                    " (GIVEN UP ON, still open)"
+
+                else if readingsOpen > lootWindowCloseControlReadings then
+                    " (pressing Alt+C at it)"
+
+                else if readingsOpen > lootWindowOwnControlsReadings then
+                    -- Both, because the count is all this clause has: which of
+                    -- the two the reading takes turns on whether the parser
+                    -- found a Close control on it, and that is not a number.
+                    " (clicking its Close control, or Alt+C if it has none)"
+
+                else
+                    ""
+               )
 
 
 {-| Whether a row is loot rather than something to shoot.
@@ -11905,10 +13377,12 @@ siteProgressStepOrElse context ifNeither =
             activateAccelerationGateIfPresent context
 
         opportunityWarpStep =
-            warpToOpportunitySiteIfAvailable context.readingFromGameClient
+            warpToOpportunitySiteIfAvailable
+                (escalationEntriesPermitted context.eventContext.botSettings context.readingFromGameClient)
 
         arrivalIsOffered =
-            opportunityTravelStep context.readingFromGameClient
+            opportunityTravelStep
+                (escalationEntriesPermitted context.eventContext.botSettings context.readingFromGameClient)
                 |> Maybe.map (.label >> opportunityLabelArrivesAtTheSite)
                 |> Maybe.withDefault False
     in
@@ -12786,21 +14260,93 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             }
 
         standingInADeadEnd =
-            -- Asks the panel the same question the decision asks it. It used to
-            -- test the marker pip while `jumpToNextSystem` tested the panel's
-            -- words, and with a real route beside a stale `No Destination` the
-            -- two disagreed in the worst available direction: the decision asked
-            -- the host for a route on every reading, and this counter -- the
-            -- only thing bounding that asking -- stayed at 0 because the pip was
-            -- there. Run 31 asked 2,494 times in 48 minutes and reported
-            -- `0/20 readings` on every one of them, so `routeAskGiveUpReadings`
-            -- could never fire. One reading of the panel, used by both.
+            -- Asks the panel and the scanner the same questions the decision
+            -- asks them, which is twice something this counter got wrong.
+            --
+            -- It used to test the marker pip while `jumpToNextSystem` tested the
+            -- panel's words, and with a real route beside a stale
+            -- `No Destination` the two disagreed in the worst available
+            -- direction: the decision asked the host for a route on every
+            -- reading, and this counter -- the only thing bounding that asking
+            -- -- stayed at 0 because the pip was there. Run 31 asked 2,494 times
+            -- in 48 minutes and reported `0/20 readings` on every one of them.
+            --
+            -- #273 is the same shape one clause along. This read "nothing at all
+            -- on the probe scanner" while the ask fires on "no anomaly matching
+            -- the settings", and with a narrow `anomaly-name` beside two
+            -- signatures that do not match it, *every* reading took the other
+            -- branch and reset the counter. Across the 411 readings the recorded
+            -- runs ever printed an ask on, 397 carry a count of 0 or 1 and the
+            -- highest any of them carries is 16 against a bound of 20 -- so the
+            -- give-up has never once been reached while this bot was asking.
+            -- `anomaliesWorthHunting` is now the one filter both sides read.
             (context.readingFromGameClient.shipUI /= Nothing)
+                && not (shipIsWarpingOrJumping context.readingFromGameClient)
                 && not (routePanelShowsARoute context.readingFromGameClient)
-                && (context.readingFromGameClient.probeScannerWindow
-                        |> Maybe.map (.scanResults >> List.isEmpty)
-                        |> Maybe.withDefault True
-                   )
+                && List.isEmpty
+                    (anomaliesWorthHunting
+                        { botSettings = context.botSettings
+                        , visitedAnomalies = visitedAnomalies
+                        }
+                        context.readingFromGameClient
+                    )
+                && not (gridStillHasSomethingToDo incomingDamageNow context.readingFromGameClient)
+
+        anEscalationIsBeingWorkedInADeadEnd =
+            -- What the counter advances on, which is deliberately the hold's
+            -- condition *without* its bound. Conjoined with `standingInADeadEnd`
+            -- for the reason the ask below is: that is the condition under which
+            -- `setRouteToNextHuntingGround` is reached at all, so counting
+            -- anything wider would spend the bound on readings the branch never
+            -- ran on -- #145's `gateWithinReachTicks` and #11's
+            -- `dronesInSpaceTicks`, which each counted the ship being *near*
+            -- something rather than the branch asking for it.
+            --
+            -- **Leaving the bound out here is what makes it a bound.** Advancing
+            -- on `standingDownForATrackedEscalation` instead would reset the
+            -- count on the very reading the hold expired, so the next reading
+            -- would hold again -- a duty cycle of forty held readings and one
+            -- ask, forever, rather than a give-up. That is `gunsSilencedTicks`
+            -- pinned at 1 by a reset the thing it was waiting on could trigger.
+            standingInADeadEnd
+                && escalationIsBeingWorked
+                    (escalationEntriesPermitted context.botSettings context.readingFromGameClient)
+
+        standingDownForAnEscalationNow =
+            -- The reading the decision holds the grid on, re-derived here
+            -- because the memory update never sees the decision.
+            anEscalationIsBeingWorkedInADeadEnd
+                && standingDownForATrackedEscalation
+                    { escalationIsBeingWorked = True
+                    , standDownReadings = botMemoryBefore.escalationStandDownReadings
+                    }
+
+        destinationAskedForNow =
+            -- What the decision branch is asking for, named by the *same* picker
+            -- it uses. Forgotten the moment a route exists, so arriving and
+            -- going dry again asks afresh rather than reading as already asked.
+            --
+            -- `Nothing` where the circuit has nowhere to send the ship, which is
+            -- the answer `setRouteToNextHuntingGround` tethers on rather than
+            -- asking (#262). That is why the counter below is keyed on this
+            -- value and not on `standingInADeadEnd`: runs 12, 26 and 27 latched
+            -- the give-up having issued no ask at all, two of them with no
+            -- `hunt-system` configured, because the counter ran while nothing
+            -- was being asked for.
+            --
+            -- `Nothing` while the circuit is standing down for a tracked
+            -- escalation (#279), for that same reason and it is the same
+            -- defect: no ask goes out on those readings, so a counter that ran
+            -- through them would latch `routeSettingGivenUp` for the session
+            -- against asks nobody made.
+            if standingInADeadEnd && not standingDownForAnEscalationNow then
+                nextHuntingGroundFrom context.botSettings
+                    botMemoryBefore.huntSystemIndex
+                    context.readingFromGameClient
+                    botMemoryBefore.lastDockedStationNameFromInfoPanel
+
+            else
+                Nothing
 
         dronesInSpaceCountNow =
             context.readingFromGameClient.dronesWindow
@@ -13195,43 +14741,74 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
                 else
                     botMemoryBefore.fleetBroadcastFollowed
-    , destinationAskedFor =
-        -- What the decision branch is asking for, named by the *same* picker it
-        -- uses. Forgotten the moment a route exists, so arriving and going dry
-        -- again asks afresh rather than reading as already asked.
-        --
-        -- Tracked only while the ship is in space with no route and nothing at
-        -- all on the probe scanner -- which is narrower than the condition the
-        -- ask itself fires on (that one is "no anomaly *matching the
-        -- settings*"). Narrower is the safe direction and the same one
-        -- `noProbeScanResultsAndNoRouteLastTimeInSpace` above argues for: the
-        -- counter advances only in a state where the branch is certainly
-        -- asking, so it can under-count and delay the give-up, and can never
-        -- run up while the bot is happily fighting in a system it has anomalies
-        -- in. Counting that would be issue #11's mistake again -- a counter
-        -- measuring something other than the thing it bounds.
-        if standingInADeadEnd then
-            nextHuntingGroundFrom context.botSettings botMemoryBefore.huntSystemIndex context.readingFromGameClient
-
-        else
-            Nothing
+    , destinationAskedFor = destinationAskedForNow
     , destinationAskReadings =
-        if standingInADeadEnd then
-            botMemoryBefore.destinationAskReadings + 1
+        -- Counts the readings the branch is asking on, which is what
+        -- `routeAskGiveUpReadings` is a bound on. `destinationAskedForNow` is
+        -- the whole condition: it is `Just` exactly when the ship is in a dead
+        -- end and the circuit has somewhere to send it, so the counter and the
+        -- ask cannot disagree about whether an ask is happening or about which
+        -- system it is for.
+        --
+        -- **The comment this replaces reasoned correctly and priced it wrong.**
+        -- It said counting a narrower state "can under-count and delay the
+        -- give-up", which would be tolerable. Narrowing to an *empty* probe
+        -- scanner does not delay the give-up, it removes it: a non-empty
+        -- scanner is the steady state in the very situation the ask exists for,
+        -- so the counter reset on every reading and the bound was unreachable.
+        -- #273, and it is #11's own mistake in the shape that comment cites
+        -- while walking into it -- a counter measuring something other than the
+        -- thing it bounds.
+        --
+        -- The fear behind the narrowing is answered by the ask's own condition
+        -- rather than by a second one: `standingInADeadEnd` already requires
+        -- that no anomaly on the scanner is worth hunting, and the one thing it
+        -- does not imply -- a fight still going on with the site's signature
+        -- gone -- is `gridStillHasSomethingToDo`, which the decision reads at
+        -- the same site through the same declaration.
+        if destinationAskedForNow == Nothing then
+            0
 
         else
-            0
+            botMemoryBefore.destinationAskReadings + 1
     , routeSettingGivenUp =
         -- Latched for the session. A host with no ESI credentials, or one that
         -- does not read the directive at all, will never answer -- and a bot
         -- that keeps asking is one that never goes back to hunting.
         botMemoryBefore.routeSettingGivenUp
             || (routeAskGiveUpReadings < botMemoryBefore.destinationAskReadings)
+    , escalationStandDownReadings =
+        -- Resets on any reading the hold does not apply to -- a route
+        -- appearing, the escalation leaving the tracker, the ship docking, an
+        -- anomaly worth hunting turning up, or anything left to do on the grid
+        -- -- so the bound measures one uninterrupted hold rather than a
+        -- session's worth of them.
+        if anEscalationIsBeingWorkedInADeadEnd then
+            botMemoryBefore.escalationStandDownReadings + 1
+
+        else
+            0
     , lockBatch = lockBatchAccounting.dispatch
     , lockBatchClicksAsked = lockBatchAccounting.clicksAsked
     , lockBatchClicksAnswered = lockBatchAccounting.clicksAnswered
     , lockBatchLastChange = lockBatchAccounting.change
     , targetsCountLastReading = context.readingFromGameClient.targets |> List.length
+    , combatStalemate =
+        combatStalemateAfterReading
+            { before = botMemoryBefore.combatStalemate
+            , fightIsUnderway = combatFightIsUnderway context.readingFromGameClient
+            , ratsInOverview = namesOfRatsInOverview |> List.length
+            }
+    , outgoingFire =
+        outgoingFireAfterReading
+            { before = botMemoryBefore.outgoingFire
+            , summaries = context.readingFromGameClient.outgoingDamageSinceLastReading
+            }
+    , kills =
+        killCountAfterReading
+            { before = botMemoryBefore.kills
+            , kills = context.readingFromGameClient.killsSinceLastReading
+            }
     , lockAttempt = lockRangeLearning.attempt
     , lockRangeStatedMeters =
         -- Overwritten rather than narrowed: the ceiling is not a constant even
@@ -13273,11 +14850,93 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
 getCurrentAnomalyIDAsSeenInProbeScanner : ReadingFromGameClient -> Maybe String
 getCurrentAnomalyIDAsSeenInProbeScanner =
+    getCurrentAnomalyIdentityAsSeenInProbeScanner >> Maybe.map .id
+
+
+{-| The scanner's own words for the site the ship is in: its ID, Name and Group.
+
+**Nothing keys on this.** `visitedAnomalies` is filed under the ID and stays
+that way, because the ID is what the client gives uniquely per site on this grid
+while a Name is shared by every site of a kind -- an anomaly memory keyed on
+`Sansha Refuge` would confuse the one just cleared with the next one. This is
+for _saying_ which site that is, in the client's own words.
+
+The three cells come off the **same** scan-result row rather than from three
+lookups, so they cannot be answered from different rows if the scanner re-sorts
+between reads. That is not a hypothetical tidiness: the overview's own re-sort
+between a read and a click is documented here as having locked the wrong object
+and shot an asteroid for 290 readings.
+
+`Nothing` for a cell is the scanner not giving one, and it is not an empty name.
+The renderer says so in words for the same reason `loadRefusalFromGameLog` does:
+a fabricated blank reads as a site the client declined to name, which is a
+different fact from one nobody read.
+
+Reading it at all is #197. `anomaly-name` is matched against the Name cell, and
+until now that cell was read once, folded into a `Bool` and dropped -- so what a
+run recorded was the ID, no recorded run carried a site name, and the question of
+what that column may contain was unanswerable from the corpus at any size rather
+than merely unanswered.
+
+-}
+type alias AnomalyIdentity =
+    { id : String
+    , name : Maybe String
+    , group : Maybe String
+    }
+
+
+getCurrentAnomalyIdentityAsSeenInProbeScanner : ReadingFromGameClient -> Maybe AnomalyIdentity
+getCurrentAnomalyIdentityAsSeenInProbeScanner =
     .probeScannerWindow
         >> Maybe.map getScanResultsForSitesOnGrid
         >> Maybe.withDefault []
         >> List.head
-        >> Maybe.andThen (.cellsTexts >> Dict.get "ID")
+        >> Maybe.andThen
+            (\scanResult ->
+                scanResult.cellsTexts
+                    |> Dict.get "ID"
+                    |> Maybe.map
+                        (\id ->
+                            { id = id
+                            , name = scanResult.cellsTexts |> Dict.get "Name"
+                            , group = scanResult.cellsTexts |> Dict.get "Group"
+                            }
+                        )
+            )
+
+
+{-| `'EGC-528' 'Sansha Refuge' (Combat Site)`, for the lines a run is read back from.
+
+**The ID stays first and stays single-quoted.** `engagement_watch.py` names every
+screenshot it takes from `We are in anomaly '([^']+)'`, which takes the first
+quoted group out of the line -- so a name appended after the ID is invisible to
+it, and a name put in front would silently rename every screenshot of every run
+while the watcher went on looking healthy.
+
+-}
+describeAnomalyIdentity : AnomalyIdentity -> String
+describeAnomalyIdentity anomaly =
+    "'"
+        ++ anomaly.id
+        ++ "' "
+        ++ (anomaly.name |> Maybe.map (\name -> "'" ++ name ++ "'") |> Maybe.withDefault "(name unread)")
+        ++ " "
+        ++ (anomaly.group |> Maybe.map (\group -> "(" ++ group ++ ")") |> Maybe.withDefault "(group unread)")
+
+
+{-| `EGC-528/Sansha Refuge`, for the one-line header printed on every decision.
+
+Joined by a slash rather than a space because the header's next field is the
+active target's name, and two bare names running together read as one. The Group
+is left out: it is `Combat Site` for everything this bot hunts, so in the line
+printed most often it would be a column of one repeated word.
+
+-}
+describeAnomalyIdentityForHeader : AnomalyIdentity -> String
+describeAnomalyIdentityForHeader anomaly =
+    anomaly.id
+        ++ (anomaly.name |> Maybe.map (\name -> "/" ++ name) |> Maybe.withDefault "")
 
 
 getScanResultsForSitesOnGrid : EveOnline.ParseUserInterface.ProbeScannerWindow -> List EveOnline.ParseUserInterface.ProbeScanResult

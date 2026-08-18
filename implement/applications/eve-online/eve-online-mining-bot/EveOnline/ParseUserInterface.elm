@@ -56,6 +56,7 @@ type alias ParsedUserInterface =
     , gameLogEntriesSinceLastReading : Maybe (List GameLogEntry)
     , incomingDamageSinceLastReading : Maybe IncomingDamage
     , outgoingDamageSinceLastReading : Maybe (List OutgoingDamageToTarget)
+    , killsSinceLastReading : Maybe Int
     }
 
 
@@ -599,6 +600,7 @@ parseUserInterfaceFromUITree uiTree =
     , gameLogEntriesSinceLastReading = parseGameLogEntriesSinceLastReadingFromUITreeRoot uiTree
     , incomingDamageSinceLastReading = parseIncomingDamageSinceLastReadingFromUITreeRoot uiTree
     , outgoingDamageSinceLastReading = parseOutgoingDamageSinceLastReadingFromUITreeRoot uiTree
+    , killsSinceLastReading = parseKillsSinceLastReadingFromUITreeRoot uiTree
     }
 
 
@@ -778,11 +780,29 @@ Scoped to the reading by the host, which drains its queue as it builds the tree,
 so this is what the shots since the previous read achieved rather than a running
 total.
 
+**`hits` and `misses` are separate counts and summing them is the one mistake to
+avoid here.** A landed shot for zero damage says the guns cannot hurt this
+object; a miss says they cannot hit it, which is a range or tracking problem and
+resolves on its own. Issue #267 measured the difference rather than assuming it:
+across 5,631 episodes in the client's own logs, no target that ever landed a
+shot for zero was hurt afterwards, while targets the guns went on to kill
+absorbed runs of up to 702 consecutive misses first. So a rule may read both,
+and no rule may treat one as the other.
+
+`misses` defaults to zero rather than to `Nothing`, which is the one place this
+record takes a default instead of reporting absence. A host older than #267
+writes no such key, and reading that as "no shots missed" is exactly the
+behaviour those hosts already had -- so the default degrades to the previous
+rule rather than inventing evidence. The distinction that must not be lost, "is
+this channel here at all", is carried by the `Maybe` around the whole list and
+is untouched.
+
 -}
 type alias OutgoingDamageToTarget =
     { name : String
     , hits : Int
     , damage : Int
+    , misses : Int
     }
 
 
@@ -813,12 +833,56 @@ parseOutgoingDamageToTarget targetNode =
                 { name = name
                 , hits = targetNode |> getIntPropertyFromDictEntries "hits" |> Maybe.withDefault 0
                 , damage = targetNode |> getIntPropertyFromDictEntries "damage" |> Maybe.withDefault 0
+                , misses = targetNode |> getIntPropertyFromDictEntries "misses" |> Maybe.withDefault 0
                 }
 
 
 syntheticOutgoingDamageNodeTypeName : String
 syntheticOutgoingDamageNodeTypeName =
     "MacOsHostSyntheticOutgoingDamage"
+
+
+{-| How many rats the client paid a bounty for since the last reading.
+
+The fourth of the host's synthetic nodes, and the one that carries the least:
+one number, because the `(bounty)` channel it is summed from says nothing else.
+Across the 17,388 bounty lines in the recorded client sessions there are two
+wordings and neither names a target, so this count can never be split per rat,
+per name or per anomaly -- which is a property rather than a shortfall, since
+an anomaly is a pocket of identically named rats and a name-keyed fold over one
+is what PR #274 found reporting a stall on a rat that was never in it.
+
+**What it counts is what the client paid, not what this ship killed.** A rat a
+fleetmate finished that this ship damaged still pays and is counted; a rat this
+ship killed whose bounty went elsewhere is not; and anything with no bounty --
+a structure, a wreck -- writes no line however thoroughly it is destroyed. No
+rule may read this as "kills by this ship".
+
+**`Nothing` is "this host does not carry the channel" and `Just 0` is "the
+client reported nothing dying this reading"**, which is the same distinction the
+other three synthetic nodes keep and the same one that must never be collapsed:
+a session that killed nothing and a session nobody counted read identically
+otherwise.
+
+The count is read **strictly**, with no default. A node present without the key
+is a host disagreeing with this parser about the node's own shape, and the safe
+answer to that is "we do not know" rather than a fabricated zero -- a defaulted
+count is one that reports a quiet grid for a broken channel.
+
+-}
+parseKillsSinceLastReadingFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe Int
+parseKillsSinceLastReadingFromUITreeRoot uiTreeRoot =
+    uiTreeRoot.uiNode.children
+        |> Maybe.withDefault []
+        |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
+        |> List.filter (.pythonObjectTypeName >> (==) syntheticKillsNodeTypeName)
+        |> List.head
+        |> Maybe.andThen (getIntPropertyFromDictEntries "kills")
+
+
+syntheticKillsNodeTypeName : String
+syntheticKillsNodeTypeName =
+    "MacOsHostSyntheticKills"
 
 
 asUITreeNodeWithDisplayRegion :

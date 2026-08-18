@@ -228,6 +228,16 @@ a second source of truth for the same statistic. Everything else is carried,
 including channels never seen here — the list is a deny-list, because a channel
 silently dropped for being unfamiliar is this repo's signature failure.
 
+**Both of those have since had their totals carried anyway, and the distinction
+is the lines against the summary.** The `(combat)` half is the two paragraphs
+below, and #284 does the same for `(bounty)`: the count rides a fourth synthetic
+node while the lines stay withheld exactly as they are. The
+second-source-of-truth objection above is answered rather than overruled —
+`web_console.BOUNTY_TEXT_RE` is the console's own pattern, imported by the host
+rather than restated, so the bot's number and the console's come off one literal
+by construction and a case runs both over every bounty line in the recorded
+corpus and requires the same number. Nothing about this list changed.
+
 **The combat lines are withheld; their total is not.** Issue #32 wanted a
 retreat that does not depend on the ship's HUD, and the only instrument that can
 give it is the one channel the bot could not see. Both halves of that turn out
@@ -259,6 +269,32 @@ than one total, unlike the incoming node, because the question it answers is
 about one object — see "What the bot gives up on: shots that land and achieve
 nothing". Its `Nothing` points the opposite way from the retreat's: a host that
 cannot answer must not read as "everything is immune".
+
+**And the kill count is a fourth.** `MacOsHostSyntheticKills` carries one
+number, `kills` since the last reading, lifted into
+`ParsedUserInterface.killsSinceLastReading : Maybe Int` in all six vendored
+copies. It is the client's own statement that a rat died, which is the only
+thing in this system that says so — every other combat instrument here reports
+*effort*, and `combatStalemate` had to infer "nothing is dying" from the guns
+being busy.
+
+**It names nothing, and that is why it is safe.** The client writes no target on
+this channel — 17,388 lines across the recorded sessions and not one carries a
+name — so the count can never be split per rat, per name or per anomaly. That
+matters because an anomaly is a pocket of identically named rats and PR #274
+found a name-keyed fold reporting "702 consecutive misses on a target the guns
+went on to hurt" for what was the same *name* on a different rat. A count that
+never attributes cannot mis-attribute.
+
+**What it counts is what the client paid, not what this ship killed**, and no
+rule may read it otherwise: a fleetmate's rat this ship damaged pays and is
+counted, a rat this ship killed whose bounty went elsewhere is not, and anything
+with no bounty writes no line however thoroughly it is destroyed. Read strictly
+rather than defaulted, so a node whose key this parser does not recognise
+answers `Nothing` — "we do not know" — instead of a fabricated zero. `Nothing`
+and `Just 0` keep the same distinction they keep everywhere else on this
+channel: a session that killed nothing and a session nobody counted must not
+read alike.
 
 **A reading's entries are gone by the next reading, and that shapes every
 consumer.** A branch that reads them and writes nothing down sees a refusal once
@@ -886,12 +922,36 @@ producing an endless open/close flap that looks like hard failure.
 **In-game hotkeys, preferred over a cascade wherever one exists** (this account's
 bindings): `Shift+F` launches drones, `F` engages the current target, `Shift+R`
 recalls, `Alt+F1` toggles the propulsion module, `F1`–`F4` are weapon slots 1-4,
-`Ctrl+W` closes the active window — all confirmed live. `Alt+C` for the inventory
-is EVE's default and is used by the courier-pickup path, but has not yet fired in
-a real run.
+`Alt+C` toggles the inventory — all confirmed live.
 A keypress is one effect where a cascade is a multi-tick right-click → hover →
 click with its own retry logic. Note `Alt+F1` is a *toggle*, not a "deactivate" —
-press it only when the module reads active.
+press it only when the module reads active, and the same is true of `Alt+C`.
+
+**`Ctrl+W` needs the window focused and `Alt+C` does not**, which is the whole
+of why two versions of the loot-window escape pressed the first at a window
+nobody had focused and closed nothing. `Ctrl+W` is the client's *close the
+active window*; the bot never focuses the window it is trying to shut, so the
+key goes to whatever is active instead. Measured twice, a year apart, on the
+same branch: 650 presses in one run closing nothing, then **919 decision lines
+across 303 readings** at an escalation room in Uchat on 2026-08-16
+(`saxrat_uchat_escalation_2026-08-16.log`), again closing nothing, with the
+bot's own `lootWindowOpenTicks` reaching **301** and 302 of those 303 readings
+carrying no other decision at all.
+
+**`Alt+C` closes it and needs no focus**, read off the stuck client either side
+of one press by hand — `windows before: ['InventoryPrimary']`, `pressed Alt-C`,
+`windows after : []` — after which the Ctrl+W count froze and the bot took an
+acceleration gate and engaged the next room. `lootWindowCloseRung` presses that
+instead, and it is a **toggle**, so it may only be pressed at a reading that
+already carries the window and only with a settling window between presses:
+pressed at no inventory it *opens* one, which would manufacture the very window
+the branch exists to remove.
+
+The first of those two measurements was written down here and never acted on,
+and it is why this paragraph now records the mechanism rather than the symptom:
+a finding kept as prose that no test executes is how one survived a year and
+became two. What executes it is
+`tools/macos-host/tests/test_saxrat_loot_window_close.py`.
 
 **Window resolution must pick the largest window by area** for a pid, not the
 first over a width threshold: a fullscreen game window has a smaller same-width
@@ -1357,7 +1417,21 @@ in `elm repl` and the overview rows they are asked about come from the **real**
 the restatement. The discriminating case for the spelling is the plainest one:
 the corpus literal fed in byte for byte, since `is sensor damping me` is no
 substring of `Pilot is sensor dampening me` and a misspelled matcher answers
-`False`. The corpus is recounted as **relations** — tracking disruption dwarfs
+`False`. ```
+python3 -m unittest, module by module, NO_COLOR=1
+  clean origin/main   108 modules, 2844 cases, 0 skipped, 10 failures
+  this branch         109 modules, 2870 cases, 0 skipped, 10 failures
+```
+
+The two failure sets are identical name for name: ten corpus-reading cases
+across `test_retreat_latency`, `test_retreat_not_executing`,
+`test_saxrat_ammo_swap`, `test_saxrat_message_box_standoff` and
+`test_saxrat_undock_settling`, all of which fail on a pristine export of
+`origin/main` and skip in CI. That set is **not** the one #271 recorded a week
+earlier — it reported one failure and there are now ten — which is why it is
+measured per change rather than inherited.
+
+The corpus is recounted as **relations** — tracking disruption dwarfs
 warp disruption, the misspelling occurs nowhere, `is jamming me` occurs nowhere,
 lines exceed readings — so a growing corpus cannot turn a true claim red.
 
@@ -1511,6 +1585,14 @@ that — the same warning `defaultRunAwayIncomingDamageThreshold` carries.
 problem and giving up is not the answer to it — without that, a gun firing out
 of range would give up on everything it could not reach.
 
+**This rule is mission-runner-only by design rather than merely unported**, and
+the operator's own account of it is what settles that: it exists to catch *a
+mis-locked invulnerable object*, which is why every object it has ever fired on
+is an asteroid, a gate or a structure and why the by-name latch is correct
+there. saxrat fights rats, which die; it has no population for this rule to act
+on, and #267's own measurement over the rat corpus found none. Porting it would
+be porting a rule to a bot whose grid never produces its input.
+
 **The verdict is latched in `BotMemory.zeroDamage` and kept for the session**,
 the way `missionNamesAbandoned` is. A reading's summary is gone by the next one,
 so a branch that read the zero and wrote nothing down would see it once and go
@@ -1549,9 +1631,12 @@ the client's own count -- these shots are achieving nothing. Unlock it
 (Ctrl+Shift+Click) and leave it alone for the rest of the session.
 ```
 
-and the status line carries `shots landing for zero: 'X' 3/8` every reading, so
-a target climbing towards the threshold and one that never climbs are
-distinguishable while watching a run.
+and the status line carries
+`shots achieving nothing: 'X' 3/8 (3 landed for zero, 0 missed)` every reading,
+so a target climbing towards the threshold and one that never climbs are
+distinguishable while watching a run. (The clause was `shots landing for zero:`
+until #267 gave a miss a way to join a tally; the two halves are printed because
+the sum alone cannot say which kind of evidence a case rests on.)
 
 **No `never-attack` setting was added.** `attack-object` is a positive list and
 this bot still has no negative one — the scope matters, because read as a claim
@@ -1567,7 +1652,7 @@ restart.
 **Untested against a live client.** The rule is executed through the real
 `Bot.elm` in `elm repl` and the threshold is checked against the client's own
 recorded lines, but no run has given up on anything. What to watch on the first
-one: the status line's `shots landing for zero:` clause appearing at all — if it
+one: the status line's `shots achieving nothing:` clause appearing at all — if it
 never does on a run that fights, the outgoing summary is not reaching the bot —
 then the unlock line above, then `GIVEN UP ON` for the rest of the session with
 the object never locked again. The failure to watch for is a lock/unlock
@@ -2451,11 +2536,14 @@ in succession, so the real separation is wider still.
 confirmed live as the client's own "close the active window". Escape is what
 this codebase already escalates with — `beginCascade` presses it rather than
 right-clicking a computed empty point, `clearStrayContextMenu` presses it at a
-menu that has not advanced in three ticks — and it needs no focus. Ctrl+W does:
-`lootWindowRefusesToCloseTicks` records a version that pressed it at an
-unfocused window 650 times in one run and closed nothing, and the live recovery
-needed the title bar clicked first. Clicking an unidentified modal to focus it
-is a click into a dialog nobody has read. A naked Escape can open the client's
+menu that has not advanced in three ticks — and it needs no focus. Ctrl+W does,
+and the loot-window escape is where that has been paid for twice: it pressed
+Ctrl+W at a window nobody had focused, 650 times in one run and 919 decision
+lines in another, closing nothing either time (see "In-game hotkeys" above,
+and `lootWindowCloseRung` for what it presses now). Clicking an unidentified
+modal to focus it is a click into a dialog nobody has read — and the loot
+window's own recovery says a focus click is not what was missing anyway, since
+one unfocused `Alt+C` shut it. A naked Escape can open the client's
 own pause menu — `closeSystemSettingsMenu` records that happening live from
 exactly this key — and that is covered rather than risked, since that branch is
 the entry *before* this one in the same list.
@@ -2729,16 +2817,13 @@ that gave run 21 **zero** — whether a run catches a gun mid-cycle at the momen
 a verdict comes due is luck. A run that never swaps and a run that swaps
 sometimes look like different bugs and are the same one.
 
-`isInActiveState` is the entry that means *switched on*, and it backs three
-things: since #50, whether the ammo swap's switch-off landed; since #72, a report
-of the client having taken the guns back; and since #76, whether a gun needs
-stopping before a load. That third one is the **positive** direction, which #50
-had ruled out — a considered departure, and the reason it is safe is that the
-claim is unchanged. Run 11 showed `True` for eighteen readings on a gun that
-fired nothing at all, so it is still not evidence the module is doing its job;
-what it is evidence of is the toggle being on, which is precisely the condition
-the client's own refusal names (`while it is active`). Reading it as "the guns
-are working" would be #12 and #34 a third time and nothing does.
+`isInActiveState` backs three things: since #50, whether the ammo swap's
+switch-off landed; since #72, a report of the client having taken the guns back;
+and since #76, whether a gun needs stopping before a load. All three read it as
+*switched on*. **That reading is wrong, and the corpus the status line has been
+collecting since #267 is what says so** — see "`isInActiveState` is not the
+toggle; it is the deactivation transient" below, which is #286 and which is the
+first thing to read before touching any of the three.
 
 The keep-active filter and `decisionToKillRats` still consult `isActive`, which
 #39 refused to rewire on one sample and #76 still refuses.
@@ -2750,6 +2835,14 @@ carried `ramp_active`, and it then appeared per module as each first cycled
 `ShipModuleButtonRamps` widget being created when cycling starts. Treating
 `Nothing` as off is still the right default, but it conflates "off" with "has
 never run", so never store it as a defaulted `Bool`.
+
+**The widget is destroyed when the module stops, too, which #286 measured and
+this paragraph did not know.** Absence is not only a session-start state: run 52
+has thirteen separate absence episodes, twelve of them 32 to 78 readings long,
+falling on travel between anomalies and on being docked. So "has never run" is
+the narrower reading and "is not running now" is the wider one — which makes
+absence the *strongest* of the three ramp values about the module being idle,
+and it is what the section below leans on.
 
 ### The sprites really are missing; the state is somewhere else
 
@@ -2777,7 +2870,7 @@ What the same 240s sample says about the rest:
 
 | entry | observed | reading |
 |---|---|---|
-| `isInActiveState` | `True` on all four modules, all 92 samples | **switched on** — the flag `isActive` should have been |
+| `isInActiveState` | `True` on all four modules, all 92 samples | read here as **switched on**, which #286 measured to be wrong — it is `not isDeactivating`, see below |
 | `isDeactivating` | `False` throughout that sample; **`True` in run 11**, on every reading a swap had a gun switched off | switching off, cycle not yet finished — see below |
 | `effect_activating` | `0`, except a single `1` at 175.3s, 2.6s before a cycle began | a brief pulse at **activation** |
 | `waitingForActiveTarget` | absent until 141.3s, then `0` on all four at once | `0` = not waiting; appears late, needs more observation |
@@ -2805,15 +2898,20 @@ together, with `ramp_active` still `True` because the gun is finishing its cycle
 **The switch-off lands, first time, in one reading**, which is the observation #35
 and #39 both asked for and neither had.
 
-Two readings later the column becomes `F/T/F` and stays there. The guns are
-switched back **on**, and **not by anything in the bot** — see "The switch-off
-does not hold" below, where #72 read the dispatched effects across that window
-and found no press of the button in either recorded run. This file used to
-attribute it to `decisionToKillRats`; that was wrong, and it was wrong in the
-direction that made the swap's own failure look like correct behaviour by its
-intended owner. What is true either way is that the swap kept going: its
-`gunsSilencedTicks` counter consults nothing the module says (deliberately, #38)
-so it counted to its bound of 20 while the guns had been back on since reading 3.
+Two readings later the column becomes `F/T/F` and stays there. This file read
+that as the guns being switched back **on** by the client, and **#286 measured
+that it is not** — the gun neither cycles nor fires across any of those windows;
+what returned to `True` is a flag that is `False` only while the deactivation is
+in progress. See "`isInActiveState` is not the toggle" below. #72's other half
+survives and is what makes the correction findable: it read the dispatched
+effects across that window and found no press of the button in either recorded
+run, which is exactly what an unpressed, switched-off gun looks like. This file
+used to attribute the re-arm to `decisionToKillRats`; that was wrong too, and it
+was wrong in the direction that made the swap's own failure look like correct
+behaviour by its intended owner. What is true through all three readings is
+that the swap kept going: its `gunsSilencedTicks` counter consults nothing the
+module says (deliberately, #38), so it counted to its bound of 20 — and, on
+#286's reading, the guns had been off rather than back on for all of it.
 
 **`isInActiveState` is decisive about the switch-off and says nothing about the
 guns working.** In that same window the weapon fired *not once* — all 33 outgoing
@@ -2836,6 +2934,154 @@ which is what keeps #38's deadline independent of a signal that could stall it.
 A module button is a **toggle**, so a click repeated before the client has shown
 its result switches the module back off. `moduleButtonClickSettlingSteps` gives a
 click 5 steps to appear in a reading first.
+
+### `isInActiveState` is not the toggle; it is the deactivation transient
+
+Issue #286, and it is the instrument #267 added answering the question nobody
+could ask when the three rules were written. A live read of an Omen Navy Issue
+found four `ModuleButton` nodes all reading `isInActiveState=True` while, by
+the operator's own account of the client, only the afterburner was running —
+and the disproof was a state change rather than a snapshot, since pressing the
+armour repairer's and the sensor booster's hotkeys moved them from
+`ramp_active=None` to `ramp_active=True`. A module button is a toggle, so a
+press that switched them **on** is a press made while they were **off**.
+
+**The corpus settles what the field is instead, and it is one bit shared with
+`isDeactivating`.** `describeTopRowModuleDictState` has been printing five
+entries per top-row module on every reading since #267. Read back over every
+log in `~/eve-bot-logs` that carries the clause — **34 runs, 55,921 readings,
+61,948 module observations**, counted per reading rather than per decision line
+— `isInActiveState` and `isDeactivating` are exact complements with **no
+exceptions at all**:
+
+| `ramp_active` | `isInActiveState` | `isDeactivating` | observations |
+|---|---|---|---:|
+| `-` | `T` | `F` | 20,095 |
+| `F` | `T` | `F` | 24,669 |
+| `T` | `T` | `F` | 17,011 |
+| `T` | `F` | `T` | 125 |
+| `F` | `F` | `T` | 48 |
+
+Not one observation reads `F`/`F` or `T`/`T`. They are separate dictionary keys
+read by separate `Dict.get`s in the parser, so the agreement is the client's
+and not an artefact of the read. One counterexample anywhere would break it and
+there is none, which is the same standard #76's own table was held to.
+
+So `isInActiveState = Just False` means **this module is in the act of shutting
+down** — not that it is off. It is `True` for a module that is running and
+`True` for a module that is off and idle, and the only thing it distinguishes
+is the transient in between. Those transients are short: 85 episodes across the
+corpus, median **2** readings, longest **7**, and 40 of them one reading wide.
+A reading is one to eight seconds, so a switch-off whose transient falls
+between two readings leaves no trace at all.
+
+**Three independent readings say the same thing, and the last one has ground
+truth under it.**
+
+- **A module whose ramp widget does not exist reads `True`.** On the 20,095
+  observations where `ramp_active` is *absent from the tree* — the
+  `ShipModuleButtonRamps` widget does not exist, so the module is not running —
+  `isInActiveState` reads `True` on **100.00%** of them. That absence is not
+  only a session-start state, which is how this file has read it since #35: run
+  52 has thirteen separate absence episodes, twelve of them 32 to 78 readings
+  long, and they land on travel between anomalies and on being docked. So the
+  widget is destroyed when the module stops as well as created when it starts.
+- **Four whole sessions of it.** `saxrat_escalation_trip`,
+  `saxrat_uchat_arrival`, `saxrat_escalation_probe` and run 51 — the 2026-08-16
+  Uchat runs, the same ship and evening as the live read #286 was filed on —
+  carry `-/T/F/-/-` on **every one of their 354 readings** and **zero**
+  outgoing combat lines. The guns were never on all session and the field read
+  `True` throughout.
+- **The swap's own disarm, with the client's combat log as the witness.**
+  `switchOffUndoneByClient` has been set in **35** windows across **eight
+  runs** and **both bots** — saxrat's status clause says `a gun has been
+  switched back on` and the mission runner's says `the client switched a gun
+  back on by itself … the guns are firing`. Over the ten readings before each
+  swap started, the guns fired **0.177 lines a reading** with `ramp_active`
+  reading `T` on **37.7%** of readings; over the ten readings after each window
+  cleared, **0.224** and **40.6%**. Over the 191 readings *inside* the windows:
+  **zero** gun lines and `ramp_active` `T` on **zero** readings.
+
+  Two things keep that from being an absence of evidence. The client names the
+  weapon on every outgoing line, so a gun shot and a drone shot are separable
+  without attributing anything — and 146 *drone* lines were written inside
+  those same windows, so the channel was live and the guns contributed none of
+  it. saxrat run 52, which contributes nine of the windows, flies no drones at
+  all, and its windows are empty of both.
+
+**`switchOffUndoneByClient` is therefore a phantom, and the "client re-arms the
+guns on every swap" finding it rests on is the same misreading.** The gun was
+switched off, stayed off, and the flag came back to `True` because the
+deactivation finished. That the bot dispatched no press in the window — #72's
+own measurement — is the corroboration rather than the mystery.
+
+**What each entry appears to mean, and how much of it is measured:**
+
+| entry | reading | confidence |
+|---|---|---|
+| `ramp_active` | the duty cycle, and the best "is it running" the client offers. A reading carries a gun line on 0.9% of the readings it is absent, 5.7% where it is `False`, and 48.6% where it is `True` | high; #35's original measurement plus the corpus |
+| `isInActiveState` | `not isDeactivating`. `False` **only** during the deactivation transient | high; 61,948 observations, zero exceptions |
+| `isDeactivating` | the same bit, positively. The client accepted a switch-off and is shutting the module down | high |
+| `effect_activating` | an activation pulse. A reading carries a gun line on 64.0% of the readings it reads `1`, against 21.4% for `0` and 0.5% where it is absent | medium |
+| `waitingForActiveTarget` | mostly `0` or absent; nothing here reads it | low, unchanged since #39 |
+
+### What the three rules read, and what it costs each of them
+
+Nothing is changed on this evidence — the rules sit on the path that disarms
+the ship, and #34 is what acting on a field's assumed meaning costs. What
+follows is the reading, so the fix is somebody's decision rather than a drift.
+
+- **#76 `weaponIsSwitchedOn`** is `isInActiveState == Just True`, which is
+  `not isDeactivating`, which is true on **99.7%** of all observations. It is
+  close to a constant. So the entry gate opens on a ship whose guns are idle,
+  and the switch-off is pressed on a gun that may already be off — and the
+  button is a toggle, so such a press turns it **on**. That last step is a
+  mechanism and **not an observation**: the fight presses the weapon hotkey on
+  the same readings, and nothing in a log attributes a cycle to one of the two
+  presses. What #76 is still right about is the one thing it fixed — it does
+  not read the duty cycle, which is what made run 21 skip the switch-off on
+  nine readings in ten.
+- **#50 `moduleReadsSwitchedOff`** is *sufficient* and not *necessary*. `Just
+  False` really is the client saying the switch-off landed; what it cannot say
+  is that a switch-off did **not** land, because the transient is short —
+  median two readings, longest seven — and a reading that misses it reports the
+  same thing as a click that never arrived. That is the shape of `none has yet
+  read switched off`.
+- **#154 `switchOffUndoneByClient`** is measured false above. It latches on
+  the deactivation ending, and what it does with that is make
+  `ammoSwapDisarmEndsTheSession` decline to fire — so the guard that exists
+  because *a disarmed ship is worse than the wrong charge* is switched off by a
+  report that the ship is armed, taken on a ship that is not.
+
+**Is this the root cause of the swap's "the guns never go quiet"?** Partly, and
+the corpus is specific about how much. Over the 66 `none has yet read switched
+off` waits the clause has ever printed, counted in readings: on **34** of them
+the client's combat log records **no gun line at all** for the whole wait, so
+the guns were quiet and the swap could not tell; on the other **32** the guns
+were still firing, which is #76's territory — a switch-off click that did not
+land, and nothing here addresses it. Half, not all.
+
+**What would close the rest**, and it is still the read #286 asked for: a live
+sample of a module that is **online but switched off**, with the client's own
+state known to the operator. Two things stop the corpus supplying it.
+`describeTopRowModuleDictState` prints `moduleButtonsRows.top` only, so the
+repairer and the booster the issue's disproof actually used are in no log; and
+`online` is parsed on every reading and printed on none, so "online but
+switched off" and "offline" read the same in every recorded run. Extending that
+clause to the other rows and adding `online` is one function and would make the
+next live read checkable against the log — it is deliberately not in #286,
+which changes no behaviour at all.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_module_active_state_meaning.py`. The corpus is
+recomputed as *relations* rather than as the numbers above — the two flags
+never agree, a ramp-absent module never reads switched off, the swap's own
+disarm windows carry no fire — so a corpus that grows cannot turn a true claim
+red, and **the day a run contradicts one of them the case goes red**, which is
+what makes this a finding that can stop being true rather than a paragraph. The
+three rules are *executed* through the real `Bot.elm` in `elm repl` over the
+five module states the corpus actually contains, in both apps, so what each
+rule answers for a real client state is run rather than read.
 
 **Module tooltips cannot be read the framework's way here.**
 `getModuleButtonTooltipFromModuleButton` looks up a dictionary that
@@ -5873,7 +6119,10 @@ shipped configuration rather than edge cases:
 | leaving an anomaly somebody was already sitting in (#194) | reachable code that could not fire: `weJustFinishedWarping` demanded `shipIsWarping == Just False`, which the client only ever answers while some **other** manoeuvre is named — a warp ending answers `Nothing` — so the trigger was unreachable and `FoundOtherPilotOnArrival` has never been constructed in a recorded run | `warpJustEnded`, on `Just True` followed by anything that is not `Just True`, with the ship UI's presence read separately so a reading that could not see the ship is not an arrival; "arrival" stays the landing reading, which is what the corpus measures — see the section below |
 | the overview's EWAR hints (#267) | read and never shown: `combatPriorityTier` acts on two of the five literals the corpus holds, through `commonIndications`, which the parser derives from exactly these strings — and across saxrat's 227,749 recorded readings there is no `Overview indications:` line or equivalent, because that clause was mission-runner-only | `describeOverviewIndicationHints`, in saxrat's own words (`hints 2 ('…' '…')`): distinct strings from rendered rows only, capped at eight with the count taken before the cap |
 | nothing watching the ship's health (#267) | `attritionIsUnguarded` was mission-runner-only, and saxrat's shipped defaults are exactly the state it names — both hitpoint thresholds at `-1`, so a run started without settings had the damage window armed and neither gauge guard able to see a grind, and said so nowhere | the rule byte for byte as the mission runner has it, and `describeRetreatCover` **without** its low-water-mark half, which saxrat already prints beside the withheld-readings count |
+| what its own guns achieved | `outgoingDamageSinceLastReading` read in **zero** places: every shot the bot ever fired was summed by the host, decoded by the parser and thrown away, on every reading of every recorded run | `OutgoingFireMemory` and `describeOutgoingFire`, both halves of the channel printed beside each other. An instrument: nothing decides on it, and the corpus says there is no threshold to decide on — see the section below |
 | the weapons' own dict entries (#267) | parsed on every reading, printed on none — which is why #154's Unverified note asks for exactly this reading and could not get it: `switchOffUndoneByClient` is a latch derived from `isInActiveState` with nothing printing the field it derives from | `describeTopRowModuleDictState`, five entries a module, `-` for absent against `F` and `0` |
+| whether anything is dying | **no kill count anywhere in the repository** — every occurrence of "kills" in the Elm source was prose in a doc comment, and `combatStalemate` had to infer "nothing is dying" from the guns being busy | `KillCountMemory`, off a fourth synthetic node summing the client's `(bounty)` lines. A session total that names nothing, and nothing decides on it — see the section below |
+| the status line | twelve lines under no header, reprinted in full under every decision: **79.8% of run 52's 27.7 MB log**, four decisions in five byte-identical to the one before | a one-line header on every decision, the twelve diagnostics unchanged and printed on change — see the section below |
 
 Two things about the port are worth keeping in view.
 
@@ -5910,11 +6159,29 @@ an *index* advanced when the ship is standing in the system it points at, not a
 "first name that is not here" rule — that one ping-pongs between the first two
 entries and never reaches the third. `routeAskGiveUpReadings` (20) bounds the
 asking and **latches**, because a host with no ESI credentials will never
-answer. And the counter behind it advances only while the ship is in space with
-no route and an empty probe scanner — narrower than the condition the ask
-itself fires on, deliberately, so it can never run up while the bot is happily
-fighting in a system that still has anomalies. Counting that would be #11's
-mistake a third time.
+answer. And the counter behind it advances on the readings the branch is
+**asking** on, which is #273 and is what this paragraph used to get wrong.
+
+It used to say the counter advanced "only while the ship is in space with no
+route and an empty probe scanner — narrower than the condition the ask itself
+fires on, deliberately", on the ground that narrower could only delay the
+give-up. **That prices a systematically absent condition as a late one.** The
+ask fires on *no anomaly matching the settings*; a non-empty scanner is the
+steady state in exactly that situation, so with a narrow `anomaly-name` beside
+signatures that do not match it every reading reset the counter and the bound
+was unreachable. Across the 411 readings the recorded saxrat runs ever printed
+an ask on, 397 carry a count of 0 or 1 and none reaches the bound. Not late,
+never — #11's own mistake in the shape the argument cites while walking into it.
+
+`anomaliesWorthHunting` is the one filter both sides read now, and the counter
+is keyed on `destinationAskedFor` rather than on the dead end, so a bot with
+nowhere to ask for spends no budget — which is the same defect from the other
+side, and what runs 12, 26 and 27 latched the give-up on having issued no ask at
+all. The fear the narrowing was for is answered by two declarations the decision
+reads too: `gridStillHasSomethingToDo` (a fight still going with the site's own
+signature already off the scanner, which is the one state the ask's condition
+does not exclude) and `shipIsWarpingOrJumping`. See "The route ask is bounded by
+the readings it fires on" below.
 
 `home-system` is consulted only once the circuit has been walked once. With no
 `hunt-system` at all the bot names nowhere and parks exactly as before, so an
@@ -5934,6 +6201,89 @@ on the first run: `Hunt circuit: A -> B -> C, next B` in the status line, then
 Destination` and `jumpToNextSystem` taking over. `Asked for 'B' N/20 readings
 ago with no route yet` climbing to `ROUTE SETTING GIVEN UP` is the host not
 answering, and its own log says why.
+
+### The route ask is bounded by the readings it fires on
+
+Issue #273, and the paragraph above is the argument it overturns.
+`destinationAskReadings` is what `routeAskGiveUpReadings` is compared against,
+and it advanced only while `standingInADeadEnd` — which demanded an **empty**
+probe scanner, where `setRouteToNextHuntingGround` fires whenever no anomaly
+matches the settings. With a narrow `anomaly-name` beside two non-matching
+signatures, every reading took the counter's `else` branch. The counter
+oscillated 0 → 1 → 0, `routeAskGiveUpReadings < destinationAskReadings` could
+never be true, and the ask was unbounded.
+
+**The corpus carries the pinning rather than the incident.** Across the 411
+readings the recorded saxrat runs ever printed an ask on, 397 (97%) carry a
+count of 0 or 1 and the highest any of them carries is 16 against a bound of 20
+— so no recorded run has ever asked with the counter anywhere near the bound.
+The run #273 itself quotes — 439 asks across a session's last 47,000 log lines —
+is **not on this machine**; the busiest recorded run asks on 35 readings.
+`TheRunTheIssueQuotesIsNotHere` says so as a case, because the issue reads as
+though a recording here shows it.
+
+**One filter, read by both sides.** `anomaliesWorthHunting` answers "is there
+anything here this bot would hunt", and both the decision that picks an anomaly
+and the memory update that bounds the ask call it.
+`findReasonToIgnoreProbeScanResult` therefore takes an `AnomalyChoiceContext`
+(`{ botSettings, visitedAnomalies }`) rather than a whole `BotDecisionContext` —
+the same split `nextHuntingGroundFrom` was made for, and for the same reason:
+the memory update never sees a decision.
+
+**Two guards are shared rather than restated**, because two spellings of one
+idea is the drift the issue is about. `gridStillHasSomethingToDo` is the
+three-way disjunction `decideNextActionWhenInSpace` used to spell inline — an
+attackable row, a notable wreck, a target to unlock — and it is the one state
+the ask's own condition does *not* imply, since the site's signature drops off
+the scanner while the fight goes on. That is exactly the "happily fighting" case
+the replaced argument narrowed for. `shipIsWarpingOrJumping` is the reading
+`HOOOOONK in warp` is printed on; a warp across a system runs longer than 20
+readings at this bot's step delay, so counting through one would have latched
+the give-up on a bot that was travelling perfectly well.
+
+**And the counter is keyed on the ask rather than on the dead end.**
+`destinationAskedFor` is `Just` only when the circuit has somewhere to send the
+ship, and the counter reads that, so a reading `setRouteToNextHuntingGround`
+answers by tethering spends no budget. #263's own recount found that half from
+the other side: runs 12, 26 and 27 latched the give-up having issued **no ask at
+all**, two of them with no `hunt-system` configured.
+
+**What the bot does once it fires** is tether, on that reading and every reading
+after: the latch is `botMemoryBefore.routeSettingGivenUp || …` and the branch
+tests it before the picker, so it is a hot path rather than a one-off — PR
+#257's shape, and both halves are asserted.
+
+**No bounded retry, and rotation is not here either.** `run_bot` acts only when
+the asked-for name changes, so a standing ask is one authenticated ESI call.
+Retrying it is not the recovery: the issue's own evidence is that ESI answered
+`destination 'Shumam' set` twice while the client's route panel read
+`No Destination` throughout, so the call is not what failed. Rotating the
+circuit past an entry the client will not route to is the recovery that could
+work, and it is a change to what the give-up *does* rather than to when it
+fires. It is deliberately not in this change: the bound has never fired while a
+bot was asking, so nobody has seen a reachable give-up, and designing the
+recovery before the first live firing would be calibrating against nothing.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_route_ask_bound.py`. The counter is folded
+through the real `updateMemoryForNewReadingFromGame` in `elm repl` over readings
+the real `EveOnline.ParseUserInterface` produced, and the condition it replaces
+is folded over the **same** readings beside it — without that control a session
+reaching the bound says nothing, since any counter that only rises reaches any
+bound. #263's two-callers-agree property is executed against the memory the fold
+produced rather than only read at the picker's call site.
+
+**Unverified: any of it running.** No run has been flown, and by construction
+nobody has watched a give-up fire while the bot was asking. What to watch on the
+first run that goes dry in a system with signatures on the scanner:
+`Asking the host to set the destination to 'X' (N/20 readings)` with **N
+climbing** rather than reading 0, then the give-up once, then tethering. Also
+unverified: a ship held at an acceleration gate is not excluded from the counter
+— `siteProgressStepOrElse` needs a whole `BotDecisionContext`, so that read
+cannot be shared the way the other two are — and 20 consecutive such readings
+with nothing on the grid would latch the give-up early. No recorded run shows
+that shape and the outcome is what the give-up does anyway, but it is the
+direction this widening could be wrong in.
 
 ### The lock range is learned here too, and the "no evidence" branch is the common one
 
@@ -5963,11 +6313,15 @@ by reading it".
 
 **One premise of the mission runner's is not true here and is not relied on.**
 Its `lockClickLocationFromStepEffects` argues that the lock chord "is the only
-place in this bot that presses Ctrl without Shift". saxrat presses Ctrl in three
-places: the lock, `ctrlShiftClickUiElement` (which holds Shift too), and the loot
-window's Ctrl+W. The third has no mouse effect at all, so there is no
-`MouseMoveTo` for the rule to take — both conditions are load-bearing here where
-one was there, and a case asks each of the three.
+place in this bot that presses Ctrl without Shift". saxrat pressed Ctrl in three
+places when this was written: the lock, `ctrlShiftClickUiElement` (which holds
+Shift too), and the loot window's Ctrl+W. The third has no mouse effect at all,
+so there was no `MouseMoveTo` for the rule to take — both conditions are
+load-bearing here where one was there. **The loot window presses Alt+C now**, so
+that third case is a chord this bot no longer builds; the case still asks about
+it, because what has to stay true of the rule is that a keys-only chord yields
+no location whether or not any branch still emits one, and it asks about Alt+C
+beside it.
 
 **What the refusal costs more of here.** Only the first lock of an engagement can
 ever teach a refusal, because the evidence needs the target bar empty at both
@@ -7508,10 +7862,13 @@ whose whole problem is the log's size. `test_the_channel_is_still_reported` is w
 goes red if that clause is ever dropped, since dropping it is what would turn
 this removal into a loss.
 
-**The outgoing half is genuinely unreported here**, and adding it is a separate
-change with its own evidence: saxrat reads `outgoingDamageSinceLastReading`
-nowhere, so a clause for it is a new instrument rather than a replacement for a
-removed one.
+**The outgoing half was genuinely unreported here**, and adding it was a
+separate change with its own evidence: saxrat read
+`outgoingDamageSinceLastReading` nowhere, so a clause for it is a new instrument
+rather than a replacement for a removed one. That change has since landed — see
+"saxrat reads what its own guns achieved, and there is no threshold to put on
+it" below — so both directions of the channel are printed now, and this
+removal's replacement is the whole summary rather than half of one.
 
 **`visibleCombatMessages` is kept, unused**, which is the mission runner's own
 answer to the same question — its `combatFeedIsReportedByTheHostGameLog` marker
@@ -7562,6 +7919,539 @@ matcher, and the status line simply stops carrying a clause. What a run would
 show is negative: `Combat feed` no longer appearing, and `dmg N/T (45s, Nrd)`
 appearing exactly as before. A run whose log still carries the feed is one flying
 an older tree, which is what `# bot version:` is for.
+
+### saxrat reads what its own guns achieved, and there is no threshold to put on it
+
+The ask was *"if we see lots of missed shots from us, we swap ammo and/or
+manoeuvre class"*. PR #271 made a miss reach the bot for the first time —
+`misses` sits beside `hits` on `OutgoingDamageToTarget` in all six vendored
+parser copies — so the signal was available with no host or parser work.
+
+**What ships is the instrument and not the trigger.** The rule has no threshold,
+and the client's own logs are what say so rather than caution about saying so.
+
+**First, the gap that was already there.** saxrat read
+`outgoingDamageSinceLastReading` in **zero** places. Every shot this bot has ever
+fired was counted by the host, decoded by the parser and thrown away, on every
+reading of every recorded run — the same shape as `quickMessage` before #123 and
+`avoidRats` before #125, and the worse kind: evidence that arrived and was
+discarded. `OutgoingFireMemory` folds it per reading and `describeOutgoingFire`
+prints it, beside `describeIncomingDamage`, which is the same channel in the
+other direction.
+
+#### The measurement, against the client's own kill signal
+
+Over the 40 sessions carrying outgoing fire in `~/Documents/EVE/logs/Gamelogs`
+(207,313 shots), cut at every `(bounty)` line — the only thing in this corpus
+that states a rat died, and a channel the bot is deliberately not given, so it is
+genuinely independent of anything the bot decided:
+
+| | miss share |
+|---|---|
+| worst kill-free stretch that then **produced a kill** | **100%** |
+| the next one down | **99.1%**, over 467 shots and 456 seconds |
+| worst stretch that **never** produced a kill | no higher than either |
+
+**The top row does the work and needs no second population.** A stretch that
+missed nearly every shot for 456 seconds went on to kill its rat, so any
+threshold on a miss rate below 100% fires on that fight and breaks it off. The
+"never produced a kill" group is thin — seven stretches, each the last of its
+session — and nothing here rests on it.
+
+**The two populations do not separate, at any share, at any length.** And read
+the other way round they separate *backwards*: over 30-second windows the median
+miss share is **5% where a rat died and 2% where none did**. A rule keyed on
+missing would fire hardest on the grids that were paying.
+
+**Whether they appear to separate at all depends on how the corpus is cut**,
+which is itself the evidence. At a 30-second window the two look separated at
+82% against 90%; at 45 and 60 seconds the population that produced kills reaches
+100% as well and the gap is gone. A gap that moves with the window length is an
+artefact of the window.
+
+**The stalls this bot actually suffers are low-miss stalls**, which is PR #272's
+own finding restated from this side: *"the guns were landing and the repairs were
+faster"*. Most kill-free fighting in the corpus sits below a 50% miss share. So a
+miss signal could not have caught run 48 however it was tuned, and
+`combatStalemate` is not made faster or more specific by one.
+
+#### The 702-consecutive-miss hazard is worse than recorded, not better
+
+`parse_outgoing_miss`' doc comment reads it as *"a target the guns went on to
+hurt absorbed 702 consecutive misses first"*. Located in the corpus, that run is
+a `Hunter Alvi` in `20260814_161640`: **702 shots, 2,650 seconds, not one
+landing**, at a steady 32 shots per two minutes to the end of the session, with
+zero kills in the whole stretch.
+
+**It was never a fight that recovered.** That reading comes from a name-keyed
+fold — the same *name* had been hurt earlier in the session, on a different rat —
+and scored against the bounty channel the run produced nothing at all. So the one
+episode that looks like the signal working is a genuine unwinnable stall, and it
+is indistinguishable by share and by length from the 99.1% stretch that
+recovered. The hazard is that the two cannot be told apart, not that long miss
+runs are usually benign.
+
+#### The range-conditioned form was measured too, and it does not separate either
+
+The answer offered to "the pooled miss rate has no threshold" is that a miss only
+means *the ammo is wrong* when the range says so too — the loaded charge on the
+wrong side of the `ammo-swap-range` crossover for the current target distance. So
+the fire is partitioned on exactly that and the kill question asked inside each
+half.
+
+**This needs saxrat's own run logs rather than the client's**, because only they
+carry the loaded charge and the target distance beside the shots — and they echo
+the client's `(combat)` and `(bounty)` lines, so the same independent kill signal
+is available. Counted in **readings**, folded at real reading boundaries:
+`# [N.M]` is reading N, *step* M, and folding on the whole marker counts steps,
+which is the confusion that has already cost `stall_watch.py` two calibrations,
+#141 a retreat measurement and #164 an issue's whole diagnosis. 29 runs,
+**18,644 appropriate readings against 5,520 mismatched**, 40,468 shots.
+
+**The mechanism the hypothesis rests on is not there.** Pooled over every
+classifiable reading:
+
+| partition | shots | missed | miss share |
+|---|---:|---:|---:|
+| charge **appropriate** for the range | 30,281 | 3,494 | **11.5%** |
+| charge **mismatched** | 10,187 | 895 | **8.8%** |
+
+A charge on the wrong side of the crossover misses **no more** than one on the
+right side — slightly less — and the same holds band by band when the comparison
+is controlled for distance. That is what a crossover *is*: it is about damage at
+range, not about tracking, and what makes a shot miss is the target's angular
+velocity. So the proposed condition is not selecting fights where the guns cannot
+hit, because there is no such population to select.
+
+**And the partition does not separate the kill question.** Inside the mismatched
+half, with a lookahead of even **ten readings**, the stretches that produced a
+kill reach a **100%** miss share while the ones that produced none top out at
+17%, 4% and 0% — and at a shot floor of 40 there are **zero** barren mismatched
+stretches left at all. Conditioning removes the barren population rather than
+sharpening it.
+
+**Scored with no lookahead it appears to separate, and that gap is one stretch
+at every shot floor.** That stretch is run 36's: the guns hold a short-range
+charge while the target drifts from 19 km out to 34 km against a 15 km
+crossover, and miss every shot — **58 shots over 133 readings, no kill**. It is
+scored barren only because the class changed before the kill landed. **Three rats
+die in the very next ten readings**, on three landed shots and no misses at all. So the one stretch carrying the
+apparent gap is a boundary artefact, which is the same trap that made the pooled
+window measurement look separated at one window length and not at another.
+
+**The dead band is excluded rather than assigned**, because inside it the swap
+itself declines to decide — and run 48's deadlock is exactly a target parked in
+that band, so the readings a careless classification would misfile are the ones
+the question is about. The charge is the bot's *believed* one, which its own
+clause marks `assumed from the load, not read back`; that is deliberate rather
+than a compromise, since a trigger could only ever act on the belief, so
+measuring on the belief measures exactly the input the proposed rule would have
+had.
+
+#### Why neither actuator was wired
+
+- **The manoeuvre half is expressible and was not widened.**
+  `ensureShipIsKeepingRange` holds `vkey_E` and `ensureShipIsOrbiting` holds
+  `vkey_W` over a click, and they are the last two key-wrapped clicks on the hot
+  path — PR #243 removed the third (`vkey_Q` on approach) because a posted key
+  inherits the session's modifiers, and with the Fn bit set the bot pressed
+  macOS Quick Note at itself 241 times in one run. They are also the *outermost*
+  dispatch in `decideActionInAnomaly` and re-issue on every reading until the
+  client reports the manoeuvre, so changing class more often makes them fire
+  more often on a path that has no bound of its own. **They should be converted
+  the way PR #249 converted the approach before anything drives them harder**;
+  that is a prerequisite rather than a nicety, and it is not this change.
+- **The ammo half is fed by a distance and by nothing else.** `rangeVerdict` is
+  a pure function of the active target's distance and the configured crossover,
+  so "swap because we are missing" would need a second input to a rule that has
+  one. And the actuator does not finish what it starts — see below.
+
+#### The ammo swap abandons the attempts it already starts, and why
+
+Run 50 carries **127 `Gave up on loading` lines**, 79 abandoning
+`Multifrequency M` and 48 abandoning `Radio M`. Counted as *attempts* rather than
+as lines those are **6 attempts**, against 26 started — 13 of which completed and
+7 of which were dropped when the target went away. Two causes, and neither is the
+disarm bound being too short:
+
+- **The weapon's context menu does not offer the wanted charge.** `Could not find
+  menu entry with text containing 'Radio M'` appears 100 times and the
+  `Multifrequency M` form 14, and the cascade then waits until
+  `clearStrayContextMenu` clears the menu and the budget expires. The menu omits
+  the charge *already loaded*, so this is the swap asking for a charge the gun
+  may already carry while `chargeLoaded` reads `(assumed from the load, not read
+  back)` — which is #154's own open question, now with a run behind it.
+- **The guns never go quiet.** The other four attempts spend the budget on
+  `Stop this weapon before loading` (8 to 23 times each), `Told the guns to stop
+  3 of 3 readings ago and none has yet read switched off`, and the disarm gate
+  deferring under incoming fire. That is #76's territory — a switch-off click
+  that does not land — and nothing here addresses it.
+
+**The client refuses nothing**: `cannot load or unload` appears **zero** times in
+run 50, so the guns are being stopped properly when they are stopped at all.
+
+So the swap completes 13 of the 19 attempts that get an answer and abandons the
+other 6, bounded and retried at the next change of range. **Triggering more swaps
+on a miss signal would make the bot worse rather than better**, and there is no
+miss signal to trigger on in any case.
+
+#### Verified without a live client
+
+`tools/macos-host/tests/test_saxrat_outgoing_fire.py` (26 cases). The rule is
+executed through the real `Bot.elm` in `elm repl` and folded over whole sessions
+rather than asked once, and the readings it is asked about carry the host's own
+`MacOsHostSyntheticOutgoingDamage` node — built by `botlab_host.py`'s emitter and
+decoded by the real `EveOnline.ParseUserInterface`, so the `misses` key the host
+writes strictly is the one under test. The corpus is recomputed as **relations**
+rather than as the numbers above, so a corpus that grows cannot turn a true claim
+red — and if one of them ever fails, the finding has changed and the trigger has
+become writable, which is what that file exists to make visible.
+
+The hazard case is the one to keep: **a thousand readings of nothing but misses**
+folded through the rule leave `combatStalemateVerdict` exactly where it was,
+because the two do not share an input. That is what "nothing decides on this"
+means operationally rather than as a claim about occurrences.
+
+Confirmed by mutation, ten of them, each failing a named case: the run advanced
+on a landed zero, so #90's failure and this one collapse; the run reset on a
+reading with no shot in it, which is `gunsSilencedTicks` pinned at 1 again; an
+absent channel counted as a reading that missed nothing; `hits` and `misses`
+summed, which is the one mistake the parser's doc comment names; the ship-wide
+run advanced by a reading that hit one target and missed another; the worst-run
+high-water mark following the live run down; the status clause dropping its
+"Nothing decides on this"; a decision reading the field; a second call site given
+to either manoeuvre verb; and the wanted charge given a second input.
+
+The range-conditioned measurement is graded the same way, on its own premises,
+since what it asserts is a finding rather than shipped behaviour: five
+mutations, each failing a named case -- the lookahead ignored, so a class
+boundary fakes a stall; the kill channel never read; every reading called
+appropriate, so the partition has one side; **the dead band classified instead
+of excluded**, which survived the first pass and is why
+`test_the_dead_band_is_excluded_rather_than_assigned` exists; and misses pooled
+into the landed count.
+
+#### Unverified
+
+**Any of it running.** No run has been flown; this was written with the corpus
+and the repl. What to watch on the first one is `Outgoing fire:` on every
+reading, with the landed and missed counts *moving* while the guns fire. A run
+that fights and reads `NO COMBAT LOG` throughout is a host not carrying the
+channel; a run whose two counts stay at zero while the guns cycle is the summary
+not reaching the bot, which is the direction this fails silently in.
+
+**Whether a bot-side reading separates the populations where a client-side second
+does not.** The pooled numbers are folded at the client's own second, which is
+finer than a real reading (one to eight seconds) — the fold most favourable to a
+long run, and the same argument #271 makes. The range-conditioned measurement
+*is* bot-side and folded at real reading boundaries, so that gap is closed for
+the partitioned question and open for the pooled one. What still has no reading
+anywhere is the miss share sitting beside the target's own hitpoints, which is
+the one instrument that would say whether a fight is being won rather than
+whether a rat happened to die in the window.
+
+**The charge the partition is built on is the bot's belief, not the gun's
+state.** Run 50's own give-ups are the case where those come apart, so a
+mismatch classified from `chargeLoaded` can be a mismatch that never existed.
+That weakens the partition toward noise rather than toward a false separation,
+and the mechanism result would need a very systematic error to flip — but it is
+not measured, and the clause this change ships is what would let a later run
+measure it.
+
+**Why run 50's menu did not offer the charge.** Whether the gun already carried
+it — in which case the menu is correct and `chargeLoaded` is wrong — or the menu
+was attributed to the wrong module is still not established, and nothing here
+claims those attempts would have succeeded.
+
+### The whole run on one line, and the repetition ended where it was made
+
+The operator's ask: *"our Status text could be much more brief and informative.
+I'm imagining a header that'd read `Amarr YYZ-123 Centium Devourer 10/100/100 5
+rats 273 kills 12 anoms` … and anything else you think is important enough for a
+single status line brief. Let's reduce the verbosity of all the rest of it."*
+
+Three things, and they are one thing.
+
+#### The header
+
+```
+Amarr AIC-176 Centii Devourer [10/100/100] 5 rats 273 kills 12 anoms | ship 58/100 | dmg 604/3500
+```
+
+The six fields asked for, in that order and those words, and two more. Run 48
+sat in one anomaly for 3,883 seconds and the first question anybody asked was
+whether the ship was in trouble; **the answer that settled it was a shield at
+0%, an armour that was not moving and incoming damage far below the retreat
+threshold** — three numbers that were all in the log and took a replay to find,
+because they were spread across three separate diagnostic lines.
+
+Four things about the rendering are decisions rather than layout.
+
+- **`ship` is the *believed* pair, not the live gauge.** That is what every
+  guard here goes by: `plausibleHitpointsPercent` rejects the impossible
+  readings and `believed` withholds a fall a second reading has not confirmed,
+  and this hull produced values from -213% to 40,028,800% on one recorded run. A
+  header reading the live value would print numbers no rule acts on. A gauge
+  that has not answered yet reads `?`, never a number.
+- **The target's condition is `describeTargetHitpoints`, called rather than
+  copied.** PR #244 pinned that clause as deliberately unshared between saxrat
+  and the mission runner, and a header spelling the triple out again would be a
+  third rendering for two apps to drift between. `activeTargetNameFromReading`
+  was extracted for the same reason, since the header and the row below it both
+  want it.
+- **The second field has three states and no fourth is invented.** Warping, an
+  anomaly the probe scanner names, and in station. `DEADSPACE` is deliberately
+  absent: a pocket reached through an acceleration gate has no scan-result row,
+  so the scanner names nothing and the honest answer is `-`. The docked test is
+  asked *first*, because a docked reading has no ship UI and
+  `shipWarpingFromReading` answers `Nothing` there.
+- **`no kill log` rather than `0 kills`** where the host does not carry the
+  channel, which is `describeOutgoingFire`'s `NO COMBAT LOG` for its reason.
+
+#### The kill count, which is new capability
+
+There was no kill count anywhere in this repository — every occurrence of
+"kills" in the Elm source was prose in a doc comment. See the Architecture
+section for the fourth synthetic node, what it counts and the three things it
+cannot claim. `KillCountMemory` accumulates the session total in
+`updateMemoryForNewReadingFromGame`, which is the only thing that runs
+unconditionally on every reading, and **nothing decides on it** — PR #130's
+posture for `quickMessage`, and here with the extra reason that what a bounty
+counts is not what a combat rule would want it to mean.
+
+#### The verbosity, ended at the layer that was making it
+
+**The repetition is the host's, not the bot's**, and that placement is the
+finding rather than a convenience. A bot emits one status text per decision;
+`log_decision` printed all of it every time. Measured over saxrat run 52 — 27.7
+MB, 5,102 readings, 16,742 decisions — **79.8% of the whole log is status
+text**, of which the diagnostic lines under the header are 77.2% and the header
+itself 2.6%. Fixing that in an Elm status function would have been fixing the
+wrong layer, and would have needed the bot to know which decision of a reading
+it was on, which it cannot.
+
+`decision_log_lines` prints the first line every time and each line below it
+only when that line differs from the last line *printed* in its place.
+
+**Per line rather than per body, and the difference is a factor of two.** The
+first version of this suppressed the body only where the whole of it repeated,
+which removes **26.8%** of run 52's log: the body is byte-identical to the
+previous decision's on only about a third of them, because some counter or other
+moves on two decisions in three and drags all eleven steady lines through with
+it. Per line it is **61.5%**. Both numbers were recomputed from the run rather
+than inferred from the per-clause change rates that made the first version look
+adequate, which is the mistake that version was.
+
+Three properties:
+
+- **Nothing is deleted or made conditional.** All 54 `describe*` clauses are
+  where they were, in the words they were in. `describeOverviewIndicationHints`
+  (#267's `hints`, 702 readings of `Pilot is tracking disrupting me` in run 52),
+  `describeTopRowModuleDictState`, `attritionIsUnguarded` and
+  `describeOutgoingFire` are all untouched.
+- **The comparison is against what was printed, never against a reading count**,
+  so the "changed but not shown" case does not exist. A line that differs from
+  the last line printed at its position is printed however the bot happens to be
+  stepping. A *position* is not a clause — a docked reading's status text is
+  shorter — and the invariant is deliberately about the position, which is what
+  makes it one line to state and one line to check.
+- **It says how many it suppressed**, one short line
+  (`#   (11 status line(s) unchanged)`), because a log that prints a clause less
+  often without saying so is a log whose counts have quietly changed meaning.
+
+**What that costs, stated rather than left to be found.** Anything counting a
+status clause's occurrences in a *future* recorded run is now counting the
+decisions that clause *moved* on rather than every decision. Counting
+**readings** is unaffected — that has always been done on
+`RequestToVolatileProcess` — and the intra-reading duplication the suppression
+removes is duplication those counters never wanted. What is genuinely lost is
+per clause: a clause carrying a per-reading counter still prints on nearly every
+reading, and a steady one now prints once. So a ratio between two things the
+*same* clause counts survives; an absolute count of a clause's occurrences does
+not, and neither does a comparison between a steady clause and a moving one. Existing recorded logs are unchanged, so no corpus case goes red
+today; the ones to watch on a future run are `test_saxrat_combat_stalemate`'s
+per-reading regexes and `test_arrival_pilot_window`'s, both of which sample
+readings out of the status body.
+
+**One trap found while doing it, worth keeping.** A comment placed between
+`statusTextFromState`'s `in` and its list does not fail
+`test_quick_message_logged`'s placement pin — that pin locates the outer list by
+splitting the collapsed declaration on `in [ `, so removing that occurrence makes
+it read the whole function and pass on anything. `Bot.elm` says so where the
+comment would go, and `test_saxrat_kill_counter` has the case.
+
+#### Verified without a live client
+
+`tools/macos-host/tests/test_saxrat_kill_counter.py`, **46 cases**. The rules are
+executed through the real `Bot.elm` in `elm repl` and the readings they are asked
+about carry the host's own synthetic node, decoded by the real
+`EveOnline.ParseUserInterface` — so the `kills` key the host writes is the one
+under test rather than a record shaped by hand. The rule is *folded* over
+sessions rather than asked once, since a counter that is right for one reading
+and wrong across a session is the defect that shape prevents. The corpus is
+recounted as **relations**: the status text is most of a recorded log, the body
+dwarfs the header, most decisions reprint a body byte for byte, and the two
+bounty readers agree on every recorded line.
+
+Run against a pristine export of `origin/main` with only the test file copied
+in, **42 of the 46 fail**. The four that pass are the three corpus measurements
+— statements about the world rather than about the code — and
+`test_the_bounty_lines_still_do_not_reach_the_bot`, whose job is to refuse a
+*future* widening rather than to discriminate this change.
+
+**Unverified: any of it running.** No run has been flown. What to watch on the
+first one is the header on every decision with `N kills` *climbing* while rats
+die, and `#   (N status line(s) unchanged)` appearing between decisions of one
+reading. A run that fights and reads `no kill log` throughout is a host not
+carrying the channel; a run whose kill count stays at 0 while the bounty lines
+scroll past in the echo is the node not reaching the bot, which is the direction
+this fails silently in. And **whether a bounty line is one rat is measured off
+the client's logs rather than observed**: only 0.25% of them are byte-identical
+to another in the same session and none occurs more than twice, which is not
+what a channel duplicating its own output looks like — but nobody has counted
+rats on a grid and compared.
+
+### The loot window's escape pressed a key that needs focus, and pressed it forever
+
+Issue #285, and it is the second recorded instance of one defect.
+`decisionIfNoEnemyToAttack`'s loot-window escape fired at
+`lootWindowOpenTicks > 2` and pressed **Ctrl+W** at a window it had never
+focused — with **no upper bound**, so once the trigger was crossed it was the
+only thing the bot did for as long as the window stayed in the reading.
+Measured live on 2026-08-16, an escalation room in Uchat with the site cleared:
+**919** `force it shut (Ctrl+W)` decision lines and **zero** windows closed.
+`Alt+C` pressed by hand at the same client shut it — `['InventoryPrimary']`
+before, `[]` after — the Ctrl+W count froze, and the bot went on to take an
+acceleration gate.
+
+**The run is `saxrat_uchat_escalation_2026-08-16.log` and it is on this Mac**,
+which matters because the first pass at this measurement globbed
+`saxrat_run*.log`, missed the incident entirely, and reported a clean corpus.
+Recounted from it: the 919 lines fall on **303** readings at three lines a
+reading, the bot's own `lootWindowOpenTicks` peaks at **301**, and 302 of those
+303 readings carry no decision but this one. The issue's own "roughly 190
+readings" is an estimate off the line count and understates the episode by half.
+
+**Both halves are fixed and the second one is the more important.** Swapping the
+keystroke alone would leave the branch unbounded, and a *working* keystroke that
+fails for some other reason takes every reading forever exactly as the broken
+one did. This is the family PR #257 (a step on a hot path that could act forever
+without progressing, 108 minutes) and PR #272 (8,770 readings at a branch that
+asked "bounce?" and never bounced) are already in.
+
+**The click this bot could never reach.** Found while writing the ladder, and it
+is why the mission runner never had this incident:
+`wreckLootWindowsFromReadingFromGameClient` selects a window **by** its carrying
+"Loot All", and the close-button lookup sat under the `Nothing` branch of a
+second lookup for that same text on the same node — so the Close click, and the
+`askForHelpToGetUnstuck` beneath it, were unreachable by construction. The
+escalation was therefore the only thing after "Loot All". The mission runner
+reached the equivalent click and its own comment records what happened:
+*"Confirmed live on a window that had been stuck open for hours: Ctrl+W alone
+left it open, clicking its title bar first then Ctrl+W closed it, and clicking
+Close closed it with no focus step at all."* That bot also bounds the wait, at
+`lootWindowRefusesToCloseTicks` (30). **So the finding was acted on in one bot
+and not the other**, which is the sharper version of "recorded and never acted
+on".
+
+**The ladder, and what the bound falls through to.** `lootWindowCloseRung` is a
+pure rule over `{ readingsOpen, closeControlIsInTheReading, togglePressedRecently }`:
+
+  - up to `lootWindowOwnControlsReadings` (2), "Loot All" — the control for the
+    thing the window is open to do;
+  - to `lootWindowCloseControlReadings` (6), the window's own **Close** control,
+    where the reading carries one;
+  - past that, or on any reading whose controls the parser cannot find, `Alt+C`;
+  - past `lootWindowForceCloseGiveUpReadings` (16), **nothing**: the branch says
+    so once and hands the reading to `lootAnotherWreckOrLeaveTheGrid`, which is
+    the same expression the no-loot-window case takes. On the reading the bound
+    expires and on every reading after, the bot opens the next notable wreck,
+    scrolls one into view, or leaves the grid — it acts, and it never returns
+    to the loot window while that window stays open. A loot window nobody can
+    close is worth strictly less than a bot that goes on ratting, which is
+    `closeMessageBox`'s own answer to the same shape.
+
+**`> 2` is the right trigger and nothing has to be reset on a close**, both
+measured rather than kept. `lootWindowOpenTicks` is derived from the window
+being *in the reading* — zero on any reading with no wreck loot window — so a
+close that lands ends the escalation by itself and the next wreck starts from
+the first rung. And every stretch the counter records in a run where the window
+closed peaks at exactly **2** (ten of them across five runs, plus one of 1 in
+the incident run after the window was shut by hand), so the trigger sits above
+the whole recorded distribution of closes that worked.
+
+**16 is a multiple rather than a number**, eight times that rung, and it is
+placed in a gap rather than cut through a distribution — the recorded peaks are
+1, 2 and **301**, and nothing lies between. It is enough for several clicks on
+the Close control and several presses at the settling window, and under the
+shortest escalation any recorded run ran: the five saxrat runs that ever reached
+the force-close spent **2, 3, 23, 29 and 303** consecutive readings in it and
+closed nothing in any of them.
+
+**Alt+C is a toggle, so the press is conditioned twice.** It is only reachable
+from a reading that already carries the window — pressed at no inventory it
+*opens* one, manufacturing the window the branch exists to remove — and it gets
+`moduleButtonClickSettlingSteps`' window between presses, because pressing a
+toggle before the client has shown the result re-opens what the last press
+closed. The live measurement says the propagation is not instant. The settle
+falls through to a rung that *clicks something* rather than to a wait — "Loot
+All" — and it does not displace the Close control, since it is the keystroke
+being settled for and not the mouse.
+
+**No focus click, and that is a conclusion rather than an omission.** The
+earlier recovery needed a title bar clicked because the key being pressed was
+Ctrl+W; Alt+C needs no focus and was verified unfocused. The two rungs below
+already click *into* the window, so if focus were what was missing those clicks
+would have supplied it, and clicking a window at a computed point is what
+`beginCascade` records costing a real route an accidental "Clear All Waypoints".
+
+**The chord is built the way the fixed input path expects.** `Alt+C` is
+`KeyDown vkey_MENU, KeyDown vkey_C, KeyUp vkey_C, KeyUp vkey_MENU` — the shape
+`Alt+F1` already uses in this file — because `cg_input` stamps each posted event
+with the modifiers *this process is holding*, which is PR #241's fix. Checked
+against the host rather than assumed: `vkey_MENU` (0x12) maps to Option and
+`vkey_C` (0x43) to `C` in `_VK_TO_CGKEYCODE`, and `cgi_flag_for_key` holds
+`CGI_FLAG_OPTION | CGI_DEVICE_LOPTION` for Option in both halves, so the `C`
+keydown that follows carries it.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_saxrat_loot_window_close.py`. The rung, the chord's
+round trip and the status clause are executed through the real `Bot.elm` in
+`elm repl`, and the readings the branch is asked about are built by the **real**
+`EveOnline.ParseUserInterface` — so what `wreckLootWindowsFromReadingFromGameClient`
+matches is the parser's own answer rather than a hand-written record. The
+counter is folded over whole sessions rather than asked once, so "a close resets
+it" is run rather than read. The corpus is recounted as *relations* — every
+recorded stretch that closed is at or below the first rung, the runs that
+reached the escalation spent many times that in it, and the decision lines
+outnumber the readings — so a growing corpus cannot turn a true claim red.
+
+**Unverified: any of it running.** No run has been flown since. Whether `Alt+C`
+closes a *genuinely separate* loot or secondary window is not established: what
+closed by hand was `InventoryPrimary`, and the stuck tree held only that node and no
+`LootWindow`, so `wreckLootWindowsFromReadingFromGameClient` was matching the
+primary inventory. That is the case the branch is nominally about, and the
+bound is what covers it being wrong. What to watch on the first run that meets
+one: `loot N/16` in the status line climbing at all — on a healthy run it
+appears at 1 or 2 and vanishes — then the Close-control line, then
+`(pressing Alt+C at it)` for a reading or two, then the clause gone.
+`(GIVEN UP ON, still open)` standing while ordinary decisions resume is the
+bound doing its job; the same clause on a run where windows are closing normally
+would mean the settle is swallowing the presses. **The Close click has never
+run on this bot at all** — it was unreachable until now — so a run that reaches
+`loot 3/16` and prints `click its own Close control` is the first evidence
+anyone will have of it here.
+
+**How often that control is findable at all is the other open question.** saxrat
+asks `parseWindowControlsFromWindow |> .closeButton`, a texture match, where the
+mission runner keeps a second question beside it — a descendant whose `_name` is
+`CloseButtonIcon` — and records why: before that parser learned this client's
+`system_icons/close_16px`, "across 112 logged runs the loot window's own close
+arm matched it zero times and missed 77". saxrat's vendored parser does carry
+the macOS texture, so the standard parse should work here, but nothing has
+watched it. The failure direction is the safe one — a reading with no control
+found goes straight to `Alt+C` rather than waiting — and porting
+`closeControlOfWindow`'s fallback is the follow-up.
 
 ### An in-range acceleration gate is opened from the panel here too
 
@@ -8014,15 +8904,39 @@ would otherwise pass: a corpus of letters and spaces says nothing about whether
 a comma is possible, so `test_the_column_does_carry_other_punctuation` is what
 stops the finding resting on a narrow sample.
 
-**`anomaly-name` is not answered, and the corpus is structurally unable to answer
-it.** Neither bot ever logs the probe scanner's Name cell. `Dict.get "Name"`
-occurs once in saxrat's `Bot.elm`, inside `matchesAnomalyNameFromSettings`, where
-it is folded into a `Bool` and dropped; what a run prints about an anomaly is the
-**ID** the scanner gives it (`We are in anomaly 'AIC-176'`). So the site words
-`run_saxrat.sh` itself asks for -- `Hideaway`, `Refuge`, `Burrow`, `Rally Point`,
-`Sanctum`, `Haven`, `Forsaken`, `Forlorn` -- occur across all 86 recorded runs
-**zero** times. There is no reading to go back to, and no amount of corpus makes
-one.
+**`anomaly-name` was not answerable, and the fix was to start writing the column
+down.** Neither bot ever logged the probe scanner's Name cell: `Dict.get "Name"`
+occurred once in saxrat's `Bot.elm`, inside `matchesAnomalyNameFromSettings`,
+where it was folded into a `Bool` and dropped, and what a run printed about an
+anomaly was the **ID** the scanner gives it (`We are in anomaly 'AIC-176'`). So
+the site words `run_saxrat.sh` itself asks for -- `Hideaway`, `Refuge`, `Burrow`,
+`Rally Point`, `Sanctum`, `Haven`, `Forsaken`, `Forlorn` -- occur across all 86
+recorded runs **zero** times. There was no reading to go back to, and no amount
+of corpus made one.
+
+**`describeAnomalyIdentity` now prints the Name and Group beside the ID**, on the
+decision line, the `Current anomaly:` clause and the one-line header, so a run
+flown from here writes the column down. The 86 runs behind the counts above are
+unchanged and still cannot answer it; what changed is that the next corpus can.
+**Logging it is not knowing it** -- six names is not a distribution, and the
+question stays open until a corpus of them exists.
+
+Two things that had to hold, and are asserted rather than assumed. The ID stays
+the **first single-quoted token** on the line, because `engagement_watch.py`
+names every screenshot it takes from `We are in anomaly '([^']+)'` and takes the
+first group -- a name put in front would silently rename every screenshot of
+every run while the watcher went on looking healthy. And **nothing keys on the
+name**: `visitedAnomalies` is still filed under the ID, since a Name is shared by
+every site of a kind and a memory keyed on `Sansha Refuge` would confuse the one
+just cleared with the next one.
+
+**A corpus reader broke on it, silently, which is the shape to expect from this
+change.** `test_saxrat_combat_stalemate.ANOMALY` was
+`^Current anomaly: (\S+?)\.` -- a run of non-space followed directly by a full
+stop, which the new line does not have. It would have matched **nothing** on
+every future run while reporting a corpus that simply never named an anomaly. It
+takes both spellings now, capturing the ID either way, which is `RATS_OLD`'s own
+precedent one line below it.
 
 **The five names anybody has written down are the whole of the direct evidence,
 and one of them is the useful one.** `test_saxrat_anomaly_name_wildcard.py` keeps
@@ -9235,6 +10149,47 @@ exists.
   has never run at all; watch the status line's `Arrival window:` clause going
   `OPEN` after each warp and then `closed`, and escalate on a pilot named there
   who warped in during a fight.
+
+  And since #284 it **says the whole run on one line, and knows whether anything
+  is dying**. The status text now opens with a header — `Amarr AIC-176 Centii
+  Devourer [10/100/100] 5 rats 273 kills 12 anoms | ship 58/100 | dmg
+  604/3500` — carrying the six fields the operator asked for plus the ship's
+  believed gauges and the incoming-damage window against its threshold, which
+  are the three numbers run 48's 3,883-second stall took a replay to find. The
+  kill count is **new capability**: there was none anywhere in the repository,
+  and it comes off the client's `(bounty)` channel through a fourth synthetic
+  node and all six vendored parsers. It counts bounty payouts to this character
+  rather than kills by this ship, it names nothing and cannot be split, and
+  nothing decides on it. The verbosity is reduced **in the host** rather than in
+  the bot, because that is where the repetition was made: `decision_log_lines`
+  prints the header every decision and the diagnostics only when they changed,
+  and says so when it suppresses. No clause was deleted or reworded. See "The
+  whole run on one line, and the repetition ended where it was made" above.
+  **Untested against a live client**; watch `N kills` climbing while rats die,
+  and escalate on a run that fights and reads `no kill log` throughout.
+
+  And since #285 its **loot-window escape presses a key that works, and stops
+  pressing it**. It pressed `Ctrl+W` — the client's *close the active window* —
+  at a window it had never focused, with no upper bound, so once
+  `lootWindowOpenTicks > 2` that was the only thing the bot did for as long as
+  the window stayed in the reading: 919 decision lines across **303** readings
+  and zero windows closed, measured live, and the **second** recorded instance
+  of the same defect after the 650 this file already carried.
+  `Alt+C` is the inventory toggle and needs no focus, and one press by hand shut
+  the stuck window. Both halves are fixed: the keystroke, and a bound at sixteen
+  readings after which the branch says so once and hands the reading to the same
+  wreck path the no-loot-window case takes — open the next wreck, scroll one
+  into view, or leave the grid — with the window still on the screen. A third
+  thing came out of it: the window's own **Close** control, which this bot could
+  never click, because the lookup for it sat under a `Nothing` branch of a test
+  for the very text the window is selected by. That click is the mission
+  runner's own answer to this defect and is now a rung of its own. See "The loot
+  window's escape pressed a key that needs focus, and pressed it forever" above,
+  including why no focus click is kept, why the trigger and the reset are left
+  as they are, and the recount that puts the incident at 303 readings rather
+  than the issue's 190. **Untested against a live client**; watch `loot N/16` in
+  the status line, `(pressing Alt+C at it)` for a reading or two, and then the
+  clause gone.
 - **`route_setter.py`** works — reads a chat channel's MOTD, parses the embedded
   `showinfo:5//<systemID>` links (tag-stripped, so a malformed `Sizamo</loc>d`
   still recovers as `"Sizamod"`), right-clicks each in the packed rich text and

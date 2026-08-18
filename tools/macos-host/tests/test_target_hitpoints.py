@@ -607,6 +607,22 @@ class TheFieldIsAnInstrumentAndNothingActsOnIt(unittest.TestCase):
                 "field these cases think it does")
 
     def test_only_the_status_line_reads_the_two_rules(self):
+        """The two rules are the status line's and nothing else's.
+
+        **saxrat's status line is two declarations since #284**, and this counts
+        both. `describeStatusHeader` is the header row -- the one line the host
+        prints on every decision -- and it names the target and its condition
+        because that is the question the operator asked the header to answer. It
+        is still the status line reading these rules, and there is still exactly
+        one rendering of the triple: the header *calls* `describeTargetHitpoints`
+        rather than spelling the three numbers out again, which is what keeps
+        PR #244's deliberate divergence between the two apps down to one clause
+        per app rather than two.
+
+        What this case still refuses is what it always refused: a *decision*
+        reading either rule. Each named reader may read each rule once, and
+        nothing outside them may read it at all.
+        """
         # The declarations are cut out of the *source* and stripped afterwards:
         # removing the doc comments first leaves a leading blank line where each
         # one was, which `top_level_declarations` no longer recognises -- a
@@ -614,19 +630,26 @@ class TheFieldIsAnInstrumentAndNothingActsOnIt(unittest.TestCase):
         # checked nothing, which is what this file exists to prevent.
         for app, source in self.sources().items():
             code = self.code_only(source)
-            status = self.code_only(declaration(source, "statusTextFromState"))
+            declarations = top_level_declarations(source)
+            readers = ["statusTextFromState"]
+            if "describeStatusHeader" in declarations:
+                readers.append("describeStatusHeader")
+            bodies = [self.code_only(declaration(source, name))
+                      for name in readers]
             for name in ("activeTargetHitpointsPercent", "describeTargetHitpoints"):
                 own = self.code_only(declaration(source, name))
                 self.assertEqual(
                     code.count(name),
                     # its own signature and its own definition line
                     own.count(name)
-                    + status.count(name),
-                    "%s: %s is read outside statusTextFromState and its own "
+                    + sum(body.count(name) for body in bodies),
+                    "%s: %s is read outside the status line and its own "
                     "declaration" % (app, name))
-                self.assertEqual(
-                    status.count(name), 1,
-                    "%s: the status line reads %s more than once" % (app, name))
+                for reader, body in zip(readers, bodies):
+                    self.assertEqual(
+                        body.count(name), 1,
+                        "%s: %s reads %s more than once"
+                        % (app, reader, name))
 
     def test_no_decision_branch_names_the_field(self):
         # The named branches a target's condition would obviously be wired into

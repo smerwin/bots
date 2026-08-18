@@ -283,6 +283,46 @@ class Session:
     def rclick(self, cx, cy, settle=1.5):
         self.click(cx, cy, button=RIGHT, settle=settle)
 
+    def doubleclick(self, cx, cy, button=LEFT, settle=1.5):
+        """Approach, then double click. The client's own way into a row.
+
+        A market sell order, an inventory stack, an asset in a hangar: the
+        client opens these on a double click and offers nothing on a right
+        click, so without this the repl simply cannot reach them. Trying to
+        buy one specific market order is what found the gap -- right-clicking
+        the row answers with the column menu (`Make primary`, `Hide Jumps`)
+        and nothing else.
+
+        **It is one protocol command, not two clicks, and that distinction is
+        the whole reason this exists.** Both platforms already carried the
+        verb -- `cg_input`'s own `doubleclick` on macOS, `win_platform
+        .command`'s `elif verb == "doubleclick"` here -- and only `Session`
+        never exposed it. Sending `down`/`up` twice through `_cg_send`
+        instead does not work, and it is worth saying why, because it looks
+        like it should: each line is a separate round trip through the
+        backend, so the gap between the two presses is whatever that
+        machinery costs rather than the few milliseconds asked for. On
+        Windows the receiving application does the detection from that gap
+        against `GetDoubleClickTime`, so a slow pair arrives as two single
+        clicks; `WindowsInput.double_click` posts both pairs back to back
+        with nothing between them, which is what its own docstring says is
+        required. macOS is stricter still and cannot be faked at this level
+        at all -- the second press has to carry
+        `kCGMouseEventClickState = 2`, which only `cg_input`'s own command
+        sets.
+
+        The settle is longer than `click`'s by default because what a double
+        click opens is usually a window, and the caller's next read wants it
+        to be in the tree.
+        """
+        x, y = self.to_screen(cx, cy)
+        self._cg_send(f"move {x - 40:.1f} {y:.1f}")
+        time.sleep(0.2)
+        self._cg_send(f"move {x:.1f} {y:.1f}")
+        time.sleep(0.35)
+        self._cg_send(f"doubleclick {button}")
+        time.sleep(settle)
+
     def key(self, *names, settle=1.0):
         """Press keys together, released in reverse -- key('alt', 'j')."""
         codes = [KEYS[n] if isinstance(n, str) else n for n in names]

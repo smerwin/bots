@@ -171,6 +171,32 @@ eve.size_of(n)          # (312, 38)
 eve.click_node(n)       # centre of it, descending if it has no size of its own
 ```
 
+## Double clicking
+
+```python
+eve.doubleclick(x, y)   # one protocol command, not two clicks
+```
+
+Some things the client only opens on a double click and offers nothing at all
+on a right click, so this is the only way in — an inventory stack, an asset in a
+hangar, and (per CLAUDE.md) an overview wreck, where the client reads a double
+click as "Open Cargo" and flies there first if it has to.
+
+**Do not try to fake it with two `down`/`up` pairs.** Each `_cg_send` is its own
+round trip through the backend, so the gap between the presses is whatever that
+machinery costs rather than the few milliseconds intended. On Windows the
+receiving application decides from that gap against `GetDoubleClickTime`, so a
+slow pair arrives as two single clicks; macOS is stricter and cannot be faked
+here at all, since the second press must carry `kCGMouseEventClickState = 2`.
+Both platforms already carried a `doubleclick` verb — `cg_input`'s own on macOS,
+`win_platform.command`'s here — and only the repl was missing the method.
+
+**A row that ignores it is telling you something.** A market Sellers row does
+not open on a double click and its right-click menu offers only column options
+(`Make primary`, `Hide Jumps`), so a specific sell order cannot be bought that
+way; the Buy dialog's **Advanced** form is the route. Verified against a live
+client, and it cost an evening to find out.
+
 ## Coordinates
 
 The client's internal canvas is not screen points, and the ratio is **not** the

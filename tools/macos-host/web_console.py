@@ -32,7 +32,26 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # "(bounty) 6,000 ISK added to next bounty payout" -- one line per rat killed,
 # carrying what it paid. The (combat) lines are per shot, not per kill, so they
 # are no use for a kill count; this is.
-BOUNTY_RE = re.compile(r"\(bounty\)\s+([\d,]+(?:\.\d+)?)\s*ISK")
+#
+# **Two anchorings of one literal, because there are now two readers.** This
+# console counts kills off whole echoed lines, which still carry the "(bounty)"
+# channel marker; `botlab_host.GameLogTail` counts them off a parsed entry,
+# whose `text` has already had the "[ ts ] (channel) " prefix cut away. Those
+# are the same fact read at two points of the same pipeline, and CLAUDE.md's own
+# objection to giving the bot this channel is that a second reader would be a
+# second source of truth for one statistic. So there is one pattern and two
+# anchorings of it, rather than two patterns -- and
+# `test_saxrat_kill_counter.TheHostAndTheConsoleCountTheSameKillsTest` runs both
+# over every bounty line in the recorded corpus and requires the same number.
+#
+# The client writes exactly two wordings, measured over the 17,388 bounty lines
+# in the 38 sessions of `~/Documents/EVE/logs/Gamelogs` that carry any: 17,174
+# of the plain form and 214 ending "(payment adjusted)". Both are a rat that
+# died, so the pattern stops at the payout clause and reads no further.
+_BOUNTY_PAYOUT = r"([\d,]+(?:\.\d+)?)\s*ISK added to next bounty payout"
+BOUNTY_RE = re.compile(r"\(bounty\)\s+" + _BOUNTY_PAYOUT)
+# The same, against a parsed entry's `text` -- what the host's tail hands over.
+BOUNTY_TEXT_RE = re.compile(r"^" + _BOUNTY_PAYOUT)
 
 # Tailscale hands out addresses from the 100.64.0.0/10 carrier-grade NAT range.
 TAILNET_RE = re.compile(r"\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b")
