@@ -3294,14 +3294,14 @@ openDroneBayFromShipCard context =
 The station panel keeps the Ships tab's cards in the UI tree while a different
 tab is showing: display regions intact, no `_display` to say otherwise. That is
 the overview's virtualised-row shape in a second widget, and it has the same
-consequence -- right-clicking one lands on whatever the *visible* tab has put in
+consequence -- right-clicking one lands on whatever the _visible_ tab has put in
 that place. Watched live: with the Agents tab selected, the right-click aimed at
 card 0 (an Omen Navy Issue) opened an agent's menu instead, offering "Start
 Conversation" and "Remove from Addressbook", and the cascade then failed to find
 "Open Drone Bay" for as long as the window lasted.
 
 The bot puts itself into that state. `surveyAgentsInStation` selects the Agents
-tab and nothing ever puts it back, so a session that surveys leaves the *next*
+tab and nothing ever puts it back, so a session that surveys leaves the _next_
 session's restock right-clicking agents -- which is why this is keyed on the
 tab rather than on anything about the cards. The cards say nothing that
 distinguishes the two states.
@@ -3309,7 +3309,7 @@ distinguishes the two states.
 Answering with an empty list rather than a flag is what makes the existing
 recovery fire: `openDroneBayFromShipCard` already treats "no card in this
 reading" as "open the tab that has them", and that is exactly the right
-response here. What had to change beside it is *which* tab it clicks -- see
+response here. What had to change beside it is _which_ tab it clicks -- see
 `shipHangarTabToOpen`.
 
 -}
@@ -3330,7 +3330,7 @@ shipItemCardsOnScreen readingFromGameClient =
 {-| The tab to click to bring the ship cards into view.
 
 "Ships" while the panel is already showing the hangars, "Hangars" to get that
-far -- and "Hangars" *only* when the cards are in the tree but off screen,
+far -- and "Hangars" _only_ when the cards are in the tree but off screen,
 because in that state the "Ships" strip is hidden in the same way the cards are
 and clicking it would land on the visible tab's own rows.
 
