@@ -91,7 +91,14 @@ codesign -s - --entitlements tree_walker/entitlements.plist -f tree_walker/tree_
 
 clang -framework ApplicationServices -o window_probe/window_probe window_probe/window_probe.c
 clang -O2 -framework ApplicationServices -o cg_input/cg_input cg_input/cg_input.c
+clang -O2 -framework ApplicationServices -o cg_record/cg_record cg_record/cg_record.c
 ```
+
+**You do not have to remember any of this.** `./build_tools.sh` rebuilds
+whichever of these have a source newer than their binary, with the right flags
+and signature for each, and the launchers run it before every session. The list
+above is what it does, kept in step with it by
+`tests/test_native_tools_are_built.py`.
 
 `window_probe` and `cg_input` need no entitlements — they use public
 `ApplicationServices` APIs gated by the Accessibility and Screen Recording
