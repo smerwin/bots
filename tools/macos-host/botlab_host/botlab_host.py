@@ -3153,6 +3153,15 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
                 if click_at is not None:
                     for line in dispatcher.click_connection_lost_quit(click_at):
                         print(line, file=sys.stderr)
+            # #310: the console names the bot, and both Windows hosts fly the
+            # same one -- so two consoles are the same page twice unless they
+            # also name the pilot. The title this reads is the same field the
+            # ESI destination guard already refuses to route against, asked here
+            # rather than at construction because it does not exist until the
+            # bot's first client-list request has been answered above.
+            if console is not None:
+                console.note_character(esi_waypoint.character_from_window_title(
+                    dispatcher.volatile.game_window_title))
             send_start = time.monotonic()
             response = send_event({"TaskCompletedEvent": {"taskId": task_id, "taskResult": result}})
             send_elapsed = time.monotonic() - send_start

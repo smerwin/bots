@@ -128,6 +128,13 @@ class ConsoleState:
         self.app_name = app_name or ""
         self.bot_source = bot_source or ""
         self.version = version or ""
+
+        # Who the console is watching, which is the one identity above that the
+        # host cannot resolve before the console exists: the name comes from the
+        # client's window title, and the title is not read until the bot asks for
+        # the client list, several seconds into the session. So it is written
+        # under the lock like any other update, and empty until then.
+        self.character = ""
         self.tick = 0
         self.status_text = ""
         self.settings_text = settings_text or ""
@@ -176,6 +183,30 @@ class ConsoleState:
         with self._lock:
             self._append("host", line)
 
+    def note_character(self, character):
+        """Who the client is flying, once the host can name one.
+
+        Called on every pass of the bot loop rather than once, because there is
+        no single moment the name is known: the title arrives with whichever
+        client-list request happens to be first. So this has to be quiet when
+        nothing has changed, and a name reaching the log twice would be a line
+        per reading for the rest of the session.
+
+        **`None` is the host saying it cannot tell**, not the client changing
+        pilot -- a window with no title, or one that carries no name, answers
+        `None` through `character_from_window_title`, and a reading that cannot
+        tell must not erase a name that an earlier reading could. So an absent
+        name is ignored rather than stored, which is the same rule the ESI
+        destination guard reads it by: "cannot check" is not "mismatch".
+        """
+        with self._lock:
+            if not character or character == self.character:
+                return
+            known_before = self.character
+            self.character = character
+            self._append("host", f"now flying {character}" if known_before
+                         else f"flying {character}")
+
     def note_finished(self, reason):
         with self._lock:
             self.finished = True
@@ -194,6 +225,7 @@ class ConsoleState:
                 "appName": self.app_name,
                 "botSource": self.bot_source,
                 "version": self.version,
+                "character": self.character,
                 "uptimeSeconds": int(time.time() - self.started_at),
                 "sessionSecondsLeft": seconds_left,
                 "tick": self.tick,
