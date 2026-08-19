@@ -6248,7 +6248,10 @@ on the first run: `Hunt circuit: A -> B -> C, next B` in the status line, then
 `# ESI: destination … set` on stderr, then the route panel flipping from `No
 Destination` and `jumpToNextSystem` taking over. `Asked for 'B' N/20 readings
 ago with no route yet` climbing to `ROUTE SETTING GIVEN UP` is the host not
-answering, and its own log says why.
+answering — and **its log does not necessarily say why**, which is #306: until
+that fix the host could fail to read the ask at all, and a host that never read
+one prints exactly what a host that was never asked prints. See "The give-up
+fired because the host read one decision per tick" below.
 
 ### The route ask is bounded by the readings it fires on
 
@@ -6332,6 +6335,62 @@ cannot be shared the way the other two are — and 20 consecutive such readings
 with nothing on the grid would latch the give-up early. No recorded run shows
 that shape and the outcome is what the give-up does anyway, but it is the
 direction this widening could be wrong in.
+
+### The give-up fired because the host read one decision per tick
+
+Issue #306, and it is the reason the three changes above looked like they had
+not worked. #263 stopped the circuit asking for the system it is already in,
+#273 fixed a counter that could never reach its bound, #287 made the circuit
+stand down for a live escalation — all of them upstream of a host that was never
+going to act. Two runs on 18 Aug parked with hours left: a 3 hour run at 107
+minutes, and a 6 hour run after its first system, with 53 kills and 373,438 ISK
+already banked and roughly four hours unused.
+
+**The ask was never read, rather than read and refused.** A tick drains a queue
+of tasks, and every `TaskCompletedEvent` brings back a fresh `ContinueSession`
+with a freshly computed status text — which is why `log_decision` sub-numbers
+them `[N.0]`, `[N.1]`, and so on. The route directive was parsed off `cont` at
+the *foot* of the loop, and by then `cont` is whatever the bot decided **after**
+the last effect was dispatched. A bot that wants a route while it is also driving
+a context-menu cascade writes the directive on the decisions that work the menu
+and something else on the decision the tick ends on.
+
+That reads as nothing at all in the log, because the block only prints once the
+parsed name *changes*: `None` on every ordinary reading is exactly what it prints
+nothing for. So a run asking 21 times and a run never asking looked identical,
+and the two candidate causes — the parser returning `None`, or the parser never
+being shown the text — could not be told apart from the log.
+
+**The corpus separates them with no ambiguity.** Over the 37 recorded runs in
+`~/eve-bot-logs` that ask for a route at all: 273 asks landed on a tick's final
+decision, 454 on an earlier one, and the host set 229 routes. All 229 came from a
+tick whose final decision carried the directive; **not one of the 454 was ever
+acted on**. Whether a route got set was decided by where in the tick the ask
+happened to fall.
+
+The fix collects the ask from every decision of the tick and still acts once, at
+the foot of the loop, between ticks — the ESI call blocks, and blocking between a
+completed task and the next one would cut a dispatched input sequence in half.
+The suppression is unchanged and still a lease rather than a high-water mark: one
+authenticated call per distinct name, cleared by a tick on which nothing asks, so
+the same system asked for again later is set again. A cascade's silent decisions
+do not clear it — the clearing is the whole tick's business, not one decision's.
+
+**A parked run does not need a restart.** The latch stops the bot *asking*; it
+never stopped it *travelling* a route that appears. Run
+
+    python3 esi_waypoint.py set --name "<the system the log says it is asking for>"
+
+and the bot picks the route up and resumes hunting. That was how #306 was
+diagnosed — the manual call succeeded on the same name, in the same minute, on
+the same token the host had, which is what ruled ESI out.
+
+**Unverified: a live run.** The behaviour is pinned by
+`test_destination_ask_survives_a_busy_tick`, which drives the real tick loop with
+a scripted bot; six of its ten cases fail on the code that shipped the bug. What
+to watch on the first live run is `# the bot asked for the route to 'X'` appearing
+on stderr within a reading or two of the first `@host set-destination X`, rather
+than after several — and the ask counter not climbing past 1 or 2.
 
 ### The lock range is learned here too, and the "no evidence" branch is the common one
 
@@ -9811,8 +9870,9 @@ exists.
   stderr, then the client's route panel flipping from `No Destination` — and then
   `Home station: travelling to` taking over, which is the bot accepting the route
   as its own. Three readings of the ask followed by `Search for '<tail>'` is the
-  fallback firing, which means the host did not set the route and its own log
-  says why.
+  fallback firing, which means the host did not set the route — its own log says
+  why only if it got as far as reading the ask, which before #306 it often did
+  not.
 
   And it now **knows whether it has read a briefing at all**, rather than
   treating a session that has never seen one as a session whose briefing said
