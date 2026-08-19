@@ -1627,7 +1627,7 @@ missionBotDecisionRootBeforeApplyingSettings context =
                                     |> Maybe.withDefault (decideActionWhenInSpace context { shipUI = shipUI })
                                 )
                 }
-                context.readingFromGameClient
+                context
 
 
 {-| End the session on a bound that has already expired, before anything else.

@@ -337,7 +337,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                         )
                 , ifUndockingComplete = decideNextActionWhenInSpace context
                 }
-                context.readingFromGameClient
+                context
             )
 
 

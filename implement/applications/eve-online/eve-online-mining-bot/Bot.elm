@@ -264,7 +264,7 @@ miningBotDecisionRootBeforeApplyingSettings context =
                                     seeUndockingComplete
                                 )
                 }
-                context.readingFromGameClient
+                context
             )
 
 
