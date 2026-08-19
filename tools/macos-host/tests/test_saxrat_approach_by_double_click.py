@@ -133,6 +133,7 @@ class ApproachRepl(SaxratRepl):
         " , memory = initBotMemory"
         " , previousStepsEffects = []"
         " , previousReadingsFromGameClient = []"
+        " , readingsWithoutShipUIOrStationWindow = 0"
         " , contextMenuCascadeLevel = 0"
         " , randomIntegers = [] }",
         # The branch, asked about the first row of a really parsed reading.

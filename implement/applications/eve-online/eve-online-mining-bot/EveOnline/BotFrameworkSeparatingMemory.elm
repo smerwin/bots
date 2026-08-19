@@ -73,6 +73,11 @@ type alias StepDecisionContext botSettings botMemory =
     , memory : botMemory
     , previousStepEffects : List Common.EffectOnWindow.EffectOnWindowStructure
     , previousReadingsFromGameClient : List ReadingFromGameClientMemory
+
+    -- How many readings in a row, this one included, have shown neither a ship
+    -- UI nor a station window. `previousReadingsFromGameClient` cannot answer
+    -- this: it keeps a reading's context menus and nothing else.
+    , readingsWithoutShipUIOrStationWindow : Int
     , contextMenuCascadeLevel : Int
     , randomIntegers : List Int
     }
@@ -86,6 +91,7 @@ type alias BotState botMemory =
     { botMemory : botMemory
     , lastStepEffects : List Common.EffectOnWindow.EffectOnWindowStructure
     , lastReadingsFromGameClient : List ReadingFromGameClientMemory
+    , readingsWithoutShipUIOrStationWindow : Int
     }
 
 
@@ -128,6 +134,7 @@ initStateInBaseFramework botMemory =
     { botMemory = botMemory
     , lastStepEffects = []
     , lastReadingsFromGameClient = []
+    , readingsWithoutShipUIOrStationWindow = 0
     }
 
 
@@ -199,6 +206,12 @@ processEventInBaseFramework config eventContext event stateBefore =
                     min (contextMenuCascadeLevelAlreadyInPreviousReading + 1)
                         (List.length readingFromGameClient.contextMenus)
 
+                readingsWithoutShipUIOrStationWindow : Int
+                readingsWithoutShipUIOrStationWindow =
+                    readingsWithoutShipUIOrStationWindowAfter
+                        stateBefore.readingsWithoutShipUIOrStationWindow
+                        readingFromGameClient
+
                 decisionContext =
                     { eventContext = eventContext
                     , memory = botMemory
@@ -206,6 +219,7 @@ processEventInBaseFramework config eventContext event stateBefore =
                     , screenshot = screenshot
                     , previousStepEffects = stateBefore.lastStepEffects
                     , previousReadingsFromGameClient = stateBefore.lastReadingsFromGameClient
+                    , readingsWithoutShipUIOrStationWindow = readingsWithoutShipUIOrStationWindow
                     , contextMenuCascadeLevel = contextMenuCascadeLevel
                     , randomIntegers = readingFromGameClientCompleted.randomIntegers
                     }
@@ -243,6 +257,7 @@ processEventInBaseFramework config eventContext event stateBefore =
                     readingFromGameClientMemory
                         :: stateBefore.lastReadingsFromGameClient
                         |> List.take 8
+              , readingsWithoutShipUIOrStationWindow = readingsWithoutShipUIOrStationWindow
               }
             , case decisionLeaf of
                 ContinueSession continueSession ->
@@ -661,22 +676,148 @@ ensureInfoPanelLocationInfoIsExpanded previousStepEffects readingFromGameClient 
                         )
 
 
+{-| How many readings in a row showing neither a ship UI nor a station window it
+takes before the bot concludes anything from them.
+
+The corpus is what sets it. Over the 111 recorded runs in `~/eve-bot-logs`,
+**110 episodes** reach `askForHelpToGetUnstuck` through
+`undockUsingStationWindow`'s `I do not see the station window.`, and not one of
+them is a stall: every one ends on its own, and the widest is **7 readings**
+(saxrat run 6, tick 9, undocking at the start of the session) measured by the
+ticks it spans, 4 measured by the memory reads dispatched inside it.
+
+Twelve rather than eight, and the extra four are bought from a second
+measurement rather than from taste. Episodes that reach the alarm are not the
+only ones this number gates -- it gates the docked _conclusion_, so it also has
+to clear the longest stretch of readings the client can leave without a readable
+HUD, whether or not the branch that happened to run shouted about it. The
+longest recorded is **ten** (`mission_run35.log`, ticks 2540.5 to 2550.1, over
+17 seconds), on a mission-runner reading whose docked arm answered the mission
+tracker rather than the undock and so never raised the alarm. In saxrat the
+docked arm does reach the undock, so the same ten readings would have. Twelve
+clears both measurements with margin; eight clears only the first.
+
+The episodes come in two shapes and both are answered by one number:
+
+  - **79** where the readings either side show a ship in space with real
+    hitpoints and rats on the overview -- issue #304's shape, a reading the
+    parser could not complete. 76 of the 79 are one reading wide and the widest
+    is two;
+  - **31** where the ship is at a station: 29 across an undock, where the station
+    window has gone and the ship UI has not arrived, and 2 where the ship stayed
+    docked and the station window itself dropped out of one reading. These are
+    the wide ones, and a bound that only counted readings without a _ship UI_
+    would not have touched them: the ship UI has been absent for the whole time
+    the ship was in the station.
+
+What twelve costs is eleven readings of latency on a real stall, of the order of
+twenty seconds at this host's measured rate, on a signal whose whole purpose is
+to fetch a human. It costs a genuine dock nothing at all, because a genuine dock
+has the station window and never reaches the count.
+
+-}
+readingsWithoutShipUIOrStationWindowBeforeConcluding : Int
+readingsWithoutShipUIOrStationWindowBeforeConcluding =
+    12
+
+
+{-| The count after one more reading: one further if that reading showed neither
+object, and back to zero if it showed either.
+
+A named function rather than a `let` inside the step so that a case can fold the
+rule the framework actually runs over a sequence of real readings, instead of
+restating the arithmetic in Python and testing the restatement.
+
+Capped rather than left to climb: nothing reads it above the bound, and a number
+that keeps moving is a status line the host has to reprint on every reading for
+as long as the state lasts -- since #284 a line is suppressed only while it is
+unchanged.
+
+-}
+readingsWithoutShipUIOrStationWindowAfter : Int -> ReadingFromGameClient -> Int
+readingsWithoutShipUIOrStationWindowAfter readingsBefore readingFromGameClient =
+    case ( readingFromGameClient.shipUI, readingFromGameClient.stationWindow ) of
+        ( Nothing, Nothing ) ->
+            min readingsWithoutShipUIOrStationWindowBeforeConcluding
+                (readingsBefore + 1)
+
+        _ ->
+            0
+
+
+{-| Docked, in space, or a reading that does not say -- and the third is not the
+first.
+
+The split used to read an absent ship UI as _docked_, which is
+`distinguish absent from false` collapsed the wrong way: an absent ship UI has
+at least three causes -- genuinely docked, a reading the parser could not
+complete, and a client mid-transition or stalled -- and only the first of them
+makes the docked arm the right place to be.
+
+**What is evidence of being docked is the station window**, not the absence of
+the ship UI. It is the same object the docked arm goes on to act on, it is in the
+reading on every recorded reading of a genuinely docked ship, and it is a
+positive fact rather than a missing one -- so believing it costs no readings and
+introduces no counter.
+
+When neither is in the reading, the reading says nothing about where the ship is.
+The bot then does not conclude, and does not act: it gives the reading back. That
+is not a stall, because it is bounded --
+`readingsWithoutShipUIOrStationWindowBeforeConcluding` readings in a row of
+saying nothing is itself the finding, and the bot takes the docked arm to say so,
+which is where `askForHelpToGetUnstuck` lives. Nothing below this split could
+have run on such a reading anyway: the retreat, the guns and the drones all need
+the ship UI, and the undock needs the station window.
+
+**Waiting is what the bot already did on these readings**, and the change is
+that it stops shouting while it does. `askForHelpToGetUnstuck` dispatches no
+effects; so does `waitForProgressInGame`. The recorded episodes recover by
+themselves either way.
+
+-}
 branchDependingOnDockedOrInSpace :
     { ifDocked : DecisionPathNode
     , ifSeeShipUI : EveOnline.ParseUserInterface.ShipUI -> Maybe DecisionPathNode
     , ifUndockingComplete : SeeUndockingComplete -> DecisionPathNode
     }
-    -> ReadingFromGameClient
+    ->
+        { a
+            | readingFromGameClient : ReadingFromGameClient
+            , readingsWithoutShipUIOrStationWindow : Int
+        }
     -> DecisionPathNode
-branchDependingOnDockedOrInSpace { ifDocked, ifSeeShipUI, ifUndockingComplete } readingFromGameClient =
-    case readingFromGameClient.shipUI of
+branchDependingOnDockedOrInSpace { ifDocked, ifSeeShipUI, ifUndockingComplete } context =
+    case context.readingFromGameClient.shipUI of
         Nothing ->
-            Common.DecisionPath.describeBranch "I see no ship UI, assume we are docked." ifDocked
+            case context.readingFromGameClient.stationWindow of
+                Just _ ->
+                    Common.DecisionPath.describeBranch
+                        "I see no ship UI and I do see the station window, so we are docked."
+                        ifDocked
+
+                Nothing ->
+                    if context.readingsWithoutShipUIOrStationWindow < readingsWithoutShipUIOrStationWindowBeforeConcluding then
+                        Common.DecisionPath.describeBranch
+                            ("This reading shows neither a ship UI nor a station window, so it does not say where the ship is ("
+                                ++ String.fromInt context.readingsWithoutShipUIOrStationWindow
+                                ++ " reading(s) in a row of that, and I conclude at "
+                                ++ String.fromInt readingsWithoutShipUIOrStationWindowBeforeConcluding
+                                ++ "). Wait for a reading that does."
+                            )
+                            waitForProgressInGame
+
+                    else
+                        Common.DecisionPath.describeBranch
+                            ("Neither a ship UI nor a station window for "
+                                ++ String.fromInt readingsWithoutShipUIOrStationWindowBeforeConcluding
+                                ++ " readings in a row -- that is long enough to be the client and not a dropped reading."
+                            )
+                            ifDocked
 
         Just shipUI ->
             ifSeeShipUI shipUI
                 |> Maybe.withDefault
-                    (case readingFromGameClient.overviewWindows of
+                    (case context.readingFromGameClient.overviewWindows of
                         [] ->
                             Common.DecisionPath.describeBranch
                                 "I see no overview window, wait until undocking completed."

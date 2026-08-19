@@ -808,6 +808,31 @@ Console`. A stamp reading `unknown` on a run launched from this checkout would
 mean the version is being computed against something that is not the bot's
 source directory.
 
+**The fourth identity is the pilot, and it is the one the host cannot resolve up
+front.** Naming the bot was enough while one machine flew one of two bots; it
+stopped being enough once saxrat ran on both Windows hosts, because the app name
+is the bot directory's leaf and both consoles then read `eve-online-saxrat` —
+the same page twice, by the same argument that put the app name in the tab
+title. The name was never missing, only unrouted: the client titles its window
+`EVE - <character>`, `find_eve_processes` captures it, and
+`esi_waypoint.character_from_window_title` parses it for the ESI destination
+guard, which refuses to route a *different* character than the bot is flying. So
+the name was already trusted enough to block a live action while never reaching
+the operator watching the run.
+
+It cannot join the other three as a constructor argument, and that is the whole
+of the wiring: `ConsoleState` is built before the bot has asked for the client
+list, so the title does not exist yet. `note_character` is pushed from
+`run_bot`'s loop beside the connection-lost drain — the same shape, the loop
+reading what the volatile host recorded — and is called on every pass, so it
+announces a name once rather than once a reading. **An absent name never erases
+a known one**: `character_from_window_title` answers `None` for a window with no
+name, including `find_eve_processes`' own `"EVE"` fallback, and that is the host
+saying *cannot tell* rather than the client changing pilot — the same reading
+`set_destination` gives it. Verified in
+`tools/macos-host/tests/test_console_names_the_character.py` (19 cases), six
+mutations, each failing a named case.
+
 Two design points that are load-bearing rather than stylistic. **HTTP handlers
 never touch the pipe to the bot process** — it is a strict request/response
 conversation with the Elm runtime, and a second writer desynchronises it — so
