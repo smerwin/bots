@@ -64,15 +64,16 @@ mutated; that one is a property of the method and is not counted below.
     `test_every_copy_counts_readings_without_either_object`. It leaves the whole
     of `TheIssuesThreeReadingShapeTest` passing, which is exactly its shape: it
     fixes the 79 episodes the issue is filed on and none of the 31 it is not;
-  - moving the bound to 9 fails `test_fixed_values_either_side_of_the_boundary`
-    alone; moving it to 7 fails that plus
+  - moving the bound to 11 or to 13 fails
+    `test_fixed_values_either_side_of_the_boundary`, and nothing else -- both
+    edges, so a bound that admitted everything could not pass;
+  - pinning it at 4 -- a width the alarm-reaching episodes themselves reach --
+    fails **four**: that one plus
     `test_the_widest_recorded_undock_raises_no_alarm`,
     `test_the_bound_is_a_bound_and_not_a_ceiling_nothing_reaches` and
-    `test_the_bound_is_wider_than_the_widest_episode_recorded_here`;
-  - pinning the bound at 4 -- a number the corpus reaches -- fails **five**,
-    among them `test_the_bound_is_wider_than_the_widest_episode_recorded_here`,
-    which re-takes the widest episode from whatever runs this machine has rather
-    than trusting the number written above.
+    `test_the_bound_is_wider_than_the_widest_episode_recorded_here`, which
+    re-takes the widest episode from whatever runs this machine has rather than
+    trusting the number written above.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
@@ -435,17 +436,17 @@ class TheAlarmArrivesAtTheBoundAndNotBeforeTest(SplitCase):
         self.assertIn(ALARM, text)
 
     def test_fixed_values_either_side_of_the_boundary(self):
-        seven, eight = self.repl.strings(
-            ["textOver (repeated 7 unparsed)",
-             "textOver (repeated 8 unparsed)"],
+        eleven, twelve = self.repl.strings(
+            ["textOver (repeated 11 unparsed)",
+             "textOver (repeated 12 unparsed)"],
             definitions=DockedSplitRepl.HELPERS)
-        self.assertNotIn(ALARM, seven)
-        self.assertIn(ALARM, eight)
+        self.assertNotIn(ALARM, eleven)
+        self.assertIn(ALARM, twelve)
 
     def test_the_bound_is_a_bound_and_not_a_ceiling_nothing_reaches(self):
         self.assertEqual(
             [True, True],
-            self.booleans(["bound > 7", "bound < 60"]))
+            self.booleans(["bound > 10", "bound < 60"]))
 
 
 class TheSplitReadsTheStationWindowAndNotTheAbsenceTest(unittest.TestCase):

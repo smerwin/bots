@@ -1068,8 +1068,18 @@ The corpus is what sets it. Over the 111 recorded runs in `~/eve-bot-logs`,
 `undockUsingStationWindow`'s `I do not see the station window.`, and not one of
 them is a stall: every one ends on its own, and the widest is **7 readings**
 (saxrat run 6, tick 9, undocking at the start of the session) measured by the
-ticks it spans, 4 measured by the memory reads dispatched inside it. Eight is the
-first number above the wider of the two measurements.
+ticks it spans, 4 measured by the memory reads dispatched inside it.
+
+Twelve rather than eight, and the extra four are bought from a second
+measurement rather than from taste. Episodes that reach the alarm are not the
+only ones this number gates -- it gates the docked _conclusion_, so it also has
+to clear the longest stretch of readings the client can leave without a readable
+HUD, whether or not the branch that happened to run shouted about it. The
+longest recorded is **ten** (`mission_run35.log`, ticks 2540.5 to 2550.1, over
+17 seconds), on a mission-runner reading whose docked arm answered the mission
+tracker rather than the undock and so never raised the alarm. In saxrat the
+docked arm does reach the undock, so the same ten readings would have. Twelve
+clears both measurements with margin; eight clears only the first.
 
 The episodes come in two shapes and both are answered by one number:
 
@@ -1084,15 +1094,15 @@ The episodes come in two shapes and both are answered by one number:
     would not have touched them: the ship UI has been absent for the whole time
     the ship was in the station.
 
-What eight costs is one reading of latency per reading of a real stall, about
-fifteen seconds at this host's measured rate, on a signal a human answers. It
-costs a genuine dock nothing at all, because a genuine dock has the station
-window and never reaches the count.
+What twelve costs is eleven readings of latency on a real stall, of the order of
+twenty seconds at this host's measured rate, on a signal whose whole purpose is
+to fetch a human. It costs a genuine dock nothing at all, because a genuine dock
+has the station window and never reaches the count.
 
 -}
 readingsWithoutShipUIOrStationWindowBeforeConcluding : Int
 readingsWithoutShipUIOrStationWindowBeforeConcluding =
-    8
+    12
 
 
 {-| The count after one more reading: one further if that reading showed neither
