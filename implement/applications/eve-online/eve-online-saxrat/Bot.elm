@@ -2872,9 +2872,39 @@ argues the other way.
 -}
 escalationDestinationIsPermitted : BotSettings -> EveOnline.ParseUserInterface.OpportunityInfoPanelEntry -> Bool
 escalationDestinationIsPermitted botSettings entry =
-    entry.destination
-        |> Maybe.andThen .security
-        |> securityIsPermitted botSettings.escalationMinimumSecurity
+    case entry.destination of
+        Nothing ->
+            True
+
+        Just destination ->
+            case destination.systemName of
+                -- A step that names no remote system is not a trip anywhere:
+                -- verified live against saxrat run 6's own tracked entry, a
+                -- Sansha's Command Relay Outpost step reading 'Undock', whose
+                -- destination parses as `Just { jumps = Nothing, security =
+                -- Nothing, systemName = Nothing }` -- all three fields absent
+                -- together, because there is no destination system distinct
+                -- from the one the ship is already in. The strict `absent =
+                -- refuse` rule this used to be treated that the same as a
+                -- client naming an unknown system, and filtered every entry
+                -- of every escalation out on every reading, at every step,
+                -- for the whole session: `escalationEntriesPermitted` handed
+                -- `opportunityTravelStep` an empty list regardless of what
+                -- was actually offered, and the docked-branch and in-space
+                -- branches both fell through to the hunt circuit and route
+                -- asking as if no escalation existed at all.
+                --
+                -- The safety argument this rule exists for is untouched: a
+                -- step that *does* name a system is still refused unless
+                -- that system's security is known and high enough. What
+                -- changes is only the case a real destination and a merely
+                -- local one used to share -- no system named at all.
+                Nothing ->
+                    True
+
+                Just _ ->
+                    destination.security
+                        |> securityIsPermitted botSettings.escalationMinimumSecurity
 
 
 {-| The reading with escalations this bot may not be sent to removed.
@@ -13526,11 +13556,22 @@ label nobody has read leaves the bot behaving exactly as it did before this
 change, which is a route-panel stargate cascade rather than a click into a panel
 listing several escalations.
 
-The five words are the ones the mission runner's own `missionTravelStep` sorts as
-commands -- `Set Destination`, `Jump`, `Warp to Location`, `Dock` -- plus
-`Warp to Site`, which is what this branch has been matching all along. `Dock` has
-never been read off _this_ widget and is carried on the strength of that
-separation rather than on an observation here.
+The five words this list originally had are the ones the mission runner's own
+`missionTravelStep` sorts as commands -- `Set Destination`, `Jump`,
+`Warp to Location`, `Dock` -- plus `Warp to Site`, which is what this branch has
+been matching all along. `Dock` has never been read off _this_ widget and is
+carried on the strength of that separation rather than on an observation here.
+
+**`Undock` was missing, and it is read off this widget** -- captured live from
+saxrat run 6, docked at Nafomeh with an escalation tracked: the panel's own
+travel step read `Undock` in as many words, and this list not carrying the word
+meant `travelLabelIsACommand` answered `False` for it regardless of what else
+was true. Combined with `escalationDestinationIsPermitted`'s own gap on the same
+run (see its comment), the escalation was invisible from both directions at
+once -- the docked branch's `warpToOpportunitySiteIfAvailable == Nothing` check
+never saw a reason to undock, and once undocked by another route entirely, the
+next step (`Warp to Site`, which _was_ on this list) still could not be reached
+because the entry never survived the destination filter to be asked about.
 
 Compared case-insensitively on the trimmed label, so a client that changes its
 capitalisation does not switch the branch off; the comparison is still an
@@ -13548,7 +13589,7 @@ travelLabelIsACommand label =
 
 opportunityTravelCommandLabels : List String
 opportunityTravelCommandLabels =
-    [ "set destination", "jump", "warp to site", "warp to location", "dock" ]
+    [ "set destination", "jump", "warp to site", "warp to location", "dock", "undock" ]
 
 
 {-| Of the steps the tracker is offering, the one that gets the ship _into_ a
