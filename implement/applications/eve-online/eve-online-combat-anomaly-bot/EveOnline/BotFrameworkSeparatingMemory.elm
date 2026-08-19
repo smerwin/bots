@@ -217,20 +217,9 @@ processEventInBaseFramework config eventContext event stateBefore =
 
                 readingsWithoutShipUIOrStationWindow : Int
                 readingsWithoutShipUIOrStationWindow =
-                    if
-                        (readingFromGameClient.shipUI == Nothing)
-                            && (readingFromGameClient.stationWindow == Nothing)
-                    then
-                        -- Capped rather than left to climb. Nothing reads it
-                        -- above the bound, and a number that keeps moving is a
-                        -- status line the host has to reprint on every reading
-                        -- for as long as the state lasts (#284 suppresses a
-                        -- status line only while it is unchanged).
-                        min readingsWithoutShipUIOrStationWindowBeforeConcluding
-                            (stateBefore.readingsWithoutShipUIOrStationWindow + 1)
-
-                    else
-                        0
+                    readingsWithoutShipUIOrStationWindowAfter
+                        stateBefore.readingsWithoutShipUIOrStationWindow
+                        readingFromGameClient
 
                 decisionContext =
                     { eventContext = eventContext
@@ -1102,6 +1091,30 @@ window and never reaches the count.
 readingsWithoutShipUIOrStationWindowBeforeConcluding : Int
 readingsWithoutShipUIOrStationWindowBeforeConcluding =
     8
+
+
+{-| The count after one more reading: one further if that reading showed neither
+object, and back to zero if it showed either.
+
+A named function rather than a `let` inside the step so that a case can fold the
+rule the framework actually runs over a sequence of real readings, instead of
+restating the arithmetic in Python and testing the restatement.
+
+Capped rather than left to climb: nothing reads it above the bound, and a number
+that keeps moving is a status line the host has to reprint on every reading for
+as long as the state lasts -- since #284 a line is suppressed only while it is
+unchanged.
+
+-}
+readingsWithoutShipUIOrStationWindowAfter : Int -> ReadingFromGameClient -> Int
+readingsWithoutShipUIOrStationWindowAfter readingsBefore readingFromGameClient =
+    case ( readingFromGameClient.shipUI, readingFromGameClient.stationWindow ) of
+        ( Nothing, Nothing ) ->
+            min readingsWithoutShipUIOrStationWindowBeforeConcluding
+                (readingsBefore + 1)
+
+        _ ->
+            0
 
 
 {-| Docked, in space, or a reading that does not say -- and the third is not the
