@@ -7,10 +7,10 @@ docked arm's first stop -- `undockUsingStationWindow` -- found no station window
 either and answered `askForHelpToGetUnstuck` outright. One bad reading, the full
 "come and look" alarm, and the reading after it back to shooting rats.
 
-**What the corpus says, counted rather than remembered.** Over all 112 recorded
-runs in `~/eve-bot-logs`, **110 episodes** reach that alarm through
-`I do not see the station window.`, and not one of them is a stall -- every one
-ends by itself. They come in two shapes:
+**What the corpus says, counted rather than remembered.** Over the 111 recorded
+runs in `~/eve-bot-logs`, **110 episodes** across 40 of them reach that alarm
+through `I do not see the station window.`, and not one of them is a stall --
+every one ends by itself. They come in two shapes:
 
   - **79** where the reading before and the reading after both show a ship in
     space with real hitpoints and rats on the overview. This is #304's shape.
@@ -570,8 +570,11 @@ class TheBoundClearsEveryRecordedEpisodeTest(unittest.TestCase):
                 if max(reads, ticks) > widest:
                     widest, where = max(reads, ticks), os.path.basename(path)
         if not total:
+            # Worded to match `check_expected_skips.EXPECTED`'s corpus entry:
+            # a reason that matches none of them fails CI, and this one names
+            # the same absent evidence as the gate in `setUpClass`.
             self.skipTest(
-                "no run on this machine reached the alarm through the missing "
+                "no recorded runs here reached the alarm through the missing "
                 "station window, so there is no episode to measure")
         bound = self.bound_from_source()
         self.assertLess(

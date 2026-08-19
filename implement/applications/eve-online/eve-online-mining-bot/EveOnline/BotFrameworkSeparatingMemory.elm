@@ -679,7 +679,7 @@ ensureInfoPanelLocationInfoIsExpanded previousStepEffects readingFromGameClient 
 {-| How many readings in a row showing neither a ship UI nor a station window it
 takes before the bot concludes anything from them.
 
-The corpus is what sets it. Over all 112 recorded runs in `~/eve-bot-logs`,
+The corpus is what sets it. Over the 111 recorded runs in `~/eve-bot-logs`,
 **110 episodes** reach `askForHelpToGetUnstuck` through
 `undockUsingStationWindow`'s `I do not see the station window.`, and not one of
 them is a stall: every one ends on its own, and the widest is **7 readings**
