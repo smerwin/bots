@@ -55,6 +55,8 @@
   .note{color:var(--dim);font-size:12px}
   .note.mono{font-family:var(--mono)}
   .note.path{max-width:38ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .note.pilot{color:var(--ink)}
+  .note.pilot.unknown{color:var(--dim);font-style:italic}
   .ok{color:var(--accent)}
 </style>
 </head>
@@ -62,6 +64,7 @@
 <header>
   <span class="dot" id="dot"></span>
   <h1 id="app">Host Console</h1>
+  <span class="note pilot" id="character">character unknown</span>
   <span class="note mono" id="version">—</span>
   <span class="note path" id="source" title=""></span>
   <span class="note" id="conn">connecting…</span>
@@ -183,6 +186,22 @@ function identify(s){
   $("source").title = s.botSource || "";
 }
 
+// Who this console is watching. Deliberately not part of `identify()`: those
+// three are fixed before the page exists and are read once, while the character
+// is not known until the bot has asked for the client list, so this is re-read
+// on every poll until a name arrives. The tab title carries it because the app
+// name alone does not tell two saxrat consoles apart -- both are
+// `eve-online-saxrat`, and it is the pilot that differs.
+let named = null;
+function nameCharacter(s){
+  const character = s.character || "";
+  if (character === named) return;
+  named = character;
+  $("character").textContent = character || "character unknown";
+  $("character").classList.toggle("unknown", !character);
+  if (character) document.title = `${character} — ${s.appName || "Host Console"}`;
+}
+
 async function poll(){
   try {
     const res = await fetch(`/api/state?since=${since}`);
@@ -190,6 +209,7 @@ async function poll(){
     since = s.latestSeq;
 
     identify(s);
+    nameCharacter(s);
 
     $("conn").textContent = s.finished ? ("finished — " + (s.finishReason || ""))
                                        : (s.paused ? "paused" : "running");
