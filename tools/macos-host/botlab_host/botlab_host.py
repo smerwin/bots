@@ -2992,6 +2992,26 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
     # standing ask is not a route set on every tick. `None` while it is not
     # asking, which is what lets the same station be asked for again later.
     last_requested_destination = None
+    # The destination asked for by *any* decision of the tick now running, not
+    # only by the one it happens to end on.
+    #
+    # #306. A tick drains a queue of tasks and every completion hands back a
+    # fresh ContinueSession, so `cont` at the foot of the loop is whatever the
+    # bot decided *after* the last effect was dispatched. A bot that wants a
+    # route while it is also driving a context-menu cascade writes the directive
+    # on the decisions that work the menu and something else on the decision the
+    # tick ends on, and the ask was then never read at all: the parser was never
+    # shown the text, so nothing printed and nothing was suppressed either.
+    # Across the 37 recorded runs that ask for a route, every one of the 229
+    # routes this host set came from a tick whose *final* decision carried the
+    # directive, and all 454 asks that landed on an earlier decision of a tick
+    # were ignored -- which is a run parked with hours left whenever the cadence
+    # does not happen to line up.
+    #
+    # Collected here and acted on at the foot of the loop, rather than acted on
+    # where it is seen: the ESI call blocks, and blocking between a completed
+    # task and the next one would cut a dispatched input sequence in half.
+    tick_requested_destination = None
     # The status text's lines below its first, as they were last *printed*, one
     # entry per position. Compared against rather than counted per reading, so a
     # line that changed can never be suppressed however the bot happens to be
@@ -3085,6 +3105,11 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         cont = response["ContinueSession"]
         decision_seq = 0
         log_decision(cont, decision_seq)
+        # Every decision of this tick is a reading the bot took and a status
+        # text it wrote, so every one of them can carry the route directive --
+        # see `tick_requested_destination`. Started fresh here rather than
+        # carried over, so a bot that has stopped asking clears the lease.
+        tick_requested_destination = bot_requested_destination(cont.get("statusText"))
         tick_start = time.monotonic()
 
         # Drain tasks as a queue, not a fixed batch: (1) a response can
@@ -3137,6 +3162,13 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
             cont = response["ContinueSession"]
             decision_seq += 1
             log_decision(cont, decision_seq)
+            # The latest ask of the tick wins, and a decision that asks for
+            # nothing does not erase one that did: a cascade's later steps are
+            # silent about the route while the ask still stands. Clearing is the
+            # whole tick's business, above, not one decision's.
+            mid_tick_destination = bot_requested_destination(cont.get("statusText"))
+            if mid_tick_destination is not None:
+                tick_requested_destination = mid_tick_destination
             for t in cont["startTasks"]:
                 if t["taskId"] not in seen_ids:
                     pending.append(t)
@@ -3211,7 +3243,11 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         # Deliberately the same code as the volatile-process request answers, so
         # the two ways in cannot report a failure differently. It prints its own
         # outcome, token-free, on both paths.
-        requested_destination = bot_requested_destination(cont.get("statusText"))
+        #
+        # Read from the whole tick rather than from `cont`, which is only its
+        # last decision -- #306, and the reason two runs on 18 Aug parked with
+        # hours left while asking 21 times each.
+        requested_destination = tick_requested_destination
         if requested_destination != last_requested_destination:
             last_requested_destination = requested_destination
             if requested_destination is not None:

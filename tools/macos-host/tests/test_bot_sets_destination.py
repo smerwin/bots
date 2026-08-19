@@ -225,8 +225,10 @@ class TheHostActsOnAChangeNotOnEveryTick(unittest.TestCase):
         self.source = collapsed(host_source())
 
     def test_the_ask_is_read_from_this_tick_not_remembered(self):
+        """Opened fresh at the head of every tick, so a bot that has stopped
+        asking is a bot the host stops acting for."""
         self.assertIn(
-            'requested_destination = bot_requested_destination(cont.get("statusText"))',
+            'tick_requested_destination = bot_requested_destination(cont.get("statusText"))',
             self.source)
 
     def test_only_a_change_of_destination_is_acted_on(self):
@@ -256,16 +258,42 @@ class TheHostActsOnAChangeNotOnEveryTick(unittest.TestCase):
         self.assertIn("dispatcher.volatile._set_autopilot_destination(", self.source)
         self.assertIn('{"name": requested_destination}', self.source)
 
-    def test_it_sits_between_ticks_beside_the_deadline_check(self):
+    def test_the_call_sits_between_ticks_beside_the_deadline_check(self):
         """The ESI call blocks this loop, so the bot's next reading is taken
         after it finished -- which is what makes the route panel a confirmation
         one reading later. Mid-tick it would cut a dispatched input sequence in
-        half."""
+        half.
+
+        Anchored on the *call* rather than on the parse: since #306 the ask is
+        read from every decision of the tick, so a parse now happens mid-tick by
+        design and only the acting may not."""
         deadline = self.source.index("granted_seconds = bot_requested_overrun_seconds")
-        route = self.source.index("requested_destination = bot_requested_destination")
+        route = self.source.index("requested_destination = tick_requested_destination")
         notify = self.source.index('notify = cont.get("notifyWhenArrivedAtTime")')
         self.assertLess(deadline, route)
         self.assertLess(route, notify)
+        self.assertEqual(
+            1, self.source.count("dispatcher.volatile._set_autopilot_destination("),
+            "one call site, so it cannot sit mid-tick as well")
+
+    def test_every_decision_of_a_tick_is_read_not_only_its_last(self):
+        """#306. A tick drains a queue of tasks and each completion hands back a
+        fresh decision, so `cont` at the foot of the loop is the one taken after
+        the last effect was dispatched. Reading the ask off that alone ignored
+        every ask that came on a decision the tick did not end on -- 454 of them
+        across the recorded corpus, against 229 routes actually set, all 229 of
+        which had the directive on their tick's final decision.
+
+        The behaviour is pinned by `test_destination_ask_survives_a_busy_tick`,
+        which drives the loop; this pins that the reading is per decision rather
+        than per tick, which is the part a rewrite would quietly undo."""
+        self.assertIn(
+            "mid_tick_destination = bot_requested_destination(cont.get(\"statusText\"))",
+            self.source)
+        self.assertIn(
+            "if mid_tick_destination is not None: "
+            "tick_requested_destination = mid_tick_destination",
+            self.source)
 
 
 class TheSearchBarRemains(unittest.TestCase):
