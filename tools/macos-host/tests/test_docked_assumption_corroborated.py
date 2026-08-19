@@ -15,11 +15,13 @@ every one ends by itself. They come in two shapes:
   - **79** where the reading before and the reading after both show a ship in
     space with real hitpoints and rats on the overview. This is #304's shape.
     76 of the 79 are one reading wide and the widest is two;
-  - **31** where the ship is docking or undocking, so the station window has
-    gone and the ship UI has not arrived yet. These are the wide ones -- up to
-    seven readings -- and a rule that only counted readings without a *ship UI*
-    would not have touched a single one of them, because the ship UI had been
-    absent for the whole time the ship was in the station.
+  - **31** where the ship is at a station: 29 across an undock, where the
+    station window has gone and the ship UI has not arrived yet, and 2 where the
+    ship stayed docked and the station window itself dropped out of one reading.
+    These are the wide ones -- up to seven readings -- and a rule that only
+    counted readings without a *ship UI* would not have touched a single one of
+    them, because the ship UI had been absent for the whole time the ship was in
+    the station.
 
 Two absences, one rule. **The docked conclusion is drawn from the station
 window** -- a positive fact, the same object the docked arm goes on to act on --
@@ -79,7 +81,7 @@ import os
 import re
 import unittest
 
-from prerequisites import EVE_BOT_LOGS, ElmRepl, open_repl
+from prerequisites import EVE_BOT_LOGS, open_repl
 from test_info_panel_icon_click_settling import SIX_VENDORED_FRAMEWORKS
 from test_saxrat_ported_guards import (
     SAXRAT_DIR, SaxratRepl, collapsed, label, node, overview, ship_ui,

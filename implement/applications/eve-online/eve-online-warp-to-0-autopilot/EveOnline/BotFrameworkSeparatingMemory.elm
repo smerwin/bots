@@ -1077,10 +1077,12 @@ The episodes come in two shapes and both are answered by one number:
     hitpoints and rats on the overview -- issue #304's shape, a reading the
     parser could not complete. 76 of the 79 are one reading wide and the widest
     is two;
-  - **31** where the ship is docking or undocking, so the station window has
-    gone and the ship UI has not arrived. These are the wide ones, and a bound
-    that only counted readings without a _ship UI_ would not have touched them:
-    the ship UI has been absent for the whole time the ship was in the station.
+  - **31** where the ship is at a station: 29 across an undock, where the station
+    window has gone and the ship UI has not arrived, and 2 where the ship stayed
+    docked and the station window itself dropped out of one reading. These are
+    the wide ones, and a bound that only counted readings without a _ship UI_
+    would not have touched them: the ship UI has been absent for the whole time
+    the ship was in the station.
 
 What eight costs is one reading of latency per reading of a real stall, about
 fifteen seconds at this host's measured rate, on a signal a human answers. It
