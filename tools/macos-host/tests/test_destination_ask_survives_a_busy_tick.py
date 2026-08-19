@@ -269,7 +269,8 @@ class AnAskIsReadFromEveryDecisionOfTheTick(unittest.TestCase):
     def test_the_last_ask_of_a_tick_is_the_one_acted_on(self):
         """Two names inside one tick is a bot that changed its mind mid-tick,
         and what it wants is the later one. Seen live: `saxrat_run52.log` tick
-        898 asks for 'Ana' on three decisions and 'Jaswelu' on the fourth."""
+        898 asks for 'Ana' on `[898.0]` and `[898.1]` and for 'Jaswelu' on
+        `[898.2]`, which is where that tick ends."""
         destinations, _, _ = drive([
             continue_session(asking("Ana"), task_ids=["t1"]),
             continue_session(asking("Jaswelu")),
