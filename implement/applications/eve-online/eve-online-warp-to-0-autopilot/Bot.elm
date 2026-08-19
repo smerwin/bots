@@ -178,6 +178,7 @@ autopilotBotDecisionRoot context =
                         context
                         { infoPanelRouteFirstMarker = infoPanelRouteFirstMarker }
                 }
+                context.readingsWithoutShipUI
                 context.readingFromGameClient
     )
         |> EveOnline.BotFrameworkSeparatingMemory.setMillisecondsToNextReadingFromGameBase 2000

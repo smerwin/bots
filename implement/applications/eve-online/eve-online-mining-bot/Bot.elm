@@ -264,6 +264,7 @@ miningBotDecisionRootBeforeApplyingSettings context =
                                     seeUndockingComplete
                                 )
                 }
+                context.readingsWithoutShipUI
                 context.readingFromGameClient
             )
 

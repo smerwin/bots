@@ -337,6 +337,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                         )
                 , ifUndockingComplete = decideNextActionWhenInSpace context
                 }
+                context.readingsWithoutShipUI
                 context.readingFromGameClient
             )
 

@@ -1638,6 +1638,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                                                                 (decideNextActionWhenInSpace context { shipUI = shipUI })
                                                         )
                                         }
+                                        context.readingsWithoutShipUI
                                         context.readingFromGameClient
                                     )
                             )

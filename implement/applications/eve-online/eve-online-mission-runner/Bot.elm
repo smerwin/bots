@@ -1627,6 +1627,7 @@ missionBotDecisionRootBeforeApplyingSettings context =
                                     |> Maybe.withDefault (decideActionWhenInSpace context { shipUI = shipUI })
                                 )
                 }
+                context.readingsWithoutShipUI
                 context.readingFromGameClient
 
 

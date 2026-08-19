@@ -73,6 +73,12 @@ type alias StepDecisionContext botSettings botMemory =
     , memory : botMemory
     , previousStepEffects : List Common.EffectOnWindow.EffectOnWindowStructure
     , previousReadingsFromGameClient : List ReadingFromGameClientMemory
+
+    -- How many readings in a row, counting this one, have had no ship UI.
+    -- `previousReadingsFromGameClient` cannot answer this: it keeps only the
+    -- context menus of a reading, so nothing downstream can tell a reading
+    -- whose ship UI was missing from one where it was there.
+    , readingsWithoutShipUI : Int
     , contextMenuCascadeLevel : Int
     , randomIntegers : List Int
     }
@@ -86,6 +92,7 @@ type alias BotState botMemory =
     { botMemory : botMemory
     , lastStepEffects : List Common.EffectOnWindow.EffectOnWindowStructure
     , lastReadingsFromGameClient : List ReadingFromGameClientMemory
+    , readingsWithoutShipUI : Int
     }
 
 
@@ -128,6 +135,11 @@ initStateInBaseFramework botMemory =
     { botMemory = botMemory
     , lastStepEffects = []
     , lastReadingsFromGameClient = []
+
+    -- A session that starts docked reads 0 here and undocks on its first
+    -- reading all the same: the station window decides that case, and the
+    -- count is only consulted where nothing corroborates.
+    , readingsWithoutShipUI = 0
     }
 
 
@@ -199,6 +211,11 @@ processEventInBaseFramework config eventContext event stateBefore =
                     min (contextMenuCascadeLevelAlreadyInPreviousReading + 1)
                         (List.length readingFromGameClient.contextMenus)
 
+                readingsWithoutShipUI : Int
+                readingsWithoutShipUI =
+                    countReadingsWithoutShipUI readingFromGameClient
+                        stateBefore.readingsWithoutShipUI
+
                 decisionContext =
                     { eventContext = eventContext
                     , memory = botMemory
@@ -206,6 +223,7 @@ processEventInBaseFramework config eventContext event stateBefore =
                     , screenshot = screenshot
                     , previousStepEffects = stateBefore.lastStepEffects
                     , previousReadingsFromGameClient = stateBefore.lastReadingsFromGameClient
+                    , readingsWithoutShipUI = readingsWithoutShipUI
                     , contextMenuCascadeLevel = contextMenuCascadeLevel
                     , randomIntegers = readingFromGameClientCompleted.randomIntegers
                     }
@@ -243,6 +261,7 @@ processEventInBaseFramework config eventContext event stateBefore =
                     readingFromGameClientMemory
                         :: stateBefore.lastReadingsFromGameClient
                         |> List.take 8
+              , readingsWithoutShipUI = readingsWithoutShipUI
               }
             , case decisionLeaf of
                 ContinueSession continueSession ->
@@ -661,17 +680,132 @@ ensureInfoPanelLocationInfoIsExpanded previousStepEffects readingFromGameClient 
                         )
 
 
+{-| How many readings in a row without a ship UI it takes before _docked_ is a
+conclusion the split will draw with nothing else to go on.
+
+An absent ship UI has at least three causes, and the split below used to collapse
+them into the one that is almost never true here:
+
+1.  genuinely docked -- and then it stays absent for as long as the ship is in
+    the station, and the station window is there to say so;
+2.  **a reading the parser could not complete** -- and then it is back within a
+    few readings and nothing else is there either;
+3.  a session change or a client stall.
+
+Issue #304 records four `I am stuck here and need help to continue.` alarms
+across three runs, and every one of them is case 2: the reading before the alarm
+and the reading after it both show a live ship in space, with real hitpoints,
+rats on the overview and incoming damage. The ship never docked.
+
+**The number is the longest case-2 episode in the recorded corpus, plus two.**
+Measured over every `*.log` under `~/eve-bot-logs` -- 111 files, 1,082,795 host
+ticks -- there are 107 episodes where the ship UI was absent while the ship was
+demonstrably in space. Counted in _readings_ rather than in log entries, which is
+the unit this bound is in: the host prints roughly three entries per completed
+memory read, and the bot only decides on the entry where the read completes.
+100 of the 107 are one reading, five are two, one is three, and one is **ten** --
+`mission_run35.log`, ticks 2540.5 to 2550.1, ten consecutive failed reads over
+17.1 seconds. So the issue's proposed two would have left most of the tail, and
+twelve clears all of it with a reading to spare on a tail that has exactly one
+point in it above three.
+
+**Twelve is affordable because a genuine dock does not pay it.** The split takes
+the docked arm at once when the station window is there, which is what a docked
+client shows and what a ship in space cannot; the count is only consulted where
+nothing corroborates, which is the case that used to raise the alarm. So the
+price of the bound is paid on the readings the bot could not read anyway, not on
+every dock cycle.
+
+**The alarm is delayed, not removed.** A ship that really is stuck shows no ship
+UI on any reading, so the count reaches this bound and stays there, and
+`askForHelpToGetUnstuck` is raised on the twelfth reading and on every reading
+after it -- some 35 seconds later than before, for a signal whose whole purpose
+is to fetch a human.
+
+**Not a bound on `askForHelpToGetUnstuck`.** The alarm is the symptom. The cause
+is a bot concluding it is docked from one dropped reading and then choosing on
+that arm -- so the corroboration is at the split, where the conclusion is drawn,
+rather than at the one branch that happened to shout about it.
+
+-}
+readingsWithoutShipUIBeforeAssumingDocked : Int
+readingsWithoutShipUIBeforeAssumingDocked =
+    12
+
+
+{-| The count the split is corroborated against, advanced by one reading.
+
+A declaration of its own rather than a `let` inside
+`processEventInBaseFramework`, for the reason #297 pulled
+`infoPanelRepairClickIsSettling` out of the branch that consulted it: a rule
+reachable only by driving the whole event handler is a rule no case can ask
+about, and a case that drives the handler asserts on the handler.
+
+The argument order is `reading` then `before` so that
+`List.foldl countReadingsWithoutShipUI 0` is the whole history of a session,
+which is how the cases in `test_docked_assumption_needs_corroboration.py` get
+the number they hand to the split.
+
+**Capped rather than left to climb.** Since #284 the host suppresses a status
+line only while it is unchanged, so a count that keeps rising is the docked
+branch's description rewritten on every reading -- a status block reprinted for
+as long as the ship sits in the station. Nothing above the cap is asked
+anything: the split compares against the cap and no other number.
+
+-}
+countReadingsWithoutShipUI : ReadingFromGameClient -> Int -> Int
+countReadingsWithoutShipUI readingFromGameClient before =
+    case readingFromGameClient.shipUI of
+        Nothing ->
+            min readingsWithoutShipUIBeforeAssumingDocked (before + 1)
+
+        Just _ ->
+            0
+
+
 branchDependingOnDockedOrInSpace :
     { ifDocked : DecisionPathNode
     , ifSeeShipUI : EveOnline.ParseUserInterface.ShipUI -> Maybe DecisionPathNode
     , ifUndockingComplete : SeeUndockingComplete -> DecisionPathNode
     }
+    -> Int
     -> ReadingFromGameClient
     -> DecisionPathNode
-branchDependingOnDockedOrInSpace { ifDocked, ifSeeShipUI, ifUndockingComplete } readingFromGameClient =
+branchDependingOnDockedOrInSpace { ifDocked, ifSeeShipUI, ifUndockingComplete } readingsWithoutShipUI readingFromGameClient =
     case readingFromGameClient.shipUI of
         Nothing ->
-            Common.DecisionPath.describeBranch "I see no ship UI, assume we are docked." ifDocked
+            case readingFromGameClient.stationWindow of
+                Just _ ->
+                    -- The positive half of the corroboration, and the reason
+                    -- the bound above is affordable. A missing ship UI is the
+                    -- absence of evidence; a station window is evidence, and
+                    -- one the client cannot show to a ship in space. Every dock
+                    -- the corpus records arrives with it, so the common case
+                    -- costs no readings at all.
+                    Common.DecisionPath.describeBranch
+                        "I see no ship UI and I do see the station window -- we are docked."
+                        ifDocked
+
+                Nothing ->
+                    if readingsWithoutShipUI < readingsWithoutShipUIBeforeAssumingDocked then
+                        -- Not `ifDocked`, which is the conclusion this reading
+                        -- does not support, and not the in-space arm either,
+                        -- which has no ship UI to be handed. Nothing else is
+                        -- waiting on the reading: this split is the last entry
+                        -- in every app's decision root, so what is given back
+                        -- is a reading on which the bot could only have
+                        -- guessed.
+                        Common.DecisionPath.describeBranch
+                            ("I see no ship UI and no station window either, and only on the last "
+                                ++ String.fromInt readingsWithoutShipUI
+                                ++ " reading(s) -- not yet enough to conclude we docked. Wait for the next reading rather than acting on it."
+                            )
+                            waitForProgressInGame
+
+                    else
+                        Common.DecisionPath.describeBranch
+                            "I have seen no ship UI and no station window for long enough that a dropped reading cannot explain it -- assume we are docked."
+                            ifDocked
 
         Just shipUI ->
             ifSeeShipUI shipUI

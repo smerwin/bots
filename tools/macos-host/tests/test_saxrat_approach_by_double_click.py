@@ -133,6 +133,11 @@ class ApproachRepl(SaxratRepl):
         " , memory = initBotMemory"
         " , previousStepsEffects = []"
         " , previousReadingsFromGameClient = []"
+        # 0 is "this reading has a ship UI", which every reading here does. The
+        # field arrived with #304; a context literal that omits it does not
+        # compile, which is the intended way to find out that the framework now
+        # counts something.
+        " , readingsWithoutShipUI = 0"
         " , contextMenuCascadeLevel = 0"
         " , randomIntegers = [] }",
         # The branch, asked about the first row of a really parsed reading.
