@@ -1392,6 +1392,12 @@ class VolatileHost:
         # character than the bot is flying -- see `esi_waypoint.set_destination`.
         self.game_window_title = None
         self.game_log = game_log  # GameLogTail, or None when there is no channel to give
+        # `connection_lost_quit_point` over the last tree walked, waiting to be
+        # taken by the loop. Kept here rather than recomputed from the task
+        # result because the result carries the tree as *serialised JSON*, and
+        # re-parsing several thousand nodes once a reading to ask one question
+        # about them is a cost the read path does not need.
+        self._connection_lost = None
 
     def _get_live(self, process_id):
         live = self.live.get(process_id)
@@ -1648,6 +1654,12 @@ class VolatileHost:
         # untruncated read costs 0.80s against 0.72s truncated, and anything
         # past 10000 costs nothing at all since the tree is smaller than that.
         tree = tree_walker.tree(root_addr, metatype, str_type, max_depth=24, max_nodes=20000)
+        # Asked before the synthetic nodes below are appended, so what is
+        # judged is what the client is actually drawing (#299). They carry no
+        # display region and no `MessageBox`, so the answer would not change --
+        # but a reading that says the client is showing a modal must be about
+        # the client and nothing this host added to it.
+        self._connection_lost = connection_lost_quit_point(tree)
         entries = tree.get("dictEntriesOfInterest", {})
         w, h = entries.get("_displayWidth"), entries.get("_displayHeight")
         if isinstance(w, (int, float)) and isinstance(h, (int, float)) and w > 0 and h > 0:
@@ -1694,6 +1706,16 @@ class VolatileHost:
                 "memoryReadingSerialRepresentationJson": json.dumps(tree),
             }
         }
+
+    def take_connection_lost(self):
+        """The last read's Connection Lost verdict, once.
+
+        Cleared on the way out so the watch is fed exactly one reading per read
+        that completed. A tick that dispatches a screenshot or an input task
+        must not advance a counter measured in readings.
+        """
+        verdict, self._connection_lost = self._connection_lost, None
+        return verdict
 
     def _set_autopilot_destination(self, body):
         """Set the client's autopilot destination through ESI.
@@ -1841,6 +1863,310 @@ class ReadCompletionWatch:
         return None
 
 
+# The two halves of the Connection Lost modal's own wording, lowercased. Both
+# rather than either, and kept identical to `messageBoxSaysTheConnectionIsLost`
+# in both `Bot.elm` copies, which #185 derived from the same recorded instances.
+#
+# Both halves matter because the corpus carries a *second* box titled
+# `Connection Lost`: `saxrat_run15.log`'s reads
+# `OK / Connection Lost / The connection to the server was closed.`, over a
+# single **OK**. That one is deliberately not matched here -- its wording was
+# never walked, its button is not the Quit this acts on, and quitting a client
+# on a title alone is the indiscriminate match #101 is about.
+CONNECTION_LOST_WORDING = ("connection lost", "connection to server was lost")
+
+# The label on the one control the box offers, lowercased and trimmed. This is
+# matched rather than the button's `_name`, because the name is **not known**:
+# `messageBoxIdentityForOperator` truncates before the `with buttons [...]`
+# section, so none of the four recorded instances says what it was. `Quit` is
+# known -- it is the first entry of the identity every one of them printed,
+# which is `getAllContainedDisplayTexts` over the box.
+CONNECTION_LOST_QUIT_LABEL = "quit"
+
+# How many consecutive readings must carry the box before the click is posted.
+# Small on purpose: in all four recorded instances (`saxrat_run22`, `33`, `38`
+# and `40`) the box was still on screen at the last reading of the log, so it
+# has never once cleared on its own and waiting longer buys nothing. What the
+# count is for is a half-built tree, not a transient dialog.
+CONNECTION_LOST_READINGS_BEFORE_QUIT = 5
+
+# How many readings to let a posted click take effect before posting another.
+# The click can legitimately not land: `_windows_input` stands down for
+# `HUMAN_INPUT_STAND_DOWN_SECONDS` after a person touches the mouse, and it
+# aborts a sequence whose window is not frontmost.
+CONNECTION_LOST_READINGS_BETWEEN_CLICKS = 10
+
+# How many clicks are posted before this stops trying and says so. It does not
+# escalate to killing the client: a kill is what #299 exists to stop -- EVE
+# writes its window layout on a clean exit, and the killed client came back with
+# the probe scanner closed and the info panels in the state that then met #297.
+CONNECTION_LOST_MAX_CLICKS = 3
+
+
+def _fixed_number(value):
+    """An int out of a dict entry, by `getDisplayRegionFromDictEntries`' rule.
+
+    The Elm side accepts an int, a string holding one, or an object with an
+    `int_low32` field -- EVE's own numbers arrive as all three.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    if isinstance(value, dict):
+        return _fixed_number(value.get("int_low32"))
+    return None
+
+
+def node_display_text(node):
+    """The node's own display text, by `getDisplayText`'s rule, or `None`.
+
+    Under `_setText` or `_text`, longest wins, and either may hold a nested node
+    rather than a string -- EVE's info panel puts the text one level down inside
+    a `Link` object, which the Elm side already had to handle.
+    """
+    entries = node.get("dictEntriesOfInterest") or {}
+    texts = []
+    for key in ("_setText", "_text"):
+        entry = entries.get(key)
+        if isinstance(entry, str):
+            texts.append(entry)
+        elif isinstance(entry, dict):
+            nested = node_display_text(entry)
+            if nested is not None:
+                texts.append(nested)
+    if not texts:
+        return None
+    # `max` keeps the first of equal-length candidates, which is the order
+    # `List.sortBy (String.length >> negate) |> List.head` settles ties in.
+    return max(texts, key=len)
+
+
+def display_texts_in(node):
+    """Every display text in `node` and its descendants.
+
+    The raw subtree, with no regard for display regions -- `parseMessageBox`
+    reads the box's wording with `getAllContainedDisplayTexts`, which walks the
+    unparsed node.
+    """
+    found = []
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        text = node_display_text(current)
+        if text is not None:
+            found.append(text)
+        stack.extend(current.get("children") or [])
+    return found
+
+
+def _display_region_of(node):
+    """`(x, y, width, height)` relative to the parent, or `None`.
+
+    All four keys or nothing, which is what the Elm side requires before it will
+    treat a node as having a position at all.
+    """
+    entries = node.get("dictEntriesOfInterest") or {}
+    region = []
+    for key in ("_displayX", "_displayY", "_displayWidth", "_displayHeight"):
+        value = _fixed_number(entries.get(key))
+        if value is None:
+            return None
+        region.append(value)
+    return tuple(region)
+
+
+def walk_with_regions(node, x, y, width, height):
+    """`(node, absolute x, absolute y, width, height)`, for the region-bearing subtree.
+
+    `x`/`y` are where `node` itself sits, absolutely. Children add their own
+    `_displayX`/`_displayY` to that, which is `asUITreeNodeWithInheritedOffset`'s
+    arithmetic -- the stored numbers are relative to the parent and only the sum
+    is a position on the screen.
+
+    **A child with no display region ends the walk there**, descendants and all.
+    That is not a shortcut: `listDescendantsWithDisplayRegion` cannot see past
+    such a node either, so a subtree this skips is one the bot's own parser
+    never had a position for, and clicking into it would be acting on a
+    coordinate nothing computed.
+    """
+    stack = [(node, x, y, width, height)]
+    while stack:
+        current, current_x, current_y, current_w, current_h = stack.pop()
+        yield current, current_x, current_y, current_w, current_h
+        for child in current.get("children") or []:
+            region = _display_region_of(child)
+            if region is None:
+                continue
+            stack.append((child, current_x + region[0], current_y + region[1],
+                          region[2], region[3]))
+
+
+def find_connection_lost_box(tree):
+    """The Connection Lost modal in `tree` as `(node, x, y, w, h)`, or `None`.
+
+    A `MessageBox` node saying both halves of the wording. The type name is
+    asked for as well as the words because that is what the box *is* -- four
+    recorded runs printed `Message box: N/120 ... 'Quit / Connection Lost /
+    Connection to server was lost.'`, and that clause is only ever built from a
+    node `parseMessageBoxesFromUITreeRoot` already accepted, which matches
+    `pythonObjectTypeName == "MessageBox"` and nothing else.
+    """
+    root = _display_region_of(tree) or (0, 0, 0, 0)
+    for node, x, y, width, height in walk_with_regions(tree, *root):
+        if node.get("pythonObjectTypeName") != "MessageBox":
+            continue
+        texts = [text.lower() for text in display_texts_in(node)]
+        if all(any(half in text for text in texts)
+               for half in CONNECTION_LOST_WORDING):
+            return node, x, y, width, height
+    return None
+
+
+# What `connection_lost_quit_point` answers when there is no such box, and when
+# there is one but nothing in it this host can aim at.
+CONNECTION_LOST_ABSENT = "absent"
+CONNECTION_LOST_NO_CONTROL = "no control"
+CONNECTION_LOST_QUIT_AT = "quit at"
+
+
+def connection_lost_quit_point(tree):
+    """`(verdict, point)` -- where to click to quit a disconnected client.
+
+    `point` is in the same units and origin as `totalDisplayRegion`, so it needs
+    the window's screen origin added before it is a place on the screen, exactly
+    as the bot's own clicks do.
+
+    **It fails to `CONNECTION_LOST_NO_CONTROL` rather than to a guess.** The
+    box's node shape has never been walked: what is known is that it parses as a
+    `MessageBox` and that `Quit` is among its display texts, both off the
+    recorded runs. What is *not* known is which node carries that text or what
+    the button's `_name` is. So the only thing clicked is a node whose text is
+    `Quit` and which has a display region of its own -- and if the tree turns
+    out not to hold one, nothing is clicked and the host says so. The centre of
+    the box, or its only button by shape, are both the sort of guess that clicks
+    an unread control on a live client.
+    """
+    found = find_connection_lost_box(tree)
+    if found is None:
+        return CONNECTION_LOST_ABSENT, None
+    box, box_x, box_y, box_w, box_h = found
+    for node, x, y, width, height in walk_with_regions(
+            box, box_x, box_y, box_w, box_h):
+        text = node_display_text(node)
+        if text is None or text.strip().lower() != CONNECTION_LOST_QUIT_LABEL:
+            continue
+        if width <= 0 or height <= 0:
+            continue
+        return CONNECTION_LOST_QUIT_AT, (x + width // 2, y + height // 2)
+    return CONNECTION_LOST_NO_CONTROL, None
+
+
+class ConnectionLostWatch:
+    """Decides when to click Quit on a client that has lost its connection.
+
+    Issue #299. A client sitting on this modal holds the install open so the
+    launcher cannot patch, and nothing dismissed it: since #185 the bot answers
+    `LeaveTheMessageBoxAlone` at it, deliberately, because every control on it
+    quits the client and #54's rule is that the automatic reply declines. So it
+    sat -- one launched 15:38 on 16 Aug was still there the next morning, having
+    slept through downtime -- until a person ran `Stop-Process`, which is
+    **worse than clicking Quit**: EVE writes its window layout on a clean exit,
+    and the killed client came back with the probe scanner closed and the info
+    panels in the state that then met #297. Both were investigated as fresh
+    bugs before the cause was understood.
+
+    **The trigger is the box, not the read-completion count.** #299 offered
+    `ReadCompletionWatch`'s threshold as the hook, on the reasoning that the
+    client stops answering when this happens. The corpus says otherwise, three
+    times over. In `saxrat_run40.log` the box was up for **1199 consecutive
+    readings**, every one of them a read that completed and carried the box's
+    own wording -- the client goes on rendering and its memory goes on being
+    readable, because a read here is `tree_walker` walking the client's address
+    space, not a request the client has to answer. `READS ARE NOT COMPLETING`
+    appears in **no** recorded run, this dialog's four included. And run 11, the
+    stall #164 was filed about, was 608 reads issued and never answered rather
+    than reads that came back with an `Err`, which is the only shape
+    `read_failure_reason` counts. So that counter is neither necessary nor
+    sufficient here, and the dialog is the positive evidence #299 asked for.
+
+    **The host is the actor, so #54's rule is not touched at all.** No affirmative
+    goes near `closeMessageBoxByDeclining`; the bot goes on leaving the box
+    alone and the host quits the client out from under it.
+
+    **It does not relaunch.** Quitting alone unblocks the launcher's patching,
+    which is #299's stated goal, and relaunching has its own failure mode --
+    CLAUDE.md records a press-and-hold that needed two attempts because the
+    first only activated the launcher window.
+    """
+
+    def __init__(self, before_quit=CONNECTION_LOST_READINGS_BEFORE_QUIT,
+                 between_clicks=CONNECTION_LOST_READINGS_BETWEEN_CLICKS,
+                 max_clicks=CONNECTION_LOST_MAX_CLICKS):
+        self.before_quit = before_quit
+        self.between_clicks = between_clicks
+        self.max_clicks = max_clicks
+        self.readings = 0
+        self.clicks = 0
+        self.next_click_at = before_quit
+        self.announced = None
+
+    def note(self, verdict, point):
+        """One reading. Answers `(point to click or None, line to print or None)`."""
+        if verdict == CONNECTION_LOST_ABSENT:
+            line = None
+            if self.announced is not None:
+                line = ("# THE CONNECTION LOST BOX IS GONE after %d readings and"
+                        " %d click(s) at its Quit" % (self.readings, self.clicks))
+            self.readings = 0
+            self.clicks = 0
+            self.next_click_at = self.before_quit
+            self.announced = None
+            return None, line
+
+        self.readings += 1
+
+        if verdict == CONNECTION_LOST_NO_CONTROL:
+            if self.readings < self.before_quit or self.announced == "no control":
+                return None, None
+            self.announced = "no control"
+            return None, (
+                "# CONNECTION LOST, AND NOTHING TO CLICK: the box has been up"
+                " for %d readings but carries no node reading 'Quit' with a"
+                " display region, so this host will not click at it. The client"
+                " is holding the install open and the launcher cannot patch"
+                " until somebody quits it" % self.readings)
+
+        if self.readings < self.next_click_at:
+            return None, None
+
+        if self.clicks >= self.max_clicks:
+            if self.announced == "given up":
+                return None, None
+            self.announced = "given up"
+            return None, (
+                "# CONNECTION LOST AND THE CLIENT WILL NOT TAKE THE CLICK: %d"
+                " clicks posted at its Quit over %d readings and the box is"
+                " still up. Not killing it -- a kill loses the window layout"
+                " (#299), so this is now an operator's call"
+                % (self.clicks, self.readings))
+
+        self.clicks += 1
+        self.next_click_at = self.readings + self.between_clicks
+        self.announced = "clicking"
+        return point, (
+            "# CONNECTION LOST: the client has been showing 'Connection Lost /"
+            " Connection to server was lost.' for %d readings. Clicking its"
+            " Quit at %s (attempt %d of %d) so the launcher can patch -- a"
+            " clean exit, which is what preserves the window layout"
+            % (self.readings, point, self.clicks, self.max_clicks))
+
+
 class TaskDispatcher:
     def __init__(self, execute_input=False, capture_screenshots=False, game_log=None):
         self.volatile = VolatileHost(game_log=game_log)
@@ -1855,6 +2181,12 @@ class TaskDispatcher:
         # rather than on every read -- but a geometry that *changes* mid-run
         # says so again, which is the case that stranded run 22.
         self._canvas_note = None
+        # `clientRectLeftUpperToScreen` as last reported to the bot, which is
+        # what turns a `totalDisplayRegion` into a place on the screen. Kept so
+        # this host can aim a click of its own by the same arithmetic the bot
+        # uses (#299); `None` until a window read has calibrated it, and a
+        # click with no calibration is declined rather than guessed.
+        self._client_left_upper = None
         self._cg_input = None
         # Mouse buttons currently held, so cursor motion between a ButtonDown
         # and its ButtonUp is emitted as a drag rather than a plain move.
@@ -1931,6 +2263,45 @@ class TaskDispatcher:
             return {"OpenWindowResponse": {"Err": "OpenWindowRequest not supported by this macOS host"}}
 
         return {"CompleteWithoutResult": True}
+
+    def click_connection_lost_quit(self, point):
+        """Post one left click at `point`, a `totalDisplayRegion` coordinate.
+
+        Answers the lines to print. The sequence is the bot's own shape and
+        goes down the bot's own path, so everything `_windows_input` has learned
+        applies unchanged -- the window is brought to the front first (CLAUDE.md:
+        a window that is not frontmost will not accept a click), the move is
+        eased and forced because a click needs a real movement gesture, and a
+        person who has touched the mouse in the last few seconds stands this
+        down. A stood-down click is not a failure: the box is still there on the
+        next reading and the watch posts another.
+        """
+        if not self.execute_input:
+            return ["# CONNECTION LOST: would click Quit at %s, but"
+                    " --execute-input is not set, so nothing is posted" % (point,)]
+        if self._client_left_upper is None:
+            return ["# CONNECTION LOST: cannot click Quit -- no window read has"
+                    " calibrated the screen origin yet, so %s is not a place on"
+                    " the screen" % (point,)]
+        processes = find_eve_processes()
+        if not processes:
+            return ["# CONNECTION LOST: cannot click Quit -- no client window"
+                    " to click in"]
+        left, top = self._client_left_upper
+        x, y = left + point[0], top + point[1]
+        response = self._windows_input([
+            {"BringWindowToForeground": processes[0]["mainWindowId"]},
+            {"MouseMoveAbsolute": [x, y]},
+            {"WaitMilliseconds": 210},
+            {"ButtonDown": 0x01},
+            {"WaitMilliseconds": 210},
+            {"ButtonUp": 0x01},
+        ])["WindowsInputResponse"]
+        errors = response.get("errorMessages") or []
+        if errors:
+            return ["# CONNECTION LOST: the click at Quit did not go through:"
+                    " %s" % "; ".join(errors)]
+        return ["# CONNECTION LOST: clicked Quit at screen point (%d, %d)" % (x, y)]
 
     @staticmethod
     def _unwrap_request_considering_focus(payload):
@@ -2017,6 +2388,7 @@ class TaskDispatcher:
                 window_canvas_geometry(rect, root_size)
             self._scale_x, self._scale_y = scale_x, scale_y
             self._canvas_inset = (inset_x, inset_y)
+            self._client_left_upper = (scaled_rect["left"], scaled_rect["top"])
             self._report_canvas_calibration(root_size, point_w, point_h,
                                             rect["backing_scale"], scale_x, scale_y,
                                             inset_x, inset_y)
@@ -2610,6 +2982,7 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         )
 
     read_watch = ReadCompletionWatch()
+    connection_lost_watch = ConnectionLostWatch()
     tick = 0
     tick_start = time.monotonic()
     # Only so the granted-overrun notice is printed when the figure changes
@@ -2742,6 +3115,19 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
             read_note = read_watch.note(read_failure_reason(task_tag, result))
             if read_note is not None:
                 print(read_note, file=sys.stderr)
+            # #299: a client that has lost its connection sits on a modal
+            # forever, holding the install open so the launcher cannot patch.
+            # The bot deliberately leaves that box alone (#185), so the host is
+            # what quits it -- and it can, because a read here walks the
+            # client's memory rather than asking the client anything.
+            connection_lost = dispatcher.volatile.take_connection_lost()
+            if connection_lost is not None:
+                click_at, note = connection_lost_watch.note(*connection_lost)
+                if note is not None:
+                    print(note, file=sys.stderr)
+                if click_at is not None:
+                    for line in dispatcher.click_connection_lost_quit(click_at):
+                        print(line, file=sys.stderr)
             send_start = time.monotonic()
             response = send_event({"TaskCompletedEvent": {"taskId": task_id, "taskResult": result}})
             send_elapsed = time.monotonic() - send_start

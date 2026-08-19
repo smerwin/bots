@@ -2607,6 +2607,54 @@ a run where boxes are being answered normally means the identity is churning les
 than it should; a `message box` clause that never appears at all on a run that
 dismisses one means the standoff is not being written.
 
+## The host quits a client that has lost its connection; the bot still will not
+
+The one box the bot deliberately never answers is `Connection Lost / Connection
+to server was lost.`, whose only control is **Quit**. #185 made
+`messageBoxStandoffVerdictForBox` answer `LeaveTheMessageBoxAlone` at it, because
+#54's rule is that the automatic reply declines and every control on this box
+quits the client. The consequence #299 records is that it then sat there
+forever, holding the install open so the launcher could not patch — one client
+launched 15:38 on 16 Aug was still on it the next morning, having slept through
+downtime.
+
+**`Stop-Process` is not the workaround, it is a second bug.** EVE writes its
+window layout on a clean exit. The killed client came back with the probe
+scanner closed, so a run launched expecting it open could not hunt at all, and
+with the info panels in the state that then met #297's deadlock. Both were
+investigated as fresh bugs before the cause was understood.
+
+So **`botlab_host.py` clicks the Quit**, and `Bot.elm` is untouched:
+`closeMessageBoxByDeclining` still contains no affirmative, the bot still leaves
+the box alone, and the host quits the client out from under it. The two sides
+recognise the box by the same two substrings, which
+`test_connection_lost_host_quit.py` pins across the language boundary.
+
+**The trigger is the box, not `ReadCompletionWatch`.** #299 proposed the
+reads-not-completing threshold, reasoning that the client stops answering at
+downtime. It does not stop answering *this* host: a read here is `tree_walker`
+walking the client's address space, not a request the client services, so the
+tree stays readable while the connection is gone. `saxrat_run40.log` held this
+box for **1199 consecutive readings**, every one of them a completed read
+carrying its wording, and `READS ARE NOT COMPLETING` appears in no recorded run
+at all.
+
+**Related, and not fixed here:** `read_failure_reason` only counts a
+`RequestToVolatileProcess` that came back carrying an `Err`. Run 11 — the stall
+#166 built that counter for — was 608 reads *issued and never answered*, and a
+`ReadFromWindowResult` of `ProcessNotFound` arrives inside an `Ok` envelope. So
+the counter has never fired in the corpus, and on run 11's own shape it could
+not have.
+
+What to watch on the first run that meets this box: `# CONNECTION LOST:` naming
+the reading count and the screen point, then `clicked Quit at screen point`, and
+the client gone. `NOTHING TO CLICK` means the box parsed but carries no node
+reading `Quit` with a display region — the node shape has still never been
+walked, so that is the outcome to expect if it differs. `WILL NOT TAKE THE
+CLICK` means three clicks were posted and the box outlived them; the host does
+**not** escalate to a kill, deliberately, because the kill is what this exists
+to stop.
+
 ## Context-menu cascade robustness
 
 `EveOnline.BotFrameworkSeparatingMemory.elm`'s shared cascade logic
