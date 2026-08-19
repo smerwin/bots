@@ -2133,7 +2133,17 @@ statusTextFromState context =
         describeCurrentReading =
             case readingFromGameClient.shipUI of
                 Nothing ->
-                    [ "I do not see the ship UI. Looks like we are docked." ]
+                    -- Which of the two it is, rather than the guess the split
+                    -- itself stopped making (#304). A header that says "docked"
+                    -- on a reading the bot has declined to draw that conclusion
+                    -- from is one the operator has to disbelieve.
+                    [ case readingFromGameClient.stationWindow of
+                        Just _ ->
+                            "I do not see the ship UI and I do see the station window. Docked."
+
+                        Nothing ->
+                            "I see neither the ship UI nor the station window, so this reading does not say where the ship is."
+                    ]
 
                 Just shipUI ->
                     let
