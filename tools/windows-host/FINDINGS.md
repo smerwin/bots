@@ -754,6 +754,92 @@ batch-minus-one. Unresolved, and it matters beyond throughput: the same window
 is where an overview row can shift under a click, which is the likeliest feeder
 of the lock-range ratchet in issue #206.
 
+### A window on top of the overview: clicks that land somewhere else
+
+Run 2 lost **3 hours 45 minutes** to this, in one anomaly, with the ship safe
+and the host healthy the whole time. It is the sharpest edge found on Windows so
+far, it is not a Windows bug, and it explains two things this file already
+carries as unresolved.
+
+**What happened.** The client's Probe Scanner sat over the top of the PVE
+overview. Measured live, mid-stall:
+
+| | origin | size | spans |
+|---|---|---|---|
+| `ProbeScannerWindow` | (454, 122) | 373 x 379 | x 454-827, y 122-**501** |
+| `OverviewWindow` (PVE) | (385, 431) | 310 x 471 | x 385-695, y 431-902 |
+| the one rat row | (394, 487) | 292 x 17 | x 394-686, y 487-504 |
+
+`lockTargetFromOverviewEntry` clicks the row's centre, which is
+(394 + 146, 487 + 8) = **(540, 495)** -- six pixels above the Probe Scanner's
+bottom edge. Every lock click for three and three quarter hours went into the
+Probe Scanner. About 20,000 input events, no lock, no menu, no shot fired
+(`Outgoing fire: 0 landed / 0 missed`), and the row sitting there at 3,786 m
+inside a proven 42,000 m lock range.
+
+**The rule that misses it.** `overviewEntryIsDisplayed` asks whether a row is
+rendered *within its own window*. It has no notion of another window on top,
+because the UI tree carries geometry and not z-order. So a row can be
+`_display`ed and unclickable at the same time, and nothing in the bot can
+currently tell the difference between "the client refused" and "the click never
+arrived".
+
+**Nothing escalates, which is why it ran for hours.** `stalemate` is the counter
+that would give up (`200 to close in and 300 to leave`), and it only advances
+while there is an *active target*. An occluded row never becomes one, so the
+counter sat at 0 for the whole stall. `approach`, `menus` and `stuck` likewise.
+`I am stuck here and need help to continue` fired three times in 124k lines, and
+from an unrelated ship-UI blip rather than from this. The same shape as run 41's
+2,266 km double-click, which got a fix for the approach path specifically rather
+than a general one.
+
+**It poisons the lock-range learning, and that is the part worth reading twice.**
+`recordLockRangeAnswer`'s refusal test takes four things at once: the attempt has
+had its readings to land, the row is still in the overview and still `_display`ed,
+the row still does not read targeted or targeting, and the target bar was empty at
+both ends. **An occluded row satisfies all four.** Occlusion does not change
+`_display`, and the click never reaches the client's targeting code at all, so the
+bot books a refusal at a distance the client never actually refused.
+`lockRefusedAtMeters` only falls. Observed at the end of the stall:
+
+```
+lock 42000m (set 39000 client - proven 42000 refused 3786 attempt none)
+```
+
+A refusal at 3,786 m standing against a proof at 42,000 m -- the bounds crossed,
+from a click that never landed. This is a concrete feeder for the ratchet in
+issue #206, and it is the first one that has been observed rather than suspected.
+
+**It is also a candidate for the lock shortfall above.** Run 28: asked 372,
+answered 151, **40.6%**. Run 2: asked 39, got 16, **41.0%**. A window that
+covers part of an overview drops a stable fraction of clicks, which is what a
+consistent percentage across unrelated runs looks like. Not proven -- run 28's
+window layout was not recorded -- but it is a third candidate beside the two
+listed above, and the cheapest to rule in or out on the next run by writing the
+window rectangles into the log.
+
+**The fix: click a visible sub-region, not the centre.** For a row rectangle R,
+subtract the rectangles of the other windows that overlap it, and click the
+centroid of the largest surviving rectangle instead of the centre of R. Here the
+row's left 60 px (x 394-454) and its bottom 3 px (y 501-504) were clear, so the
+lock was reachable the whole time and the bot was aiming at the one part of the
+row that was not.
+
+Two properties make this worth doing rather than merely tidy:
+
+- **It needs no z-order.** Subtracting *every* overlapping window's rectangle,
+  whether or not it is on top, only ever over-excludes: the worst case is
+  declining to click a row that would have worked. Z-order would make it exact,
+  but the conservative version is safe and can be written today. Whether the
+  tree exposes layering at all is the open question -- sibling order is a guess
+  and has not been tested.
+- **An empty result is the honest answer.** If nothing survives the subtraction
+  the row is genuinely unclickable, and it should then be excluded from
+  `overviewEntriesToLock` *and* barred from teaching a refusal. That single
+  change would have turned this from a 3h45m silent livelock into a bot that
+  says the row is buried and moves on, and would have kept the lock-range
+  bounds clean.
+
 ### Smaller ones, each having cost something
 
 - **The run logs are PowerShell-captured and wrapped.** A status clause
