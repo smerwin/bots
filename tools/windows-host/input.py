@@ -478,6 +478,22 @@ def bring_window_to_foreground(
     of a window that is behind another) pass ``allow_synthetic_alt=True``.
     ``engagement_watch.py`` deliberately raises nothing at all for this reason
     and records what was frontmost instead.
+
+    **``SW_RESTORE`` is guarded on ``IsIconic``, and it has to be.** The
+    original call was unconditional -- ``ShowWindow(hwnd, SW_RESTORE)``, "in
+    case minimised" -- and ``SW_RESTORE`` does not mean "if minimised, show
+    normally"; it means "leave the minimised *or maximised* state and go to
+    the last windowed size and position", every time it is called. So a raise
+    aimed at a window that was already maximised silently un-maximised it,
+    every single call, all day: the EVE client and the launcher both ended up
+    windowed at an old, sometimes off-screen rect, and every symptom of that
+    read as a *different* bug -- an avatar press-and-hold aimed at
+    launcher-window-relative coordinates that used to be right, undock clicks
+    that stopped landing, all of it downstream of a window whose size and
+    position had moved without anything reporting that it had. ``IsIconic``
+    is one extra syscall and answers the only question ``SW_RESTORE`` was
+    ever needed for -- whether the window is genuinely minimised -- so a
+    maximised or already-normal window is now left exactly as it was.
     """
     if window_is_foreground(hwnd):
         return True
@@ -496,7 +512,8 @@ def bring_window_to_foreground(
                 # attach, so the transition is in effect for the request below.
                 _user32.keybd_event(_VK_MENU, 0, 0, 0)
                 _user32.keybd_event(_VK_MENU, 0, KEYEVENTF_KEYUP, 0)
-            _user32.ShowWindow(wintypes.HWND(hwnd), 9)  # SW_RESTORE, in case minimised
+            if _user32.IsIconic(wintypes.HWND(hwnd)):
+                _user32.ShowWindow(wintypes.HWND(hwnd), 9)  # SW_RESTORE, genuinely minimised
             _user32.SetWindowPos(
                 wintypes.HWND(hwnd), wintypes.HWND(_HWND_TOP), 0, 0, 0, 0,
                 _SWP_NOMOVE | _SWP_NOSIZE | _SWP_SHOWWINDOW,
