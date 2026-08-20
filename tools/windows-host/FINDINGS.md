@@ -869,6 +869,127 @@ Its `sys.path.insert` points at a checkout that need not exist; run it from its
 own directory. And **the client pid and window handle both change on every
 relaunch** — re-resolve both, never carry either across a restart.
 
+## 9. One machine, no toolchain: the native walker was never built here
+
+This machine (host for `Olivia Ochre`'s saxrat runs) runs measurably slower
+than others flying the same bot, and the first hypothesis was thermal
+throttling — a plausible guess for a mobile CPU (AMD Ryzen 5 5500U, 6c/12t,
+2.1 GHz base) under sustained load. `\Processor Information(_Total)\% Processor
+Performance` (the reliable real-throughput counter on modern AMD parts;
+`\Processor Information(_Total)\Processor Frequency` is documented-unreliable
+on this family, and `Win32_Processor.MaxClockSpeed`/`CurrentClockSpeed`
+reflects the rated label rather than real-time boost) showed no sustained
+drop, and `MSAcpi_ThermalZoneTemperature` is not exposed at all on this box —
+no OEM sensor driver. Thermal throttling was ruled out rather than found.
+
+**The real cause was narrower and specific to this one machine:
+`tree_walker.exe` had never been built here.** `TreeWalkerClient` falls back
+silently to the pure-Python walker whenever the compiled binary is absent —
+one line to stderr and nothing else, deliberately (see section 6, "falls back
+... rather than failing") — so the host runs correctly and simply slower,
+which is exactly the shape that goes unnoticed. No MSVC toolchain had ever
+been installed on this machine, so `tree_walker/build.bat` had nothing to
+compile against.
+
+Fixed by installing Visual Studio 2022 Build Tools with the C++ workload via
+`winget`, then running `tree_walker/build.bat` with its fully-qualified path
+(a first attempt via `Set-Location` + a relative filename failed with
+`'build.bat' is not recognized` — the working directory set in one PowerShell
+call did not carry into the `cmd.exe` subprocess it spawned). Result:
+`tree_walker.exe`, 164,352 bytes, and the next saxrat launch printed
+`# tree_walker: native (tree_walker.exe)` in place of the "not built" line.
+
+**The gain measured here is real and much smaller than section 7's
+143ms/2405ms figure, and the reason is the read budget rather than the
+walker.** That comparison was taken at `max_depth=16, max_nodes=5000` against
+a 3,495-node tree on a different machine; `_read_from_window`'s own budget has
+since been raised twice (its comments record why — content sitting 19 levels
+deep, a mission grid with 5,554 nodes silently truncated at the old 5,000-node
+cap) and is now `max_depth=24, max_nodes=20000`. Measured on this machine,
+same character, same settings, comparing the saxrat run immediately before the
+build against the one immediately after — the only variable changed being
+which walker answers `ReadFromWindow`:
+
+| | `RequestToVolatileProcess` (tree_walker read) dispatch | `InvokeMethodOnWindowRequest` (screenshot) dispatch |
+|---|---:|---:|
+| pre-build, Python walker (`saxrat_20260819-205456.log`, n=171) | mean **3.335s**, min 3.203s, max 4.235s | mean 4.847s, max 6.156s |
+| post-build, native walker (`saxrat_20260819-214548.log`, n=110) | mean **2.359s**, min 2.171s, max 2.907s | mean 4.279s, max 5.625s |
+
+**About 1.4x, not 8.7x**, on the memory read specifically — real, and worth
+having, but a fraction of the isolated-benchmark figure. A larger tree at a
+larger depth/node budget means more nodes for the C walker's own fixed
+per-node cost to add up over, and a much larger JSON payload to marshal across
+the stdin/stdout pipe and decode with `json.loads` on the Python side — both
+untouched by moving the walk itself from Python to C. Nobody has profiled
+which of those two dominates on this machine; the number above is what
+shipped, not a diagnosis of where the remaining ~2.2-2.4s goes.
+
+**The screenshot read (`InvokeMethodOnWindowRequest`) is untouched by this fix
+and is now the larger of the two per-cycle costs** — mean 4.28-4.85s against
+the memory read's 2.36-3.34s. It is not memory reading at all: it is the
+second, independent per-cycle read the framework issues alongside
+`ReadFromWindow` (see the Architecture section of `CLAUDE.md`), returning
+`windowRect`/`clientRect`/`imageData` so the host can translate the memory
+tree's internal coordinates into real screen pixels for clicking — the bot's
+sole answer to "where on screen is this button". Both reads are dispatched
+serially in `run_bot`'s task queue, so the two costs simply add: pre-build
+~8.18s of read time per cycle, post-build ~6.64s, both dominated by the
+screenshot rather than the walk. **If this machine still feels slow relative
+to its neighbours after this fix, the screenshot capture path is where to look
+next, not the tree walker.**
+
+**Unverified: whether the same before/after ratio holds on a quiet, docked
+reading.** Both logs compared here are mid-session, in-space readings, likely
+close to the 20,000-node budget; a much smaller tree — docked, few overview
+rows — may show a ratio closer to the isolated benchmark's, since the fixed
+IPC/JSON cost would be a smaller share of a smaller payload. Nobody has run
+that comparison.
+
+## 10. `bring_window_to_foreground` was un-maximizing the client on every call
+
+`input.py`'s `bring_window_to_foreground` called `ShowWindow(hwnd, SW_RESTORE)`
+unconditionally, commented "in case minimised". `SW_RESTORE` (value 9) does not
+mean "if minimised, restore to normal" — it means "leave whichever of minimised
+or maximised state the window is in, and go to the last windowed size and
+position", every time it is called, on a window in either state. So a call
+aimed at a window that was already maximised silently un-maximised it, on
+every single invocation — and `BotFramework.elm` prepends this call to *every*
+input sequence, so the common case (already frontmost, already maximised) paid
+it regardless.
+
+The result read as several unrelated bugs before the mechanism was found: an
+avatar press-and-hold aimed at launcher-window-relative coordinates that used
+to be right and stopped landing, undock clicks that stopped landing, the
+client window observed at an old, sometimes off-screen rect (`(-397, 221)
+1726x1090` on one capture) with other windows overlapping it. Confirmed live: a
+`ShowWindow(hwnd, SW_MAXIMIZE)` + `SetForegroundWindow` restored the window to
+its expected maximized geometry, and the very next undock click — which had
+been silently missing — landed.
+
+**Fixed by guarding on `IsIconic(hwnd)` first** — one extra syscall, and the
+only question `SW_RESTORE` was ever needed to answer (is this window genuinely
+minimised). A maximised or already-normal window is now left exactly as it
+was:
+
+```python
+if _user32.IsIconic(wintypes.HWND(hwnd)):
+    _user32.ShowWindow(wintypes.HWND(hwnd), 9)  # SW_RESTORE, genuinely minimised
+```
+
+`IsIconic` is called through the same informal ctypes style already used for
+`ShowWindow`/`SetForegroundWindow` in this function, with no new
+`argtypes`/`restype` declared, matching the file's existing convention for
+this block.
+
+**Verified live, once, not through an automated test** — no `tests/` directory
+exists yet in `tools/windows-host/`. Called `win_input.bring_window_to_foreground`
+directly against the real, already-maximized EVE client and confirmed
+`client_width`/`client_height` unchanged before and after (1710x1051 both
+times). Not verified: the genuinely-minimised case still restoring correctly
+after the guard (nothing changed about that branch, but nothing has re-run it
+either), and whether the launcher window — which goes through the same
+function — shows the identical symptom; it was not captured mid-bug.
+
 ## Running it
 
 ```bash
