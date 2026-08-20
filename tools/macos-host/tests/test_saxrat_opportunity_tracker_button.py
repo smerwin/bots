@@ -127,8 +127,17 @@ SITE_NAME = "Sansha's Command Relay Outpost"
 # them. `Warp to Location` and `Dock` come from the mission runner's own
 # vocabulary for the same widget type; `Dock` has never been read off the
 # tracker and is carried on that separation rather than on an observation here.
+#
+# `Undock` joined them in #313, which is the change
+# `test_the_entering_row_wins_nothing_the_allow_list_refuses` already describes:
+# #280 had it under "Not this" as a state read while the ship was undocking, and
+# it was then read off the live client as what this widget renders while the ship
+# is docked in the escalation's own system -- a command, and the one that gets
+# the ship out of a station it parked in. That case was written to keep `Undock`
+# out of `STATE_LABELS` so it would not go red on a change that is right; this
+# list is the other half of the same move and was missed.
 COMMAND_LABELS = ["Set Destination", "Jump", "Warp to Site",
-                  "Warp to Location", "Dock"]
+                  "Warp to Location", "Dock", "Undock"]
 
 # The states. Clicking one re-commands a trip already under way.
 STATE_LABELS = ["Warping", "Jumping", "Docking", "Preparing", "Undocking",
@@ -876,7 +885,14 @@ class TheWholeTreeSearchIsGone(unittest.TestCase):
         self.assertIn("travelLabelIsReadableText label", rule)
         self.assertIn("opportunityTravelCommandLabels |> List.member", rule)
 
-    def test_the_command_list_is_the_five_words_and_no_more(self):
+    def test_the_command_list_is_exactly_the_listed_words(self):
+        """Named for the property rather than for a count.
+
+        It was `..._is_the_five_words_and_no_more` until `Undock` made them six,
+        and a name carrying the number goes stale on exactly the change this
+        case exists to notice -- while still passing, so the staleness is
+        invisible.
+        """
         listed = collapsed(body_of(self.source, "opportunityTravelCommandLabels"))
         for text in COMMAND_LABELS:
             self.assertIn('"%s"' % text.lower(), listed)
