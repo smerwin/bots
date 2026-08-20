@@ -1388,8 +1388,9 @@ class VolatileHost:
         self.root_display_size = {}  # processId -> (width, height) in "game pixel" units, from UIRoot's own _displayWidth/_displayHeight
         self.game_pid = None
         # The client's own window title, which names the character it is flying.
-        # Kept so `_set_autopilot_destination` can refuse to route a *different*
-        # character than the bot is flying -- see `esi_waypoint.set_destination`.
+        # Kept so `_set_autopilot_destination` routes *that* character rather
+        # than whichever one a single stored token happened to belong to -- see
+        # `esi_waypoint.set_destination`.
         self.game_window_title = None
         self.game_log = game_log  # GameLogTail, or None when there is no channel to give
         # `connection_lost_quit_point` over the last tree walked, waiting to be
@@ -1759,8 +1760,11 @@ class VolatileHost:
                 # Whose autopilot this endpoint drives is decided by the token,
                 # not by the client the bot is attached to, so a token for the
                 # wrong character reports success and routes somebody else. The
-                # window title is what this host knows the character by; `None`
-                # means it could not tell and the call proceeds as before.
+                # window title is what this host knows the character by, and
+                # `esi_waypoint` now holds a token per character and uses this
+                # name to pick one. `None` means the title could not be read:
+                # that still proceeds where one character is authorised, and
+                # refuses where several are, since any pick would be a guess.
                 expected_character=esi_waypoint.character_from_window_title(
                     self.game_window_title),
             )

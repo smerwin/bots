@@ -83,6 +83,14 @@ def _target(service: str) -> str:
     Credential Manager is already per-user -- so it is carried as `UserName`,
     which is informational there rather than part of the key. That matches how
     the macOS side actually behaves, where the account is the logged-in user.
+
+    **The service is the whole key here, and callers that need more than one
+    entry of a kind have to say so in the service.** ``esi_waypoint.py`` holds
+    one refresh token per EVE character and puts the character's name in the
+    service (``eve-esi-refresh:<character>``) rather than in the account for
+    exactly this reason: two characters sharing a service would be two entries
+    on macOS, where the Keychain keys on (service, account), and *one* entry
+    here, silently, each overwriting the last.
     """
     return f"eve-bot-windows-host:{service}"
 
@@ -168,7 +176,13 @@ if __name__ == "__main__":
     parser.add_argument("--service", default=None)
     args = parser.parse_args()
 
-    services = [args.service] if args.service else ["eve-esi-refresh", "eve-esi-client-id"]
+    # `eve-esi-refresh` is the pre-multi-character slot, and reads "not stored"
+    # once it has been filed under its character -- which is success rather
+    # than a missing credential. The per-character entries cannot be listed
+    # from here (there is no enumeration in this API and none is wanted for a
+    # secret); `esi_waypoint.py characters` is what answers that.
+    services = [args.service] if args.service else [
+        "eve-esi-refresh", "eve-esi-characters", "eve-esi-client-id"]
     for service in services:
         if args.action == "delete":
             print(f"{service}: {'deleted' if delete(service) else 'was not stored'}")
