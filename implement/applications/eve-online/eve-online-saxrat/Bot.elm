@@ -42,7 +42,7 @@
       works.)
 
       + `anomaly-name` : Choose the name of anomalies to take. You can use this setting multiple times to select multiple names, or separate several with commas on one line. The comma always separates, so a name that itself contains one cannot be written here in either form. **Naming any replaces the shipped defaults** (`sansha rally point` and `angel rally point`) rather than adding to them, so the list is exactly what you write; with no `anomaly-name` at all those two are what the bot hunts. Matched whole and ignoring case, so the name must be written as the probe scanner's own Name column shows it -- except that an entry ending in `*` matches any name starting with the rest of it, so `anomaly-name=Sansha*` takes every Sansha site and `anomaly-name=*` takes every combat anomaly. Note a wildcard cannot tell an easy site from one that will kill this ship: it matches Havens and Sanctums as readily as Burrows.
-      + `hide-when-neutral-in-local` : Set this to 'yes' to make the bot dock in a station or structure when a neutral or hostile appears in the 'local' chat.
+      + `hide-when-neutral-in-local` : Set this to 'yes' to make the bot leave when a neutral or hostile appears in the 'local' chat. Two steps rather than one: first the same celestial warp `runAwayIfLowHealth` takes -- whatever the overview already shows at AU range, falling back to the surroundings-menu tether/dock cascade only when it offers nothing to warp to -- and then, once the ship is off that grid, the same "leave this system" travel the hunt circuit already uses when there is nothing left to hunt (`jumpToNextSystem`), so the ship keeps moving toward the next hunting ground rather than settling for a different rock in the same system the neutral is still in local of. Docking was the whole answer here until this line, and it was the wrong one for the reason `runAway`'s own doc comment gives for the health guards: a search for a station or structure can fail, can be far away, or can point at a structure that is not friendly, where the celestial is already on screen and the warp is one panel button. If already docked when this fires, the bot simply stays docked. See `hideFromNeutralInLocal`.
       + `avoid-rat` : Name of a rat to avoid, as it appears in the overview. You can use this setting multiple times to select multiple names, or separate several with commas on one line. The comma always separates, so a name that itself contains one cannot be written here in either form.
       + `anomaly-wait-time`: Minimum time to wait after arriving in an anomaly before considering it finished. Use this if you see anomalies in which rats arrive later than you arrive on grid.
       + `warp-at`: Distance in km to warp to when warping to an anomaly, e.g. `warp-at=30`. Must match one of the game client's own preset "Warp to Within" distances offered in that menu (typically 0, 5, 10, 15, 20, 30, 50, 70, 100) -- an arbitrary value will not match any menu entry and will leave the bot stuck. Defaults to 100.
@@ -540,6 +540,15 @@ type alias BotMemory =
     { lastDockedStationNameFromInfoPanel : Maybe String
     , shipModules : ShipModulesMemory
     , shipWarpingInLastReading : Maybe Bool
+
+    -- Whether this `hide-when-neutral-in-local` episode has already gotten the
+    -- ship moving -- set the first reading it is seen warping or jumping while
+    -- `neutralOrHostileInLocal` answers `Just True`, cleared the moment that
+    -- answer stops being `Just True`. What `hideFromNeutralInLocal` reads to
+    -- tell "just fled, still landing" from "already moving, keep going toward
+    -- the next hunting ground" apart, across however many hops that takes. See
+    -- `hideFromNeutralInLocal`.
+    , hidingFromNeutralPastFirstHop : Bool
 
     -- How many readings ago the last warp finished, which is what opens the
     -- arrival window the other-pilot snapshot is taken inside. `Nothing` means
@@ -1629,9 +1638,7 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                                                 runAwayIfLowHealth context shipUI
                                                     |> Maybe.withDefault
                                                         (continueIfShouldHide
-                                                            { ifShouldHide =
-                                                                returnDronesToBay context
-                                                                    (dockAtRandomStationOrStructure context)
+                                                            { ifShouldHide = hideFromNeutralInLocal context
                                                             }
                                                             context
                                                             |> Maybe.withDefault
@@ -4820,32 +4827,115 @@ continueIfShouldHide config context =
                 Nothing
 
             else
-                case context.readingFromGameClient |> localChatWindowFromUserInterface of
+                case neutralOrHostileInLocal context.readingFromGameClient of
                     Nothing ->
                         Just (describeBranch "I don't see the local chat window." askForHelpToGetUnstuck)
 
-                    Just localChatWindow ->
-                        let
-                            chatUserHasGoodStanding chatUser =
-                                goodStandingPatterns
-                                    |> List.any
-                                        (\goodStandingPattern ->
-                                            chatUser.standingIconHint
-                                                |> Maybe.map (stringContainsIgnoringCase goodStandingPattern)
-                                                |> Maybe.withDefault False
-                                        )
+                    Just True ->
+                        Just (describeBranch "There is an enemy or neutral in local chat." config.ifShouldHide)
 
-                            subsetOfUsersWithNoGoodStanding =
-                                localChatWindow.userlist
-                                    |> Maybe.map .visibleUsers
-                                    |> Maybe.withDefault []
-                                    |> List.filter (chatUserHasGoodStanding >> not)
-                        in
-                        if 1 < (subsetOfUsersWithNoGoodStanding |> List.length) then
-                            Just (describeBranch "There is an enemy or neutral in local chat." config.ifShouldHide)
+                    Just False ->
+                        Nothing
 
-                        else
-                            Nothing
+
+{-| Whether local chat carries anyone this bot does not have good standing
+with. `Nothing` when the local chat window itself is not in the reading --
+distinct from `Just False`, which is "the window is there and everyone in it
+reads as friendly" -- so a caller that cannot tell the difference does not
+default to "safe".
+
+Pulled out of `continueIfShouldHide` so `updateMemoryForNewReadingFromGame` can
+ask the same question `hideFromNeutralInLocal` is answering, which is what lets
+`hidingFromNeutralPastFirstHop` be latched from the reading rather than from a
+decision the memory update never sees. Two callers reading two copies of this
+would drift the moment one of them is retuned and the other is not, the way
+`ammoSwapDisarmDamageBudget` stays deliberately un-inherited elsewhere in this
+file for the opposite reason -- here the two questions are the same question and
+should never be two answers.
+
+-}
+neutralOrHostileInLocal : ReadingFromGameClient -> Maybe Bool
+neutralOrHostileInLocal readingFromGameClient =
+    readingFromGameClient
+        |> localChatWindowFromUserInterface
+        |> Maybe.map
+            (\localChatWindow ->
+                let
+                    chatUserHasGoodStanding chatUser =
+                        goodStandingPatterns
+                            |> List.any
+                                (\goodStandingPattern ->
+                                    chatUser.standingIconHint
+                                        |> Maybe.map (stringContainsIgnoringCase goodStandingPattern)
+                                        |> Maybe.withDefault False
+                                )
+
+                    subsetOfUsersWithNoGoodStanding =
+                        localChatWindow.userlist
+                            |> Maybe.map .visibleUsers
+                            |> Maybe.withDefault []
+                            |> List.filter (chatUserHasGoodStanding >> not)
+                in
+                1 < (subsetOfUsersWithNoGoodStanding |> List.length)
+            )
+
+
+{-| The response to `hide-when-neutral-in-local`: get off the current grid
+first, then keep moving toward the next hunting ground, rather than either
+alone.
+
+`runAway` by itself is right for the first reaction and wrong as the whole
+answer here -- it rotates among whatever is at AU range on the overview every
+`runAwayCelestialStickyReadings` readings and nothing in it ever leaves the
+system, so a ship that only ever changes which rock it orbits is still standing
+in the same local chat the neutral is in. `jumpToNextSystem` by itself is wrong
+the other way: reached with no route yet set, its first move is to *ask* the
+host for one and wait, which is exactly the readings this setting exists to
+react to fastest -- the ship sitting still, exposed, on whatever grid it was
+already on when the neutral showed up.
+
+So this is the two-step sequence the setting's own name suggests, and the order
+is fixed rather than chosen fresh each reading:
+
+1. **Not yet moving**: `runAway`'s own celestial warp -- immediate, needs
+   nothing from ESI or the hunt circuit, and is the fastest exit this bot has.
+2. **Currently warping or jumping**: wait it out, `decideNextActionWhenInSpace`'s
+   own `HOOOOONK in warp` guard reused rather than a second copy of it -- acting
+   on route or gate UI mid-transit is not a state any other branch here risks
+   either.
+3. **Landed since the transit began**: `jumpToNextSystem`, unchanged -- asking
+   the host for the next hunting ground and travelling the route it sets exactly
+   as when there is nothing left to hunt in this system. Reused rather than
+   reimplemented so a route already in flight (set by ordinary hunting before
+   the neutral ever showed up) is simply continued rather than abandoned.
+
+**Which of the three applies is `hidingFromNeutralPastFirstHop`, latched in the
+memory update rather than derived here**, because a decision cannot write
+memory and the transition (has this hide episode already gotten the ship moving
+at all) has to survive across however many readings and however many hops it
+takes. It is set the first reading the ship is seen warping or jumping while
+the neutral condition holds -- covering a celestial warp just issued by step 1
+*and* a gate jump `jumpToNextSystem` has already put the ship on the far side
+of, so a second neutral met after the first jump does not fall back to a
+pointless celestial hop before continuing on -- and cleared the moment the
+neutral condition itself clears, so the next hide episode starts fresh at step
+1 rather than inheriting a stale "already moving".
+
+-}
+hideFromNeutralInLocal : BotDecisionContext -> DecisionPathNode
+hideFromNeutralInLocal context =
+    if shipIsWarpingOrJumping context.readingFromGameClient then
+        describeBranch
+            "Hiding from local: already warping or jumping clear of this grid -- let it land before deciding the next hop."
+            (returnDronesToBay context waitForProgressInGame)
+
+    else if context.memory.hidingFromNeutralPastFirstHop then
+        describeBranch
+            "Hiding from local: off the grid this hide episode already fled, so keep moving toward the next hunting ground."
+            (jumpToNextSystem context)
+
+    else
+        runAway context
 
 
 {-| Root-caused live: this only ever searched the surroundings-button menu
@@ -8686,6 +8776,7 @@ initBotMemory =
     { lastDockedStationNameFromInfoPanel = Nothing
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , shipWarpingInLastReading = Nothing
+    , hidingFromNeutralPastFirstHop = False
     , readingsSinceWarpEnded = Nothing
     , readingsCount = 0
     , visitedAnomalies = Dict.empty
@@ -14419,6 +14510,22 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         shipIsWarping =
             shipWarpingFromReading context.readingFromGameClient
 
+        -- Off entirely unless the setting is armed, so a session that never
+        -- uses this pays nothing for it -- `ammoSwap`'s own posture, for the
+        -- same reason. `neutralOrHostileInLocal` walking the chat window's
+        -- userlist is cheap but not free, and every other reading here already
+        -- has enough to compute.
+        hidingFromNeutralPastFirstHopNow =
+            if context.botSettings.hideWhenNeutralInLocal /= AppSettings.Yes then
+                False
+
+            else if neutralOrHostileInLocal context.readingFromGameClient == Just True then
+                botMemoryBefore.hidingFromNeutralPastFirstHop
+                    || shipIsWarpingOrJumping context.readingFromGameClient
+
+            else
+                False
+
         namesOfRatsInOverview =
             getNamesOfRatsInOverview context.readingFromGameClient
 
@@ -14553,6 +14660,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         botMemoryBefore.shipModules
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
     , shipWarpingInLastReading = shipIsWarping
+    , hidingFromNeutralPastFirstHop = hidingFromNeutralPastFirstHopNow
     , readingsSinceWarpEnded = readingsSinceWarpEnded
     , readingsCount = botMemoryBefore.readingsCount + 1
     , visitedAnomalies = visitedAnomalies
