@@ -6609,33 +6609,23 @@ launchAndEngageDrones context =
                                 droneLaunchCeiling (droneLaunchStateFrom context)
                         in
                         if 0 < (idlingDrones |> List.length) then
+                            -- `F` engages the currently locked/active target directly,
+                            -- the same hotkey the mission runner uses (see "In-game
+                            -- hotkeys" in CLAUDE.md). The menu cascade this replaced
+                            -- opened on 'Assist' -> 'Gal Bistot' when present, which
+                            -- costs several readings of right-click/hover/click before
+                            -- a drone fires a shot -- and Gal is frequently not even on
+                            -- the grid, so those readings bought nothing. A locked
+                            -- target already exists by the time this branch is reached
+                            -- (the caller is inside "I see a locked target", below the
+                            -- container/wreck stray check), so F always has something
+                            -- to aim at here.
                             Just
-                                (describeBranch "Assist Gal if available, else engage target"
-                                    (useContextMenuCascade
-                                        ( "drones group", droneGroupInSpace.header.uiNode )
-                                        (MenuEntryWithCustomChoice
-                                            { describeChoice = "'Assist' if present, else 'Engage Target'"
-                                            , chooseEntry =
-                                                \currentMenu ->
-                                                    case
-                                                        currentMenu.entries
-                                                            |> List.filter (.text >> stringContainsIgnoringCase "Assist")
-                                                            |> List.head
-                                                    of
-                                                        Just assistEntry ->
-                                                            Just
-                                                                ( assistEntry
-                                                                , useMenuEntryWithTextContaining "Gal Bistot" menuCascadeCompleted
-                                                                )
-
-                                                        Nothing ->
-                                                            currentMenu.entries
-                                                                |> List.filter (.text >> stringContainsIgnoringCase "Engage Target")
-                                                                |> List.head
-                                                                |> Maybe.map (\entry -> ( entry, menuCascadeCompleted ))
-                                            }
-                                        )
-                                        context
+                                (describeBranch "Engage target with drones (F)"
+                                    (decideActionForCurrentStep
+                                        [ EffectOnWindow.KeyDown EffectOnWindow.vkey_F
+                                        , EffectOnWindow.KeyUp EffectOnWindow.vkey_F
+                                        ]
                                     )
                                 )
 
