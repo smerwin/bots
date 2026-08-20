@@ -622,7 +622,7 @@ procedure and its traps; this file carries the facts.
 | `cycle_run.sh` | stops the running bot (escalating past a Ctrl-C that does not land) and starts the next run in the screen session, waiting for its first decision and failing fast with the log's tail if the run died instead |
 | `reload_drones.py` | standalone one-off: refill drone bay from station hangar. Still the way to restock *outside* a session; the mission runner now does the same thing for itself while winding down |
 | `route_setter/route_setter.py` | standalone one-off: set the autopilot route from a chat channel's MOTD |
-| `esi_waypoint.py` | set the client's autopilot destination through ESI, the official API. A CLI (`auth`/`resolve`/`set`) and an importable module -- `botlab_host.py` calls `set_destination` in-process for `SetAutopilotDestinationRequest`, so failures arrive as `EsiError` values rather than exit codes with a reason on stdout |
+| `esi_waypoint.py` | set the client's autopilot destination through ESI, the official API. A CLI (`auth`/`characters`/`forget`/`resolve`/`set`) and an importable module -- `botlab_host.py` calls `set_destination` in-process for `SetAutopilotDestinationRequest`, so failures arrive as `EsiError` values rather than exit codes with a reason on stdout. Holds one refresh token **per character** and picks the one the client is flying |
 | `cg_record/` | passive **listen-only** `CGEventTap`, the mirror of `cg_input`: one line per mouse or key event on stdout, in the same screen points `cg_input` takes. Needs the same Accessibility grant, and says so on stderr rather than recording nothing when it lacks it |
 | `action_shape.py` | records the *shape* of manual actions rather than their coordinates -- resolves each click against the UI tree to "the overview row of typeID N", "the menu entry containing 'Warp to'", "`selectedItemWarpTo`" -- then collapses a right-click-then-menu-entry pair into the one cascade it is, and emits an Elm **sketch**. `self-test` and `resolve` run anywhere `eve_repl` does; `record` is macOS-only since it drives `cg_record` |
 
@@ -10334,7 +10334,8 @@ exists.
   required a real-money EVE Store purchase and so ruled it out. `POST
   /ui/autopilot/waypoint/` is the correct way to set a route, and
   `tools/macos-host/esi_waypoint.py` implements it (PKCE, so no client secret
-  exists; the refresh token lives in the macOS Keychain and is never printed).
+  exists; the refresh tokens live in the macOS Keychain, one per character, and
+  are never printed).
   Name resolution is verified both ways. The authenticated half is **proven
   live** and this file's earlier "untested pending a browser login" was stale:
   issue #17 records `esi_waypoint.py set --name "Amarr VI (Zorast) - Moon 2 -
@@ -10390,6 +10391,98 @@ exists.
   BotLab.exe, costs three readings per route and then behaves exactly as before.
   A failure is loud in the host's log (`# ESI: destination … not set: …`) and
   attempted once per distinct destination.
+
+  ### One refresh token per character, picked by the client's own pilot
+
+  `/ui/autopilot/waypoint/` acts on whichever character the **token** belongs
+  to, not on the client the bot is flying, so a token authorised for the wrong
+  character reports success and sets a route the bot will never see. saxrat run
+  14 was parked for its whole session on exactly that: the host logged
+  `# ESI: destination 'Hamse' set (30003547)` while the token belonged to
+  `Gal Bistot` and the bot flew `Joan d'Arkonor`, whose route panel read
+  `No Destination` throughout. The bot then spent 3,932 readings latched on
+  `ROUTE SETTING GIVEN UP -- this host does not set destinations`, which was the
+  one conclusion the evidence beside it ruled out.
+
+  Everything needed to do better was already here and wired to *refuse* rather
+  than resolve. `character_from_window_title` reads the pilot off the client's
+  own `EVE - <character>` title, `find_eve_processes` captures that title,
+  `token_character` asks `/oauth/verify` who the stored token authorises, and
+  `set_destination` compared the two and raised on a mismatch. The missing piece
+  was storage: there was one token.
+
+  **The character goes in the Keychain _service_, not the account, and that is
+  the part that is wrong in the obvious implementation.** The Keychain keys on
+  `(service, account)`, so varying the account looks correct on this machine.
+  The Windows Credential Manager's `_target()` keys on the **target alone** and
+  carries the account as an informational `UserName` — so account-keying is two
+  entries on macOS and **one** on Windows, each character silently overwriting
+  the last. Varying the service behaves identically on both and needed no change
+  to `credential_store.py`'s API.
+
+  | what | service | account |
+  |---|---|---|
+  | client id (one app registration, shared) | `eve-esi-client-id` | `$USER` |
+  | pre-multi-character token (legacy slot) | `eve-esi-refresh` | `$USER` |
+  | per-character refresh token | `eve-esi-refresh:<name trimmed and lower-cased>` | `$USER` |
+  | non-secret index of names and ids | `eve-esi-characters` | `$USER` |
+
+  The index is in the store rather than a file — one mechanism, one place to
+  revoke, no path or ACL decision — and it is **never load-bearing for using a
+  token**: a lookup by name goes straight to that character's entry, so a lost
+  row still leaves that character usable. It decides only what `characters`
+  lists and how many tokens the ambiguity rule believes exist, and both fail
+  closed. It is filtered against the tokens themselves, so a stale row cannot
+  manufacture an ambiguity.
+
+  **Ambiguity refuses; it never guesses.** `character_to_route` answers five
+  cases, and the fourth is the whole safety property:
+
+  | the client's pilot | tokens stored | what happens |
+  |---|---|---|
+  | known | one for it | that character's token, with no verify and so no round trip |
+  | known | none for it | refuses, naming the character and saying to run `auth` and pick it |
+  | unreadable | exactly one | that one -- **unchanged for every single-character install** |
+  | unreadable | more than one | **refuses**, naming them |
+  | unreadable | none | today's "no stored refresh token -- run auth" |
+
+  Picking one in that fourth row would be precisely run 14 again, and a refusal
+  naming the candidates is recoverable where a wrong route is not. `None` from
+  the window title still means _cannot check_ rather than _mismatch_, which is
+  why the third row is left alone: a hard refusal on an unreadable title would
+  break a working setup to guard against an unproven one.
+
+  **Migration cannot lose the token, and the ordering is the argument.**
+  Exchange the legacy token, write the rotated value back to the legacy slot
+  first (which is what `access_token` always did), verify, copy to the
+  character's entry, index it, and only then delete the legacy entry. Killed
+  between any two steps, the next run finds a live token in the legacy slot and
+  redoes the whole thing; an interruption costs one extra rotation and nothing
+  is deleted that has not been proved re-stored. A migration that *fails* — a
+  revoked token — deletes nothing, warns once on stderr, and does not stop a
+  per-character token from working.
+
+  **It costs one HTTP request fewer per set, not more.** The old guard verified
+  once per process; a token filed under a character is one CCP has already
+  named, so selection is a local lookup. What is added is a credential-store
+  read, which is local and memoised per process. The budget is now also asked
+  *before* selection, so an expired one reports the expiry rather than whatever
+  the store said.
+
+  **`_token_character` had to stop being a single module global**, and this is
+  the way a fix here would most easily introduce the bug it is fixing: an
+  unkeyed cache hands the first character's identity to every later caller. It
+  is keyed per character, with a case that asks two characters and requires two
+  answers.
+
+  **Unverified: no live ESI call has been made against this.** There were no
+  credentials, no client and no recorded runs on the machine it was written on,
+  so all 55 cases run against a fake CCP that models refresh-token rotation
+  invalidating the old value — which is what makes the migration's ordering
+  checkable at all. The first real `auth` is what confirms the migration path.
+  What to watch: `auth` naming the character it filed, `characters` listing both
+  after a second `auth`, and the host's `# ESI: destination … set` arriving on a
+  run whose window title names the second pilot.
 
   **No route has yet been set this way.** The plumbing and its unit tests are
   merged; nothing has travelled the full path from a bot decision to a real
