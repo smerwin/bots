@@ -2935,6 +2935,65 @@ class TaskDispatcher:
 # Main loop
 # ---------------------------------------------------------------------------
 
+# The longest a single tick may hold the outer loop before it is given back.
+#
+# **Everything that protects a run lives outside the task loop**: `tick += 1`,
+# the `max_ticks` check, the console command drain and the session deadline are
+# all reached only once `while pending` returns. The deadline's own comment
+# calls itself "a lease renewed every tick, so a bot that stops asking -- or
+# that hangs, or crashes -- is stopped on the next one", and a tick that does
+# not end is a run where there is no next one and none of the three are ever
+# evaluated. Issue #321; #312 found the console half of the same hole.
+#
+# **Seconds rather than substeps, because substeps miss the worst cases.**
+# Measured over every `*.log` under `~/eve-bot-logs` -- 120 files, 237,431
+# ticks with a measurable duration -- a substep cap of 50 still misses two of
+# the 39 blocks longer than ten minutes, and the worst thing every cap misses
+# is the same tick: `martha_run1_2026-08-20.log` tick 640, 3,140 seconds spent
+# on 45 substeps. `slicer_run1_2026-08-19.log` tick 482 blocked 2,674 seconds
+# on three. A handful of tasks that each take forever hold the loop exactly as
+# hard as thousands of fast ones, and only the clock sees both.
+#
+# **300 sits in a real gap.** Ticks are normally tiny: the mode is 3 substeps,
+# 99% run 20 or fewer, and the 11-20 band's 95th percentile blocks for under 18
+# seconds. Of the 331 ticks that blocked longer than a minute, 304 never
+# changed their own status header from first substep to last -- no kill, no
+# target, no system, no damage -- which is the wedge shape. Among the 27 whose
+# header moved at all, the longest that is not already known to be pathological
+# is **180.9 s**, and the next is **414.1 s**. Anything between those two cuts
+# only ticks that were getting nowhere.
+#
+# The bound is deliberately clear of setup, which normally completes in
+# seconds: `getNextSetupTask` is a closed state machine waiting on specific
+# results, so a guard firing there could stall a launch rather than rescue one.
+# At 300 s a setup that tripped this was already broken.
+MAX_TICK_SECONDS = 300.0
+
+
+def tick_bound_note(tick, elapsed_seconds, decisions, abandoned_tasks):
+    """What to say when a tick has held the loop too long, or `None`.
+
+    A declaration of its own so a case can ask the rule rather than drive the
+    whole event loop to reach it -- the same reason `countReadingsWithoutShipUI`
+    is not a `let` inside the step it serves.
+
+    **It says what happened and not that anything is fixed.** Handing the tick
+    back does not un-wedge the bot: the outer loop sends a `TimeArrivedEvent`,
+    the bot re-derives, and if the cause is still there it asks for the same
+    tasks and blocks again. What the bound buys is that the wedge becomes
+    visible in the tick counter, interruptible from the console, and subject to
+    the session deadline.
+    """
+    if elapsed_seconds <= MAX_TICK_SECONDS:
+        return None
+    return (f"# tick {tick} has held the loop for {elapsed_seconds:.0f}s over "
+            f"{decisions} decision(s), past the {MAX_TICK_SECONDS:.0f}s bound -- "
+            f"giving it back with {abandoned_tasks} task(s) undispatched, which "
+            f"the bot re-asks for on the next reading. The tick counter, the "
+            f"console's pause/stop and the session deadline are all downstream "
+            f"of this loop and have not run while it held.")
+
+
 def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_screenshots=False,
             session_duration_minutes=None, game_log_dir=None, console=None):
     proc = subprocess.Popen(
@@ -3055,11 +3114,19 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
             break
 
         if console is not None:
-            # Apply what the console asked for, here and only here: this is the
-            # thread that owns the pipe to the bot process, and that pipe is a
-            # strict request/response conversation. A handler thread writing to
-            # it would interleave with a task response and desynchronise the
+            # Apply what the console asked for on this thread and no other: it
+            # is the one that owns the pipe to the bot process, and that pipe is
+            # a strict request/response conversation. A handler thread writing
+            # to it would interleave with a task response and desynchronise the
             # runtime.
+            #
+            # Pause and stop are *also* drained inside the task loop below, and
+            # this is still where both are answered -- the pause wait and the
+            # stop break live here. The settings change is what has to stay
+            # here to be applied at all, because re-sending
+            # `BotSettingsChangedEvent` is itself a write to the pipe and this
+            # is the point where the conversation is between exchanges rather
+            # than inside one.
             while True:
                 command = console.take_command()
                 if command is None:
@@ -3182,6 +3249,45 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
                 if t["taskId"] not in seen_ids:
                     pending.append(t)
                     seen_ids.add(t["taskId"])
+
+            # #312: pause and stop are drained here as well as between ticks.
+            # A tick can hold this loop for over an hour, and the outer loop's
+            # drain does not run for any of it -- so the two controls an
+            # operator reaches for during exactly that state were inert.
+            # Neither needs the pipe, which is what makes this safe here: pause
+            # sets a flag and stop sets a break, while a settings change
+            # re-sends `BotSettingsChangedEvent` and so stays at the tick
+            # boundary where the request/response conversation is between
+            # exchanges rather than inside one.
+            if console is not None:
+                give_tick_back = False
+                while True:
+                    command = console.take_command()
+                    if command is None:
+                        break
+                    if command == "pause":
+                        console.set_paused(True)
+                        give_tick_back = True
+                    elif command == "resume":
+                        console.set_paused(False)
+                    elif command == "stop":
+                        stop_requested = True
+                        give_tick_back = True
+                if give_tick_back:
+                    # Both are answered by the outer loop -- the pause wait and
+                    # the stop break both live there -- so reaching them is the
+                    # whole point of not finishing the queue first.
+                    break
+
+            note = tick_bound_note(tick, time.monotonic() - tick_start,
+                                   decision_seq + 1, len(pending))
+            if note is not None:
+                print(note, file=sys.stderr)
+                if console is not None:
+                    console.note_host(
+                        f"tick {tick} held the loop {time.monotonic() - tick_start:.0f}s "
+                        f"and was given back")
+                break
 
         if "FinishSession" in response:
             continue
