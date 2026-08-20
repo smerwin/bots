@@ -4889,7 +4889,7 @@ answer here -- it rotates among whatever is at AU range on the overview every
 `runAwayCelestialStickyReadings` readings and nothing in it ever leaves the
 system, so a ship that only ever changes which rock it orbits is still standing
 in the same local chat the neutral is in. `jumpToNextSystem` by itself is wrong
-the other way: reached with no route yet set, its first move is to *ask* the
+the other way: reached with no route yet set, its first move is to _ask_ the
 host for one and wait, which is exactly the readings this setting exists to
 react to fastest -- the ship sitting still, exposed, on whatever grid it was
 already on when the neutral showed up.
@@ -4897,17 +4897,17 @@ already on when the neutral showed up.
 So this is the two-step sequence the setting's own name suggests, and the order
 is fixed rather than chosen fresh each reading:
 
-1. **Not yet moving**: `runAway`'s own celestial warp -- immediate, needs
-   nothing from ESI or the hunt circuit, and is the fastest exit this bot has.
-2. **Currently warping or jumping**: wait it out, `decideNextActionWhenInSpace`'s
-   own `HOOOOONK in warp` guard reused rather than a second copy of it -- acting
-   on route or gate UI mid-transit is not a state any other branch here risks
-   either.
-3. **Landed since the transit began**: `jumpToNextSystem`, unchanged -- asking
-   the host for the next hunting ground and travelling the route it sets exactly
-   as when there is nothing left to hunt in this system. Reused rather than
-   reimplemented so a route already in flight (set by ordinary hunting before
-   the neutral ever showed up) is simply continued rather than abandoned.
+1.  **Not yet moving**: `runAway`'s own celestial warp -- immediate, needs
+    nothing from ESI or the hunt circuit, and is the fastest exit this bot has.
+2.  **Currently warping or jumping**: wait it out, `decideNextActionWhenInSpace`'s
+    own `HOOOOONK in warp` guard reused rather than a second copy of it -- acting
+    on route or gate UI mid-transit is not a state any other branch here risks
+    either.
+3.  **Landed since the transit began**: `jumpToNextSystem`, unchanged -- asking
+    the host for the next hunting ground and travelling the route it sets exactly
+    as when there is nothing left to hunt in this system. Reused rather than
+    reimplemented so a route already in flight (set by ordinary hunting before
+    the neutral ever showed up) is simply continued rather than abandoned.
 
 **Which of the three applies is `hidingFromNeutralPastFirstHop`, latched in the
 memory update rather than derived here**, because a decision cannot write
@@ -4915,7 +4915,7 @@ memory and the transition (has this hide episode already gotten the ship moving
 at all) has to survive across however many readings and however many hops it
 takes. It is set the first reading the ship is seen warping or jumping while
 the neutral condition holds -- covering a celestial warp just issued by step 1
-*and* a gate jump `jumpToNextSystem` has already put the ship on the far side
+_and_ a gate jump `jumpToNextSystem` has already put the ship on the far side
 of, so a second neutral met after the first jump does not fall back to a
 pointless celestial hop before continuing on -- and cleared the moment the
 neutral condition itself clears, so the next hide episode starts fresh at step
