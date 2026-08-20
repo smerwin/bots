@@ -356,6 +356,28 @@ def launch(name, args):
     print("clients before: %d" % len(before))
 
     raise_window(win)
+
+    # `raise_window` sends SW_RESTORE, so a launcher that was maximized is a
+    # different rect by the time it is frontmost -- and the point above was
+    # computed against the rect as it was *before* the raise.  On this machine
+    # that is 1712x1083 at (-1,-8) maximized against 1402x801 at (154,137)
+    # restored, which put two launch attempts about 150 px off the avatar and
+    # reported only "the activation did not take".  The launcher's own content
+    # does not scale with the window either: it draws at a fixed size, centred,
+    # so the same fraction genuinely means two different points.
+    #
+    # Re-resolve after the raise and recompute against the rect that will be on
+    # screen when the click lands.  Said out loud rather than silently, because
+    # a click that misses looks exactly like a launcher that ignored it.
+    raised = launcher_window(timeout=5) or win
+    if (raised.x, raised.y, raised.width, raised.height) != \
+            (win.x, win.y, win.width, win.height):
+        sx = raised.x + int(round(fx * raised.width))
+        sy = raised.y + int(round(fy * raised.height))
+        print("the raise changed the launcher rect to %dx%d at (%d,%d)"
+              % (raised.width, raised.height, raised.x, raised.y))
+        print("recomputed target -> screen (%d,%d)" % (sx, sy))
+
     io = win_input.WindowsInput(execute=True)
     io.glide_to(sx, sy, force_movement=True)
     time.sleep(0.3)

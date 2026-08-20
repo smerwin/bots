@@ -58,17 +58,32 @@ SETTINGS=$(printf 'hunt-system=%s\n' \
     Hamse Lashkai Zhilshinou Ana Jaswelu Shumam Nalu Hiramu \
     Knophtikoo Fora Safilbab Kerepa Nosodnis Sizamod Seitam)
 
-# Omen Navy Issue.  The ship is 'Bene', read off the client, and its crystals
-# are Medium -- `Multifrequency M` verbatim from the cargo row, which is what
-# makes the size suffix a reading rather than a guess.  Both charge names must
-# match the weapon's own right-click menu exactly or the swap looks configured
-# and never fires.
+# Coercer Navy Issue, flying Aurora crystals and nothing else.
 #
-# `run-away-incoming-damage-threshold` is 3500, the repo's own calibrated
-# figure, measured on a larger hull.  2000 was a judgement for the Coercer Navy
-# Issue and would be twitchy on a cruiser with several times the buffer.  Still
-# a judgement: #119's live hull-scaling is in the mission runner and has never
-# been ported here, so nothing derives this.
+# The ammo swap is deliberately OFF.  Bot.elm turns it on only when all three of
+# `short-range-ammo`, `long-range-ammo` and `ammo-swap-range` are set, and with a
+# single crystal type there is nothing to swap to.  The two names are left
+# present-but-empty, which is the file's own documented way to switch the swap
+# off without losing the line -- `nonEmptySettingValue` reads a blank as absent.
+# Consequence worth stating: with the swap off the bot never loads a charge at
+# all, so the guns must already have Aurora in them when the run starts.
+#
+# `run-away-incoming-damage-threshold` is 1200, and it is an operator judgement
+# for this hull rather than a derived figure.  Bot.elm's 3500 default is
+# calibrated against sixteen recorded sessions of a much larger hull and says in
+# as many words that it is "a number about a hull, not about the game"; the 2000
+# that stood here for this ship was a judgement too.  1200 breaks off earlier
+# than either.  On a destroyer's buffer that is the safe direction to be wrong,
+# but it is the number most likely to want changing after the first session --
+# watch for the bot bailing out of fights it would have won.
+#
+# `targeting-range` is 39000, this ship's lock range as the operator gives it.
+# It replaces the 66000 default, which came from a cruiser and would have spent
+# the first minutes of every session asking for locks this hull cannot take.
+# Still a starting value rather than the last word: Bot.elm narrows the range
+# in-session from the client's own accepted and refused locks and clamps it
+# between the two, so a wrong figure here is corrected by the client rather than
+# obeyed.  Recorded as operator-supplied, not measured by anything in this repo.
 #
 # The armour percentage guard stays at 70 and is hull-agnostic -- it is what
 # carried run 35 through 85 retreats without a loss.  The shield one stays off:
@@ -82,13 +97,12 @@ SETTINGS=$(printf 'hunt-system=%s\n' \
 # does nothing for the rest of the session while every log line looks healthy.
 SETTINGS="$SETTINGS
 anomaly-name=Sansha*
-short-range-ammo=Multifrequency M
-long-range-ammo=Radio M
-ammo-swap-range=20000
+short-range-ammo=
+long-range-ammo=
 home-system=Amarr
-targeting-range=66000
+targeting-range=39000
 run-away-armor-hitpoints-threshold-percent=70
-run-away-incoming-damage-threshold=3500
+run-away-incoming-damage-threshold=1200
 keep-at-range=yes
 orbit-in-combat=no
 warp-at=30
