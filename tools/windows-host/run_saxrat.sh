@@ -2,6 +2,7 @@
 # Start one eve-online-saxrat run on Windows, refusing if a host is already alive.
 #
 #   ./run_saxrat.sh <run number> [minutes]
+#   EVE_SHIP=dragoon ./run_saxrat.sh <run number> [minutes]
 #
 # The macOS launcher next door (tools/macos-host/run_saxrat.sh) is the model.
 # What is different here is entirely the platform, and all of it is a trap that
@@ -58,47 +59,45 @@ SETTINGS=$(printf 'hunt-system=%s\n' \
     Hamse Lashkai Zhilshinou Ana Jaswelu Shumam Nalu Hiramu \
     Knophtikoo Fora Safilbab Kerepa Nosodnis Sizamod Seitam)
 
-# Coercer Navy Issue, flying Aurora crystals and nothing else.
-#
-# The ammo swap is deliberately OFF.  Bot.elm turns it on only when all three of
-# `short-range-ammo`, `long-range-ammo` and `ammo-swap-range` are set, and with a
-# single crystal type there is nothing to swap to.  The two names are left
-# present-but-empty, which is the file's own documented way to switch the swap
-# off without losing the line -- `nonEmptySettingValue` reads a blank as absent.
-# Consequence worth stating: with the swap off the bot never loads a charge at
-# all, so the guns must already have Aurora in them when the run starts.
-#
-# `run-away-incoming-damage-threshold` is 1200, and it is an operator judgement
-# for this hull rather than a derived figure.  Bot.elm's 3500 default is
-# calibrated against sixteen recorded sessions of a much larger hull and says in
-# as many words that it is "a number about a hull, not about the game"; the 2000
-# that stood here for this ship was a judgement too.  1200 breaks off earlier
-# than either.  On a destroyer's buffer that is the safe direction to be wrong,
-# but it is the number most likely to want changing after the first session --
-# watch for the bot bailing out of fights it would have won.
-#
-# `targeting-range` is 39000, this ship's lock range as the operator gives it.
-# It replaces the 66000 default, which came from a cruiser and would have spent
-# the first minutes of every session asking for locks this hull cannot take.
-# Still a starting value rather than the last word: Bot.elm narrows the range
-# in-session from the client's own accepted and refused locks and clamps it
-# between the two, so a wrong figure here is corrected by the client rather than
-# obeyed.  Recorded as operator-supplied, not measured by anything in this repo.
-#
-# The armour percentage guard stays at 70 and is hull-agnostic -- it is what
-# carried run 35 through 85 retreats without a loss.  The shield one stays off:
-# on an armour-tanked hull the shield is a fuse rather than a buffer and rests
-# near 0%, so a shield threshold trips a minute into every fight and never
-# releases.  With both unset, CLAUDE.md's `ATTRITION UNGUARDED` clause fires and
-# nothing is watching the hull at all.
-#
 # `hide-when-neutral-in-local=no` is the one whose absence silently parks the
 # bot: with it defaulted the other way, a neutral in local means it tethers and
 # does nothing for the rest of the session while every log line looks healthy.
-SETTINGS="$SETTINGS
-anomaly-name=Sansha*
-short-range-ammo=
-long-range-ammo=
+#
+# The armour percentage guard stays at 70 in both profiles and is hull-agnostic
+# -- it is what carried run 35 through 85 retreats without a loss.  The shield
+# one stays off: on an armour-tanked hull the shield is a fuse rather than a
+# buffer and rests near 0%, so a shield threshold trips a minute into every
+# fight and never releases.
+#
+# The hull-specific half.  `EVE_SHIP` picks it; the circuit above is shared.
+#
+# This is a profile rather than an edit-in-place because the settings for a run
+# have twice now survived only in a session transcript: the log echoes the
+# source path, the commit and every learned bound, and *not one line of the
+# settings string it was started with*.  Run 50 flew a Dragoon for six hours and
+# the only record of what it was configured with is what a reader can infer back
+# out of the status clauses (`lock 40000m`, `dmg N/1200`, `attrition guarded
+# (shield -1 armor 70)`, `Ammo swap: off`).  That is recoverable and it is not a
+# record.
+SHIP="${EVE_SHIP:-oni}"
+
+case "$SHIP" in
+oni)
+# Omen Navy Issue.  The ship is 'Bene', read off the client, and its crystals
+# are Medium -- `Multifrequency M` verbatim from the cargo row, which is what
+# makes the size suffix a reading rather than a guess.  Both charge names must
+# match the weapon's own right-click menu exactly or the swap looks configured
+# and never fires.
+#
+# `run-away-incoming-damage-threshold` is 3500, the repo's own calibrated
+# figure, measured on a larger hull.  2000 was a judgement for the Coercer Navy
+# Issue and would be twitchy on a cruiser with several times the buffer.  Still
+# a judgement: #119's live hull-scaling is in the mission runner and has never
+# been ported here, so nothing derives this.
+HULL="anomaly-name=Sansha*
+short-range-ammo=Multifrequency M
+long-range-ammo=Radio M
+ammo-swap-range=20000
 home-system=Amarr
 targeting-range=39000
 run-away-armor-hitpoints-threshold-percent=70
@@ -109,6 +108,54 @@ warp-at=30
 hide-when-neutral-in-local=no
 accept-fleet-invite-from=Gal Bistot
 follow-fleet-broadcast-from=Gal Bistot"
+;;
+
+dragoon)
+# Dragoon, a drone destroyer.  Flown for run 50: 214 kills over 17 anomalies
+# with no retreat and the ship at 100% armour when the client died.
+#
+# **No ammo settings at all**, and their absence is the configuration rather
+# than an omission -- a Dragoon fights with drones and has no turret to load, so
+# naming a charge would arm a swap that can never find a weapon menu to read.
+# The bot says so on every reading (`Ammo swap: off (needs ...)`), which is the
+# state to expect here and not a fault.
+#
+# `run-away-incoming-damage-threshold` is 1200 rather than 3500, and it is the
+# one number here derived from evidence rather than carried over: the Coercer
+# lost on 2026-08-18 died having taken **3,522** damage against a 3500
+# threshold, so the guard was 99.4% of that hull's durability and could only
+# fire at the moment of death.  A destroyer needs a threshold well inside its
+# own buffer.  Run 50 never tripped it across repeated `Tower Sentry Sansha I`
+# fights -- the same rat class that killed the Coercer -- peaking at 925, which
+# is the evidence that 1200 is placed rather than merely lower.
+#
+# `targeting-range=40000` is the operator's figure.  Note the client stated 45
+# km in its own words during run 50 and the learned `proven` bound ratcheted to
+# 50 km, so this setting is the narrower of the two and is what governs.
+#
+# Orbit rather than keep-at-range: drones apply their damage regardless of the
+# ship's own transversal, so the ship orbits to stay hard to hit.
+HULL="anomaly-name=Sansha*
+home-system=Amarr
+targeting-range=40000
+run-away-armor-hitpoints-threshold-percent=70
+run-away-incoming-damage-threshold=1200
+keep-at-range=no
+orbit-in-combat=yes
+warp-at=30
+hide-when-neutral-in-local=no
+accept-fleet-invite-from=Gal Bistot
+follow-fleet-broadcast-from=Gal Bistot"
+;;
+
+*)
+echo "unknown EVE_SHIP '$SHIP' -- known profiles: oni dragoon"
+exit 1
+;;
+esac
+
+SETTINGS="$SETTINGS
+$HULL"
 
 LOG="$LOGDIR/saxrat_run${N}.log"
 cd "$REPO/tools/macos-host/botlab_host"
