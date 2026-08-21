@@ -6274,10 +6274,20 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                                         --     |> Maybe.andThen (\overviewEntryToAttack -> ensureShipIsOrbiting seeUndockingComplete.shipUI overviewEntryToAttack)
                                         --         |> Maybe.withDefault waitForProgressInGame)
                                         Just ( inactiveModuleIndex, inactiveModule ) ->
-                                            clickTargetBeforeShooting context overviewEntriesToAttack
+                                            -- A turret stuck unable to activate (interference, a
+                                            -- target it cannot hurt) must not starve drones of the
+                                            -- 'F' that keeps them on the active target -- see the
+                                            -- 'No idling drones.' branch above, which only runs once
+                                            -- every top-row module already reads active. Asking here
+                                            -- too means drones get re-engaged every reading a fight
+                                            -- is on, whether or not the guns are cooperating.
+                                            launchAndEngageDrones context
                                                 |> Maybe.withDefault
-                                                    (describeBranch "Cycle combat mod"
-                                                        (activateWeaponModuleButWaitIfActivatedInPreviousStep context inactiveModuleIndex inactiveModule)
+                                                    (clickTargetBeforeShooting context overviewEntriesToAttack
+                                                        |> Maybe.withDefault
+                                                            (describeBranch "Cycle combat mod"
+                                                                (activateWeaponModuleButWaitIfActivatedInPreviousStep context inactiveModuleIndex inactiveModule)
+                                                            )
                                                     )
                                 )
     in
