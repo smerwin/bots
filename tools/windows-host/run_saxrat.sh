@@ -148,8 +148,44 @@ accept-fleet-invite-from=Gal Bistot
 follow-fleet-broadcast-from=Gal Bistot"
 ;;
 
+coercer)
+# Coercer Navy Issue 'Pew Pew Pew', flown by Cathy Crokite. Real lock range
+# read off the client is 37.4 km; targeting-range is set narrower than that
+# deliberately, same posture as the dragoon profile.
+#
+# `run-away-incoming-damage-threshold=2500` and
+# `run-away-armor-hitpoints-threshold-percent=80` are this hull's own numbers
+# from the 2026-08-19/20 handoff, not carried over from oni or dragoon -- the
+# previous ship on this account (an Omen Navy Issue) was lost to a Sansha
+# escalation on 17 Aug, at 100%->5% armour in under two minutes, while its
+# client-side "Keep at Range" default sat at 7,500 m instead of a distance
+# matched to the fit. That default is a per-client setting, not a bot one --
+# see PILOT.md's "Intervening by hand" -- and must be checked on this hull
+# before a run, not assumed from the settings string below.
+#
+# short-range-ammo/long-range-ammo name the crystals as the weapon's own
+# right-click menu writes them for this hull (Multifrequency S / Aurora S).
+# The cargo has carried only Aurora S at times; the swap then correctly
+# reports "carries neither charge" and keeps firing Aurora rather than
+# latching disarmed -- that is expected, not a fault.
+HULL="anomaly-name=Sansha*
+short-range-ammo=Multifrequency S
+long-range-ammo=Aurora S
+ammo-swap-range=20000
+home-system=Amarr
+targeting-range=35000
+run-away-armor-hitpoints-threshold-percent=80
+run-away-incoming-damage-threshold=2500
+keep-at-range=yes
+orbit-in-combat=no
+warp-at=30
+hide-when-neutral-in-local=no
+accept-fleet-invite-from=Gal Bistot
+follow-fleet-broadcast-from=Gal Bistot"
+;;
+
 *)
-echo "unknown EVE_SHIP '$SHIP' -- known profiles: oni dragoon"
+echo "unknown EVE_SHIP '$SHIP' -- known profiles: oni dragoon coercer"
 exit 1
 ;;
 esac

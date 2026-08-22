@@ -132,8 +132,8 @@ EVE_SHIP=dragoon ./run_saxrat.sh <run number> [minutes]
 ```
 
 Git Bash, not `cmd`. `EVE_SHIP` picks the hull profile baked into the script —
-`oni` if the variable is omitted, `dragoon` the other one currently defined —
-and `[minutes]` defaults to 360.
+`oni` if the variable is omitted, `dragoon` and `coercer` the other two
+currently defined — and `[minutes]` defaults to 360.
 
 **The settings string for each profile lives inside the script**, in a
 `case "$SHIP" in ... esac` block, rather than being typed at the prompt. That is
