@@ -1671,69 +1671,69 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                                 |> Maybe.withDefault
                                     (respondToFleetAtLocationBroadcast context
                                         |> Maybe.withDefault
-                                    (respondToFleetBackupBroadcast context
-                                        |> Maybe.withDefault
-                                    (followFleetBroadcast context
-                                        |> Maybe.withDefault
-                                            (branchDependingOnDockedOrInSpace
-                                        { ifDocked =
-                                            continueIfShouldHide
-                                                { ifShouldHide =
-                                                    describeBranch "Stay docked." waitForProgressInGame
-                                                }
-                                                context
+                                            (respondToFleetBackupBroadcast context
                                                 |> Maybe.withDefault
-                                                    (if
-                                                        context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
-                                                            && (context.readingFromGameClient
-                                                                    |> infoPanelRouteFirstMarkerFromReadingFromGameClient
-                                                                    |> (==) Nothing
-                                                               )
-                                                            -- A "Warp to Site" opportunity takes
-                                                            -- precedence over staying docked: the
-                                                            -- Opportunities panel this comes from is
-                                                            -- part of the persistent left sidebar
-                                                            -- (like the route panel), so it's
-                                                            -- checkable even while docked. Undocking
-                                                            -- here rather than trying to click it
-                                                            -- directly from dock -- untested whether
-                                                            -- that even works -- lets the very next
-                                                            -- tick's normal in-space priority chain
-                                                            -- (which already puts this ahead of
-                                                            -- tether/dock) pick it up once genuinely
-                                                            -- in space.
-                                                            && (context.readingFromGameClient
-                                                                    |> escalationEntriesPermitted context.eventContext.botSettings
-                                                                    |> warpToOpportunitySiteIfAvailable
-                                                                    |> (==) Nothing
-                                                               )
-                                                     then
-                                                        describeBranch
-                                                            "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
-                                                            waitForProgressInGame
+                                                    (followFleetBroadcast context
+                                                        |> Maybe.withDefault
+                                                            (branchDependingOnDockedOrInSpace
+                                                                { ifDocked =
+                                                                    continueIfShouldHide
+                                                                        { ifShouldHide =
+                                                                            describeBranch "Stay docked." waitForProgressInGame
+                                                                        }
+                                                                        context
+                                                                        |> Maybe.withDefault
+                                                                            (if
+                                                                                context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
+                                                                                    && (context.readingFromGameClient
+                                                                                            |> infoPanelRouteFirstMarkerFromReadingFromGameClient
+                                                                                            |> (==) Nothing
+                                                                                       )
+                                                                                    -- A "Warp to Site" opportunity takes
+                                                                                    -- precedence over staying docked: the
+                                                                                    -- Opportunities panel this comes from is
+                                                                                    -- part of the persistent left sidebar
+                                                                                    -- (like the route panel), so it's
+                                                                                    -- checkable even while docked. Undocking
+                                                                                    -- here rather than trying to click it
+                                                                                    -- directly from dock -- untested whether
+                                                                                    -- that even works -- lets the very next
+                                                                                    -- tick's normal in-space priority chain
+                                                                                    -- (which already puts this ahead of
+                                                                                    -- tether/dock) pick it up once genuinely
+                                                                                    -- in space.
+                                                                                    && (context.readingFromGameClient
+                                                                                            |> escalationEntriesPermitted context.eventContext.botSettings
+                                                                                            |> warpToOpportunitySiteIfAvailable
+                                                                                            |> (==) Nothing
+                                                                                       )
+                                                                             then
+                                                                                describeBranch
+                                                                                    "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
+                                                                                    waitForProgressInGame
 
-                                                     else
-                                                        undockUsingStationWindow context
+                                                                             else
+                                                                                undockUsingStationWindow context
+                                                                            )
+                                                                , ifSeeShipUI =
+                                                                    \shipUI ->
+                                                                        runAwayIfLowHealth context shipUI
+                                                                            |> Maybe.withDefault
+                                                                                (continueIfShouldHide
+                                                                                    { ifShouldHide = hideFromNeutralInLocal context
+                                                                                    }
+                                                                                    context
+                                                                                    |> Maybe.withDefault
+                                                                                        (decideNextActionWhenInSpace context { shipUI = shipUI })
+                                                                                )
+                                                                }
+                                                                context
+                                                            )
                                                     )
-                                        , ifSeeShipUI =
-                                            \shipUI ->
-                                                runAwayIfLowHealth context shipUI
-                                                    |> Maybe.withDefault
-                                                        (continueIfShouldHide
-                                                            { ifShouldHide = hideFromNeutralInLocal context
-                                                            }
-                                                            context
-                                                            |> Maybe.withDefault
-                                                                (decideNextActionWhenInSpace context { shipUI = shipUI })
-                                                        )
-                                        }
-                                        context
+                                            )
                                     )
                             )
-                                )
-                                )
                     )
-                )
             )
 
 
@@ -2809,7 +2809,7 @@ the drones window's identically-named rows.
 **Unverified: entry order when more than one broadcast has fired.** Only one
 entry was ever live when this was written, so this takes the tree's own list
 order and cannot say whether that is newest-first. It is only ever used to
-tell two *different* calls apart from each other (see
+tell two _different_ calls apart from each other (see
 `fleetLastBroadcastText`), and picking the wrong one of several stacked
 entries would at worst let one repeat go unanswered rather than mis-identify
 the pilot, since the marker split still runs on whichever text this returns.
@@ -2833,7 +2833,7 @@ fleetBroadcastHistoryEntryText readingFromGameClient =
 own, reused identically by `fleetAtLocationBroadcast` below.
 
 **Why this differs from the travel broadcast's plain banner text.** The banner
-is a *last broadcast* display with no timestamp, so a second, later call for
+is a _last broadcast_ display with no timestamp, so a second, later call for
 help from the same pilot renders identically to the first and would read as
 "already handled" under the travel broadcast's own latch shape -- fine there,
 since a repeated identical travel broadcast really is redundant (the ship is
@@ -3013,7 +3013,7 @@ Local chat lists everyone in the system by definition, so this is the same
 `localChatWindowFromUserInterface |> .userlist |> .visibleUsers` read
 `getNamesOfOtherPilotsInOverview` already does (`Bot.elm` -- see "Strings and
 identities read off a live client" in `CLAUDE.md`), just without that
-function's own fleetmate exclusion: that function wants *other* pilots, this
+function's own fleetmate exclusion: that function wants _other_ pilots, this
 one wants to find a specific fleetmate.
 
 -}
@@ -3038,7 +3038,7 @@ still outranks going to someone else's fight.
 
 **Only the in-system case is handled at all**, and that narrowing is load
 -bearing rather than an oversight. The first version also tried to route
-toward a caller who was *not* yet in this system, right-clicking the banner
+toward a caller who was _not_ yet in this system, right-clicking the banner
 and taking "Set Destination" -- confirmed live to be offered on this exact
 broadcast type. What live running then showed is that the client refuses to
 act on it: saxrat run 16 clicked it every reading for twelve straight minutes
@@ -3049,7 +3049,7 @@ broadcast, which names a real system and which the client happily routes
 to, a "needs backup" call carries no navigable destination at all. No amount
 of retrying, and no different latch shape, was going to make that click land;
 the earlier two-reading-lag version merely hid the failure by giving up
-after one attempt, and the fix to *that* (retry until the client confirms it
+after one attempt, and the fix to _that_ (retry until the client confirms it
 worked) turned a quiet non-event into a loud, useless spam loop instead. Both
 are downstream of the same wrong premise, so the premise -- not the retry
 policy -- is what changed.
@@ -3132,7 +3132,7 @@ respectively rather than inventing a third shape:
 
   - **In this system** -- the same "Fleet Member" -> "Warp to Member" cascade
     `respondToFleetBackupBroadcast` uses, re-issued every reading and
-    credited only once a *previous* reading saw her in system with this ship
+    credited only once a _previous_ reading saw her in system with this ship
     standing still (`fleetAtLocationInSystemStanding`), for the identical
     reason given there.
   - **Not in this system** -- unlike a "needs backup" call, this broadcast
