@@ -101,6 +101,13 @@ MISSION_RUNNER_BOT_ELM = os.path.join(
 STATED_SIX = "You are already managing 6 targets, as many as you have skill to."
 STATED_FIVE = "You are already managing 5 targets, as many as you have skill to."
 
+# The second wording, reported live rather than found in a recorded run --
+# see `maxTargetsElectronicsMarker`'s own doc comment for why that is trusted
+# rather than checked against a sighting.
+STATED_SIX_ELECTRONICS = (
+    "You are already managing 6 targets, as many as your ship's electronics "
+    "are capable of.")
+
 # The near-miss. Same shape, same closing clause to within one word, and about
 # something else entirely -- the case `maxTargetsSkillMarker` documents.
 DRONE_REFUSAL = ("You cannot launch Acolyte I because you are already "
@@ -145,6 +152,7 @@ SHARED_DECLARATIONS = (
     "updateMaxTargetsLearning",
     "maxTargetsStatedMarker",
     "maxTargetsSkillMarker",
+    "maxTargetsElectronicsMarker",
 )
 
 
@@ -430,6 +438,49 @@ class TheClientsSentenceIsNotTheDroneOne(BothAppsRepl, unittest.TestCase):
                 answers, [True],
                 "%s takes the first integer in the line rather than the count "
                 "the matched clause is about" % app)
+
+
+class TheClientAlsoWritesAHardwareCappedWording(BothAppsRepl, unittest.TestCase):
+    """`maxTargetsElectronicsMarker`'s own case: a second qualifier for the
+    same refusal, on a ship whose electronics rather than whose pilot skill is
+    the binding constraint. Reported live rather than recorded in a run here,
+    which is why this asks the rule rather than the corpus."""
+
+    def test_the_electronics_wording_states_the_same_maximum(self):
+        for app, answers in self.each(
+                ["maxTargetsStatedInGameLog [ %s ] == Just %d"
+                 % ('{ timestamp = Nothing, channel = Just "notify"'
+                    ', text = "%s" }' % STATED_SIX_ELECTRONICS, CLIENT_MAXIMUM)]):
+            self.assertEqual(
+                answers, [True],
+                "%s does not read the hardware-capped wording as a stated "
+                "maximum" % app)
+
+    def test_the_electronics_wording_moves_the_ceiling(self):
+        for app, answers in self.each(
+                ["maxTargetsCeiling (step %s %s) == %d"
+                 % (reading(0, [("notify", STATED_SIX_ELECTRONICS)]),
+                    state(SHIPPED_DEFAULT), CLIENT_MAXIMUM)]):
+            self.assertEqual(
+                answers, [True],
+                "%s reads the hardware-capped wording but does not raise the "
+                "ceiling from it -- the two markers must reach the same "
+                "verdict, not just the same matcher" % app)
+
+    def test_a_third_qualifier_is_still_declined(self):
+        """The OR is between two named qualifiers, not a licence for any
+        wording that follows `already managing N targets` -- a client saying
+        something this repo has never seen must still teach nothing."""
+        reworded = ("You are already managing 6 targets, as many as this "
+                    "session allows.")
+        for app, answers in self.each(
+                ["maxTargetsStatedInGameLog [ %s ] == Nothing"
+                 % ('{ timestamp = Nothing, channel = Just "notify"'
+                    ', text = "%s" }' % reworded)]):
+            self.assertEqual(
+                answers, [True],
+                "%s widened past the two named qualifiers to admit any "
+                "wording, which is not what this change is" % app)
 
 
 class TheTargetBarProvesAFloor(BothAppsRepl, unittest.TestCase):

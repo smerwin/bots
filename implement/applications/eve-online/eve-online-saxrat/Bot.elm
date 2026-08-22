@@ -8341,12 +8341,26 @@ maxTargetsSkillMarker =
     "as many as you have skill to"
 
 
+{-| A second wording for the same refusal, on a hardware- rather than
+skill-based cap: `You are already managing N targets, as many as your ship's
+electronics are capable of.` Reported live rather than recorded in the corpus
+yet -- no run here has ever printed it -- so it is trusted on the operator's
+word rather than checked against a recorded sighting. `maxTargetsStatedInGameLog`
+accepts either qualifier; neither is required alongside the other, since the
+client only ever writes one per refusal.
+-}
+maxTargetsElectronicsMarker : String
+maxTargetsElectronicsMarker =
+    "as many as your ship's electronics are capable of"
+
+
 {-| The maximum the client stated on this reading, if it stated one.
 
 `You are already managing 6 targets, as many as you have skill to.` on
 `(notify)` -- the channel `loadRefusalFromGameLog` already reads, so this needed
 no new plumbing. 228 distinct entries across the recorded runs of both apps, and
-491 across the client's own game logs.
+491 across the client's own game logs. The client also writes a second,
+hardware-capped wording for the same refusal -- see `maxTargetsElectronicsMarker`.
 
 **The same sentence arrives on the quick-message channel too**, as
 `<center>You are already managing 6 targets, as many as you have skill to.`, 40
@@ -8370,7 +8384,9 @@ maxTargetsStatedInGameLog entries =
         |> List.filter
             (\entry ->
                 stringContainsIgnoringCase maxTargetsStatedMarker entry.text
-                    && stringContainsIgnoringCase maxTargetsSkillMarker entry.text
+                    && (stringContainsIgnoringCase maxTargetsSkillMarker entry.text
+                            || stringContainsIgnoringCase maxTargetsElectronicsMarker entry.text
+                       )
             )
         |> List.filterMap (.text >> maxTargetsInStatement)
         |> List.head
