@@ -3027,6 +3027,31 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
 
     response = send_event({"BotSettingsChangedEvent": settings or ""})
 
+    # A bot that refuses its settings answers `FinishSession` here, naming the
+    # key it could not read. Read that answer before sending anything else.
+    #
+    # **Sending a second event on top of it destroys the diagnostic.** The bot
+    # is now finished and still holds `botSettings = Nothing`, so the next event
+    # routes through `processEventAfterIntegrateEvent`, finds no settings, and
+    # answers `"Unexpected order of events: I did not receive any bot-settings
+    # changed event."` -- which overwrites `response` and is what the operator
+    # sees. The true message, `"Failed to parse these bot-settings: <key>"`, is
+    # gone, and the one that replaces it points at event ordering: a launch that
+    # failed because saxrat was handed the mission runner's drone settings cost
+    # a session's debugging under an error describing a different fault
+    # entirely.
+    #
+    # Only reachable when `--session-duration-minutes` is set, which both
+    # launchers always pass -- so in practice a settings typo *always* reported
+    # the wrong cause.
+    if "FinishSession" in response:
+        print(f"# FinishSession: {response['FinishSession']['statusText']}", file=sys.stderr)
+        if console is not None:
+            console.note_finished(response["FinishSession"]["statusText"])
+        proc.stdin.close()
+        proc.wait(timeout=5)
+        return
+
     session_end_at_milliseconds = None
     if session_duration_minutes is not None:
         # BotFramework.elm's own continueIfShouldHide already docks (and
