@@ -567,6 +567,21 @@ type alias BotMemory =
     , lootWindowOpenTicks : Int
     , routeFirstMarkerRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , routeFirstMarkerUnchangedTicks : Int
+
+    -- Readings spent trying to jump toward the *same* next system, whether
+    -- through the selected-item panel or the route-marker cascade. Reset
+    -- whenever the next system on the route changes (a leg completed, or a
+    -- new route was set) or the reading offers no next system at all. Not a
+    -- measure of "stuck" on its own -- it counts ordinary settling time too
+    -- -- but `jumpCascadeStuckReadings` past this bound is what
+    -- `jumpToNextSystem` reads to fall back to
+    -- `jumpToNextSystemViaSurroundingsButton` instead of continuing to
+    -- retry the marker cascade. See that function's own doc comment for why:
+    -- saxrat run 23 spent 27 readings and 7 discard-and-reopen cycles on the
+    -- marker cascade alone for one leg, well past the "3-4 menu opens"
+    -- that cascade's own comment expects.
+    , jumpCascadeSystem : Maybe String
+    , jumpCascadeReadings : Int
     , targetToUnlockRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , targetToUnlockUnchangedTicks : Int
     , noProbeScanResultsAndNoRouteLastTimeInSpace : Bool
@@ -3806,6 +3821,9 @@ jumpToNextSystem context =
                         "Route panel's first marker just appeared or moved since the last reading -- wait for the route to finish (re)computing before clicking it."
                         waitForProgressInGame
 
+                else if jumpCascadeStuckReadings < context.memory.jumpCascadeReadings then
+                    jumpToNextSystemViaSurroundingsButton context
+
                 else
                     returnDronesToBay context
                         (jumpThroughRouteStargate context
@@ -3832,6 +3850,106 @@ jumpToNextSystem context =
                                 context
                             )
                         )
+
+
+{-| How many readings `jumpToNextSystem` may spend working toward the _same_
+next system -- through the selected-item panel or the route-marker cascade --
+before giving up on both and falling back to
+`jumpToNextSystemViaSurroundingsButton` instead.
+
+**An operator judgement, not a measured figure.** The one recorded incident
+this is sized against (saxrat run 23) took 27 readings and 7 discard-and-reopen
+cycles on the marker cascade alone, well past the "3-4 menu opens" that
+cascade's own comment already expects as ordinary. 15 leaves the ordinary case
+several times over its documented room while still cutting the incident's own
+length roughly in half -- not a floor derived from a corpus, since this is the
+only occurrence on record.
+
+-}
+jumpCascadeStuckReadings : Int
+jumpCascadeStuckReadings =
+    15
+
+
+{-| Jump to the route's next system by right-clicking the persistent
+"surroundings" button rather than the route panel's own marker.
+
+**Confirmed live, in one pass** (a menu this transient does not survive
+between two separate live-inspection scripts): right-clicking
+`ListSurroundingsBtn` -- the same button `tetherAtStructure` and
+`alignToStructure` already use to reach "Stations"/"Structures" -- also offers
+a **Stargates** category, listing this system's gates by the name of the
+system each one leads to, and hovering a system name reveals a **Jump**
+entry. Three levels: `Stargates -> <system name> -> Jump`.
+
+**Why this exists at all rather than just widening the marker cascade's own
+tolerance again.** The marker cascade discards and reopens when the icon
+looks too far from where the previous click landed -- a _geometry_ problem,
+already tolerant to 200px (widened once already from the shared default of
+70). Run 23's 7-cycle stall was not fixed by that tolerance, so whatever kept
+discarding it is not simply "a little further away than expected" in the way
+widening the number again would fix. The surroundings button is a fixed,
+never-moving UI element (unlike the route strip, which "sits in a strip that
+can shift as the route updates"), so this is a different _kind_ of target
+rather than a more patient version of the same one.
+
+**The system name is matched as a substring, not exactly**, unlike the
+identity-sensitive matches elsewhere in this file (`fleetNeedsBackupBroadcast`,
+the route panel's own name-vs-overview-row match in `routeStargateJump`).
+Those guard against handing a pilot's own warp or a route to the wrong
+target; this one is choosing among the _current_ system's own gates, each
+leading to a name the client itself put there, so a substring collision would
+need two of this system's neighbours to share a name -- solar system names in
+EVE are unique, so that cannot happen. `useMenuEntryWithTextContaining` is
+used rather than `useMenuEntryWithTextEqual` because the live capture did not
+confirm whether the row carries markup (a security-status colour tag, as the
+route panel's own labels do) around the bare name.
+
+All three levels confirmed live, the third by direct operator observation
+rather than a read this file's own tooling could keep up with (the flyout
+does not stay open long enough to right-click it, hover it, and read the
+result across separate process launches -- it has to be one continuous
+session): the entry really does read exactly `Jump`, matched with
+`useMenuEntryWithTextEqual` rather than a substring for that reason.
+
+**Unverified: the cascade running end to end.** Nothing has driven all three
+levels in one live sequence and watched a jump land this way -- the pieces
+are each confirmed, the whole is not. It also does not fire in the ordinary
+course of things, since it is reached only past `jumpCascadeStuckReadings`;
+the first real test of this function is whatever run next gets stuck long
+enough to reach it. Whether recalling drones first (mirroring
+`jumpToNextSystem`'s own `returnDronesToBay`) is actually necessary at this
+point in the tree -- rather than merely harmless -- is also unconfirmed.
+
+-}
+jumpToNextSystemViaSurroundingsButton : BotDecisionContext -> DecisionPathNode
+jumpToNextSystemViaSurroundingsButton context =
+    case context.readingFromGameClient |> nextSystemOnRouteFromReading of
+        Nothing ->
+            describeBranch
+                "Was going to fall back to the surroundings-button cascade, but the route panel no longer names a next system -- nothing to jump toward this way either."
+                waitForProgressInGame
+
+        Just systemName ->
+            describeBranch
+                ("The route-marker cascade has been stuck trying to jump toward '"
+                    ++ systemName
+                    ++ "' for "
+                    ++ String.fromInt context.memory.jumpCascadeReadings
+                    ++ " readings, past "
+                    ++ String.fromInt jumpCascadeStuckReadings
+                    ++ " -- right-click the surroundings button instead and cascade to this gate by name."
+                )
+                (returnDronesToBay context
+                    (useContextMenuCascadeOnListSurroundingsButton
+                        (useMenuEntryWithTextEqual "Stargates"
+                            (useMenuEntryWithTextContaining systemName
+                                (useMenuEntryWithTextEqual "Jump" menuCascadeCompleted)
+                            )
+                        )
+                        context
+                    )
+                )
 
 
 {-| What the panel may be asked to do about the route's next stargate.
@@ -9320,6 +9438,8 @@ initBotMemory =
     , lootWindowOpenTicks = 0
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
+    , jumpCascadeSystem = Nothing
+    , jumpCascadeReadings = 0
     , targetToUnlockRegion = Nothing
     , targetToUnlockUnchangedTicks = 0
     , noProbeScanResultsAndNoRouteLastTimeInSpace = False
@@ -15228,6 +15348,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else if currentRouteFirstMarkerRegion == botMemoryBefore.routeFirstMarkerRegion then
             botMemoryBefore.routeFirstMarkerUnchangedTicks + 1
+
+        else
+            0
+    , jumpCascadeSystem = context.readingFromGameClient |> nextSystemOnRouteFromReading
+    , jumpCascadeReadings =
+        if (context.readingFromGameClient |> nextSystemOnRouteFromReading) == Nothing then
+            0
+
+        else if (context.readingFromGameClient |> nextSystemOnRouteFromReading) == botMemoryBefore.jumpCascadeSystem then
+            botMemoryBefore.jumpCascadeReadings + 1
 
         else
             0
