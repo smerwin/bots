@@ -130,6 +130,7 @@ import EveOnline.BotFramework
         ( ReadingFromGameClient
         , SeeUndockingComplete
         , ShipModulesMemory
+        , UIElement
         , UseContextMenuCascadeNode(..)
         , doEffectsClickModuleButton
         , infoPanelRouteFirstMarkerFromReadingFromGameClient
@@ -566,6 +567,22 @@ type alias BotMemory =
     , lootWindowOpenTicks : Int
     , routeFirstMarkerRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , routeFirstMarkerUnchangedTicks : Int
+
+    -- The route-marker cascade's own right-click on the route panel's first
+    -- marker, counted rather than the readings elapsed -- a reading spent
+    -- waiting for a menu to render ("give the game one more reading") is not
+    -- a sign of being stuck, where a *repeated* right-click at the same
+    -- marker (the cascade discarding what it found and reopening) is. Reset
+    -- whenever the next system on the route changes (a leg completed, or a
+    -- new route was set) or the reading offers no next system at all.
+    -- `jumpCascadeStuckReopens` past this count is what `jumpToNextSystem`
+    -- reads to fall back to `jumpToNextSystemViaSurroundingsButton` instead
+    -- of continuing to retry the marker. See that function's own doc comment
+    -- for why: saxrat run 23 spent 27 readings and 7 discard-and-reopen
+    -- cycles on the marker cascade alone for one leg, well past the "3-4
+    -- menu opens" that cascade's own comment expects.
+    , jumpCascadeSystem : Maybe String
+    , jumpCascadeReopens : Int
     , targetToUnlockRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , targetToUnlockUnchangedTicks : Int
     , noProbeScanResultsAndNoRouteLastTimeInSpace : Bool
@@ -639,6 +656,64 @@ type alias BotMemory =
     -- to read it out of. Latching on the second sighting instead makes the ask
     -- go out exactly once.
     , fleetBroadcastSeen : Maybe String
+
+    -- The "needs backup" call this session has already warped to, identified
+    -- by its own text. Latched on a real, directly-observable fact each
+    -- reading -- the ship warping while the pilot is in local chat -- rather
+    -- than on a "seen N readings" counter, because the underlying action is
+    -- a real multi-reading UI cascade (right-click, wait for the menu, click
+    -- an entry) and not the idempotent host-directive `fleetBroadcastFollowed`
+    -- latches for. A reading-count latch here would (and, live, did) cut the
+    -- cascade off before it had a chance to complete: see
+    -- `respondToFleetBackupBroadcast`. Never latches for a call whose pilot
+    -- is not in this system -- there is no verified way to act on one, so it
+    -- is simply left unlatched and re-checked every reading, harmlessly,
+    -- unless the ship later arrives in her system on its own.
+    --
+    -- Latching on "in local chat and warping" alone has a real gap: if the
+    -- call is first read on a reading where this ship *already* happens to
+    -- be warping for an unrelated reason (between anomalies, retreating --
+    -- which happens constantly), it credits that warp as the click's own
+    -- success and never dispatches one at all. `fleetBackupInSystemStanding`
+    -- is what closes it: a call only latches here once a *previous* reading
+    -- saw the pilot in system and this ship standing still, which is the
+    -- one state a dispatched click can actually be given credit from.
+    , fleetBackupBroadcastFollowed : Maybe String
+
+    -- The identity of a backup call seen with its pilot already in local
+    -- chat and this ship *not* warping -- the one state in which a "Warp to
+    -- Member" click just dispatched could plausibly be the reason the ship
+    -- is warping on the very next reading. See `fleetBackupBroadcastFollowed`.
+    , fleetBackupInSystemStanding : Maybe String
+
+    -- The "at location" call this session has already warped to *in person*.
+    -- Deliberately separate from the not-in-system ask below: arriving in
+    -- her system by whatever route does not mean this ship has actually
+    -- reached her, so the in-system branch must still get its own turn even
+    -- after a route has already been asked for and travelled. Shaped exactly
+    -- like `fleetBackupBroadcastFollowed` -- a real cascade needs a real
+    -- click credited, not a reading count. See
+    -- `respondToFleetAtLocationBroadcast`.
+    , fleetAtLocationBroadcastFollowed : Maybe String
+
+    -- Same role as `fleetBackupInSystemStanding`, for an at-location call's
+    -- own in-system warp.
+    , fleetAtLocationInSystemStanding : Maybe String
+
+    -- The identity of an at-location call this ship has already asked the
+    -- host to route toward, latched like `fleetBroadcastFollowed` -- an
+    -- idempotent directive is safe to latch on the second sighting, since it
+    -- is not a multi-step click that can be cut off mid-cascade. Once
+    -- latched this ship hands the reading back to ordinary travel for the
+    -- rest of the trip, the same restraint `followFleetBroadcast` states for
+    -- itself, and it does **not** stop the in-system branch above from later
+    -- firing once she is actually reached.
+    , fleetAtLocationDestinationAsked : Maybe String
+
+    -- Seen at all, regardless of the pilot's location -- the lag signal for
+    -- `fleetAtLocationDestinationAsked` above, same shape as
+    -- `fleetBroadcastSeen`.
+    , fleetAtLocationBroadcastSeen : Maybe String
     , destinationAskReadings : Int
     , routeSettingGivenUp : Bool
 
@@ -1591,61 +1666,87 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                 |> Maybe.withDefault
                     (recoverPodAfterShipLoss context
                         |> Maybe.withDefault
-                            (followFleetBroadcast context
+                            -- Read directly off the reading rather than
+                            -- waiting for `branchDependingOnDockedOrInSpace`
+                            -- to reach `ifSeeShipUI`, so a ship worth
+                            -- retreating still retreats even though
+                            -- `respondToFleetBackupBroadcast` sits above that
+                            -- split -- a lost ship helps nobody. Below the
+                            -- retreat's own doc comment says this is below
+                            -- it; it previously was not, and a critically
+                            -- damaged ship would have warped *toward* a
+                            -- fleet-mate's fight rather than away from its
+                            -- own. `runAwayIfLowHealth` is still reached the
+                            -- ordinary way further down for every reading
+                            -- this does not fire on -- calling it twice on
+                            -- the same context and reading is redundant, not
+                            -- wrong.
+                            ((context.readingFromGameClient.shipUI
+                                |> Maybe.andThen (runAwayIfLowHealth context)
+                             )
                                 |> Maybe.withDefault
-                                    (branchDependingOnDockedOrInSpace
-                                        { ifDocked =
-                                            continueIfShouldHide
-                                                { ifShouldHide =
-                                                    describeBranch "Stay docked." waitForProgressInGame
-                                                }
-                                                context
+                                    (respondToFleetAtLocationBroadcast context
+                                        |> Maybe.withDefault
+                                            (respondToFleetBackupBroadcast context
                                                 |> Maybe.withDefault
-                                                    (if
-                                                        context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
-                                                            && (context.readingFromGameClient
-                                                                    |> infoPanelRouteFirstMarkerFromReadingFromGameClient
-                                                                    |> (==) Nothing
-                                                               )
-                                                            -- A "Warp to Site" opportunity takes
-                                                            -- precedence over staying docked: the
-                                                            -- Opportunities panel this comes from is
-                                                            -- part of the persistent left sidebar
-                                                            -- (like the route panel), so it's
-                                                            -- checkable even while docked. Undocking
-                                                            -- here rather than trying to click it
-                                                            -- directly from dock -- untested whether
-                                                            -- that even works -- lets the very next
-                                                            -- tick's normal in-space priority chain
-                                                            -- (which already puts this ahead of
-                                                            -- tether/dock) pick it up once genuinely
-                                                            -- in space.
-                                                            && (context.readingFromGameClient
-                                                                    |> escalationEntriesPermitted context.eventContext.botSettings
-                                                                    |> warpToOpportunitySiteIfAvailable
-                                                                    |> (==) Nothing
-                                                               )
-                                                     then
-                                                        describeBranch
-                                                            "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
-                                                            waitForProgressInGame
+                                                    (followFleetBroadcast context
+                                                        |> Maybe.withDefault
+                                                            (branchDependingOnDockedOrInSpace
+                                                                { ifDocked =
+                                                                    continueIfShouldHide
+                                                                        { ifShouldHide =
+                                                                            describeBranch "Stay docked." waitForProgressInGame
+                                                                        }
+                                                                        context
+                                                                        |> Maybe.withDefault
+                                                                            (if
+                                                                                context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
+                                                                                    && (context.readingFromGameClient
+                                                                                            |> infoPanelRouteFirstMarkerFromReadingFromGameClient
+                                                                                            |> (==) Nothing
+                                                                                       )
+                                                                                    -- A "Warp to Site" opportunity takes
+                                                                                    -- precedence over staying docked: the
+                                                                                    -- Opportunities panel this comes from is
+                                                                                    -- part of the persistent left sidebar
+                                                                                    -- (like the route panel), so it's
+                                                                                    -- checkable even while docked. Undocking
+                                                                                    -- here rather than trying to click it
+                                                                                    -- directly from dock -- untested whether
+                                                                                    -- that even works -- lets the very next
+                                                                                    -- tick's normal in-space priority chain
+                                                                                    -- (which already puts this ahead of
+                                                                                    -- tether/dock) pick it up once genuinely
+                                                                                    -- in space.
+                                                                                    && (context.readingFromGameClient
+                                                                                            |> escalationEntriesPermitted context.eventContext.botSettings
+                                                                                            |> warpToOpportunitySiteIfAvailable
+                                                                                            |> (==) Nothing
+                                                                                       )
+                                                                             then
+                                                                                describeBranch
+                                                                                    "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
+                                                                                    waitForProgressInGame
 
-                                                     else
-                                                        undockUsingStationWindow context
+                                                                             else
+                                                                                undockUsingStationWindow context
+                                                                            )
+                                                                , ifSeeShipUI =
+                                                                    \shipUI ->
+                                                                        runAwayIfLowHealth context shipUI
+                                                                            |> Maybe.withDefault
+                                                                                (continueIfShouldHide
+                                                                                    { ifShouldHide = hideFromNeutralInLocal context
+                                                                                    }
+                                                                                    context
+                                                                                    |> Maybe.withDefault
+                                                                                        (decideNextActionWhenInSpace context { shipUI = shipUI })
+                                                                                )
+                                                                }
+                                                                context
+                                                            )
                                                     )
-                                        , ifSeeShipUI =
-                                            \shipUI ->
-                                                runAwayIfLowHealth context shipUI
-                                                    |> Maybe.withDefault
-                                                        (continueIfShouldHide
-                                                            { ifShouldHide = hideFromNeutralInLocal context
-                                                            }
-                                                            context
-                                                            |> Maybe.withDefault
-                                                                (decideNextActionWhenInSpace context { shipUI = shipUI })
-                                                        )
-                                        }
-                                        context
+                                            )
                                     )
                             )
                     )
@@ -2540,17 +2641,41 @@ fleetTravelBroadcastMarker =
     ": Travel to "
 
 
+{-| Every descendant of the fleet window itself, so a search for a `_name`
+the client reuses elsewhere (`entryLabel`, confirmed live to also be the
+drones window's own row name) cannot pick up a node from some other window
+instead. Fixes a real bug: `fleetBroadcastHistoryEntryText` used to search
+`readingFromGameClient.uiTree` whole, and with drones actively engaged --
+each rendering an `entryLabel` row such as `'Integrated' Acolyte Fighting`
+-- `List.head` over the unscoped tree returned the drone's row rather than
+the broadcast's, every single time a "needs backup" call was checked during
+active combat, which is exactly when a call is most likely to be genuine.
+The marker split then finds no `" needs backup"` in a drone status string
+and answers `Nothing`, silently, on every reading -- confirmed live on
+saxrat run 20, where Martha's banner and a fresh history entry were both
+present and `respondToFleetBackupBroadcast` never printed a line at all.
+`Nothing` for an absent fleet window, not a crash -- there is nothing to
+search.
+-}
+fleetWindowDescendants : ReadingFromGameClient -> List EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+fleetWindowDescendants readingFromGameClient =
+    readingFromGameClient.fleetWindow
+        |> Maybe.map (.uiNode >> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion)
+        |> Maybe.withDefault []
+
+
 {-| The banner naming the client's most recent fleet broadcast.
 
 Found by the `_name` the client gives it rather than by position, because the
 banner sits four containers deep and every one of those is a `Container` that
-carries no other identity.
+carries no other identity. Scoped to the fleet window -- see
+`fleetWindowDescendants`.
 
 -}
 fleetBroadcastBannerText : ReadingFromGameClient -> Maybe String
 fleetBroadcastBannerText readingFromGameClient =
-    readingFromGameClient.uiTree
-        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+    readingFromGameClient
+        |> fleetWindowDescendants
         |> List.filter
             (.uiNode
                 >> EveOnline.ParseUserInterface.getNameFromDictEntries
@@ -2667,6 +2792,432 @@ followFleetBroadcast context =
                         ++ hostDirectiveSetDestination broadcast.system
                     )
                     waitForProgressInGame
+            )
+
+
+{-| The client's own words for a fleet "needs backup" broadcast, read off a
+live one.
+
+Captured live: `"Martha Mercoxit needs backup"` on the persistent banner and
+`"15:16:16 - Martha Mercoxit needs backup"` on the broadcast-history panel's
+own entry for it. **No colon**, unlike the travel broadcast's
+`"Gal Bistot: Travel to Riramia"` -- this is a suffix marker, not an infix one,
+and the pilot's name is everything before it.
+
+-}
+fleetBackupBroadcastMarker : String
+fleetBackupBroadcastMarker =
+    " needs backup"
+
+
+{-| The most recent entry in the fleet window's broadcast-history panel, if
+that panel happens to be showing.
+
+Read the same way `fleetBroadcastBannerText` reads the persistent banner --
+filter by the `_name` the client gives the text node, take the first, scoped
+to the fleet window (`fleetWindowDescendants`). Captured live:
+`TextBody name='entryLabel' text='15:16:16 - Martha Mercoxit needs
+backup'`, one child deep inside a `BroadcastEntry` inside the
+`BroadcastHistoryPanel`. **The scoping is load-bearing, not tidiness** -- see
+`fleetWindowDescendants`'s own comment for the confirmed live collision with
+the drones window's identically-named rows.
+
+**Unverified: entry order when more than one broadcast has fired.** Only one
+entry was ever live when this was written, so this takes the tree's own list
+order and cannot say whether that is newest-first. It is only ever used to
+tell two _different_ calls apart from each other (see
+`fleetLastBroadcastText`), and picking the wrong one of several stacked
+entries would at worst let one repeat go unanswered rather than mis-identify
+the pilot, since the marker split still runs on whichever text this returns.
+
+-}
+fleetBroadcastHistoryEntryText : ReadingFromGameClient -> Maybe String
+fleetBroadcastHistoryEntryText readingFromGameClient =
+    readingFromGameClient
+        |> fleetWindowDescendants
+        |> List.filter
+            (.uiNode
+                >> EveOnline.ParseUserInterface.getNameFromDictEntries
+                >> (==) (Just "entryLabel")
+            )
+        |> List.filterMap (.uiNode >> EveOnline.ParseUserInterface.getDisplayText)
+        |> List.head
+
+
+{-| The string a "needs backup" call is identified by, for the latch in
+`fleetBackupBroadcastFollowed` and, since it names no broadcast type of its
+own, reused identically by `fleetAtLocationBroadcast` below.
+
+**Why this differs from the travel broadcast's plain banner text.** The banner
+is a _last broadcast_ display with no timestamp, so a second, later call for
+help from the same pilot renders identically to the first and would read as
+"already handled" under the travel broadcast's own latch shape -- fine there,
+since a repeated identical travel broadcast really is redundant (the ship is
+already going there), and wrong here, since a second cry for help is not the
+same event as the first. The history panel's own entry carries a timestamp, so
+it is used as the identity whenever that panel is showing; the plain banner is
+the fallback when it is not, which accepts the travel broadcast's own
+limitation rather than requiring an operator to keep a particular fleet-window
+tab open.
+
+**One history panel, one entry, whatever the type.** The panel interleaves
+every broadcast type in one timestamped list, so `List.head` here is simply
+"whatever the last broadcast was" -- a backup call and an at-location call
+each look for their own marker in it and correctly find nothing when the top
+entry is the other type, which is what lets an operator's later broadcast of
+either kind supersede an earlier one of the other without either detector
+needing to know the other exists.
+
+-}
+fleetLastBroadcastText : ReadingFromGameClient -> Maybe String
+fleetLastBroadcastText readingFromGameClient =
+    case fleetBroadcastHistoryEntryText readingFromGameClient of
+        Just historyEntry ->
+            Just historyEntry
+
+        Nothing ->
+            fleetBroadcastBannerText readingFromGameClient
+
+
+{-| Who is calling for backup, and the text identifying this particular call.
+
+**Matched exactly against the permitted list, never as a substring**, for
+`fleetTravelBroadcast`'s reason: this hands a pilot the ship's own warp.
+
+-}
+fleetNeedsBackupBroadcast : List String -> ReadingFromGameClient -> Maybe { pilot : String, identity : String }
+fleetNeedsBackupBroadcast permittedPilots readingFromGameClient =
+    fleetLastBroadcastText readingFromGameClient
+        |> Maybe.andThen
+            (\identity ->
+                case String.indexes fleetBackupBroadcastMarker identity of
+                    [] ->
+                        Nothing
+
+                    index :: _ ->
+                        let
+                            -- The history entry carries a leading "HH:MM:SS - "
+                            -- the banner does not; splitting from the *end* on
+                            -- the marker's own index, rather than assuming a
+                            -- fixed prefix, reads the pilot's name correctly out
+                            -- of either shape.
+                            pilot =
+                                identity |> String.left index |> String.trim
+
+                            pilotFromEitherShape =
+                                case String.split " - " pilot of
+                                    [ _, afterDash ] ->
+                                        afterDash
+
+                                    _ ->
+                                        pilot
+                        in
+                        if String.isEmpty pilotFromEitherShape then
+                            Nothing
+
+                        else if
+                            permittedPilots
+                                |> List.any
+                                    (\permitted ->
+                                        String.toLower (String.trim permitted) == String.toLower pilotFromEitherShape
+                                    )
+                        then
+                            Just { pilot = pilotFromEitherShape, identity = identity }
+
+                        else
+                            Nothing
+            )
+
+
+{-| The client's own words for a fleet "at location" broadcast, read off a
+live one.
+
+Captured live: `"Martha Mercoxit is at location Toshabia"` on the persistent
+banner and `"17:36:53 - Martha Mercoxit is at location Toshabia"` on the
+broadcast-history panel's own entry -- an **infix** marker, like the travel
+broadcast's `": Travel to "`, with the pilot's name before it and a real
+solar-system name after it. Unlike the "needs backup" call, this one names
+somewhere navigable, which is what lets `respondToFleetAtLocationBroadcast`
+route toward it through the same reliable ESI directive
+`followFleetBroadcast` already uses, rather than through a client-side click
+that a "needs backup" call proved the client will refuse outright.
+
+-}
+fleetAtLocationBroadcastMarker : String
+fleetAtLocationBroadcastMarker =
+    " is at location "
+
+
+{-| Who broadcast being at a location, where, and the text identifying this
+particular call.
+
+Reads the same shared last-broadcast text `fleetNeedsBackupBroadcast` does
+(`fleetLastBroadcastText`) and looks for its own marker in it, so an
+operator's later broadcast of either kind supersedes an earlier one of the
+other -- see `fleetLastBroadcastText`'s own comment. **Matched exactly
+against the permitted list, never as a substring**, for `fleetTravelBroadcast`'s
+reason: this hands a pilot the ship's own warp or its route.
+
+-}
+fleetAtLocationBroadcast : List String -> ReadingFromGameClient -> Maybe { pilot : String, system : String, identity : String }
+fleetAtLocationBroadcast permittedPilots readingFromGameClient =
+    fleetLastBroadcastText readingFromGameClient
+        |> Maybe.andThen
+            (\identity ->
+                case String.indexes fleetAtLocationBroadcastMarker identity of
+                    [] ->
+                        Nothing
+
+                    index :: _ ->
+                        let
+                            beforeMarker =
+                                identity |> String.left index |> String.trim
+
+                            pilotFromEitherShape =
+                                case String.split " - " beforeMarker of
+                                    [ _, afterDash ] ->
+                                        afterDash
+
+                                    _ ->
+                                        beforeMarker
+
+                            system =
+                                identity
+                                    |> String.dropLeft (index + String.length fleetAtLocationBroadcastMarker)
+                                    |> String.trim
+                        in
+                        if String.isEmpty pilotFromEitherShape || String.isEmpty system then
+                            Nothing
+
+                        else if
+                            permittedPilots
+                                |> List.any
+                                    (\permitted ->
+                                        String.toLower (String.trim permitted) == String.toLower pilotFromEitherShape
+                                    )
+                        then
+                            Just { pilot = pilotFromEitherShape, system = system, identity = identity }
+
+                        else
+                            Nothing
+            )
+
+
+{-| The broadcast banner as a clickable element, for right-clicking it
+directly. **Confirmed live**: right-clicking this exact node (the same one
+`fleetBroadcastBannerText` reads for its text) opens a context menu offering
+`Set Destination`, `Add Waypoint`, a `Fleet Member` submenu (`Warp to Member`,
+`Warp to Member Within`, `Show Info`, `Add to Watch List`), and `Ignore this
+type of broadcast` -- no fleet-member roster window needs to be open. Scoped
+to the fleet window -- see `fleetWindowDescendants`.
+-}
+fleetBroadcastBannerElement : ReadingFromGameClient -> Maybe UIElement
+fleetBroadcastBannerElement readingFromGameClient =
+    readingFromGameClient
+        |> fleetWindowDescendants
+        |> List.filter
+            (.uiNode
+                >> EveOnline.ParseUserInterface.getNameFromDictEntries
+                >> (==) (Just "bannerLabel")
+            )
+        |> List.head
+
+
+{-| Whether a pilot is currently in this solar system, read off local chat.
+
+Local chat lists everyone in the system by definition, so this is the same
+`localChatWindowFromUserInterface |> .userlist |> .visibleUsers` read
+`getNamesOfOtherPilotsInOverview` already does (`Bot.elm` -- see "Strings and
+identities read off a live client" in `CLAUDE.md`), just without that
+function's own fleetmate exclusion: that function wants _other_ pilots, this
+one wants to find a specific fleetmate.
+
+-}
+pilotIsInLocalChat : String -> ReadingFromGameClient -> Bool
+pilotIsInLocalChat pilotName readingFromGameClient =
+    readingFromGameClient
+        |> localChatWindowFromUserInterface
+        |> Maybe.andThen .userlist
+        |> Maybe.map .visibleUsers
+        |> Maybe.withDefault []
+        |> List.filterMap .name
+        |> List.any (\name -> String.toLower (String.trim name) == String.toLower (String.trim pilotName))
+
+
+{-| Warp to a fleet-mate who broadcast "needs backup", when the ship is
+already in her system.
+
+**Placed above `followFleetBroadcast`**: an emergency call outranks a routine
+travel broadcast if both are pending. Below the retreats, the pod recovery and
+the setup list, same as the travel broadcast -- a lost ship or a stuck menu
+still outranks going to someone else's fight.
+
+**Only the in-system case is handled at all**, and that narrowing is load
+-bearing rather than an oversight. The first version also tried to route
+toward a caller who was _not_ yet in this system, right-clicking the banner
+and taking "Set Destination" -- confirmed live to be offered on this exact
+broadcast type. What live running then showed is that the client refuses to
+act on it: saxrat run 16 clicked it every reading for twelve straight minutes
+and the game log answered `You can't set that as a waypoint` every single
+time, without exception. That is EVE's own refusal to compute an autopilot
+route to a fleet member's live in-space position -- unlike a travel
+broadcast, which names a real system and which the client happily routes
+to, a "needs backup" call carries no navigable destination at all. No amount
+of retrying, and no different latch shape, was going to make that click land;
+the earlier two-reading-lag version merely hid the failure by giving up
+after one attempt, and the fix to _that_ (retry until the client confirms it
+worked) turned a quiet non-event into a loud, useless spam loop instead. Both
+are downstream of the same wrong premise, so the premise -- not the retry
+policy -- is what changed.
+
+So this now does the one thing that is actually observed working: when the
+caller is **already in this system**, right-click the banner, `Fleet Member`
+then `Warp to Member` (exact text at both steps -- `"Warp to Member"` is a
+substring of `"Warp to Member Within"`, confirmed live in the same menu),
+re-issued every reading exactly like `jumpToNextSystem`'s own cascade until
+the client shows the ship actually warping -- that is what latches
+`fleetBackupBroadcastFollowed`, not a click count. Idempotent by the same
+argument the file already makes for its other repeated cascades: a
+right-click that finds no menu yet waits, one that finds a stale menu
+discards and reopens, and clicking "Warp to Member" again before the first
+has landed simply repeats the same command.
+
+**A caller who is not in this system gets nothing from this branch at all**
+-- `Nothing`, falling through to ordinary hunting, exactly as if the call had
+never been seen. That is a real capability gap, stated rather than hidden:
+there is currently no verified way for this bot to travel toward a "needs
+backup" caller across systems. The fleet window's per-member location column,
+if the client renders one, would be the way to learn a real system name and
+hand it to the same `@host set-destination` mechanism `followFleetBroadcast`
+already uses reliably -- but that is unread and unverified, and belongs in a
+follow-up built against a live client rather than guessed at again here.
+
+-}
+respondToFleetBackupBroadcast : BotDecisionContext -> Maybe DecisionPathNode
+respondToFleetBackupBroadcast context =
+    fleetNeedsBackupBroadcast
+        context.eventContext.botSettings.followFleetBroadcastFrom
+        context.readingFromGameClient
+        |> Maybe.andThen
+            (\backup ->
+                if context.memory.fleetBackupBroadcastFollowed == Just backup.identity then
+                    Nothing
+
+                else
+                    Just backup
+            )
+        |> Maybe.andThen
+            (\backup ->
+                if pilotIsInLocalChat backup.pilot context.readingFromGameClient then
+                    fleetBroadcastBannerElement context.readingFromGameClient
+                        |> Maybe.map
+                            (\bannerElement ->
+                                describeBranch
+                                    ("'"
+                                        ++ backup.pilot
+                                        ++ "' broadcast needing backup and is in this system -- recall drones and warp to them."
+                                    )
+                                    (ensureDronesRecalledBeforeWarping context
+                                        (useContextMenuCascade
+                                            ( "fleet broadcast", bannerElement )
+                                            (useMenuEntryWithTextEqual "Fleet Member"
+                                                (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
+                                            )
+                                            context
+                                        )
+                                    )
+                            )
+
+                else
+                    Nothing
+            )
+
+
+{-| Warp to a fleet-mate who broadcast being at a location, or ask the host
+to route there.
+
+**Placed beside `respondToFleetBackupBroadcast`, same tier**: both outrank
+the routine travel broadcast and the anomaly grid, both are outranked by the
+retreats, the pod recovery and the setup list. Which of the two wins when
+both are pending is decided by which the client currently shows as the last
+broadcast (`fleetLastBroadcastText`) -- there is only one banner, so only one
+of them can ever answer `Just` on a given reading.
+
+Two states, mirroring `followFleetBroadcast` and `respondToFleetBackupBroadcast`
+respectively rather than inventing a third shape:
+
+  - **In this system** -- the same "Fleet Member" -> "Warp to Member" cascade
+    `respondToFleetBackupBroadcast` uses, re-issued every reading and
+    credited only once a _previous_ reading saw her in system with this ship
+    standing still (`fleetAtLocationInSystemStanding`), for the identical
+    reason given there.
+  - **Not in this system** -- unlike a "needs backup" call, this broadcast
+    names a real solar system (confirmed live: `"<pilot> is at location
+    <system>"`), so this asks the host to route there through the same
+    reliable `@host set-destination` directive `followFleetBroadcast` already
+    uses, rather than repeating the click-based mistake that broadcast type
+    proved the client refuses. Latches `fleetAtLocationDestinationAsked` on
+    the second sighting and hands the reading back to ordinary travel for the
+    rest of the trip -- this owns no second travel path. That latch does
+    **not** stop the in-system branch above from firing once she is actually
+    reached; the two track separately (`fleetAtLocationBroadcastFollowed` vs
+    `fleetAtLocationDestinationAsked`) for exactly that reason.
+
+-}
+respondToFleetAtLocationBroadcast : BotDecisionContext -> Maybe DecisionPathNode
+respondToFleetAtLocationBroadcast context =
+    fleetAtLocationBroadcast
+        context.eventContext.botSettings.followFleetBroadcastFrom
+        context.readingFromGameClient
+        |> Maybe.andThen
+            (\call ->
+                if context.memory.fleetAtLocationBroadcastFollowed == Just call.identity then
+                    Nothing
+
+                else
+                    Just call
+            )
+        |> Maybe.andThen
+            (\call ->
+                if pilotIsInLocalChat call.pilot context.readingFromGameClient then
+                    fleetBroadcastBannerElement context.readingFromGameClient
+                        |> Maybe.map
+                            (\bannerElement ->
+                                describeBranch
+                                    ("'"
+                                        ++ call.pilot
+                                        ++ "' broadcast being at location '"
+                                        ++ call.system
+                                        ++ "' and is in this system -- recall drones and warp to them."
+                                    )
+                                    (ensureDronesRecalledBeforeWarping context
+                                        (useContextMenuCascade
+                                            ( "fleet broadcast", bannerElement )
+                                            (useMenuEntryWithTextEqual "Fleet Member"
+                                                (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
+                                            )
+                                            context
+                                        )
+                                    )
+                            )
+
+                else if context.memory.fleetAtLocationDestinationAsked == Just call.identity then
+                    Nothing
+
+                else
+                    Just
+                        (describeBranch
+                            ("'"
+                                ++ call.pilot
+                                ++ "' broadcast being at location '"
+                                ++ call.system
+                                ++ "' and is not in this system -- asking the host to set the route to '"
+                                ++ call.system
+                                ++ "'. "
+                                ++ hostDirectiveSetDestination call.system
+                            )
+                            waitForProgressInGame
+                        )
             )
 
 
@@ -3271,6 +3822,9 @@ jumpToNextSystem context =
                         "Route panel's first marker just appeared or moved since the last reading -- wait for the route to finish (re)computing before clicking it."
                         waitForProgressInGame
 
+                else if jumpCascadeStuckReopens < context.memory.jumpCascadeReopens then
+                    jumpToNextSystemViaSurroundingsButton context
+
                 else
                     returnDronesToBay context
                         (jumpThroughRouteStargate context
@@ -3297,6 +3851,116 @@ jumpToNextSystem context =
                                 context
                             )
                         )
+
+
+{-| How many times `jumpToNextSystem`'s route-marker cascade may (re)open its
+menu for the _same_ next system before giving up on it and falling back to
+`jumpToNextSystemViaSurroundingsButton` instead.
+
+**Counted in menu opens, not readings.** A reading spent waiting for a menu
+to render ("give the game one more reading") is not evidence of being stuck;
+a _repeated_ right-click at the marker -- the cascade discarding what it
+found and reopening -- is. `BotMemory.jumpCascadeReopens` counts exactly that,
+read off the previous step's own dispatched effects
+(`previousStepRightClickedElement`), so waiting readings hold the count
+rather than resetting or advancing it.
+
+**An operator's own choice, not a measured figure**, and set deliberately at
+the edge of what the marker cascade's own comment calls ordinary ("3-4 menu
+opens") rather than above it. The one recorded incident this reasoning has
+behind it (saxrat run 23) took 7 discard-and-reopen cycles before
+self-resolving; 3 does not wait to find out whether a given stall is that
+incident or an unremarkable retry -- it treats the marker cascade as worth
+one ordinary attempt and switches to the surroundings-button path readily
+rather than as a rare last resort. The cost of that choice: a cascade that
+would have completed on its fourth or fifth open now gets interrupted and
+redone through a different, heavier path instead.
+
+-}
+jumpCascadeStuckReopens : Int
+jumpCascadeStuckReopens =
+    3
+
+
+{-| Jump to the route's next system by right-clicking the persistent
+"surroundings" button rather than the route panel's own marker.
+
+**Confirmed live, in one pass** (a menu this transient does not survive
+between two separate live-inspection scripts): right-clicking
+`ListSurroundingsBtn` -- the same button `tetherAtStructure` and
+`alignToStructure` already use to reach "Stations"/"Structures" -- also offers
+a **Stargates** category, listing this system's gates by the name of the
+system each one leads to, and hovering a system name reveals a **Jump**
+entry. Three levels: `Stargates -> <system name> -> Jump`.
+
+**Why this exists at all rather than just widening the marker cascade's own
+tolerance again.** The marker cascade discards and reopens when the icon
+looks too far from where the previous click landed -- a _geometry_ problem,
+already tolerant to 200px (widened once already from the shared default of
+70). Run 23's 7-cycle stall was not fixed by that tolerance, so whatever kept
+discarding it is not simply "a little further away than expected" in the way
+widening the number again would fix. The surroundings button is a fixed,
+never-moving UI element (unlike the route strip, which "sits in a strip that
+can shift as the route updates"), so this is a different _kind_ of target
+rather than a more patient version of the same one.
+
+**The system name is matched as a substring, not exactly**, unlike the
+identity-sensitive matches elsewhere in this file (`fleetNeedsBackupBroadcast`,
+the route panel's own name-vs-overview-row match in `routeStargateJump`).
+Those guard against handing a pilot's own warp or a route to the wrong
+target; this one is choosing among the _current_ system's own gates, each
+leading to a name the client itself put there, so a substring collision would
+need two of this system's neighbours to share a name -- solar system names in
+EVE are unique, so that cannot happen. `useMenuEntryWithTextContaining` is
+used rather than `useMenuEntryWithTextEqual` because the live capture did not
+confirm whether the row carries markup (a security-status colour tag, as the
+route panel's own labels do) around the bare name.
+
+All three levels confirmed live, the third by direct operator observation
+rather than a read this file's own tooling could keep up with (the flyout
+does not stay open long enough to right-click it, hover it, and read the
+result across separate process launches -- it has to be one continuous
+session): the entry really does read exactly `Jump`, matched with
+`useMenuEntryWithTextEqual` rather than a substring for that reason.
+
+**Unverified: the cascade running end to end.** Nothing has driven all three
+levels in one live sequence and watched a jump land this way -- the pieces
+are each confirmed, the whole is not. It also does not fire in the ordinary
+course of things, since it is reached only past `jumpCascadeStuckReopens`;
+the first real test of this function is whatever run next gets stuck long
+enough to reach it. Whether recalling drones first (mirroring
+`jumpToNextSystem`'s own `returnDronesToBay`) is actually necessary at this
+point in the tree -- rather than merely harmless -- is also unconfirmed.
+
+-}
+jumpToNextSystemViaSurroundingsButton : BotDecisionContext -> DecisionPathNode
+jumpToNextSystemViaSurroundingsButton context =
+    case context.readingFromGameClient |> nextSystemOnRouteFromReading of
+        Nothing ->
+            describeBranch
+                "Was going to fall back to the surroundings-button cascade, but the route panel no longer names a next system -- nothing to jump toward this way either."
+                waitForProgressInGame
+
+        Just systemName ->
+            describeBranch
+                ("The route-marker cascade has (re)opened its menu "
+                    ++ String.fromInt context.memory.jumpCascadeReopens
+                    ++ " time(s) trying to jump toward '"
+                    ++ systemName
+                    ++ "', past "
+                    ++ String.fromInt jumpCascadeStuckReopens
+                    ++ " -- right-click the surroundings button instead and cascade to this gate by name."
+                )
+                (returnDronesToBay context
+                    (useContextMenuCascadeOnListSurroundingsButton
+                        (useMenuEntryWithTextEqual "Stargates"
+                            (useMenuEntryWithTextContaining systemName
+                                (useMenuEntryWithTextEqual "Jump" menuCascadeCompleted)
+                            )
+                        )
+                        context
+                    )
+                )
 
 
 {-| What the panel may be asked to do about the route's next stargate.
@@ -8811,6 +9475,8 @@ initBotMemory =
     , lootWindowOpenTicks = 0
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
+    , jumpCascadeSystem = Nothing
+    , jumpCascadeReopens = 0
     , targetToUnlockRegion = Nothing
     , targetToUnlockUnchangedTicks = 0
     , noProbeScanResultsAndNoRouteLastTimeInSpace = False
@@ -8841,6 +9507,12 @@ initBotMemory =
     , destinationAskedFor = Nothing
     , fleetBroadcastFollowed = Nothing
     , fleetBroadcastSeen = Nothing
+    , fleetBackupBroadcastFollowed = Nothing
+    , fleetBackupInSystemStanding = Nothing
+    , fleetAtLocationBroadcastFollowed = Nothing
+    , fleetAtLocationInSystemStanding = Nothing
+    , fleetAtLocationDestinationAsked = Nothing
+    , fleetAtLocationBroadcastSeen = Nothing
     , destinationAskReadings = 0
     , routeSettingGivenUp = False
     , escalationStandDownReadings = 0
@@ -14716,6 +15388,34 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , jumpCascadeSystem = context.readingFromGameClient |> nextSystemOnRouteFromReading
+    , jumpCascadeReopens =
+        case context.readingFromGameClient |> infoPanelRouteFirstMarkerFromReadingFromGameClient of
+            Nothing ->
+                0
+
+            Just marker ->
+                let
+                    sameSystemAsBefore =
+                        (context.readingFromGameClient |> nextSystemOnRouteFromReading) == botMemoryBefore.jumpCascadeSystem
+
+                    justRightClickedTheMarker =
+                        previousStepRightClickedElement context.previousStepsEffects marker.uiNode
+                in
+                if sameSystemAsBefore then
+                    if justRightClickedTheMarker then
+                        botMemoryBefore.jumpCascadeReopens + 1
+
+                    else
+                        -- A reading spent waiting for the menu to render is
+                        -- not evidence of being stuck -- hold, don't reset.
+                        botMemoryBefore.jumpCascadeReopens
+
+                else if justRightClickedTheMarker then
+                    1
+
+                else
+                    0
     , targetToUnlockRegion = currentTargetToUnlockRegion
     , targetToUnlockUnchangedTicks =
         if currentTargetToUnlockRegion == Nothing then
@@ -14916,6 +15616,127 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
                 else
                     botMemoryBefore.fleetBroadcastFollowed
+    , fleetBackupBroadcastFollowed =
+        -- Latched on the ship actually **warping** while the pilot is in
+        -- local chat -- a fact read straight off this reading, not off a
+        -- "seen N readings" counter. Two earlier designs both got this wrong
+        -- live, in opposite directions, and both are why the field is shaped
+        -- this way now:
+        --
+        -- The first latched after the identity had merely been *seen*
+        -- twice, on the same shape `fleetBroadcastFollowed` uses for the
+        -- idempotent host-directive above. The persistent banner reads
+        -- identically on every reading it is up, so "seen twice" was reached
+        -- one or two readings after the first sighting regardless of
+        -- whether any click had landed -- saxrat run 15 shows three separate
+        -- attempts, each cut off at "cascade level 0" with no click ever
+        -- reaching the client, three stray menus left behind, and the ship
+        -- never warped anywhere.
+        --
+        -- The second dropped the counter for exactly that reason and instead
+        -- tried to route toward a caller who was not yet in this system,
+        -- retrying the click every reading until the client confirmed it.
+        -- Live, that confirmed something worse than a timing bug: EVE simply
+        -- refuses to compute an autopilot route to a fleet member's live
+        -- in-space position at all -- run 16's game log answered
+        -- `You can't set that as a waypoint` on every single one of several
+        -- hundred consecutive attempts. So the not-in-system case is no
+        -- longer attempted here at all (see `respondToFleetBackupBroadcast`)
+        -- and this field only ever latches for the in-system case, which is
+        -- the one observed actually working.
+        --
+        -- A third gap was found live rather than engineered around in
+        -- advance and is closed here: a ship already warping for an
+        -- unrelated reason (this bot is warping constantly -- between
+        -- anomalies, retreating) on the reading a call is first read would
+        -- credit that warp as the click's own success and never dispatch
+        -- one at all. `fleetBackupInSystemStanding`, below, is read from the
+        -- *previous* reading rather than this one for exactly the reason
+        -- `fleetBroadcastFollowed`'s own two-reading lag exists: crediting
+        -- this reading's own "standing" fact would let a ship that starts
+        -- this very reading already stationary in her system immediately
+        -- satisfy both halves at once with no click in between.
+        case fleetNeedsBackupBroadcast context.botSettings.followFleetBroadcastFrom context.readingFromGameClient of
+            Nothing ->
+                botMemoryBefore.fleetBackupBroadcastFollowed
+
+            Just backup ->
+                if
+                    pilotIsInLocalChat backup.pilot context.readingFromGameClient
+                        && (shipWarpingFromReading context.readingFromGameClient == Just True)
+                        && (botMemoryBefore.fleetBackupInSystemStanding == Just backup.identity)
+                then
+                    Just backup.identity
+
+                else
+                    botMemoryBefore.fleetBackupBroadcastFollowed
+    , fleetBackupInSystemStanding =
+        case fleetNeedsBackupBroadcast context.botSettings.followFleetBroadcastFrom context.readingFromGameClient of
+            Nothing ->
+                Nothing
+
+            Just backup ->
+                if
+                    pilotIsInLocalChat backup.pilot context.readingFromGameClient
+                        && (shipWarpingFromReading context.readingFromGameClient /= Just True)
+                then
+                    Just backup.identity
+
+                else
+                    Nothing
+    , fleetAtLocationBroadcastFollowed =
+        -- Same shape as `fleetBackupBroadcastFollowed`: latched only on the
+        -- ship actually warping while the pilot is in local chat, credited
+        -- only once a *previous* reading saw her in system with this ship
+        -- standing still (`fleetAtLocationInSystemStanding`).
+        case fleetAtLocationBroadcast context.botSettings.followFleetBroadcastFrom context.readingFromGameClient of
+            Nothing ->
+                botMemoryBefore.fleetAtLocationBroadcastFollowed
+
+            Just call ->
+                if
+                    pilotIsInLocalChat call.pilot context.readingFromGameClient
+                        && (shipWarpingFromReading context.readingFromGameClient == Just True)
+                        && (botMemoryBefore.fleetAtLocationInSystemStanding == Just call.identity)
+                then
+                    Just call.identity
+
+                else
+                    botMemoryBefore.fleetAtLocationBroadcastFollowed
+    , fleetAtLocationInSystemStanding =
+        case fleetAtLocationBroadcast context.botSettings.followFleetBroadcastFrom context.readingFromGameClient of
+            Nothing ->
+                Nothing
+
+            Just call ->
+                if
+                    pilotIsInLocalChat call.pilot context.readingFromGameClient
+                        && (shipWarpingFromReading context.readingFromGameClient /= Just True)
+                then
+                    Just call.identity
+
+                else
+                    Nothing
+    , fleetAtLocationBroadcastSeen =
+        fleetAtLocationBroadcast context.botSettings.followFleetBroadcastFrom
+            context.readingFromGameClient
+            |> Maybe.map .identity
+    , fleetAtLocationDestinationAsked =
+        -- Same second-sighting lag `fleetBroadcastFollowed` uses for the
+        -- idempotent host directive: safe here because asking again before
+        -- this latches costs nothing (the host dedupes on the name), and
+        -- once latched this ship hands the reading back to ordinary travel
+        -- for the rest of the trip rather than asking forever.
+        case fleetAtLocationBroadcast context.botSettings.followFleetBroadcastFrom context.readingFromGameClient of
+            Nothing ->
+                Nothing
+
+            Just call ->
+                if botMemoryBefore.fleetAtLocationBroadcastSeen == Just call.identity then
+                    Just call.identity
+
+                else
+                    botMemoryBefore.fleetAtLocationDestinationAsked
     , destinationAskedFor = destinationAskedForNow
     , destinationAskReadings =
         -- Counts the readings the branch is asking on, which is what
