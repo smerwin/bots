@@ -348,22 +348,39 @@ class TheTailFansTheKillQueueOutTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# the parser, in all six vendored copies
+# the parser, in every vendored copy that carries the kill channel
+
+#: `eve-online-mining-bot`'s tree was replaced with Viir's current upstream
+#: (see CLAUDE.md's Architecture section), which predates the kill-count
+#: channel entirely -- its `ParseUserInterface.elm` carries no
+#: `killsSinceLastReading` field at all. Excluded from
+#: `TheVendoredParserCopiesTest` rather than assigned a shape; porting the
+#: synthetic kills node into the newer base is follow-up work, not done here.
+WITHOUT_KILLS = {"eve-online-mining-bot"}
+
+
+def kill_parser_paths():
+    return sorted(
+        path for path in glob.glob(PARSER_GLOB)
+        if os.path.basename(os.path.dirname(os.path.dirname(path)))
+        not in WITHOUT_KILLS)
 
 
 class TheVendoredParserCopiesTest(unittest.TestCase):
-    """All six, identically -- #271's argument rather than #252's.
+    """All copies that carry the channel, identically -- #271's argument
+    rather than #252's.
 
     `ParsedUserInterface` is a shared type five of the six `Bot.elm`s read, and
-    the synthetic-node parsers are one of the places the six copies have **not**
-    diverged. Adding to one copy would put a divergence into a block that has
-    none, which is the opposite of what #252 concluded for an app-local panel
-    parser.
+    the synthetic-node parsers are one of the places those five copies have
+    **not** diverged. Adding to one copy would put a divergence into a block
+    that has none, which is the opposite of what #252 concluded for an
+    app-local panel parser. `eve-online-mining-bot` is excluded (see
+    `WITHOUT_KILLS`), not counted as a sixth divergent copy.
     """
 
     def blocks(self):
-        paths = sorted(glob.glob(PARSER_GLOB))
-        self.assertEqual(len(paths), 6, paths)
+        paths = kill_parser_paths()
+        self.assertEqual(len(paths), 5, paths)
         out = {}
         for path in paths:
             text = source_of(path)
@@ -379,12 +396,18 @@ class TheVendoredParserCopiesTest(unittest.TestCase):
                          "the kill parser has diverged between copies")
 
     def test_every_copy_carries_the_field_and_fills_it(self):
-        for path in sorted(glob.glob(PARSER_GLOB)):
+        for path in kill_parser_paths():
             text = source_of(path)
             self.assertIn(", killsSinceLastReading : Maybe Int", text, path)
             self.assertIn(
                 ", killsSinceLastReading = parseKillsSinceLastReadingFromUITreeRoot"
                 " uiTree", text, path)
+
+    def test_the_mining_bot_is_excluded_because_it_genuinely_lacks_the_field(self):
+        path = os.path.join(
+            EVE_APPS, "eve-online-mining-bot", "EveOnline",
+            "ParseUserInterface.elm")
+        self.assertNotIn("killsSinceLastReading", source_of(path))
 
     def test_the_type_name_agrees_with_the_host_across_languages(self):
         """The one string two languages have to agree on, pinned in both.

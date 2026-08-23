@@ -1474,7 +1474,17 @@ class TheVendoredParserPolicyIsUnbroken(unittest.TestCase):
         self.assertEqual(len(carrying), 1, carrying)
 
     def test_every_copy_still_carries_the_block_the_policy_covers(self):
+        # `eve-online-mining-bot`'s tree was replaced with Viir's current
+        # upstream (see CLAUDE.md's Architecture section), which predates the
+        # game-log channel entirely -- see
+        # `test_game_log_channel.VendoredParserTest`'s own `WITHOUT_GAME_LOG`
+        # exclusion, which this is the same fact read from a second file.
         for path in self.parser_paths():
+            if path.startswith(
+                    os.path.join(self.APPS_DIR, "eve-online-mining-bot") + os.sep):
+                self.assertNotIn(
+                    "gameLogEntriesSinceLastReading", source_of(path), path)
+                continue
             self.assertIn(
                 "    , gameLogEntriesSinceLastReading = "
                 "parseGameLogEntriesSinceLastReadingFromUITreeRoot uiTree\n",

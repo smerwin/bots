@@ -696,8 +696,18 @@ class SyntheticNodeTest(unittest.TestCase):
             self.assertIn(call, body)
 
 
+#: `eve-online-mining-bot`'s tree was replaced with Viir's current upstream
+#: (see CLAUDE.md's Architecture section), which predates this channel
+#: entirely -- its `ParseUserInterface.elm` carries no
+#: `outgoingDamageSinceLastReading` field at all. Excluded from
+#: `VendoredParserTest` rather than assigned a shape; porting the synthetic
+#: outgoing-damage node into the newer base is follow-up work, not done here.
+WITHOUT_OUTGOING_DAMAGE = {"eve-online-mining-bot"}
+
+
 class VendoredParserTest(unittest.TestCase):
-    """`ParseUserInterface.elm` is vendored six times; the policy is all six.
+    """`ParseUserInterface.elm` is vendored six times; the policy is all six
+    that carry this channel (see `WITHOUT_OUTGOING_DAMAGE`).
 
     #30's check applied to the new block. A type name that disagreed across the
     two languages would have the parser answer `Nothing` -- "this host has no
@@ -710,6 +720,8 @@ class VendoredParserTest(unittest.TestCase):
     def setUp(self):
         self.sources = {}
         for app in sorted(os.listdir(self.APPS_DIR)):
+            if app in WITHOUT_OUTGOING_DAMAGE:
+                continue
             path = os.path.join(self.APPS_DIR, app, "EveOnline", "ParseUserInterface.elm")
             if os.path.isfile(path):
                 with open(path, encoding="utf-8") as handle:
@@ -723,7 +735,7 @@ class VendoredParserTest(unittest.TestCase):
         return source[start:source.index("\n\n\n", end)]
 
     def test_every_copy_has_it(self):
-        self.assertEqual(len(self.sources), 6, sorted(self.sources))
+        self.assertEqual(len(self.sources), 5, sorted(self.sources))
         for path, source in self.sources.items():
             self.assertIn(
                 "    , outgoingDamageSinceLastReading : "
@@ -732,6 +744,14 @@ class VendoredParserTest(unittest.TestCase):
                 "    , outgoingDamageSinceLastReading = "
                 "parseOutgoingDamageSinceLastReadingFromUITreeRoot uiTree\n",
                 source, path)
+
+    def test_the_mining_bot_is_excluded_because_it_genuinely_lacks_the_field(self):
+        path = os.path.join(
+            self.APPS_DIR, "eve-online-mining-bot", "EveOnline",
+            "ParseUserInterface.elm")
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertNotIn("outgoingDamageSinceLastReading", source)
 
     def test_every_copy_has_the_same_one(self):
         blocks = {path: self.block(source) for path, source in self.sources.items()}
