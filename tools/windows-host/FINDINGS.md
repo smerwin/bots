@@ -707,6 +707,66 @@ other windows, and was read as the launcher. Verify by reading
 this and refuses to click otherwise, on the grounds that the click would
 otherwise land in whatever is really there.
 
+### An elevated window on the desktop makes the foreground lock unbreakable, ALT included
+
+Run 10 (`saxrat_run10.log`) spent its entire session -- **81 minutes, 305
+undock clicks, 5,496 readings** -- docked at Amarr, never once reaching the
+"already undocking" state. `stationWindow.abortUndockButton` stayed `Nothing`
+the whole run; every click was dispatched (`WindowsInputRequest` fired, no
+exceptions, no `errorMessages`) and none of them landed.
+
+**The ALT workaround above does not cover this case, and the difference is
+measurable rather than a guess.** Two ordinary PowerShell console windows had
+been left open on the desktop -- launched from Explorer, not by the bot, not
+overlapping the undock button's screen position (ruled out first: the button's
+live-read region put its centre at screen (1573, 315); the consoles' rects
+topped out at x=1253). What they had in common instead was **elevation**:
+`GetTokenInformation`/`TokenElevation` reports both as `ELEVATED`, against the
+EVE client and the bot's own host process both `not elevated`. Windows'
+inter-process message filtering (UIPI) blocks a lower-integrity process from
+taking input focus from a higher one, full stop -- and that block sits
+*underneath* the ordinary foreground lock the ALT trick releases. Reproduced
+directly: `AttachThreadInput` against the elevated window's thread returns
+`GetLastError() == 5` (`ERROR_ACCESS_DENIED`); `SetForegroundWindow` then
+returns `0` regardless of whether a synthetic ALT precedes it. Minimizing,
+moving off-screen, or lowering the elevated window did not change any of this
+-- the block is about the two processes' integrity levels, not the window's
+visibility or position, so nothing client-side can route around it.
+
+**`Stop-Process -Force` against an elevated PID from a non-elevated caller
+fails the same way, and PowerShell hides it.** `-ErrorAction SilentlyContinue`
+(or any script that does not check the call's own result) reports nothing and
+looks exactly like a successful close -- the window may even flicker its title
+blank for a moment without actually dying. Confirmed live: `Stop-Process -Id
+<elevated pid> -Force -ErrorAction Stop` surfaces `Access is denied`, where
+`-ErrorAction SilentlyContinue` on the identical call produced no output and
+the process (checked independently via `tasklist`) was still running. Only an
+elevated caller can close an elevated window; there is no unprivileged
+workaround, and continuing to try (kill, minimize, reposition, re-foreground
+the target and then hide the blocker) is time spent proving the same fact
+several ways rather than finding a new one.
+
+**The fix is operational, not code**: no elevated console (or anything else
+elevated) may be left open on this desktop while a run is live. `bring_window_
+to_foreground`'s own fast path -- already-foreground costs nothing -- is
+exactly why this is invisible until something elevated shows up: every prior
+run undocked instantly because nothing on the desktop outranked the bot's
+integrity level. Worth a preflight check before starting a long run:
+
+```powershell
+Get-Process | Where-Object { $_.MainWindowTitle -ne "" } | ForEach-Object {
+    $h = @{}
+    # TokenElevation via OpenProcessToken, as above, or just: does the
+    # window title read "Administrator: ..."? -- a weaker but zero-cost signal
+    $_.MainWindowTitle
+}
+```
+
+Runs 6 through 9 were unaffected because nothing elevated happened to be open;
+run 10's two elevated consoles started 18 minutes before it launched, from an
+unrelated task on the same desktop, and were still there when the session's
+6-hour budget was abandoned early rather than let run out uselessly docked.
+
 ### The UI-root cache is per boot, and a cold scan looks like a hang
 
 After a reboot the cached root address is stale, so the host does a full scan:
