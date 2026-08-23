@@ -815,13 +815,30 @@ class TheStrayMenuGuardTest(unittest.TestCase):
             ]),
             [True, True])
 
-    def test_the_settle_is_long_enough_to_have_tripped_the_guard(self):
-        # This is why the clause exists rather than being defensive: the swap
-        # holds a menu for at least as many readings as the guard waits.
-        self.assertLessEqual(
-            self.threshold, self.settle,
-            "if the settle were shorter than the guard's patience the swap "
-            "could never have tripped it, and this clause would be unmotivated")
+    def test_the_swap_outlasts_the_guard_so_the_clause_is_load_bearing(self):
+        """Why the exemption exists, measured against the bound that reaches it.
+
+        Not the settle. `ammoSwapSilenceSettleTicks` is 3 and the guard now
+        waits 12, so the settle alone can never trip it -- an earlier version of
+        this case compared those two, and when the threshold moved from 3 to 12
+        it read as though the whole clause had gone dead. It has not.
+
+        `ammoSwapOwnsTheMenu` follows `ammoSwapIsActingOnAVerdict`, which stands
+        for as long as the verdict does: up to `ammoSwapVerdictGiveUpTicks`, or
+        `ammoSwapSilencedGiveUpTicks` when the guns are already off. Both are
+        past the guard's patience, so a menu the swap is driving *does* reach
+        the threshold, and without this clause Escape would close the menu the
+        load is about to be clicked out of.
+
+        Asserted against the longer of the two, because that is the one that
+        decides whether the collision is reachable at all.
+        """
+        self.assertGreater(
+            max(self.verdict_bound, self.silence_bound), self.threshold,
+            "the swap's own deadlines no longer outlast the guard's patience, "
+            "so a menu it is driving can never reach the threshold -- at which "
+            "point this clause really would be dead and should go, rather than "
+            "sitting here implying a collision that cannot happen")
 
     def test_the_suppression_is_bounded_by_the_swap_s_own_deadlines(self):
         # The guard's promise is that a menu cannot sit forever. That survives

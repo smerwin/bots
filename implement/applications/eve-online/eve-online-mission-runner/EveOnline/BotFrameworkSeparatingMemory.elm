@@ -468,6 +468,32 @@ readingsToWaitForAFirstContextMenu =
     10
 
 
+{-| A point somewhere inside the given region rather than always its exact
+center, so a cascade that has to reopen its menu several times in a row (its
+own target unchanged, only what occludes it shifting) does not keep clicking
+the identical pixel every attempt.
+
+Bounded to the region handed in -- typically what `subtractRegionsFromRegion`
+already carved out as clear of every currently-open context menu -- so this
+never trades the occlusion safety away for variety; it only varies _where
+inside the already-safe area_ the click lands. Falls back to the exact center
+when there are not two random integers on hand to spend (early in a session,
+before the host has supplied any), which is `centerFromDisplayRegion`'s own
+answer.
+
+-}
+randomPointWithinDisplayRegion : List Int -> EveOnline.ParseUserInterface.DisplayRegion -> EveOnline.ParseUserInterface.Location2d
+randomPointWithinDisplayRegion randomIntegers region =
+    case randomIntegers of
+        randomX :: randomY :: _ ->
+            { x = region.x + modBy (max 1 region.width) (abs randomX)
+            , y = region.y + modBy (max 1 region.height) (abs randomY)
+            }
+
+        _ ->
+            centerFromDisplayRegion region
+
+
 useContextMenuCascadeWithCustomConfig :
     FilterToDiscardContextMenu a b
     -> { targetUIElement : UIElement, targetUIElementName : String }
@@ -563,7 +589,7 @@ useContextMenuCascadeWithCustomConfig filterToDiscardContextMenu target useConte
                             ++ " menu(s) currently open)"
                         )
                         (preferredRegion
-                            |> centerFromDisplayRegion
+                            |> randomPointWithinDisplayRegion context.randomIntegers
                             |> Common.EffectOnWindow.effectsMouseClickAtLocation Common.EffectOnWindow.MouseButtonRight
                             |> decideActionForCurrentStep
                         )

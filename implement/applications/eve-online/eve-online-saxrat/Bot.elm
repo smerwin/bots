@@ -14815,10 +14815,32 @@ genuinely stuck cascade -- sitting at the same depth, unable to find its
 next entry -- still trips this after a few ticks; a cascade that keeps
 advancing, no matter how many levels or how slowly, never does.
 
+**This raced the cascade's own recovery and usually won.**
+`useContextMenuCascadeWithCustomConfig`'s `beginCascade` gives a stuck-but-open
+menu up to 8 readings of "no progress" (widened from 3 -> 4 -> 8 specifically
+for `enterAnomaly`'s own "Warp to Within..." distance flyout, per its comment)
+before discarding and reopening itself -- on the same target, respecting
+whatever of it is not occluded. With this threshold at 3, `clearStrayContextMenu`
+fired first on every single occasion the cascade needed more than three readings
+to render, since it sits at the head of `decideNextActionWhenInSpace` and
+pre-empts everything below it. That is not a stray menu at that point -- it is
+a cascade still within its own documented patience, being torn down by a
+completely different, cascade-blind recovery mechanism that then clicks beside
+the info panel: nowhere near the probe scanner row the cascade was working, and
+discarding whatever level of progress the cascade had made. Confirmed live: a
+Sansha Refuge scan result was repeatedly abandoned this way before its "to
+within"/"Within N km" flyout ever finished rendering.
+
+Raised to clear the cascade's own 8-reading lookback with margin, so a cascade
+that is going to recover on its own gets the chance to. It still trips on a
+menu that outlasts the cascade's own patience -- that is the case this exists
+for -- and `strayContextMenuGiveUpTicks` (a multiple of this) still bounds the
+worst case.
+
 -}
 strayContextMenuStuckTicksThreshold : Int
 strayContextMenuStuckTicksThreshold =
-    3
+    12
 
 
 {-| Everything the stray-menu verdict turns on.
@@ -14838,9 +14860,9 @@ type alias StrayContextMenuCase =
 
 The threshold on its own was right until this bot could swap ammo. The swap holds
 a weapon's context menu open across the settle -- `ammoSwapSilenceSettleTicks` is
-3 and so is `strayContextMenuStuckTicksThreshold`, and `menuOpenOnGunAtX` answers
-only where the right-click was the immediately previous step, so most of those
-readings look from here exactly like a menu nobody is driving. Escape would then
+3, well inside `strayContextMenuStuckTicksThreshold` -- and `menuOpenOnGunAtX`
+answers only where the right-click was the immediately previous step, so most of
+those readings look from here exactly like a menu nobody is driving. Escape would then
 close the menu the load is about to be clicked out of, the swap would re-open it,
 and the two would take turns until `ammoSwapVerdictGiveUpTicks` ended the attempt.
 
