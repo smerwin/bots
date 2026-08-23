@@ -468,19 +468,30 @@ BANNER = "Gal Bistot: Travel to Riramia"
 
 
 def broadcast_tree(banner_text):
-    """The captured banner, at the depth and under the names the client uses."""
+    """The captured banner, at the depth and under the names the client uses.
+
+    Wrapped in a `FleetWindow`-typed node -- confirmed live (#329) that the
+    real client always does, and that `fleetBroadcastBannerText` /
+    `fleetBroadcastHistoryEntryText` are now scoped to exactly that node
+    (`fleetWindowDescendants`), since an unscoped search for `entryLabel`
+    collides with the drones window's own identically-named rows. A fixture
+    missing this wrapper reads as "no fleet window at all" and answers
+    `NONE` regardless of what the banner says.
+    """
     return tree_with([
-        node("FleetBroadcastCont", {"_name": "broadcastCont"}, [
-            node("ContainerAutoSize", {"_name": "mainCont"}, [
-                node("Container", {"_name": "lastBroadcastCont"}, [
-                    node("Container", {"_name": "lastBroadcastBanner"}, [
-                        node("EveLabelMedium",
-                             {"_name": "bannerLabel", "_setText": banner_text},
-                             region=(33, 1, 183, 21)),
+        node("FleetWindow", {"_name": "fleetwindow"}, [
+            node("FleetBroadcastCont", {"_name": "broadcastCont"}, [
+                node("ContainerAutoSize", {"_name": "mainCont"}, [
+                    node("Container", {"_name": "lastBroadcastCont"}, [
+                        node("Container", {"_name": "lastBroadcastBanner"}, [
+                            node("EveLabelMedium",
+                                 {"_name": "bannerLabel", "_setText": banner_text},
+                                 region=(33, 1, 183, 21)),
+                        ], region=(0, 0, 673, 23)),
                     ], region=(0, 0, 673, 23)),
-                ], region=(0, 0, 673, 23)),
-            ], region=(10, 10, 673, 68)),
-        ], region=(-10, 326, 693, 87)),
+                ], region=(10, 10, 673, 68)),
+            ], region=(-10, 326, 693, 87)),
+        ], region=(0, 0, 320, 323)),
     ])
 
 
