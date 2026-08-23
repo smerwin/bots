@@ -16,6 +16,7 @@ import Common.EffectOnWindow
 import Dict
 import EveOnline.MemoryReading
 import Json.Decode
+import Json.Encode
 import List.Extra
 import Maybe.Extra
 import Regex
@@ -45,18 +46,16 @@ type alias ParsedUserInterface =
     , repairShopWindow : Maybe RepairShopWindow
     , characterSheetWindow : Maybe CharacterSheetWindow
     , fleetWindow : Maybe FleetWindow
+    , locationsWindow : Maybe LocationsWindow
     , watchListPanel : Maybe WatchListPanel
     , standaloneBookmarkWindow : Maybe StandaloneBookmarkWindow
     , moduleButtonTooltip : Maybe ModuleButtonTooltip
     , heatStatusTooltip : Maybe HeatStatusTooltip
     , neocom : Maybe Neocom
     , messageBoxes : List MessageBox
-    , layerAbovemain : Maybe UITreeNodeWithDisplayRegion
+    , layerAbovemain : Maybe LayerAbovemain
     , keyActivationWindow : Maybe KeyActivationWindow
-    , gameLogEntriesSinceLastReading : Maybe (List GameLogEntry)
-    , incomingDamageSinceLastReading : Maybe IncomingDamage
-    , outgoingDamageSinceLastReading : Maybe (List OutgoingDamageToTarget)
-    , killsSinceLastReading : Maybe Int
+    , compressionWindow : Maybe CompressionWindow
     }
 
 
@@ -111,7 +110,7 @@ type alias ShipUI =
         , middle : List ShipUIModuleButton
         , bottom : List ShipUIModuleButton
         }
-    , offensiveBuffButtonNames : List String
+    , offensiveBuffButtons : List { uiNode : UITreeNodeWithDisplayRegion, name : String }
     , squadronsUI : Maybe SquadronsUI
     , stopButton : Maybe UITreeNodeWithDisplayRegion
     , maxSpeedButton : Maybe UITreeNodeWithDisplayRegion
@@ -130,8 +129,8 @@ type alias ShipUIModuleButton =
     , slotUINode : UITreeNodeWithDisplayRegion
     , isActive : Maybe Bool
     , isHiliteVisible : Bool
+    , isBusy : Bool
     , rampRotationMilli : Maybe Int
-    , stateFromDictEntries : ShipUIModuleButtonState
     }
 
 
@@ -222,7 +221,6 @@ type alias InfoPanelRoute =
 
 type alias InfoPanelRouteRouteElementMarker =
     { uiNode : UITreeNodeWithDisplayRegion
-    , numJumps : Maybe Int
     }
 
 
@@ -292,8 +290,6 @@ type alias OverviewWindowEntryCommonIndications =
     , targetedByMe : Bool
     , isJammingMe : Bool
     , isWarpDisruptingMe : Bool
-    , isTrackingDisruptingMe : Bool
-    , isSensorDampeningMe : Bool
     }
 
 
@@ -423,7 +419,7 @@ type alias Inventory =
 
 
 type InventoryItemsView
-    = InventoryItemsListView { items : List UITreeNodeWithDisplayRegion }
+    = InventoryItemsListView { items : List InventoryItemsListViewEntry }
     | InventoryItemsNotListView { items : List UITreeNodeWithDisplayRegion }
 
 
@@ -444,6 +440,12 @@ type alias InventoryWindowCapacityGauge =
     { used : Int
     , maximum : Maybe Int
     , selected : Maybe Int
+    }
+
+
+type alias InventoryItemsListViewEntry =
+    { uiNode : UITreeNodeWithDisplayRegion
+    , cellsTexts : Dict.Dict String String
     }
 
 
@@ -491,7 +493,7 @@ type alias HeatStatusTooltip =
 
 type alias Neocom =
     { uiNode : UITreeNodeWithDisplayRegion
-    , iconInventory : Maybe UITreeNodeWithDisplayRegion
+    , inventoryButton : Maybe UITreeNodeWithDisplayRegion
     , clock : Maybe NeocomClock
     }
 
@@ -546,9 +548,47 @@ type alias StandaloneBookmarkWindow =
     }
 
 
+type alias LayerAbovemain =
+    { uiNode : UITreeNodeWithDisplayRegion
+    , quickMessage : Maybe QuickMessage
+    }
+
+
+type alias QuickMessage =
+    { uiNode : UITreeNodeWithDisplayRegion
+    , text : String
+    }
+
+
 type alias KeyActivationWindow =
     { uiNode : UITreeNodeWithDisplayRegion
     , activateButton : Maybe UITreeNodeWithDisplayRegion
+    }
+
+
+type alias CompressionWindow =
+    { uiNode : UITreeNodeWithDisplayRegion
+    , compressButton : Maybe UITreeNodeWithDisplayRegion
+    , windowControls : Maybe WindowControls
+    }
+
+
+type alias LocationsWindow =
+    { uiNode : UITreeNodeWithDisplayRegion
+    , placeEntries : List LocationsWindowPlaceEntry
+    }
+
+
+type alias LocationsWindowPlaceEntry =
+    { uiNode : UITreeNodeWithDisplayRegion
+    , mainText : String
+    }
+
+
+type alias WindowControls =
+    { uiNode : UITreeNodeWithDisplayRegion
+    , minimizeButton : Maybe UITreeNodeWithDisplayRegion
+    , closeButton : Maybe UITreeNodeWithDisplayRegion
     }
 
 
@@ -591,298 +631,15 @@ parseUserInterfaceFromUITree uiTree =
     , repairShopWindow = parseRepairShopWindowFromUITreeRoot uiTree
     , characterSheetWindow = parseCharacterSheetWindowFromUITreeRoot uiTree
     , fleetWindow = parseFleetWindowFromUITreeRoot uiTree
+    , locationsWindow = parseLocationsWindowFromUITreeRoot uiTree
     , watchListPanel = parseWatchListPanelFromUITreeRoot uiTree
     , standaloneBookmarkWindow = parseStandaloneBookmarkWindowFromUITreeRoot uiTree
     , neocom = parseNeocomFromUITreeRoot uiTree
     , messageBoxes = parseMessageBoxesFromUITreeRoot uiTree
     , layerAbovemain = parseLayerAbovemainFromUITreeRoot uiTree
     , keyActivationWindow = parseKeyActivationWindowFromUITreeRoot uiTree
-    , gameLogEntriesSinceLastReading = parseGameLogEntriesSinceLastReadingFromUITreeRoot uiTree
-    , incomingDamageSinceLastReading = parseIncomingDamageSinceLastReadingFromUITreeRoot uiTree
-    , outgoingDamageSinceLastReading = parseOutgoingDamageSinceLastReadingFromUITreeRoot uiTree
-    , killsSinceLastReading = parseKillsSinceLastReadingFromUITreeRoot uiTree
+    , compressionWindow = parseCompressionWindowFromUITreeRoot uiTree
     }
-
-
-{-| One line EVE's own client wrote to its game log, as carried into a reading
-by the macOS host in this fork. `channel` is the client's own bracketed
-category -- `notify` for a refusal, `None` for travel -- and is a `Maybe`
-because a node missing it is a host that did not say, not a line without one.
--}
-type alias GameLogEntry =
-    { timestamp : Maybe String
-    , channel : Maybe String
-    , text : String
-    }
-
-
-{-| What the client said in its own game log since the previous reading.
-
-The client explains every refusal there and nowhere else -- "You cannot load or
-unload <weapon> while it is active", "You are already managing 6 targets, as
-many as you have skill to", "You cannot launch Acolyte I because you are already
-controlling 5 drones" -- while a bot that sees only the UI tree has to infer each
-of them from something else failing to change.
-
-`Nothing` and `Just []` are different answers and must stay so. `Nothing` is a
-host that provides no game log at all -- BotLab.exe, or this fork's host run
-with `--no-game-log` -- and reading that as "the client said nothing" is how a
-bot concludes a command was accepted because no refusal arrived.
-
-The node this reads is **not from the game client**: the macOS host appends it
-to the tree it emits, which is why its type name says so in full. It carries no
-display region, so it is invisible to every other parser in this module, and its
-text sits under `text` rather than `_setText`/`_text` so `getDisplayText` cannot
-reach it and mistake a logged line for something rendered on screen.
-
-Scoped to the reading by the host, which drains its queue as it builds the tree:
-these are the lines written since the previous read, not a growing buffer that
-would have a bot answering a refusal from four minutes ago.
-
--}
-parseGameLogEntriesSinceLastReadingFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe (List GameLogEntry)
-parseGameLogEntriesSinceLastReadingFromUITreeRoot uiTreeRoot =
-    uiTreeRoot.uiNode.children
-        |> Maybe.withDefault []
-        |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
-        |> List.filter (.pythonObjectTypeName >> (==) syntheticGameLogNodeTypeName)
-        |> List.head
-        |> Maybe.map
-            (\gameLogNode ->
-                gameLogNode.children
-                    |> Maybe.withDefault []
-                    |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
-                    |> List.filterMap parseGameLogEntry
-            )
-
-
-syntheticGameLogNodeTypeName : String
-syntheticGameLogNodeTypeName =
-    "MacOsHostSyntheticGameLog"
-
-
-parseGameLogEntry : EveOnline.MemoryReading.UITreeNode -> Maybe GameLogEntry
-parseGameLogEntry entryNode =
-    case getStringPropertyFromDictEntries "text" entryNode of
-        Nothing ->
-            Nothing
-
-        Just text ->
-            Just
-                { timestamp = getStringPropertyFromDictEntries "timestamp" entryNode
-                , channel = getStringPropertyFromDictEntries "channel" entryNode
-                , text = text
-                }
-
-
-{-| How much damage the client's own combat log says arrived since the last
-reading, as carried by the macOS host in this fork.
-
-`damage` is the total in hitpoints, `hits` the number of shots that landed
-(misses cost nothing and are not counted), and `topAttacker` whichever name did
-the most of it -- enough for a decision to say what is shooting without carrying
-a list of shots.
-
-**This is the one instrument here that does not go through the ship's HUD.**
-`ShipUI.hitpointsPercent` is a float read out of a gauge widget in live memory,
-and it is not reliably true: across eight recorded runs it produced -1021821%,
-2132822% and 8362% among others, always for exactly one reading and always
-surrounded by sane values, which is what a read landing on a reallocated object
-looks like. A number the client states outright cannot fail that way.
-
-`Nothing` and `Just { damage = 0, ... }` are different answers and must stay so,
-for the same reason they are for `gameLogEntriesSinceLastReading`. `Nothing` is
-a host that does not carry this at all -- BotLab.exe, or this fork's host run
-with `--no-game-log` -- and reading it as "no damage taken" is how a bot
-concludes it is safe because nothing is listening.
-
-The node this reads is **not from the game client**: the macOS host appends it
-to the tree it emits, which is why its type name says so in full. It carries no
-display region, so no other parser in this module can reach it, and its values
-sit under plain keys rather than `_setText`/`_text` so `getDisplayText` cannot
-mistake them for something rendered on screen.
-
-Scoped to the reading by the host, which drains its queue as it builds the tree,
-so this is the fire taken since the previous read rather than a running total.
-
--}
-type alias IncomingDamage =
-    { damage : Int
-    , hits : Int
-    , topAttacker : Maybe String
-    }
-
-
-parseIncomingDamageSinceLastReadingFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe IncomingDamage
-parseIncomingDamageSinceLastReadingFromUITreeRoot uiTreeRoot =
-    uiTreeRoot.uiNode.children
-        |> Maybe.withDefault []
-        |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
-        |> List.filter (.pythonObjectTypeName >> (==) syntheticIncomingDamageNodeTypeName)
-        |> List.head
-        |> Maybe.map
-            (\damageNode ->
-                { damage = damageNode |> getIntPropertyFromDictEntries "damage" |> Maybe.withDefault 0
-                , hits = damageNode |> getIntPropertyFromDictEntries "hits" |> Maybe.withDefault 0
-                , topAttacker = getStringPropertyFromDictEntries "topAttacker" damageNode
-                }
-            )
-
-
-syntheticIncomingDamageNodeTypeName : String
-syntheticIncomingDamageNodeTypeName =
-    "MacOsHostSyntheticIncomingDamage"
-
-
-getIntPropertyFromDictEntries : String -> EveOnline.MemoryReading.UITreeNode -> Maybe Int
-getIntPropertyFromDictEntries dictEntryKey node =
-    node.dictEntriesOfInterest
-        |> Dict.get dictEntryKey
-        |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.int >> Result.toMaybe)
-
-
-{-| What this ship's own shots achieved since the last reading, per target, as
-carried by the macOS host in this fork.
-
-`hits` counts the shots that **landed** on that target -- a miss carries no
-damage number in the client's log and is not counted -- and `damage` is what
-those hits took off it. So `hits = 12, damage = 0` is the client stating that
-twelve shots connected with an object and achieved nothing, which is a fact
-about that object that no other reading in this system reports.
-
-**Issue #90.** Run 27 locked an `Infested Asteroid` and shot it for roughly 290
-consecutive readings, every shot landing for zero, while nine real rats sat on
-the same overview untouched and the mission objective was already finished. The
-bot could not see it: the host summed the _incoming_ half of the combat channel
-for #32 and matched the outgoing half nowhere, so no field in any reading said
-how much damage this ship was dealing.
-
-**Per target rather than one total**, unlike `IncomingDamage`, because the
-question is about one object. Guns and drones engage different things in the
-same reading -- run 27's drones were landing real damage on a rat in the very
-readings its guns were achieving nothing on the asteroid -- so a single sum
-would have read as healthy throughout the incident this exists for.
-
-`Nothing` and `Just []` are different answers, and the fail-safe direction here
-is the **opposite** of the retreat's. `Just []` is "the client reported no shot
-landing this reading"; `Nothing` is "this host does not carry the channel", and
-a bot that read the second as evidence would conclude every target is immune on
-a host that simply has no game log. Absent means unknown, and unknown must keep
-shooting.
-
-The node this reads is **not from the game client**: the macOS host appends it
-to the tree it emits, which is why its type name says so in full. It carries no
-display region, so no other parser in this module can reach it, and its values
-sit under plain keys rather than `_setText`/`_text` so `getDisplayText` cannot
-mistake a target's name for something rendered on screen.
-
-Scoped to the reading by the host, which drains its queue as it builds the tree,
-so this is what the shots since the previous read achieved rather than a running
-total.
-
-**`hits` and `misses` are separate counts and summing them is the one mistake to
-avoid here.** A landed shot for zero damage says the guns cannot hurt this
-object; a miss says they cannot hit it, which is a range or tracking problem and
-resolves on its own. Issue #267 measured the difference rather than assuming it:
-across 5,631 episodes in the client's own logs, no target that ever landed a
-shot for zero was hurt afterwards, while targets the guns went on to kill
-absorbed runs of up to 702 consecutive misses first. So a rule may read both,
-and no rule may treat one as the other.
-
-`misses` defaults to zero rather than to `Nothing`, which is the one place this
-record takes a default instead of reporting absence. A host older than #267
-writes no such key, and reading that as "no shots missed" is exactly the
-behaviour those hosts already had -- so the default degrades to the previous
-rule rather than inventing evidence. The distinction that must not be lost, "is
-this channel here at all", is carried by the `Maybe` around the whole list and
-is untouched.
-
--}
-type alias OutgoingDamageToTarget =
-    { name : String
-    , hits : Int
-    , damage : Int
-    , misses : Int
-    }
-
-
-parseOutgoingDamageSinceLastReadingFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe (List OutgoingDamageToTarget)
-parseOutgoingDamageSinceLastReadingFromUITreeRoot uiTreeRoot =
-    uiTreeRoot.uiNode.children
-        |> Maybe.withDefault []
-        |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
-        |> List.filter (.pythonObjectTypeName >> (==) syntheticOutgoingDamageNodeTypeName)
-        |> List.head
-        |> Maybe.map
-            (\outgoingDamageNode ->
-                outgoingDamageNode.children
-                    |> Maybe.withDefault []
-                    |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
-                    |> List.filterMap parseOutgoingDamageToTarget
-            )
-
-
-parseOutgoingDamageToTarget : EveOnline.MemoryReading.UITreeNode -> Maybe OutgoingDamageToTarget
-parseOutgoingDamageToTarget targetNode =
-    case getStringPropertyFromDictEntries "name" targetNode of
-        Nothing ->
-            Nothing
-
-        Just name ->
-            Just
-                { name = name
-                , hits = targetNode |> getIntPropertyFromDictEntries "hits" |> Maybe.withDefault 0
-                , damage = targetNode |> getIntPropertyFromDictEntries "damage" |> Maybe.withDefault 0
-                , misses = targetNode |> getIntPropertyFromDictEntries "misses" |> Maybe.withDefault 0
-                }
-
-
-syntheticOutgoingDamageNodeTypeName : String
-syntheticOutgoingDamageNodeTypeName =
-    "MacOsHostSyntheticOutgoingDamage"
-
-
-{-| How many rats the client paid a bounty for since the last reading.
-
-The fourth of the host's synthetic nodes, and the one that carries the least:
-one number, because the `(bounty)` channel it is summed from says nothing else.
-Across the 17,388 bounty lines in the recorded client sessions there are two
-wordings and neither names a target, so this count can never be split per rat,
-per name or per anomaly -- which is a property rather than a shortfall, since
-an anomaly is a pocket of identically named rats and a name-keyed fold over one
-is what PR #274 found reporting a stall on a rat that was never in it.
-
-**What it counts is what the client paid, not what this ship killed.** A rat a
-fleetmate finished that this ship damaged still pays and is counted; a rat this
-ship killed whose bounty went elsewhere is not; and anything with no bounty --
-a structure, a wreck -- writes no line however thoroughly it is destroyed. No
-rule may read this as "kills by this ship".
-
-**`Nothing` is "this host does not carry the channel" and `Just 0` is "the
-client reported nothing dying this reading"**, which is the same distinction the
-other three synthetic nodes keep and the same one that must never be collapsed:
-a session that killed nothing and a session nobody counted read identically
-otherwise.
-
-The count is read **strictly**, with no default. A node present without the key
-is a host disagreeing with this parser about the node's own shape, and the safe
-answer to that is "we do not know" rather than a fabricated zero -- a defaulted
-count is one that reports a quiet grid for a broken channel.
-
--}
-parseKillsSinceLastReadingFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe Int
-parseKillsSinceLastReadingFromUITreeRoot uiTreeRoot =
-    uiTreeRoot.uiNode.children
-        |> Maybe.withDefault []
-        |> List.map EveOnline.MemoryReading.unwrapUITreeNodeChild
-        |> List.filter (.pythonObjectTypeName >> (==) syntheticKillsNodeTypeName)
-        |> List.head
-        |> Maybe.andThen (getIntPropertyFromDictEntries "kills")
-
-
-syntheticKillsNodeTypeName : String
-syntheticKillsNodeTypeName =
-    "MacOsHostSyntheticKills"
 
 
 asUITreeNodeWithDisplayRegion :
@@ -895,23 +652,29 @@ asUITreeNodeWithDisplayRegion { selfDisplayRegion, totalDisplayRegion, occludedR
         uiNode.children
             |> Maybe.map
                 (List.foldl
-                    (\currentChild mappedSiblings ->
+                    (\currentChild ( mappedSiblings, occludedRegionsFromSiblings ) ->
                         let
-                            occludingSiblingsRegions =
-                                mappedSiblings
-                                    |> List.filterMap justCaseWithDisplayRegion
-                                    |> List.filter (.uiNode >> typeOccludesFollowingSiblingNodes)
+                            currentChildResult =
+                                currentChild
+                                    |> EveOnline.MemoryReading.unwrapUITreeNodeChild
+                                    |> asUITreeNodeWithInheritedOffset
+                                        { x = totalDisplayRegion.x, y = totalDisplayRegion.y }
+                                        { occludedRegions = occludedRegionsFromSiblings ++ occludedRegions }
+
+                            newOccludedRegionsFromSiblings =
+                                currentChildResult
+                                    |> justCaseWithDisplayRegion
+                                    |> Maybe.map listDescendantsWithDisplayRegion
+                                    |> Maybe.withDefault []
+                                    |> List.filter (.uiNode >> nodeOccludesFollowingNodes)
                                     |> List.map .totalDisplayRegion
                         in
-                        (currentChild
-                            |> EveOnline.MemoryReading.unwrapUITreeNodeChild
-                            |> asUITreeNodeWithInheritedOffset
-                                { x = totalDisplayRegion.x, y = totalDisplayRegion.y }
-                                { occludedRegions = occludedRegions ++ occludingSiblingsRegions }
+                        ( currentChildResult :: mappedSiblings
+                        , newOccludedRegionsFromSiblings ++ occludedRegionsFromSiblings
                         )
-                            :: mappedSiblings
                     )
-                    []
+                    ( [], [] )
+                    >> Tuple.first
                     >> List.reverse
                 )
     , selfDisplayRegion = selfDisplayRegion
@@ -930,7 +693,7 @@ asUITreeNodeWithInheritedOffset :
     -> EveOnline.MemoryReading.UITreeNode
     -> ChildOfNodeWithDisplayRegion
 asUITreeNodeWithInheritedOffset inheritedOffset { occludedRegions } rawNode =
-    case rawNode |> getDisplayRegionFromDictEntries of
+    case getDisplayRegionFromDictEntries rawNode of
         Nothing ->
             ChildWithoutRegion rawNode
 
@@ -939,7 +702,11 @@ asUITreeNodeWithInheritedOffset inheritedOffset { occludedRegions } rawNode =
                 (asUITreeNodeWithDisplayRegion
                     { selfDisplayRegion = selfRegion
                     , totalDisplayRegion =
-                        { selfRegion | x = inheritedOffset.x + selfRegion.x, y = inheritedOffset.y + selfRegion.y }
+                        { x = inheritedOffset.x + selfRegion.x
+                        , y = inheritedOffset.y + selfRegion.y
+                        , width = selfRegion.width
+                        , height = selfRegion.height
+                        }
                     , occludedRegions = occludedRegions
                     }
                     rawNode
@@ -957,10 +724,19 @@ getDisplayRegionFromDictEntries uiNode =
                     ]
                 )
 
+        fixedNumberFromPropertyName : String -> Maybe Int
         fixedNumberFromPropertyName propertyName =
-            uiNode.dictEntriesOfInterest
-                |> Dict.get propertyName
-                |> Maybe.andThen (fixedNumberFromJsonValue >> Result.toMaybe)
+            case Dict.get propertyName uiNode.dictEntriesOfInterest of
+                Just jsonValue ->
+                    case fixedNumberFromJsonValue jsonValue of
+                        Ok number ->
+                            Just number
+
+                        Err _ ->
+                            Nothing
+
+                Nothing ->
+                    Nothing
     in
     case
         ( ( fixedNumberFromPropertyName "_displayX", fixedNumberFromPropertyName "_displayY" )
@@ -1069,11 +845,33 @@ parseInfoPanelLocationInfoFromInfoPanelContainer infoPanelContainerNode =
                         |> List.head
 
                 currentSolarSystemName =
-                    infoPanelNode.uiNode
-                        |> getAllContainedDisplayTexts
-                        |> List.filterMap parseCurrentSolarSystemFromUINodeText
-                        |> List.head
-                        |> Maybe.map String.trim
+                    case
+                        infoPanelNode.uiNode
+                            |> getAllContainedDisplayTexts
+                            |> List.filterMap parseCurrentSolarSystemFromUINodeText
+                            |> List.head
+                    of
+                        Just currentSolarSystemNameOld ->
+                            {-
+                               Might be obsolete since the new branch introduced 2024-05-26.
+                               Prevalence of this variant is unknown.
+                            -}
+                            Just (String.trim currentSolarSystemNameOld)
+
+                        Nothing ->
+                            infoPanelNode
+                                |> listDescendantsWithDisplayRegion
+                                {-
+                                   2024-05-26: Observed property '_name': "headerLabelSystemName"
+                                -}
+                                |> List.filter
+                                    (.uiNode
+                                        >> getNameFromDictEntries
+                                        >> Maybe.map (String.toLower >> String.contains "labelsystemname")
+                                        >> Maybe.withDefault False
+                                    )
+                                |> List.concatMap (.uiNode >> getAllContainedDisplayTexts)
+                                |> List.head
 
                 maybeListSurroundingsButton =
                     infoPanelNode
@@ -1153,12 +951,7 @@ parseInfoPanelRouteFromInfoPanelContainer infoPanelContainerNode =
                     infoPanelRouteNode
                         |> listDescendantsWithDisplayRegion
                         |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "AutopilotDestinationIcon")
-                        |> List.map
-                            (\uiNode ->
-                                { uiNode = uiNode
-                                , numJumps = uiNode.uiNode |> getIntPropertyFromDictEntries "numJumps"
-                                }
-                            )
+                        |> List.map (\uiNode -> { uiNode = uiNode })
             in
             Just { uiNode = infoPanelRouteNode, routeElementMarker = routeElementMarker }
 
@@ -1302,11 +1095,19 @@ parseShipUIFromUITreeRoot uiTreeRoot =
                                 _ ->
                                     Nothing
 
-                        offensiveBuffButtonNames =
+                        offensiveBuffButtons : List { uiNode : UITreeNodeWithDisplayRegion, name : String }
+                        offensiveBuffButtons =
                             shipUINode
                                 |> listDescendantsWithDisplayRegion
-                                |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "OffensiveBuffButton")
-                                |> List.filterMap (.uiNode >> getNameFromDictEntries)
+                                |> List.filterMap
+                                    (\uiNode ->
+                                        case getNameFromDictEntries uiNode.uiNode of
+                                            Nothing ->
+                                                Nothing
+
+                                            Just name ->
+                                                Just { uiNode = uiNode, name = name }
+                                    )
 
                         squadronsUI =
                             shipUINode
@@ -1331,7 +1132,7 @@ parseShipUIFromUITreeRoot uiTreeRoot =
                                 , indication = indication
                                 , moduleButtons = moduleButtons
                                 , moduleButtonsRows = groupShipUIModulesIntoRows capacitor moduleButtons
-                                , offensiveBuffButtonNames = offensiveBuffButtonNames
+                                , offensiveBuffButtons = offensiveBuffButtons
                                 , squadronsUI = squadronsUI
                                 , stopButton = descendantNodesFromPythonObjectTypeNameEqual "StopButton" |> List.head
                                 , maxSpeedButton = descendantNodesFromPythonObjectTypeNameEqual "MaxSpeedButton" |> List.head
@@ -1378,137 +1179,15 @@ parseShipUIModuleButton { slotNode, moduleButtonNode } =
             |> List.filter (.uiNode >> getNameFromDictEntries >> (==) (Just "hilite"))
             |> List.isEmpty
             |> not
+    , isBusy =
+        slotNode
+            |> listDescendantsWithDisplayRegion
+            |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "Sprite")
+            |> List.filter (.uiNode >> getNameFromDictEntries >> (==) (Just "busy"))
+            |> List.isEmpty
+            |> not
     , rampRotationMilli = rampRotationMilli
-    , stateFromDictEntries = parseShipUIModuleButtonState moduleButtonNode.uiNode
     }
-
-
-{-| What a module button says about **itself**, straight out of its own
-`dictEntriesOfInterest`.
-
-The module-state fields above this one all read the slot's sprites, and #35
-walked a top-row button's whole subtree to see which sprites are there. One is:
-`underlay`. There is no `hilite` and no `busy` on this build, so
-`isHiliteVisible` and `isBusy` cannot be anything but `False` however the module
-behaves. That much of the note in CLAUDE.md was right. The conclusion drawn from
-it -- that this client does not expose the state -- was not: the state is on the
-button itself, as twelve dict entries nothing had ever read.
-
-**`ramp_active` is a duty cycle, not an on/off state.** That is the correction
-that matters most here, and it is measured rather than argued: 92 read-only
-samples over 240s of run 9 caught the weapon's `ramp_active` flipping fourteen
-times while `isInActiveState` stayed `True` throughout -- the gun never switched
-off. The `False` half of that oscillation is the gap between cycles. `isActive`
-reads this entry and reports it as "running", and #34 is what that costs: a
-counter gated on "no gun reads as firing" resets inside every cycle, and a wait
-for "the ramp to stop" is satisfied by the gap rather than by the guns going
-quiet.
-
-**Absent and `False` are different facts.** For the first ~60s of that sample no
-module carried `ramp_active` at all -- not `False`, missing -- and it appeared
-per module as each one first cycled. `waitingForActiveTarget` did the same later,
-absent until 141s and then `0` on all four modules at once. So every field here
-is a `Maybe`, and an entry that does not decode stays `Nothing` rather than
-becoming a guessed `False`: only one of those two answers is safe to act on.
-
-**Nothing decides anything from these.** The meanings above come from one 240s
-window on one fit, and the leg #34 actually needed has no observations at all:
-`isDeactivating` -- named for exactly the state that wait cared about -- was
-never once `True`, because nothing switched a module off while the sampler ran.
-`effect_activating` was seen pulsing `1` exactly once, 2.6s before a cycle
-began. So these are parsed to be logged and read back, and `isActive`, `isBusy`
-and `isHiliteVisible` keep the meanings they had.
-
-Both decoders accept either JSON shape. This build sends booleans for
-`ramp_active` and its neighbours and plain numbers for `waitingForActiveTarget`
-and the rest, but one that sent `true` where this one sends `1` would otherwise
-turn a field silently into `Nothing` -- which is the same "the signal is dead"
-reading this whole issue is about.
-
-The field names are the client's own keys, unchanged, so that a value in the log
-and a value in the tree are the same name and no translation table has to be
-right. Reading them costs twelve dictionary lookups on a node the caller already
-holds -- no traversal, which each sprite field above does do. That is why this
-takes the bare `UITreeNode` and not the node with its display region: it has
-nothing to walk with.
-
--}
-type alias ShipUIModuleButtonState =
-    { ramp_active : Maybe Bool
-    , isInActiveState : Maybe Bool
-    , isDeactivating : Maybe Bool
-    , effect_activating : Maybe Int
-    , online : Maybe Bool
-    , blinking : Maybe Bool
-    , grey : Maybe Bool
-    , quantity : Maybe Int
-    , autoreload : Maybe Int
-    , autorepeat : Maybe Int
-    , isMaster : Maybe Bool
-    , waitingForActiveTarget : Maybe Int
-    }
-
-
-parseShipUIModuleButtonState : EveOnline.MemoryReading.UITreeNode -> ShipUIModuleButtonState
-parseShipUIModuleButtonState moduleButtonNode =
-    let
-        flag dictEntryKey =
-            getModuleButtonStateFlagFromDictEntries dictEntryKey moduleButtonNode
-
-        number dictEntryKey =
-            getModuleButtonStateNumberFromDictEntries dictEntryKey moduleButtonNode
-    in
-    { ramp_active = flag "ramp_active"
-    , isInActiveState = flag "isInActiveState"
-    , isDeactivating = flag "isDeactivating"
-    , effect_activating = number "effect_activating"
-    , online = flag "online"
-    , blinking = flag "blinking"
-    , grey = flag "grey"
-    , quantity = number "quantity"
-    , autoreload = number "autoreload"
-    , autorepeat = number "autorepeat"
-    , isMaster = flag "isMaster"
-    , waitingForActiveTarget = number "waitingForActiveTarget"
-    }
-
-
-getModuleButtonStateFlagFromDictEntries : String -> EveOnline.MemoryReading.UITreeNode -> Maybe Bool
-getModuleButtonStateFlagFromDictEntries dictEntryKey uiNode =
-    uiNode.dictEntriesOfInterest
-        |> Dict.get dictEntryKey
-        |> Maybe.andThen (Json.Decode.decodeValue jsonDecodeBoolFromBoolOrInt >> Result.toMaybe)
-
-
-getModuleButtonStateNumberFromDictEntries : String -> EveOnline.MemoryReading.UITreeNode -> Maybe Int
-getModuleButtonStateNumberFromDictEntries dictEntryKey uiNode =
-    uiNode.dictEntriesOfInterest
-        |> Dict.get dictEntryKey
-        |> Maybe.andThen (Json.Decode.decodeValue jsonDecodeIntFromIntOrBool >> Result.toMaybe)
-
-
-jsonDecodeBoolFromBoolOrInt : Json.Decode.Decoder Bool
-jsonDecodeBoolFromBoolOrInt =
-    Json.Decode.oneOf
-        [ Json.Decode.bool
-        , Json.Decode.int |> Json.Decode.map ((/=) 0)
-        ]
-
-
-jsonDecodeIntFromIntOrBool : Json.Decode.Decoder Int
-jsonDecodeIntFromIntOrBool =
-    Json.Decode.oneOf
-        [ Json.Decode.int
-        , Json.Decode.bool
-            |> Json.Decode.map
-                (\asBool ->
-                    if asBool then
-                        1
-
-                    else
-                        0
-                )
-        ]
 
 
 parseShipUICapacitorFromUINode : UITreeNodeWithDisplayRegion -> ShipUICapacitor
@@ -1805,36 +1484,11 @@ parseOverviewWindowEntry entriesHeaders overviewEntryNode =
                 |> List.sortBy (Tuple.second >> .totalDisplayRegion >> .x)
                 |> List.map Tuple.first
 
-        cellsTexts =
-            overviewEntryNode
-                |> getAllContainedDisplayTextsWithRegion
-                |> List.filterMap
-                    (\( cellText, cell ) ->
-                        let
-                            cellMiddle =
-                                cell.totalDisplayRegion.x + (cell.totalDisplayRegion.width // 2)
-
-                            maybeHeader =
-                                entriesHeaders
-                                    |> List.filter
-                                        (\( _, header ) ->
-                                            header.totalDisplayRegion.x
-                                                < cellMiddle
-                                                + 1
-                                                && cellMiddle
-                                                < header.totalDisplayRegion.x
-                                                + header.totalDisplayRegion.width
-                                                - 1
-                                        )
-                                    |> List.head
-                        in
-                        maybeHeader
-                            |> Maybe.map (\( headerText, _ ) -> ( headerText, cellText ))
-                    )
-                |> Dict.fromList
+        listViewEntry =
+            parseListViewEntry entriesHeaders overviewEntryNode
 
         objectDistance =
-            cellsTexts
+            listViewEntry.cellsTexts
                 |> Dict.get "Distance"
 
         objectDistanceInMeters =
@@ -1885,8 +1539,6 @@ parseOverviewWindowEntry entriesHeaders overviewEntryNode =
             , targetedByMe = namesUnderSpaceObjectIcon |> Set.member "targetedByMeIndicator"
             , isJammingMe = rightAlignedIconsHintsContainsTextIgnoringCase "is jamming me"
             , isWarpDisruptingMe = rightAlignedIconsHintsContainsTextIgnoringCase "is warp disrupting me"
-            , isTrackingDisruptingMe = rightAlignedIconsHintsContainsTextIgnoringCase "is tracking disrupting me"
-            , isSensorDampeningMe = rightAlignedIconsHintsContainsTextIgnoringCase "is sensor dampening me"
             }
 
         opacityPercent =
@@ -1896,12 +1548,12 @@ parseOverviewWindowEntry entriesHeaders overviewEntryNode =
     in
     { uiNode = overviewEntryNode
     , textsLeftToRight = textsLeftToRight
-    , cellsTexts = cellsTexts
+    , cellsTexts = listViewEntry.cellsTexts
     , objectDistance = objectDistance
     , objectDistanceInMeters = objectDistanceInMeters
-    , objectName = cellsTexts |> Dict.get "Name"
-    , objectType = cellsTexts |> Dict.get "Type"
-    , objectAlliance = cellsTexts |> Dict.get "Alliance"
+    , objectName = listViewEntry.cellsTexts |> Dict.get "Name"
+    , objectType = listViewEntry.cellsTexts |> Dict.get "Type"
+    , objectAlliance = listViewEntry.cellsTexts |> Dict.get "Alliance"
     , iconSpriteColorPercent = iconSpriteColorPercent
     , namesUnderSpaceObjectIcon = namesUnderSpaceObjectIcon
     , bgColorFillsPercent = bgColorFillsPercent
@@ -1950,14 +1602,7 @@ parseSelectedItemWindowFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe Sel
 parseSelectedItemWindowFromUITreeRoot uiTreeRoot =
     uiTreeRoot
         |> listDescendantsWithDisplayRegion
-        -- The macOS client names this window 'SelectedItemWnd'; 'ActiveItem' is
-        -- the name the upstream parser was written against and matches nothing
-        -- here, which read as "no panel" rather than as an error.
-        |> List.filter
-            (.uiNode
-                >> .pythonObjectTypeName
-                >> (\typeName -> List.member typeName [ "ActiveItem", "SelectedItemWnd" ])
-            )
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "ActiveItem")
         |> List.head
         |> Maybe.map parseSelectedItemWindow
 
@@ -2441,56 +2086,11 @@ parseStationWindowFromUITreeRoot uiTreeRoot =
                     findButtonInDescendantsByDisplayTextsPredicate
                         (List.any (String.toLower >> textMatches))
                         windowNode
-
-                {- One button occupies this slot and it carries three labels in
-                   turn: "Undock" while docked, then "Abort Undock", then
-                   "Undocking...". Only the first is a button to press. Pressing
-                   either of the others cancels the undock that is already under
-                   way, which is the loop.
-
-                   `buttonFromDisplayText` matches a *whole* label -- equality, or
-                   the label wrapped in tags -- so "Abort Undock" matched neither
-                   "undock" nor "undocking", and "Undocking..." misses the
-                   `"undocking"` matcher that was plainly written for it, because
-                   the ellipsis is part of the label. Both states therefore left
-                   `undockButton` and `abortUndockButton` empty, which every caller
-                   reads as "I do not see the undock button".
-
-                   saxrat's run 43 spent 10,310 readings there, asking for help
-                   while docked, against only 12 that reached the already-undocking
-                   branch the bot already had, and clicked undock 20,486 times in
-                   between. Matching "abort" alone cut that to 3 in three minutes
-                   but did not free the ship: 256 clicks still met 132 waits,
-                   because the third label was still invisible.
-
-                   Matched on substrings, because these are phrases rather than
-                   words and the client decorates them. "abort" is the wording the
-                   mission runner's `labelUndoesStepInProgress` has flown without
-                   looping; "undocking" is the word this parser already chose for
-                   the same state.
-                -}
-                buttonUndoingTheUndock =
-                    findButtonInDescendantsByDisplayTextsPredicate
-                        (List.any
-                            (String.toLower
-                                >> (\text ->
-                                        String.contains "abort" text
-                                            || String.contains "undocking" text
-                                   )
-                            )
-                        )
-                        windowNode
             in
             Just
                 { uiNode = windowNode
-                , undockButton =
-                    case buttonUndoingTheUndock of
-                        Just _ ->
-                            Nothing
-
-                        Nothing ->
-                            buttonFromDisplayText "undock"
-                , abortUndockButton = buttonUndoingTheUndock
+                , undockButton = buttonFromDisplayText "undock"
+                , abortUndockButton = buttonFromDisplayText "undocking"
                 }
 
 
@@ -2558,40 +2158,7 @@ parseInventoryWindow windowUiNode =
 
         selectedContainerInventory =
             maybeSelectedContainerInventoryNode
-                |> Maybe.map
-                    (\selectedContainerInventoryNode ->
-                        let
-                            listViewItemNodes =
-                                selectedContainerInventoryNode
-                                    |> listDescendantsWithDisplayRegion
-                                    |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "Item")
-
-                            scrollControlsNode =
-                                selectedContainerInventoryNode
-                                    |> listDescendantsWithDisplayRegion
-                                    |> List.filter (.uiNode >> .pythonObjectTypeName >> String.contains "ScrollControls")
-                                    |> List.head
-
-                            notListViewItemNodes =
-                                selectedContainerInventoryNode
-                                    |> listDescendantsWithDisplayRegion
-                                    |> List.filter (.uiNode >> .pythonObjectTypeName >> String.contains "InvItem")
-
-                            itemsView =
-                                if 0 < (listViewItemNodes |> List.length) then
-                                    Just (InventoryItemsListView { items = listViewItemNodes })
-
-                                else if 0 < (notListViewItemNodes |> List.length) then
-                                    Just (InventoryItemsNotListView { items = notListViewItemNodes })
-
-                                else
-                                    Nothing
-                        in
-                        { uiNode = selectedContainerInventoryNode
-                        , itemsView = itemsView
-                        , scrollControls = scrollControlsNode |> Maybe.map parseScrollControls
-                        }
-                    )
+                |> Maybe.map parseInventory
 
         buttonToSwitchToListView =
             rightContainerNode
@@ -2623,6 +2190,162 @@ parseInventoryWindow windowUiNode =
     , buttonToSwitchToListView = buttonToSwitchToListView
     , buttonToStackAll = buttonToStackAll
     }
+
+
+parseInventory : UITreeNodeWithDisplayRegion -> Inventory
+parseInventory inventoryNode =
+    let
+        listViewItemNodes =
+            inventoryNode
+                |> listDescendantsWithDisplayRegion
+                |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "Item")
+                |> subsequenceNotContainedInAnyOtherWithDisplayRegion
+
+        scrollNode =
+            inventoryNode
+                |> listDescendantsWithDisplayRegion
+                |> List.filter (.uiNode >> .pythonObjectTypeName >> String.toLower >> String.contains "scroll")
+                |> List.head
+
+        scrollControlsNode =
+            scrollNode
+                |> Maybe.map listDescendantsWithDisplayRegion
+                |> Maybe.withDefault []
+                |> List.filter (.uiNode >> .pythonObjectTypeName >> String.contains "ScrollControls")
+                |> List.head
+
+        headersContainerNode =
+            scrollNode
+                |> Maybe.andThen
+                    (getMostPopulousDescendantWithDisplayRegionMatchingPredicate
+                        (predicateAny
+                            [ .uiNode >> .pythonObjectTypeName >> String.toLower >> String.contains "headers"
+                            , .uiNode
+                                >> getNameFromDictEntries
+                                >> Maybe.map (String.toLower >> String.contains "headers")
+                                >> Maybe.withDefault False
+                            ]
+                        )
+                    )
+
+        entriesHeaders =
+            headersContainerNode
+                |> Maybe.map getAllContainedDisplayTextsWithRegion
+                |> Maybe.withDefault []
+                |> List.Extra.uniqueBy Tuple.first
+
+        notListViewItemNodes =
+            inventoryNode
+                |> listDescendantsWithDisplayRegion
+                |> List.filter (.uiNode >> .pythonObjectTypeName >> String.contains "InvItem")
+                |> subsequenceNotContainedInAnyOtherWithDisplayRegion
+
+        itemsView =
+            if 0 < (listViewItemNodes |> List.length) then
+                Just
+                    (InventoryItemsListView
+                        { items =
+                            listViewItemNodes
+                                |> List.map (parseInventoryItemsListViewEntry entriesHeaders)
+                        }
+                    )
+
+            else if 0 < (notListViewItemNodes |> List.length) then
+                Just (InventoryItemsNotListView { items = notListViewItemNodes })
+
+            else
+                Nothing
+    in
+    { uiNode = inventoryNode
+    , itemsView = itemsView
+    , scrollControls = scrollControlsNode |> Maybe.map parseScrollControls
+    }
+
+
+parseInventoryItemsListViewEntry :
+    List ( String, UITreeNodeWithDisplayRegion )
+    -> UITreeNodeWithDisplayRegion
+    -> InventoryItemsListViewEntry
+parseInventoryItemsListViewEntry entriesHeaders inventoryEntryNode =
+    let
+        listViewEntry =
+            parseListViewEntry entriesHeaders inventoryEntryNode
+    in
+    { uiNode = inventoryEntryNode
+    , cellsTexts = listViewEntry.cellsTexts
+    }
+
+
+parseListViewEntry :
+    List ( String, UITreeNodeWithDisplayRegion )
+    -> UITreeNodeWithDisplayRegion
+    -> { cellsTexts : Dict.Dict String String }
+parseListViewEntry entriesHeaders listViewEntryNode =
+    {-
+       Observations show two different kinds of representations of the texts in the cells in a list view:
+
+       + Each cell text in a dedicated UI element. (Overview entry)
+       + All cell texts in a single UI element, separated by a tab-tag (<t>) (Inventory item)
+
+       Following is an example of the latter case:
+       Condensed Scordite<t><right>200<t>Scordite<t><t><t><right>30 m3<t><right>2.290,00 ISK
+    -}
+    case entriesHeaders |> List.head of
+        Nothing ->
+            { cellsTexts = Dict.empty }
+
+        Just leftmostHeader ->
+            let
+                headerRegionMatchesCellRegion headerRegion cellRegion =
+                    (headerRegion.x < cellRegion.x + 3)
+                        && (headerRegion.x + headerRegion.width > cellRegion.x + cellRegion.width - 3)
+
+                cellsTexts =
+                    listViewEntryNode
+                        |> getAllContainedDisplayTextsWithRegion
+                        |> List.concatMap
+                            (\( cellText, cell ) ->
+                                let
+                                    distanceFromLeftmostHeader =
+                                        cell.totalDisplayRegion.x - (Tuple.second leftmostHeader).totalDisplayRegion.x
+
+                                    maybeHeaderByCellRegion =
+                                        entriesHeaders
+                                            |> List.filter
+                                                (\( _, header ) ->
+                                                    headerRegionMatchesCellRegion
+                                                        header.totalDisplayRegion
+                                                        cell.totalDisplayRegion
+                                                )
+                                            |> List.head
+                                in
+                                case maybeHeaderByCellRegion of
+                                    Just ( headerText, _ ) ->
+                                        [ ( headerText, cellText ) ]
+
+                                    Nothing ->
+                                        if abs distanceFromLeftmostHeader < 4 then
+                                            []
+
+                                        else
+                                            cellText
+                                                |> String.split "<t>"
+                                                |> List.map String.trim
+                                                |> List.indexedMap Tuple.pair
+                                                |> List.filterMap
+                                                    (\( cellIndex, cellSubText ) ->
+                                                        entriesHeaders
+                                                            |> List.drop cellIndex
+                                                            |> List.head
+                                                            |> Maybe.map
+                                                                (\( headerText, _ ) ->
+                                                                    ( headerText, cellSubText )
+                                                                )
+                                                    )
+                            )
+                        |> Dict.fromList
+            in
+            { cellsTexts = cellsTexts }
 
 
 getContainedTreeViewEntryRootNodes : UITreeNodeWithDisplayRegion -> List UITreeNodeWithDisplayRegion
@@ -3192,17 +2915,11 @@ parseStandaloneBookmarkWindow windowUINode =
 
 parseNeocomFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe Neocom
 parseNeocomFromUITreeRoot uiTreeRoot =
-    case
-        uiTreeRoot
-            |> listDescendantsWithDisplayRegion
-            |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "Neocom")
-            |> List.head
-    of
-        Nothing ->
-            Nothing
-
-        Just uiNode ->
-            Just (parseNeocom uiNode)
+    uiTreeRoot
+        |> listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "NeocomContainer")
+        |> List.head
+        |> Maybe.map parseNeocom
 
 
 parseNeocom : UITreeNodeWithDisplayRegion -> Neocom
@@ -3215,17 +2932,6 @@ parseNeocom neocomUiNode =
                 |> List.concatMap getAllContainedDisplayTextsWithRegion
                 |> List.head
 
-        nodeFromTexturePathEnd texturePathEnd =
-            neocomUiNode
-                |> listDescendantsWithDisplayRegion
-                |> List.filter
-                    (.uiNode
-                        >> getTexturePathFromDictEntries
-                        >> Maybe.map (String.endsWith texturePathEnd)
-                        >> Maybe.withDefault False
-                    )
-                |> List.head
-
         clock =
             maybeClockTextAndNode
                 |> Maybe.map
@@ -3235,9 +2941,15 @@ parseNeocom neocomUiNode =
                         , parsedText = parseNeocomClockText clockText
                         }
                     )
+
+        inventoryButton =
+            neocomUiNode
+                |> listDescendantsWithDisplayRegion
+                |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "ButtonInventory")
+                |> List.head
     in
     { uiNode = neocomUiNode
-    , iconInventory = nodeFromTexturePathEnd "items.png"
+    , inventoryButton = inventoryButton
     , clock = clock
     }
 
@@ -3282,6 +2994,112 @@ parseKeyActivationWindow windowUiNode =
     in
     { uiNode = windowUiNode
     , activateButton = activateButton
+    }
+
+
+parseCompressionWindowFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe CompressionWindow
+parseCompressionWindowFromUITreeRoot uiTreeRoot =
+    uiTreeRoot
+        |> listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "CompressionWindow")
+        |> List.head
+        |> Maybe.map parseCompressionWindow
+
+
+parseCompressionWindow : UITreeNodeWithDisplayRegion -> CompressionWindow
+parseCompressionWindow windowUiNode =
+    let
+        compressButton =
+            findButtonInDescendantsContainingDisplayText "Compress" windowUiNode
+    in
+    { uiNode = windowUiNode
+    , windowControls = parseWindowControlsFromWindow windowUiNode
+    , compressButton = compressButton
+    }
+
+
+parseLocationsWindowFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe LocationsWindow
+parseLocationsWindowFromUITreeRoot uiTreeRoot =
+    {-
+       2024-09-02 'Locations' window as shared by Paul with 'session-recording-2024-08-26T22-54-47.zip'
+       For discussion of the 'Locations' window, see <https://forum.botlab.org/t/the-mining-robot-cant-find-its-way-home/4922/5>
+    -}
+    uiTreeRoot
+        |> listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "LocationsWindow")
+        |> List.head
+        |> Maybe.map parseLocationsWindow
+
+
+parseLocationsWindow : UITreeNodeWithDisplayRegion -> LocationsWindow
+parseLocationsWindow windowNode =
+    let
+        placeEntries : List LocationsWindowPlaceEntry
+        placeEntries =
+            windowNode
+                |> listDescendantsWithDisplayRegion
+                |> List.filter (.uiNode >> .pythonObjectTypeName >> String.contains "PlaceEntry")
+                |> List.filterMap parseLocationsWindowPlaceEntry
+    in
+    { uiNode = windowNode
+    , placeEntries = placeEntries
+    }
+
+
+parseLocationsWindowPlaceEntry : UITreeNodeWithDisplayRegion -> Maybe LocationsWindowPlaceEntry
+parseLocationsWindowPlaceEntry entryNode =
+    {-
+       Screenshots show a grid layout of cells with text in each cell aligned in columns.
+       But at least in 'session-recording-2024-08-26T22-54-47.zip', the text appeared in a single node of type "EveLabelMedium"
+       As already seen in other windows, that text appears split into the cells texts by '<t>' tags.
+       Following is a middle part of an observed text in a 'EveLabelMedium' node in a 'PlaceEntry' node:
+       ...<t>Refinery<t>0<t>Y5C-YD<t>...
+    -}
+    case
+        entryNode
+            |> getAllContainedDisplayTextsWithRegion
+            |> List.sortBy (Tuple.second >> .totalDisplayRegion >> areaFromDisplayRegion >> Maybe.withDefault 0)
+            |> List.map Tuple.first
+            |> List.head
+    of
+        Nothing ->
+            Nothing
+
+        Just mainText ->
+            Just { uiNode = entryNode, mainText = mainText }
+
+
+parseWindowControlsFromWindow : UITreeNodeWithDisplayRegion -> Maybe WindowControls
+parseWindowControlsFromWindow =
+    listDescendantsWithDisplayRegion
+        >> List.filter (.uiNode >> .pythonObjectTypeName >> String.contains "WindowControls")
+        >> List.head
+        >> Maybe.map parseWindowControls
+
+
+parseWindowControls : UITreeNodeWithDisplayRegion -> WindowControls
+parseWindowControls controlsNode =
+    let
+        nodeFromTexturePathContains texturePathSubstring =
+            controlsNode
+                |> listDescendantsWithDisplayRegion
+                |> List.filter
+                    (.uiNode
+                        >> getTexturePathFromDictEntries
+                        >> Maybe.map (String.toLower >> String.contains (String.toLower texturePathSubstring))
+                        >> Maybe.withDefault False
+                    )
+                |> List.head
+
+        minimizeButton =
+            nodeFromTexturePathContains "eveicon/window/minimize"
+
+        closeButton =
+            nodeFromTexturePathContains "eveicon/window/close"
+    in
+    { uiNode = controlsNode
+    , minimizeButton = minimizeButton
+    , closeButton = closeButton
     }
 
 
@@ -3380,12 +3198,47 @@ parseScrollControls scrollControlsNode =
     }
 
 
-parseLayerAbovemainFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe UITreeNodeWithDisplayRegion
+parseLayerAbovemainFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe LayerAbovemain
 parseLayerAbovemainFromUITreeRoot uiTreeRoot =
-    uiTreeRoot
-        |> listDescendantsWithDisplayRegion
-        |> List.filter (.uiNode >> getNameFromDictEntries >> (==) (Just "l_abovemain"))
-        |> List.head
+    case
+        uiTreeRoot
+            |> listDescendantsWithDisplayRegion
+            |> List.filter (.uiNode >> getNameFromDictEntries >> (==) (Just "l_abovemain"))
+            |> List.head
+    of
+        Nothing ->
+            Nothing
+
+        Just layerAboveMainUINode ->
+            Just
+                { uiNode = layerAboveMainUINode
+                , quickMessage = parseQuickMessage layerAboveMainUINode
+                }
+
+
+parseQuickMessage : UITreeNodeWithDisplayRegion -> Maybe QuickMessage
+parseQuickMessage layerAboveMainUINode =
+    case
+        layerAboveMainUINode
+            |> listDescendantsWithDisplayRegion
+            |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "QuickMessage")
+            |> List.head
+    of
+        Nothing ->
+            Nothing
+
+        Just quickMessageUINode ->
+            let
+                text =
+                    quickMessageUINode.uiNode
+                        |> getAllContainedDisplayTexts
+                        |> List.head
+                        |> Maybe.withDefault ""
+            in
+            Just
+                { uiNode = quickMessageUINode
+                , text = text
+                }
 
 
 getSubstringBetweenXmlTagsAfterMarker : String -> String -> Maybe String
@@ -3400,14 +3253,17 @@ getSubstringBetweenXmlTagsAfterMarker marker =
 parseNumberTruncatingAfterOptionalDecimalSeparator : String -> Result String Int
 parseNumberTruncatingAfterOptionalDecimalSeparator numberDisplayText =
     let
+        expectedSeparators : List String
         expectedSeparators =
-            [ ",", ".", "’", " ", "\u{00A0}", "\u{202F}" ]
+            [ ",", ".", "’", "'", " ", "\u{00A0}", "\u{202F}" ]
 
+        groupsTexts : List String
         groupsTexts =
             expectedSeparators
                 |> List.foldl (\separator -> List.concatMap (String.split separator))
                     [ String.trim numberDisplayText ]
 
+        lastGroupIsFraction : Bool
         lastGroupIsFraction =
             case List.reverse groupsTexts of
                 lastGroupText :: _ :: _ ->
@@ -3416,6 +3272,7 @@ parseNumberTruncatingAfterOptionalDecimalSeparator numberDisplayText =
                 _ ->
                     False
 
+        integerText : String
         integerText =
             String.join ""
                 (if lastGroupIsFraction then
@@ -3442,10 +3299,43 @@ getDisplayText uiNode =
             (\displayTextPropertyName ->
                 uiNode.dictEntriesOfInterest
                     |> Dict.get displayTextPropertyName
-                    |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.string >> Result.toMaybe)
+                    |> Maybe.andThen getDisplayTextFromDictEntry
             )
         |> List.sortBy (String.length >> negate)
         |> List.head
+
+
+getDisplayTextFromDictEntry : Json.Encode.Value -> Maybe String
+getDisplayTextFromDictEntry dictEntryValue =
+    case
+        Json.Decode.decodeValue
+            (Json.Decode.oneOf
+                [ Json.Decode.string
+
+                {-
+                   2024-05-26: Observed in info panel:
+                   Property '_setText' contained not string but a python object of type 'Link', which in turn references a dictionary.
+                   That dictionary contains a key '_text' with the actual text.
+                -}
+                , Json.Decode.andThen
+                    (\asNode ->
+                        case getDisplayText asNode of
+                            Just text ->
+                                Json.Decode.succeed text
+
+                            Nothing ->
+                                Json.Decode.fail "Failed to extract text from Link object"
+                    )
+                    EveOnline.MemoryReading.uiTreeNodeDecoder
+                ]
+            )
+            dictEntryValue
+    of
+        Err _ ->
+            Nothing
+
+        Ok ok ->
+            Just ok
 
 
 getAllContainedDisplayTexts : EveOnline.MemoryReading.UITreeNode -> List String
@@ -3458,18 +3348,19 @@ getAllContainedDisplayTexts uiNode =
 getAllContainedDisplayTextsWithRegion : UITreeNodeWithDisplayRegion -> List ( String, UITreeNodeWithDisplayRegion )
 getAllContainedDisplayTextsWithRegion uiNode =
     uiNode
-        :: (uiNode |> listDescendantsWithDisplayRegion)
+        :: listDescendantsWithDisplayRegion uiNode
         |> List.filterMap
             (\descendant ->
-                let
-                    displayText =
-                        descendant.uiNode |> getDisplayText |> Maybe.withDefault ""
-                in
-                if 0 < (displayText |> String.length) then
-                    Just ( displayText, descendant )
+                case getDisplayText descendant.uiNode of
+                    Nothing ->
+                        Nothing
 
-                else
-                    Nothing
+                    Just displayText ->
+                        if 0 < String.length displayText then
+                            Just ( displayText, descendant )
+
+                        else
+                            Nothing
             )
 
 
@@ -3484,8 +3375,9 @@ getHintTextFromDictEntries =
 
 
 getTexturePathFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Maybe String
-getTexturePathFromDictEntries =
-    getStringPropertyFromDictEntries "texturePath"
+getTexturePathFromDictEntries node =
+    getStringPropertyFromDictEntries "texturePath" node
+        |> Maybe.Extra.or (getStringPropertyFromDictEntries "_texturePath" node)
 
 
 getStringPropertyFromDictEntries : String -> EveOnline.MemoryReading.UITreeNode -> Maybe String
@@ -3576,7 +3468,75 @@ getVerticalOffsetFromParent =
         >> Maybe.map round
 
 
-getMostPopulousDescendantMatchingPredicate : (EveOnline.MemoryReading.UITreeNode -> Bool) -> EveOnline.MemoryReading.UITreeNode -> Maybe EveOnline.MemoryReading.UITreeNode
+{-| Returns the subsequence of items not contained in any of the other ones
+-}
+subsequenceNotContainedInAnyOtherWithDisplayRegion :
+    List UITreeNodeWithDisplayRegion
+    -> List UITreeNodeWithDisplayRegion
+subsequenceNotContainedInAnyOtherWithDisplayRegion original =
+    original
+        |> List.filter
+            (\item ->
+                original
+                    |> List.any (\other -> item /= other && nodeDescendantsContainWithDisplayRegion item other)
+                    |> not
+            )
+
+
+nodeDescendantsContainWithDisplayRegion : UITreeNodeWithDisplayRegion -> UITreeNodeWithDisplayRegion -> Bool
+nodeDescendantsContainWithDisplayRegion =
+    treeNodeDescendantsContain listChildrenWithDisplayRegion
+
+
+{-| Returns True if the set of descendants of the second node contains the first node.
+(Order of arguments is same as in `List.member`)
+To learn more about these kinds of trees, see <https://en.wikipedia.org/wiki/Tree_(graph_theory)>
+-}
+treeNodeDescendantsContain : (node -> List node) -> node -> node -> Bool
+treeNodeDescendantsContain childrenFromNode contained containing =
+    let
+        children =
+            childrenFromNode containing
+    in
+    List.member contained children
+        || List.any (treeNodeDescendantsContain childrenFromNode contained) children
+
+
+getMostPopulousDescendantWithDisplayRegionMatchingPredicate :
+    (UITreeNodeWithDisplayRegion -> Bool)
+    -> UITreeNodeWithDisplayRegion
+    -> Maybe UITreeNodeWithDisplayRegion
+getMostPopulousDescendantWithDisplayRegionMatchingPredicate predicate parent =
+    listDescendantsWithDisplayRegion parent
+        |> List.filter predicate
+        |> List.sortBy countDescendantsInUITreeNodeWithDisplayRegion
+        |> List.reverse
+        |> List.head
+
+
+countDescendantsInUITreeNodeWithDisplayRegion : UITreeNodeWithDisplayRegion -> Int
+countDescendantsInUITreeNodeWithDisplayRegion parent =
+    parent.children
+        |> Maybe.withDefault []
+        |> List.filterMap unwrapUITreeNodeWithDisplayRegionChild
+        |> List.map (countDescendantsInUITreeNodeWithDisplayRegion >> (+) 1)
+        |> List.sum
+
+
+unwrapUITreeNodeWithDisplayRegionChild : ChildOfNodeWithDisplayRegion -> Maybe UITreeNodeWithDisplayRegion
+unwrapUITreeNodeWithDisplayRegionChild child =
+    case child of
+        ChildWithRegion node ->
+            Just node
+
+        ChildWithoutRegion _ ->
+            Nothing
+
+
+getMostPopulousDescendantMatchingPredicate :
+    (EveOnline.MemoryReading.UITreeNode -> Bool)
+    -> EveOnline.MemoryReading.UITreeNode
+    -> Maybe EveOnline.MemoryReading.UITreeNode
 getMostPopulousDescendantMatchingPredicate predicate parent =
     EveOnline.MemoryReading.listDescendantsInUITreeNode parent
         |> List.filter predicate
@@ -3609,10 +3569,23 @@ justCaseWithDisplayRegion child =
             Just childWithRegion
 
 
-typeOccludesFollowingSiblingNodes : EveOnline.MemoryReading.UITreeNode -> Bool
-typeOccludesFollowingSiblingNodes node =
-    -- session-recording-2022-12-09T12-32-56.zip: In Overview window: "SortHeaders"
-    node.pythonObjectTypeName == "SortHeaders"
+nodeOccludesFollowingNodes : EveOnline.MemoryReading.UITreeNode -> Bool
+nodeOccludesFollowingNodes node =
+    Set.member node.pythonObjectTypeName pythonObjectTypesKnownToOccludeFollowingElements
+
+
+pythonObjectTypesKnownToOccludeFollowingElements : Set.Set String
+pythonObjectTypesKnownToOccludeFollowingElements =
+    Set.fromList
+        [ -- session-recording-2022-12-09T12-32-56.zip: In Overview window: "SortHeaders"
+          "SortHeaders"
+        , "ContextMenu"
+        , "OverviewWindow"
+        , "DronesWindow"
+        , "SelectedItemWnd"
+        , "InventoryPrimary"
+        , "ChatWindowStack"
+        ]
 
 
 subtractRegionsFromRegion :
@@ -3706,6 +3679,12 @@ regionsOverlap regionA regionB =
         , subtrahend = regionB
         }
         /= [ regionA ]
+
+
+predicateAny : List (a -> Bool) -> a -> Bool
+predicateAny predicates candidate =
+    predicates
+        |> List.any (\predicate -> predicate candidate)
 
 
 {-| Remove duplicate values, keeping the first instance of each element which appears more than once.

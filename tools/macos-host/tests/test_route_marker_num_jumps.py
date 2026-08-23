@@ -394,17 +394,33 @@ class TheOtherConsumersAreUnaffectedTest(unittest.TestCase):
             self.assertNotIn("numJumps", body)
 
 
+#: `eve-online-mining-bot`'s tree was replaced with Viir's current upstream
+#: (see CLAUDE.md), which predates #171 entirely: its
+#: `InfoPanelRouteRouteElementMarker` carries only `uiNode` and its
+#: `parseInfoPanelRouteFromInfoPanelContainer` reads no `numJumps` at all, so
+#: it cannot be compared byte for byte against the five copies that do carry
+#: this field. It is excluded from `TheSixCopiesTest` rather than assigned a
+#: shape; porting #171 into the newer base is tracked as follow-up work, not
+#: done here.
+WITHOUT_NUM_JUMPS = {"eve-online-mining-bot"}
+
+APP_DIRS_WITH_NUM_JUMPS = {
+    app: path for app, path in APP_DIRS.items() if app not in WITHOUT_NUM_JUMPS
+}
+
+
 class TheSixCopiesTest(unittest.TestCase):
-    """The parser policy: vendored six times, identically.
+    """The parser policy: vendored identically across the apps that carry it.
 
     `InfoPanelRouteRouteElementMarker` and the parse function that builds it
-    are compared byte for byte across all six copies, the way
+    are compared byte for byte across the five copies that carry #171 (see
+    `WITHOUT_NUM_JUMPS` for the one that does not), the way
     `test_game_log_channel.py` compares its own vendored block.
     """
 
     def test_the_type_alias_is_identical_across_all_six_copies(self):
         blocks = {app: marker_type_alias_block(source_of(parser_file(app)))
-                  for app in APP_DIRS}
+                  for app in APP_DIRS_WITH_NUM_JUMPS}
         first_app, first_block = next(iter(blocks.items()))
         for app, block in blocks.items():
             self.assertEqual(
@@ -415,7 +431,7 @@ class TheSixCopiesTest(unittest.TestCase):
 
     def test_the_parse_function_is_identical_across_all_six_copies(self):
         blocks = {app: parse_function_block(source_of(parser_file(app)))
-                  for app in APP_DIRS}
+                  for app in APP_DIRS_WITH_NUM_JUMPS}
         first_app, first_block = next(iter(blocks.items()))
         for app, block in blocks.items():
             self.assertEqual(
@@ -425,12 +441,19 @@ class TheSixCopiesTest(unittest.TestCase):
         self.assertIn('getIntPropertyFromDictEntries "numJumps"', first_block)
 
     def test_every_copy_already_has_the_int_helper_it_needs(self):
-        """`getIntPropertyFromDictEntries` predates this change in all six --
+        """`getIntPropertyFromDictEntries` predates this change in all five --
         confirmed rather than assumed, since a copy missing it would fail to
         compile instead of failing a case."""
-        for app in APP_DIRS:
+        for app in APP_DIRS_WITH_NUM_JUMPS:
             source = source_of(parser_file(app))
             self.assertIn(
                 "getIntPropertyFromDictEntries : String -> "
                 "EveOnline.MemoryReading.UITreeNode -> Maybe Int",
                 source, app)
+
+    def test_the_mining_bot_is_excluded_because_it_genuinely_lacks_the_field(self):
+        """Guards the exclusion itself: `eve-online-mining-bot` must really
+        lack `numJumps`, not merely be left out for convenience."""
+        source = source_of(parser_file("eve-online-mining-bot"))
+        block = marker_type_alias_block(source)
+        self.assertNotIn("numJumps", block)

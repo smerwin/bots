@@ -907,10 +907,23 @@ class VendoredParserTest(unittest.TestCase):
     checkable rather than a note somebody has to remember: it compares the block
     byte for byte across the six, and pins the two strings the host and the
     parser have to agree on across languages.
+
+    **A second deliberate divergence, `eve-online-mining-bot`.** That app's
+    whole tree was replaced with Viir's current upstream (a materially newer
+    generation -- 2025-11-24 against this fork's prior 2023-04-05 base) rather
+    than kept on this fork's own lineage, and vanilla upstream carries none of
+    this fork's synthetic-node integration: no game-log channel, no damage
+    summaries, no kill count. That is a real capability the mining bot gave up
+    by taking the newer base, not an oversight -- porting the integration
+    forward is tracked as follow-up work, not done here. `WITHOUT_GAME_LOG`
+    names the one app this applies to; every other app is still held to "all
+    six, identically" in full.
     """
 
     APPS_DIR = os.path.join(os.path.dirname(os.path.dirname(MACOS_HOST_DIR)),
                             "implement", "applications", "eve-online")
+
+    WITHOUT_GAME_LOG = {"eve-online-mining-bot"}
 
     def parser_paths(self):
         paths = []
@@ -919,6 +932,9 @@ class VendoredParserTest(unittest.TestCase):
             if os.path.isfile(path):
                 paths.append(path)
         return paths
+
+    def app_of(self, path):
+        return os.path.basename(os.path.dirname(os.path.dirname(path)))
 
     def block(self, source):
         start = source.index("{-| One line EVE's own client wrote")
@@ -934,10 +950,21 @@ class VendoredParserTest(unittest.TestCase):
         for path in self.paths:
             with open(path, encoding="utf-8") as handle:
                 self.sources[path] = handle.read()
+        self.sources_with_game_log = {
+            path: source for path, source in self.sources.items()
+            if self.app_of(path) not in self.WITHOUT_GAME_LOG
+        }
 
     def test_every_copy_has_it(self):
+        # Six vendored parsers total -- a sixth quietly appearing or
+        # disappearing from the tree is itself worth catching, independent of
+        # which ones carry the game-log integration.
         self.assertEqual(len(self.paths), 6, self.paths)
-        for path, source in self.sources.items():
+        self.assertEqual(
+            {self.app_of(p) for p in self.paths} - self.WITHOUT_GAME_LOG,
+            {self.app_of(p) for p in self.sources_with_game_log},
+        )
+        for path, source in self.sources_with_game_log.items():
             self.assertIn("    , gameLogEntriesSinceLastReading : Maybe (List GameLogEntry)\n",
                           source, path)
             self.assertIn(
@@ -946,8 +973,9 @@ class VendoredParserTest(unittest.TestCase):
                 source, path)
 
     def test_every_copy_has_the_same_one(self):
-        blocks = {path: self.block(source) for path, source in self.sources.items()}
-        reference = blocks[self.paths[0]]
+        blocks = {path: self.block(source) for path, source in self.sources_with_game_log.items()}
+        reference_path = next(iter(self.sources_with_game_log))
+        reference = blocks[reference_path]
         for path, block in blocks.items():
             self.assertEqual(block, reference, path)
 
@@ -955,7 +983,7 @@ class VendoredParserTest(unittest.TestCase):
         # The one string the two languages have to agree on. Disagreeing costs
         # nothing at compile time and everything at runtime: the parser would
         # answer `Nothing` -- "this host has no game log" -- for every reading.
-        for path, source in self.sources.items():
+        for path, source in self.sources_with_game_log.items():
             self.assertIn(f'    "{botlab_host.SYNTHETIC_GAME_LOG_TYPE_NAME}"\n', source, path)
 
     def test_the_parser_reads_the_keys_the_host_writes(self):
@@ -963,10 +991,22 @@ class VendoredParserTest(unittest.TestCase):
             [botlab_host.parse_game_log_line(REFUSAL_DRONE_LIMIT)])
         written = set(node["children"][0]["dictEntriesOfInterest"])
         self.assertEqual(written, {"timestamp", "channel", "text"})
-        for path, source in self.sources.items():
+        for path, source in self.sources_with_game_log.items():
             for key in written:
                 self.assertIn(f'getStringPropertyFromDictEntries "{key}" entryNode',
                               source, path)
+
+    def test_the_mining_bot_is_excluded_because_it_genuinely_lacks_the_block(self):
+        # Guards the exclusion itself: if eve-online-mining-bot ever regains
+        # the integration (e.g. it gets ported forward onto the newer base),
+        # WITHOUT_GAME_LOG has to shrink to match, or this test would be
+        # quietly hiding a real copy that should be back in the byte-for-byte
+        # comparison.
+        excluded = [p for p in self.paths if self.app_of(p) in self.WITHOUT_GAME_LOG]
+        self.assertTrue(excluded)
+        for path in excluded:
+            with self.assertRaises(ValueError, msg=path):
+                self.block(self.sources[path])
 
 
 if __name__ == "__main__":

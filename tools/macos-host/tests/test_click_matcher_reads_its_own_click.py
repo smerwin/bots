@@ -26,13 +26,16 @@ mission runner and saxrat have had the `ButtonDown` arm since the same defect
 was found and repaired there; saxrat's own doc comment records the diagnosis in
 the past tense.
 
-**The issue names four apps and the corpus says two.** `eve-online-mining-bot`
-and `eve-online-wingus` are on the 2023 interface: their `EffectOnWindowStructure`
-declares no `ButtonDown`, so their click really is `KeyDown`-encoded, the arm
-they have is the right one, and an arm naming `ButtonDown` would not compile.
-`test_the_arm_matches_the_encoding_the_app_actually_emits` is that correction as
-a rule rather than a note, so a later port cannot copy the fix into an app whose
-clients spell a click the other way.
+**The issue names four apps and the corpus said two.** `eve-online-wingus` is
+still on the 2023 interface: its `EffectOnWindowStructure` declares no
+`ButtonDown`, so its click really is `KeyDown`-encoded, the arm it has is the
+right one, and an arm naming `ButtonDown` would not compile.
+`eve-online-mining-bot` was the other 2023-interface app until its whole tree
+was replaced with Viir's current upstream, on the 2024_10_19 interface -- it
+now belongs in `PHOTON_APPS` and carries `ButtonDown` like the rest of that
+group. `test_the_arm_matches_the_encoding_the_app_actually_emits` is that
+correction as a rule rather than a note, so a later port cannot copy the fix
+into an app whose clients spell a click the other way.
 
 The strongest case here is the one that needs no knowledge of either encoding:
 **every app's matcher is asked about that app's own `effectsMouseClickAtLocation`
@@ -54,14 +57,20 @@ APPS_DIR = os.path.join(REPO, "implement", "applications", "eve-online")
 
 # The two dialects, named by what their effect type is called. Every app in each
 # group vendors the same `Common/EffectOnWindow.elm` vocabulary.
+#
+# eve-online-mining-bot moved from INTERFACE_2023_APPS to PHOTON_APPS when its
+# whole tree was replaced with Viir's current upstream (a materially newer
+# generation on the 2024_10_19 host interface) -- its Common/EffectOnWindow.elm
+# now carries ButtonDown and effectsMouseClickAtLocation builds the
+# [ MouseMoveTo, ButtonDown, ButtonUp ] shape like every other Photon-era app.
 PHOTON_APPS = (
     "eve-online-mission-runner",
     "eve-online-saxrat",
     "eve-online-combat-anomaly-bot",
     "eve-online-warp-to-0-autopilot",
+    "eve-online-mining-bot",
 )
 INTERFACE_2023_APPS = (
-    "eve-online-mining-bot",
     "eve-online-wingus",
 )
 ALL_APPS = PHOTON_APPS + INTERFACE_2023_APPS

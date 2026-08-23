@@ -57,9 +57,11 @@ bot stops paying for it: at most one reading in `moduleButtonClickSettlingSteps
     of that mutation: the alternation is broken, the starvation is not;
   - moving the settling window by one in either direction fails three, split
     across the two boundary cases and the fold;
-  - reverting all six copies to the code this issue was filed on fails
-    eighteen, which is every behavioural case in this file plus the pins in
-    `test_info_panel_icon_click_settling.py`.
+  - reverting all copies of this mechanism to the code this issue was filed on
+    fails eighteen, which is every behavioural case in this file plus the pins
+    in `test_info_panel_icon_click_settling.py`. (`eve-online-mining-bot`'s
+    tree has since been replaced with Viir's current upstream and carries none
+    of this mechanism at all; it is excluded from every case here.)
 
 **Executed rather than restated.** Every reading here is a UI tree run through
 the real `EveOnline.ParseUserInterface`, and the rule is the one in the app's
@@ -81,7 +83,7 @@ import unittest
 
 from prerequisites import ElmRepl, open_repl
 from test_info_panel_icon_click_settling import (
-    EXTRA_PREAMBLE, MINING_BOT_DIR, SIX_VENDORED_FRAMEWORKS, WINGUS_DIR,
+    EXTRA_PREAMBLE, SIX_VENDORED_FRAMEWORKS, WINGUS_DIR,
     info_panel_container)
 from test_saxrat_ported_guards import (
     SaxratRepl, body_of, collapsed, label, node, source_of)
@@ -417,7 +419,6 @@ class GroupCBothAppsRepl:
     @classmethod
     def setUpClass(cls):
         cls.repls = {
-            "mining bot": open_repl(GroupCRepairRepl, app_dir=MINING_BOT_DIR),
             "wingus": open_repl(GroupCRepairRepl, app_dir=WINGUS_DIR),
         }
 
@@ -434,12 +435,15 @@ class GroupCBothAppsRepl:
 
 class TheAlternationTerminatesOnTheOlderInterfaceTooTest(
         GroupCBothAppsRepl, unittest.TestCase):
-    """`eve-online-mining-bot` and `eve-online-wingus`, folded the same way.
+    """`eve-online-wingus`, folded the same way.
 
     One step of history buys a narrower bound -- every other reading rather than
     five in six -- and it is the same property: the repair cannot hold the tree
     on consecutive readings, so the run-away-when-shields-are-low branch below
     the setup list is reachable however long the panel stays broken.
+    `eve-online-mining-bot` used to share this shape; its tree was replaced with
+    Viir's current upstream and it no longer carries this mechanism at all --
+    see `test_info_panel_icon_click_settling.py`'s exclusion note.
     """
 
     READINGS = 40
@@ -456,7 +460,7 @@ class TheAlternationTerminatesOnTheOlderInterfaceTooTest(
 
 
 class BothBranchesReadOneGuardTest(unittest.TestCase):
-    """The shape of the fix, in each of the six vendored copies.
+    """The shape of the fix, in each vendored copy that carries this mechanism.
 
     Read through `body_of`'s declaration slice rather than searched for anywhere
     in the file, so a guard that landed in the wrong function would not satisfy
