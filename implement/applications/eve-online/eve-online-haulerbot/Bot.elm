@@ -345,7 +345,7 @@ searchSubmitCooldownReadings =
 raising the `Station: Information` window before giving up on that attempt and
 trying the search again from the top. A simplified bound compared to
 `eve-online-mission-runner`'s own version of this, which additionally
-diagnoses *why* nothing matched -- left out here since the search bar is only
+diagnoses _why_ nothing matched -- left out here since the search bar is only
 the fallback path, exercised while `route-by-esi = no` or while no ESI
 credentials are configured.
 -}
@@ -597,7 +597,7 @@ verbatim from `eve-online-mission-runner`'s drone-bay restock, which
 established live that Alt+C silently refuses a drop into a specialised hold
 while looking identical in the UI tree -- this bot never uses Alt+C for that
 reason. Latches `cargoOpenedFromShipCard` in memory once the cargo hold shows
-up as *some* inventory window's selected container, the only evidence a
+up as _some_ inventory window's selected container, the only evidence a
 reading carries that the click landed.
 -}
 openCargoFromShipCard : BotDecisionContext -> Maybe DecisionPathNode
@@ -787,7 +787,7 @@ holdProgressFor hold memory =
 {-| The hold's own left-tree entry. The general cargo hold has no fixed label
 -- it carries the ship's own name -- so it is found by node type, the same
 trick `eve-online-mission-runner`'s `loadCourierCargo` uses. The ore/mining
-hold *is* found by label, since nothing in this repo has established a type
+hold _is_ found by label, since nothing in this repo has established a type
 name for it the way `"TreeViewEntryInventoryCargo"` is established for cargo;
 both "ore hold" and "mining hold" are matched, since which the client renders
 for a hauler hull specifically is unverified against a live client.
@@ -973,7 +973,7 @@ inventoryItemsInView inventoryWindow =
 {-| The first item in the (currently selected) item hangar eligible for
 `hold` -- matching `include-item-pattern` if any is set, and, for the ore
 hold specifically, matching `ore-hold-item-pattern`; for the cargo hold,
-anything eligible that is *not* an ore-hold match, so ore never lands in
+anything eligible that is _not_ an ore-hold match, so ore never lands in
 general cargo while the ore hold still has room for it (the ore hold's own
 `willTakeNoMore` latch is what lets ore fall through to cargo once it is
 full or absent).
@@ -1598,7 +1598,7 @@ The item hangar and hold can each be read as either
 `EveOnline.ParseUserInterface.InventoryItemsListView` (a table of rows, icon
 then name then quantity then volume, much wider than it is tall) or
 `InventoryItemsNotListView` (a roughly square icon stacked over its label) --
-`inventoryItemsInView` already handles both when *finding* items, but this
+`inventoryItemsInView` already handles both when _finding_ items, but this
 function used one grab point for both, taking the horizontal centre of
 whatever region it was handed. Centred on a list-view row that lands on a
 text column or the gap between two of them, not on the icon -- and a
@@ -1619,7 +1619,7 @@ item never actually left the hangar -- despite the point landing within the
 icon's own bounds by the numbers, and the operator confirmed the client's
 own visible symptom was every item in the hangar getting selected rather
 than one being dragged. The mechanism: an icon-grid selection widget (this
-one included) only treats a press-and-drag as *move the item* once that
+one included) only treats a press-and-drag as _move the item_ once that
 item is already the active selection; a press-and-drag starting on an item
 that is not yet selected is read as the start of a rubber-band multi-select
 instead. So a full click (`MouseMoveTo`, `ButtonDown`, `ButtonUp`) at the
@@ -1628,6 +1628,7 @@ dispatched list -- the framework's own `WaitMilliseconds` between every
 pair of effects gives the client room to register them as two separate
 gestures (select, then drag) rather than one continuous one. Confirmed live
 across both directions: a full load and a full unload, both landing.
+
 -}
 dragFromItemIconOntoUiElement : UITreeNodeWithDisplayRegion -> UITreeNodeWithDisplayRegion -> DecisionPathNode
 dragFromItemIconOntoUiElement itemElement targetElement =
@@ -1663,7 +1664,7 @@ edge: a full two-stack unload landed cleanly this way. **Icon-view grid items
 have a known, unresolved limitation past the first column.** A single item
 in the grid's first slot drags correctly with the plain
 `region.width // 2` centre this branch uses -- confirmed live, the same run
-that established the click-then-drag fix above. A *second* item, one column
+that established the click-then-drag fix above. A _second_ item, one column
 over, did not: the operator watched the drag land to the left of the second
 column's icon, repeatedly, and no offset tried here corrected it before the
 operator switched that inventory panel to list view instead, which is the
@@ -1989,7 +1990,22 @@ statusTextFromDecisionContext context =
                     "in space, " ++ describeErrand
 
         describeHolds =
-            "cargo hold drags " ++ String.fromInt context.memory.cargoHold.dragsDispatched ++ (if context.memory.cargoHold.willTakeNoMore then " (full)" else "") ++ ", ore hold drags " ++ String.fromInt context.memory.oreHold.dragsDispatched ++ (if context.memory.oreHold.willTakeNoMore then " (full)" else "")
+            "cargo hold drags "
+                ++ String.fromInt context.memory.cargoHold.dragsDispatched
+                ++ (if context.memory.cargoHold.willTakeNoMore then
+                        " (full)"
+
+                    else
+                        ""
+                   )
+                ++ ", ore hold drags "
+                ++ String.fromInt context.memory.oreHold.dragsDispatched
+                ++ (if context.memory.oreHold.willTakeNoMore then
+                        " (full)"
+
+                    else
+                        ""
+                   )
     in
     [ "Trips completed: " ++ String.fromInt context.memory.tripsCompleted
     , describeLocation

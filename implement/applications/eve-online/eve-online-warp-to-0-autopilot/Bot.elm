@@ -243,7 +243,7 @@ decideStepWhenInSpace context { infoPanelRouteFirstMarker } shipUI =
             (routeMarkerCascade context infoPanelRouteFirstMarker)
 
 
-{-| How many consecutive readings the route panel may go on naming the *same*
+{-| How many consecutive readings the route panel may go on naming the _same_
 next system, with no jump landing, before giving up on the marker cascade and
 falling back to `jumpToNextSystemViaSurroundingsButton` instead.
 
@@ -255,10 +255,11 @@ from, so this counts readings instead, which cannot distinguish "waiting for
 a menu to render" from "stuck" the way saxrat's can -- and is set well above
 an ordinary cascade's length rather than at its edge for that reason. This
 bot's own measured baseline (see `jumpThroughRouteStargate`'s doc comment) is
-about 19 readings per completed jump on the *old*, un-widened 70px tolerance;
+about 19 readings per completed jump on the _old_, un-widened 70px tolerance;
 30 gives the newly-widened 200px tolerance room to still be slower than the
 other apps' own copies of this cascade without tripping the fallback on an
 ordinary leg.
+
 -}
 jumpCascadeStuckReadings : Int
 jumpCascadeStuckReadings =
