@@ -1378,7 +1378,20 @@ def synthetic_kills_node(kills):
 
 
 class VolatileHost:
-    def __init__(self, game_log=None):
+    def __init__(self, game_log=None, legacy_search_ui_root=False):
+        # The 2023_02_06 host interface's VolatileProcessInterface.elm has no
+        # notion of an in-progress search at all -- it decodes only a flat
+        # `SearchUIRootAddressResult { processId, uiRootAddress }`, matching
+        # BotLab.exe's original synchronous C# volatile process. Answering it
+        # with the 2024 interface's staged `SearchUIRootAddressResponse` (used
+        # below) is a response its own decoder's closed `oneOf` never matches,
+        # so the request silently fails to decode and the bot's setup state
+        # never learns the search happened -- it re-asks forever. Confirmed
+        # live: the mining bot's `Bot.elm` looped on "Search the address of
+        # the UI root" for the whole session, even after the host had found
+        # and cached the root within the first second, because the answer
+        # never reached the Elm decoder in a shape it recognised.
+        self.legacy_search_ui_root = legacy_search_ui_root
         self.roots = {}          # processId -> ui root address (int)
         self.root_search = {}    # processId -> {"begin": ms, "thread": Thread, "result": addr|None|"pending"}
         self.metatype = {}       # processId -> metatype addr
@@ -1426,6 +1439,12 @@ class VolatileHost:
 
         if "SearchUIRootAddress" in req:
             process_id = req["SearchUIRootAddress"]["processId"]
+            if self.legacy_search_ui_root:
+                addr = self._search_ui_root_blocking(process_id)
+                return json.dumps({"SearchUIRootAddressResult": {
+                    "processId": process_id,
+                    "uiRootAddress": hex(addr) if addr is not None else None,
+                }})
             return json.dumps({"SearchUIRootAddressResponse": self._search_ui_root(process_id)})
 
         if "ReadFromWindow" in req:
@@ -1517,16 +1536,20 @@ class VolatileHost:
         except OSError:
             pass
 
-    def _search_ui_root_worker(self, process_id, state):
+    def _find_ui_root(self, process_id):
         """One-time cost: take a real dump (the only way to repr-scan for
         the root object's address), find it, then all later ReadFromWindow
-        calls use the fast LiveSample path -- no more dumps needed."""
+        calls use the fast LiveSample path -- no more dumps needed.
+
+        Blocks the calling thread until it has an answer (or gives up); the
+        caller decides whether that thread is a background worker (the 2024
+        interface's polling protocol) or the request-handling thread itself
+        (the 2023 interface's synchronous one -- see `_search_ui_root_blocking`)."""
         cached = self._cached_ui_root(process_id)
         if cached is not None:
             self.metatype[process_id] = cached["metatype"]
             self.str_type[process_id] = cached["str_type"]
-            state["result"] = cached["root"]
-            return
+            return cached["root"]
         if IS_WINDOWS:
             # No dump and no repr scan: the text macOS seeds from is not in this
             # client's memory at all (FINDINGS.md section 3), and the type
@@ -1538,11 +1561,10 @@ class VolatileHost:
                     self.str_type[process_id] = str_type
                 if root is not None:
                     self._store_ui_root_cache(process_id, root, metatype, str_type)
-                state["result"] = root
+                return root
             except Exception as exc:
                 print(f"# SearchUIRootAddress failed: {exc}", file=sys.stderr)
-                state["result"] = None
-            return
+                return None
         try:
             with tempfile.TemporaryDirectory() as d:
                 subprocess.run([MEMORY_SAMPLE_BIN, str(process_id), d], check=True,
@@ -1550,18 +1572,32 @@ class VolatileHost:
                 sample = rh.Sample(d)
                 metatype = rh.find_metatype(sample, self._any_seed_addr(sample))
                 if metatype is None:
-                    state["result"] = None
-                    return
+                    return None
                 str_type = self._bootstrap_str_type(sample, metatype)
                 self.metatype[process_id] = metatype
                 self.str_type[process_id] = str_type
                 root = rh.find_ui_root(sample, metatype, str_type)
                 if root is not None:
                     self._store_ui_root_cache(process_id, root, metatype, str_type)
-                state["result"] = root
+                return root
         except Exception as exc:
             print(f"# SearchUIRootAddress failed: {exc}", file=sys.stderr)
-            state["result"] = None
+            return None
+
+    def _search_ui_root_worker(self, process_id, state):
+        state["result"] = self._find_ui_root(process_id)
+
+    def _search_ui_root_blocking(self, process_id):
+        """The 2023 interface's synchronous answer: block until the root is
+        known (or the search has failed) rather than polling. Reuses
+        `self.roots` so a second request for an already-found process is free,
+        matching the async path's own cache."""
+        if process_id in self.roots:
+            return self.roots[process_id]
+        addr = self._find_ui_root(process_id)
+        if addr is not None:
+            self.roots[process_id] = addr
+        return addr
 
     @staticmethod
     def _any_seed_addr(sample):
@@ -2172,8 +2208,9 @@ class ConnectionLostWatch:
 
 
 class TaskDispatcher:
-    def __init__(self, execute_input=False, capture_screenshots=False, game_log=None):
-        self.volatile = VolatileHost(game_log=game_log)
+    def __init__(self, execute_input=False, capture_screenshots=False, game_log=None,
+                 legacy_search_ui_root=False):
+        self.volatile = VolatileHost(game_log=game_log, legacy_search_ui_root=legacy_search_ui_root)
         self._process_ids = {}
         self.execute_input = execute_input
         self.capture_screenshots = capture_screenshots
@@ -2999,7 +3036,8 @@ def tick_bound_note(tick, elapsed_seconds, decisions, abandoned_tasks):
 
 
 def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_screenshots=False,
-            session_duration_minutes=None, game_log_dir=None, console=None):
+            session_duration_minutes=None, game_log_dir=None, console=None,
+            legacy_search_ui_root=False):
     proc = subprocess.Popen(
         ["node", DRIVER_JS, bot_js_path],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
@@ -3014,7 +3052,7 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
     )
     game_log = GameLogTail(game_log_dir) if game_log_dir else None
     dispatcher = TaskDispatcher(execute_input=execute_input, capture_screenshots=capture_screenshots,
-                                game_log=game_log)
+                                game_log=game_log, legacy_search_ui_root=legacy_search_ui_root)
 
     def send_event(event_at_time):
         event = {"timeInMilliseconds": int(time.time() * 1000), "eventAtTime": event_at_time}
@@ -4031,6 +4069,7 @@ def main():
         # afterwards, long after any console has been closed.
         print(f"# bot version: {bot_version}", file=sys.stderr)
         build_dir = prepare_build_dir(bot_dir, workdir)
+        legacy_search_ui_root = host_interface_of_bot(build_dir) == "BotLab.BotInterface_To_Host_2023_02_06"
         bot_js = compile_bot(build_dir)
         print(f"# compiled: {bot_js}", file=sys.stderr)
         console = None
@@ -4064,7 +4103,7 @@ def main():
                 capture_screenshots=args.capture_screenshots,
                 session_duration_minutes=args.session_duration_minutes,
             game_log_dir=None if args.no_game_log else args.game_log_dir,
-            console=console)
+            console=console, legacy_search_ui_root=legacy_search_ui_root)
     finally:
         if args.keep_build_dir:
             print(f"# left build dir at {workdir}", file=sys.stderr)
