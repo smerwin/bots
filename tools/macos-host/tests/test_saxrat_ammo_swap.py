@@ -815,28 +815,30 @@ class TheStrayMenuGuardTest(unittest.TestCase):
             ]),
             [True, True])
 
-    def test_the_clause_is_now_defensive_rather_than_load_bearing(self):
-        """The guard's patience outgrew the settle, so the swap can no longer
-        trip it -- and that is a consequence worth pinning rather than dropping.
+    def test_the_swap_outlasts_the_guard_so_the_clause_is_load_bearing(self):
+        """Why the exemption exists, measured against the bound that reaches it.
 
-        The clause was written when both were 3: the swap held a weapon's menu
-        for exactly as many readings as the guard waited, so without the
-        exemption the two took turns and the attempt loaded nothing. Raising the
-        threshold to clear `enterAnomaly`'s 8-reading lookback moved the guard
-        to 12 while the settle stayed at 3, which means the collision it was
-        written for can no longer happen.
+        Not the settle. `ammoSwapSilenceSettleTicks` is 3 and the guard now
+        waits 12, so the settle alone can never trip it -- an earlier version of
+        this case compared those two, and when the threshold moved from 3 to 12
+        it read as though the whole clause had gone dead. It has not.
 
-        **The exemption is kept anyway**, because it costs nothing and the
-        threshold has already been retuned once. What is asserted is the
-        relationship, so that a future change closing the gap again is noticed
-        here rather than in a run that loads nothing: if the settle ever reaches
-        the threshold, the clause is load-bearing again and this case says so.
+        `ammoSwapOwnsTheMenu` follows `ammoSwapIsActingOnAVerdict`, which stands
+        for as long as the verdict does: up to `ammoSwapVerdictGiveUpTicks`, or
+        `ammoSwapSilencedGiveUpTicks` when the guns are already off. Both are
+        past the guard's patience, so a menu the swap is driving *does* reach
+        the threshold, and without this clause Escape would close the menu the
+        load is about to be clicked out of.
+
+        Asserted against the longer of the two, because that is the one that
+        decides whether the collision is reachable at all.
         """
         self.assertGreater(
-            self.threshold, self.settle,
-            "the settle has reached the guard's patience again, so the swap "
-            "can once more trip it -- the exemption is load-bearing, not "
-            "defensive, and the cases around it should be read in that light")
+            max(self.verdict_bound, self.silence_bound), self.threshold,
+            "the swap's own deadlines no longer outlast the guard's patience, "
+            "so a menu it is driving can never reach the threshold -- at which "
+            "point this clause really would be dead and should go, rather than "
+            "sitting here implying a collision that cannot happen")
 
     def test_the_suppression_is_bounded_by_the_swap_s_own_deadlines(self):
         # The guard's promise is that a menu cannot sit forever. That survives

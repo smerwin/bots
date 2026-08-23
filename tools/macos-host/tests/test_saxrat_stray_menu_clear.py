@@ -258,11 +258,24 @@ class TheRescueIsBoundedTest(unittest.TestCase):
             self.repl.evaluate([self._stray(10845)]), [False])
 
     def test_the_ammo_swap_still_owns_its_own_menu(self):
+        """Asked past the threshold, or it proves nothing.
+
+        This read `stuckTicks = 5` while the threshold was 3. At 12 the same
+        case answers `False` because 5 is simply below the bound, exemption or
+        no exemption -- it would have passed with the whole
+        `ammoSwapOwnsTheMenu` clause deleted. The count is now taken from the
+        declaration so the case stays on the far side of it, and the control
+        beside it shows the same reading *without* the swap is a stray.
+        """
         self.assertEqual(
             self.repl.evaluate([
-                'strayContextMenuIsStray { stuckTicks = 5,'
-                ' ammoSwapOwnsTheMenu = True }']),
-            [False])
+                'strayContextMenuIsStray { stuckTicks ='
+                ' strayContextMenuStuckTicksThreshold + 1,'
+                ' ammoSwapOwnsTheMenu = True }',
+                'strayContextMenuIsStray { stuckTicks ='
+                ' strayContextMenuStuckTicksThreshold + 1,'
+                ' ammoSwapOwnsTheMenu = False }']),
+            [False, True])
 
     def test_the_bound_is_written_as_a_multiple_of_the_threshold(self):
         source = source_of(SAXRAT_BOT_ELM)
