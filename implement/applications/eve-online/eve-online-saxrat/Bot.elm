@@ -3857,18 +3857,21 @@ next system -- through the selected-item panel or the route-marker cascade --
 before giving up on both and falling back to
 `jumpToNextSystemViaSurroundingsButton` instead.
 
-**An operator judgement, not a measured figure.** The one recorded incident
-this is sized against (saxrat run 23) took 27 readings and 7 discard-and-reopen
-cycles on the marker cascade alone, well past the "3-4 menu opens" that
-cascade's own comment already expects as ordinary. 15 leaves the ordinary case
-several times over its documented room while still cutting the incident's own
-length roughly in half -- not a floor derived from a corpus, since this is the
-only occurrence on record.
+**An operator's own choice, not a measured figure**, and set deliberately at
+the edge of what the marker cascade's own comment calls ordinary ("3-4 menu
+opens") rather than above it. The one recorded incident this reasoning has
+behind it (saxrat run 23) took 27 readings and 7 discard-and-reopen cycles
+before self-resolving; 3 does not wait to find out whether a given stall is
+that incident or an unremarkable retry -- it treats the marker cascade as
+worth one ordinary attempt and switches to the surroundings-button path
+readily rather than as a rare last resort. The cost of that choice: a cascade
+that would have completed on its fourth or fifth open now gets interrupted
+and redone through a different, heavier path instead.
 
 -}
 jumpCascadeStuckReadings : Int
 jumpCascadeStuckReadings =
-    15
+    3
 
 
 {-| Jump to the route's next system by right-clicking the persistent
