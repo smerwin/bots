@@ -211,20 +211,45 @@ class TheRescueIsBoundedTest(unittest.TestCase):
         cls.repl.close()
 
     def _stray(self, ticks):
-        return ('strayContextMenuIsStray { stuckTicks = %d,'
+        """`ticks` may be a number or an Elm expression yielding one.
+
+        The boundary cases below name the shipped declarations rather than the
+        numbers they currently hold: this threshold has been retuned once
+        already -- 3 to 12, to clear `enterAnomaly`'s own 8-reading lookback --
+        and a case that hard-codes the old value fails on a change that is
+        right, which teaches the reader to edit the number rather than to check
+        the rule.
+        """
+        return ('strayContextMenuIsStray { stuckTicks = %s,'
                 ' ammoSwapOwnsTheMenu = False }' % ticks)
 
     def test_it_arms_at_the_threshold_and_not_before(self):
         self.assertEqual(
             self.repl.evaluate([
-                self._stray(2), self._stray(3), self._stray(4)]),
+                self._stray("strayContextMenuStuckTicksThreshold - 1"),
+                self._stray("strayContextMenuStuckTicksThreshold"),
+                self._stray("strayContextMenuStuckTicksThreshold + 1")]),
             [False, True, True])
+
+    def test_it_clears_the_cascade_lookback_it_was_raised_for(self):
+        """Why the threshold moved, asserted rather than left in a comment.
+
+        Below `enterAnomaly`'s 8-reading lookback the clearer was discarding a
+        cascade still inside its own patience and clicking beside the info
+        panel -- the rescue reproducing what it rescues from, a third time.
+        """
+        self.assertEqual(
+            self.repl.evaluate(["strayContextMenuStuckTicksThreshold > 8"]),
+            [True])
 
     def test_it_stands_aside_past_the_give_up(self):
         self.assertEqual(
             self.repl.evaluate([
-                "strayContextMenuGiveUpTicks == 60",
-                self._stray(59), self._stray(60), self._stray(600)]),
+                "strayContextMenuGiveUpTicks"
+                " == strayContextMenuStuckTicksThreshold * 20",
+                self._stray("strayContextMenuGiveUpTicks - 1"),
+                self._stray("strayContextMenuGiveUpTicks"),
+                self._stray("strayContextMenuGiveUpTicks * 10")]),
             [True, True, False, False])
 
     def test_run_18_would_have_stood_aside(self):

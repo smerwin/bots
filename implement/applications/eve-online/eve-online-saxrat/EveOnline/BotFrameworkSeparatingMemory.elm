@@ -475,8 +475,8 @@ the identical pixel every attempt.
 
 Bounded to the region handed in -- typically what `subtractRegionsFromRegion`
 already carved out as clear of every currently-open context menu -- so this
-never trades the occlusion safety away for variety; it only varies *where
-inside the already-safe area* the click lands. Falls back to the exact center
+never trades the occlusion safety away for variety; it only varies _where
+inside the already-safe area_ the click lands. Falls back to the exact center
 when there are not two random integers on hand to spend (early in a session,
 before the host has supplied any), which is `centerFromDisplayRegion`'s own
 answer.

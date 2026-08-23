@@ -815,13 +815,28 @@ class TheStrayMenuGuardTest(unittest.TestCase):
             ]),
             [True, True])
 
-    def test_the_settle_is_long_enough_to_have_tripped_the_guard(self):
-        # This is why the clause exists rather than being defensive: the swap
-        # holds a menu for at least as many readings as the guard waits.
-        self.assertLessEqual(
+    def test_the_clause_is_now_defensive_rather_than_load_bearing(self):
+        """The guard's patience outgrew the settle, so the swap can no longer
+        trip it -- and that is a consequence worth pinning rather than dropping.
+
+        The clause was written when both were 3: the swap held a weapon's menu
+        for exactly as many readings as the guard waited, so without the
+        exemption the two took turns and the attempt loaded nothing. Raising the
+        threshold to clear `enterAnomaly`'s 8-reading lookback moved the guard
+        to 12 while the settle stayed at 3, which means the collision it was
+        written for can no longer happen.
+
+        **The exemption is kept anyway**, because it costs nothing and the
+        threshold has already been retuned once. What is asserted is the
+        relationship, so that a future change closing the gap again is noticed
+        here rather than in a run that loads nothing: if the settle ever reaches
+        the threshold, the clause is load-bearing again and this case says so.
+        """
+        self.assertGreater(
             self.threshold, self.settle,
-            "if the settle were shorter than the guard's patience the swap "
-            "could never have tripped it, and this clause would be unmotivated")
+            "the settle has reached the guard's patience again, so the swap "
+            "can once more trip it -- the exemption is load-bearing, not "
+            "defensive, and the cases around it should be read in that light")
 
     def test_the_suppression_is_bounded_by_the_swap_s_own_deadlines(self):
         # The guard's promise is that a menu cannot sit forever. That survives
