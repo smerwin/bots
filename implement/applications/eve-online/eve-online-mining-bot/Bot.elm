@@ -1932,7 +1932,7 @@ readShipUIModuleButtonTooltips =
 
 
 {-| The framework's own `readShipUIModuleButtonTooltipWhereNotYetInMemory`
-picks its target from *every* module button, top row included -- and since
+picks its target from _every_ module button, top row included -- and since
 `knownMiningModulesFromContext` no longer needs a mining laser's tooltip at
 all (it reads `moduleButtonsRows.top` directly), a discovery attempt landing
 on a top-row button is now a wasted hover on a module whose identity this bot
