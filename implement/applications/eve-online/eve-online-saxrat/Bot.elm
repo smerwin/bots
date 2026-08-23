@@ -568,20 +568,21 @@ type alias BotMemory =
     , routeFirstMarkerRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , routeFirstMarkerUnchangedTicks : Int
 
-    -- Readings spent trying to jump toward the *same* next system, whether
-    -- through the selected-item panel or the route-marker cascade. Reset
+    -- The route-marker cascade's own right-click on the route panel's first
+    -- marker, counted rather than the readings elapsed -- a reading spent
+    -- waiting for a menu to render ("give the game one more reading") is not
+    -- a sign of being stuck, where a *repeated* right-click at the same
+    -- marker (the cascade discarding what it found and reopening) is. Reset
     -- whenever the next system on the route changes (a leg completed, or a
-    -- new route was set) or the reading offers no next system at all. Not a
-    -- measure of "stuck" on its own -- it counts ordinary settling time too
-    -- -- but `jumpCascadeStuckReadings` past this bound is what
-    -- `jumpToNextSystem` reads to fall back to
-    -- `jumpToNextSystemViaSurroundingsButton` instead of continuing to
-    -- retry the marker cascade. See that function's own doc comment for why:
-    -- saxrat run 23 spent 27 readings and 7 discard-and-reopen cycles on the
-    -- marker cascade alone for one leg, well past the "3-4 menu opens"
-    -- that cascade's own comment expects.
+    -- new route was set) or the reading offers no next system at all.
+    -- `jumpCascadeStuckReopens` past this count is what `jumpToNextSystem`
+    -- reads to fall back to `jumpToNextSystemViaSurroundingsButton` instead
+    -- of continuing to retry the marker. See that function's own doc comment
+    -- for why: saxrat run 23 spent 27 readings and 7 discard-and-reopen
+    -- cycles on the marker cascade alone for one leg, well past the "3-4
+    -- menu opens" that cascade's own comment expects.
     , jumpCascadeSystem : Maybe String
-    , jumpCascadeReadings : Int
+    , jumpCascadeReopens : Int
     , targetToUnlockRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , targetToUnlockUnchangedTicks : Int
     , noProbeScanResultsAndNoRouteLastTimeInSpace : Bool
@@ -3821,7 +3822,7 @@ jumpToNextSystem context =
                         "Route panel's first marker just appeared or moved since the last reading -- wait for the route to finish (re)computing before clicking it."
                         waitForProgressInGame
 
-                else if jumpCascadeStuckReadings < context.memory.jumpCascadeReadings then
+                else if jumpCascadeStuckReopens < context.memory.jumpCascadeReopens then
                     jumpToNextSystemViaSurroundingsButton context
 
                 else
@@ -3852,25 +3853,32 @@ jumpToNextSystem context =
                         )
 
 
-{-| How many readings `jumpToNextSystem` may spend working toward the _same_
-next system -- through the selected-item panel or the route-marker cascade --
-before giving up on both and falling back to
+{-| How many times `jumpToNextSystem`'s route-marker cascade may (re)open its
+menu for the _same_ next system before giving up on it and falling back to
 `jumpToNextSystemViaSurroundingsButton` instead.
+
+**Counted in menu opens, not readings.** A reading spent waiting for a menu
+to render ("give the game one more reading") is not evidence of being stuck;
+a _repeated_ right-click at the marker -- the cascade discarding what it
+found and reopening -- is. `BotMemory.jumpCascadeReopens` counts exactly that,
+read off the previous step's own dispatched effects
+(`previousStepRightClickedElement`), so waiting readings hold the count
+rather than resetting or advancing it.
 
 **An operator's own choice, not a measured figure**, and set deliberately at
 the edge of what the marker cascade's own comment calls ordinary ("3-4 menu
 opens") rather than above it. The one recorded incident this reasoning has
-behind it (saxrat run 23) took 27 readings and 7 discard-and-reopen cycles
-before self-resolving; 3 does not wait to find out whether a given stall is
-that incident or an unremarkable retry -- it treats the marker cascade as
-worth one ordinary attempt and switches to the surroundings-button path
-readily rather than as a rare last resort. The cost of that choice: a cascade
-that would have completed on its fourth or fifth open now gets interrupted
-and redone through a different, heavier path instead.
+behind it (saxrat run 23) took 7 discard-and-reopen cycles before
+self-resolving; 3 does not wait to find out whether a given stall is that
+incident or an unremarkable retry -- it treats the marker cascade as worth
+one ordinary attempt and switches to the surroundings-button path readily
+rather than as a rare last resort. The cost of that choice: a cascade that
+would have completed on its fourth or fifth open now gets interrupted and
+redone through a different, heavier path instead.
 
 -}
-jumpCascadeStuckReadings : Int
-jumpCascadeStuckReadings =
+jumpCascadeStuckReopens : Int
+jumpCascadeStuckReopens =
     3
 
 
@@ -3918,7 +3926,7 @@ session): the entry really does read exactly `Jump`, matched with
 **Unverified: the cascade running end to end.** Nothing has driven all three
 levels in one live sequence and watched a jump land this way -- the pieces
 are each confirmed, the whole is not. It also does not fire in the ordinary
-course of things, since it is reached only past `jumpCascadeStuckReadings`;
+course of things, since it is reached only past `jumpCascadeStuckReopens`;
 the first real test of this function is whatever run next gets stuck long
 enough to reach it. Whether recalling drones first (mirroring
 `jumpToNextSystem`'s own `returnDronesToBay`) is actually necessary at this
@@ -3935,12 +3943,12 @@ jumpToNextSystemViaSurroundingsButton context =
 
         Just systemName ->
             describeBranch
-                ("The route-marker cascade has been stuck trying to jump toward '"
+                ("The route-marker cascade has (re)opened its menu "
+                    ++ String.fromInt context.memory.jumpCascadeReopens
+                    ++ " time(s) trying to jump toward '"
                     ++ systemName
-                    ++ "' for "
-                    ++ String.fromInt context.memory.jumpCascadeReadings
-                    ++ " readings, past "
-                    ++ String.fromInt jumpCascadeStuckReadings
+                    ++ "', past "
+                    ++ String.fromInt jumpCascadeStuckReopens
                     ++ " -- right-click the surroundings button instead and cascade to this gate by name."
                 )
                 (returnDronesToBay context
@@ -9442,7 +9450,7 @@ initBotMemory =
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
     , jumpCascadeSystem = Nothing
-    , jumpCascadeReadings = 0
+    , jumpCascadeReopens = 0
     , targetToUnlockRegion = Nothing
     , targetToUnlockUnchangedTicks = 0
     , noProbeScanResultsAndNoRouteLastTimeInSpace = False
@@ -15355,15 +15363,33 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         else
             0
     , jumpCascadeSystem = context.readingFromGameClient |> nextSystemOnRouteFromReading
-    , jumpCascadeReadings =
-        if (context.readingFromGameClient |> nextSystemOnRouteFromReading) == Nothing then
-            0
+    , jumpCascadeReopens =
+        case context.readingFromGameClient |> infoPanelRouteFirstMarkerFromReadingFromGameClient of
+            Nothing ->
+                0
 
-        else if (context.readingFromGameClient |> nextSystemOnRouteFromReading) == botMemoryBefore.jumpCascadeSystem then
-            botMemoryBefore.jumpCascadeReadings + 1
+            Just marker ->
+                let
+                    sameSystemAsBefore =
+                        (context.readingFromGameClient |> nextSystemOnRouteFromReading) == botMemoryBefore.jumpCascadeSystem
 
-        else
-            0
+                    justRightClickedTheMarker =
+                        previousStepRightClickedElement context.previousStepsEffects marker.uiNode
+                in
+                if sameSystemAsBefore then
+                    if justRightClickedTheMarker then
+                        botMemoryBefore.jumpCascadeReopens + 1
+
+                    else
+                        -- A reading spent waiting for the menu to render is
+                        -- not evidence of being stuck -- hold, don't reset.
+                        botMemoryBefore.jumpCascadeReopens
+
+                else if justRightClickedTheMarker then
+                    1
+
+                else
+                    0
     , targetToUnlockRegion = currentTargetToUnlockRegion
     , targetToUnlockUnchangedTicks =
         if currentTargetToUnlockRegion == Nothing then
