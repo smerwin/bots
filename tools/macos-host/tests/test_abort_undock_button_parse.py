@@ -28,16 +28,28 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 APPS = os.path.join(REPO, "implement", "applications", "eve-online")
 
+ALL_APPS = (
+    "eve-online-combat-anomaly-bot",
+    "eve-online-mining-bot",
+    "eve-online-mission-runner",
+    "eve-online-saxrat",
+    "eve-online-warp-to-0-autopilot",
+    "eve-online-wingus",
+)
+
+# `eve-online-mining-bot`'s tree was replaced with Viir's current upstream
+# (see CLAUDE.md's Architecture section), which predates this fix entirely:
+# its parse still calls `buttonFromDisplayText "undock"` /
+# `buttonFromDisplayText "undocking"` directly (whole-label matching), with
+# no `buttonUndoingTheUndock` helper and no abort-suppression case at all.
+# Excluded from every case below rather than assigned a shape; porting this
+# fix into the newer base is follow-up work, not done here.
+WITHOUT_ABORT_UNDOCK_MATCHING = {"eve-online-mining-bot"}
+
 PARSER_COPIES = [
     os.path.join(APPS, app, "EveOnline", "ParseUserInterface.elm")
-    for app in (
-        "eve-online-combat-anomaly-bot",
-        "eve-online-mining-bot",
-        "eve-online-mission-runner",
-        "eve-online-saxrat",
-        "eve-online-warp-to-0-autopilot",
-        "eve-online-wingus",
-    )
+    for app in ALL_APPS
+    if app not in WITHOUT_ABORT_UNDOCK_MATCHING
 ]
 
 
@@ -117,6 +129,15 @@ class AbortUndockIsRecognised(unittest.TestCase):
         start = runner.index("labelUndoesStepInProgress label =")
         self.assertIn('"abort"', collapse(runner[start:start + 200]),
                       "the mission runner tests the same word for the same label")
+
+    def test_the_mining_bot_is_excluded_because_it_genuinely_lacks_the_fix(self):
+        path = os.path.join(
+            APPS, "eve-online-mining-bot", "EveOnline", "ParseUserInterface.elm")
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertNotIn("buttonUndoingTheUndock", source)
+        self.assertIn(
+            'undockButton = buttonFromDisplayText "undock"', collapse(source))
 
 
 if __name__ == "__main__":

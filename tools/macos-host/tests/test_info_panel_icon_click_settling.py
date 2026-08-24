@@ -41,10 +41,11 @@ and the step-count wording ("I clicked this icon 3 step(s) ago") is gone from
 the log with the branch that printed it. `test_info_panel_repair_deadlock.py`
 carries that change's own reasoning and its fold over the alternation.
 
-**The change lands in `EveOnline/BotFrameworkSeparatingMemory.elm` in all six
-vendored copies**, but the six copies are not one file with six names -- they
-have already diverged into three shapes, and the fix is written once per shape
-rather than pasted six times:
+**The change lands in `EveOnline/BotFrameworkSeparatingMemory.elm` in five of
+the six vendored copies** (`eve-online-mining-bot` is the exception -- see
+below), and those five are not one file with five names -- they have already
+diverged into three shapes, and the fix is written once per shape rather than
+pasted five times:
 
   - `eve-online-mission-runner` and `eve-online-saxrat` (byte-identical before
     this change) carry `previousStepsEffects : List (List EffectOnWindowStruct)`
@@ -54,13 +55,22 @@ rather than pasted six times:
   - `eve-online-combat-anomaly-bot` and `eve-online-warp-to-0-autopilot` carry
     the same `previousStepsEffects` shape and the same settling machinery, on an
     older revision of this function's "icon missing" branch (left untouched).
-  - `eve-online-mining-bot` and `eve-online-wingus` are on the 2023 host
-    interface, carry only `previousStepEffects : List EffectOnWindowStructure`
-    (one step, not several) and have never had the module-button settling
-    pattern ported into this file at all. The fix there is `doEffectsClickUIElement`
-    asked directly as a `Bool` against that one step, which is the same rule with
-    one step of history instead of five -- all this shape's `StepDecisionContext`
-    carries.
+  - `eve-online-wingus` is on the 2023 host interface, carries only
+    `previousStepEffects : List EffectOnWindowStructure` (one step, not
+    several) and has never had the module-button settling pattern ported into
+    this file at all. The fix there is `doEffectsClickUIElement` asked
+    directly as a `Bool` against that one step, which is the same rule with
+    one step of history instead of five -- all this shape's
+    `StepDecisionContext` carries.
+
+`eve-online-mining-bot` was on this same 2023-interface shape until its whole
+tree was replaced with Viir's current upstream (2024_10_19 interface, a
+materially newer generation) -- that tree carries none of #227/#297 at all,
+not even the older single-step form: `ensureInfoPanelLocationInfoIsExpanded`
+there takes only a reading, with no settling guard of any kind ahead of its
+click. `eve-online-mining-bot` is therefore excluded from every case in this
+file rather than assigned to a shape, and porting #227/#297 into the newer
+base is tracked as follow-up work, not done here.
 
 Confirmed by mutation: reverting the mission runner's guard to the pre-fix
 `case mouseClickOnUIElement ... of Err _ -> ... Ok clickEffect ->
@@ -115,9 +125,6 @@ COMBAT_ANOMALY_DIR = os.path.join(
 WARP_TO_0_DIR = os.path.join(
     REPO_DIR, "implement", "applications", "eve-online",
     "eve-online-warp-to-0-autopilot")
-MINING_BOT_DIR = os.path.join(
-    REPO_DIR, "implement", "applications", "eve-online",
-    "eve-online-mining-bot")
 WINGUS_DIR = os.path.join(
     REPO_DIR, "implement", "applications", "eve-online", "eve-online-wingus")
 
@@ -130,8 +137,6 @@ SIX_VENDORED_FRAMEWORKS = {
         COMBAT_ANOMALY_DIR, "EveOnline", "BotFrameworkSeparatingMemory.elm"),
     "warp-to-0 autopilot": os.path.join(
         WARP_TO_0_DIR, "EveOnline", "BotFrameworkSeparatingMemory.elm"),
-    "mining bot": os.path.join(
-        MINING_BOT_DIR, "EveOnline", "BotFrameworkSeparatingMemory.elm"),
     "wingus": os.path.join(
         WINGUS_DIR, "EveOnline", "BotFrameworkSeparatingMemory.elm"),
 }
@@ -340,7 +345,6 @@ class GroupCBothAppsRepl:
     @classmethod
     def setUpClass(cls):
         cls.repls = {
-            "mining bot": open_repl(GroupCRepl, app_dir=MINING_BOT_DIR),
             "wingus": open_repl(GroupCRepl, app_dir=WINGUS_DIR),
         }
 
@@ -357,12 +361,15 @@ class GroupCBothAppsRepl:
 
 class TheGuardHoldsOnTheOlderHostInterfaceToo(
         GroupCBothAppsRepl, unittest.TestCase):
-    """`eve-online-mining-bot` and `eve-online-wingus`.
+    """`eve-online-wingus`.
 
-    Neither has ever had the module-button settling pattern in this file, and
+    It has never had the module-button settling pattern in this file, and
     `StepDecisionContext` here carries only the immediately previous step's
     effects -- so the guard is the same rule with one step of history rather
-    than five, which is all this shape has to give it.
+    than five, which is all this shape has to give it. `eve-online-mining-bot`
+    used to share this shape; its tree was replaced with Viir's current
+    upstream and it no longer carries this file's settling-guard mechanism at
+    all, in any shape -- see the exclusion note near `SIX_VENDORED_FRAMEWORKS`.
     """
 
     def test_no_previous_click_means_click_now(self):
@@ -425,7 +432,6 @@ class EachCopyNamesItsOwnSettlingCheckTest(unittest.TestCase):
         "saxrat": "doEffectsClickUIElement",
         "combat anomaly bot": "doEffectsClickUIElement",
         "warp-to-0 autopilot": "doEffectsClickUIElement",
-        "mining bot": "doEffectsClickUIElement",
         "wingus": "doEffectsClickUIElement",
     }
 
@@ -448,13 +454,15 @@ class BotElmThreadsThePreviousStepsEffectsThroughTest(unittest.TestCase):
         "mission runner": os.path.join(MISSION_RUNNER_DIR, "Bot.elm"),
         "saxrat": os.path.join(SAXRAT_DIR, "Bot.elm"),
         "combat anomaly bot": os.path.join(COMBAT_ANOMALY_DIR, "Bot.elm"),
-        "mining bot": os.path.join(MINING_BOT_DIR, "Bot.elm"),
         "wingus": os.path.join(WINGUS_DIR, "Bot.elm"),
     }
 
     def test_generalSetupInUserInterface_calls_it_with_an_argument(self):
         # `warp-to-0-autopilot` never calls `ensureInfoPanelLocationInfoIsExpanded`
         # at all, so it is not in `APPS` -- there is no caller side to check.
+        # Neither does `eve-online-mining-bot`: its tree was replaced with
+        # Viir's current upstream, which has no settling-guard mechanism for
+        # this function to call at all.
         for app, path in self.APPS.items():
             block = collapsed(body_of(source_of(path), "generalSetupInUserInterface"))
             self.assertIn(

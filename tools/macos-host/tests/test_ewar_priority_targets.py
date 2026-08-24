@@ -701,11 +701,31 @@ class TheVendoredParserPolicy(unittest.TestCase):
     not reach it.
     """
 
+    # `eve-online-mining-bot`'s tree was replaced with Viir's current upstream
+    # (see CLAUDE.md's Architecture section), which predates #231 entirely --
+    # its `OverviewWindowEntryCommonIndications` carries only `targeting`,
+    # `targetedByMe`, `isJammingMe` and `isWarpDisruptingMe`, neither of the
+    # two fields this file is about. Excluded from every case below rather
+    # than assigned a shape; porting #231 into the newer base is follow-up
+    # work, not done here.
+    WITHOUT_EWAR_WIDENING = {"eve-online-mining-bot"}
+
     def parsers(self):
-        paths = sorted(glob.glob(os.path.join(
-            EVE_ONLINE_APPS, "*", "EveOnline", "ParseUserInterface.elm")))
-        self.assertEqual(len(paths), 6, paths)
+        paths = sorted(
+            path for path in glob.glob(os.path.join(
+                EVE_ONLINE_APPS, "*", "EveOnline", "ParseUserInterface.elm"))
+            if os.path.basename(os.path.dirname(os.path.dirname(path)))
+            not in self.WITHOUT_EWAR_WIDENING)
+        self.assertEqual(len(paths), 5, paths)
         return {path: source_of(path) for path in paths}
+
+    def test_the_mining_bot_is_excluded_because_it_genuinely_lacks_the_fields(self):
+        path = os.path.join(
+            EVE_ONLINE_APPS, "eve-online-mining-bot", "EveOnline",
+            "ParseUserInterface.elm")
+        source = source_of(path)
+        self.assertNotIn("isTrackingDisruptingMe", source)
+        self.assertNotIn("isSensorDampeningMe", source)
 
     @staticmethod
     def alias_block(source):

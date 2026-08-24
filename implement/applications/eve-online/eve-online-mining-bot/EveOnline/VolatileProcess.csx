@@ -5,8 +5,8 @@
 #r "sha256:B9B4E633EA6C728BAD5F7CBBEF7F8B842F7E10181731DBE5EC3CD995A6F60287"
 #r "sha256:81110D44256397F0F3C572A20CA94BB4C669E5DE89F9348ABAD263FBD81C54B9"
 
-// https://github.com/Arcitectus/Sanderling/releases/download/v2023-01-03/read-memory-64-bit-separate-assemblies-697d97fafeca8ad47bed81464ee9d97624da5c56-win10-x64.zip
-#r "sha256:9c6dac74d50062c63d9df5e6d5c23a4da6ae64cf1898138cb0b5982de2869ce7"
+// https://github.com/Arcitectus/Sanderling/releases/download/v2025-10-24/read-memory-64-bit-separate-assemblies-594a2339a63d7e946872a77c0d5772acdf75bd98-win-x64.zip
+#r "sha256:b1cb3048db6b5be1016c3ef97f7054a99643a2e8376654b4964aada0669bc472"
 
 #r "mscorlib"
 #r "netstandard"
@@ -22,7 +22,8 @@
 #r "System.Security.Cryptography.Primitives"
 
 //  "System.Drawing.Common"
-#r "sha256:C5333AA60281006DFCFBBC0BC04C217C581EFF886890565E994900FB60448B02"
+// https://www.nuget.org/api/v2/package/System.Drawing.Common/9.0.4
+#r "sha256:144bc126a785601c27754cde054c2423179ebca3f734dac2b0e98738f3b59bee"
 
 //  "System.Drawing.Primitives"
 #r "sha256:CA24032E6D39C44A01D316498E18FE9A568D59C6009842029BC129AA6B989BCD"
@@ -36,13 +37,40 @@ using System.Runtime.InteropServices;
 
 
 int readingFromGameCount = 0;
-var generalStopwatch = System.Diagnostics.Stopwatch.StartNew();
+static var generalStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
 var readingFromGameHistory = new Queue<ReadingFromGameClient>();
 
 
 string ToStringBase16(byte[] array) => BitConverter.ToString(array).Replace("-", "");
 
+
+var searchUIRootAddressTasks = new Dictionary<int, SearchUIRootAddressTask>();
+
+class SearchUIRootAddressTask
+{
+    public Request.SearchUIRootAddressStructure request;
+
+    public TimeSpan beginTime;
+
+    public Response.SearchUIRootAddressCompletedStruct completed;
+
+    public SearchUIRootAddressTask(Request.SearchUIRootAddressStructure request)
+    {
+        this.request = request;
+        beginTime = generalStopwatch.Elapsed;
+
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            var uiTreeRootAddress = FindUIRootAddressFromProcessId(request.processId);
+
+            completed = new Response.SearchUIRootAddressCompletedStruct
+            {
+                uiRootAddress = uiTreeRootAddress?.ToString()
+            };
+        });
+    }
+}
 
 struct ReadingFromGameClient
 {
@@ -59,8 +87,6 @@ class Request
 
     public ReadFromWindowStructure ReadFromWindow;
 
-    public TaskOnWindow<EffectSequenceElement[]> EffectSequenceOnWindow;
-
     public class SearchUIRootAddressStructure
     {
         public int processId;
@@ -72,61 +98,17 @@ class Request
 
         public ulong uiRootAddress;
     }
-
-    public class TaskOnWindow<Task>
-    {
-        public string windowId;
-
-        public bool bringWindowToForeground;
-
-        public Task task;
-    }
-
-    public class EffectSequenceElement
-    {
-        public EffectOnWindowStructure effect;
-
-        public int? delayMilliseconds;
-    }
-
-    public class EffectOnWindowStructure
-    {
-        public MouseMoveToStructure MouseMoveTo;
-
-        public KeyboardKey KeyDown;
-
-        public KeyboardKey KeyUp;
-    }
-
-    public class KeyboardKey
-    {
-        public int virtualKeyCode;
-    }
-
-    public class MouseMoveToStructure
-    {
-        public Location2d location;
-    }
-
-    public enum MouseButton
-    {
-        left, right,
-    }
 }
 
 class Response
 {
     public GameClientProcessSummaryStruct[] ListGameClientProcessesResponse;
 
-    public SearchUIRootAddressResultStructure SearchUIRootAddressResult;
+    public SearchUIRootAddressResponseStruct SearchUIRootAddressResponse;
 
     public ReadFromWindowResultStructure ReadFromWindowResult;
 
     public string FailedToBringWindowToFront;
-
-    public object CompletedEffectSequenceOnWindow;
-
-    public object CompletedOtherEffect;
 
     public class GameClientProcessSummaryStruct
     {
@@ -139,10 +121,31 @@ class Response
         public int mainWindowZIndex;
     }
 
-    public class SearchUIRootAddressResultStructure
+    public class SearchUIRootAddressResponseStruct
     {
         public int processId;
 
+        public SearchUIRootAddressStage stage;
+    }
+
+
+    public class SearchUIRootAddressStage
+    {
+        public SearchUIRootAddressInProgressStruct SearchUIRootAddressInProgress;
+
+        public SearchUIRootAddressCompletedStruct SearchUIRootAddressCompleted;
+    }
+
+    public class SearchUIRootAddressInProgressStruct
+    {
+        public long searchBeginTimeMilliseconds;
+
+        public long currentTimeMilliseconds;
+    }
+
+
+    public class SearchUIRootAddressCompletedStruct
+    {
         public string uiRootAddress;
     }
 
@@ -194,14 +197,21 @@ Response request(Request request)
 
     if (request.SearchUIRootAddress != null)
     {
-        var uiTreeRootAddress = FindUIRootAddressFromProcessId(request.SearchUIRootAddress.processId);
+        searchUIRootAddressTasks.TryGetValue(request.SearchUIRootAddress.processId, out var searchTask);
+
+        if (searchTask is null)
+        {
+            searchTask = new SearchUIRootAddressTask(request.SearchUIRootAddress);
+
+            searchUIRootAddressTasks[request.SearchUIRootAddress.processId] = searchTask;
+        }
 
         return new Response
         {
-            SearchUIRootAddressResult = new Response.SearchUIRootAddressResultStructure
+            SearchUIRootAddressResponse = new Response.SearchUIRootAddressResponseStruct
             {
                 processId = request.SearchUIRootAddress.processId,
-                uiRootAddress = uiTreeRootAddress?.ToString(),
+                stage = SearchUIRootAddressTaskAsResponseStage(searchTask)
             },
         };
     }
@@ -252,22 +262,6 @@ Response request(Request request)
             }
         }
 
-        {
-            /*
-            Maybe taking screenshots needs the window to be not occluded by other windows.
-            We can review this later.
-            */
-            var setForegroundWindowError = SetForegroundWindowInWindows.TrySetForegroundWindow(windowHandle);
-
-            if (setForegroundWindowError != null)
-            {
-                return new Response
-                {
-                    FailedToBringWindowToFront = setForegroundWindowError,
-                };
-            }
-        }
-
         var historyEntry = new ReadingFromGameClient
         {
             windowHandle = windowHandle,
@@ -296,42 +290,28 @@ Response request(Request request)
         };
     }
 
-    if (request?.EffectSequenceOnWindow?.task != null)
-    {
-        var windowHandle = new IntPtr(long.Parse(request.EffectSequenceOnWindow.windowId));
-
-        if (request.EffectSequenceOnWindow.bringWindowToForeground)
-        {
-            var setForegroundWindowError = SetForegroundWindowInWindows.TrySetForegroundWindow(windowHandle);
-
-            if (setForegroundWindowError != null)
-            {
-                return new Response
-                {
-                    FailedToBringWindowToFront = setForegroundWindowError,
-                };
-            }
-        }
-
-        foreach (var sequenceElement in request.EffectSequenceOnWindow.task)
-        {
-            if (sequenceElement?.effect != null)
-                ExecuteEffectOnWindow(sequenceElement.effect, windowHandle, request.EffectSequenceOnWindow.bringWindowToForeground);
-
-            if (sequenceElement?.delayMilliseconds != null)
-                System.Threading.Thread.Sleep(sequenceElement.delayMilliseconds.Value);
-        }
-
-        return new Response
-        {
-            CompletedEffectSequenceOnWindow = new object(),
-        };
-    }
-
     return null;
 }
 
-ulong? FindUIRootAddressFromProcessId(int processId)
+static Response.SearchUIRootAddressStage SearchUIRootAddressTaskAsResponseStage(SearchUIRootAddressTask task)
+{
+    return task.completed switch
+    {
+        Response.SearchUIRootAddressCompletedStruct completed =>
+        new Response.SearchUIRootAddressStage { SearchUIRootAddressCompleted = completed },
+
+        _ => new Response.SearchUIRootAddressStage
+        {
+            SearchUIRootAddressInProgress = new Response.SearchUIRootAddressInProgressStruct
+            {
+                searchBeginTimeMilliseconds = (long)task.beginTime.TotalMilliseconds,
+                currentTimeMilliseconds = generalStopwatch.ElapsedMilliseconds,
+            }
+        }
+    };
+}
+
+static ulong? FindUIRootAddressFromProcessId(int processId)
 {
     var candidatesAddresses =
         read_memory_64_bit.EveOnline64.EnumeratePossibleAddressesForUIRootObjectsFromProcessId(processId);
@@ -349,82 +329,6 @@ ulong? FindUIRootAddressFromProcessId(int processId)
             .FirstOrDefault()
             ?.pythonObjectAddress;
     }
-}
-
-void ExecuteEffectOnWindow(
-    Request.EffectOnWindowStructure effectOnWindow,
-    IntPtr windowHandle,
-    bool bringWindowToForeground)
-{
-    if (bringWindowToForeground)
-        BotEngine.WinApi.User32.SetForegroundWindow(windowHandle);
-
-    if (effectOnWindow?.MouseMoveTo != null)
-    {
-        //  Build motion description based on https://github.com/Arcitectus/Sanderling/blob/ada11c9f8df2367976a6bcc53efbe9917107bfa7/src/Sanderling/Sanderling/Motor/Extension.cs#L24-L131
-
-        var mousePosition = new Bib3.Geometrik.Vektor2DInt(
-            effectOnWindow.MouseMoveTo.location.x,
-            effectOnWindow.MouseMoveTo.location.y);
-
-        var mouseButtons = new BotEngine.Motor.MouseButtonIdEnum[] { };
-
-        var windowMotor = new Sanderling.Motor.WindowMotor(windowHandle);
-
-        var motionSequence = new BotEngine.Motor.Motion[]{
-            new BotEngine.Motor.Motion(
-                mousePosition: mousePosition,
-                mouseButtonDown: mouseButtons,
-                windowToForeground: bringWindowToForeground),
-            new BotEngine.Motor.Motion(
-                mousePosition: mousePosition,
-                mouseButtonUp: mouseButtons,
-                windowToForeground: bringWindowToForeground),
-        };
-
-        windowMotor.ActSequenceMotion(motionSequence);
-    }
-
-    if (effectOnWindow?.KeyDown != null)
-    {
-        var virtualKeyCode = (WindowsInput.Native.VirtualKeyCode)effectOnWindow.KeyDown.virtualKeyCode;
-
-        (MouseActionForKeyUpOrDown(keyCode: virtualKeyCode, buttonUp: false)
-        ??
-        (() => new WindowsInput.InputSimulator().Keyboard.KeyDown(virtualKeyCode)))();
-    }
-
-    if (effectOnWindow?.KeyUp != null)
-    {
-        var virtualKeyCode = (WindowsInput.Native.VirtualKeyCode)effectOnWindow.KeyUp.virtualKeyCode;
-
-        (MouseActionForKeyUpOrDown(keyCode: virtualKeyCode, buttonUp: true)
-        ??
-        (() => new WindowsInput.InputSimulator().Keyboard.KeyUp(virtualKeyCode)))();
-    }
-}
-
-static System.Action MouseActionForKeyUpOrDown(WindowsInput.Native.VirtualKeyCode keyCode, bool buttonUp)
-{
-    WindowsInput.IMouseSimulator mouseSimulator() => new WindowsInput.InputSimulator().Mouse;
-
-    var method = keyCode switch
-    {
-        WindowsInput.Native.VirtualKeyCode.LBUTTON =>
-            buttonUp ?
-            (System.Func<WindowsInput.IMouseSimulator>)mouseSimulator().LeftButtonUp
-            : mouseSimulator().LeftButtonDown,
-        WindowsInput.Native.VirtualKeyCode.RBUTTON =>
-            buttonUp ?
-            (System.Func<WindowsInput.IMouseSimulator>)mouseSimulator().RightButtonUp
-            : mouseSimulator().RightButtonDown,
-        _ => null
-    };
-
-    if (method != null)
-        return () => method();
-
-    return null;
 }
 
 string SerializeToJsonForBot<T>(T value) =>
@@ -519,55 +423,6 @@ static public class WinApi
 
     [DllImport("user32.dll", SetLastError = true)]
     static public extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-}
-
-static public class SetForegroundWindowInWindows
-{
-    static public int AltKeyPlusSetForegroundWindowWaitTimeMilliseconds = 60;
-
-    /// <summary>
-    /// </summary>
-    /// <param name="windowHandle"></param>
-    /// <returns>null in case of success</returns>
-    static public string TrySetForegroundWindow(IntPtr windowHandle)
-    {
-        try
-        {
-            /*
-            * For the conditions for `SetForegroundWindow` to work, see https://docs.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow
-            * */
-            BotEngine.WinApi.User32.SetForegroundWindow(windowHandle);
-
-            if (BotEngine.WinApi.User32.GetForegroundWindow() == windowHandle)
-                return null;
-
-            var windowsInZOrder = WinApi.ListWindowHandlesInZOrder();
-
-            var windowIndex = windowsInZOrder.ToList().IndexOf(windowHandle);
-
-            if (windowIndex < 0)
-                return "Did not find window for this handle";
-
-            {
-                var simulator = new WindowsInput.InputSimulator();
-
-                simulator.Keyboard.KeyDown(WindowsInput.Native.VirtualKeyCode.MENU);
-                BotEngine.WinApi.User32.SetForegroundWindow(windowHandle);
-                simulator.Keyboard.KeyUp(WindowsInput.Native.VirtualKeyCode.MENU);
-
-                System.Threading.Thread.Sleep(AltKeyPlusSetForegroundWindowWaitTimeMilliseconds);
-
-                if (BotEngine.WinApi.User32.GetForegroundWindow() == windowHandle)
-                    return null;
-
-                return "Alt key plus SetForegroundWindow approach was not successful.";
-            }
-        }
-        catch (Exception e)
-        {
-            return "Exception: " + e.ToString();
-        }
-    }
 }
 
 struct Rectangle
