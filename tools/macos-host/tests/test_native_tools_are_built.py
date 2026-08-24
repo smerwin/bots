@@ -27,6 +27,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -188,10 +189,14 @@ class TheStalenessRuleIsTheRightWayRound(unittest.TestCase):
         timestamps a build leaves behind, which a source read cannot settle.
         Skipped where the tools cannot be built at all.
         """
+        if sys.platform != "darwin":
+            self.skipTest("not macOS: the native tools are Darwin-only")
         first = subprocess.run([BUILD_TOOLS], capture_output=True, text=True)
-        if first.returncode != 0:
-            self.skipTest("the native tools do not build here: %s"
-                          % first.stderr.strip()[:200])
+        self.assertEqual(
+            first.returncode, 0,
+            "the native tools do not build on this macOS machine, which is a "
+            "breakage rather than an absent prerequisite: %s"
+            % first.stderr.strip()[:400])
         second = subprocess.run([BUILD_TOOLS], capture_output=True, text=True)
         self.assertEqual(second.returncode, 0)
         self.assertNotIn(
