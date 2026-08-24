@@ -3,6 +3,7 @@
 #
 #   ./run_saxrat.sh <run number> [minutes]
 #   EVE_SHIP=dragoon ./run_saxrat.sh <run number> [minutes]
+#   EVE_SHIP=slicer  ./run_saxrat.sh <run number> [minutes]
 #
 # The macOS launcher next door (tools/macos-host/run_saxrat.sh) is the model.
 # What is different here is entirely the platform, and all of it is a trap that
@@ -129,15 +130,17 @@ dragoon)
 # fights -- the same rat class that killed the Coercer -- peaking at 925, which
 # is the evidence that 1200 is placed rather than merely lower.
 #
-# `targeting-range=40000` is the operator's figure.  Note the client stated 45
-# km in its own words during run 50 and the learned `proven` bound ratcheted to
-# 50 km, so this setting is the narrower of the two and is what governs.
+# `targeting-range=36000` is the operator's figure, tightened from the 40000
+# run 50 flew under.  The client stated 45 km in its own words during run 50
+# and the learned `proven` bound ratcheted to 50 km, so this setting is still
+# the narrowest of the three and is what governs -- nothing here re-derives it
+# from evidence, it is a deliberate tightening for this run.
 #
 # Orbit rather than keep-at-range: drones apply their damage regardless of the
 # ship's own transversal, so the ship orbits to stay hard to hit.
 HULL="anomaly-name=Sansha*
 home-system=Amarr
-targeting-range=40000
+targeting-range=36000
 run-away-armor-hitpoints-threshold-percent=70
 run-away-incoming-damage-threshold=1200
 keep-at-range=no
@@ -184,8 +187,37 @@ accept-fleet-invite-from=Gal Bistot
 follow-fleet-broadcast-from=Gal Bistot"
 ;;
 
+slicer)
+# Slicer, Kara Kernite's sniper frigate. First run under this profile -- there
+# is no combat history yet to derive `run-away-incoming-damage-threshold` from,
+# unlike oni and dragoon. 1200 is the operator's own figure for this hull's
+# buffer, not something measured here; watch the first run's `dmg N/1200` and
+# tighten or loosen it once real damage windows exist.
+#
+# **No ammo settings at all**, deliberately, same shape as dragoon and for a
+# different reason: this is a fixed long-range fit on Aurora crystals only, so
+# there is no second charge to swap to. Naming one charge with none to swap
+# between would arm a swap that can never complete. Aurora is loaded by hand
+# before the run; the bot never touches ammo here.
+#
+# Orbit rather than keep-at-range, matching the sniper doctrine: at
+# targeting-range=56000 the ship holds range on the orbit itself rather than
+# needing a separate keep-at-range command.
+HULL="anomaly-name=Sansha*
+home-system=Amarr
+targeting-range=56000
+run-away-armor-hitpoints-threshold-percent=70
+run-away-incoming-damage-threshold=1200
+keep-at-range=no
+orbit-in-combat=yes
+warp-at=30
+hide-when-neutral-in-local=no
+accept-fleet-invite-from=Olivia Ochre
+follow-fleet-broadcast-from=Olivia Ochre"
+;;
+
 *)
-echo "unknown EVE_SHIP '$SHIP' -- known profiles: oni dragoon coercer"
+echo "unknown EVE_SHIP '$SHIP' -- known profiles: oni dragoon coercer slicer"
 exit 1
 ;;
 esac
