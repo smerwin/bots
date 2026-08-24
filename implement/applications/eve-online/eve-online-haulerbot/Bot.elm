@@ -55,6 +55,15 @@
      default) rather than driving the in-game search bar (`no`). See
      `eve-online-mission-runner`'s own use of this same setting.
 
+      When using more than one setting, start a new line for each setting in the
+      text input field. Here is an example of a complete settings string:
+
+   source-station=Amarr VIII (Oris) - Emperor Family Academy
+   destination-station=Ashab VII - Moon 1 - Imperial Armaments Factory
+   include-item-pattern=Veldspar
+   ore-hold-item-pattern=Veldspar
+   route-by-esi=yes
+
 -}
 {-
    catalog-tags:eve-online,hauling,logistics,industry

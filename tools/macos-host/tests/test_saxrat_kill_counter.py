@@ -50,7 +50,7 @@ import re
 import sys
 import unittest
 
-from prerequisites import open_repl
+from prerequisites import open_repl, vendored_parser_count
 from test_saxrat_ported_guards import (
     SAXRAT_BOT_ELM, SaxratRepl, body_of, collapsed, source_of)
 
@@ -380,7 +380,9 @@ class TheVendoredParserCopiesTest(unittest.TestCase):
 
     def blocks(self):
         paths = kill_parser_paths()
-        self.assertEqual(len(paths), 5, paths)
+        self.assertEqual(
+            len(paths),
+            vendored_parser_count(paths) - len(WITHOUT_KILLS), paths)
         out = {}
         for path in paths:
             text = source_of(path)

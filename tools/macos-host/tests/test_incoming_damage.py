@@ -34,6 +34,8 @@ import sys
 import tempfile
 import unittest
 
+from prerequisites import vendored_parser_count
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
 REPO_DIR = os.path.dirname(os.path.dirname(MACOS_HOST_DIR))
@@ -283,7 +285,10 @@ class VendoredParserTest(unittest.TestCase):
         return source[start:source.index("\n\n\n", end)]
 
     def test_every_copy_has_it(self):
-        self.assertEqual(len(self.sources), 5, sorted(self.sources))
+        self.assertEqual(
+            len(self.sources),
+            vendored_parser_count(self.sources) - len(WITHOUT_INCOMING_DAMAGE),
+            sorted(self.sources))
         for path, source in self.sources.items():
             self.assertIn("    , incomingDamageSinceLastReading : Maybe IncomingDamage\n",
                           source, path)

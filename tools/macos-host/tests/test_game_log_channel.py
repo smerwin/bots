@@ -51,6 +51,8 @@ import sys
 import tempfile
 import unittest
 
+from prerequisites import vendored_parser_count
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
 REPO_DIR = os.path.dirname(os.path.dirname(MACOS_HOST_DIR))
@@ -959,7 +961,8 @@ class VendoredParserTest(unittest.TestCase):
         # Six vendored parsers total -- a sixth quietly appearing or
         # disappearing from the tree is itself worth catching, independent of
         # which ones carry the game-log integration.
-        self.assertEqual(len(self.paths), 6, self.paths)
+        self.assertEqual(len(self.paths),
+                         vendored_parser_count(self.paths), self.paths)
         self.assertEqual(
             {self.app_of(p) for p in self.paths} - self.WITHOUT_GAME_LOG,
             {self.app_of(p) for p in self.sources_with_game_log},
