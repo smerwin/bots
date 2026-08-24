@@ -60,6 +60,21 @@ EXPECTED = [
      "those cases exist for is checked on this runner too, in a header that "
      "deliberately depends on nothing, so the skip does not take the rule "
      "with it."),
+    (r"^not macOS: the native tools are Darwin-only$",
+     "the case that builds the six C tools twice to prove the build is "
+     "idempotent. They are Darwin-only -- probe.c reaches for mach/mach.h -- "
+     "so the Linux runner cannot build them at all. **Gated on the platform "
+     "rather than on the build failing**, which matters: the earlier shape "
+     "skipped whenever the compiler returned non-zero, so a genuine breakage "
+     "on a macOS machine would have skipped exactly like an absent toolchain "
+     "and reported nothing. On macOS a failed build is now a failed case."),
+    (r"^no native tool has been built here$",
+     "the invariant that no built binary is older than its source, where "
+     "there is nothing built to check it against. CI has no binaries and "
+     "cannot make any, and neither has a fresh checkout before its first "
+     "launch -- so this is absent evidence in the same sense the "
+     "corpus-reading skips are, and the rule it guards is still asserted by "
+     "the cases that read the build script itself."),
 ]
 
 # Reasons that are never acceptable, with what each one means. Anything not in

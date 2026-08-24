@@ -83,6 +83,18 @@ of them fighting over the cursor produces chaos. Set the game client up first
     esac
 done
 
+# Rebuild any native tool whose source has moved since it was last compiled.
+# The Elm bot is recompiled on every run; the C tools are gitignored build
+# output that nothing refreshed, so a pulled fix to one of them could sit
+# unbuilt indefinitely -- see build_tools.sh for the day that cost every typed
+# character. Before the guard below, so a build failure leaves the running bot
+# alone instead of killing it and then refusing to start.
+"${SCRIPT_DIR}/build_tools.sh" || {
+    echo "run_saxrat.sh: a native tool failed to build -- refusing to start." >&2
+    echo "  The old binary is still in place, and running it is what this check exists to stop." >&2
+    exit 1
+}
+
 # Guard: one bot at a time. A stale run left alive from a previous session
 # would still be clicking/typing against the game client and fighting this
 # one for control, so kill any previous run_saxrat.sh wrapper (matched by
