@@ -68,6 +68,96 @@ class Report:
             print("  [--] %-32s %s" % (label, why))
 
 
+def _node_region(node, x, y):
+    """A node's absolute screen rectangle as `(x0, y0, x1, y1)`, or `None` if
+    it carries no size of its own.
+
+    `tree_walker` emits no `totalDisplayRegion` -- see `eve_repl.py`'s own
+    header -- so size lives in `dictEntriesOfInterest` as
+    `_displayWidth`/`_displayHeight`, while `x, y` (from `eve_read.walk`) are
+    already the accumulated absolute position.
+    """
+    entries = (node.get("dictEntriesOfInterest") or {}) if node else {}
+    width = entries.get("_displayWidth")
+    height = entries.get("_displayHeight")
+    if not width or not height:
+        return None
+    return (x, y, x + width, y + height)
+
+
+def _regions_overlap(a, b):
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    return ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1
+
+
+# `EveOnline.ParseUserInterface.pythonObjectTypesKnownToOccludeFollowingElements`
+# already ships in every bot -- built from real observed occlusions, and it is
+# where `ChatWindowStack`, #318's actual occluder, comes from. Unioned with any
+# node whose own type name says it is a window, rather than used alone: the
+# curated set is what caught this bug's occluder, and the suffix test is what
+# stops this being one more detector built against a single specific shape,
+# which is #318's own diagnosis of the check it replaces. Over-including here
+# costs nothing -- this only reports, never acts.
+KNOWN_OCCLUDING_TYPES = frozenset({
+    "SortHeaders", "ContextMenu", "OverviewWindow", "DronesWindow",
+    "SelectedItemWnd", "InventoryPrimary", "ChatWindowStack",
+})
+
+
+def _is_window_like(type_name):
+    return (type_name in KNOWN_OCCLUDING_TYPES
+            or type_name.endswith("Wnd") or type_name.endswith("Window"))
+
+
+def windows_over_undock_button(nodes):
+    """Every displayed, window-like node whose rectangle overlaps the undock
+    button's own -- a real rectangle-overlap test rather than one specific
+    occluder shape (#318).
+
+    Confirmed live: the Local chat window (`ChatWindowStack`) sat over the
+    station lobby's `UndockButton` at almost exactly its own rectangle, down to
+    their `Minimize` controls sharing one pixel, while carrying no
+    `CloseButtonIcon` in the narrow top-right band the check this replaces
+    looked at -- so it read clean for the full ~65 minutes the bot clicked into
+    the chat window instead of the button underneath it.
+
+    Needs no z-order, for the reason `FINDINGS.md`'s locked-target-bar section
+    gives: flagging every overlapping window's rectangle whether or not it is
+    on top only ever over-reports, and over-reporting here costs nothing since
+    this check only prints a remedy -- it posts no input and fixes nothing
+    itself.
+
+    Returns `None` if the undock button's own region cannot be resolved at all
+    -- no `UndockButton` node and no `LobbyWnd` to fall back to, or neither
+    carries a size -- which is distinct from an empty list, meaning the check
+    ran and found nothing covering it.
+    """
+    button = next((t for t in nodes
+                   if t[0] and t[0].get("pythonObjectTypeName") == "UndockButton"), None)
+    lobby = next((t for t in nodes
+                  if t[0] and t[0].get("pythonObjectTypeName") == "LobbyWnd"), None)
+
+    button_region = _node_region(*button) if button else None
+    if button_region is None and lobby is not None:
+        button_region = _node_region(*lobby)
+    if button_region is None:
+        return None
+
+    exclude_ids = {id(t[0]) for t in (button, lobby) if t is not None}
+    covering = []
+    for node, x, y in nodes:
+        if not node or id(node) in exclude_ids:
+            continue
+        type_name = node.get("pythonObjectTypeName", "")
+        if not _is_window_like(type_name):
+            continue
+        region = _node_region(node, x, y)
+        if region and _regions_overlap(region, button_region):
+            covering.append((type_name, region))
+    return covering
+
+
 def panels_of(eve, nodes):
     container = next((n for n, x, y in nodes
                       if n and n.get("pythonObjectTypeName") == "InfoPanelContainer"), None)
@@ -118,12 +208,17 @@ def main():
                      "Alt+P, then re-run this; it is a space window")
 
     if docked:
-        covering = [(n, x, y) for n, x, y in nodes
-                    if n and (n.get("dictEntriesOfInterest", {}) or {}).get("_name") == "CloseButtonIcon"
-                    and x > 1500 and y < 70]
-        report.check("nothing over the undock button", not covering,
-                     "%d closable window(s) top-right" % len(covering),
-                     "close them; the bot cannot tell an occluded button from a slow undock")
+        covering = windows_over_undock_button(nodes)
+        if covering is None:
+            report.skip("nothing over the undock button",
+                        "no UndockButton or LobbyWnd node with a size in this "
+                        "reading -- cannot check occlusion")
+        else:
+            report.check(
+                "nothing over the undock button", not covering,
+                ", ".join(sorted({type_name for type_name, _ in covering})),
+                "close the window(s) named above; the bot cannot tell an "
+                "occluded button from a slow undock")
 
     menus = sum(1 for n, x, y in nodes
                 if n and "ContextMenu" in n.get("pythonObjectTypeName", ""))
