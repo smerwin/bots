@@ -2433,8 +2433,15 @@ statusTextFromState context =
     in
     [ [ describePerformance ]
     , describeCurrentReading
+    , -- Last, and on its own line, matching the mission runner's own
+      -- placement: the host prints the status text inline after the tick
+      -- marker, so the first line is what an operator reads as "what is
+      -- this reading about", and that has to stay the mission rather than
+      -- the wind-down bookkeeping.
+      [ hostDirectiveExtendSession context ]
     ]
         |> List.concat
+        |> List.filter (String.isEmpty >> not)
         |> String.join "\n"
 
 
@@ -3893,10 +3900,15 @@ wingmanDecisionRootBeforeApplyingSettings context =
         |> Maybe.withDefault
             (branchDependingOnDockedOrInSpace
                 { ifDocked =
-                    describeBranch "Undock."
-                        (undockUsingStationWindow context
-                            { ifCannotReachButton = askForHelpToGetUnstuck }
-                        )
+                    case dockedSessionIsEnding context of
+                        Just stayDocked ->
+                            stayDocked
+
+                        Nothing ->
+                            describeBranch "Undock."
+                                (undockUsingStationWindow context
+                                    { ifCannotReachButton = askForHelpToGetUnstuck }
+                                )
                 , ifSeeShipUI = wingmanDecisionRootInSpace context
                 }
                 context
@@ -3910,7 +3922,7 @@ since that can land while still docked.
 -}
 wingmanDecisionRootInSpace : BotDecisionContext -> ShipUI -> DecisionPathNode
 wingmanDecisionRootInSpace context shipUI =
-    case sessionIsEnding context of
+    case sessionIsEnding context shipUI of
         Just goHome ->
             goHome
 
@@ -4095,36 +4107,224 @@ dronesForTheFleet context =
     launchAndEngageDrones { redirectToTargets = Nothing } context
 
 
-{-| The trip home, when the session is nearly over.
+{-| How long before the planned session end to stop taking new work and head
+home. Named the same as the mission runner's constant of the same name and
+the same value (200s), because it is the same question -- "enough time to
+finish a warp and a dock, not so much that a short session never gets
+anything done" -- asked by both `sessionIsEnding` and
+`dockedSessionIsEnding` below and by `hostDirectiveExtendSession`, so the
+three cannot silently disagree about when the wind-down starts.
+-}
+secondsBeforeSessionEndToWindDown : Int
+secondsBeforeSessionEndToWindDown =
+    200
 
-**Not implemented, and it says so.** The route wants the `@host set-destination`
-directive and the wind-down allowance the mission runner already measured (420
-seconds, asked for through the status text because the allowance is otherwise
-past the planned end and can never be spent). Returning `Nothing` here would
-read as "nothing to do" and quietly fly past the session's end, so this answers
-with a branch that names what is missing instead.
+
+{-| How long past the planned session end the trip home may run before this
+bot gives up trying to reach it and ends the session where it is instead.
+Ported from the mission runner's `homeStationTripSecondsPastSessionEnd` --
+same number (420s), same argument: a couple of jumps plus a dock is several
+minutes, well past the 200s window the wind-down starts in, and cutting the
+trip off mid-flight strands the ship exactly where #350 found it. #7 and #14
+are both the same shape this refuses to repeat: a wait with no end reads in
+the log exactly like a bot working. This is a longer bound, not a missing
+one -- past it the session ends, loudly, naming the station it never reached.
+-}
+tripHomeSecondsPastSessionEnd : Int
+tripHomeSecondsPastSessionEnd =
+    420
+
+
+{-| The `@host extend-session` directive, asking the host to hold the session
+open past its planned end while the trip home is under way. Ported from the
+mission runner's `hostDirectiveExtendSession` and flattened to this bot's one
+wind-down phase -- fly home, then dock, no restock and no pod recovery to
+budget separately for.
+
+**A lease, not a setting**, exactly as `hostDirectiveSetDestination` above:
+re-derived from live state every reading, so a bot that stops needing the
+extension (because it has docked) stops asking for it on the very next
+reading, and the host is never handed a deadline it does not also get to see
+lapse. Placed as its own last line of the status text -- see
+`statusTextFromState` -- because the host scans the whole text for the
+`@host` token, but an operator reads the first line as "what is this reading
+about", and that has to stay whatever `wingmanDecisionRootInSpace` decided
+rather than this bookkeeping.
+
+**Docked asks for nothing.** Once the ship is docked, either the trip
+succeeded or was never needed, and `dockedSessionIsEnding` below is what ends
+the session from there -- asking for more time here would extend a session
+this bot has already decided to finish.
 
 -}
-sessionIsEnding : BotDecisionContext -> Maybe DecisionPathNode
-sessionIsEnding context =
-    case context.eventContext.sessionTimeLimitInMilliseconds of
+hostDirectiveExtendSession : BotDecisionContext -> String
+hostDirectiveExtendSession context =
+    case EveOnline.BotFramework.secondsToSessionEnd context.eventContext of
+        Nothing ->
+            ""
+
+        Just secondsRemaining ->
+            if secondsBeforeSessionEndToWindDown < secondsRemaining then
+                ""
+
+            else
+                case context.readingFromGameClient.shipUI of
+                    Nothing ->
+                        ""
+
+                    Just _ ->
+                        hostDirectivePrefix ++ "extend-session " ++ String.fromInt tripHomeSecondsPastSessionEnd
+
+
+{-| The trip home, when the session is nearly over.
+
+Sets the destination to `home-station` (default `defaultHomeStation`) through
+the same `@host set-destination` directive the travel broadcast already uses,
+then flies it with `flyRouteHome` -- which docks at the far end too, since
+the route marker's own menu offers "Dock" once the destination station is
+reached, the same property `navigateTowardFleetCommander`'s own mechanism
+already has. Nothing here needs to know the difference between another jump
+and arrival.
+
+**Bounded by `tripHomeSecondsPastSessionEnd`.** Past it, this stops asking
+the ship to keep flying and ends the session where it is instead of
+repeating #350's own incident under a longer deadline -- see that constant's
+own comment.
+
+-}
+sessionIsEnding : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
+sessionIsEnding context shipUI =
+    case EveOnline.BotFramework.secondsToSessionEnd context.eventContext of
         Nothing ->
             Nothing
 
-        Just sessionTimeLimit ->
-            if sessionTimeLimit - context.eventContext.timeInMilliseconds > 200 * 1000 then
+        Just secondsRemaining ->
+            if secondsBeforeSessionEndToWindDown < secondsRemaining then
                 Nothing
 
             else
+                let
+                    stationName =
+                        Maybe.withDefault defaultHomeStation context.eventContext.botSettings.homeStation
+                in
                 Just
-                    (describeBranch
-                        ("The session ends soon and the trip to '"
-                            ++ Maybe.withDefault defaultHomeStation
-                                context.eventContext.botSettings.homeStation
-                            ++ "' is not implemented yet."
-                        )
-                        waitForProgressInGame
+                    (if secondsRemaining <= -tripHomeSecondsPastSessionEnd then
+                        describeBranch
+                            ("Home station: gave up -- the session ended "
+                                ++ String.fromInt -secondsRemaining
+                                ++ " seconds ago and I never reached '"
+                                ++ stationName
+                                ++ "'. Stopping here rather than flying on past the deadline."
+                            )
+                            (Common.DecisionPath.endDecisionPath EveOnline.BotFrameworkSeparatingMemory.FinishSession)
+
+                     else
+                        describeBranch
+                            ("Home station: heading to '"
+                                ++ stationName
+                                ++ "'. "
+                                ++ hostDirectiveSetDestination stationName
+                            )
+                            (flyRouteHome context shipUI)
                     )
+
+
+{-| Whether a docked ship should stay docked and end the session, once the
+session is inside its wind-down window, rather than undocking again.
+
+**Without this, the trip home above is pointless.** `wingmanDecisionRootBeforeApplyingSettings`'s
+docked branch has always meant "undock", unconditionally -- nothing before
+this distinguished a ship that just arrived home, as the trip's own endpoint,
+from a ship docked somewhere else with the wind-down window merely open. A
+ship that reached `home-station` would have been undocked again on the very
+next reading, reproducing #350's stall one system later instead of fixing
+it.
+
+**Gated on actually being at the home station, not merely on being
+docked somewhere.** The obvious simpler rule -- "docked and the window is
+open, so stay" -- has a real failure mode: a session that starts docked (the
+ordinary way to launch this bot) and is given a short
+`--session-duration-minutes` would end on its very first reading, never
+undocking at all. Comparing `context.memory.lastDockedStationNameFromInfoPanel`
+against `home-station` is the same identity `dockedAtHomeStation` uses in the
+mission runner, and it is what tells "just arrived home" apart from "docked
+somewhere else, or docked before the trip has even started" -- only the
+first stays put; the second falls through to the ordinary "Undock." branch,
+so the ship still undocks and `sessionIsEnding` above still gets a chance to
+route it home before the session actually ends.
+
+**Ends the session rather than waiting**, because there is nothing left to
+do once the ship is genuinely home: this bot has no restock and no
+maintenance to run while docked, so `sessionIsEnding` above and this
+together cover the whole wind-down -- flying while in space, staying put
+once docked at the right place.
+
+-}
+dockedSessionIsEnding : BotDecisionContext -> Maybe DecisionPathNode
+dockedSessionIsEnding context =
+    case EveOnline.BotFramework.secondsToSessionEnd context.eventContext of
+        Nothing ->
+            Nothing
+
+        Just secondsRemaining ->
+            if secondsBeforeSessionEndToWindDown < secondsRemaining then
+                Nothing
+
+            else
+                let
+                    stationName =
+                        Maybe.withDefault defaultHomeStation context.eventContext.botSettings.homeStation
+                in
+                if context.memory.lastDockedStationNameFromInfoPanel == Just stationName then
+                    Just
+                        (describeBranch
+                            ("Session ending and docked at the home station '"
+                                ++ stationName
+                                ++ "' -- stay here rather than undock again."
+                            )
+                            (Common.DecisionPath.endDecisionPath EveOnline.BotFrameworkSeparatingMemory.FinishSession)
+                        )
+
+                else
+                    Nothing
+
+
+{-| Fly the current route home, docking at the far end. The same body as
+`navigateTowardFleetCommander`, kept as a separate function rather than a
+shared one that both call: the two memory fields it reads
+(`routeFirstMarkerRegion`, `routeFirstMarkerUnchangedTicks`) already track
+"whatever route the client currently has" rather than anything
+commander-specific, so sharing them costs nothing, but a rename touching
+`navigateTowardFleetCommander`'s existing call site and every place WINGMAN.md
+already names it is exactly the kind of file-wide churn COORDINATION.md's
+"land fast, land clean" asks changes on a shared file to avoid while other
+machines have their own open branches against it (#347, #348, #349). See
+`navigateTowardFleetCommander`'s own comment for the full argument this body
+makes, including why the third rung
+(`eve-online-warp-to-0-autopilot`'s `jumpCascadeStuckReadings`) is not ported.
+-}
+flyRouteHome : BotDecisionContext -> ShipUI -> DecisionPathNode
+flyRouteHome context shipUI =
+    case infoPanelRouteFirstMarkerFromReadingFromGameClient context.readingFromGameClient of
+        Nothing ->
+            describeBranch
+                "No route in the info panel -- either the destination has not taken effect yet, or the route has already been flown to its end and this reading has not yet seen the station window appear."
+                waitForProgressInGame
+
+        Just infoPanelRouteFirstMarker ->
+            if shipUIIndicatesShipIsWarpingOrJumping shipUI then
+                describeBranch
+                    "I see the ship is warping or jumping. I wait until that maneuver ends."
+                    waitForProgressInGame
+
+            else if context.memory.routeFirstMarkerUnchangedTicks < 1 then
+                describeBranch
+                    "Route panel's first marker just appeared or moved since the last reading -- wait for the route to finish (re)computing before clicking it."
+                    waitForProgressInGame
+
+            else
+                jumpThroughRouteStargate context
+                    (routeMarkerCascade context infoPanelRouteFirstMarker)
 
 
 {-| What a fleet broadcast is asking for.

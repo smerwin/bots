@@ -457,16 +457,19 @@ is in the fleet. Unlocking handles the case where the lock happened some other
 way — a stray ctrl-click, or a broadcast arriving after the lock. Both halves
 read the same `fleetPilotNames`.
 
-### 5. The trip home
+### 5. The trip home -- built, not yet flown (#350)
 
 `home-station`, defaulting to `Amarr VIII (Oris) - Emperor Family Academy`,
-routed by ESI and then autopiloted. Take the mission runner's precedent: it
-budgets 420 seconds and asks for it through `@host extend-session`, because the
-allowance is otherwise measured past the planned end and can never be spent —
-run 17 was killed mid-trip with its own clock reading 420 s of headroom.
+routed by ESI and flown with the same jump/dock mechanism
+`navigateTowardFleetCommander` already uses, budgeting 420 seconds past the
+planned end through `@host extend-session` (the mission runner's own
+precedent, for the same reason: run 17 was killed mid-trip with its own clock
+reading 420 s of headroom). Also fixes the docked branch, which used to mean
+"undock" unconditionally and would have undocked again the moment the ship
+reached home. See `notes/350-trip-home.md` for the write-up.
 
 This only fires when `secondsToSessionEnd` is set, so **the launcher must pass
-`--session-duration-minutes`** or the trip home silently never happens.
+`--session-duration-minutes`** or the trip home never happens at all.
 
 ### 6. Retire wingus, and `legacy_search_ui_root` with it
 
@@ -508,6 +511,9 @@ restart.
   it — in particular whether the panel or the marker cascade ends up doing
   the flying, and whether the surroundings-button fallback's absence is ever
   actually missed.
+- **The trip home (#350).** `elm make` proves the types; nothing has watched
+  the ship actually reach `home-station` and stay docked. See
+  `notes/350-trip-home.md` for what to watch on the first run.
 
 ## Flown
 

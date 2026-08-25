@@ -171,10 +171,36 @@ class TheFleetIsScopedAndComplete(unittest.TestCase):
     def test_a_called_target_in_the_fleet_is_not_shot(self):
         self.assertIn("is in this fleet. Not shooting it.", self.source)
 
-    def test_the_trip_home_says_it_is_unfinished_rather_than_doing_nothing(self):
-        """Answering `Nothing` would read as "nothing to do" and fly past the
-        session's end in silence."""
-        self.assertIn("is not implemented yet.", self.source)
+    def test_the_trip_home_routes_and_docks_rather_than_announcing_a_gap(self):
+        """This pinned the *absence* of the feature until #350 built it.
+
+        It read `assertIn("is not implemented yet.", source)`, which is a
+        perfectly good assertion right up until someone implements the thing --
+        and then it fails on the change it should have started covering, which
+        is how a reader is taught to edit the pin rather than check the rule.
+        The rule worth pinning is the one the two live runs established: a
+        session that ends must not leave the ship in space.
+        """
+        self.assertIn("flyRouteHome", self.source)
+        self.assertIn("homeStation", self.source)
+        self.assertNotIn("is not implemented yet.", self.source)
+
+    def test_it_gives_up_rather_than_renewing_the_lease_forever(self):
+        """The mission runner's 420 seconds, and its bound.
+
+        A wind-down that keeps asking for more time is a session that never
+        ends -- #321's lesson in a different place.
+        """
+        self.assertIn("extend-session", self.source)
+
+    def test_the_docked_branch_no_longer_undocks_unconditionally(self):
+        """Found by #354's own review, not by the issue.
+
+        The docked arm has always meant "undock". Without gating it on being at
+        the home station, the ship would dock at the end of its trip and undock
+        again on the very next reading, making the whole trip pointless.
+        """
+        self.assertIn("defaultHomeStation", self.source)
 
 
 if __name__ == "__main__":
