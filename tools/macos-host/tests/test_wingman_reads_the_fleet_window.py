@@ -179,3 +179,123 @@ class TheFleetIsScopedAndComplete(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheBroadcastVocabularyIsParsedTest(unittest.TestCase):
+    """Every wording four live runs actually observed, through the real parser.
+
+    Three grammars, not one -- which is why `parseFleetBroadcast` is a parser
+    and not a prefix test:
+
+        Target Heather Hemorphite (Tristan)        no sender at all
+        Gal Bistot: Travel to Bhizheba             sender behind a colon
+        Gal Bistot is at location Amarr            sender, no colon
+
+    Asserted by equality against the value the parser should produce, so each
+    case pins the arm *and* the fields it carried out of the text -- an arm
+    reached with the argument mangled is a bot flying to the wrong place.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_every_observed_wording_parses_to_its_own_value(self):
+        for banner, expected in [
+                ('Target Heather Hemorphite (Tristan)',
+                 'CalledTarget "Heather Hemorphite"'),
+                ('Gal Bistot: Travel to Bhizheba',
+                 'TravelTo { pilot = "Gal Bistot", destination = "Bhizheba" }'),
+                ('Gal Bistot: Jump Stargate Bhizheba',
+                 'JumpGate { pilot = "Gal Bistot", gate = "Bhizheba" }'),
+                ('Gal Bistot: Align Stargate Bhizheba',
+                 'AlignGate { pilot = "Gal Bistot", gate = "Bhizheba" }'),
+                ('Gal Bistot is at location Amarr',
+                 'AtLocation { pilot = "Gal Bistot", system = "Amarr" }'),
+                ('Gal Bistot is in position at Stargate Amarr',
+                 'InPositionAt { pilot = "Gal Bistot", gate = "Amarr" }')]:
+            with self.subTest(banner):
+                self.assertEqual(
+                    self.repl.evaluate(
+                        ['parseFleetBroadcast "%s" == %s' % (banner, expected)]),
+                    [True])
+
+    def test_in_position_is_not_read_as_at_location(self):
+        """`is in position at Stargate X` also contains `is at`.
+
+        The one ordering mistake this parser can make, and the one that would
+        route the ship to a system named after a stargate.
+        """
+        self.assertEqual(
+            self.repl.evaluate(
+                ['parseFleetBroadcast "Gal Bistot is in position at Stargate Amarr"'
+                 ' == InPositionAt { pilot = "Gal Bistot", gate = "Amarr" }']),
+            [True])
+
+    def test_a_wording_nobody_has_read_is_carried_rather_than_dropped(self):
+        # It reaches the arm that opens the broadcast's own menu, which is how
+        # the remaining wordings get captured instead of guessed at.
+        self.assertEqual(
+            self.repl.evaluate(
+                ['parseFleetBroadcast "Gal Bistot: Something Nobody Has Seen"'
+                 ' == Unrecognized "Gal Bistot: Something Nobody Has Seen"']),
+            [True])
+
+    def test_only_the_called_target_has_no_sender(self):
+        """Which is why `follow-fleet-broadcast-from` cannot gate it."""
+        self.assertEqual(
+            self.repl.evaluate([
+                'fleetBroadcastSender (parseFleetBroadcast'
+                ' "Target Heather Hemorphite (Tristan)") == Nothing',
+                'fleetBroadcastSender (parseFleetBroadcast'
+                ' "Gal Bistot is at location Amarr") == Just "Gal Bistot"',
+                'fleetBroadcastSender (parseFleetBroadcast'
+                ' "Gal Bistot: Jump Stargate Bhizheba") == Just "Gal Bistot"']),
+            [True, True, True])
+
+
+class TheDronesAssistTheCommanderTest(unittest.TestCase):
+    """Source-pinned: the cascade needs a drones window and a live fleet.
+
+    What is checkable from here is the shape, and the shape is where the two
+    measured failures live.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(WINGMAN_BOT_ELM, encoding="utf-8") as handle:
+            cls.source = handle.read()
+
+    def test_the_commander_is_read_from_the_panel_not_hardcoded(self):
+        """saxrat's version named `Gal Bistot` in the source.
+
+        A wingman that only ever assists one pilot is a wingman for one fleet.
+        """
+        self.assertIn("fleetCommanderNameFromPanel", self.source)
+        self.assertNotIn('useMenuEntryWithTextContaining "Gal Bistot"', self.source)
+
+    def test_it_falls_back_to_engage_target_in_the_same_reading(self):
+        """#314 deleted the unbounded cascade because the named pilot was often
+        off grid and the readings it spent bought nothing. The fallback is what
+        makes reinstating it safe."""
+        self.assertIn("'Assist' if present, else 'Engage Target'", self.source)
+        self.assertIn("Engage Target", self.source)
+
+    def test_the_drone_arm_is_reached_before_the_combat_arm(self):
+        """#326: a turret that could not activate held the decision on the
+        other arm of that `case` for 262 consecutive readings, drones out and
+        idle, nothing landing. So the drone arm must not sit behind it."""
+        root = self.source[self.source.index("wingmanDecisionRootInSpace context shipUI ="):]
+        root = root[:root.index("\n\n\n")]
+        self.assertLess(
+            root.index("dronesAssistTheCommander"),
+            root.index("modulesToActivateAlwaysActivated"),
+            "the drone arm is behind the inherited combat arm again")
+
+    def test_the_assist_can_be_turned_off(self):
+        # A logi or a solo fit wants its drones on its own target.
+        self.assertIn("assistFleetCommander", self.source)

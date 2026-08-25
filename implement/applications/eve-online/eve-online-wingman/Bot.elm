@@ -3761,14 +3761,26 @@ wingmanDecisionRootInSpace context shipUI =
                     actOnBroadcast
 
                 Nothing ->
-                    {- Module activation, rat combat and drones all still come
-                       from the arm this bot inherited from the combat anomaly
-                       bot, which does the three together. Splitting them so
-                       `activate-module-always` is its own step -- ahead of the
-                       broadcast rather than behind it -- is the next piece of
-                       work, and is why this is a skeleton.
-                    -}
-                    modulesToActivateAlwaysActivated context shipUI
+                    case dronesAssistTheCommander context of
+                        Just assist ->
+                            assist
+
+                        Nothing ->
+                            {- Module activation and rat combat still come from
+                               the arm this bot inherited from the combat
+                               anomaly bot, which does both together. Splitting
+                               them so `activate-module-always` is its own step,
+                               ahead of the broadcast rather than behind it, is
+                               still outstanding -- see WINGMAN.md.
+
+                               The drone arm above deliberately sits *before*
+                               this one rather than inside it: #326 measured a
+                               turret that could not activate holding the
+                               decision on the other arm of this `case` for 262
+                               consecutive readings, with the drones out and
+                               idle the whole time.
+                            -}
+                            modulesToActivateAlwaysActivated context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
@@ -3854,15 +3866,7 @@ actOnFleetBroadcast context shipUI =
                                     )
 
                         Nothing ->
-                            Just
-                                (describeBranch
-                                    ("The broadcast reads '"
-                                        ++ bannerText
-                                        ++ "', which is not one of the two forms read so far"
-                                        ++ " -- see broadcastVerbsNotYetRead."
-                                    )
-                                    waitForProgressInGame
-                                )
+                            Just (actOnBroadcastVerb context bannerText)
 
 
 {-| Lock the pilot a `Target` broadcast named, from their overview row.
@@ -3937,3 +3941,523 @@ sessionIsEnding context =
                         )
                         waitForProgressInGame
                     )
+
+
+{-| What a fleet broadcast is asking for.
+
+**Six shapes, all observed live**, across four runs on three hosts plus the
+original UI-tree capture. They fall into three grammars rather than one, which
+is why this is a parser and not a prefix test:
+
+  - `Target <name> (<hull>)` -- no sender at all;
+  - `<Sender>: <verb> <argument>` -- sender behind a colon;
+  - `<Sender> is at location <system>` -- sender with no colon.
+
+`Unrecognized` is not a failure. It carries the text so the caller can open the
+broadcast's own context menu and read what the client offers for it, which is
+how the remaining wordings get captured without guessing at them.
+
+-}
+type FleetBroadcast
+    = CalledTarget String
+    | TravelTo { pilot : String, destination : String }
+    | JumpGate { pilot : String, gate : String }
+    | AlignGate { pilot : String, gate : String }
+    | AtLocation { pilot : String, system : String }
+    | InPositionAt { pilot : String, gate : String }
+    | NeedBackup { pilot : String }
+    | Unrecognized String
+
+
+{-| Read a broadcast banner, whatever shape it is in.
+
+Ordered most specific first: `is in position at Stargate X` also contains
+`is at`, and `Jump Stargate X` is a colon form whose verb happens to start with
+a word that appears in others. Matching loosely here would route a broadcast to
+the wrong arm, which is worse than not matching it at all.
+
+-}
+parseFleetBroadcast : String -> FleetBroadcast
+parseFleetBroadcast bannerText =
+    let
+        trimmed : String
+        trimmed =
+            String.trim bannerText
+
+        afterColon : Maybe { pilot : String, rest : String }
+        afterColon =
+            case String.indexes ": " trimmed of
+                firstColon :: _ ->
+                    Just
+                        { pilot = String.left firstColon trimmed |> String.trim
+                        , rest =
+                            String.dropLeft (firstColon + 2) trimmed |> String.trim
+                        }
+
+                [] ->
+                    Nothing
+
+        withoutSender : String -> Maybe { pilot : String, argument : String }
+        withoutSender marker =
+            case String.indexes marker trimmed of
+                firstMarker :: _ ->
+                    Just
+                        { pilot = String.left firstMarker trimmed |> String.trim
+                        , argument =
+                            String.dropLeft (firstMarker + String.length marker) trimmed
+                                |> String.trim
+                        }
+
+                [] ->
+                    Nothing
+    in
+    case targetBroadcastPilotName trimmed of
+        Just calledTarget ->
+            CalledTarget calledTarget
+
+        Nothing ->
+            case withoutSender " is in position at Stargate " of
+                Just inPosition ->
+                    InPositionAt
+                        { pilot = inPosition.pilot, gate = inPosition.argument }
+
+                Nothing ->
+                    case withoutSender " is at location " of
+                        Just atLocation ->
+                            AtLocation
+                                { pilot = atLocation.pilot
+                                , system = atLocation.argument
+                                }
+
+                        Nothing ->
+                            case afterColon of
+                                Nothing ->
+                                    Unrecognized trimmed
+
+                                Just { pilot, rest } ->
+                                    parseBroadcastVerb pilot rest trimmed
+
+
+{-| The verb half of a `<Sender>: <verb> <argument>` broadcast.
+-}
+parseBroadcastVerb : String -> String -> String -> FleetBroadcast
+parseBroadcastVerb pilot rest whole =
+    if String.startsWith "Travel to " rest then
+        TravelTo
+            { pilot = pilot
+            , destination = String.dropLeft (String.length "Travel to ") rest
+            }
+
+    else if String.startsWith "Jump Stargate " rest then
+        JumpGate
+            { pilot = pilot
+            , gate = String.dropLeft (String.length "Jump Stargate ") rest
+            }
+
+    else if String.startsWith "Align Stargate " rest then
+        AlignGate
+            { pilot = pilot
+            , gate = String.dropLeft (String.length "Align Stargate ") rest
+            }
+
+    else if stringContainsIgnoringCase "need backup" rest then
+        NeedBackup { pilot = pilot }
+
+    else
+        Unrecognized whole
+
+
+{-| Who a broadcast came from, where the shape carries a sender.
+
+`CalledTarget` answers `Nothing`: that form names the target and says nothing
+about who called it, which is why `follow-fleet-broadcast-from` cannot gate it.
+
+-}
+fleetBroadcastSender : FleetBroadcast -> Maybe String
+fleetBroadcastSender broadcast =
+    case broadcast of
+        CalledTarget _ ->
+            Nothing
+
+        TravelTo { pilot } ->
+            Just pilot
+
+        JumpGate { pilot } ->
+            Just pilot
+
+        AlignGate { pilot } ->
+            Just pilot
+
+        AtLocation { pilot } ->
+            Just pilot
+
+        InPositionAt { pilot } ->
+            Just pilot
+
+        NeedBackup { pilot } ->
+            Just pilot
+
+        Unrecognized _ ->
+            Nothing
+
+
+{-| Act on a broadcast that is not a called target and not a travel destination.
+
+The travel and target forms are handled above, where they already were. This is
+the rest of the vocabulary, and the arm that faces a wording nobody has read.
+
+**An unrecognized broadcast opens its own context menu rather than waiting.**
+That is the one place this bot deliberately acts without knowing what it will
+get: the client's menu for a broadcast names what can be done with it, so
+opening it and letting the next reading record the entries is how the remaining
+wordings get captured. Waiting instead -- which is what this did before -- means
+the vocabulary can only ever be learned by a person clicking through the fleet
+window by hand.
+
+It costs a right-click on a UI element this bot already has, and the cascade's
+own discard rule closes it again if nothing matches.
+
+-}
+actOnBroadcastVerb : BotDecisionContext -> String -> DecisionPathNode
+actOnBroadcastVerb context bannerText =
+    let
+        permitted : String -> Bool
+        permitted pilot =
+            List.member pilot context.eventContext.botSettings.followFleetBroadcastFrom
+    in
+    case parseFleetBroadcast bannerText of
+        CalledTarget _ ->
+            describeBranch
+                "Handled above -- a called target reaches its own branch."
+                waitForProgressInGame
+
+        TravelTo _ ->
+            describeBranch
+                "Handled above -- a travel destination reaches its own branch."
+                waitForProgressInGame
+
+        AtLocation { pilot, system } ->
+            if not (permitted pilot) then
+                describeBranch
+                    ("'"
+                        ++ pilot
+                        ++ "' is at "
+                        ++ system
+                        ++ " but is not named in 'follow-fleet-broadcast-from'."
+                    )
+                    waitForProgressInGame
+
+            else
+                goToFleetMate context pilot system "is at location"
+
+        InPositionAt { pilot, gate } ->
+            if not (permitted pilot) then
+                describeBranch
+                    ("'"
+                        ++ pilot
+                        ++ "' is in position at "
+                        ++ gate
+                        ++ " but is not named in 'follow-fleet-broadcast-from'."
+                    )
+                    waitForProgressInGame
+
+            else
+                goToFleetMate context pilot gate "is in position at"
+
+        NeedBackup { pilot } ->
+            if not (permitted pilot) then
+                describeBranch
+                    ("'"
+                        ++ pilot
+                        ++ "' needs backup but is not named in"
+                        ++ " 'follow-fleet-broadcast-from'."
+                    )
+                    waitForProgressInGame
+
+            else
+                goToFleetMate context pilot "" "needs backup"
+
+        JumpGate { pilot, gate } ->
+            if not (permitted pilot) then
+                describeBranch
+                    ("'"
+                        ++ pilot
+                        ++ "' called a jump at "
+                        ++ gate
+                        ++ " but is not named in 'follow-fleet-broadcast-from'."
+                    )
+                    waitForProgressInGame
+
+            else
+                describeBranch
+                    ("'"
+                        ++ pilot
+                        ++ "' called a jump at '"
+                        ++ gate
+                        ++ "'. Jumping is not wired yet -- see WINGMAN.md."
+                    )
+                    waitForProgressInGame
+
+        AlignGate { pilot, gate } ->
+            if not (permitted pilot) then
+                describeBranch
+                    ("'"
+                        ++ pilot
+                        ++ "' called an align at "
+                        ++ gate
+                        ++ " but is not named in 'follow-fleet-broadcast-from'."
+                    )
+                    waitForProgressInGame
+
+            else
+                describeBranch
+                    ("'"
+                        ++ pilot
+                        ++ "' called an align at '"
+                        ++ gate
+                        ++ "'. Aligning is not wired yet -- see WINGMAN.md."
+                    )
+                    waitForProgressInGame
+
+        Unrecognized text ->
+            openTheBroadcastsOwnMenu context text
+
+
+{-| Warp to a fleet-mate who is on this grid, or route toward them if not.
+
+The in-system half is the cascade saxrat drives: right-click the pilot's
+overview row, `Fleet Member`, then `Warp to Member` -- matched with
+`useMenuEntryWithTextEqual` at both steps, because `"Warp to Member"` is a
+substring of `"Warp to Member Within"` and a containing match takes the wrong
+entry.
+
+The out-of-system half hands the place name to `@host set-destination`, the
+same ESI directive the travel broadcast already uses. **`needs backup` carries
+no place**, so there is nothing to route to and it says so rather than routing
+somewhere arbitrary -- saxrat found the client refuses a waypoint to a member's
+live position on every one of several hundred attempts.
+
+-}
+goToFleetMate : BotDecisionContext -> String -> String -> String -> DecisionPathNode
+goToFleetMate context pilot place calledIt =
+    case
+        context.readingFromGameClient.overviewWindows
+            |> List.concatMap .entries
+            |> List.filter (.objectName >> (==) (Just pilot))
+            |> List.head
+    of
+        Just overviewEntry ->
+            describeBranch
+                ("'"
+                    ++ pilot
+                    ++ "' "
+                    ++ calledIt
+                    ++ " and is on this grid -- warping to them."
+                )
+                (useContextMenuCascadeOnOverviewEntry
+                    (useMenuEntryWithTextEqual "Fleet Member"
+                        (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
+                    )
+                    overviewEntry
+                    context
+                )
+
+        Nothing ->
+            if String.isEmpty place then
+                describeBranch
+                    ("'"
+                        ++ pilot
+                        ++ "' "
+                        ++ calledIt
+                        ++ " and is not on this grid. That broadcast names no"
+                        ++ " place to route to, so there is nothing to fly toward."
+                    )
+                    waitForProgressInGame
+
+            else
+                describeBranch
+                    ("'"
+                        ++ pilot
+                        ++ "' "
+                        ++ calledIt
+                        ++ " '"
+                        ++ place
+                        ++ "' and is not on this grid -- asking the host for the route. "
+                        ++ hostDirectiveSetDestination place
+                    )
+                    waitForProgressInGame
+
+
+{-| Right-click a broadcast nobody has read, so the next reading records its menu.
+-}
+openTheBroadcastsOwnMenu : BotDecisionContext -> String -> DecisionPathNode
+openTheBroadcastsOwnMenu context bannerText =
+    case fleetBroadcastBannerElement context.readingFromGameClient of
+        Nothing ->
+            describeBranch
+                ("The broadcast reads '"
+                    ++ bannerText
+                    ++ "', which is a wording this bot does not read -- and its"
+                    ++ " banner is not in this reading, so there is nothing to"
+                    ++ " open."
+                )
+                waitForProgressInGame
+
+        Just bannerElement ->
+            describeBranch
+                ("The broadcast reads '"
+                    ++ bannerText
+                    ++ "', which is a wording this bot does not read. Opening its"
+                    ++ " own menu so the next reading records what the client"
+                    ++ " offers for it."
+                )
+                (useContextMenuCascade
+                    ( "fleet broadcast banner", bannerElement )
+                    menuCascadeCompleted
+                    context
+                )
+
+
+{-| The banner as a clickable element, rather than as text.
+-}
+fleetBroadcastBannerElement : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+fleetBroadcastBannerElement readingFromGameClient =
+    readingFromGameClient
+        |> fleetWindowDescendants
+        |> List.filter
+            (.uiNode
+                >> EveOnline.ParseUserInterface.getNameFromDictEntries
+                >> (==) (Just "bannerLabel")
+            )
+        |> List.head
+
+
+{-| The fleet commander's name, read from the fleet window's own header.
+
+**Inferred from the header's shape, and that inference is stated rather than
+buried.** The captured header carried five labels beside a `Boss` icon and a
+`Fleet Commander` icon:
+
+    no commander Fleet 5 Gal Bistot Squad 1 4 Wing 1 4
+
+Four of the five describe the fleet's structure and every one of them contains
+a parenthesis; the pilot's name is the one that does not. So that is the rule,
+rather than reading the icons -- which would be better evidence, but which
+label belongs to which icon was not established from the capture, and a wrong
+answer here points the drones at the wrong pilot.
+
+Falls back to the first pilot in `follow-fleet-broadcast-from`, which is a
+pilot the operator has already said they trust with this ship.
+
+-}
+fleetCommanderNameFromPanel : BotDecisionContext -> Maybe String
+fleetCommanderNameFromPanel context =
+    let
+        fromHeader : Maybe String
+        fromHeader =
+            context.readingFromGameClient
+                |> fleetWindowDescendants
+                |> List.filter
+                    (.uiNode
+                        >> .pythonObjectTypeName
+                        >> String.contains "FleetHeader"
+                    )
+                |> List.concatMap
+                    EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+                |> List.filterMap (.uiNode >> EveOnline.ParseUserInterface.getDisplayText)
+                |> List.map String.trim
+                |> List.filter (String.isEmpty >> not)
+                |> List.filter (String.contains "(" >> not)
+                |> List.head
+    in
+    case fromHeader of
+        Just name ->
+            Just name
+
+        Nothing ->
+            context.eventContext.botSettings.followFleetBroadcastFrom |> List.head
+
+
+{-| Drones out, and assisting the commander rather than this ship's own target.
+
+**Assist first, `F` behind it, and the fallback is the point.** #314 deleted an
+unbounded assist cascade from saxrat, and its reason was measured rather than
+stylistic: the named pilot was frequently not on the grid, so the readings the
+cascade spent bought nothing. A wingman is the case where that reasoning
+inverts -- the commander is on the grid by definition -- but "by definition" is
+not "always", so `MenuEntryWithCustomChoice` takes `Engage Target` whenever the
+menu has no `Assist`, in the same reading rather than a later one.
+
+**Reached without asking whether the guns are cycling.** #326 found a turret
+that could not activate on the current target holding the decision on the other
+arm of its `case` for 262 consecutive readings -- drones out, drones idle,
+nothing landing the whole time. So this sits in the decision root beside the
+other arms, not behind the combat one.
+
+`assist-fleet-commander=no` keeps the drones on this ship's own target, which
+is `launchAndEngageDrones`' existing behaviour.
+
+-}
+dronesAssistTheCommander : BotDecisionContext -> Maybe DecisionPathNode
+dronesAssistTheCommander context =
+    if context.eventContext.botSettings.assistFleetCommander /= PromptParser.Yes then
+        Nothing
+
+    else
+        case ( context.readingFromGameClient.dronesWindow, fleetCommanderNameFromPanel context ) of
+            ( Just dronesWindow, Just commander ) ->
+                case dronesWindow.droneGroupInSpace of
+                    Nothing ->
+                        Nothing
+
+                    Just droneGroupInSpace ->
+                        let
+                            idlingDrones : Int
+                            idlingDrones =
+                                droneGroupInSpace
+                                    |> EveOnline.ParseUserInterface.enumerateAllDronesFromDronesGroup
+                                    |> List.filter
+                                        (.uiNode
+                                            >> .uiNode
+                                            >> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+                                            >> List.any (stringContainsIgnoringCase "idle")
+                                        )
+                                    |> List.length
+                        in
+                        if idlingDrones < 1 then
+                            Nothing
+
+                        else
+                            Just
+                                (describeBranch
+                                    ("Assist '" ++ commander ++ "' with the idling drones, else engage this ship's target.")
+                                    (useContextMenuCascade
+                                        ( "drones group", droneGroupInSpace.header.uiNode )
+                                        (MenuEntryWithCustomChoice
+                                            { describeChoice = "'Assist' if present, else 'Engage Target'"
+                                            , chooseEntry =
+                                                \currentMenu ->
+                                                    case
+                                                        currentMenu.entries
+                                                            |> List.filter (.text >> stringContainsIgnoringCase "Assist")
+                                                            |> List.head
+                                                    of
+                                                        Just assistEntry ->
+                                                            Just
+                                                                ( assistEntry
+                                                                , useMenuEntryWithTextContaining commander menuCascadeCompleted
+                                                                )
+
+                                                        Nothing ->
+                                                            currentMenu.entries
+                                                                |> List.filter (.text >> stringContainsIgnoringCase "Engage Target")
+                                                                |> List.head
+                                                                |> Maybe.map (\entry -> ( entry, menuCascadeCompleted ))
+                                            }
+                                        )
+                                        context
+                                    )
+                                )
+
+            _ ->
+                Nothing
