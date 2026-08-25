@@ -30,8 +30,9 @@ The decision root, in order. Each arm is reached only when the one above has
 nothing to do.
 
 1. **Undock** if docked, through `undockUsingStationWindow`.
-2. **Act on the fleet broadcast**, if the banner carries one of the two forms
-   that have been read (below).
+2. **Act on the fleet broadcast** — in practice only the `Target …` form,
+   which is the one and only form that reaches a branch. Everything else the
+   fleet broadcasts falls into a named wait. See "Live runs".
 3. **Everything else** — module activation, rat combat, drones — still comes
    from the arm inherited from the combat anomaly bot, which does the three
    together.
@@ -59,7 +60,14 @@ BroadcastButton     (tooltip)    'Broadcast: Need Backup'  (and seven more)
 
 Three things follow, and each one shaped the code.
 
-### The two broadcast forms are shaped differently
+### The broadcast forms are shaped differently
+
+**"Read" and "acted on" are not the same thing here, and conflating them is
+what four live runs had to correct.** The parsing below is real — the banner,
+the history and the timestamp discriminator all work — but only the `Target …`
+form is wired to a branch. The travel form's wording was known from the first
+capture, documented, and never dispatched. Six forms have now been observed and
+one is acted on; the table under "Live runs" is the honest count.
 
 A **travel** broadcast names its sender before a colon:
 `Gal Bistot: Travel to Riramia`. A **target** broadcast names the target and its
@@ -119,7 +127,50 @@ because a bot that guesses reads exactly like one that knows.
   established from one capture, and a wrong answer points the drones at the
   wrong pilot.
 
-## First live run
+## Live runs
+
+Four flights on three Windows hosts, all 2026-08-24, all against commit
+`be47b3fc` and all following Gal Bistot's fleet. They were written up
+separately and are gathered here; **each host saw something the others did
+not**, which is why all three are kept rather than one being called first.
+
+What they agree on, and neither of them found alone:
+
+- **The bot drives a real client cleanly.** No crash, no stall and no
+  `askForHelpToGetUnstuck` in any of the four sessions.
+- **Undock works**, first decision, on every host.
+- **No broadcast was ever acted on**, on any host, because only the `Target …`
+  form reaches a branch. See the catalogue below.
+- **A session that ends leaves the ship in space**, undocked and unpiloted,
+  until a person docks it by hand.
+
+### The broadcast wordings observed so far
+
+The union of all four runs plus the original UI-tree capture. `<Sender>` is the
+broadcasting pilot as the client writes them.
+
+| observed wording | acted on? |
+|---|---|
+| `Target <name> (<hull>)` | **yes** — the only form with a branch |
+| `<Sender>: Travel to <destination>` | no — dispatch never written |
+| `<Sender>: Jump Stargate <name>` | no — verb not matched |
+| `<Sender>: Align Stargate <name>` | no — verb not matched |
+| `<Sender> is at location <system>` | no — verb not matched |
+| `<Sender> is in position at Stargate <name>` | no — verb not matched |
+
+Two things this table says that the button list alone did not.
+
+**The live vocabulary is wider than the ten buttons.** `Jump Stargate` and
+`Align Stargate` are not among the button-enumerated broadcasts at all, so a
+capture pass driven only by clicking buttons would have missed them.
+
+**Two of these are shaped `<Sender>: <verb>`** — the same shape as the travel
+form — so `follow-fleet-broadcast-from` filters them correctly today and only
+the verb is unmatched. `is at location` and `is in position at` use a third
+shape again, with no colon.
+
+
+### `DMC-MPC-001` — 45 minutes, Greta Gneiss
 
 **Windows machine `DMC-MPC-001`, 2026-08-24, commit `be47b3fc`.** A 45-minute
 watched smoke test — `accept-fleet-invite-from=Gal Bistot`,
@@ -172,6 +223,91 @@ watching it, until the operator checked in by hand.
 **Nothing else happened.** No rats, no other pilots on the overview, no
 combat, no drone activity — the whole run was one clean undock, five unmatched
 broadcasts, and sitting still until the timer ran out.
+
+### `DMC-MPC-002` — 25 and 60 minutes, Heather Hemorphite
+
+Two runs, Heather Hemorphite, following Gal Bistot's real fleet: run 1 (25
+min, `wingman_run1.log`, ended cleanly at its session-duration limit), run 2
+(60 min, `wingman_run2.log`). Both compiled and ran end to end via
+`botlab_host.py` on this Windows host with no crash, no stall, and no
+`askForHelpToGetUnstuck` across either session — the first evidence this bot
+can drive a real client at all.
+
+**The fleet was live and broadcasting throughout, and none of it was acted
+on.** Seven distinct real broadcasts came off Gal Bistot's fleet across the
+two runs, none matching a form the bot currently acts on:
+
+```
+Gal Bistot: Travel to Amarr VIII (Oris) - Emperor Family Academy
+Gal Bistot: Travel to Bhizheba
+Gal Bistot is at location Amarr
+Gal Bistot is at location Bhizheba
+Gal Bistot: Jump Stargate Bhizheba
+Gal Bistot: Align Stargate Bhizheba
+Gal Bistot is in position at Stargate Amarr
+```
+
+**The travel broadcast is not actually matched, and that is a doc/code
+mismatch rather than an unobserved wording.** This file's own prose (above)
+frames `…: Travel to …` as one of "the two forms that have been read" and
+implies `actOnFleetBroadcast` acts on it. Reading the source: it does not.
+`actOnFleetBroadcast` matches only `targetBroadcastPilotName` — the `Target …`
+form — and every other broadcast, travel included, falls straight into the
+generic "not one of the two forms read so far" wait. So as shipped, the
+wingman never follows the commander's travel, jump or align calls; the only
+broadcast form it can act on (called targets) went completely unexercised in
+both runs, because the fleet never called one. Either the doc's framing or
+`actOnFleetBroadcast` needs to change — right now they disagree.
+
+**Four of the seven are wordings not in the original capture above**: `is at
+location <system>`, `Jump Stargate <name>`, `Align Stargate <name>`, and `is
+in position at Stargate <name>` — the last of these is presumably the real
+rendering of `broadcastVerbsNotYetRead`'s placeholder `"In Position at"`.
+Worth folding into a capture pass alongside the eight already named there.
+
+**`Visited anomalies: 0` held for the whole of both sessions.** No anomaly,
+no combat, no drone activity, no locked target of any kind. So the inherited
+solo-hunt fallback (module activation, rat combat, drones) is exactly as
+unexercised by this as it was before these runs — two clean runs against an
+idle grid say nothing about whether that arm, the called-target lock/no-shoot
+branch, or the not-yet-built unlock path actually work.
+
+### `DMC-MPC-003` — 50 minutes, Olivia Ochre
+
+Fifty minutes, supervised, `run_wingman.sh` on Windows, Olivia Ochre. She was
+already in Gal Bistot's fleet from an earlier session, so this run exercised
+none of `accept-fleet-invite-from` — only inherited membership, not the accept
+itself.
+
+- **Undock worked**, first decision, cleanly: `Click on the button to
+  undock.` then `I see we are already undocking.`, confirmed by the client's
+  own game log (`Undocking from Amarr VIII (Oris) ... to Amarr solar
+  system.`) and by the drones window becoming readable afterwards.
+- **Two more broadcast wordings turned up, and were declined rather than
+  guessed at**: `Gal Bistot: Align Stargate Bhizheba` and `Gal Bistot: Jump
+  Stargate Bhizheba`. Both are shaped like the travel form this bot already
+  reads (`Sender: verb`), so `follow-fleet-broadcast-from` filtered them
+  correctly, but the verb itself is not `Travel to`, so
+  `broadcastVerbsNotYetRead`'s branch fired and the bot waited rather than
+  acting — exactly the fail-closed behaviour "What is deliberately
+  unfinished" describes. Neither of these two is among the ten
+  button-enumerated broadcasts either, so the live vocabulary is wider than
+  that list alone.
+- **No target broadcast, no fleet invite, no combat.** The overview named a
+  different pilot every so often across the run — Ang Morage, Akon Keikira,
+  Acuru Leithar, Anger Wolf, Alex667 — ordinary Amarr-hub traffic passing
+  through, never more than one at a time, none hostile, none staying on
+  grid.
+- **The trip home did exactly what its own doc comment promised, and that is
+  the most useful thing this run confirmed.** At the ~47-minute mark:
+  `The session ends soon and the trip to 'Amarr VIII (Oris) - Emperor Family
+  Academy' is not implemented yet.` — named rather than silent, which is
+  "Where it is going / 5. The trip home"'s whole point. **The consequence is
+  operational and immediate**: the host stopped the process at the planned
+  50 minutes with the ship still undocked and stationary in space. Nothing
+  in this bot docks it, so ending a session this way leaves a live ship
+  sitting unpiloted until a person docks it by hand.
+- No crash, no stall, no error anywhere in the run's ~1,197 readings.
 
 ## Where it is going
 
@@ -262,127 +398,33 @@ the profile block again. Four ships were pointed at a new commander through
 their consoles on 2026-08-22 and were back on the old one after their next
 restart.
 
-## DMC-MPC-002: first live runs, Windows host
-
-Two runs, Heather Hemorphite, following Gal Bistot's real fleet: run 1 (25
-min, `wingman_run1.log`, ended cleanly at its session-duration limit), run 2
-(60 min, `wingman_run2.log`). Both compiled and ran end to end via
-`botlab_host.py` on this Windows host with no crash, no stall, and no
-`askForHelpToGetUnstuck` across either session — the first evidence this bot
-can drive a real client at all.
-
-**The fleet was live and broadcasting throughout, and none of it was acted
-on.** Seven distinct real broadcasts came off Gal Bistot's fleet across the
-two runs, none matching a form the bot currently acts on:
-
-```
-Gal Bistot: Travel to Amarr VIII (Oris) - Emperor Family Academy
-Gal Bistot: Travel to Bhizheba
-Gal Bistot is at location Amarr
-Gal Bistot is at location Bhizheba
-Gal Bistot: Jump Stargate Bhizheba
-Gal Bistot: Align Stargate Bhizheba
-Gal Bistot is in position at Stargate Amarr
-```
-
-**The travel broadcast is not actually matched, and that is a doc/code
-mismatch rather than an unobserved wording.** This file's own prose (above)
-frames `…: Travel to …` as one of "the two forms that have been read" and
-implies `actOnFleetBroadcast` acts on it. Reading the source: it does not.
-`actOnFleetBroadcast` matches only `targetBroadcastPilotName` — the `Target …`
-form — and every other broadcast, travel included, falls straight into the
-generic "not one of the two forms read so far" wait. So as shipped, the
-wingman never follows the commander's travel, jump or align calls; the only
-broadcast form it can act on (called targets) went completely unexercised in
-both runs, because the fleet never called one. Either the doc's framing or
-`actOnFleetBroadcast` needs to change — right now they disagree.
-
-**Four of the seven are wordings not in the original capture above**: `is at
-location <system>`, `Jump Stargate <name>`, `Align Stargate <name>`, and `is
-in position at Stargate <name>` — the last of these is presumably the real
-rendering of `broadcastVerbsNotYetRead`'s placeholder `"In Position at"`.
-Worth folding into a capture pass alongside the eight already named there.
-
-**`Visited anomalies: 0` held for the whole of both sessions.** No anomaly,
-no combat, no drone activity, no locked target of any kind. So the inherited
-solo-hunt fallback (module activation, rat combat, drones) is exactly as
-unexercised by this as it was before these runs — two clean runs against an
-idle grid say nothing about whether that arm, the called-target lock/no-shoot
-branch, or the not-yet-built unlock path actually work.
-
 ## Not verified
 
-- **The decision root has now driven a client, twice, cleanly** — see above.
-  What has *not* been driven: the travel-broadcast path (not implemented, see
-  above), the target-broadcast path (implemented, never exercised — no
-  `Target …` broadcast occurred in either run), and the inherited solo-hunt
-  arm (never triggered — no anomaly was ever on grid).
-- **The remaining eight (now effectively eleven, with the four new wordings
-  above) broadcast verbs**, as above.
-## First live run (DMC-MPC-003, 2026-08-24)
+One list. Two were merged, and both had gone stale in the merging — one still
+said "flown once, for 45 minutes" after four flights, and one still opened
+"everything downstream of nothing has flown yet".
 
-Fifty minutes, supervised, `run_wingman.sh` on Windows, Olivia Ochre. She was
-already in Gal Bistot's fleet from an earlier session, so this run exercised
-none of `accept-fleet-invite-from` — only inherited membership, not the accept
-itself.
-
-- **Undock worked**, first decision, cleanly: `Click on the button to
-  undock.` then `I see we are already undocking.`, confirmed by the client's
-  own game log (`Undocking from Amarr VIII (Oris) ... to Amarr solar
-  system.`) and by the drones window becoming readable afterwards.
-- **Two more broadcast wordings turned up, and were declined rather than
-  guessed at**: `Gal Bistot: Align Stargate Bhizheba` and `Gal Bistot: Jump
-  Stargate Bhizheba`. Both are shaped like the travel form this bot already
-  reads (`Sender: verb`), so `follow-fleet-broadcast-from` filtered them
-  correctly, but the verb itself is not `Travel to`, so
-  `broadcastVerbsNotYetRead`'s branch fired and the bot waited rather than
-  acting — exactly the fail-closed behaviour "What is deliberately
-  unfinished" describes. Neither of these two is among the ten
-  button-enumerated broadcasts either, so the live vocabulary is wider than
-  that list alone.
-- **No target broadcast, no fleet invite, no combat.** The overview named a
-  different pilot every so often across the run — Ang Morage, Akon Keikira,
-  Acuru Leithar, Anger Wolf, Alex667 — ordinary Amarr-hub traffic passing
-  through, never more than one at a time, none hostile, none staying on
-  grid.
-- **The trip home did exactly what its own doc comment promised, and that is
-  the most useful thing this run confirmed.** At the ~47-minute mark:
-  `The session ends soon and the trip to 'Amarr VIII (Oris) - Emperor Family
-  Academy' is not implemented yet.` — named rather than silent, which is
-  "Where it is going / 5. The trip home"'s whole point. **The consequence is
-  operational and immediate**: the host stopped the process at the planned
-  50 minutes with the ship still undocked and stationary in space. Nothing
-  in this bot docks it, so ending a session this way leaves a live ship
-  sitting unpiloted until a person docks it by hand.
-- No crash, no stall, no error anywhere in the run's ~1,197 readings.
-
-## Not verified
-
-- **The remaining eight (button-enumerated) broadcast wordings.** Two
-  *travel*-shaped wordings beyond `Travel to` are no longer unverified — see
-  the run above — but `Need Backup`, `Need Shield`, `Need Armor`, `Need
-  Capacitor`, `At Location`, `In Position at`, `Spotted an Enemy` and
-  `Request That the Fleet Hold Position` have still never been seen rendered.
-- **Flown once, for 45 minutes** — see "First live run" above. Undock and the
-  named-wait fallback are confirmed live; everything below this line is still
-  unconfirmed.
-- **The remaining eight broadcast wordings**, as above.
-- **The travel-broadcast dispatch itself is unwritten**, not merely uncaptured
-  — see "First live run" above. `follow-fleet-broadcast-from` has never been
-  matched against a real broadcast.
-- **Which header label is the commander**, as above.
+- **The eight button-enumerated wordings.** `Need Backup`, `Need Shield`,
+  `Need Armor`, `Need Capacitor`, `At Location`, `In Position at`,
+  `Spotted an Enemy` and `Request That the Fleet Hold Position` have never been
+  seen rendered. `is at location` and `is in position at` above are *probably*
+  two of them, but the pairing is inferred from the wording rather than
+  observed by clicking the button and reading the result.
+- **The travel-broadcast dispatch is unwritten, not merely uncaptured.** Its
+  wording has been known since the first capture and observed on every host.
+  `follow-fleet-broadcast-from` has never been matched against a real
+  broadcast's sender.
+- **`accept-fleet-invite-from` has never driven a client.** Every run inherited
+  fleet membership from an earlier session rather than accepting an invite.
+- **The target-broadcast path, though implemented, was never exercised** — no
+  fleet called a target during any run.
+- **The inherited solo-hunt arm was never triggered.** `Visited anomalies: 0`
+  held throughout; no anomaly, no rat, no locked target, no drone activity. So
+  module activation, rat combat, drones, the called-target lock and no-shoot
+  guard, and the unlock path are all exactly as unproven as before the flights.
+- **The trip home's route, dock and ESI mechanics.** Only the "not implemented
+  yet" branch has ever fired.
+- **Which header label is the commander.**
 - **Whether a target broadcast can name something that is not a pilot** — a
-  structure, a wreck. Only a pilot has been observed, and the overview match
-  would simply fail on anything else, which is the safe direction.
-- **The accept-fleet-invite-from step itself.** The 2026-08-24 run inherited
-  fleet membership from an earlier session rather than exercising the accept,
-  so that branch has still never driven a client.
-- **Everything downstream of "nothing has flown yet" that a run without a
-  fleet-mate broadcasting `Travel to` or a target, or without rats on grid,
-  cannot exercise**: the drone-assist arm, the fleet-member-unlock arm, and
-  the module-activation ordering from "Where it is going / 2".
-- **The trip home's actual route/dock/ESI mechanics.** Only the "not
-  implemented yet" branch has fired live; nothing past that has ever run.
-- **Everything downstream of the broadcast arm** — module activation, rat
-  combat, drones, unlocking fleet members — since the one live run never saw a
-  rat, a target, or a locked fleet member.
+  structure, a wreck. Only a pilot has been observed; the overview match would
+  simply fail on anything else, which is the safe direction.
