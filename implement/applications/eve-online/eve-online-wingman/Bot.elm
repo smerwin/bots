@@ -1467,98 +1467,72 @@ decideNextActionWhenInSpaceNotHiding context shipUI =
     else
         readShipUIModuleButtonTooltips context
             |> Maybe.withDefault
-                (case
-                    context
-                        |> knownModulesToActivateAlways
-                        |> List.filter (Tuple.second >> moduleIsActiveOrReloading >> not)
-                        |> List.head
-                 of
-                    Just ( inactiveModuleMatchingText, inactiveModule ) ->
-                        describeBranch ("I see inactive module '" ++ inactiveModuleMatchingText ++ "' to activate always. Activate it.")
-                            (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
-
-                    Nothing ->
-                        modulesToActivateAlwaysActivated context shipUI
+                (activateAlwaysOnModules context
+                    |> Maybe.withDefault (fightPointedRatsOrReturnDrones context shipUI)
                 )
 
 
-modulesToActivateAlwaysActivated :
+{-| The next inactive module that `activate-module-always` names, if any --
+`Just` a click if one is inactive, `Nothing` once every named module already
+reads active.
+
+Extracted out of what is now `decideNextActionWhenInSpaceNotHiding`'s own
+inline check (that function is this app's inherited, unreachable copy of the
+combat anomaly bot's root, kept for reference) so the wingman's own root can
+reach the same behaviour instead of never checking it at all -- #349 found
+that `wingmanDecisionRootInSpace` called straight into
+`modulesToActivateAlwaysActivated` (now `fightPointedRatsOrReturnDrones`) and
+never activated an always-on module in its own right.
+-}
+activateAlwaysOnModules : BotDecisionContext -> Maybe DecisionPathNode
+activateAlwaysOnModules context =
+    case
+        context
+            |> knownModulesToActivateAlways
+            |> List.filter (Tuple.second >> moduleIsActiveOrReloading >> not)
+            |> List.head
+    of
+        Nothing ->
+            Nothing
+
+        Just ( inactiveModuleMatchingText, inactiveModule ) ->
+            Just
+                (describeBranch ("I see inactive module '" ++ inactiveModuleMatchingText ++ "' to activate always. Activate it.")
+                    (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
+                )
+
+
+{-| Self-defense only: fight back if a rat has pointed this ship, otherwise
+return drones to the bay and wait.
+
+**Deliberately does not hunt anomalies.** This function used to be named
+`modulesToActivateAlwaysActivated` and, once no rat was pointing the ship,
+used the probe scanner to warp itself into an anomaly on an idle grid --
+which is not following a commander, and is exactly the behaviour #349 names
+as what made a six-hour unattended run a bad idea. WINGMAN.md's own first
+line says what this bot is: "it does not hunt, it follows a fleet commander."
+So an idle wingman now sits still rather than going looking for a fight.
+`enterAnomaly` and `decideActionInAnomaly` are still in this file, reachable
+only from the inherited, unreachable `anomalyBotDecisionRoot` -- nothing on
+the wingman's own path calls them any more.
+
+Fighting a rat that has actually pointed this ship is kept, because that is
+self-defense rather than hunting: the ship did not choose the fight, and
+refusing to shoot back at something already attacking it would be worse than
+either hunting or standing down.
+-}
+fightPointedRatsOrReturnDrones :
     BotDecisionContext
     -> EveOnline.ParseUserInterface.ShipUI
     -> DecisionPathNode
-modulesToActivateAlwaysActivated context shipUI =
+fightPointedRatsOrReturnDrones context shipUI =
     case fightRatsIfShipIsPointed context shipUI of
         Just fightPointingRats ->
-            {-
-               Adapt to observation shared with session-recording-2024-05-15T13-11-03:
-               The anomaly is not visible anymore, since 'site has despawned',
-               but there are still rats pointing the player ship.
-               Therefore, we increase priority of fighting pointing rats to be independent of an anomaly.
-            -}
             fightPointingRats
 
         Nothing ->
-            let
-                returnDronesAndEnterAnomaly { ifNoAcceptableAnomalyAvailable } =
-                    returnDronesToBay context
-                        |> Maybe.withDefault
-                            (describeBranch "No drones to return."
-                                (enterAnomaly { ifNoAcceptableAnomalyAvailable = ifNoAcceptableAnomalyAvailable }
-                                    context
-                                    shipUI
-                                )
-                            )
-
-                returnDronesAndEnterAnomalyOrWait =
-                    returnDronesAndEnterAnomaly
-                        { ifNoAcceptableAnomalyAvailable =
-                            describeBranch "Wait for a matching anomaly to appear." waitForProgressInGame
-                        }
-            in
-            case context.readingFromGameClient |> getCurrentAnomalyIDAsSeenInProbeScanner of
-                Nothing ->
-                    describeBranch "Looks like we are not in an anomaly." returnDronesAndEnterAnomalyOrWait
-
-                Just anomalyID ->
-                    case memoryOfAnomalyWithID anomalyID context.memory of
-                        Nothing ->
-                            describeBranch
-                                ("Program error: Did not find memory of anomaly " ++ anomalyID)
-                                waitForProgressInGame
-
-                        Just memoryOfAnomaly ->
-                            let
-                                arrivalInAnomalyAgeSeconds =
-                                    (context.eventContext.timeInMilliseconds - memoryOfAnomaly.arrivalTime.milliseconds) // 1000
-
-                                continueInAnomaly : () -> DecisionPathNode
-                                continueInAnomaly () =
-                                    decideActionInAnomaly
-                                        { arrivalInAnomalyAgeSeconds = arrivalInAnomalyAgeSeconds }
-                                        context
-                                        shipUI
-                                        returnDronesAndEnterAnomalyOrWait
-                            in
-                            describeBranch ("We are in anomaly '" ++ anomalyID ++ "' since " ++ String.fromInt arrivalInAnomalyAgeSeconds ++ " seconds.")
-                                (case findReasonToAvoidAnomalyFromMemory context { anomalyID = anomalyID } of
-                                    Just reasonToAvoidAnomaly ->
-                                        describeBranch
-                                            ("Found a reason to avoid this anomaly: "
-                                                ++ describeReasonToAvoidAnomaly reasonToAvoidAnomaly
-                                            )
-                                            (returnDronesAndEnterAnomaly
-                                                { ifNoAcceptableAnomalyAvailable =
-                                                    describeBranch "Get out of this anomaly."
-                                                        (dockAtRandomStationOrStructure
-                                                            context
-                                                            shipUI
-                                                        )
-                                                }
-                                            )
-
-                                    Nothing ->
-                                        continueInAnomaly ()
-                                )
+            returnDronesToBay context
+                |> Maybe.withDefault (describeBranch "Nothing to do. Wait." waitForProgressInGame)
 
 
 undockUsingStationWindow :
@@ -3812,6 +3786,11 @@ wingmanDecisionRootBeforeApplyingSettings context =
             )
 
 
+{-| The order the operator asked for (#349): undock, activate always-on
+modules, act on the broadcast, drones assist the commander, everything else.
+Accepting a fleet invite sits ahead of all of it, in `generalSetupInUserInterface`,
+since that can land while still docked.
+-}
 wingmanDecisionRootInSpace : BotDecisionContext -> ShipUI -> DecisionPathNode
 wingmanDecisionRootInSpace context shipUI =
     case sessionIsEnding context of
@@ -3819,42 +3798,56 @@ wingmanDecisionRootInSpace context shipUI =
             goHome
 
         Nothing ->
-            case actOnFleetBroadcast context shipUI of
-                Just actOnBroadcast ->
-                    actOnBroadcast
+            case activateAlwaysOnModules context of
+                Just activate ->
+                    activate
 
                 Nothing ->
-                    case dronesAssistTheCommander context of
-                        Just assist ->
-                            assist
+                    case actOnFleetBroadcast context shipUI of
+                        Just actOnBroadcast ->
+                            actOnBroadcast
 
                         Nothing ->
-                            case accelerationGateStep context of
-                                Just takeTheGate ->
-                                    -- #348. Sits *after* the drone arm, never
-                                    -- before it, so a gate this bot can see is
-                                    -- never taken while drones are still owed a
-                                    -- command on a live grid -- the same
-                                    -- ordering argument #326 already established
-                                    -- for the drone arm itself, one level up.
-                                    takeTheGate
+                            case dronesAssistTheCommander context of
+                                Just assist ->
+                                    assist
 
                                 Nothing ->
-                                    {- Module activation and rat combat still come from
-                                       the arm this bot inherited from the combat
-                                       anomaly bot, which does both together. Splitting
-                                       them so `activate-module-always` is its own step,
-                                       ahead of the broadcast rather than behind it, is
-                                       still outstanding -- see WINGMAN.md.
+                                    case accelerationGateStep context of
+                                        Just takeTheGate ->
+                                            -- #348. Sits *after* the drone arm,
+                                            -- never before it, so a gate this
+                                            -- bot can see is never taken while
+                                            -- drones are still owed a command on
+                                            -- a live grid -- the same ordering
+                                            -- argument #326 established for the
+                                            -- drone arm itself, one level up.
+                                            takeTheGate
 
-                                       The drone arm above deliberately sits *before*
-                                       this one rather than inside it: #326 measured a
-                                       turret that could not activate holding the
-                                       decision on the other arm of this `case` for 262
-                                       consecutive readings, with the drones out and
-                                       idle the whole time.
-                                    -}
-                                    modulesToActivateAlwaysActivated context shipUI
+                                        Nothing ->
+                                            {- The inherited combat-anomaly-bot
+                                               arm is gone from here (#349): it
+                                               hunted anomalies on an idle grid,
+                                               which is not following a
+                                               commander. What remains is
+                                               self-defense only.
+
+                                               The drone arm above deliberately
+                                               sits *before* both of these
+                                               rather than inside them: #326
+                                               measured a turret that could not
+                                               activate holding the decision on
+                                               the other arm of this `case` for
+                                               262 consecutive readings, with
+                                               the drones out and idle the whole
+                                               time. Module activation is placed
+                                               ahead of the drone arm safely,
+                                               unlike that turret: it is a state
+                                               check and a click, never
+                                               something that can block on a
+                                               target lock.
+                                            -}
+                                            fightPointedRatsOrReturnDrones context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
