@@ -34,6 +34,15 @@
   "a client has this character loaded" and must not be trusted as the only
   guard: the caller is still responsible for excluding any character whose
   client is currently running, by id, explicitly.
+
+  BACKED UP, NOT DELETED: whatever a character's own file held before it is
+  relinked is copied aside to `<file>.bak-<timestamp>` first, never removed
+  outright. The link this creates is a standing arrangement rather than a
+  one-time copy -- once linked, that character's client can overwrite the
+  golden file just by playing normally -- so an operator who wants that
+  character's old, independent layout back later, or who relinked the wrong
+  id, has it. Skipped only where there is nothing to lose: a character with
+  no existing file at all, or one already sharing the golden file's inode.
 #>
 param(
     [Parameter(Mandatory=$true)][string]$GoldenCharacterId,
@@ -86,12 +95,15 @@ foreach ($id in $CharacterIds) {
         continue
     }
 
+    $backupPath = "$target.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+
     if ($WhatIf) {
-        Write-Host "would link $id -> golden ($GoldenCharacterId)" -ForegroundColor Yellow
+        Write-Host "would back up $id to $(Split-Path $backupPath -Leaf), then link $id -> golden ($GoldenCharacterId)" -ForegroundColor Yellow
         continue
     }
 
+    Copy-Item -LiteralPath $target -Destination $backupPath
     Remove-Item -LiteralPath $target -Force
     New-Item -ItemType HardLink -Path $target -Target $goldenPath | Out-Null
-    Write-Host "linked $id -> golden ($GoldenCharacterId)" -ForegroundColor Green
+    Write-Host "linked $id -> golden ($GoldenCharacterId) (old file backed up to $(Split-Path $backupPath -Leaf))" -ForegroundColor Green
 }
