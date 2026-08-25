@@ -6,6 +6,12 @@
 
   Run this on each target machine (002, 003, 004).
 
+  REFUSES TO RUN WHILE ANY EVE CLIENT IS UP. The golden file's bytes are
+  rewritten in place, and in place means every hardlinked character at once --
+  including one that is logged in and will write its own settings back over
+  the top on logout. See eve_clients_running.ps1 for why there is no override.
+  Stop the sessions and log the clients out first.
+
 .PARAMETER ShareRoot
   Where the staged golden file lives. Defaults to the UNC path from
   SHARE_GOLDEN_SETTINGS_on_001.md.
@@ -26,6 +32,9 @@ param(
     [string[]]$CharacterIds = @(),
     [string]$SettingsDir = "$env:LOCALAPPDATA\CCP\EVE\c_eve_sharedcache_tq_tranquility\settings_Default"
 )
+
+. (Join-Path $PSScriptRoot "eve_clients_running.ps1")
+Assert-NoRunningEveClients -Action "refresh the golden settings file"
 
 $remoteFile = Join-Path $ShareRoot "core_char_$GoldenCharacterId.dat"
 if (-not (Test-Path $remoteFile)) {

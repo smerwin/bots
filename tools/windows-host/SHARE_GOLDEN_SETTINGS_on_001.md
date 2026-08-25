@@ -20,6 +20,13 @@ Re-run just the `Copy-Item` line any time Greta's overview changes on this
 machine and you want to push a refresh — the share stays pointed at the same
 staging folder, so nothing else needs to change.
 
+**Log Greta out before you copy.** The client holds its overview in memory and
+writes `core_char_*.dat` back on logout, so a copy taken mid-session stages
+whatever the file held at last logout, not the layout you just finished
+arranging. This is the manual half of the same rule
+`eve_clients_running.ps1` enforces for the scripts on the receiving machines —
+there is nothing here to enforce it for you.
+
 To stop sharing when you're done:
 
 ```powershell

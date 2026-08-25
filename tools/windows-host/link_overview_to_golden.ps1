@@ -25,15 +25,18 @@
   Standard ShouldProcess support -- pass -WhatIf to see what would happen
   with nothing touched.
 
-  SAFETY, AND ITS LIMIT: this refuses to touch a file the exclusive-open
-  probe below can prove is locked. Verified NOT to catch the common case,
-  though -- a character actively logged in and flying right now (confirmed
-  live against Olivia Ochre mid-session on 2026-08-25) still opened clean,
-  because the client evidently does not hold this file open continuously
-  for the life of the session. So this check catches a narrower window than
-  "a client has this character loaded" and must not be trusted as the only
-  guard: the caller is still responsible for excluding any character whose
-  client is currently running, by id, explicitly.
+  REFUSES TO RUN WHILE ANY EVE CLIENT IS UP, unless -WhatIf (which writes
+  nothing). See eve_clients_running.ps1.
+
+  That guard is the load-bearing one, because the per-file exclusive-open
+  probe below is NOT enough on its own and was verified not to be: a
+  character actively logged in and flying right now (confirmed live against
+  Olivia Ochre mid-session on 2026-08-25) still opened clean, because the
+  client evidently does not hold this file open continuously for the life of
+  the session. The probe is kept anyway -- it costs nothing and still catches
+  the moment the file genuinely is locked -- but it catches a much narrower
+  window than "a client has this character loaded", so it must never be the
+  only thing standing between a running session and a relink.
 
   BACKED UP, NOT DELETED: whatever a character's own file held before it is
   relinked is copied aside to `<file>.bak-<timestamp>` first, never removed
@@ -50,6 +53,13 @@ param(
     [string]$SettingsDir = "$env:LOCALAPPDATA\CCP\EVE\c_eve_sharedcache_tq_tranquility\settings_Default",
     [switch]$WhatIf
 )
+
+# -WhatIf touches nothing, so it stays usable while the clients are still up --
+# which is when an operator most wants to preview the run before scheduling it.
+if (-not $WhatIf) {
+    . (Join-Path $PSScriptRoot "eve_clients_running.ps1")
+    Assert-NoRunningEveClients -Action "relink settings files"
+}
 
 $goldenPath = Join-Path $SettingsDir "core_char_$GoldenCharacterId.dat"
 if (-not (Test-Path $goldenPath)) {
