@@ -437,6 +437,14 @@ type alias BotMemory =
     -- bot is not asking it (rats present, most often), and resets only once
     -- no gate is on the overview at all.
     , gateAskedReadings : Int
+
+    -- Readings in a row spent clicking a weapon that will not come active on
+    -- the locked target, bounded for the reason #326 measured: a turret that
+    -- could not activate held that bot's decision for 262 consecutive
+    -- readings. Advances only while actually clicking, and resets the moment
+    -- nothing is locked -- so a fight that ends clears it and the next called
+    -- target gets the full allowance again.
+    , weaponsAskedReadings : Int
     }
 
 
@@ -1533,8 +1541,18 @@ fightPointedRatsOrReturnDrones context shipUI =
             fightPointingRats
 
         Nothing ->
-            returnDronesToBay context
-                |> Maybe.withDefault (describeBranch "Nothing to do. Wait." waitForProgressInGame)
+            if not (List.isEmpty context.readingFromGameClient.targets) then
+                -- Something is still locked, so this is a fight in progress
+                -- that simply is not pointing this ship -- which is the normal
+                -- case for a target the commander called. Recalling the drones
+                -- here would undo `dronesAssistTheCommander`'s work on the very
+                -- next reading and leave the bot pulling its drones in and
+                -- sending them back out for as long as the target lived.
+                describeBranch "A target is locked -- leaving the drones out." waitForProgressInGame
+
+            else
+                returnDronesToBay context
+                    |> Maybe.withDefault (describeBranch "Nothing to do. Wait." waitForProgressInGame)
 
 
 undockUsingStationWindow :
@@ -2339,6 +2357,7 @@ initBotMemory =
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
     , gateAskedReadings = 0
+    , weaponsAskedReadings = 0
     }
 
 
@@ -2428,6 +2447,7 @@ statusTextFromState context =
                     , [ describeDrones ]
                     , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
                     , [ describeAccelerationGateAsk context ]
+                    , [ describeWeaponsAsk context ]
                     ]
                         |> List.map (String.join " ")
     in
@@ -2824,6 +2844,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 Just gateEntry ->
                     List.isEmpty namesOfRatsInOverview
                         && selectedItemIsOverviewEntry context.readingFromGameClient gateEntry
+
+        -- The same shape as `askingTheGateToOpen`: something is locked and at
+        -- least one weapon is still not cycling, which is exactly the state
+        -- `fireOnActiveTarget` spends a click on. Advancing only here means a
+        -- fight where every weapon does come active leaves the counter alone
+        -- rather than burning the allowance while the guns are working.
+        askingAWeaponToActivate : Bool
+        askingAWeaponToActivate =
+            not (List.isEmpty context.readingFromGameClient.targets)
+                && (context.readingFromGameClient.shipUI
+                        |> Maybe.map (shipUIModulesToActivateOnTarget >> List.any (.isActive >> Maybe.withDefault False >> not))
+                        |> Maybe.withDefault False
+                   )
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -2882,6 +2915,15 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , weaponsAskedReadings =
+        if List.isEmpty context.readingFromGameClient.targets then
+            0
+
+        else if askingAWeaponToActivate then
+            botMemoryBefore.weaponsAskedReadings + 1
+
+        else
+            botMemoryBefore.weaponsAskedReadings
     }
 
 
@@ -3942,41 +3984,53 @@ wingmanDecisionRootInSpace context shipUI =
                                     assist
 
                                 Nothing ->
-                                    case accelerationGateStep context of
-                                        Just takeTheGate ->
-                                            -- #348. Sits *after* the drone arm,
-                                            -- never before it, so a gate this
-                                            -- bot can see is never taken while
-                                            -- drones are still owed a command on
-                                            -- a live grid -- the same ordering
-                                            -- argument #326 established for the
-                                            -- drone arm itself, one level up.
-                                            takeTheGate
+                                    case fireOnActiveTarget context of
+                                        Just fire ->
+                                            -- Strictly below the drone arm and
+                                            -- strictly above the gate: a locked
+                                            -- target means a fight, and a bot
+                                            -- that would rather take a gate
+                                            -- than shoot what the commander
+                                            -- called has left the fleet a ship
+                                            -- short in the pocket it just left.
+                                            fire
 
                                         Nothing ->
-                                            {- The inherited combat-anomaly-bot
-                                               arm is gone from here (#349): it
-                                               hunted anomalies on an idle grid,
-                                               which is not following a
-                                               commander. What remains is
-                                               self-defense only.
+                                            case accelerationGateStep context of
+                                                Just takeTheGate ->
+                                                    -- #348. Sits after the
+                                                    -- drone arm and after the
+                                                    -- guns, never before
+                                                    -- them, so a gate this
+                                                    -- bot can see is never
+                                                    -- taken while drones are
+                                                    -- still owed a command on
+                                                    -- a live grid -- the same
+                                                    -- ordering argument #326
+                                                    -- established for the
+                                                    -- drone arm itself.
+                                                    takeTheGate
 
-                                               The drone arm above deliberately
-                                               sits *before* both of these
-                                               rather than inside them: #326
-                                               measured a turret that could not
-                                               activate holding the decision on
-                                               the other arm of this `case` for
-                                               262 consecutive readings, with
-                                               the drones out and idle the whole
-                                               time. Module activation is placed
-                                               ahead of the drone arm safely,
-                                               unlike that turret: it is a state
-                                               check and a click, never
-                                               something that can block on a
-                                               target lock.
-                                            -}
-                                            fightPointedRatsOrReturnDrones context shipUI
+                                                Nothing ->
+                                                    {- The inherited
+                                                       combat-anomaly-bot arm
+                                                       is gone from here
+                                                       (#349): it hunted
+                                                       anomalies on an idle
+                                                       grid, which is not
+                                                       following a commander.
+                                                       What remains is
+                                                       self-defense only --
+                                                       and it is now genuinely
+                                                       the last resort it
+                                                       reads as, because
+                                                       `fireOnActiveTarget`
+                                                       above it fires on
+                                                       anything locked whether
+                                                       or not a rat has
+                                                       pointed this ship.
+                                                    -}
+                                                    fightPointedRatsOrReturnDrones context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
@@ -4010,11 +4064,7 @@ actOnFleetBroadcast context shipUI =
                             )
 
                     else
-                        Just
-                            (describeBranch
-                                ("Lock the called target '" ++ calledTarget ++ "'.")
-                                (lockCalledTarget context calledTarget)
-                            )
+                        bringCalledTargetUnderFire context calledTarget
 
                 Nothing ->
                     case
@@ -4063,6 +4113,53 @@ actOnFleetBroadcast context shipUI =
 
                         Nothing ->
                             Just (actOnBroadcastVerb context bannerText)
+
+
+{-| Lock the called target, then get out of the way.
+
+**Answering `Nothing` once it is locked is the whole point of this function.**
+The broadcast banner does not clear when the target is locked -- it stays up
+for the rest of the call -- so the target arm of `actOnFleetBroadcast` used to
+answer `Just (lock it)` on every single reading for as long as the banner was
+up. Because that arm sits above `dronesAssistTheCommander` and above the
+combat arm in `wingmanDecisionRootInSpace`, and the first arm to answer `Just`
+ends the reading, the bot could never reach its drones or its guns while a
+target was called. It locked what it was told to, correctly and repeatedly,
+and then never shot it: locking read as working, engaging read as broken.
+
+So this answers `Just` only while there is something left to do about the
+lock. Once the target is in the target bar, the reading falls through to the
+drone arm and then to `fireOnActiveTarget`.
+
+-}
+bringCalledTargetUnderFire : BotDecisionContext -> String -> Maybe DecisionPathNode
+bringCalledTargetUnderFire context calledTarget =
+    case lockedTargetNamed calledTarget context.readingFromGameClient of
+        Just _ ->
+            Nothing
+
+        Nothing ->
+            Just
+                (describeBranch
+                    ("Lock the called target '" ++ calledTarget ++ "'.")
+                    (lockCalledTarget context calledTarget)
+                )
+
+
+{-| The locked target whose target-bar text carries this name, if it is
+locked at all.
+
+Matched against `textsTopToBottom` rather than against the overview, because
+the question this answers is "is it already in the target bar", and the
+target bar is the only thing that knows. The texts carry distance and other
+decoration alongside the name, so this contains rather than equals.
+
+-}
+lockedTargetNamed : String -> ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.Target
+lockedTargetNamed name reading =
+    reading.targets
+        |> List.filter (.textsTopToBottom >> List.any (stringContainsIgnoringCase name))
+        |> List.head
 
 
 {-| Lock the pilot a `Target` broadcast named, from their overview row.
@@ -4837,6 +4934,115 @@ dronesAssistTheCommander context =
                 Nothing
 
 
+{-| How many readings in a row this bot will go on clicking a weapon that
+never comes active before it stops asking and lets the rest of the reading
+run. #326 is the measurement: a turret that could not activate on the current
+target held that bot's decision for **262 consecutive readings**, drones out
+and idle, nothing landing. Twenty is well past the handful of readings a
+module legitimately needs to start cycling and nowhere near a session.
+
+Past the bound this answers `Nothing` rather than parking on
+`askForHelpToGetUnstuck`, for the reason `accelerationGateStep` gives at its
+own give-up: handing the reading back lets the drones, the gate and the trip
+home still run, and `describeWeaponsAsk` keeps the give-up visible in the
+status line instead of hiding it.
+
+-}
+weaponsAskedReadingsBound : Int
+weaponsAskedReadingsBound =
+    20
+
+
+{-| Weapons cycling on whatever is locked.
+
+**This is the arm that was missing.** Before it, the only thing in this bot
+that ever activated a weapon was `fightUsingDronesAndModules`, reachable only
+through `fightRatsIfShipIsPointed` -- which answers `Nothing` unless a rat has
+actually pointed this ship. A target the fleet commander called and this bot
+dutifully locked is not pointing anybody, so nothing ever fired on it.
+
+**Placed after `dronesAssistTheCommander`, never before it.** #326's lesson is
+that reaching the drone arm must not require every weapon to read active
+first; keeping the guns strictly below the drones is what makes that true
+here regardless of what the guns do.
+
+-}
+fireOnActiveTarget : BotDecisionContext -> Maybe DecisionPathNode
+fireOnActiveTarget context =
+    case context.readingFromGameClient.shipUI of
+        Nothing ->
+            Nothing
+
+        Just shipUI ->
+            let
+                inactiveWeapon : Maybe ShipUIModuleButton
+                inactiveWeapon =
+                    shipUI
+                        |> shipUIModulesToActivateOnTarget
+                        |> List.filter (.isActive >> Maybe.withDefault False >> not)
+                        |> List.head
+            in
+            case
+                weaponsStep
+                    { targetLocked = not (List.isEmpty context.readingFromGameClient.targets)
+                    , inactiveWeaponPresent = inactiveWeapon /= Nothing
+                    , askedReadings = context.memory.weaponsAskedReadings
+                    }
+            of
+                NoTargetToFireOn ->
+                    Nothing
+
+                AllWeaponsCycling ->
+                    Nothing
+
+                GaveUpOnWeapons ->
+                    Nothing
+
+                ActivateAWeapon ->
+                    inactiveWeapon
+                        |> Maybe.map
+                            (\inactiveModule ->
+                                describeBranch
+                                    "I see a locked target and a weapon that is not cycling. Activate it."
+                                    (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
+                            )
+
+
+{-| The weapon decision on its own, as four named answers over three facts --
+the same shape as `accelerationGateActivationStep`, and for the same reason:
+the interesting rule here is an ordering between a bound and a state check,
+and a rule that can only be reached through a full `BotDecisionContext` is a
+rule nothing can execute in a test.
+
+The bound is checked **before** "are all the weapons already cycling", so a
+give-up is reported as a give-up rather than being masked by a fight that
+happens to be going fine at that moment.
+
+-}
+weaponsStep :
+    { targetLocked : Bool, inactiveWeaponPresent : Bool, askedReadings : Int }
+    -> WeaponsStep
+weaponsStep { targetLocked, inactiveWeaponPresent, askedReadings } =
+    if not targetLocked then
+        NoTargetToFireOn
+
+    else if weaponsAskedReadingsBound <= askedReadings then
+        GaveUpOnWeapons
+
+    else if not inactiveWeaponPresent then
+        AllWeaponsCycling
+
+    else
+        ActivateAWeapon
+
+
+type WeaponsStep
+    = NoTargetToFireOn
+    | AllWeaponsCycling
+    | GaveUpOnWeapons
+    | ActivateAWeapon
+
+
 {-| Take the acceleration gate the fleet's pocket needs, but only once the
 overview is clear of rats -- taking it mid-fight abandons whatever the fleet
 is still fighting and leaves the commander a ship short in the pocket this
@@ -4973,6 +5179,32 @@ sides. This bot has no corpus of its own yet; see WINGMAN.md.
 accelerationGateRefusesThisShipTicks : Int
 accelerationGateRefusesThisShipTicks =
     40
+
+
+{-| What the guns are doing, in one line.
+
+Exists for the same reason `describeAccelerationGateAsk` does: `fireOnActiveTarget`
+answers `Nothing` when it gives up, so without this the give-up would be
+invisible -- a bot with a target locked and silent guns would read in the
+status line exactly like a bot with nothing to shoot. That is the shape #343's
+review caught, and the one that made this whole class of bug hard to see from
+a console in the first place.
+
+-}
+describeWeaponsAsk : BotDecisionContext -> String
+describeWeaponsAsk context =
+    if List.isEmpty context.readingFromGameClient.targets then
+        "Weapons: nothing locked."
+
+    else if weaponsAskedReadingsBound <= context.memory.weaponsAskedReadings then
+        "Weapons: GAVE UP after "
+            ++ String.fromInt context.memory.weaponsAskedReadings
+            ++ " readings asking a weapon to come active on a locked target."
+
+    else
+        "Weapons: target locked, "
+            ++ String.fromInt context.memory.weaponsAskedReadings
+            ++ " readings spent asking one to activate."
 
 
 {-| The acceleration-gate ask, for the status line -- printed on every reading
