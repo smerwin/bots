@@ -506,16 +506,20 @@ class WingusIsTheAppTheRuleWasWrittenFor(unittest.TestCase):
         self.assertIn("Unknown setting name", self.help)
         self.assertIn("Delete the line", self.help)
 
-    def test_the_setting_this_bot_does_accept_is_still_reported(self):
-        # `hated-rat` is what wingus parses instead, and `--help` lists it under
-        # "Also accepted, but not described in the bot's own header". Naming it
-        # in the header's prose would take it out of that list -- `bot_help.py`
-        # filters on the section's whole text -- so the note deliberately does
-        # not, and this case is what notices if that changes.
-        self.assertIn(WINGUS_OWN_RAT_SETTING, setting_keys(self.source))
-        also_accepted = "".join(self.help.split(
-            "Also accepted, but not described in the bot's own header:")[1:])
-        self.assertIn(WINGUS_OWN_RAT_SETTING, also_accepted)
+    def test_the_setting_this_bot_used_to_accept_instead_is_gone_too(self):
+        """`hated-rat` was what wingus parsed instead of `avoid-rat`.
+
+        #195 removed it: it parsed, it filled a field, and the field had a real
+        reader that nothing ever called. So this bot now accepts **neither**
+        rat setting, and the contrast this case used to draw -- "the one it
+        does accept" -- no longer has two sides.
+
+        Asserted as absent rather than deleted, because an operator whose
+        settings file still carries the line needs the header to say what
+        happened, exactly as `avoid-rat`'s own removal does.
+        """
+        self.assertNotIn(WINGUS_OWN_RAT_SETTING, setting_keys(self.source))
+        self.assertIn(WINGUS_OWN_RAT_SETTING, self.help)
 
     def test_the_field_the_setting_would_have_filled_is_still_absent(self):
         # The half no repl case can see: wingus never had `avoidRats` at all,
@@ -598,8 +602,14 @@ class WingusParserAnswersForItself(unittest.TestCase):
                               for key in sorted(offered)]),
             [True] * len(offered))
 
-    def test_the_setting_this_bot_accepts_instead_still_parses(self):
+    def test_the_setting_this_bot_used_to_accept_no_longer_parses(self):
+        """#195 removed `hated-rat`, so the parser must now refuse it.
+
+        This case read `parses([...]) == [True]` until then. It is the pin that
+        would have gone red on the removal whether or not the removal was
+        right, which is why it now asserts the removal instead of the setting.
+        """
         self.assertEqual(
             self.repl.parses(["%s = Infested Carrier"
                               % WINGUS_OWN_RAT_SETTING]),
-            [True])
+            [False])
