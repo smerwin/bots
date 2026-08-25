@@ -432,3 +432,220 @@ class TheModuleActivationSplitTest(unittest.TestCase):
         fallback = fallback[:fallback.index("\n\n\n")]
         self.assertIn("fightRatsIfShipIsPointed", fallback)
         self.assertIn("returnDronesToBay", fallback)
+
+
+from test_saxrat_ported_guards import (  # noqa: E402
+    SaxratRepl, node, overview, source_of)
+from test_saxrat_route_stargate_panel_jump import (  # noqa: E402
+    JUMP_BUTTON, selected_item_window)
+
+# Stargate rows exactly as `overview()` and the real parser expect them --
+# Distance/Name/Type, the shape `test_saxrat_route_stargate_panel_jump.py`'s
+# own LIVE_STARGATE_ROWS were read off a live client in.
+BHIZHEBA_GATE_ROW = ("8,998 m", "Bhizheba", "Stargate (Amarr System)")
+OTHER_GATE_ROW = ("12,000 m", "Tar", "Stargate (CONCORD System)")
+
+
+class WingmanJumpRepl(WingmanRepl):
+    """The fleet-window repl, extended with the parser modules `gateOverviewEntry`
+    and `routeStargateJumpForNamedGate` need to be handed a real reading."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("prefix", "wingman-jump-repl-")
+        kwargs.setdefault("preamble", (
+            "import Bot exposing (..)",
+            "import EveOnline.MemoryReading",
+            "import EveOnline.ParseUserInterface",
+        ))
+        super().__init__(**kwargs)
+
+
+class TheGateOverviewEntryTest(unittest.TestCase):
+    """`gateOverviewEntry`, over the overview a real reading would carry.
+
+    #347's own safety condition: the gate a `Jump Stargate X` or
+    `Align Stargate X` broadcast names may not be on the overview at all, and
+    this is what has to answer `Nothing` rather than a different row when that
+    happens -- `stargateNameLeadsToSystem` is the same identity match
+    `routeStargateJumpFromReading` already trusts for the route panel's own
+    next system, reused rather than a fifth copy of it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanJumpRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def found(self, gate_name, rows, hide_rows=()):
+        overview_window = overview(rows)
+        for index in hide_rows:
+            entries = overview_window["children"][0]["children"][1:]
+            entries[index]["dictEntriesOfInterest"]["_display"] = False
+        definition = SaxratRepl.reading_binding("reading", [overview_window])
+        return self.repl.strings(
+            ['reading |> Maybe.andThen (gateOverviewEntry "%s")'
+             ' |> Maybe.andThen .objectName'
+             ' |> Maybe.withDefault "<none>"' % gate_name],
+            definitions=[definition])[0]
+
+    def test_the_named_gate_is_found_on_the_overview(self):
+        self.assertEqual(
+            self.found("Bhizheba", [BHIZHEBA_GATE_ROW, OTHER_GATE_ROW]),
+            "Bhizheba")
+
+    def test_a_gate_leading_elsewhere_is_not_believed_to_be_it(self):
+        """The wrong-system hazard: nothing here may stand in for a gate that
+        is not on the overview."""
+        self.assertEqual(self.found("Bhizheba", [OTHER_GATE_ROW]), "<none>")
+
+    def test_a_row_that_is_not_a_stargate_does_not_match(self):
+        self.assertEqual(
+            self.found("Bhizheba", [("500 m", "Bhizheba", "Wreck")]), "<none>")
+
+    def test_a_row_the_client_is_not_drawing_is_not_believed(self):
+        """A row scrolled out of the overview keeps a plausible region pointing
+        at whatever was recycled into its place -- CLAUDE.md's "Reading the
+        overview"."""
+        self.assertEqual(
+            self.found("Bhizheba", [BHIZHEBA_GATE_ROW], hide_rows=(0,)),
+            "<none>")
+
+    def test_the_name_is_matched_on_word_boundaries_not_as_a_substring(self):
+        self.assertEqual(
+            self.found("Bhi", [("500 m", "Bhizheba", "Stargate (Bhizheba)")]),
+            "<none>",
+            "'Bhi' matched 'Bhizheba' as a substring")
+
+
+class TheRouteStargateJumpForNamedGateTest(unittest.TestCase):
+    """`routeStargateJumpForNamedGate`, over a real reading.
+
+    The same `routeStargateJump` rule `navigateTowardFleetCommander` already
+    trusts, fed the broadcast's own gate name instead of the route panel's
+    next system -- reused unchanged rather than a fourth copy of the jump
+    logic, which is what #347 asked for.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanJumpRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def verdict(self, gate_name, rows, panel_showing, buttons=(JUMP_BUTTON,)):
+        children = [overview(rows)]
+        if panel_showing is not None:
+            children.append(selected_item_window(panel_showing, buttons))
+        definition = SaxratRepl.reading_binding("reading", children)
+        return self.repl.strings([
+            'reading |> Maybe.map (routeStargateJumpForNamedGate "%s"'
+            ' >> describeRouteStargateJump)'
+            ' |> Maybe.withDefault "no reading at all"' % gate_name
+        ], definitions=[definition])[0]
+
+    def test_the_named_gate_is_jumped_when_the_panel_already_shows_it(self):
+        answer = self.verdict(
+            "Bhizheba", [BHIZHEBA_GATE_ROW],
+            "Bhizheba (<color=#ff4ecef8>0.8</color>)")
+        self.assertIn("Jump through 'Bhizheba'", answer)
+
+    def test_a_panel_showing_a_different_gate_does_not_jump(self):
+        """The failure this whole design refuses: pressing Jump while the panel
+        shows another gate would send the ship through the wrong stargate."""
+        answer = self.verdict(
+            "Bhizheba", [BHIZHEBA_GATE_ROW],
+            "Tar (<color=#ff4ecef8>0.8</color>)")
+        self.assertIn("not showing the stargate to 'Bhizheba'", answer)
+        self.assertNotIn("Jump through", answer)
+
+    def test_no_gate_named_for_the_broadcast_declines(self):
+        answer = self.verdict("Bhizheba", [OTHER_GATE_ROW], None)
+        self.assertIn(
+            "No stargate on the overview is named for 'Bhizheba'", answer)
+        self.assertNotIn("Jump through", answer)
+
+    def test_a_panel_without_the_jump_button_declines(self):
+        answer = self.verdict(
+            "Bhizheba", [BHIZHEBA_GATE_ROW],
+            "Bhizheba (<color=#ff4ecef8>0.8</color>)",
+            buttons=("selectedItemOrbit",))
+        self.assertIn("offers no 'selectedItemJump'", answer)
+        self.assertNotIn("Jump through", answer)
+
+
+class TheCalledGateHandlingIsWiredTest(unittest.TestCase):
+    """`jumpToCalledGate` and `alignToCalledGate` need a whole
+    `BotDecisionContext` to run, which is why they are read here rather than
+    executed -- the same reason `test_route_stargate_panel_jump.py`'s
+    `TheFallBackIsTheCascadeTest` reads `jumpThroughRouteStargate` instead of
+    constructing a `BotDecisionContext` by hand. The two pure pieces they
+    compose, `gateOverviewEntry` and `routeStargateJumpForNamedGate`, are
+    executed for real above.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = source_of(WINGMAN_BOT_ELM)
+
+    def test_both_refuse_a_gate_not_on_the_overview_rather_than_guessing(self):
+        self.assertIn(
+            "is not on the overview -- nothing to jump through.", self.source)
+        self.assertIn(
+            "is not on the overview -- nothing to align to.", self.source)
+
+    def test_jump_reuses_the_two_pure_pieces_rather_than_a_new_rule(self):
+        self.assertIn("gateOverviewEntry gateName", self.source)
+        self.assertIn(
+            "routeStargateJumpForNamedGate gateName", self.source)
+
+    def test_align_opens_the_gate_s_own_menu_and_clicks_nothing(self):
+        """The `openTheBroadcastsOwnMenu` pattern: aligning is not a cascade
+        this repo has driven before and the client's own wording for it has
+        never been read, so the next reading is what records it rather than a
+        guess."""
+        self.assertIn(
+            "reading records what 'Align' offers.", self.source)
+        self.assertIn(
+            "useContextMenuCascadeOnOverviewEntry menuCascadeCompleted"
+            " overviewEntry context", self.source)
+
+    def test_the_broadcast_arms_call_the_new_functions(self):
+        self.assertIn("(jumpToCalledGate context gate)", self.source)
+        self.assertIn("(alignToCalledGate context gate)", self.source)
+
+    def test_neither_arm_lost_its_permission_gate(self):
+        # `JumpGate {` and `AlignGate {` also match the type definition and
+        # `fleetBroadcastSender`, both above `actOnBroadcastVerb`'s own
+        # definition -- start from the definition itself, not the first call
+        # site, or the slice below catches those instead of the case arms.
+        root = self.source[
+            self.source.index("actOnBroadcastVerb context bannerText ="):]
+        jump_arm = root[root.index("JumpGate {"):root.index("AlignGate {")]
+        align_arm = root[root.index("AlignGate {"):]
+        align_arm = align_arm[:align_arm.index("Unrecognized text ->")]
+        for arm in (jump_arm, align_arm):
+            self.assertIn("not(permittedpilot)", arm.replace(" ", ""))
+            self.assertIn("follow-fleet-broadcast-from", arm)
+
+    def test_no_third_escalation_rung_was_ported(self):
+        """#347 is explicit: `jumpCascadeStuckReadings` -- the stuck-cascade
+        counter warp-to-0 falls back to a surroundings-button cascade with --
+        must not come along, because approximating it without the real
+        `newJumpsCompleted`/`lastSolarSystemName` bookkeeping would misfire on
+        exactly the case it protects against. `navigateTowardFleetCommander`'s
+        own comment already names both terms to explain why *it* has only two
+        rungs (#343); this checks the block #347 added rather than repeating
+        that, since a comment mentioning a term is not the same as code using
+        it.
+        """
+        block = self.source[
+            self.source.index("gateOverviewEntry gateName readingFromGameClient ="):
+            self.source.index("nextSystemOnRouteFromReading readingFromGameClient =")]
+        self.assertNotIn("jumpCascadeStuckReadings", block)
+        self.assertNotIn("newJumpsCompleted", block)
+        self.assertNotIn("surroundings", block)
