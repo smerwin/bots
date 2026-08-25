@@ -262,6 +262,63 @@ the profile block again. Four ships were pointed at a new commander through
 their consoles on 2026-08-22 and were back on the old one after their next
 restart.
 
+## DMC-MPC-002: first live runs, Windows host
+
+Two runs, Heather Hemorphite, following Gal Bistot's real fleet: run 1 (25
+min, `wingman_run1.log`, ended cleanly at its session-duration limit), run 2
+(60 min, `wingman_run2.log`). Both compiled and ran end to end via
+`botlab_host.py` on this Windows host with no crash, no stall, and no
+`askForHelpToGetUnstuck` across either session — the first evidence this bot
+can drive a real client at all.
+
+**The fleet was live and broadcasting throughout, and none of it was acted
+on.** Seven distinct real broadcasts came off Gal Bistot's fleet across the
+two runs, none matching a form the bot currently acts on:
+
+```
+Gal Bistot: Travel to Amarr VIII (Oris) - Emperor Family Academy
+Gal Bistot: Travel to Bhizheba
+Gal Bistot is at location Amarr
+Gal Bistot is at location Bhizheba
+Gal Bistot: Jump Stargate Bhizheba
+Gal Bistot: Align Stargate Bhizheba
+Gal Bistot is in position at Stargate Amarr
+```
+
+**The travel broadcast is not actually matched, and that is a doc/code
+mismatch rather than an unobserved wording.** This file's own prose (above)
+frames `…: Travel to …` as one of "the two forms that have been read" and
+implies `actOnFleetBroadcast` acts on it. Reading the source: it does not.
+`actOnFleetBroadcast` matches only `targetBroadcastPilotName` — the `Target …`
+form — and every other broadcast, travel included, falls straight into the
+generic "not one of the two forms read so far" wait. So as shipped, the
+wingman never follows the commander's travel, jump or align calls; the only
+broadcast form it can act on (called targets) went completely unexercised in
+both runs, because the fleet never called one. Either the doc's framing or
+`actOnFleetBroadcast` needs to change — right now they disagree.
+
+**Four of the seven are wordings not in the original capture above**: `is at
+location <system>`, `Jump Stargate <name>`, `Align Stargate <name>`, and `is
+in position at Stargate <name>` — the last of these is presumably the real
+rendering of `broadcastVerbsNotYetRead`'s placeholder `"In Position at"`.
+Worth folding into a capture pass alongside the eight already named there.
+
+**`Visited anomalies: 0` held for the whole of both sessions.** No anomaly,
+no combat, no drone activity, no locked target of any kind. So the inherited
+solo-hunt fallback (module activation, rat combat, drones) is exactly as
+unexercised by this as it was before these runs — two clean runs against an
+idle grid say nothing about whether that arm, the called-target lock/no-shoot
+branch, or the not-yet-built unlock path actually work.
+
+## Not verified
+
+- **The decision root has now driven a client, twice, cleanly** — see above.
+  What has *not* been driven: the travel-broadcast path (not implemented, see
+  above), the target-broadcast path (implemented, never exercised — no
+  `Target …` broadcast occurred in either run), and the inherited solo-hunt
+  arm (never triggered — no anomaly was ever on grid).
+- **The remaining eight (now effectively eleven, with the four new wordings
+  above) broadcast verbs**, as above.
 ## First live run (DMC-MPC-003, 2026-08-24)
 
 Fifty minutes, supervised, `run_wingman.sh` on Windows, Olivia Ochre. She was
