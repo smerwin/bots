@@ -299,3 +299,92 @@ class TheDronesAssistTheCommanderTest(unittest.TestCase):
     def test_the_assist_can_be_turned_off(self):
         # A logi or a solo fit wants its drones on its own target.
         self.assertIn("assistFleetCommander", self.source)
+
+
+class TheAccelerationGateStepTest(unittest.TestCase):
+    """#348: take a gate, but only clear of rats, and bounded.
+
+    `accelerationGateActivationStep` is executed for real through `elm repl`
+    -- ported from saxrat's `gateActivationStep` of the same shape, so the
+    boundary cases are the ones that matter: which side of the give-up bound
+    answers what, and that a gate not yet selected is selected before the
+    panel's button is ever asked about.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+        with open(WINGMAN_BOT_ELM, encoding="utf-8") as handle:
+            cls.source = handle.read()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_an_unselected_gate_is_selected_first(self):
+        self.assertEqual(
+            self.repl.evaluate([
+                'accelerationGateActivationStep'
+                ' { panelShowsTheGate = False, panelOffersActivateGate = False'
+                ', askedReadings = 0 } == SelectTheGate']),
+            [True])
+
+    def test_a_selected_gate_with_no_button_yet_waits(self):
+        self.assertEqual(
+            self.repl.evaluate([
+                'accelerationGateActivationStep'
+                ' { panelShowsTheGate = True, panelOffersActivateGate = False'
+                ', askedReadings = 3 } == WaitForTheActivateButton']),
+            [True])
+
+    def test_the_button_is_pressed_once_offered(self):
+        self.assertEqual(
+            self.repl.evaluate([
+                'accelerationGateActivationStep'
+                ' { panelShowsTheGate = True, panelOffersActivateGate = True'
+                ', askedReadings = 3 } == PressActivateGate']),
+            [True])
+
+    def test_the_give_up_boundary_is_exactly_forty(self):
+        # 40 is still an ordinary ask; 41 is a give-up. Same numbers saxrat's
+        # `gateRefusesThisShipTicks` uses, and the same reason: its own corpus
+        # separates a working gate's cost (0-15 readings) from a genuinely
+        # stuck one (past 335) with room on both sides.
+        self.assertEqual(
+            self.repl.evaluate([
+                'accelerationGateActivationStep'
+                ' { panelShowsTheGate = True, panelOffersActivateGate = True'
+                ', askedReadings = 40 } == PressActivateGate',
+                'accelerationGateActivationStep'
+                ' { panelShowsTheGate = True, panelOffersActivateGate = True'
+                ', askedReadings = 41 } == GiveUpOnThisGate',
+                'accelerationGateHasBeenGivenUpOn 40 == False',
+                'accelerationGateHasBeenGivenUpOn 41 == True']),
+            [True, True, True, True])
+
+    def test_a_give_up_wins_even_over_a_gate_the_panel_already_shows(self):
+        # The bound must not be shadowed by the panel already being ready --
+        # exactly the #147 shadowing this file's own doc comment references.
+        self.assertEqual(
+            self.repl.evaluate([
+                'accelerationGateActivationStep'
+                ' { panelShowsTheGate = True, panelOffersActivateGate = True'
+                ', askedReadings = 999 } == GiveUpOnThisGate']),
+            [True])
+
+    def test_it_sits_after_the_drone_arm_and_before_the_inherited_combat_arm(self):
+        root = self.source[self.source.index("wingmanDecisionRootInSpace context shipUI ="):]
+        root = root[:root.index("\n\n\n")]
+        self.assertLess(
+            root.index("dronesAssistTheCommander"),
+            root.index("accelerationGateStep"),
+            "the gate arm must not preempt drones still assisting on a live grid")
+        self.assertLess(
+            root.index("accelerationGateStep"),
+            root.index("modulesToActivateAlwaysActivated"))
+
+    def test_the_ask_is_reported_in_the_status_line(self):
+        # #343's own review caught a single "waiting" line covering two
+        # different situations; this must name which one it is.
+        self.assertIn("describeAccelerationGateAsk", self.source)
+        self.assertIn("rats still on the grid", self.source)
