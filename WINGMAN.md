@@ -29,6 +29,13 @@ is proven.
 The decision root, in order. Each arm is reached only when the one above has
 nothing to do.
 
+0. **Accept a fleet invitation** named in `accept-fleet-invite-from`, ahead of
+   the docked-or-in-space split — this is `generalSetupInUserInterface`, not
+   the space-only root below, since the confirmation can land while docked.
+   Verified live 2026-08-25: `closeMessageBox`'s Close/OK-only matcher fell
+   through to `askForHelpToGetUnstuck` on the invite's `yes_dialog_button` /
+   `no_dialog_button` pair, so an invite the setting named sat unanswered
+   forever until this was added.
 1. **Undock** if docked, through `undockUsingStationWindow`.
 2. **Act on the fleet broadcast**, if the banner carries one of the two forms
    that have been read (below).
@@ -71,6 +78,34 @@ cannot filter a target broadcast at all. Anyone in the fleet can call a target.
 The trust sits entirely in `accept-fleet-invite-from`, which decides whether
 this ship is in the fleet in the first place. That was a deliberate decision
 rather than an oversight, and the bot's own header says so.
+
+**The travel form was documented and not wired at all, until 2026-08-25.**
+`actOnFleetBroadcast` had a matcher for `Target …` and nothing for
+`… : Travel to …` — the eight verbs in `broadcastVerbsNotYetRead` fell through
+to a named wait, and so, silently, did every travel broadcast, despite this
+file and the bot's own header both listing it as one of the two forms already
+read. Fixed by porting `eve-online-saxrat`'s `fleetTravelBroadcastMarker` /
+`fleetTravelBroadcast` / the two-reading `fleetBroadcastSeen` →
+`fleetBroadcastFollowed` latch whole, adapted for one real difference: saxrat's
+copy of `EveOnline.BotFrameworkSeparatingMemory` was extended to parameterize
+`UpdateMemoryContext` with `BotSettings`, and this freshly-vendored copy was
+not, so the latch is computed unfiltered by `follow-fleet-broadcast-from` and
+permission is checked only where the memory update cannot reach — in
+`fleetTravelBroadcast` itself, at decision time.
+
+Verified live end to end: the banner `Gal Bistot: Travel to Bhizheba` (no
+timestamp — the marker is an infix, matched the same way on the timestamped
+history panel and the plain persistent banner, though only the banner is ever
+actually read) produced `@host set-destination Bhizheba` in the decision log,
+the host logged `# ESI: destination 'Bhizheba' set (30002282)`, and the
+client's own route panel came up `Route 1 Jump` naming Bhizheba. The very next
+reading printed `Already asked the host to route to 'Bhizheba', ...` instead of
+repeating the call — the latch holding.
+
+**This sets the destination and nothing here flies it.** No route-panel
+driving exists in this bot, same as the trip home below; what moves the ship is
+the client's own Autopilot toggle, if the operator has it on — the same
+mechanism `eve-online-warp-to-0-autopilot` is built entirely around.
 
 ### `entryLabel` is not the broadcast history's private name
 
@@ -204,9 +239,20 @@ restart.
 
 ## Not verified
 
-- **Nothing has been flown.** The decision root has never driven a client.
-- **The remaining eight broadcast wordings**, as above.
-- **Which header label is the commander**, as above.
 - **Whether a target broadcast can name something that is not a pilot** — a
   structure, a wreck. Only a pilot has been observed, and the overview match
-  would simply fail on anything else, which is the safe direction.
+  would simply fail on anything else, which is the safe direction. Locking a
+  called target has not been flown; only the "don't shoot a fleet member" and
+  "not one of the two forms" branches have.
+- **The remaining eight broadcast wordings**, as above.
+- **Which header label is the commander**, as above.
+- **Everything past the broadcast**: module activation, rat combat, drones,
+  unlocking, the trip home. None of it has flown; the decision root has only
+  been driven as far as accepting an invite and following a travel broadcast.
+
+## Flown
+
+- **Accepting a fleet invitation** (2026-08-25, live). See "What it does now",
+  step 0.
+- **Reading and following a travel broadcast** (2026-08-25, live). See "The
+  two broadcast forms are shaped differently", above.
