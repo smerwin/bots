@@ -107,6 +107,7 @@ import EveOnline.BotFramework
         , ReadingFromGameClient
         , ShipModulesMemory
         , UseContextMenuCascadeNode(..)
+        , infoPanelRouteFirstMarkerFromReadingFromGameClient
         , localChatWindowFromUserInterface
         , menuCascadeCompleted
         , mouseClickOnUIElement
@@ -126,11 +127,13 @@ import EveOnline.BotFrameworkSeparatingMemory
         , branchDependingOnDockedOrInSpace
         , clickModuleButtonButWaitIfClickedInPreviousStep
         , decideActionForCurrentStep
+        , discardContextMenuIfTooDistantFromTargetElement
         , ensureInfoPanelLocationInfoIsExpanded
         , ensureOverviewsSorted
         , useContextMenuCascade
         , useContextMenuCascadeOnListSurroundingsButton
         , useContextMenuCascadeOnOverviewEntry
+        , useContextMenuCascadeWithCustomConfig
         , waitForProgressInGame
         )
 import EveOnline.ParseUserInterface
@@ -139,7 +142,9 @@ import EveOnline.ParseUserInterface
         , ShipUI
         , ShipUIModuleButton
         )
+import EveOnline.MemoryReading
 import EveOnline.UnstuckBot
+import Json.Decode
 import List.Extra
 import Result.Extra
 import Set
@@ -415,6 +420,15 @@ type alias BotMemory =
     -- away, so without this the ask would repeat on every reading for the
     -- rest of the session.
     , fleetBroadcastFollowed : Maybe String
+
+    -- Ported from `eve-online-warp-to-0-autopilot`'s fields of the same name
+    -- -- see `navigateTowardFleetCommander` for what they drive. Not renamed,
+    -- so a reader who knows that bot recognises them immediately. That bot's
+    -- third rung (a `jumpCascadeStuckReadings` count falling back to the
+    -- surroundings-button cascade past 30 stuck readings) is deliberately not
+    -- ported -- see `navigateTowardFleetCommander`'s own comment for why.
+    , routeFirstMarkerRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
+    , routeFirstMarkerUnchangedTicks : Int
     }
 
 
@@ -2338,6 +2352,8 @@ initBotMemory =
     , contextMenuStuckTicks = 0
     , fleetBroadcastSeen = Nothing
     , fleetBroadcastFollowed = Nothing
+    , routeFirstMarkerRegion = Nothing
+    , routeFirstMarkerUnchangedTicks = 0
     }
 
 
@@ -2786,6 +2802,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                                 []
                     in
                     newEvents ++ botMemoryBefore.droneBandwidthLimitatatinEvents
+
+        -- Ported from `eve-online-warp-to-0-autopilot`'s field of the same
+        -- name -- see that bot's own `BotMemory` doc comment for the full
+        -- argument: right after a route is (re)set, the route panel's marker
+        -- strip needs a moment to finish computing, and clicking during that
+        -- window means clicking a position with no clickable icon there yet.
+        currentRouteFirstMarkerRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
+        currentRouteFirstMarkerRegion =
+            infoPanelRouteFirstMarkerFromReadingFromGameClient context.readingFromGameClient
+                |> Maybe.map (.uiNode >> .totalDisplayRegion)
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -2825,6 +2851,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
                 else
                     botMemoryBefore.fleetBroadcastFollowed
+    , routeFirstMarkerRegion = currentRouteFirstMarkerRegion
+    , routeFirstMarkerUnchangedTicks =
+        if currentRouteFirstMarkerRegion == Nothing then
+            0
+
+        else if currentRouteFirstMarkerRegion == botMemoryBefore.routeFirstMarkerRegion then
+            botMemoryBefore.routeFirstMarkerUnchangedTicks + 1
+
+        else
+            0
     }
 
 
@@ -3307,11 +3343,18 @@ from `eve-online-saxrat`'s `hostDirectivePrefix` / `hostDirectiveSetDestination`
 and unacknowledged: the client's own route panel is the confirmation, not
 anything the host reports back.
 
-**Sets the destination; nothing here flies it.** This bot has no route-panel
-driving logic of its own, the same posture `sessionIsEnding`'s trip home
-already takes. What moves the ship is the client's own Autopilot toggle, if the
-operator has it on -- the same mechanism `eve-online-warp-to-0-autopilot` is
-built entirely around.
+**This sets the destination; flying it is `navigateTowardFleetCommander`'s
+job, not this directive's.** The sentence this doc comment used to carry --
+that nothing here flies the route, and that `eve-online-warp-to-0-autopilot`
+is "built entirely around" the client's own Autopilot toggle -- was wrong
+about that other bot as well as about this one: read live,
+`eve-online-warp-to-0-autopilot`'s `decideStepWhenInSpace` presses the
+Selected Item panel's own Jump button (falling back to the route marker's
+context menu) whether or not the client's Autopilot toggle is on at all; it
+never reads that toggle. `sessionIsEnding`'s trip home is still exactly the
+posture the old sentence described -- nothing drives it -- but the travel
+broadcast is not, since `navigateTowardFleetCommander` below is that same
+mechanism, ported.
 
 -}
 hostDirectivePrefix : String
@@ -3322,6 +3365,357 @@ hostDirectivePrefix =
 hostDirectiveSetDestination : String -> String
 hostDirectiveSetDestination systemName =
     hostDirectivePrefix ++ "set-destination " ++ systemName
+
+
+{-| Whether a named pilot has a row on the current overview -- the proxy for
+"is the fleet commander in this system right now", since nothing here reads a
+pilot's system directly. Matched on the row's own Name, exactly as
+`lockCalledTarget` matches a called target's.
+-}
+pilotIsOnOverview : String -> ReadingFromGameClient -> Bool
+pilotIsOnOverview pilotName readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.any (.objectName >> (==) (Just pilotName))
+
+
+{-| Fly toward the fleet commander's broadcast destination, using
+`eve-online-warp-to-0-autopilot`'s own mechanism for actually flying a route --
+ported rather than reinvented, since that bot's `decideStepWhenInSpace` is
+exactly this problem already solved and measured. Everything from
+`RouteStargateJump` down to `nodeIsDisplayed` below is that bot's code,
+unchanged; only this function and the two memory fields it reads
+(`routeFirstMarkerRegion`, `routeFirstMarkerUnchangedTicks`) are new.
+
+**Called only while the commander is off this grid.** `actOnFleetBroadcast`
+is what decides that, by asking `pilotIsOnOverview` -- this function does not
+re-ask it, so it has no opinion of its own about when it should run. Once the
+commander reappears on the overview, `actOnFleetBroadcast` stops calling this
+and the ship holds wherever the last jump left it, which is the correct
+place to be: arriving is what "not out of system anymore" means.
+
+**Two rungs, not three.** `eve-online-warp-to-0-autopilot` has a third:
+`jumpCascadeStuckReadings`, which counts consecutive readings the route panel
+names the same next system with no jump landing, and falls back to a
+surroundings-button cascade past 30 of them. That count is derived from
+`newJumpsCompleted`, which is itself derived from `lastSolarSystemName`
+changing -- bookkeeping this bot has no other use for and does not otherwise
+keep. Approximating it off `nextSystemOnRouteFromReading` changing instead
+would misread the one case that bot's own comment names as the reason for
+the more careful signal -- a route that revisits a system it has already
+named, where the label repeats on a leg that did complete. Rather than ship
+a stuck-detector that can misfire on exactly the case it exists to catch,
+this bot's third rung is not ported; `jumpThroughRouteStargate`'s own two
+rungs (the panel button, then the marker's right-click cascade) are what
+run here. The cost is stated rather than hidden: a route this bot cannot
+identify a gate for, gone stuck at the marker cascade, has no further
+fallback and keeps retrying it.
+
+-}
+navigateTowardFleetCommander : BotDecisionContext -> ShipUI -> DecisionPathNode
+navigateTowardFleetCommander context shipUI =
+    case infoPanelRouteFirstMarkerFromReadingFromGameClient context.readingFromGameClient of
+        Nothing ->
+            -- Two different situations read identically here and this cannot
+            -- tell them apart: the ESI ask has not taken effect yet, or the
+            -- route was flown to the end and there is nothing left of it --
+            -- this bot keeps no "did we ever see a marker for this broadcast"
+            -- memory the way `eve-online-warp-to-0-autopilot`'s
+            -- `didTravelEnRoute` does, so the message says so honestly rather
+            -- than asserting the first when it could be either.
+            describeBranch
+                "No route in the info panel -- either the destination has not taken effect yet, or the route has already been flown to its end and the commander has moved again since."
+                waitForProgressInGame
+
+        Just infoPanelRouteFirstMarker ->
+            if shipUIIndicatesShipIsWarpingOrJumping shipUI then
+                describeBranch
+                    "I see the ship is warping or jumping. I wait until that maneuver ends."
+                    waitForProgressInGame
+
+            else if context.memory.routeFirstMarkerUnchangedTicks < 1 then
+                describeBranch
+                    "Route panel's first marker just appeared or moved since the last reading -- wait for the route to finish (re)computing before clicking it."
+                    waitForProgressInGame
+
+            else
+                jumpThroughRouteStargate context
+                    (routeMarkerCascade context infoPanelRouteFirstMarker)
+
+
+{-| Right-click the route panel's first marker and take whichever of "dock" or
+"jump" the client offers. Ported from `eve-online-warp-to-0-autopilot`'s
+function of the same name, unchanged -- see that bot's own doc comment for why
+"dock" stays first in the list.
+-}
+routeMarkerCascade :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.InfoPanelRouteRouteElementMarker
+    -> DecisionPathNode
+routeMarkerCascade context infoPanelRouteFirstMarker =
+    useContextMenuCascadeWithCustomConfig
+        (discardContextMenuIfTooDistantFromTargetElement { toleratedDistance = 200 })
+        { targetUIElement = infoPanelRouteFirstMarker.uiNode, targetUIElementName = "route element icon" }
+        (useMenuEntryWithTextContainingFirstOfCommonContinuation
+            [ "dock"
+
+            -- https://forum.botlab.org/t/i-want-to-add-korean-support-on-eve-online-bot-what-should-i-do/4370/14
+            , "도킹"
+            , "jump"
+
+            -- https://forum.botlab.org/t/i-want-to-add-korean-support-on-eve-online-bot-what-should-i-do/4370
+            , "점프 - 스타게이트 사용"
+            ]
+            menuCascadeCompleted
+        )
+        context
+
+
+{-| Whether to press the Selected Item panel's Jump, and which gate it would
+be. Ported byte for byte from `eve-online-warp-to-0-autopilot`'s function of
+the same name -- see that bot's own doc comment for the full argument (#170's
+rule, identical across saxrat, the mission runner and that bot).
+-}
+type RouteStargateJump
+    = PressTheJumpButton String
+    | NoNextSystemOnRoute
+    | NoStargateNamedForTheNextSystem String
+    | SeveralStargatesNamedForTheNextSystem String
+    | ThePanelIsShowingSomethingElse String
+    | ThePanelOffersNoJump String
+
+
+routeStargateJump :
+    { nextSystemOnRoute : Maybe String
+    , stargatesOnOverview : List { name : String, panelIsShowingIt : Bool }
+    , panelOffersJump : Bool
+    }
+    -> RouteStargateJump
+routeStargateJump input =
+    case input.nextSystemOnRoute of
+        Nothing ->
+            NoNextSystemOnRoute
+
+        Just nextSystem ->
+            case input.stargatesOnOverview |> List.filter (.name >> stargateNameLeadsToSystem nextSystem) of
+                [] ->
+                    NoStargateNamedForTheNextSystem nextSystem
+
+                [ gate ] ->
+                    if not gate.panelIsShowingIt then
+                        ThePanelIsShowingSomethingElse nextSystem
+
+                    else if not input.panelOffersJump then
+                        ThePanelOffersNoJump nextSystem
+
+                    else
+                        PressTheJumpButton gate.name
+
+                _ ->
+                    SeveralStargatesNamedForTheNextSystem nextSystem
+
+
+describeRouteStargateJump : RouteStargateJump -> String
+describeRouteStargateJump jump =
+    case jump of
+        PressTheJumpButton gateName ->
+            "Jump through '" ++ gateName ++ "' from the selected-item panel, which is already showing it."
+
+        NoNextSystemOnRoute ->
+            "The route panel does not name a next system, so nothing here says which stargate is the route's -- right-click the route marker instead."
+
+        NoStargateNamedForTheNextSystem nextSystem ->
+            "No stargate on the overview is named for '" ++ nextSystem ++ "' -- right-click the route marker instead."
+
+        SeveralStargatesNamedForTheNextSystem nextSystem ->
+            "More than one stargate on the overview is named for '" ++ nextSystem ++ "', so which one the route means is not readable here -- right-click the route marker instead."
+
+        ThePanelIsShowingSomethingElse nextSystem ->
+            "The selected-item panel is not showing the stargate to '" ++ nextSystem ++ "' -- selecting it would spend the reading this saves, so right-click the route marker instead."
+
+        ThePanelOffersNoJump nextSystem ->
+            "The selected-item panel is showing the stargate to '" ++ nextSystem ++ "' and offers no 'selectedItemJump' -- right-click the route marker instead, which is what closes the distance."
+
+
+{-| Whether an overview row's name says this stargate leads to `systemName`.
+Ported unchanged from `eve-online-warp-to-0-autopilot`.
+-}
+stargateNameLeadsToSystem : String -> String -> Bool
+stargateNameLeadsToSystem systemName gateName =
+    containsWords (punctuationAsSeparators systemName) (punctuationAsSeparators gateName)
+
+
+punctuationAsSeparators : String -> String
+punctuationAsSeparators =
+    String.map
+        (\character ->
+            if Char.isAlphaNum character then
+                character
+
+            else
+                ' '
+        )
+
+
+{-| The system the route panel says this ship jumps to next, if it says.
+Ported unchanged from `eve-online-warp-to-0-autopilot`.
+-}
+nextSystemOnRouteFromReading : ReadingFromGameClient -> Maybe String
+nextSystemOnRouteFromReading readingFromGameClient =
+    readingFromGameClient.infoPanelContainer
+        |> Maybe.andThen .infoPanelRoute
+        |> Maybe.map (.uiNode >> .uiNode >> EveOnline.ParseUserInterface.getAllContainedDisplayTexts)
+        |> Maybe.withDefault []
+        |> List.filterMap parseNextSystemInRouteFromLabelText
+        |> List.head
+
+
+parseNextSystemInRouteFromLabelText : String -> Maybe String
+parseNextSystemInRouteFromLabelText labelText =
+    [ "alt='Next System in Route'", "alt=\"Next System in Route\"" ]
+        |> List.filterMap
+            (\marker ->
+                labelText |> EveOnline.ParseUserInterface.getSubstringBetweenXmlTagsAfterMarker marker
+            )
+        |> List.map String.trim
+        |> List.filter (String.isEmpty >> not)
+        |> List.head
+
+
+{-| Whether an overview row's own words say it is a stargate. Ported unchanged
+from `eve-online-warp-to-0-autopilot`.
+-}
+overviewEntryIsAStargate : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsAStargate entry =
+    [ entry.objectName, entry.objectType ]
+        |> List.filterMap identity
+        |> List.any (containsWords "stargate")
+
+
+{-| Take the route's next stargate by pressing the Selected Item panel's own
+Jump button, where the panel is already showing that gate. Ported unchanged
+from `eve-online-warp-to-0-autopilot`.
+-}
+jumpThroughRouteStargate : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+jumpThroughRouteStargate context ifThePanelCannotDoIt =
+    let
+        jumpButton : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        jumpButton =
+            routeStargateJumpButton context.readingFromGameClient
+
+        verdict : RouteStargateJump
+        verdict =
+            routeStargateJumpFromReading context.readingFromGameClient
+    in
+    case ( verdict, jumpButton ) of
+        ( PressTheJumpButton _, Just buttonToPress ) ->
+            describeBranch (describeRouteStargateJump verdict) (clickUiElementForNavigation buttonToPress)
+
+        _ ->
+            describeBranch (describeRouteStargateJump verdict) ifThePanelCannotDoIt
+
+
+{-| The three readings `routeStargateJump` decides from, taken off one
+reading. Ported unchanged from `eve-online-warp-to-0-autopilot`.
+-}
+routeStargateJumpFromReading : ReadingFromGameClient -> RouteStargateJump
+routeStargateJumpFromReading readingFromGameClient =
+    routeStargateJump
+        { nextSystemOnRoute = nextSystemOnRouteFromReading readingFromGameClient
+        , stargatesOnOverview =
+            readingFromGameClient.overviewWindows
+                |> List.concatMap .entries
+                |> List.filter overviewEntryIsDisplayed
+                |> List.filter overviewEntryIsAStargate
+                |> List.map
+                    (\gate ->
+                        { name = gate.objectName |> Maybe.withDefault ""
+                        , panelIsShowingIt =
+                            selectedItemIsOverviewEntry readingFromGameClient gate
+                        }
+                    )
+        , panelOffersJump = routeStargateJumpButton readingFromGameClient /= Nothing
+        }
+
+
+{-| The Selected Item panel's Jump button, named once. Ported unchanged from
+`eve-online-warp-to-0-autopilot`.
+-}
+routeStargateJumpButton : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+routeStargateJumpButton readingFromGameClient =
+    selectedItemButtonNamed readingFromGameClient "selectedItemJump"
+
+
+{-| Whether `pattern` occurs in `text` as whole words rather than as a
+substring. Ported unchanged from `eve-online-warp-to-0-autopilot`.
+-}
+containsWords : String -> String -> Bool
+containsWords pattern text =
+    let
+        padded value =
+            " " ++ (value |> String.toLower |> String.words |> String.join " ") ++ " "
+    in
+    String.contains (padded pattern) (padded text)
+
+
+{-| A button in the Selected Item panel, by its own `_name`. Ported unchanged
+from `eve-online-warp-to-0-autopilot`.
+-}
+selectedItemButtonNamed :
+    ReadingFromGameClient
+    -> String
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+selectedItemButtonNamed readingFromGameClient name =
+    readingFromGameClient.selectedItemWindow
+        |> Maybe.map (.uiNode >> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion)
+        |> Maybe.withDefault []
+        |> List.filter
+            (\node ->
+                (node.uiNode |> EveOnline.ParseUserInterface.getNameFromDictEntries) == Just name
+            )
+        |> List.head
+
+
+{-| Whether the Selected Item panel is showing this overview entry. Ported
+unchanged from `eve-online-warp-to-0-autopilot`.
+-}
+selectedItemIsOverviewEntry :
+    ReadingFromGameClient
+    -> EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> Bool
+selectedItemIsOverviewEntry readingFromGameClient entry =
+    case ( readingFromGameClient.selectedItemWindow, entry.objectName ) of
+        ( Just window, Just name ) ->
+            EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode.uiNode
+                |> List.any (containsWords name)
+
+        _ ->
+            False
+
+
+{-| Whether an overview row is actually drawn. Ported unchanged from
+`eve-online-warp-to-0-autopilot`.
+-}
+overviewEntryIsDisplayed : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsDisplayed entry =
+    nodeIsDisplayed entry.uiNode.uiNode
+
+
+{-| The widget's own `_display` flag, defaulting to shown when absent. Ported
+unchanged from `eve-online-warp-to-0-autopilot`.
+-}
+nodeIsDisplayed : EveOnline.MemoryReading.UITreeNode -> Bool
+nodeIsDisplayed uiNode =
+    uiNode.dictEntriesOfInterest
+        |> Dict.get "_display"
+        |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.bool >> Result.toMaybe)
+        |> Maybe.withDefault True
+
+
+clickUiElementForNavigation : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> DecisionPathNode
+clickUiElementForNavigation uiElement =
+    decideActionForCurrentStep
+        (mouseClickOnUIElement MouseButtonLeft uiElement |> Result.withDefault [])
 
 
 {-| The wingman's decision root, in the order the operator asked for it.
@@ -3362,7 +3756,7 @@ wingmanDecisionRootInSpace context shipUI =
             goHome
 
         Nothing ->
-            case actOnFleetBroadcast context of
+            case actOnFleetBroadcast context shipUI of
                 Just actOnBroadcast ->
                     actOnBroadcast
 
@@ -3388,8 +3782,8 @@ rather than to a guess, because the button's wording is not the broadcast's and
 nothing has observed the difference yet.
 
 -}
-actOnFleetBroadcast : BotDecisionContext -> Maybe DecisionPathNode
-actOnFleetBroadcast context =
+actOnFleetBroadcast : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
+actOnFleetBroadcast context shipUI =
     case fleetBroadcastBannerText context.readingFromGameClient of
         Nothing ->
             Nothing
@@ -3422,16 +3816,27 @@ actOnFleetBroadcast context =
                     of
                         Just broadcast ->
                             if context.memory.fleetBroadcastFollowed == Just broadcast.banner then
-                                Just
-                                    (describeBranch
-                                        ("Already asked the host to route to '"
-                                            ++ broadcast.system
-                                            ++ "', the destination '"
-                                            ++ broadcast.pilot
-                                            ++ "' broadcast."
+                                if pilotIsOnOverview broadcast.pilot context.readingFromGameClient then
+                                    Just
+                                        (describeBranch
+                                            ("'"
+                                                ++ broadcast.pilot
+                                                ++ "' is on the overview -- no longer out of system, so nothing more to fly toward."
+                                            )
+                                            waitForProgressInGame
                                         )
-                                        waitForProgressInGame
-                                    )
+
+                                else
+                                    Just
+                                        (describeBranch
+                                            ("'"
+                                                ++ broadcast.pilot
+                                                ++ "' is not on the overview -- navigating toward the route to '"
+                                                ++ broadcast.system
+                                                ++ "'."
+                                            )
+                                            (navigateTowardFleetCommander context shipUI)
+                                        )
 
                             else
                                 Just

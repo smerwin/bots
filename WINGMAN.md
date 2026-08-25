@@ -110,10 +110,67 @@ client's own route panel came up `Route 1 Jump` naming Bhizheba. The very next
 reading printed `Already asked the host to route to 'Bhizheba', ...` instead of
 repeating the call — the latch holding.
 
-**This sets the destination and nothing here flies it.** No route-panel
-driving exists in this bot, same as the trip home below; what moves the ship is
-the client's own Autopilot toggle, if the operator has it on — the same
-mechanism `eve-online-warp-to-0-autopilot` is built entirely around.
+**Setting the destination used to be all this did — the ship then sat still
+until a person, or the client's own Autopilot toggle, flew it.** That was
+never quite right about `eve-online-warp-to-0-autopilot` either: read live,
+that bot's `decideStepWhenInSpace` presses the Selected Item panel's own Jump
+button (falling back to the route marker's right-click cascade) whether or
+not the client's Autopilot toggle is on — it never reads that toggle at all.
+The trip home below is still exactly the "nothing flies it" posture this
+paragraph used to claim for both; the travel broadcast is not, since
+2026-08-25.
+
+### Navigating to the fleet commander when out of system
+
+`navigateTowardFleetCommander` flies the route the ESI directive above set,
+using `eve-online-warp-to-0-autopilot`'s own mechanism ported rather than
+reinvented: press the Selected Item panel's Jump button where it already
+shows the route's next gate, falling back to the route marker's own
+right-click cascade otherwise. Nothing about that mechanism changed in the
+port — `RouteStargateJump` down to `nodeIsDisplayed` in `Bot.elm` is that
+bot's code unchanged, and the doc comments there say so at each declaration.
+
+**Gated on the commander being off this grid, and nothing else asks that
+question.** `actOnFleetBroadcast` calls `pilotIsOnOverview` — a name match
+against the current overview's rows, the same identity `lockCalledTarget`
+already uses — and only calls `navigateTowardFleetCommander` while that
+answers `False`. The moment the commander's row reappears, the travel branch
+goes back to `waitForProgressInGame` and the ship holds wherever the last
+jump left it, which is the right place to stop: arriving *is* what "not out
+of system anymore" means. Two things follow from that placement rather than
+being separately argued: a commander broadcasting from the same system this
+ship is already in never triggers navigation (nothing needs flying), and a
+target broadcast is still checked first in `actOnFleetBroadcast`, ahead of
+travel, so a called target does not have to compete with a jump in progress.
+
+**Two rungs are ported, not three.** `eve-online-warp-to-0-autopilot` has a
+third — `jumpCascadeStuckReadings`, falling back to a surroundings-button
+cascade after 30 readings of the route panel naming the same next system with
+no jump landing — built on a `lastSolarSystemName`/`jumpsCompleted` pair this
+bot keeps no other use for. Approximating the same signal off
+`nextSystemOnRouteFromReading` changing would misread exactly the case that
+bot's own comment names as the reason it uses the more careful signal: a
+route that revisits a system it has already named, where the label repeats on
+a leg that genuinely completed. Shipping a stuck-detector that can misfire on
+the one case it exists to catch is worse than not having one, so it is left
+out; `jumpThroughRouteStargate`'s own two rungs are what run here, and a leg
+this bot cannot identify a gate for has no further fallback and keeps
+retrying the marker cascade.
+
+**Untested against a live client.** The type-checks are proven — `elm make`
+succeeds on this file paired with the real host's `Main.elm` — but nothing
+has watched a commander broadcast travel from another system, and nothing has
+watched a jump land from either the panel button or the marker cascade under
+this bot's own decision root. What to watch on the first run that meets this:
+`'<pilot>' is not on the overview -- navigating toward the route to
+'<system>'.` appearing, then either `Jump through '<gate>' from the
+selected-item panel, which is already showing it.` or one of
+`describeRouteStargateJump`'s fall-back sentences, then the commander's own
+row appearing on the overview and the branch reading `is on the overview --
+no longer out of system` on the next reading. A run that reaches the travel
+branch and never prints a jump-related line at all past the first "no route
+in the info panel yet" wait means the ESI destination never took, which is
+`hostDirectiveSetDestination`'s own territory rather than this one's.
 
 ### `entryLabel` is not the broadcast history's private name
 
@@ -445,6 +502,12 @@ restart.
 - **Everything past the broadcast**: module activation, rat combat, drones,
   unlocking, the trip home. None of it has flown; the decision root has only
   been driven as far as accepting an invite and following a travel broadcast.
+- **Navigating to the commander when out of system.** `elm make` proves the
+  types; nothing has proven a jump. See "Navigating to the fleet commander
+  when out of system" above for what to watch on the first run that reaches
+  it — in particular whether the panel or the marker cascade ends up doing
+  the flying, and whether the surroundings-button fallback's absence is ever
+  actually missed.
 
 ## Flown
 
