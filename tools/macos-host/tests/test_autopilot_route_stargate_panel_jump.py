@@ -860,16 +860,38 @@ class TheFallBackIsTheCascadeTest(unittest.TestCase):
             " readingFromGameClient", wiring)
 
 
-class TheCascadeIsUnchangedTest(unittest.TestCase):
-    """The fall-back itself, which this PR moved but did not alter."""
+class TheCascadeCarriesTheWidenedToleranceTest(unittest.TestCase):
+    """The fall-back itself, and the one thing about it that has now changed.
+
+    This class used to assert the opposite -- that this bot still had the
+    shared 70px tolerance while the mission runner and saxrat had widened their
+    copies to 200 -- and said why: "changing it is a separate question with
+    separate evidence, so this pins which of the two shapes is in the file."
+
+    The evidence arrived. This bot's own doc comment above `routeMarkerCascade`
+    already described the widening as needed, for the identical reason the
+    other two widened theirs ("the route icon is small and sits in a strip that
+    can shift as the route updates"), and had never applied it to the cascade
+    it describes. So the pin is inverted rather than deleted: what it now
+    guards is that the widening stayed applied, and that it matches the number
+    the other copies use rather than a third one.
+    """
 
     def setUp(self):
         self.cascade = collapsed(without_comments(
             body_of(autopilot_source(), "routeMarkerCascade")))
 
     def test_it_still_right_clicks_the_route_element_icon(self):
-        self.assertIn('( "route element icon", infoPanelRouteFirstMarker'
-                      ".uiNode )", self.cascade)
+        """The target did not change, only how far a menu may be from it.
+
+        The custom-config form names the target with a record where the plain
+        form used a tuple, so this reads the fields rather than the old
+        punctuation.
+        """
+        self.assertIn("targetUIElement = infoPanelRouteFirstMarker.uiNode",
+                      self.cascade)
+        self.assertIn('targetUIElementName = "route element icon"',
+                      self.cascade)
 
     def test_it_still_carries_both_korean_spellings(self):
         """They came from a forum thread and nothing about this change touches
@@ -877,21 +899,20 @@ class TheCascadeIsUnchangedTest(unittest.TestCase):
         self.assertIn('"도킹"', self.cascade)
         self.assertIn('"점프 - 스타게이트 사용"', self.cascade)
 
-    def test_it_is_still_the_shared_tolerance_rather_than_the_widened_one(self):
-        """Stated rather than fixed. The mission runner widened its copy of this
-        same cascade to 200 for this same 8x8 icon, and this bot never got that;
-        changing it is a separate question with separate evidence, so this pins
-        which of the two shapes is in the file.
-        """
-        self.assertIn("useContextMenuCascade (", self.cascade)
-        self.assertNotIn("useContextMenuCascadeWithCustomConfig", self.cascade)
-        self.assertNotIn("toleratedDistance", self.cascade)
+    def test_it_carries_the_widened_tolerance_the_other_copies_use(self):
+        """200, and the same 200 -- not a third number invented here."""
+        self.assertIn("useContextMenuCascadeWithCustomConfig", self.cascade)
+        self.assertIn("discardContextMenuIfTooDistantFromTargetElement", self.cascade)
+        self.assertIn("toleratedDistance = 200", self.cascade)
 
     def test_there_is_exactly_one_route_cascade_in_the_file(self):
         """One call site. The name also appears in the import list, which is
         why this counts the application rather than the word."""
         source = collapsed(without_comments(autopilot_source()))
-        self.assertEqual(source.count("useContextMenuCascade ("), 1)
+        self.assertEqual(
+            source.count("useContextMenuCascadeWithCustomConfig ("), 1,
+            "the route cascade is applied more than once, or the import list "
+            "is being counted again")
 
 
 class TheDockLegDidNotMoveTest(unittest.TestCase):

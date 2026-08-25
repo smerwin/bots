@@ -628,3 +628,25 @@ def open_repl(repl_class=ElmRepl, **kwargs):
         "probe, so nothing below would have run. Either the app does not "
         "compile or the toolchain cannot build here (no cached dependencies, "
         "no writable ELM_HOME). %s\n%s" % (INSTALL_HINT, output))
+
+
+def vendored_parser_count(paths):
+    """How many apps should have a vendored `ParseUserInterface.elm`.
+
+    The guard these cases put in front of "every copy has it" -- so a discovery
+    that found nothing, or found a subset, cannot pass vacuously. It used to be
+    the literal `6`, written out in seven separate cases, and all seven went red
+    the day an eighth bot was added: a count that fails on exactly the change it
+    should have started covering, and that teaches whoever is holding the
+    failure to edit the number rather than ask whether the new app was covered.
+
+    Asked of the tree instead. Every app directory with a `Bot.elm` vendors the
+    parser, so that is the number, derived from the paths' own root rather than
+    from a constant each caller spells differently.
+    """
+    paths = list(paths)
+    if not paths:
+        return 0
+    apps_dir = os.path.dirname(os.path.dirname(os.path.dirname(paths[0])))
+    return sum(1 for name in os.listdir(apps_dir)
+               if os.path.isfile(os.path.join(apps_dir, name, "Bot.elm")))

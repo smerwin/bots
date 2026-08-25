@@ -72,7 +72,7 @@ import os
 import re
 import unittest
 
-from prerequisites import open_repl
+from prerequisites import open_repl, vendored_parser_count
 from test_saxrat_gate_panel_button import (
     EVE_BOT_LOGS, read_log, reading, saxrat_runs, selected_item_window)
 from test_saxrat_ported_guards import (
@@ -1452,7 +1452,7 @@ class TheVendoredParserPolicyIsUnbroken(unittest.TestCase):
                                 "ParseUserInterface.elm")
             if os.path.isfile(path):
                 paths.append(path)
-        self.assertEqual(len(paths), 6, paths)
+        self.assertEqual(len(paths), vendored_parser_count(paths), paths)
         return paths
 
     def test_only_saxrats_copy_gained_the_tracker(self):
@@ -1467,11 +1467,38 @@ class TheVendoredParserPolicyIsUnbroken(unittest.TestCase):
         """So the enforced policy is the block, not the file.
 
         Asserted rather than argued: the mission runner's own mission-tracker
-        parse is in one copy of six, and it predates this change.
+        parse does not reach every copy, and it predates this change.
+
+        **It travels with the variant, not with the app.** This read "exactly
+        one copy" while the mission runner was the only app on that variant.
+        The haulerbot then vendored the same file -- byte-identical, and needed
+        that way: it is the only variant carrying `stripHtmlTags` and
+        `ShipItemCard`, which the haulerbot's ship-card cascade compiles
+        against. The mission block came with them as a passenger.
+
+        So what is asserted is the property that actually matters -- every copy
+        carrying the block is byte-identical to the mission runner's, and at
+        least one copy does not carry it at all. A file that picked the block up
+        *and* diverged would fail here; a second app adopting the whole variant
+        does not, because that is the pairing this repo already keeps
+        elsewhere.
         """
         carrying = [path for path in self.parser_paths()
                     if "parseAgentMissionInfoPanelEntry" in source_of(path)]
-        self.assertEqual(len(carrying), 1, carrying)
+        self.assertTrue(carrying, "the block has left every copy")
+        self.assertLess(len(carrying), len(self.parser_paths()),
+                        "every copy now carries it, so it is no longer a "
+                        "divergence and the policy this pins is moot")
+        mission_runner = os.path.join(self.APPS_DIR, "eve-online-mission-runner")
+        runner = [p for p in carrying if p.startswith(mission_runner + os.sep)]
+        self.assertEqual(len(runner), 1, carrying)
+        for path in carrying:
+            self.assertEqual(
+                source_of(path), source_of(runner[0]),
+                "%s carries the mission block but is not the mission runner's "
+                "own file -- the block has been edited into a variant of its "
+                "own, which is the divergence this policy exists to catch"
+                % path)
 
     def test_every_copy_still_carries_the_block_the_policy_covers(self):
         # `eve-online-mining-bot`'s tree was replaced with Viir's current

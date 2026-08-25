@@ -77,7 +77,7 @@ import os
 import re
 import unittest
 
-from prerequisites import EVE_BOT_LOGS, open_repl
+from prerequisites import EVE_BOT_LOGS, open_repl, vendored_parser_count
 from test_saxrat_ported_guards import (
     MISSION_RUNNER_DIR, SAXRAT_BOT_ELM, SAXRAT_DIR, SaxratRepl, collapsed,
     label, node, source_of)
@@ -716,7 +716,10 @@ class TheVendoredParserPolicy(unittest.TestCase):
                 EVE_ONLINE_APPS, "*", "EveOnline", "ParseUserInterface.elm"))
             if os.path.basename(os.path.dirname(os.path.dirname(path)))
             not in self.WITHOUT_EWAR_WIDENING)
-        self.assertEqual(len(paths), 5, paths)
+        self.assertEqual(
+            len(paths),
+            vendored_parser_count(paths) - len(self.WITHOUT_EWAR_WIDENING),
+            paths)
         return {path: source_of(path) for path in paths}
 
     def test_the_mining_bot_is_excluded_because_it_genuinely_lacks_the_fields(self):
