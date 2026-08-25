@@ -227,8 +227,61 @@ accept-fleet-invite-from=Olivia Ochre
 follow-fleet-broadcast-from=Olivia Ochre"
 ;;
 
+tristan)
+# Tristan, a T1 frigate -- the first profile here for a hull this small, on
+# Heather Hemorphite's currently-open client (inferred from which client was
+# active when this profile was written, not independently confirmed against
+# a character-select screen).
+#
+# **No ammo settings, and it may not even be an omission**: a Tristan is
+# commonly fit as a pure droneboat (light drones, no turret at all), the
+# same shape the dragoon profile documents its own absence of ammo settings
+# for. If this fit does carry a turret, the swap simply stays unconfigured
+# rather than guessing a charge name this profile has no evidence for --
+# the bot reports `Ammo swap: off` either way, which is expected here and
+# not a fault.
+#
+# `run-away-incoming-damage-threshold=500` is an **unverified guess, not a
+# measurement** -- the only figures this file has (1200 for a destroyer,
+# 2500 for a Navy Issue destroyer) were both calibrated on hulls with far
+# more total EHP than a T1 frigate, and reusing either here would very
+# plausibly be well past what a Tristan can absorb in one 45-second window,
+# which is exactly the failure #32 exists to prevent -- a guard that can
+# only fire at the moment of death is not a guard. 500 was chosen to be
+# clearly on the cautious side (more false retreats, which cost nothing but
+# a trip home, rather than a threshold discovered too late) rather than
+# derived from anything this hull has actually done. Two runs have flown
+# under it since (148: 6h at 360 min; 149: 90 min) and both ended at
+# `dmg 0/500` with the retreat never firing -- consistent with the guess
+# being on the cautious side, but neither run stressed it, so 500 is still
+# unverified rather than confirmed. **Watch `dmg N/500` and this hull's own
+# peak window on a run that actually takes damage** the way the Coercer's
+# 2500 was derived from its own recorded peaks, and correct this number once
+# there is a real peak to replace the guess with.
+#
+# `run-away-armor-hitpoints-threshold-percent=70` is kept at the same value
+# every other profile here uses -- the script's own comment above calls it
+# hull-agnostic, calibrated on what carried run 35 through 85 retreats with
+# no loss, and nothing about a smaller hull changes that argument.
+#
+# `targeting-range=46000` and `orbit-in-combat=yes` (with `keep-at-range=no`
+# to match, since the two are opposites in every profile here) are the
+# operator's own figures for this run, not derived from anything measured.
+HULL="anomaly-name=Sansha*
+home-system=Amarr
+targeting-range=46000
+run-away-armor-hitpoints-threshold-percent=70
+run-away-incoming-damage-threshold=500
+keep-at-range=no
+orbit-in-combat=yes
+warp-at=30
+hide-when-neutral-in-local=no
+accept-fleet-invite-from=Gal Bistot
+follow-fleet-broadcast-from=Gal Bistot"
+;;
+
 *)
-echo "unknown EVE_SHIP '$SHIP' -- known profiles: oni dragoon coercer slicer"
+echo "unknown EVE_SHIP '$SHIP' -- known profiles: oni dragoon coercer slicer tristan"
 exit 1
 ;;
 esac
