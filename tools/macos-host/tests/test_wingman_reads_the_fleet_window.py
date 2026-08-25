@@ -256,3 +256,46 @@ class TheBroadcastVocabularyIsParsedTest(unittest.TestCase):
                 'fleetBroadcastSender (parseFleetBroadcast'
                 ' "Gal Bistot: Jump Stargate Bhizheba") == Just "Gal Bistot"']),
             [True, True, True])
+
+
+class TheDronesAssistTheCommanderTest(unittest.TestCase):
+    """Source-pinned: the cascade needs a drones window and a live fleet.
+
+    What is checkable from here is the shape, and the shape is where the two
+    measured failures live.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(WINGMAN_BOT_ELM, encoding="utf-8") as handle:
+            cls.source = handle.read()
+
+    def test_the_commander_is_read_from_the_panel_not_hardcoded(self):
+        """saxrat's version named `Gal Bistot` in the source.
+
+        A wingman that only ever assists one pilot is a wingman for one fleet.
+        """
+        self.assertIn("fleetCommanderNameFromPanel", self.source)
+        self.assertNotIn('useMenuEntryWithTextContaining "Gal Bistot"', self.source)
+
+    def test_it_falls_back_to_engage_target_in_the_same_reading(self):
+        """#314 deleted the unbounded cascade because the named pilot was often
+        off grid and the readings it spent bought nothing. The fallback is what
+        makes reinstating it safe."""
+        self.assertIn("'Assist' if present, else 'Engage Target'", self.source)
+        self.assertIn("Engage Target", self.source)
+
+    def test_the_drone_arm_is_reached_before_the_combat_arm(self):
+        """#326: a turret that could not activate held the decision on the
+        other arm of that `case` for 262 consecutive readings, drones out and
+        idle, nothing landing. So the drone arm must not sit behind it."""
+        root = self.source[self.source.index("wingmanDecisionRootInSpace context shipUI ="):]
+        root = root[:root.index("\n\n\n")]
+        self.assertLess(
+            root.index("dronesAssistTheCommander"),
+            root.index("modulesToActivateAlwaysActivated"),
+            "the drone arm is behind the inherited combat arm again")
+
+    def test_the_assist_can_be_turned_off(self):
+        # A logi or a solo fit wants its drones on its own target.
+        self.assertIn("assistFleetCommander", self.source)

@@ -3761,14 +3761,26 @@ wingmanDecisionRootInSpace context shipUI =
                     actOnBroadcast
 
                 Nothing ->
-                    {- Module activation, rat combat and drones all still come
-                       from the arm this bot inherited from the combat anomaly
-                       bot, which does the three together. Splitting them so
-                       `activate-module-always` is its own step -- ahead of the
-                       broadcast rather than behind it -- is the next piece of
-                       work, and is why this is a skeleton.
-                    -}
-                    modulesToActivateAlwaysActivated context shipUI
+                    case dronesAssistTheCommander context of
+                        Just assist ->
+                            assist
+
+                        Nothing ->
+                            {- Module activation and rat combat still come from
+                               the arm this bot inherited from the combat
+                               anomaly bot, which does both together. Splitting
+                               them so `activate-module-always` is its own step,
+                               ahead of the broadcast rather than behind it, is
+                               still outstanding -- see WINGMAN.md.
+
+                               The drone arm above deliberately sits *before*
+                               this one rather than inside it: #326 measured a
+                               turret that could not activate holding the
+                               decision on the other arm of this `case` for 262
+                               consecutive readings, with the drones out and
+                               idle the whole time.
+                            -}
+                            modulesToActivateAlwaysActivated context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
@@ -4318,3 +4330,134 @@ fleetBroadcastBannerElement readingFromGameClient =
                 >> (==) (Just "bannerLabel")
             )
         |> List.head
+
+
+{-| The fleet commander's name, read from the fleet window's own header.
+
+**Inferred from the header's shape, and that inference is stated rather than
+buried.** The captured header carried five labels beside a `Boss` icon and a
+`Fleet Commander` icon:
+
+    no commander Fleet 5 Gal Bistot Squad 1 4 Wing 1 4
+
+Four of the five describe the fleet's structure and every one of them contains
+a parenthesis; the pilot's name is the one that does not. So that is the rule,
+rather than reading the icons -- which would be better evidence, but which
+label belongs to which icon was not established from the capture, and a wrong
+answer here points the drones at the wrong pilot.
+
+Falls back to the first pilot in `follow-fleet-broadcast-from`, which is a
+pilot the operator has already said they trust with this ship.
+
+-}
+fleetCommanderNameFromPanel : BotDecisionContext -> Maybe String
+fleetCommanderNameFromPanel context =
+    let
+        fromHeader : Maybe String
+        fromHeader =
+            context.readingFromGameClient
+                |> fleetWindowDescendants
+                |> List.filter
+                    (.uiNode
+                        >> .pythonObjectTypeName
+                        >> String.contains "FleetHeader"
+                    )
+                |> List.concatMap
+                    EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+                |> List.filterMap (.uiNode >> EveOnline.ParseUserInterface.getDisplayText)
+                |> List.map String.trim
+                |> List.filter (String.isEmpty >> not)
+                |> List.filter (String.contains "(" >> not)
+                |> List.head
+    in
+    case fromHeader of
+        Just name ->
+            Just name
+
+        Nothing ->
+            context.eventContext.botSettings.followFleetBroadcastFrom |> List.head
+
+
+{-| Drones out, and assisting the commander rather than this ship's own target.
+
+**Assist first, `F` behind it, and the fallback is the point.** #314 deleted an
+unbounded assist cascade from saxrat, and its reason was measured rather than
+stylistic: the named pilot was frequently not on the grid, so the readings the
+cascade spent bought nothing. A wingman is the case where that reasoning
+inverts -- the commander is on the grid by definition -- but "by definition" is
+not "always", so `MenuEntryWithCustomChoice` takes `Engage Target` whenever the
+menu has no `Assist`, in the same reading rather than a later one.
+
+**Reached without asking whether the guns are cycling.** #326 found a turret
+that could not activate on the current target holding the decision on the other
+arm of its `case` for 262 consecutive readings -- drones out, drones idle,
+nothing landing the whole time. So this sits in the decision root beside the
+other arms, not behind the combat one.
+
+`assist-fleet-commander=no` keeps the drones on this ship's own target, which
+is `launchAndEngageDrones`' existing behaviour.
+
+-}
+dronesAssistTheCommander : BotDecisionContext -> Maybe DecisionPathNode
+dronesAssistTheCommander context =
+    if context.eventContext.botSettings.assistFleetCommander /= PromptParser.Yes then
+        Nothing
+
+    else
+        case ( context.readingFromGameClient.dronesWindow, fleetCommanderNameFromPanel context ) of
+            ( Just dronesWindow, Just commander ) ->
+                case dronesWindow.droneGroupInSpace of
+                    Nothing ->
+                        Nothing
+
+                    Just droneGroupInSpace ->
+                        let
+                            idlingDrones : Int
+                            idlingDrones =
+                                droneGroupInSpace
+                                    |> EveOnline.ParseUserInterface.enumerateAllDronesFromDronesGroup
+                                    |> List.filter
+                                        (.uiNode
+                                            >> .uiNode
+                                            >> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+                                            >> List.any (stringContainsIgnoringCase "idle")
+                                        )
+                                    |> List.length
+                        in
+                        if idlingDrones < 1 then
+                            Nothing
+
+                        else
+                            Just
+                                (describeBranch
+                                    ("Assist '" ++ commander ++ "' with the idling drones, else engage this ship's target.")
+                                    (useContextMenuCascade
+                                        ( "drones group", droneGroupInSpace.header.uiNode )
+                                        (MenuEntryWithCustomChoice
+                                            { describeChoice = "'Assist' if present, else 'Engage Target'"
+                                            , chooseEntry =
+                                                \currentMenu ->
+                                                    case
+                                                        currentMenu.entries
+                                                            |> List.filter (.text >> stringContainsIgnoringCase "Assist")
+                                                            |> List.head
+                                                    of
+                                                        Just assistEntry ->
+                                                            Just
+                                                                ( assistEntry
+                                                                , useMenuEntryWithTextContaining commander menuCascadeCompleted
+                                                                )
+
+                                                        Nothing ->
+                                                            currentMenu.entries
+                                                                |> List.filter (.text >> stringContainsIgnoringCase "Engage Target")
+                                                                |> List.head
+                                                                |> Maybe.map (\entry -> ( entry, menuCascadeCompleted ))
+                                            }
+                                        )
+                                        context
+                                    )
+                                )
+
+            _ ->
+                Nothing
