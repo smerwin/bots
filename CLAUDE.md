@@ -586,6 +586,7 @@ screenshot read), and later responses offer genuinely new tasks such as the
 | `MACOS.md` | setting the host up from nothing: SIP, permissions, building the native tools, running a bot for the first time |
 | `REPL.md` | driving the client by hand through `eve_repl` |
 | `HOTAS.md` | pinned sketch: flying the client with a stick and throttle |
+| `COORDINATION.md` | how five machines share this repo without conflicting: claim the issue first, findings go in `notes/` as new files, ownership follows the live run, land fast and formatted |
 
 ## Skills (`.claude/skills/`)
 
