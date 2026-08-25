@@ -293,7 +293,7 @@ class TheDronesAssistTheCommanderTest(unittest.TestCase):
         root = root[:root.index("\n\n\n")]
         self.assertLess(
             root.index("dronesAssistTheCommander"),
-            root.index("modulesToActivateAlwaysActivated"),
+            root.index("fightPointedRatsOrReturnDrones"),
             "the drone arm is behind the inherited combat arm again")
 
     def test_the_assist_can_be_turned_off(self):
@@ -381,10 +381,54 @@ class TheAccelerationGateStepTest(unittest.TestCase):
             "the gate arm must not preempt drones still assisting on a live grid")
         self.assertLess(
             root.index("accelerationGateStep"),
-            root.index("modulesToActivateAlwaysActivated"))
+            root.index("fightPointedRatsOrReturnDrones"))
 
     def test_the_ask_is_reported_in_the_status_line(self):
         # #343's own review caught a single "waiting" line covering two
         # different situations; this must name which one it is.
         self.assertIn("describeAccelerationGateAsk", self.source)
         self.assertIn("rats still on the grid", self.source)
+
+
+class TheModuleActivationSplitTest(unittest.TestCase):
+    """#349: `activate-module-always` reached the client only through the arm
+    inherited from the combat anomaly bot, which did module activation, rat
+    combat and anomaly hunting together. That put module activation behind
+    the broadcast and the drone arm, and it dragged an idle-grid anomaly hunt
+    in with it -- not following a commander, and the reason a six-hour
+    unattended run was a bad idea.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(WINGMAN_BOT_ELM, encoding="utf-8") as handle:
+            cls.source = handle.read()
+
+    def _wingman_root_body(self):
+        root = self.source[self.source.index("wingmanDecisionRootInSpace context shipUI ="):]
+        return root[:root.index("\n\n\n")]
+
+    def test_module_activation_is_its_own_step_ahead_of_the_broadcast(self):
+        root = self._wingman_root_body()
+        self.assertIn("activateAlwaysOnModules", root)
+        self.assertIn("actOnFleetBroadcast", root)
+        self.assertLess(
+            root.index("activateAlwaysOnModules"),
+            root.index("actOnFleetBroadcast"),
+            "module activation is not ahead of the broadcast")
+
+    def test_the_wingman_s_own_root_no_longer_reaches_anomaly_hunting(self):
+        """`enterAnomaly` / `decideActionInAnomaly` still exist in this file,
+        for the inherited `anomalyBotDecisionRoot` -- but nothing reachable
+        from `wingmanDecisionRootInSpace` may call them."""
+        root = self._wingman_root_body()
+        self.assertNotIn("enterAnomaly", root)
+        self.assertNotIn("decideActionInAnomaly", root)
+        self.assertNotIn("modulesToActivateAlwaysActivated", root)
+
+    def test_self_defense_against_a_pointing_rat_is_kept(self):
+        fallback = self.source[
+            self.source.index("fightPointedRatsOrReturnDrones :"):]
+        fallback = fallback[:fallback.index("\n\n\n")]
+        self.assertIn("fightRatsIfShipIsPointed", fallback)
+        self.assertIn("returnDronesToBay", fallback)
