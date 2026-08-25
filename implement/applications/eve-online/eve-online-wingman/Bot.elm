@@ -1483,6 +1483,7 @@ reach the same behaviour instead of never checking it at all -- #349 found
 that `wingmanDecisionRootInSpace` called straight into
 `modulesToActivateAlwaysActivated` (now `fightPointedRatsOrReturnDrones`) and
 never activated an always-on module in its own right.
+
 -}
 activateAlwaysOnModules : BotDecisionContext -> Maybe DecisionPathNode
 activateAlwaysOnModules context =
@@ -1520,6 +1521,7 @@ Fighting a rat that has actually pointed this ship is kept, because that is
 self-defense rather than hunting: the ship did not choose the fight, and
 refusing to shoot back at something already attacking it would be worse than
 either hunting or standing down.
+
 -}
 fightPointedRatsOrReturnDrones :
     BotDecisionContext

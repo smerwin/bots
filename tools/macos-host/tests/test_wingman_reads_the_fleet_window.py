@@ -293,7 +293,7 @@ class TheDronesAssistTheCommanderTest(unittest.TestCase):
         root = root[:root.index("\n\n\n")]
         self.assertLess(
             root.index("dronesAssistTheCommander"),
-            root.index("modulesToActivateAlwaysActivated"),
+            root.index("fightPointedRatsOrReturnDrones"),
             "the drone arm is behind the inherited combat arm again")
 
     def test_the_assist_can_be_turned_off(self):
@@ -381,7 +381,7 @@ class TheAccelerationGateStepTest(unittest.TestCase):
             "the gate arm must not preempt drones still assisting on a live grid")
         self.assertLess(
             root.index("accelerationGateStep"),
-            root.index("modulesToActivateAlwaysActivated"))
+            root.index("fightPointedRatsOrReturnDrones"))
 
     def test_the_ask_is_reported_in_the_status_line(self):
         # #343's own review caught a single "waiting" line covering two
