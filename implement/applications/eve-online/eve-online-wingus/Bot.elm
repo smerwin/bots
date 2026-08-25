@@ -39,6 +39,14 @@
    abandon the whole anomaly a named rat was seen in -- and whether this bot wants that
    rule has never been established. It can be added if it is ever wanted.
 
+   A `hated-rat` setting used to be accepted here too, and removed for #195's reason
+   rather than #161's: this one parsed and had a real reader, `getPriorityRatsSeenInAnomaly`
+   -- and nothing ever called that reader, so an operator who set it got a bot that
+   behaved exactly as if they had not, with no error to say so. #125's mission-runner
+   case was the same shape one step shallower (parsed and never read at all); this one
+   passed the usual "is this field read anywhere" check, because a real reader existed,
+   was written, and type-checked. Delete the line if a settings file still carries one.
+
    + `anomaly-name` : Choose the name of anomalies to take. You can use this setting multiple times to select multiple names.
    + `hide-when-neutral-in-local` : Set this to 'yes' to make the bot dock in a station or structure when a neutral or hostile appears in the 'local' chat.
    + `activate-module-always` : Text found in tooltips of ship modules that should always be active. For example: "shield hardener".
@@ -120,7 +128,6 @@ defaultBotSettings =
     { runAwayShieldHitpointsThresholdPercent = 35
     , hideWhenNeutralInLocal = AppSettings.No
     , anomalyNames = []
-    , priorityRats = []
     , activateModulesAlways = []
     , maxTargetCount = 5
     , botStepDelayMilliseconds = 900
@@ -143,12 +150,6 @@ parseBotSettings =
            , AppSettings.valueTypeString
                 (\anomalyName settings ->
                     { settings | anomalyNames = String.trim anomalyName :: settings.anomalyNames }
-                )
-           )
-         , ( "hated-rat"
-           , AppSettings.valueTypeString
-                (\priorityRat settings ->
-                    { settings | priorityRats = String.trim priorityRat :: settings.priorityRats }
                 )
            )
          , ( "activate-module-always"
@@ -190,7 +191,6 @@ type alias BotSettings =
     { runAwayShieldHitpointsThresholdPercent : Int
     , hideWhenNeutralInLocal : AppSettings.YesOrNo
     , anomalyNames : List String
-    , priorityRats : List String
     , activateModulesAlways : List String
     , maxTargetCount : Int
     , anomalyWaitTimeSeconds : Int
@@ -220,16 +220,6 @@ type alias MemoryOfAnomaly =
 
 type alias BotDecisionContext =
     EveOnline.BotFrameworkSeparatingMemory.StepDecisionContext BotSettings BotMemory
-
-
-getPriorityRatsSeenInAnomaly : BotSettings -> MemoryOfAnomaly -> Set.Set String
-getPriorityRatsSeenInAnomaly settings =
-    .ratsSeen >> Set.filter (shouldPrioritizeRatAccordingToSettings settings)
-
-
-shouldPrioritizeRatAccordingToSettings : BotSettings -> String -> Bool
-shouldPrioritizeRatAccordingToSettings settings ratName =
-    settings.priorityRats |> List.map String.toLower |> List.member (ratName |> String.toLower)
 
 
 memoryOfAnomalyWithID : String -> BotMemory -> Maybe MemoryOfAnomaly
