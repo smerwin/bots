@@ -399,6 +399,22 @@ type alias BotMemory =
     , droneBandwidthLimitatatinEvents : List { timeMilliseconds : Int, dronesInSpaceCount : Int }
     , contextMenuLastDepth : Int
     , contextMenuStuckTicks : Int
+
+    -- The banner as the *previous* reading saw it, ported from
+    -- `eve-online-saxrat`'s field of the same name. `actOnFleetBroadcast` is
+    -- handed the memory this update produces, so latching `fleetBroadcastFollowed`
+    -- on the reading the banner first appears would stop the branch that reads
+    -- it from ever firing on it -- latching on the *second* sighting instead
+    -- makes the ask go out exactly once, since the banner persists and the
+    -- second sighting always arrives. See `fleetTravelBroadcastAnyPilot`'s own
+    -- comment for why this is unfiltered by `follow-fleet-broadcast-from`.
+    , fleetBroadcastSeen : Maybe String
+
+    -- The fleet travel broadcast this session has already asked the host to
+    -- route to, as the banner's own text. The client's banner does not go
+    -- away, so without this the ask would repeat on every reading for the
+    -- rest of the session.
+    , fleetBroadcastFollowed : Maybe String
     }
 
 
@@ -804,7 +820,8 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
 
 generalSetupInUserInterface : BotDecisionContext -> Maybe DecisionPathNode
 generalSetupInUserInterface context =
-    [ closeMessageBox
+    [ acceptFleetInviteFromNamedPilot context
+    , closeMessageBox
     , ensureInfoPanelLocationInfoIsExpanded context.previousStepsEffects
     , case context.eventContext.botSettings.sortOverviewBy of
         Nothing ->
@@ -822,6 +839,124 @@ generalSetupInUserInterface context =
     ]
         |> List.filterMap ((|>) context.readingFromGameClient)
         |> List.head
+
+
+{-| `accept-fleet-invite-from` was parsed into settings and never read by any
+decision -- the same shape as `avoid-rat` before it was removed from the
+mission runner. The client's own confirmation ("Join Fleet?", `yes_dialog_button`
+/ `no_dialog_button`) falls through `closeMessageBox`'s Close/OK-only matcher
+and lands on `askForHelpToGetUnstuck`, so an invite the setting names sits
+unanswered forever. This is the one exception `closeMessageBoxByDeclining`'s own
+family allows: verified live, the box's own text reads
+
+    <a href="showinfo:1385//2120724228">Gal Bistot</a> wants you to join their fleet, do you accept?...
+
+and its two buttons read "Yes" and "No". Only a sender named in
+`accept-fleet-invite-from` is answered; anything else falls through to
+`closeMessageBox` unchanged, so the trust stays exactly where the setting's own
+documentation says it is.
+
+-}
+acceptFleetInviteFromNamedPilot : BotDecisionContext -> ReadingFromGameClient -> Maybe DecisionPathNode
+acceptFleetInviteFromNamedPilot context readingFromGameClient =
+    readingFromGameClient.messageBoxes
+        |> List.filterMap
+            (\messageBox ->
+                fleetInviteSenderFromMessageBox messageBox
+                    |> Maybe.map (\sender -> ( messageBox, sender ))
+            )
+        |> List.head
+        |> Maybe.andThen
+            (\( messageBox, sender ) ->
+                if List.member sender context.eventContext.botSettings.acceptFleetInviteFrom then
+                    messageBox.buttons
+                        |> List.filter (\button -> button.mainText == Just "Yes")
+                        |> List.head
+                        |> Maybe.map
+                            (\yesButton ->
+                                describeBranch
+                                    ("Accept the fleet invitation from '"
+                                        ++ sender
+                                        ++ "', named in accept-fleet-invite-from."
+                                    )
+                                    (case mouseClickOnUIElement MouseButtonLeft yesButton.uiNode of
+                                        Err _ ->
+                                            describeBranch "Failed to click" askForHelpToGetUnstuck
+
+                                        Ok clickAction ->
+                                            decideActionForCurrentStep clickAction
+                                    )
+                            )
+
+                else
+                    Nothing
+            )
+
+
+fleetInviteMarker : String
+fleetInviteMarker =
+    " wants you to join their fleet"
+
+
+fleetInviteSenderFromMessageBox :
+    { uiNode : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    , buttonGroup : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    , buttons : List { uiNode : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion, mainText : Maybe String }
+    }
+    -> Maybe String
+fleetInviteSenderFromMessageBox messageBox =
+    messageBox.uiNode.uiNode
+        |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+        |> List.filterMap fleetInviteSenderFromText
+        |> List.head
+
+
+fleetInviteSenderFromText : String -> Maybe String
+fleetInviteSenderFromText text =
+    case String.split fleetInviteMarker text of
+        before :: _ :: _ ->
+            before
+                |> stripHtmlTags
+                |> String.trim
+                |> (\name ->
+                        if String.isEmpty name then
+                            Nothing
+
+                        else
+                            Just name
+                   )
+
+        _ ->
+            Nothing
+
+
+{-| The sender's name arrives wrapped in an `<a href="showinfo:...">`/`</a>`
+pair, and a naive split on the last `>` takes the trailing empty string after
+the closing tag's own `>` -- caught live, the first version of this function
+answered `Nothing` for every reading of a real invite. This strips every
+`<...>` span rather than assuming one specific tag shape, the way
+`route_setter.py` strips tags out of a chat MOTD elsewhere in this repo, so a
+sender rendered with no tag at all still comes through unchanged.
+-}
+stripHtmlTags : String -> String
+stripHtmlTags text =
+    text
+        |> String.foldl
+            (\char state ->
+                if char == '<' then
+                    { state | inTag = True }
+
+                else if char == '>' then
+                    { state | inTag = False }
+
+                else if state.inTag then
+                    state
+
+                else
+                    { state | kept = state.kept ++ String.fromChar char }
+            )
+            { inTag = False, kept = "" }
+        |> .kept
 
 
 closeMessageBox : ReadingFromGameClient -> Maybe DecisionPathNode
@@ -2201,6 +2336,8 @@ initBotMemory =
     , droneBandwidthLimitatatinEvents = []
     , contextMenuLastDepth = 0
     , contextMenuStuckTicks = 0
+    , fleetBroadcastSeen = Nothing
+    , fleetBroadcastFollowed = Nothing
     }
 
 
@@ -2675,6 +2812,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.contextMenuStuckTicks + 1
+    , fleetBroadcastSeen =
+        fleetTravelBroadcastAnyPilot context.readingFromGameClient |> Maybe.map .banner
+    , fleetBroadcastFollowed =
+        case fleetTravelBroadcastAnyPilot context.readingFromGameClient |> Maybe.map .banner of
+            Nothing ->
+                botMemoryBefore.fleetBroadcastFollowed
+
+            Just banner ->
+                if botMemoryBefore.fleetBroadcastSeen == Just banner then
+                    Just banner
+
+                else
+                    botMemoryBefore.fleetBroadcastFollowed
     }
 
 
@@ -3063,6 +3213,117 @@ broadcastVerbsNotYetRead =
     ]
 
 
+{-| The client's own wording for a fleet travel broadcast, ported from
+`eve-online-saxrat`'s `fleetTravelBroadcastMarker` -- captured live on this same
+account: `Gal Bistot: Travel to Riramia`. An infix marker rather than a prefix
+one, so it reads correctly off both the timestamped history panel
+(`02:31:32 - Gal Bistot: Travel to Riramia`) and the plain persistent banner
+(`Gal Bistot: Travel to Bhizheba`) with no separate handling for either shape --
+`actOnFleetBroadcast` had no travel-form matcher at all before this, despite
+`WINGMAN.md` and this file's own header both listing it as one of the two forms
+already read: the header's example was one of the timestamped-history captures,
+and the live banner this bot actually decides from carries no timestamp.
+-}
+fleetTravelBroadcastMarker : String
+fleetTravelBroadcastMarker =
+    ": Travel to "
+
+
+fleetTravelBroadcastFromBannerText : String -> Maybe { pilot : String, system : String, banner : String }
+fleetTravelBroadcastFromBannerText banner =
+    case String.indexes fleetTravelBroadcastMarker banner of
+        [] ->
+            Nothing
+
+        index :: _ ->
+            let
+                pilot : String
+                pilot =
+                    banner |> String.left index |> String.trim
+
+                system : String
+                system =
+                    banner
+                        |> String.dropLeft (index + String.length fleetTravelBroadcastMarker)
+                        |> String.trim
+            in
+            if String.isEmpty pilot || String.isEmpty system then
+                Nothing
+
+            else
+                Just { pilot = pilot, system = system, banner = banner }
+
+
+{-| Whoever broadcast a travel destination, and where to, with no permission
+filter.
+
+**Unfiltered on purpose.** This is what the memory update latches
+(`fleetBroadcastSeen` / `fleetBroadcastFollowed`) to stop the banner asking for
+the same route on every reading for the rest of the session, and the memory
+update cannot filter by `follow-fleet-broadcast-from`: `UpdateMemoryContext`
+here carries no settings at all -- `eve-online-saxrat`'s copy of
+`EveOnline.BotFrameworkSeparatingMemory` was extended to parameterize it with
+`BotSettings` for exactly this, and this freshly-vendored copy was not.
+Permission is checked instead in `fleetTravelBroadcast` below, which is what
+`actOnFleetBroadcast` actually calls -- the trust stays exactly where the
+setting's own documentation says it is, and an unpermitted sender's broadcast
+can latch here harmlessly, since nothing ever compares this latch against an
+unpermitted broadcast's text.
+
+-}
+fleetTravelBroadcastAnyPilot : ReadingFromGameClient -> Maybe { pilot : String, system : String, banner : String }
+fleetTravelBroadcastAnyPilot readingFromGameClient =
+    fleetBroadcastBannerText readingFromGameClient
+        |> Maybe.andThen fleetTravelBroadcastFromBannerText
+
+
+{-| The same broadcast, filtered against the pilots this bot trusts with its
+own route. Matched exactly, never as a substring -- `fleetInviteSenderFromMessageBox`'s
+reason: this hands a pilot the ship's own destination.
+-}
+fleetTravelBroadcast : List String -> ReadingFromGameClient -> Maybe { pilot : String, system : String, banner : String }
+fleetTravelBroadcast permittedPilots readingFromGameClient =
+    fleetTravelBroadcastAnyPilot readingFromGameClient
+        |> Maybe.andThen
+            (\broadcast ->
+                if
+                    permittedPilots
+                        |> List.any
+                            (\permitted ->
+                                String.toLower (String.trim permitted) == String.toLower broadcast.pilot
+                            )
+                then
+                    Just broadcast
+
+                else
+                    Nothing
+            )
+
+
+{-| The channel a decision uses to ask the host for a route, since a system
+name cannot be spelled in the mouse/keyboard vocabulary a decision has. Ported
+from `eve-online-saxrat`'s `hostDirectivePrefix` / `hostDirectiveSetDestination`
+-- see the Architecture section of `CLAUDE.md` for the full argument. One-way
+and unacknowledged: the client's own route panel is the confirmation, not
+anything the host reports back.
+
+**Sets the destination; nothing here flies it.** This bot has no route-panel
+driving logic of its own, the same posture `sessionIsEnding`'s trip home
+already takes. What moves the ship is the client's own Autopilot toggle, if the
+operator has it on -- the same mechanism `eve-online-warp-to-0-autopilot` is
+built entirely around.
+
+-}
+hostDirectivePrefix : String
+hostDirectivePrefix =
+    "@host "
+
+
+hostDirectiveSetDestination : String -> String
+hostDirectiveSetDestination systemName =
+    hostDirectivePrefix ++ "set-destination " ++ systemName
+
+
 {-| The wingman's decision root, in the order the operator asked for it.
 
 Each arm is reached only when the one above it has nothing to do, which is the
@@ -3154,15 +3415,49 @@ actOnFleetBroadcast context =
                             )
 
                 Nothing ->
-                    Just
-                        (describeBranch
-                            ("The broadcast reads '"
-                                ++ bannerText
-                                ++ "', which is not one of the two forms read so far"
-                                ++ " -- see broadcastVerbsNotYetRead."
-                            )
-                            waitForProgressInGame
-                        )
+                    case
+                        fleetTravelBroadcast
+                            context.eventContext.botSettings.followFleetBroadcastFrom
+                            context.readingFromGameClient
+                    of
+                        Just broadcast ->
+                            if context.memory.fleetBroadcastFollowed == Just broadcast.banner then
+                                Just
+                                    (describeBranch
+                                        ("Already asked the host to route to '"
+                                            ++ broadcast.system
+                                            ++ "', the destination '"
+                                            ++ broadcast.pilot
+                                            ++ "' broadcast."
+                                        )
+                                        waitForProgressInGame
+                                    )
+
+                            else
+                                Just
+                                    (describeBranch
+                                        ("'"
+                                            ++ broadcast.pilot
+                                            ++ "' broadcast a travel destination and is named in "
+                                            ++ "'follow-fleet-broadcast-from' -- asking the host to set "
+                                            ++ "the route to '"
+                                            ++ broadcast.system
+                                            ++ "'. "
+                                            ++ hostDirectiveSetDestination broadcast.system
+                                        )
+                                        waitForProgressInGame
+                                    )
+
+                        Nothing ->
+                            Just
+                                (describeBranch
+                                    ("The broadcast reads '"
+                                        ++ bannerText
+                                        ++ "', which is not one of the two forms read so far"
+                                        ++ " -- see broadcastVerbsNotYetRead."
+                                    )
+                                    waitForProgressInGame
+                                )
 
 
 {-| Lock the pilot a `Target` broadcast named, from their overview row.
