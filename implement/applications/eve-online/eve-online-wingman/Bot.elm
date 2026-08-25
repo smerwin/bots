@@ -136,13 +136,13 @@ import EveOnline.BotFrameworkSeparatingMemory
         , useContextMenuCascadeWithCustomConfig
         , waitForProgressInGame
         )
+import EveOnline.MemoryReading
 import EveOnline.ParseUserInterface
     exposing
         ( OverviewWindowEntry
         , ShipUI
         , ShipUIModuleButton
         )
-import EveOnline.MemoryReading
 import EveOnline.UnstuckBot
 import Json.Decode
 import List.Extra
