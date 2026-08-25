@@ -3571,6 +3571,121 @@ punctuationAsSeparators =
         )
 
 
+{-| A broadcast-named gate, found on the overview -- matched the same way
+`routeStargateJumpFromReading` matches the route panel's own next system, since
+a `Jump Stargate X` or `Align Stargate X` broadcast names a gate directly
+rather than a place `@host set-destination` would have to compute a route
+for. #347: **the named gate may not be on the overview**, and this answers
+`Nothing` rather than a different row when it is not -- `jumpToCalledGate` and
+`alignToCalledGate` both say so rather than guessing.
+-}
+gateOverviewEntry : String -> ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+gateOverviewEntry gateName readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter overviewEntryIsAStargate
+        |> List.filter
+            (.objectName
+                >> Maybe.map (stargateNameLeadsToSystem gateName)
+                >> Maybe.withDefault False
+            )
+        |> List.head
+
+
+{-| `routeStargateJump` fed a broadcast's own gate name instead of the route
+panel's next system. `routeStargateJump` -- the pure decision underneath
+`navigateTowardFleetCommander` -- is already generic over "which system", so
+this reuses it unchanged rather than porting a fourth copy of the jump logic,
+the way #347 asked for.
+-}
+routeStargateJumpForNamedGate : String -> ReadingFromGameClient -> RouteStargateJump
+routeStargateJumpForNamedGate gateName readingFromGameClient =
+    routeStargateJump
+        { nextSystemOnRoute = Just gateName
+        , stargatesOnOverview =
+            readingFromGameClient.overviewWindows
+                |> List.concatMap .entries
+                |> List.filter overviewEntryIsDisplayed
+                |> List.filter overviewEntryIsAStargate
+                |> List.map
+                    (\gate ->
+                        { name = gate.objectName |> Maybe.withDefault ""
+                        , panelIsShowingIt = selectedItemIsOverviewEntry readingFromGameClient gate
+                        }
+                    )
+        , panelOffersJump = routeStargateJumpButton readingFromGameClient /= Nothing
+        }
+
+
+{-| Take a broadcast-named gate: press the Selected Item panel's Jump button
+where it already shows that gate, falling back to a right-click on the gate's
+own overview row and its "Jump Through Stargate" entry -- the fallback
+`routeMarkerCascade` uses for the route panel's marker, retargeted at an
+overview entry because this gate was never necessarily the target of any ESI
+route. See `gateOverviewEntry` and `routeStargateJumpForNamedGate` for the two
+pieces this composes, both reused rather than reinvented per #347.
+-}
+jumpToCalledGate : BotDecisionContext -> String -> DecisionPathNode
+jumpToCalledGate context gateName =
+    case gateOverviewEntry gateName context.readingFromGameClient of
+        Nothing ->
+            describeBranch
+                ("'" ++ gateName ++ "' is not on the overview -- nothing to jump through.")
+                waitForProgressInGame
+
+        Just overviewEntry ->
+            let
+                verdict : RouteStargateJump
+                verdict =
+                    routeStargateJumpForNamedGate gateName context.readingFromGameClient
+            in
+            case ( verdict, routeStargateJumpButton context.readingFromGameClient ) of
+                ( PressTheJumpButton _, Just buttonToPress ) ->
+                    describeBranch (describeRouteStargateJump verdict)
+                        (clickUiElementForNavigation buttonToPress)
+
+                _ ->
+                    describeBranch (describeRouteStargateJump verdict)
+                        (useContextMenuCascadeOnOverviewEntry
+                            (useMenuEntryWithTextContainingFirstOfCommonContinuation
+                                [ "jump"
+
+                                -- https://forum.botlab.org/t/i-want-to-add-korean-support-on-eve-online-bot-what-should-i-do/4370
+                                , "점프 - 스타게이트 사용"
+                                ]
+                                menuCascadeCompleted
+                            )
+                            overviewEntry
+                            context
+                        )
+
+
+{-| Open a broadcast-named gate's own context menu, so the next reading
+records what the client offers for "Align" -- the same
+`openTheBroadcastsOwnMenu` pattern #347 pointed at: aligning is not a cascade
+this repo has driven before and the client's own menu wording for it has
+never been read, so guessing at it is exactly the failure this repo's own
+testing discipline refuses. Nothing here clicks a menu entry.
+-}
+alignToCalledGate : BotDecisionContext -> String -> DecisionPathNode
+alignToCalledGate context gateName =
+    case gateOverviewEntry gateName context.readingFromGameClient of
+        Nothing ->
+            describeBranch
+                ("'" ++ gateName ++ "' is not on the overview -- nothing to align to.")
+                waitForProgressInGame
+
+        Just overviewEntry ->
+            describeBranch
+                ("'"
+                    ++ gateName
+                    ++ "' is on the overview. Opening its own menu so the next"
+                    ++ " reading records what 'Align' offers."
+                )
+                (useContextMenuCascadeOnOverviewEntry menuCascadeCompleted overviewEntry context)
+
+
 {-| The system the route panel says this ship jumps to next, if it says.
 Ported unchanged from `eve-online-warp-to-0-autopilot`.
 -}
@@ -4259,13 +4374,8 @@ actOnBroadcastVerb context bannerText =
 
             else
                 describeBranch
-                    ("'"
-                        ++ pilot
-                        ++ "' called a jump at '"
-                        ++ gate
-                        ++ "'. Jumping is not wired yet -- see WINGMAN.md."
-                    )
-                    waitForProgressInGame
+                    ("'" ++ pilot ++ "' called a jump at '" ++ gate ++ "'.")
+                    (jumpToCalledGate context gate)
 
         AlignGate { pilot, gate } ->
             if not (permitted pilot) then
@@ -4280,13 +4390,8 @@ actOnBroadcastVerb context bannerText =
 
             else
                 describeBranch
-                    ("'"
-                        ++ pilot
-                        ++ "' called an align at '"
-                        ++ gate
-                        ++ "'. Aligning is not wired yet -- see WINGMAN.md."
-                    )
-                    waitForProgressInGame
+                    ("'" ++ pilot ++ "' called an align at '" ++ gate ++ "'.")
+                    (alignToCalledGate context gate)
 
         Unrecognized text ->
             openTheBroadcastsOwnMenu context text
