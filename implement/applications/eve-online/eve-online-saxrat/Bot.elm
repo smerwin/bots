@@ -1200,7 +1200,7 @@ gridStillHasSomethingToDo : IncomingDamageMemory -> ReadingFromGameClient -> Boo
 gridStillHasSomethingToDo incomingDamage readingFromGameClient =
     anyAttackableInOverview (namesOfRecentAttackers incomingDamage) readingFromGameClient
         || anyNotableWreckInOverview readingFromGameClient
-        || (targetsToUnlockFromReadingFromGameClient readingFromGameClient |> List.isEmpty |> not)
+        || (targetsToUnlockIncludingActiveIfStray readingFromGameClient |> List.isEmpty |> not)
 
 
 findReasonToIgnoreProbeScanResult : AnomalyChoiceContext -> EveOnline.ParseUserInterface.ProbeScanResult -> Maybe ReasonToIgnoreProbeScanResult
@@ -6525,8 +6525,16 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
             else
                 scrollOverviewToReveal context (shouldAttackOverviewEntry (namesOfRecentAttackers context.memory.incomingDamage))
 
+        -- #303: run 50 held a wreck locked and active for 39 unbroken ticks
+        -- (154s) with rats on the same grid, because the bar-text match found
+        -- nothing to unlock while `activeTargetOverviewEntryIsStray` fired on
+        -- every one of those readings -- the branch that reads it only held
+        -- fire, it never freed the slot. `targetsToUnlockIncludingActiveIfStray`
+        -- is the fix; see its own doc comment for why this reads that shared
+        -- definition rather than `targetsToUnlockFromReadingFromGameClient`
+        -- directly.
         targetsToUnlock =
-            targetsToUnlockFromReadingFromGameClient context.readingFromGameClient
+            targetsToUnlockIncludingActiveIfStray context.readingFromGameClient
 
         ensureShipIsOrbitingDecision =
             overviewEntriesToAttack
@@ -12948,6 +12956,15 @@ whether the overview row for whichever target EVE currently reports as
 "active" -- the one weapons and drones actually go to when activated, since
 neither one lets you choose which locked target to hit -- looks like a
 container or wreck rather than a rat.
+
+**Also feeds the unlock candidate list, since #303.** Holding fire on a stray
+active target and freeing its lock slot used to be two different questions
+answered from two different sources, and the second one could answer "no
+evidence" while this one kept firing "hold fire" -- the ship then sat holding
+a wreck it would never shoot and never let go of. The call site building
+`targetsToUnlock` now adds the active target here whenever this answers
+`True`, so the same signal that stops the guns also frees the slot.
+
 -}
 activeTargetOverviewEntryIsStray : ReadingFromGameClient -> Bool
 activeTargetOverviewEntryIsStray readingFromGameClient =
@@ -12980,11 +12997,15 @@ matched here at all -- so the pattern still has a name to find.
 What is unconfirmed is punctuation, and the comment above says why: nothing has
 ever read this field's exact shape. `containsWords` normalises whitespace and
 not punctuation, so a bar that renders `Cargo Container(1)` would stop matching
-here where the substring test matched. That fails to _not_ unlocking a real
-container, which `activeTargetOverviewEntryIsStray` still catches off the
-overview's own clean `objectName`/`objectType` -- the "second opinion" its call
-site already describes. So the two sites keep their independence, and the
-direction this can now be wrong in is the one that leaves the guns firing.
+here where the substring test matched. That used to fail toward _not_ unlocking
+a real container and leaving it held forever, run 50's own incident -- see
+#303. `activeTargetOverviewEntryIsStray` still catches the case off the
+overview's own clean `objectName`/`objectType`, but it no longer only holds
+fire: the call site building `targetsToUnlock` adds the active target as a
+candidate whenever that check answers `True`, so a miss here is now covered
+rather than stuck. This function stays the primary source -- it can name a
+non-active locked target the overview check never looks at -- and the two are
+unioned rather than one gating the other.
 
 -}
 targetsToUnlockFromReadingFromGameClient : ReadingFromGameClient -> List EveOnline.ParseUserInterface.Target
@@ -12999,6 +13020,29 @@ targetsToUnlockFromReadingFromGameClient readingFromGameClient =
                                 |> List.any (\pattern -> containsWords pattern text)
                         )
             )
+
+
+{-| `targetsToUnlockFromReadingFromGameClient`, plus the active target when
+`activeTargetOverviewEntryIsStray` disagrees with it -- see #303 and that
+function's own doc comment for why. **One definition**, read at both the
+decision site that clicks the unlock and the memory update that drives the
+settling-window guard in front of that click: a target this function finds
+only through the overview-stray half has no bar-text region of its own for
+`targetToUnlockUnchangedTicks` to track, so if the settling guard read a
+narrower list than the click site it would never see the region settle and
+would wait on it forever -- reporting "waiting for it to settle" while never
+actually clicking. Two copies of this list would have drifted into exactly
+that silently.
+-}
+targetsToUnlockIncludingActiveIfStray : ReadingFromGameClient -> List EveOnline.ParseUserInterface.Target
+targetsToUnlockIncludingActiveIfStray readingFromGameClient =
+    targetsToUnlockFromReadingFromGameClient readingFromGameClient
+        ++ (if activeTargetOverviewEntryIsStray readingFromGameClient then
+                readingFromGameClient.targets |> List.filter .isActiveTarget
+
+            else
+                []
+           )
 
 
 {-| Whether there is currently anything in the overview worth fighting.
@@ -15213,8 +15257,12 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 |> Maybe.map (.uiNode >> .totalDisplayRegion)
 
         currentTargetToUnlockRegion =
+            -- Reads the same combined list the click site does (#303) --
+            -- see `targetsToUnlockIncludingActiveIfStray`'s own doc comment
+            -- for why the narrower, bar-text-only list would silently pin
+            -- this at `Nothing` for a target the overview-stray half found.
             context.readingFromGameClient
-                |> targetsToUnlockFromReadingFromGameClient
+                |> targetsToUnlockIncludingActiveIfStray
                 |> List.head
                 |> Maybe.map (\target -> (target.barAndImageCont |> Maybe.withDefault target.uiNode).totalDisplayRegion)
 
