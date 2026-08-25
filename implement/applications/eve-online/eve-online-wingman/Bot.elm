@@ -429,6 +429,14 @@ type alias BotMemory =
     -- ported -- see `navigateTowardFleetCommander`'s own comment for why.
     , routeFirstMarkerRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
     , routeFirstMarkerUnchangedTicks : Int
+
+    -- Readings in a row spent asking one acceleration gate to open, ported
+    -- from `eve-online-saxrat`'s `gateWithinReachTicks` -- see
+    -- `accelerationGateStep` for why a bound matters here at all. Advances
+    -- while actually asking, holds while a gate is on the overview but this
+    -- bot is not asking it (rats present, most often), and resets only once
+    -- no gate is on the overview at all.
+    , gateAskedReadings : Int
     }
 
 
@@ -2354,6 +2362,7 @@ initBotMemory =
     , fleetBroadcastFollowed = Nothing
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
+    , gateAskedReadings = 0
     }
 
 
@@ -2442,6 +2451,7 @@ statusTextFromState context =
                     [ [ describeShip ]
                     , [ describeDrones ]
                     , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
+                    , [ describeAccelerationGateAsk context ]
                     ]
                         |> List.map (String.join " ")
     in
@@ -2812,6 +2822,25 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         currentRouteFirstMarkerRegion =
             infoPanelRouteFirstMarkerFromReadingFromGameClient context.readingFromGameClient
                 |> Maybe.map (.uiNode >> .totalDisplayRegion)
+
+        gateOnOverview : Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+        gateOnOverview =
+            nearestAccelerationGateOnOverview context.readingFromGameClient
+
+        -- Same shape as `askingAnAccelerationGateToOpen` in saxrat: the gate
+        -- is on the overview, the panel is already showing it, and nothing
+        -- else is holding this bot back from pressing it -- rats on the
+        -- overview count as holding back, since #348 is what this counter
+        -- exists for.
+        askingTheGateToOpen : Bool
+        askingTheGateToOpen =
+            case gateOnOverview of
+                Nothing ->
+                    False
+
+                Just gateEntry ->
+                    List.isEmpty namesOfRatsInOverview
+                        && selectedItemIsOverviewEntry context.readingFromGameClient gateEntry
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -2858,6 +2887,15 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else if currentRouteFirstMarkerRegion == botMemoryBefore.routeFirstMarkerRegion then
             botMemoryBefore.routeFirstMarkerUnchangedTicks + 1
+
+        else
+            0
+    , gateAskedReadings =
+        if askingTheGateToOpen then
+            botMemoryBefore.gateAskedReadings + 1
+
+        else if gateOnOverview /= Nothing then
+            botMemoryBefore.gateAskedReadings
 
         else
             0
@@ -3592,6 +3630,31 @@ overviewEntryIsAStargate entry =
         |> List.any (containsWords "stargate")
 
 
+{-| Whether an overview row's own words say it is an acceleration gate.
+-}
+overviewEntryIsAnAccelerationGate : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsAnAccelerationGate entry =
+    [ entry.objectName, entry.objectType ]
+        |> List.filterMap identity
+        |> List.any (containsWords "acceleration gate")
+
+
+{-| The nearest displayed acceleration gate on the overview, if there is one.
+A hidden row's region belongs to whatever was recycled into its place, so a
+row that is not `_display`ed is excluded rather than clicked. `Result.withDefault`
+pushes an unreadable (AU) distance to the back rather than dropping it, since a
+gate whose distance cannot be read is still a gate worth reporting on.
+-}
+nearestAccelerationGateOnOverview : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+nearestAccelerationGateOnOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter overviewEntryIsAnAccelerationGate
+        |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
+        |> List.head
+
+
 {-| Take the route's next stargate by pressing the Selected Item panel's own
 Jump button, where the panel is already showing that gate. Ported unchanged
 from `eve-online-warp-to-0-autopilot`.
@@ -3766,21 +3829,32 @@ wingmanDecisionRootInSpace context shipUI =
                             assist
 
                         Nothing ->
-                            {- Module activation and rat combat still come from
-                               the arm this bot inherited from the combat
-                               anomaly bot, which does both together. Splitting
-                               them so `activate-module-always` is its own step,
-                               ahead of the broadcast rather than behind it, is
-                               still outstanding -- see WINGMAN.md.
+                            case accelerationGateStep context of
+                                Just takeTheGate ->
+                                    -- #348. Sits *after* the drone arm, never
+                                    -- before it, so a gate this bot can see is
+                                    -- never taken while drones are still owed a
+                                    -- command on a live grid -- the same
+                                    -- ordering argument #326 already established
+                                    -- for the drone arm itself, one level up.
+                                    takeTheGate
 
-                               The drone arm above deliberately sits *before*
-                               this one rather than inside it: #326 measured a
-                               turret that could not activate holding the
-                               decision on the other arm of this `case` for 262
-                               consecutive readings, with the drones out and
-                               idle the whole time.
-                            -}
-                            modulesToActivateAlwaysActivated context shipUI
+                                Nothing ->
+                                    {- Module activation and rat combat still come from
+                                       the arm this bot inherited from the combat
+                                       anomaly bot, which does both together. Splitting
+                                       them so `activate-module-always` is its own step,
+                                       ahead of the broadcast rather than behind it, is
+                                       still outstanding -- see WINGMAN.md.
+
+                                       The drone arm above deliberately sits *before*
+                                       this one rather than inside it: #326 measured a
+                                       turret that could not activate holding the
+                                       decision on the other arm of this `case` for 262
+                                       consecutive readings, with the drones out and
+                                       idle the whole time.
+                                    -}
+                                    modulesToActivateAlwaysActivated context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
@@ -4461,3 +4535,179 @@ dronesAssistTheCommander context =
 
             _ ->
                 Nothing
+
+
+{-| Take the acceleration gate the fleet's pocket needs, but only once the
+overview is clear of rats -- taking it mid-fight abandons whatever the fleet
+is still fighting and leaves the commander a ship short in the pocket this
+bot just left. See #348.
+
+**Narrower than `eve-online-saxrat`'s `activateAccelerationGateIfPresent` on
+purpose.** Two things that bot needs and this one does not: distance triage
+for a gate far enough away to be evidence something went wrong (a wingman
+follows a fleet through a known pocket rather than hunting blind across a
+whole system, so a gate this bot can see on the overview at all is one worth
+taking), and the `unlessAlreadyClosingIn` approach guard around the press
+(porting `shipApproachingTicks` for one click was more machinery than this is
+worth carrying). What is ported is the shape that matters: press the Selected
+Item panel's own button rather than a context-menu cascade, and bound how long
+this bot goes on asking.
+
+**Which of the two things holding it back is always named.** A single
+"waiting" line covering both "no gate here" and "rats still on the grid" is
+the shape #343's own review caught elsewhere in this file -- this answers
+`Nothing` for the first, silently, exactly as every other arm in this decision
+root does when it has nothing to do, and describes the second explicitly.
+
+-}
+accelerationGateStep : BotDecisionContext -> Maybe DecisionPathNode
+accelerationGateStep context =
+    case nearestAccelerationGateOnOverview context.readingFromGameClient of
+        Nothing ->
+            Nothing
+
+        Just gateEntry ->
+            if not (List.isEmpty (getNamesOfRatsInOverview context.readingFromGameClient)) then
+                Just
+                    (describeBranch
+                        "An acceleration gate is on the overview, but rats are still on the grid -- staying to fight rather than taking it."
+                        waitForProgressInGame
+                    )
+
+            else
+                let
+                    activateGateButton : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+                    activateGateButton =
+                        selectedItemButtonNamed context.readingFromGameClient "selectedItemActivateGate"
+
+                    waitForTheActivateButton : DecisionPathNode
+                    waitForTheActivateButton =
+                        describeBranch
+                            "The acceleration gate is selected but the panel offers no 'selectedItemActivateGate' yet."
+                            waitForProgressInGame
+                in
+                case
+                    accelerationGateActivationStep
+                        { panelShowsTheGate = selectedItemIsOverviewEntry context.readingFromGameClient gateEntry
+                        , panelOffersActivateGate = activateGateButton /= Nothing
+                        , askedReadings = context.memory.gateAskedReadings
+                        }
+                of
+                    GiveUpOnThisGate ->
+                        -- Hand the reading back rather than park the session --
+                        -- `askForHelpToGetUnstuck` dispatches nothing and
+                        -- waits, which is what cost saxrat run 18 three
+                        -- quarters of a session on a gate that was never going
+                        -- to open (#321's general lesson: a branch at the head
+                        -- of the tree with no bound owns the whole bot).
+                        -- `describeAccelerationGateAsk` carries the give-up in
+                        -- the status line on every reading instead.
+                        Nothing
+
+                    SelectTheGate ->
+                        Just
+                            (describeBranch
+                                "I see an acceleration gate -- select it, so the panel's own Activate Gate acts on it."
+                                (clickUiElementForNavigation gateEntry.uiNode)
+                            )
+
+                    WaitForTheActivateButton ->
+                        Just waitForTheActivateButton
+
+                    PressActivateGate ->
+                        Just
+                            (activateGateButton
+                                |> Maybe.map
+                                    (\button ->
+                                        describeBranch
+                                            "The overview is clear of rats -- activate the acceleration gate to move to the next pocket."
+                                            (clickUiElementForNavigation button)
+                                    )
+                                |> Maybe.withDefault waitForTheActivateButton
+                            )
+
+
+type AccelerationGateActivationStep
+    = SelectTheGate
+    | WaitForTheActivateButton
+    | PressActivateGate
+    | GiveUpOnThisGate
+
+
+{-| A pure function over a record so a case can execute it, ported from
+saxrat's `GateActivationCase` / `gateActivationStep` of the same shape.
+-}
+accelerationGateActivationStep :
+    { panelShowsTheGate : Bool, panelOffersActivateGate : Bool, askedReadings : Int }
+    -> AccelerationGateActivationStep
+accelerationGateActivationStep gateCase =
+    if accelerationGateHasBeenGivenUpOn gateCase.askedReadings then
+        GiveUpOnThisGate
+
+    else if not gateCase.panelShowsTheGate then
+        SelectTheGate
+
+    else if gateCase.panelOffersActivateGate then
+        PressActivateGate
+
+    else
+        WaitForTheActivateButton
+
+
+{-| Whether the budget for asking one gate to open has been spent. One
+comparison with two readers -- the step rule and the status clause -- so a
+give-up decided in one place and reported in another cannot disagree about
+whether it happened.
+-}
+accelerationGateHasBeenGivenUpOn : Int -> Bool
+accelerationGateHasBeenGivenUpOn askedReadings =
+    accelerationGateRefusesThisShipTicks < askedReadings
+
+
+{-| How many readings to keep asking a gate that is already selected before
+giving up on it, taken unchanged from saxrat's `gateRefusesThisShipTicks` --
+that bot's own corpus put a working gate's cost at 0 to 15 readings and a
+genuinely stuck one past 335, so 40 sits inside the gap with clearance on both
+sides. This bot has no corpus of its own yet; see WINGMAN.md.
+-}
+accelerationGateRefusesThisShipTicks : Int
+accelerationGateRefusesThisShipTicks =
+    40
+
+
+{-| The acceleration-gate ask, for the status line -- printed on every reading
+whether or not this bot is currently the one holding the tree, so a give-up
+that already handed the turn back is still visible.
+-}
+describeAccelerationGateAsk : BotDecisionContext -> String
+describeAccelerationGateAsk context =
+    case nearestAccelerationGateOnOverview context.readingFromGameClient of
+        Nothing ->
+            "Acceleration gate: none on the overview."
+
+        Just _ ->
+            let
+                askedReadings : Int
+                askedReadings =
+                    context.memory.gateAskedReadings
+
+                ratsPresent : Bool
+                ratsPresent =
+                    not (List.isEmpty (getNamesOfRatsInOverview context.readingFromGameClient))
+            in
+            "Acceleration gate: on the overview, "
+                ++ (if ratsPresent then
+                        "rats still on the grid -- not taking it."
+
+                    else if accelerationGateHasBeenGivenUpOn askedReadings then
+                        "GIVEN UP after "
+                            ++ String.fromInt askedReadings
+                            ++ " readings of asking."
+
+                    else
+                        "readings spent asking: "
+                            ++ String.fromInt askedReadings
+                            ++ " of "
+                            ++ String.fromInt accelerationGateRefusesThisShipTicks
+                            ++ "."
+                   )
