@@ -1,9 +1,16 @@
 #!/bin/bash
 # Start one eve-online-saxrat run on Windows, refusing if a host is already alive.
 #
-#   ./run_saxrat.sh <run number> [minutes]
-#   EVE_SHIP=dragoon ./run_saxrat.sh <run number> [minutes]
-#   EVE_SHIP=slicer  ./run_saxrat.sh <run number> [minutes]
+#   ./run_saxrat.sh [run number] [minutes]
+#   EVE_SHIP=dragoon ./run_saxrat.sh [run number] [minutes]
+#   EVE_SHIP=slicer  ./run_saxrat.sh [run number] [minutes]
+#
+# [run number] is optional and auto-increments from the highest
+# saxrat_run<N>.log already in LOGDIR -- WINDOWS.md used to tell an operator to
+# `ls -t ~/eve-bot-logs | grep -E 'saxrat_run[0-9]+\.log'` by hand and take one
+# past the highest, because reusing a number truncates that run's log. This is
+# that lookup, done for you; passing a number explicitly still works exactly as
+# before, unchanged.
 #
 # The macOS launcher next door (tools/macos-host/run_saxrat.sh) is the model.
 # What is different here is entirely the platform, and all of it is a trap that
@@ -33,13 +40,17 @@
 # directory instead, which put them outside it -- override with EVE_BOT_LOGS.
 set -e
 
-REPO="${EVE_BOT_REPO:-/c/botlab/smerwin-bots}"
+REPO="${EVE_BOT_REPO:-/c/botlab/bots}"
 LOGDIR="${EVE_BOT_LOGS:-$HOME/eve-bot-logs}"
-N="$1"
-MINUTES="${2:-360}"
-
-[ -z "$N" ] && { echo "usage: run_saxrat.sh <run number> [minutes]"; exit 1; }
 mkdir -p "$LOGDIR"
+
+N="$1"
+if [ -z "$N" ]; then
+    LAST=$(ls "$LOGDIR"/saxrat_run*.log 2>/dev/null \
+        | sed -E 's/.*saxrat_run([0-9]+)\.log/\1/' | sort -n | tail -1)
+    N=$(( ${LAST:-0} + 1 ))
+fi
+MINUTES="${2:-360}"
 
 powershell -NoProfile -ExecutionPolicy Bypass \
     -File "$(cygpath -w "$REPO/tools/windows-host/stop_bots.ps1")" | tr -d '\r'
@@ -227,9 +238,19 @@ $HULL"
 
 LOG="$LOGDIR/saxrat_run${N}.log"
 cd "$REPO/tools/macos-host/botlab_host"
+
+# No log line has ever named the settings string a run was started with --
+# WINDOWS.md's own section on it says a handoff note is the only record and
+# calls that "recoverable and ... not a record". This is that record, written
+# to the log itself before the host's own stderr starts, so it survives
+# alongside the run rather than in whichever terminal happened to be open.
+echo "--- settings (profile: $SHIP) ---" > "$LOG"
+echo "$SETTINGS" >> "$LOG"
+echo "---" >> "$LOG"
+
 nohup python -u botlab_host.py \
     "$(cygpath -w "$REPO/implement/applications/eve-online/eve-online-saxrat")" \
     --settings "$SETTINGS" --execute-input \
     --session-duration-minutes "$MINUTES" --web-console \
-    > "$LOG" 2>&1 &
+    >> "$LOG" 2>&1 &
 echo "started run $N ($MINUTES min) -> $LOG"
