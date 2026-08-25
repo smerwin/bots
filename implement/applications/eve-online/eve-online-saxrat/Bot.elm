@@ -12964,6 +12964,7 @@ evidence" while this one kept firing "hold fire" -- the ship then sat holding
 a wreck it would never shoot and never let go of. The call site building
 `targetsToUnlock` now adds the active target here whenever this answers
 `True`, so the same signal that stops the guns also frees the slot.
+
 -}
 activeTargetOverviewEntryIsStray : ReadingFromGameClient -> Bool
 activeTargetOverviewEntryIsStray readingFromGameClient =
