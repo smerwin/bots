@@ -37,16 +37,49 @@ nothing to do.
    `no_dialog_button` pair, so an invite the setting named sat unanswered
    forever until this was added.
 1. **Undock** if docked, through `undockUsingStationWindow`.
-2. **Act on the fleet broadcast** — in practice only the `Target …` form,
+2. **Head home** if the session is ending, through `sessionIsEnding`.
+3. **Activate the always-on modules** named in `activate-module-always`.
+4. **Act on the fleet broadcast** — in practice only the `Target …` form,
    which is the one and only form that reaches a branch. Everything else the
    fleet broadcasts falls into a named wait. See "Live runs".
-3. **Everything else** — module activation, rat combat, drones — still comes
-   from the arm inherited from the combat anomaly bot, which does the three
-   together.
+5. **Drones assist the commander**, `F` on the locked target as the fallback.
+6. **Fire on whatever is locked**, through `fireOnActiveTarget`.
+7. **Take the acceleration gate**, but only with the overview clear of rats.
+8. **Self-defense**, through `fightPointedRatsOrReturnDrones` — fight back
+   only if a rat has actually pointed this ship, otherwise sit still.
 
-That third point is why this is a skeleton rather than a bot. The order the
-operator asked for puts `activate-module-always` ahead of the broadcast and
-drones behind it; today they are one inherited lump behind both.
+### Why the guns are their own arm, below the drones
+
+Reported from the field on 2026-08-25: travel and locking worked, engaging a
+locked target was a D-. The cause was ordering, not any rule being wrong.
+
+**A `Target` broadcast's banner does not clear when the target is locked.** It
+stays up for the rest of the call. So the broadcast arm answered "lock it" on
+every reading for as long as the banner was up — and since the first arm to
+answer ends the reading, the bot never reached arm 5 or below while a target
+was called. It locked exactly what it was told to, repeatedly, and then never
+shot it.
+
+Nothing else would have fired either. Before `fireOnActiveTarget`, the only
+thing in this bot that activated a weapon was `fightUsingDronesAndModules`,
+reachable only through `fightRatsIfShipIsPointed` — which answers nothing
+unless a rat has pointed *this* ship. A target the commander called is not
+pointing anybody, so even a clear path down the root would have ended in
+silence.
+
+The guns sit **below** the drones and never above them, which is #326's rule
+restated: reaching the drone arm must not require the weapons to read active
+first. That issue measured a turret that could not activate holding the
+decision for 262 consecutive readings with the drones out and idle.
+`weaponsAskedReadingsBound` (20 readings) is the matching bound on this side,
+and a give-up is reported in the status line rather than by falling silent —
+`fireOnActiveTarget` hands the reading back so the drones, the gate and the
+trip home all still run.
+
+One more thing had to change with it: `fightPointedRatsOrReturnDrones`
+recalled the drones whenever the ship was not pointed, which with a called
+target locked would have fought the assist on every reading and left the bot
+pulling drones in and sending them back out for as long as the target lived.
 
 ## The fleet window, as the client actually draws it
 
@@ -497,14 +530,23 @@ restart.
 
 - **Whether a target broadcast can name something that is not a pilot** — a
   structure, a wreck. Only a pilot has been observed, and the overview match
-  would simply fail on anything else, which is the safe direction. Locking a
-  called target has not been flown; only the "don't shoot a fleet member" and
-  "not one of the two forms" branches have.
+  would simply fail on anything else, which is the safe direction.
 - **The remaining eight broadcast wordings**, as above.
 - **Which header label is the commander**, as above.
-- **Everything past the broadcast**: module activation, rat combat, drones,
-  unlocking, the trip home. None of it has flown; the decision root has only
-  been driven as far as accepting an invite and following a travel broadcast.
+- **Firing on a called target.** The ordering fix that makes the guns
+  reachable at all is proven by `elm make` and by
+  `test_wingman_engages_the_called_target.py`, not by a client. What to watch
+  on the first run: whether `Weapons:` in the status line moves off `nothing
+  locked` once a target is called, and whether it ever reaches `GAVE UP` —
+  which would mean the weapons are reachable but something else (range, a
+  wrong active target) is stopping them from cycling.
+- **Whether the called target ends up the *active* target.** `fireOnActiveTarget`
+  activates weapons on whatever the client considers active; it does not force
+  the called target into that slot. In practice a fresh lock becomes active on
+  its own, but a ship that already had something else locked may fire on the
+  wrong thing, and nothing has watched this happen either way.
+- **The rest past the broadcast**: unlocking a locked fleet member and the
+  trip home. Neither has flown.
 - **Navigating to the commander when out of system.** `elm make` proves the
   types; nothing has proven a jump. See "Navigating to the fleet commander
   when out of system" above for what to watch on the first run that reaches
@@ -521,3 +563,7 @@ restart.
   step 0.
 - **Reading and following a travel broadcast** (2026-08-25, live). See "The
   two broadcast forms are shaped differently", above.
+- **Locking a called target** (2026-08-25, live). Reported from the field as
+  working well, alongside travel — and in the same breath as engaging that
+  target being a D-, which is what "Why the guns are their own arm, below the
+  drones" above is about. The lock was never the broken half.
