@@ -155,6 +155,31 @@ class TheDecisionRootReachesTheGunsTest(unittest.TestCase):
         self.assertIn(
             "A target is locked -- leaving the drones out.", self.source)
 
+    def test_it_only_claims_to_leave_the_drones_out_when_any_are_out(self):
+        """#374: this branch said "leaving the drones out" without looking.
+
+        Run 12 printed it four times with fifteen drones in the bay and none in
+        space -- a line that reads like a bot deliberately holding its drones
+        on the field, describing a bay that never opened. The two outcomes are
+        now separate and both are named, so a log distinguishes "drones are out
+        and staying out" from "there were never any to recall".
+        """
+        body = self.source[self.source.index("\nfightPointedRatsOrReturnDrones context shipUI ="):]
+        body = body[:body.index("\n\n\n")]
+        self.assertIn("dronesAreInSpace context.readingFromGameClient", body)
+        self.assertIn("A target is locked -- leaving the drones out.", body)
+        self.assertIn("no drones are in space -- nothing to recall.", body)
+
+    def test_the_recall_and_the_decline_ask_the_same_question(self):
+        """Two copies of "is a drone in space" is how they drift apart, which
+        is the defect above: one of them was not asking at all."""
+        self.assertIn("dronesAreInSpace : ReadingFromGameClient -> Bool",
+                      self.source)
+        self.assertEqual(
+            self.source.count("dronesAreInSpace context.readingFromGameClient"),
+            2,
+            "the recall and the decline should both go through the one helper")
+
     def test_a_give_up_on_the_guns_is_visible_in_the_status_line(self):
         """`fireOnActiveTarget` answers `Nothing` when it gives up, so without
         its own status line a locked target with silent guns would read
