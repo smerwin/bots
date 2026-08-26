@@ -525,6 +525,17 @@ type alias BotMemory =
     -- rest of the session.
     , fleetBroadcastFollowed : Maybe String
 
+    -- The same two-reading latch as `fleetBroadcastSeen`/`fleetBroadcastFollowed`,
+    -- for the place (system or gate) an `AtLocation`/`InPositionAt` broadcast
+    -- names -- see `fleetMatePlaceAnyPilot`'s own comment for why this is
+    -- unfiltered by `follow-fleet-broadcast-from`, same as that pair. Without
+    -- `goToFleetMateDestinationAsked`, `goToFleetMate` asked the host once for
+    -- the route and then waited forever for a pilot who was never coming back
+    -- to this grid -- it had no second half telling it the ask had already
+    -- gone out and it was time to fly the route instead.
+    , goToFleetMatePlaceSeen : Maybe String
+    , goToFleetMateDestinationAsked : Maybe String
+
     -- Ported from `eve-online-warp-to-0-autopilot`'s fields of the same name
     -- -- see `navigateTowardFleetCommander` for what they drive. Not renamed,
     -- so a reader who knows that bot recognises them immediately. That bot's
@@ -2550,6 +2561,8 @@ initBotMemory =
     , contextMenuStuckTicks = 0
     , fleetBroadcastSeen = Nothing
     , fleetBroadcastFollowed = Nothing
+    , goToFleetMatePlaceSeen = Nothing
+    , goToFleetMateDestinationAsked = Nothing
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
     , hitpoints =
@@ -3233,6 +3246,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
                 else
                     botMemoryBefore.fleetBroadcastFollowed
+    , goToFleetMatePlaceSeen =
+        fleetMatePlaceAnyPilot context.readingFromGameClient
+    , goToFleetMateDestinationAsked =
+        case fleetMatePlaceAnyPilot context.readingFromGameClient of
+            Nothing ->
+                botMemoryBefore.goToFleetMateDestinationAsked
+
+            Just place ->
+                if botMemoryBefore.goToFleetMatePlaceSeen == Just place then
+                    Just place
+
+                else
+                    botMemoryBefore.goToFleetMateDestinationAsked
     , routeFirstMarkerRegion = currentRouteFirstMarkerRegion
     , routeFirstMarkerUnchangedTicks =
         if currentRouteFirstMarkerRegion == Nothing then
@@ -4058,6 +4084,33 @@ fleetTravelBroadcastAnyPilot readingFromGameClient =
         |> Maybe.andThen fleetTravelBroadcastFromBannerText
 
 
+{-| Wherever an `AtLocation`/`InPositionAt` broadcast currently names, with no
+permission filter -- `fleetTravelBroadcastAnyPilot`'s own reason:
+`UpdateMemoryContext` carries no `BotSettings`, so the memory update cannot
+check `follow-fleet-broadcast-from`, and an unpermitted broadcast latching
+this harmlessly is what `fleetBroadcastFollowed`'s own comment already
+accepts for the travel form. `goToFleetMate` itself is only ever called for a
+permitted pilot, so what this latch decides -- ask once, then fly -- is never
+compared against a place an unpermitted sender named.
+-}
+fleetMatePlaceAnyPilot : ReadingFromGameClient -> Maybe String
+fleetMatePlaceAnyPilot readingFromGameClient =
+    case fleetBroadcastBannerText readingFromGameClient of
+        Nothing ->
+            Nothing
+
+        Just bannerText ->
+            case parseFleetBroadcast bannerText of
+                AtLocation { system } ->
+                    Just system
+
+                InPositionAt { gate } ->
+                    Just gate
+
+                _ ->
+                    Nothing
+
+
 {-| The same broadcast, filtered against the pilots this bot trusts with its
 own route. Matched exactly, never as a substring -- `fleetInviteSenderFromMessageBox`'s
 reason: this hands a pilot the ship's own destination.
@@ -4667,7 +4720,7 @@ wingmanDecisionRootInSpace context shipUI =
             goHome
 
         Nothing ->
-            case retreatToTheCommander context of
+            case retreatToTheCommander context shipUI of
                 Just breakOff ->
                     -- #364. Above every arm that fights and below the one arm
                     -- that has a deadline, and both halves of that are
@@ -4891,7 +4944,7 @@ actOnFleetBroadcast context shipUI =
                                     )
 
                         Nothing ->
-                            Just (actOnBroadcastVerb context bannerText)
+                            Just (actOnBroadcastVerb context shipUI bannerText)
 
 
 {-| Lock the called target, then get out of the way.
@@ -5396,8 +5449,8 @@ It costs a right-click on a UI element this bot already has, and the cascade's
 own discard rule closes it again if nothing matches.
 
 -}
-actOnBroadcastVerb : BotDecisionContext -> String -> DecisionPathNode
-actOnBroadcastVerb context bannerText =
+actOnBroadcastVerb : BotDecisionContext -> ShipUI -> String -> DecisionPathNode
+actOnBroadcastVerb context shipUI bannerText =
     let
         permitted : String -> Bool
         permitted pilot =
@@ -5426,7 +5479,7 @@ actOnBroadcastVerb context bannerText =
                     waitForProgressInGame
 
             else
-                goToFleetMate context pilot system "is at location"
+                goToFleetMate context shipUI pilot system "is at location"
 
         InPositionAt { pilot, gate } ->
             if not (permitted pilot) then
@@ -5440,7 +5493,7 @@ actOnBroadcastVerb context bannerText =
                     waitForProgressInGame
 
             else
-                goToFleetMate context pilot gate "is in position at"
+                goToFleetMate context shipUI pilot gate "is in position at"
 
         NeedBackup { pilot } ->
             if not (permitted pilot) then
@@ -5453,7 +5506,7 @@ actOnBroadcastVerb context bannerText =
                     waitForProgressInGame
 
             else
-                goToFleetMate context pilot "" "needs backup"
+                goToFleetMate context shipUI pilot "" "needs backup"
 
         JumpGate { pilot, gate } ->
             if not (permitted pilot) then
@@ -5506,9 +5559,21 @@ route to and it says so rather than routing somewhere arbitrary -- saxrat found
 the client refuses a waypoint to a member's live position on every one of
 several hundred attempts.
 
+**The second half used to end there, and that was the bug.** Once a place was
+asked for, this answered `waitForProgressInGame` forever, on the premise that
+the pilot might reappear on the overview -- which cannot happen for a pilot who
+is not coming to this grid, which is the whole reason a route was asked for. A
+pilot broadcasting `is at location`/`is in position at` from another system
+left the ship parked wherever the ask fired, with the client's own route panel
+showing a destination nothing here ever looked at again.
+`goToFleetMateDestinationAsked` is the same one-reading-later latch
+`fleetBroadcastFollowed` uses for the travel-broadcast form, so the ask fires
+exactly once per place and every reading after it drives the route through
+`navigateTowardFleetCommander` instead of repeating the ask.
+
 -}
-goToFleetMate : BotDecisionContext -> String -> String -> String -> DecisionPathNode
-goToFleetMate context pilot place calledIt =
+goToFleetMate : BotDecisionContext -> ShipUI -> String -> String -> String -> DecisionPathNode
+goToFleetMate context shipUI pilot place calledIt =
     case
         context.readingFromGameClient.overviewWindows
             |> List.concatMap .entries
@@ -5542,6 +5607,18 @@ goToFleetMate context pilot place calledIt =
                         ++ " place to route to, so there is nothing to fly toward."
                     )
                     waitForProgressInGame
+
+            else if context.memory.goToFleetMateDestinationAsked == Just place then
+                describeBranch
+                    ("'"
+                        ++ pilot
+                        ++ "' "
+                        ++ calledIt
+                        ++ " '"
+                        ++ place
+                        ++ "' and is not on this grid -- navigating toward the route."
+                    )
+                    (navigateTowardFleetCommander context shipUI)
 
             else
                 describeBranch
@@ -5774,8 +5851,8 @@ reading back so the drones and the guns at least fight, and `describeRetreat`
 keeps the give-up in the status line on every reading.
 
 -}
-retreatToTheCommander : BotDecisionContext -> Maybe DecisionPathNode
-retreatToTheCommander context =
+retreatToTheCommander : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
+retreatToTheCommander context shipUI =
     case retreatStep (retreatCaseFromMemory context.eventContext.botSettings context.memory) of
         NoRetreat ->
             Nothing
@@ -5796,7 +5873,7 @@ retreatToTheCommander context =
                                 waitForProgressInGame
 
                         Just commander ->
-                            goToFleetMate context commander "" "is this fleet's commander and this ship is breaking off"
+                            goToFleetMate context shipUI commander "" "is this fleet's commander and this ship is breaking off"
                     )
                 )
 
