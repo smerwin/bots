@@ -390,14 +390,16 @@ class ThePlacementAndTheSupersessionTest(unittest.TestCase):
 
     def test_the_commander_is_read_the_one_way_both_sides_can_read_him(self):
         """The arm and the counter resolve the commander through the same
-        reading-only function. `fleetCommanderNameFromPanel` falls back to a
-        setting, and `updateMemoryForNewReadingFromGame` never sees settings --
-        an arm asking in that form would spend a budget nothing advances."""
+        reading-only function. The orbit is issued against the commander's
+        overview row, so a name the client itself did not write is a name there
+        may be no row for -- `fleetCommanderName`'s fall-back to
+        `follow-fleet-broadcast-from` belongs to the arms that run *to* him
+        (#367), not to the one that clicks his row."""
         entry = self.source[self.source.index(
             "fleetCommanderOverviewEntry readingFromGameClient ="):]
         entry = entry[:entry.index("\n\n\n")]
         self.assertIn("fleetCommanderNameFromFleetWindowHeader", entry)
-        self.assertNotIn("fleetCommanderNameFromPanel", entry)
+        self.assertNotIn("fleetCommanderName context", entry)
 
     def test_a_give_up_on_the_orbit_is_visible_in_the_status_line(self):
         """The arm answers `Nothing` when it gives up, so without this a ship
@@ -584,25 +586,6 @@ class TheRetreatOutranksTheOrbitTest(unittest.TestCase):
                          ["sessionIsEnding", "retreatToTheCommander"])
         self.assertIn("orbitTheFleetCommander", arms)
         self.assertGreater(arms.index("orbitTheFleetCommander"), 1)
-
-    def test_the_two_arms_still_read_the_commander_differently(self):
-        """Not a rule anybody wants to keep -- a fact this PR is pinning so it
-        cannot be lost. #364's retreat runs to `fleetCommanderName`, which is
-        the first pilot in `follow-fleet-broadcast-from` and answers `Nothing`
-        when that setting is unset; the orbit resolves the commander off the
-        fleet window's own header. On a reading where those disagree the two
-        arms are about different ships. Unifying them is #367; when that lands
-        this case is the one that should go red and be deleted with it."""
-        retreat = self.source[self.source.index(
-            "retreatToTheCommander context =\n"):]
-        retreat = retreat[:retreat.index("\n\n\n")]
-        orbit = self.source[self.source.index(
-            "orbitTheFleetCommander context shipUI ="):]
-        orbit = orbit[:orbit.index("\n\n\n")]
-        self.assertIn("fleetCommanderName context", retreat)
-        self.assertIn("fleetCommanderOverviewEntry", orbit)
-        self.assertNotIn("fleetCommanderName context", orbit)
-        self.assertIn("#367", self.source)
 
 
 if __name__ == "__main__":
