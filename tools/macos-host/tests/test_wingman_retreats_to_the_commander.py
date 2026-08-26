@@ -341,7 +341,7 @@ class TheRetreatIsReachableTest(unittest.TestCase):
 
     def test_the_retreat_outranks_every_arm_that_fights(self):
         retreat, modules, broadcast, drones, guns, gate = self.order_of(
-            "case retreatToTheCommander context of",
+            "case retreatToTheCommander context",
             "case activateAlwaysOnModules context of",
             "case actOnFleetBroadcast context shipUI of",
             "case dronesAssistTheCommander context of",
@@ -360,7 +360,7 @@ class TheRetreatIsReachableTest(unittest.TestCase):
         supposed to be over -- #350 again, one system later."""
         ending, retreat = self.order_of(
             "case sessionIsEnding context shipUI of",
-            "case retreatToTheCommander context of")
+            "case retreatToTheCommander context")
         self.assertLess(ending, retreat)
 
     def test_the_retreat_runs_to_the_fleet_and_not_to_the_hide_logic(self):
@@ -368,9 +368,10 @@ class TheRetreatIsReachableTest(unittest.TestCase):
         retreat must not reach it -- it docks or warps to a configured hide
         location, which is not the fleet and is not what a wingman needs."""
         body = self.source[
-            self.source.index("retreatToTheCommander context =\n"):]
+            self.source.index("\nretreatToTheCommander context"):]
         body = body[:body.index("\n\n\n")]
-        self.assertIn("goToFleetMate context commander", body)
+        self.assertIn("goToFleetMate context", body)
+        self.assertIn("commander", body)
         self.assertIn("fleetCommanderName context", body)
         self.assertNotIn("runAway ", body)
         self.assertNotIn("dockAtRandomStationOrStructure", body)

@@ -655,7 +655,7 @@ class TheCalledGateHandlingIsWiredTest(unittest.TestCase):
         # definition -- start from the definition itself, not the first call
         # site, or the slice below catches those instead of the case arms.
         root = self.source[
-            self.source.index("actOnBroadcastVerb context bannerText ="):]
+            self.source.index("\nactOnBroadcastVerb context"):]
         jump_arm = root[root.index("JumpGate {"):root.index("AlignGate {")]
         align_arm = root[root.index("AlignGate {"):]
         align_arm = align_arm[:align_arm.index("Unrecognized text ->")]
