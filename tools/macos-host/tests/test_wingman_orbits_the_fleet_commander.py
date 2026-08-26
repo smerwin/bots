@@ -456,7 +456,7 @@ class ThePlacementAndTheSupersessionTest(unittest.TestCase):
         ending, retreat, modules, broadcast, drones, guns, orbit, gate = \
             self.order_of(
                 "case sessionIsEnding context shipUI of",
-                "case retreatToTheCommander context of",
+                "case retreatToTheCommander context",
                 "case activateAlwaysOnModules context of",
                 "case actOnFleetBroadcast context shipUI of",
                 "case dronesAssistTheCommander context of",
@@ -569,7 +569,7 @@ class TheRetreatOutranksTheOrbitTest(unittest.TestCase):
             cls.source = handle.read()
 
     def test_the_retreat_arm_comes_first(self):
-        retreat = self.source.index("case retreatToTheCommander context of")
+        retreat = self.source.index("case retreatToTheCommander context")
         orbit = self.source.index(
             "case orbitTheFleetCommander context shipUI of")
         self.assertLess(retreat, orbit)

@@ -526,7 +526,7 @@ class TheThreeCommanderResolversAreTwoTest(unittest.TestCase):
         """They ran to different resolvers, so a reading where the window and
         the setting disagreed had the two arms about different ships."""
         retreat = self.source[self.source.index(
-            "retreatToTheCommander context ="):]
+            "\nretreatToTheCommander context"):]
         retreat = retreat[:retreat.index("\n\n\n")]
         drones = self.source[self.source.index(
             "dronesAssistTheCommander context ="):]
