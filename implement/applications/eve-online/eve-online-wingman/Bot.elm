@@ -5034,19 +5034,22 @@ lockCalledTarget context calledTarget =
                 context
 
 
-{-| Drones out and assisting the commander, with `F` as the fallback.
+{-| Launch drones from the bay, with nothing yet to redirect them to.
 
-**Assist first, `F` second, and both bounded.** #314 removed an assist cascade
-from saxrat because the named pilot was frequently not on the grid, so the
-readings it spent bought nothing; here the commander is on the grid by
-definition, which is what makes assist the right primary. The fallback exists
-so that a commander who is _not_ on the drone menu costs a reading rather than
-the session.
+**Unwired scaffolding from the original wingman skeleton (#337), predating
+`dronesAssistTheCommander`, and left dead until #374.** Its "Assist first, `F`
+second" cascade choice was superseded by the `MenuEntryWithCustomChoice` now
+built into `dronesAssistTheCommander` itself, which is why this is a plain
+launch rather than a second assist cascade -- two arms both choosing between
+`Assist` and `Engage Target` would be two answers to the same question. What
+it still supplies, and what nothing else on this bot's reachable decision path
+did, is the bay-launch half of `launchAndEngageDrones`: `considerLaunch`'s own
+quantity, space-limit and bandwidth gating, reused rather than duplicated.
 
-**Reached without asking whether the guns are cycling.** #326 found a turret
-that could not activate on the current target holding the decision on the other
-arm of its `case` for 262 consecutive readings, with the drones out and idle
-and nothing landing the whole time.
+`dronesAssistTheCommander` is this function's only caller, reached when it has
+no idling drone to redirect -- so a session that never sees this launch
+anything is a session whose bay was already empty or already at the space
+limit, not one where the call site is unreached.
 
 -}
 dronesForTheFleet : BotDecisionContext -> Maybe DecisionPathNode
@@ -5741,6 +5744,15 @@ other arms, not behind the combat one.
 `assist-fleet-commander=no` keeps the drones on this ship's own target, which
 is `launchAndEngageDrones`' existing behaviour.
 
+**With nothing idling to redirect, this falls through to launching some.**
+#374: every reading this arm answered `Nothing` for "nothing idling" fell
+straight through to the guns and the orbit, so drones sat in the bay for a
+whole six-hour run regardless of `assist-fleet-commander`. `dronesForTheFleet`
+is the launch this arm was missing -- unwired scaffolding from the original
+wingman skeleton, predating this function -- and reusing it here rather than
+duplicating `launchAndEngageDrones`' own bandwidth and quantity gating is what
+keeps `considerLaunch`'s checks in one place.
+
 -}
 dronesAssistTheCommander : BotDecisionContext -> Maybe DecisionPathNode
 dronesAssistTheCommander context =
@@ -5752,7 +5764,7 @@ dronesAssistTheCommander context =
             ( Just dronesWindow, Just commander ) ->
                 case dronesWindow.droneGroupInSpace of
                     Nothing ->
-                        Nothing
+                        dronesForTheFleet context
 
                     Just droneGroupInSpace ->
                         let
@@ -5769,7 +5781,7 @@ dronesAssistTheCommander context =
                                     |> List.length
                         in
                         if idlingDrones < 1 then
-                            Nothing
+                            dronesForTheFleet context
 
                         else
                             Just
