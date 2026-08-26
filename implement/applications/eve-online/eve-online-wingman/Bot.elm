@@ -17,6 +17,8 @@
      reading.
    + Acts on the fleet commander's broadcasts -- see below.
    + Launches drones and assists the fleet commander while rats are on grid.
+   + Orbits the fleet commander whenever the commander has an overview row and
+     this ship is not already orbiting -- see `orbit-fc`.
    + Routes to `home-station` through ESI and docks when the session is ending.
 
    ## Broadcasts
@@ -51,7 +53,18 @@
    + In the ship UI, arrange the modules:
      + Place the modules to use in combat (to activate on targets) in the top row.
      + Hide passive modules by disabling the check-box `Display Passive Modules`.
-   + Configure the keyboard key 'W' to make the ship orbit.
+   + Configure the keyboard key 'W' to make the ship orbit. This bot orbits the
+     fleet commander through the overview row's own context menu, which carries
+     a distance; the 'W' key is only the fall-back it degrades to if that menu
+     will not drive, and it orbits at the client's default distance instead of
+     the one asked for.
+   + **Nothing here changes the client's default Orbit distance, and nothing
+     should.** That default lives in the client rather than the ship, so it
+     survives losing the hull and applies to whatever is boarded next -- and
+     since #359 hard-linked `core_char_*.dat` across six characters, a default
+     changed while flying one of them follows the others, including any that
+     later fly `eve-online-saxrat` into a belt. `orbit-fc-range` is a
+     per-command distance and mutates nothing.
 
    ## Configuration Settings
 
@@ -73,7 +86,19 @@
      `Amarr VIII (Oris) - Emperor Family Academy`.
    + `assist-fleet-commander` : Set to 'no' to keep drones on this ship's own
      locked target instead of assisting the commander. Defaults to 'yes'.
-   + `orbit-in-combat` : Set to 'no' to stop orbiting the target.
+   + `orbit-fc` : Set to 'no' to stop orbiting the fleet commander. Defaults to
+     'yes', which **supersedes `orbit-in-combat`**: a wingman that orbits
+     whatever it is shooting drifts off the commander's grid, which is the one
+     place it is supposed to be.
+   + `orbit-fc-range` : The distance to orbit the fleet commander at, written
+     exactly as the client's own Orbit submenu writes it. Defaults to `500 m`.
+     This is menu text rather than a number, the same arrangement
+     `warp-to-anomaly-distance` uses, because what the client offers is a fixed
+     list (`500 m` up to `30 km`) and it -- not this bot -- decides whether a
+     given rung reads as metres or kilometres. Right-click anything on the
+     overview and read the Orbit entry's submenu to see the list.
+   + `orbit-in-combat` : Set to 'no' to stop orbiting the target. Read only
+     when `orbit-fc` is 'no'.
    + `deactivate-module-on-warp` : Name of a module to deactivate when warping.
      Repeatable.
    + `run-away-shield-hitpoints-threshold-percent`,
@@ -183,6 +208,8 @@ defaultBotSettings =
     , maxTargetCount = 3
     , botStepDelayMilliseconds = { minimum = 1300, maximum = 1500 }
     , anomalyWaitTimeSeconds = 15
+    , orbitFleetCommander = PromptParser.Yes
+    , orbitFleetCommanderRange = defaultOrbitFleetCommanderRange
     , orbitInCombat = PromptParser.Yes
     , orbitObjectNames = []
     , runAwayShieldHitpointsThresholdPercent = -1
@@ -328,6 +355,26 @@ parseBotSettings =
                     )
              }
            )
+         , ( "orbit-fc"
+           , { alternativeNames = [ "orbit-FC", "orbit-fleet-commander" ]
+             , description = "Whether to keep the ship orbiting the fleet commander. Defaults to 'yes', and supersedes 'orbit-in-combat'. The distance is the client's own default Orbit distance."
+             , valueParser =
+                PromptParser.valueTypeYesOrNo
+                    (\orbitFleetCommander settings ->
+                        { settings | orbitFleetCommander = orbitFleetCommander }
+                    )
+             }
+           )
+         , ( "orbit-fc-range"
+           , { alternativeNames = [ "orbit-FC-range" ]
+             , description = "The distance to orbit the fleet commander at, written exactly as the client's own Orbit submenu writes it. Defaults to '500 m'."
+             , valueParser =
+                PromptParser.valueTypeString
+                    (\orbitRange settings ->
+                        { settings | orbitFleetCommanderRange = String.trim orbitRange }
+                    )
+             }
+           )
          , ( "orbit-in-combat"
            , { alternativeNames = []
              , description = "Whether to keep the ship orbiting during combat"
@@ -426,6 +473,8 @@ type alias BotSettings =
     , maxTargetCount : Int
     , anomalyWaitTimeSeconds : Int
     , botStepDelayMilliseconds : IntervalInt
+    , orbitFleetCommander : PromptParser.YesOrNo
+    , orbitFleetCommanderRange : String
     , orbitInCombat : PromptParser.YesOrNo
     , orbitObjectNames : List String
     , runAwayShieldHitpointsThresholdPercent : Int
@@ -521,6 +570,15 @@ type alias BotMemory =
     -- nothing is locked -- so a fight that ends clears it and the next called
     -- target gets the full allowance again.
     , weaponsAskedReadings : Int
+
+    -- Readings in a row spent pressing orbit at the fleet commander's overview
+    -- row without the client ever naming the manoeuvre `Orbit`, bounded for
+    -- the same reason as the two counters above -- see
+    -- `orbitFleetCommanderAskedReadingsBound`. Advances only while the ask is
+    -- actually going out, holds once the budget is spent and the commander is
+    -- still on the grid, and resets the moment the ship reads as orbiting or
+    -- the commander leaves the overview.
+    , orbitFleetCommanderAskedReadings : Int
     }
 
 
@@ -1793,7 +1851,16 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context shipUI continueIfCo
                         context
                         shipUI
     in
-    if context.eventContext.botSettings.orbitInCombat == PromptParser.Yes then
+    if context.eventContext.botSettings.orbitFleetCommander == PromptParser.Yes then
+        {- #365: `orbit-fc` supersedes `orbit-in-combat` rather than sitting
+           beside it. Orbiting the rat this ship happens to be shooting is what
+           walks a wingman off the commander's grid, and `orbitTheFleetCommander`
+           is already holding the ship on the commander -- issuing a second
+           orbit at a different object from here would fight it every reading.
+        -}
+        decisionToKillRats
+
+    else if context.eventContext.botSettings.orbitInCombat == PromptParser.Yes then
         ensureShipIsOrbitingDecision
             |> Maybe.withDefault (Ok decisionToKillRats)
             |> Result.Extra.unpack
@@ -2479,6 +2546,7 @@ initBotMemory =
     , retreatAskedReadings = 0
     , gateAskedReadings = 0
     , weaponsAskedReadings = 0
+    , orbitFleetCommanderAskedReadings = 0
     }
 
 
@@ -2592,6 +2660,7 @@ statusTextFromState context =
                     , [ describeRetreat context ]
                     , [ describeAccelerationGateAsk context ]
                     , [ describeWeaponsAsk context ]
+                    , [ describeOrbitFleetCommanderAsk context ]
                     ]
                         |> List.map (String.join " ")
     in
@@ -3061,6 +3130,37 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                         )
                         /= Nothing
                    )
+
+        commanderIsOnGridToOrbit : Bool
+        commanderIsOnGridToOrbit =
+            fleetCommanderOverviewEntry context.readingFromGameClient /= Nothing
+
+        shipIsOrbitingNow : Bool
+        shipIsOrbitingNow =
+            shipIsOrbitingFromReading context.readingFromGameClient
+
+        -- The same shape as `askingTheGateToOpen` and `askingAWeaponToActivate`,
+        -- and taken from the shipped rule itself rather than restated beside
+        -- it: a counter advanced by one condition and read by another is
+        -- #102's defect, and `orbitFleetCommanderStep` is the only thing that
+        -- decides whether an orbit ask goes out. `retreatIsDecided` above is
+        -- the same arrangement, and #364 is what made it possible here --
+        -- `UpdateMemoryContext` carries the settings since that change, so
+        -- this reads the real `orbit-fc` rather than the `True` it had to
+        -- assume when the settings were not visible from a memory update.
+        askingTheCommanderForAnOrbit : Bool
+        askingTheCommanderForAnOrbit =
+            List.member
+                (orbitFleetCommanderStep
+                    { settingIsYes = context.botSettings.orbitFleetCommander == PromptParser.Yes
+                    , commanderOnGrid = commanderIsOnGridToOrbit
+                    , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
+                    , shipIsOrbiting = shipIsOrbitingNow
+                    , strayWindowIsOpen = windowOpenedOverTheClient context.readingFromGameClient /= Nothing
+                    , askedReadings = botMemoryBefore.orbitFleetCommanderAskedReadings
+                    }
+                )
+                orbitFleetCommanderAnswersThatSpendAReading
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -3145,6 +3245,15 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.retreatAskedReadings + 1
+    , orbitFleetCommanderAskedReadings =
+        if askingTheCommanderForAnOrbit then
+            botMemoryBefore.orbitFleetCommanderAskedReadings + 1
+
+        else if commanderIsOnGridToOrbit && not shipIsOrbitingNow then
+            botMemoryBefore.orbitFleetCommanderAskedReadings
+
+        else
+            0
     }
 
 
@@ -3866,9 +3975,24 @@ pilot's system directly. Matched on the row's own Name, exactly as
 -}
 pilotIsOnOverview : String -> ReadingFromGameClient -> Bool
 pilotIsOnOverview pilotName readingFromGameClient =
+    overviewEntryForPilot pilotName readingFromGameClient /= Nothing
+
+
+{-| The named pilot's own overview row, which is the thing a manoeuvre is
+issued against -- `ensureShipIsOrbiting` clicks it.
+
+`pilotIsOnOverview` is this same question with the row thrown away, and asks it
+through here rather than beside it: a bot that decides "the commander is on the
+grid" one way and then looks for the row another way can answer yes to the
+first and find nothing to click for the second.
+
+-}
+overviewEntryForPilot : String -> ReadingFromGameClient -> Maybe OverviewWindowEntry
+overviewEntryForPilot pilotName readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
-        |> List.any (.objectName >> (==) (Just pilotName))
+        |> List.filter (.objectName >> (==) (Just pilotName))
+        |> List.head
 
 
 {-| Fly toward the fleet commander's broadcast destination, using
@@ -4468,41 +4592,65 @@ wingmanDecisionRootInSpace context shipUI =
                                                     fire
 
                                                 Nothing ->
-                                                    case accelerationGateStep context of
-                                                        Just takeTheGate ->
-                                                            -- #348. Sits after the
-                                                            -- drone arm and after the
-                                                            -- guns, never before
-                                                            -- them, so a gate this
-                                                            -- bot can see is never
-                                                            -- taken while drones are
-                                                            -- still owed a command on
-                                                            -- a live grid -- the same
-                                                            -- ordering argument #326
-                                                            -- established for the
-                                                            -- drone arm itself.
-                                                            takeTheGate
+                                                    case orbitTheFleetCommander context shipUI of
+                                                        Just orbitTheCommander ->
+                                                            -- #365. Below the drone arm
+                                                            -- and below the guns so it
+                                                            -- can starve neither
+                                                            -- (#326), and above the
+                                                            -- gate so the gate arm's
+                                                            -- own "rats are still on
+                                                            -- the grid" wait cannot
+                                                            -- starve it in the one
+                                                            -- state it is most for.
+                                                            -- Below #364's retreat by
+                                                            -- the whole tree: a damaged
+                                                            -- ship breaks off rather
+                                                            -- than holds station, so
+                                                            -- nothing that keeps this
+                                                            -- ship on the grid may ever
+                                                            -- answer before that arm
+                                                            -- does. The full argument
+                                                            -- is in
+                                                            -- `orbitTheFleetCommander`.
+                                                            orbitTheCommander
 
                                                         Nothing ->
-                                                            {- The inherited
-                                                               combat-anomaly-bot arm
-                                                               is gone from here
-                                                               (#349): it hunted
-                                                               anomalies on an idle
-                                                               grid, which is not
-                                                               following a commander.
-                                                               What remains is
-                                                               self-defense only --
-                                                               and it is now genuinely
-                                                               the last resort it
-                                                               reads as, because
-                                                               `fireOnActiveTarget`
-                                                               above it fires on
-                                                               anything locked whether
-                                                               or not a rat has
-                                                               pointed this ship.
-                                                            -}
-                                                            fightPointedRatsOrReturnDrones context shipUI
+                                                            case accelerationGateStep context of
+                                                                Just takeTheGate ->
+                                                                    -- #348. Sits after the
+                                                                    -- drone arm and after the
+                                                                    -- guns, never before
+                                                                    -- them, so a gate this
+                                                                    -- bot can see is never
+                                                                    -- taken while drones are
+                                                                    -- still owed a command on
+                                                                    -- a live grid -- the same
+                                                                    -- ordering argument #326
+                                                                    -- established for the
+                                                                    -- drone arm itself.
+                                                                    takeTheGate
+
+                                                                Nothing ->
+                                                                    {- The inherited
+                                                                       combat-anomaly-bot arm
+                                                                       is gone from here
+                                                                       (#349): it hunted
+                                                                       anomalies on an idle
+                                                                       grid, which is not
+                                                                       following a commander.
+                                                                       What remains is
+                                                                       self-defense only --
+                                                                       and it is now genuinely
+                                                                       the last resort it
+                                                                       reads as, because
+                                                                       `fireOnActiveTarget`
+                                                                       above it fires on
+                                                                       anything locked whether
+                                                                       or not a rat has
+                                                                       pointed this ship.
+                                                                    -}
+                                                                    fightPointedRatsOrReturnDrones context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
@@ -5296,30 +5444,54 @@ pilot the operator has already said they trust with this ship.
 -}
 fleetCommanderNameFromPanel : BotDecisionContext -> Maybe String
 fleetCommanderNameFromPanel context =
-    let
-        fromHeader : Maybe String
-        fromHeader =
-            context.readingFromGameClient
-                |> fleetWindowDescendants
-                |> List.filter
-                    (.uiNode
-                        >> .pythonObjectTypeName
-                        >> String.contains "FleetHeader"
-                    )
-                |> List.concatMap
-                    EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
-                |> List.filterMap (.uiNode >> EveOnline.ParseUserInterface.getDisplayText)
-                |> List.map String.trim
-                |> List.filter (String.isEmpty >> not)
-                |> List.filter (String.contains "(" >> not)
-                |> List.head
-    in
-    case fromHeader of
+    case fleetCommanderNameFromFleetWindowHeader context.readingFromGameClient of
         Just name ->
             Just name
 
         Nothing ->
             context.eventContext.botSettings.followFleetBroadcastFrom |> List.head
+
+
+{-| The header half of `fleetCommanderNameFromPanel`, over a reading rather
+than a decision -- the divergence `selectedItemIsOverviewEntry`'s own comment
+records, and for the same reason: `updateMemoryForNewReadingFromGame` has to
+ask this question too and never sees a decision.
+
+**`orbitTheFleetCommander` asks it in this form and not the other**, which is
+the one place in this bot that reads the commander without the
+`follow-fleet-broadcast-from` fall-back behind it. That is deliberate: the
+orbit is issued against the commander's _overview row_, so a name the client
+itself did not write is a name there may be no row for, and the status line
+says the header gave no answer rather than letting the ship drift silently.
+
+**This bot now has three answers to "who is the commander", and they can
+disagree.** `fleetCommanderName` is the settings-only one -- the first pilot in
+`follow-fleet-broadcast-from` -- and is what #364's `retreatToTheCommander`
+runs to, which its own author flagged as answering `Nothing` when that setting
+is unset, so a retreat can be decided with nowhere to go.
+`fleetCommanderNameFromPanel` reads this header and falls back to that setting;
+this function is the header alone. A reading where the fleet window names one
+pilot and the setting names another is a reading where the retreat and the
+orbit are about different ships. **Unifying them is #367 and is deliberately
+not done here** -- this note exists so whoever takes it finds all three.
+
+-}
+fleetCommanderNameFromFleetWindowHeader : ReadingFromGameClient -> Maybe String
+fleetCommanderNameFromFleetWindowHeader readingFromGameClient =
+    readingFromGameClient
+        |> fleetWindowDescendants
+        |> List.filter
+            (.uiNode
+                >> .pythonObjectTypeName
+                >> String.contains "FleetHeader"
+            )
+        |> List.concatMap
+            EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filterMap (.uiNode >> EveOnline.ParseUserInterface.getDisplayText)
+        |> List.map String.trim
+        |> List.filter (String.isEmpty >> not)
+        |> List.filter (String.contains "(" >> not)
+        |> List.head
 
 
 {-| Drones out, and assisting the commander rather than this ship's own target.
@@ -5895,6 +6067,464 @@ type WeaponsStep
     | ActivateAWeapon
 
 
+{-| Keep this ship in close orbit around the fleet commander, at the distance
+`orbit-fc-range` asks for. #365.
+
+**Where it sits, and why that is not the obvious place.** A wingman's whole job
+is to be where the commander is, so the tempting placement is at the head of
+the decision root -- and that is the placement #326 spent 262 readings proving
+wrong for the guns. Anything above the drone arm can hold the reading while the
+drones sit idle, and an orbit that cannot be established (a row that shifts
+under the click, a menu that will not open) would do exactly that. So this sits
+**below `dronesAssistTheCommander` and below `fireOnActiveTarget`**, where it
+can starve neither.
+
+**And below `retreatToTheCommander`, which is not a trade-off at all.** #364's
+guard sits second in the root, under `sessionIsEnding` and over everything
+else, because a ship past its shield or armour threshold has to break off. This
+arm does the opposite -- it holds the ship on the grid it is being shot on --
+so it must never be able to answer first. Sitting five arms below the retreat
+is what guarantees that, and `TheRetreatOutranksTheOrbitTest` in
+`test_wingman_orbits_the_fleet_commander.py` refuses a rebase that inverts it.
+
+**And above `accelerationGateStep`, which is the half worth arguing.** That arm
+answers `Just (wait)` on _every_ reading a gate is on the overview while rats
+are still on the grid -- #348's deliberate refusal to abandon a fight. That is
+precisely the state this bot most needs to be next to its commander in, so
+putting the orbit below the gate would starve it in the one situation it exists
+for. Above the gate the cost is bounded and small in the other direction: a
+gate is taken a few readings later than it might have been, and the fleet's
+pocket does not move.
+
+**It supersedes `orbit-in-combat` rather than sitting beside it.** With
+`orbit-fc=yes`, `decideActionInAnomaly` does not issue its own orbit at all --
+orbiting whatever this ship is shooting is what pulls a wingman off the
+commander's grid, which is the drift the issue was filed on.
+
+**The distance comes from the context menu, not from the client's default.**
+The 'W' key orbits at whatever default the client holds, and that default is a
+_persistent client-side_ setting: PILOT.md records that it survives losing the
+hull and applies to whatever is boarded next, and #359 hard-linked
+`core_char_*.dat` across six characters, so a default changed while flying one
+of them follows the others -- including any that later fly saxrat into a belt
+at 500 m. A distance taken from the menu mutates nothing, which is why this
+path is the one the operator asked for even though it is the harder one to
+drive.
+
+**PILOT.md records this exact path failing, and what makes it tractable here is
+the framework rather than optimism.** That note is about driving the flyout by
+hand: gliding the cursor to one of its entries passed through the parent menu,
+collapsed it, and the click landed on `Show Info`. `getNextContextMenu` does
+not move-and-click in one motion. For every entry that is not the last it
+dispatches `mouseMoveToUIElement` and **nothing else** -- a hover, then the
+reading ends -- and only the final entry is clicked, from a node it matched in
+_that_ reading's parsed menu at the expected cascade depth. It never clicks a
+location it did not match. That is the same two-level distance flyout
+`enterAnomaly` drives in production as `Warp to Within` -> `Within 0 m`, and
+`useContextMenuCascadeWithCustomConfig`'s own comments name that one as a
+"hover-triggered Photon-UI flyout submenu" and record widening the no-progress
+lookback to 8 readings for it.
+
+**What is still unverified is whether the Orbit submenu is that same ordinary
+flyout.** Nothing in `~/eve-bot-logs` carries an `Orbit (N km)` menu entry, so
+no run in this repo has read that list. If it is, this is routine; if it is
+not, the failure is visible and bounded rather than silent -- see the three
+answers below.
+
+-}
+orbitTheFleetCommander : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
+orbitTheFleetCommander context shipUI =
+    let
+        commanderEntry : Maybe OverviewWindowEntry
+        commanderEntry =
+            fleetCommanderOverviewEntry context.readingFromGameClient
+    in
+    case
+        orbitFleetCommanderStep
+            { settingIsYes = context.eventContext.botSettings.orbitFleetCommander == PromptParser.Yes
+            , commanderOnGrid = commanderEntry /= Nothing
+            , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
+            , shipIsOrbiting = shipIsOrbitingFromReading context.readingFromGameClient
+            , strayWindowIsOpen = windowOpenedOverTheClient context.readingFromGameClient /= Nothing
+            , askedReadings = context.memory.orbitFleetCommanderAskedReadings
+            }
+    of
+        OrbitFleetCommanderIsOff ->
+            Nothing
+
+        NoCommanderOnGrid ->
+            Nothing
+
+        ShipIsWarpingOrJumping ->
+            Nothing
+
+        AlreadyOrbiting ->
+            -- The confirmation, and it is the client's own word rather than
+            -- ours: nothing here counts a dispatched click as an orbit. The
+            -- ship UI's manoeuvre indication reading `Orbit` is the only thing
+            -- that stops the ask, and `updateMemoryForNewReadingFromGame`
+            -- clears the counter on the same reading it does.
+            Nothing
+
+        GaveUpOnTheOrbit ->
+            -- Hand the reading back rather than park on
+            -- `askForHelpToGetUnstuck`, the answer `accelerationGateStep` and
+            -- `fireOnActiveTarget` both give at their own give-ups: the gate
+            -- and the trip home still have to run.
+            -- `describeOrbitFleetCommanderAsk` is what keeps this visible.
+            Nothing
+
+        CloseAWindowTheCascadeOpened ->
+            case windowOpenedOverTheClient context.readingFromGameClient of
+                Nothing ->
+                    Nothing
+
+                Just strayWindow ->
+                    case EveOnline.ParseUserInterface.parseWindowControlsFromWindow strayWindow |> Maybe.andThen .closeButton of
+                        Nothing ->
+                            -- Nothing is clicked at a window this bot cannot
+                            -- close by its own close button. Clicking at a
+                            -- guessed point is what #321's stray-menu rescue
+                            -- did 16,791 times in one run, and it is how a
+                            -- rescue becomes the damage.
+                            Nothing
+
+                        Just closeButton ->
+                            Just
+                                (describeBranch
+                                    ("A '"
+                                        ++ strayWindow.uiNode.pythonObjectTypeName
+                                        ++ "' opened over the client while the orbit cascade was running"
+                                        ++ " -- the mis-click PILOT.md records. Close it before asking again."
+                                    )
+                                    (clickUiElementForNavigation closeButton)
+                                )
+
+        OrbitAtRangeViaTheMenu ->
+            commanderEntry
+                |> Maybe.map
+                    (\entry ->
+                        describeBranch
+                            ("Orbit the fleet commander at '"
+                                ++ context.eventContext.botSettings.orbitFleetCommanderRange
+                                ++ "' from the overview row's own context menu."
+                            )
+                            (useContextMenuCascadeOnOverviewEntry
+                                (useMenuEntryWithTextContaining orbitMenuEntryText
+                                    (useMenuEntryWithTextContaining
+                                        context.eventContext.botSettings.orbitFleetCommanderRange
+                                        menuCascadeCompleted
+                                    )
+                                )
+                                entry
+                                context
+                            )
+                    )
+
+        OrbitAtTheClientDefaultWithTheKey ->
+            commanderEntry
+                |> Maybe.andThen (ensureShipIsOrbiting shipUI)
+                |> Maybe.map
+                    (Result.Extra.unpack
+                        (\error ->
+                            describeBranch
+                                ("Could not orbit the fleet commander: " ++ error)
+                                waitForProgressInGame
+                        )
+                        (describeBranch
+                            ("The context menu spent its budget without the client naming the manoeuvre"
+                                ++ " -- falling back to the 'W' key, which orbits at the client's own"
+                                ++ " default distance rather than '"
+                                ++ context.eventContext.botSettings.orbitFleetCommanderRange
+                                ++ "'."
+                            )
+                        )
+                    )
+
+
+{-| The text the Orbit entry is matched on in the overview row's context menu.
+
+Matched as a substring rather than an equality, because the client writes its
+own current default into the entry -- `Orbit (30 km)` in the shape saxrat run
+15's modal implies -- and that number is not this bot's to predict.
+`useMenuEntryWithTextContaining` breaks a tie by taking the **shortest**
+matching entry, which is also what keeps `orbit-fc-range`'s `500 m` from
+selecting a `2,500 m` rung if the client's list carries one.
+
+-}
+orbitMenuEntryText : String
+orbitMenuEntryText =
+    "Orbit"
+
+
+{-| The distance `orbit-fc-range` defaults to, as the client's own menu writes
+it.
+
+500 m is a round choice an operator can hold in their head, and it is the
+bottom rung of the list PILOT.md recorded (`500 m` ... `30 km`) as well as the
+least the client's own modal will accept (`between 500 and 1,000,000 meters`,
+captured in saxrat run 15). It is not measured against anything, and no run in
+this repo has yet read the Orbit submenu to confirm the rung is spelled this
+way -- which is why the setting takes menu text rather than a number, so an
+operator who sees a different spelling can just write it.
+
+-}
+defaultOrbitFleetCommanderRange : String
+defaultOrbitFleetCommanderRange =
+    "500 m"
+
+
+{-| A window sitting over the client that this bot neither opened nor uses.
+
+**Structural rather than named, and that is deliberate.** PILOT.md records the
+mis-click this exists for: the flyout collapsed mid-glide and the click landed
+on `Show Info`, opening a Database Information window. **No run in
+`~/eve-bot-logs` carries that window's type name** -- grepping the corpus for
+it finds nothing -- so a matcher written for the literal would be a matcher on
+a channel nothing has read, which is #42's shape and this file's signature
+failure. So this asks the tree: a node whose type name ends in `Window`, that
+carries its own close button, and that is neither one of the windows the parser
+already accounts for nor inside one.
+
+**Two guards keep it from closing something that matters.** The close button
+requirement means nothing is ever clicked at a guessed point -- #321's
+stray-menu rescue is what that costs. And `orbitFleetCommanderStep` only ever
+consults this while the orbit ask is already in flight: a window an operator
+opened on a healthy session is not this bot's to close.
+
+`describeOrbitFleetCommanderAsk` prints the type name of whatever this finds,
+so the first run that meets one records the literal -- the same arrangement the
+overview's `rightAlignedIconsHints` and the client's quick messages got, and
+the thing that would let a later change name this window properly.
+
+-}
+windowOpenedOverTheClient : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+windowOpenedOverTheClient readingFromGameClient =
+    let
+        knownWindowNodes : List EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        knownWindowNodes =
+            List.concat
+                [ readingFromGameClient.overviewWindows |> List.map .uiNode
+                , readingFromGameClient.inventoryWindows |> List.map .uiNode
+                , readingFromGameClient.chatWindowStacks |> List.map .uiNode
+                , readingFromGameClient.agentConversationWindows |> List.map .uiNode
+                , readingFromGameClient.messageBoxes |> List.map .uiNode
+                , [ readingFromGameClient.selectedItemWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.dronesWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.fittingWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.probeScannerWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.directionalScannerWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.stationWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.marketOrdersWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.surveyScanWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.bookmarkLocationWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.repairShopWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.characterSheetWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.fleetWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.locationsWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.standaloneBookmarkWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.keyActivationWindow |> Maybe.map .uiNode
+                  , readingFromGameClient.compressionWindow |> Maybe.map .uiNode
+                  ]
+                    |> List.filterMap identity
+                ]
+
+        addressesOfKnownWindowsAndTheirDescendants : Set.Set String
+        addressesOfKnownWindowsAndTheirDescendants =
+            knownWindowNodes
+                |> List.concatMap
+                    (\windowNode ->
+                        windowNode
+                            :: EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion windowNode
+                    )
+                |> List.map (.uiNode >> .pythonObjectAddress)
+                |> Set.fromList
+    in
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> String.endsWith "Window")
+        |> List.filter
+            (\node ->
+                not (Set.member node.uiNode.pythonObjectAddress addressesOfKnownWindowsAndTheirDescendants)
+            )
+        |> List.filter
+            (\node -> (EveOnline.ParseUserInterface.parseWindowControlsFromWindow node |> Maybe.andThen .closeButton) /= Nothing)
+        |> List.head
+
+
+{-| The orbit decision on its own, as eight named answers over five facts and a
+counter -- the shape `weaponsStep` and `accelerationGateActivationStep` already
+use here, and for the stated reason: a rule reachable only through a full
+`BotDecisionContext` is a rule nothing can execute in a test.
+
+**The order carries four arguments.**
+
+The commander is checked before anything counted, so a session that never has
+the commander on grid does not read as a give-up.
+
+`GaveUpOnTheOrbit` is checked before the stray-window close, not after. Closing
+a window is itself a click that repeats every reading, and a close that does
+not land would otherwise be the unbounded rescue #321 names -- a branch at the
+head of a tree with no bound owns the whole bot. Past the total budget the
+status line still names the window; nothing goes on poking at it.
+
+The stray window is checked before "already orbiting", because a window left
+over the client is a problem whatever the ship is doing, and it is only
+consulted at all once `0 < askedReadings` -- a window an operator opened on a
+healthy session is not this bot's to close.
+
+The two bounds are what makes the fall-back a fall-back:
+`orbitFleetCommanderMenuAskedReadingsBound` ends the cascade and
+`orbitFleetCommanderAskedReadingsBound` ends the whole ask, so the readings
+between them go to `ensureShipIsOrbiting`'s 'W' key. Degrading to "orbiting at
+the client's default distance" is a wrong distance; going on poking at a menu
+that will not drive is a bot that does nothing else.
+
+-}
+orbitFleetCommanderStep :
+    { settingIsYes : Bool
+    , commanderOnGrid : Bool
+    , shipIsWarpingOrJumping : Bool
+    , shipIsOrbiting : Bool
+    , strayWindowIsOpen : Bool
+    , askedReadings : Int
+    }
+    -> OrbitFleetCommanderStep
+orbitFleetCommanderStep orbitCase =
+    if not orbitCase.settingIsYes then
+        OrbitFleetCommanderIsOff
+
+    else if not orbitCase.commanderOnGrid then
+        NoCommanderOnGrid
+
+    else if orbitCase.shipIsWarpingOrJumping then
+        ShipIsWarpingOrJumping
+
+    else if orbitFleetCommanderHasBeenGivenUpOn orbitCase.askedReadings then
+        GaveUpOnTheOrbit
+
+    else if orbitCase.strayWindowIsOpen && 0 < orbitCase.askedReadings then
+        CloseAWindowTheCascadeOpened
+
+    else if orbitCase.shipIsOrbiting then
+        AlreadyOrbiting
+
+    else if orbitFleetCommanderMenuAskedReadingsBound <= orbitCase.askedReadings then
+        OrbitAtTheClientDefaultWithTheKey
+
+    else
+        OrbitAtRangeViaTheMenu
+
+
+{-| The answers on which this arm actually spends a reading, and therefore the
+answers the counter advances on.
+
+One list with two readers -- `updateMemoryForNewReadingFromGame` and the cases
+that check it -- rather than a condition restated beside the rule, which is
+#102's defect. The three here are the three that dispatch effects: the cascade,
+the 'W'-key fall-back, and the click that closes a window the cascade opened.
+The close counts against the same budget on purpose, so a rescue that does not
+land cannot outlive the ask it is rescuing.
+
+-}
+orbitFleetCommanderAnswersThatSpendAReading : List OrbitFleetCommanderStep
+orbitFleetCommanderAnswersThatSpendAReading =
+    [ OrbitAtRangeViaTheMenu
+    , OrbitAtTheClientDefaultWithTheKey
+    , CloseAWindowTheCascadeOpened
+    ]
+
+
+type OrbitFleetCommanderStep
+    = OrbitFleetCommanderIsOff
+    | NoCommanderOnGrid
+    | ShipIsWarpingOrJumping
+    | AlreadyOrbiting
+    | CloseAWindowTheCascadeOpened
+    | GaveUpOnTheOrbit
+    | OrbitAtRangeViaTheMenu
+    | OrbitAtTheClientDefaultWithTheKey
+
+
+{-| Whether the budget for getting one orbit started has been spent at all. One
+comparison with two readers -- the step rule and the status clause --
+`accelerationGateHasBeenGivenUpOn`'s arrangement, for its reason.
+-}
+orbitFleetCommanderHasBeenGivenUpOn : Int -> Bool
+orbitFleetCommanderHasBeenGivenUpOn askedReadings =
+    orbitFleetCommanderAskedReadingsBound <= askedReadings
+
+
+{-| How many readings the context-menu path gets before this bot stops opening
+menus and falls back to the 'W' key.
+
+**Thirty, composed from `weaponsAskedReadingsBound` rather than measured.** A
+keypress costs one reading; a cascade costs several -- right-click, wait for
+the menu to render, hover `Orbit`, wait for the flyout, click the rung -- and
+`useContextMenuCascadeWithCustomConfig` will wait up to
+`readingsToWaitForAFirstContextMenu` readings for a slow render before it even
+reopens. Thirty leaves room for a handful of complete cycles and is a round
+number, not a measurement; this bot still has no corpus of its own (see
+WINGMAN.md). A run that spends it says so in the status line, which is what
+would replace this with a measured value.
+
+-}
+orbitFleetCommanderMenuAskedReadingsBound : Int
+orbitFleetCommanderMenuAskedReadingsBound =
+    30
+
+
+{-| How many readings the whole ask gets, cascade and 'W' key together, before
+this bot hands the reading back for good.
+
+Fifty: the thirty above plus the same twenty `weaponsAskedReadingsBound` gives
+the other key-over-a-click ask in this file. Written as a sum of the two so the
+fall-back's own allowance cannot be changed by accident when either end moves.
+
+-}
+orbitFleetCommanderAskedReadingsBound : Int
+orbitFleetCommanderAskedReadingsBound =
+    orbitFleetCommanderMenuAskedReadingsBound + weaponsAskedReadingsBound
+
+
+{-| The commander's overview row, resolved the one way the memory update can
+resolve it too. See `fleetCommanderNameFromFleetWindowHeader`.
+-}
+fleetCommanderOverviewEntry : ReadingFromGameClient -> Maybe OverviewWindowEntry
+fleetCommanderOverviewEntry readingFromGameClient =
+    fleetCommanderNameFromFleetWindowHeader readingFromGameClient
+        |> Maybe.andThen (\commander -> overviewEntryForPilot commander readingFromGameClient)
+
+
+{-| Whether the client is naming this ship's manoeuvre `Orbit`.
+
+The same question `ensureShipIsOrbiting` asks before deciding it has nothing to
+do, over a reading rather than a `ShipUI` so that the memory update can ask it
+as well. An absent ship UI answers `False`, which is right for both readers:
+nothing that is not in space is orbiting.
+
+-}
+shipIsOrbitingFromReading : ReadingFromGameClient -> Bool
+shipIsOrbitingFromReading readingFromGameClient =
+    (readingFromGameClient.shipUI
+        |> Maybe.andThen .indication
+        |> Maybe.andThen .maneuverType
+    )
+        == Just EveOnline.ParseUserInterface.ManeuverOrbit
+
+
+{-| `shipUIIndicatesShipIsWarpingOrJumping` over a reading, for the same reason
+as `shipIsOrbitingFromReading`. Distinct from `shipWarpingFromReading`, which
+answers about warping only and in three values; a ship in a jump tunnel is no
+more able to start an orbit than one in warp.
+-}
+shipIsWarpingOrJumpingFromReading : ReadingFromGameClient -> Bool
+shipIsWarpingOrJumpingFromReading readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.map shipUIIndicatesShipIsWarpingOrJumping
+        |> Maybe.withDefault False
+
+
 {-| Take the acceleration gate the fleet's pocket needs, but only once the
 overview is clear of rats -- taking it mid-fight abandons whatever the fleet
 is still fighting and leaves the commander a ship short in the pocket this
@@ -6057,6 +6687,116 @@ describeWeaponsAsk context =
         "Weapons: target locked, "
             ++ String.fromInt context.memory.weaponsAskedReadings
             ++ " readings spent asking one to activate."
+
+
+{-| What the orbit on the commander is doing, in one line.
+
+Exists for the reason `describeWeaponsAsk` and `describeAccelerationGateAsk`
+do: every answer `orbitTheFleetCommander` gives other than "press it" is
+`Nothing`, and from outside the decision tree a give-up, a commander this bot
+cannot name, and a ship that is already orbiting are the same silence.
+
+The commander's rendered distance is printed because the orbit _range_ is the
+client's setting and not this bot's -- see `orbitTheFleetCommander`. A client
+still holding its shipped default reads here as a commander sitting tens of
+kilometres away while this bot reports a healthy orbit, which is the only
+evidence available that the game-client setup step was skipped.
+
+-}
+describeOrbitFleetCommanderAsk : BotDecisionContext -> String
+describeOrbitFleetCommanderAsk context =
+    let
+        commanderEntry : Maybe OverviewWindowEntry
+        commanderEntry =
+            fleetCommanderOverviewEntry context.readingFromGameClient
+
+        strayWindow : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        strayWindow =
+            windowOpenedOverTheClient context.readingFromGameClient
+
+        askedReadings : Int
+        askedReadings =
+            context.memory.orbitFleetCommanderAskedReadings
+
+        spentOf : String
+        spentOf =
+            String.fromInt askedReadings
+                ++ " of "
+                ++ String.fromInt orbitFleetCommanderMenuAskedReadingsBound
+                ++ " on the menu, "
+                ++ String.fromInt orbitFleetCommanderAskedReadingsBound
+                ++ " in all."
+    in
+    "Orbit on the commander: "
+        ++ (case
+                orbitFleetCommanderStep
+                    { settingIsYes = context.eventContext.botSettings.orbitFleetCommander == PromptParser.Yes
+                    , commanderOnGrid = commanderEntry /= Nothing
+                    , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
+                    , shipIsOrbiting = shipIsOrbitingFromReading context.readingFromGameClient
+                    , strayWindowIsOpen = strayWindow /= Nothing
+                    , askedReadings = askedReadings
+                    }
+            of
+                OrbitFleetCommanderIsOff ->
+                    "off ('orbit-fc=no')."
+
+                NoCommanderOnGrid ->
+                    case fleetCommanderNameFromFleetWindowHeader context.readingFromGameClient of
+                        Nothing ->
+                            "the fleet window's header names no commander, so there is nothing to orbit."
+
+                        Just commander ->
+                            "'" ++ commander ++ "' has no overview row -- not on this grid."
+
+                ShipIsWarpingOrJumping ->
+                    "the ship is warping or jumping."
+
+                AlreadyOrbiting ->
+                    "orbiting, commander at "
+                        ++ (commanderEntry
+                                |> Maybe.andThen .objectDistance
+                                |> Maybe.withDefault "an unread distance"
+                           )
+                        ++ "."
+
+                CloseAWindowTheCascadeOpened ->
+                    "a '"
+                        ++ (strayWindow
+                                |> Maybe.map (.uiNode >> .pythonObjectTypeName)
+                                |> Maybe.withDefault "?"
+                           )
+                        ++ "' opened over the client while asking -- closing it. Readings spent: "
+                        ++ spentOf
+
+                OrbitAtRangeViaTheMenu ->
+                    "asking the overview row's context menu for '"
+                        ++ context.eventContext.botSettings.orbitFleetCommanderRange
+                        ++ "'. Readings spent: "
+                        ++ spentOf
+
+                OrbitAtTheClientDefaultWithTheKey ->
+                    "FELL BACK to the 'W' key after "
+                        ++ String.fromInt orbitFleetCommanderMenuAskedReadingsBound
+                        ++ " readings of context menu -- orbiting at the CLIENT'S default distance, not '"
+                        ++ context.eventContext.botSettings.orbitFleetCommanderRange
+                        ++ "'. Readings spent: "
+                        ++ spentOf
+
+                GaveUpOnTheOrbit ->
+                    "GAVE UP after "
+                        ++ String.fromInt askedReadings
+                        ++ " readings, menu and 'W' key both, with the client never naming the manoeuvre."
+                        ++ (case strayWindow of
+                                Nothing ->
+                                    ""
+
+                                Just window ->
+                                    " A '"
+                                        ++ window.uiNode.pythonObjectTypeName
+                                        ++ "' is still open over the client."
+                           )
+           )
 
 
 {-| The acceleration-gate ask, for the status line -- printed on every reading
