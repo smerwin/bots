@@ -11,6 +11,10 @@
    + Activates the modules named by `activate-module-always`.
    + Accepts a fleet invitation, if it is not in a fleet and the inviting pilot
      is named by `accept-fleet-invite-from`.
+   + Breaks off and warps back to the fleet commander when its health or the
+     incoming damage rate says to -- see `retreatToTheCommander`. **Off unless
+     a `run-away-*` threshold is set**, and the status line says so on every
+     reading.
    + Acts on the fleet commander's broadcasts -- see below.
    + Launches drones and assists the fleet commander while rats are on grid.
    + Routes to `home-station` through ESI and docks when the session is ending.
@@ -72,6 +76,21 @@
    + `orbit-in-combat` : Set to 'no' to stop orbiting the target.
    + `deactivate-module-on-warp` : Name of a module to deactivate when warping.
      Repeatable.
+   + `run-away-shield-hitpoints-threshold-percent`,
+     `run-away-armor-hitpoints-threshold-percent` : Percentages below which the
+     bot breaks off and warps back to the fleet commander. Read through the
+     believed gauge behind a low-water mark, never off the live reading.
+   + `run-away-incoming-damage-threshold` : Hitpoints of incoming damage,
+     summed from the client's own combat log over a rolling 45-second window,
+     past which the bot breaks off. Needs no HUD gauge, which is the point of
+     it.
+
+     **All three default to -1, which is off, and that is deliberate.** They
+     are facts about a hull, and no run of this bot has recorded what this one
+     does under fire -- saxrat's numbers were calibrated on an Omen Navy Issue
+     and carrying them here would fail silently in whichever direction this
+     ship is different. Set them from a run's own recorded gauge values; see
+     WINGMAN.md's "Not verified".
 
       When using more than one setting, start a new line for each setting in the
       text input field. Here is an example of a complete settings string:
@@ -166,6 +185,9 @@ defaultBotSettings =
     , anomalyWaitTimeSeconds = 15
     , orbitInCombat = PromptParser.Yes
     , orbitObjectNames = []
+    , runAwayShieldHitpointsThresholdPercent = -1
+    , runAwayArmorHitpointsThresholdPercent = -1
+    , runAwayIncomingDamageThreshold = -1
     , warpToAnomalyDistance = "Within 0 m"
     , sortOverviewBy = Nothing
     , deactivateModuleOnWarp = []
@@ -237,6 +259,36 @@ parseBotSettings =
                             | followFleetBroadcastFrom =
                                 settings.followFleetBroadcastFrom ++ splitSettingIntoNames pilotNames
                         }
+                    )
+             }
+           )
+         , ( "run-away-shield-hitpoints-threshold-percent"
+           , { alternativeNames = []
+             , description = "Percentage of shield hitpoints below which the bot breaks off and warps back to the fleet commander. Read through the believed gauge and a low-water mark, never the live reading. Defaults to -1, which is off: no run of this bot has recorded what this hull's shield actually does under fire, and a threshold nobody measured is a guess about the one gauge this repo trusts least."
+             , valueParser =
+                PromptParser.valueTypeInteger
+                    (\threshold settings ->
+                        { settings | runAwayShieldHitpointsThresholdPercent = threshold }
+                    )
+             }
+           )
+         , ( "run-away-armor-hitpoints-threshold-percent"
+           , { alternativeNames = []
+             , description = "Percentage of armor hitpoints below which the bot breaks off and warps back to the fleet commander. Read through the believed gauge and a low-water mark, never the live reading. Defaults to -1, which is off, for the same reason as the shield setting above."
+             , valueParser =
+                PromptParser.valueTypeInteger
+                    (\threshold settings ->
+                        { settings | runAwayArmorHitpointsThresholdPercent = threshold }
+                    )
+             }
+           )
+         , ( "run-away-incoming-damage-threshold"
+           , { alternativeNames = []
+             , description = "Hitpoints of incoming damage, summed from the client's own combat log over a rolling 45-second window, past which the bot breaks off and warps back to the fleet commander. Needs no HUD gauge, which is the point of it. Defaults to -1, which is off: this is a number about a hull, and nothing has measured this one."
+             , valueParser =
+                PromptParser.valueTypeInteger
+                    (\threshold settings ->
+                        { settings | runAwayIncomingDamageThreshold = threshold }
                     )
              }
            )
@@ -376,6 +428,9 @@ type alias BotSettings =
     , botStepDelayMilliseconds : IntervalInt
     , orbitInCombat : PromptParser.YesOrNo
     , orbitObjectNames : List String
+    , runAwayShieldHitpointsThresholdPercent : Int
+    , runAwayArmorHitpointsThresholdPercent : Int
+    , runAwayIncomingDamageThreshold : Int
     , warpToAnomalyDistance : String
     , sortOverviewBy : Maybe String
     , deactivateModuleOnWarp : List String
@@ -438,6 +493,27 @@ type alias BotMemory =
     -- no gate is on the overview at all.
     , gateAskedReadings : Int
 
+    -- What the two HUD hitpoint gauges are willing to be believed about, and
+    -- how low each has been since the ship was last healthy. See
+    -- `updateHitpointsGaugeMemory` and `lowWaterMarkAfterReading` -- and CLAUDE.md's
+    -- "Retreating: the HUD hitpoint gauge is the weakest instrument here" for
+    -- why nothing reads the live percentage.
+    , hitpoints : HitpointsMemory
+    , lowestShieldPercentSinceHealthy : Int
+    , lowestArmorPercentSinceHealthy : Int
+
+    -- The rolling window of what the client's own combat log says has landed
+    -- on this ship, and the latched verdict taken off it. A reading's
+    -- `incomingDamageSinceLastReading` is gone by the next one, so the window
+    -- has to be accumulated here.
+    , incomingDamage : IncomingDamageMemory
+
+    -- Readings in a row on which the retreat was decided and the ship was not
+    -- in warp -- the mission runner's `retreatProgressAfterReading` in one
+    -- field. Bounded because this bot's run-to can dispatch nothing at all;
+    -- see `retreatAskedReadingsBound`.
+    , retreatAskedReadings : Int
+
     -- Readings in a row spent clicking a weapon that will not come active on
     -- the locked target, bounded for the reason #326 measured: a turret that
     -- could not activate held that bot's decision for 262 consecutive
@@ -452,6 +528,39 @@ type alias MemoryOfAnomaly =
     { arrivalTime : { milliseconds : Int }
     , otherPilotsFoundOnArrival : List String
     , ratsSeen : Set.Set String
+    }
+
+
+type alias HitpointsMemory =
+    { shield : HitpointsGaugeMemory
+    , armor : HitpointsGaugeMemory
+    }
+
+
+{-| One gauge, and what two readings of it agree on.
+
+`previousReading` is the last believable percentage this gauge produced, or
+`Nothing` for a reading the gauge was unreadable or implausible on. `believed`
+is the healthier of the last two -- the value every guard reads.
+
+-}
+type alias HitpointsGaugeMemory =
+    { previousReading : Maybe Int
+    , believed : Maybe Int
+    }
+
+
+{-| The rolling damage window, ported from `eve-online-saxrat`.
+
+`hostCarriesTheChannel` is what makes this guard's silence safe to read: an
+empty window reads identically whether the grid is quiet or the host has no
+game log at all, and only one of those means the ship is fine.
+
+-}
+type alias IncomingDamageMemory =
+    { samples : List { atMilliseconds : Int, damage : Int }
+    , hostCarriesTheChannel : Bool
+    , retreating : Bool
     }
 
 
@@ -2356,6 +2465,18 @@ initBotMemory =
     , fleetBroadcastFollowed = Nothing
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
+    , hitpoints =
+        { shield = initHitpointsGaugeMemory
+        , armor = initHitpointsGaugeMemory
+        }
+    , lowestShieldPercentSinceHealthy = 100
+    , lowestArmorPercentSinceHealthy = 100
+    , incomingDamage =
+        { samples = []
+        , hostCarriesTheChannel = False
+        , retreating = False
+        }
+    , retreatAskedReadings = 0
     , gateAskedReadings = 0
     , weaponsAskedReadings = 0
     }
@@ -2387,8 +2508,30 @@ statusTextFromState context =
 
                 Just shipUI ->
                     let
+                        -- The believed pair, not the live gauge, so the header
+                        -- says what the guards are going by rather than what
+                        -- the widget said this once. `plausibleHitpointsPercent`
+                        -- rejects the impossible readings and `believed`
+                        -- withholds a fall no second reading has confirmed, so
+                        -- a header printing the raw value would disagree with
+                        -- the retreat on exactly the readings that matter.
+                        describeGauge : Maybe Int -> String
+                        describeGauge believed =
+                            case believed of
+                                Nothing ->
+                                    "?"
+
+                                Just percent ->
+                                    String.fromInt percent ++ "%"
+
                         describeShip =
-                            "Shield HP at " ++ (shipUI.hitpointsPercent.shield |> String.fromInt) ++ "%."
+                            "Believed hitpoints: shield "
+                                ++ describeGauge context.memory.hitpoints.shield.believed
+                                ++ ", armor "
+                                ++ describeGauge context.memory.hitpoints.armor.believed
+                                ++ " (this reading's raw shield gauge: "
+                                ++ (shipUI.hitpointsPercent.shield |> String.fromInt)
+                                ++ "%)."
 
                         describeDrones =
                             case readingFromGameClient.dronesWindow of
@@ -2446,6 +2589,7 @@ statusTextFromState context =
                     [ [ describeShip ]
                     , [ describeDrones ]
                     , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
+                    , [ describeRetreat context ]
                     , [ describeAccelerationGateAsk context ]
                     , [ describeWeaponsAsk context ]
                     ]
@@ -2696,7 +2840,7 @@ emptyPointBesideTheInfoPanel readingFromGameClient =
             )
 
 
-updateMemoryForNewReadingFromGame : UpdateMemoryContext -> BotMemory -> BotMemory
+updateMemoryForNewReadingFromGame : UpdateMemoryContext BotSettings -> BotMemory -> BotMemory
 updateMemoryForNewReadingFromGame context botMemoryBefore =
     let
         currentStationNameFromInfoPanel : Maybe String
@@ -2857,6 +3001,66 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                         |> Maybe.map (shipUIModulesToActivateOnTarget >> List.any (.isActive >> Maybe.withDefault False >> not))
                         |> Maybe.withDefault False
                    )
+
+        gaugeReading : (EveOnline.ParseUserInterface.Hitpoints -> Int) -> Maybe Int
+        gaugeReading whichGauge =
+            context.readingFromGameClient.shipUI
+                |> Maybe.map (.hitpointsPercent >> whichGauge)
+                |> Maybe.andThen plausibleHitpointsPercent
+
+        hitpointsNow : HitpointsMemory
+        hitpointsNow =
+            { shield =
+                updateHitpointsGaugeMemory (gaugeReading .shield) botMemoryBefore.hitpoints.shield
+            , armor =
+                updateHitpointsGaugeMemory (gaugeReading .armor) botMemoryBefore.hitpoints.armor
+            }
+
+        shipUIIsShowing : Bool
+        shipUIIsShowing =
+            context.readingFromGameClient.shipUI /= Nothing
+
+        lowestShieldNow : Int
+        lowestShieldNow =
+            lowWaterMarkAfterReading
+                { shipUIIsShowing = shipUIIsShowing
+                , believed = hitpointsNow.shield.believed
+                , previous = botMemoryBefore.lowestShieldPercentSinceHealthy
+                }
+
+        lowestArmorNow : Int
+        lowestArmorNow =
+            lowWaterMarkAfterReading
+                { shipUIIsShowing = shipUIIsShowing
+                , believed = hitpointsNow.armor.believed
+                , previous = botMemoryBefore.lowestArmorPercentSinceHealthy
+                }
+
+        incomingDamageNow : IncomingDamageMemory
+        incomingDamageNow =
+            updateIncomingDamageMemory context botMemoryBefore.incomingDamage
+
+        -- The same question `retreatToTheCommander` asks, asked here so the
+        -- counter below measures the retreat rather than a settings-free
+        -- stand-in for it. Gated on the ship UI parsing because that is the
+        -- decision's own gate: `branchDependingOnDockedOrInSpace` only reaches
+        -- the retreat through `ifSeeShipUI`, and a docked reading whose damage
+        -- latch is still set would otherwise count against a retreat there is
+        -- no ship to make.
+        retreatIsDecided : Bool
+        retreatIsDecided =
+            (context.readingFromGameClient.shipUI /= Nothing)
+                && (retreatReason
+                        (retreatCaseFromMemory context.botSettings
+                            { botMemoryBefore
+                                | hitpoints = hitpointsNow
+                                , lowestShieldPercentSinceHealthy = lowestShieldNow
+                                , lowestArmorPercentSinceHealthy = lowestArmorNow
+                                , incomingDamage = incomingDamageNow
+                            }
+                        )
+                        /= Nothing
+                   )
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -2924,7 +3128,232 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.weaponsAskedReadings
+    , hitpoints = hitpointsNow
+    , lowestShieldPercentSinceHealthy = lowestShieldNow
+    , lowestArmorPercentSinceHealthy = lowestArmorNow
+    , incomingDamage = incomingDamageNow
+    , retreatAskedReadings =
+        if not retreatIsDecided then
+            0
+
+        else if shipIsWarping == Just True then
+            -- The ship is leaving, so the retreat is executing however long the
+            -- verdict stays latched afterwards. `retreatProgressAfterReading`'s
+            -- own rule, and the reason a slow-but-working retreat is not
+            -- charged for its own warp.
+            0
+
+        else
+            botMemoryBefore.retreatAskedReadings + 1
     }
+
+
+{-| The values this gauge is allowed to have at all.
+
+`ShipUI.hitpointsPercent` is `gauge._lastValue * 100` scraped out of the
+client's live memory while the client is mutating it, and across the mission
+runner's recorded runs it has produced -1021821%, 2132822% and 8362%, always
+for exactly one reading and always surrounded by sane values. This rejects the
+impossible ones; nothing can reject a garbage value that lands inside [0, 100],
+which is what `updateHitpointsGaugeMemory` is for.
+
+-}
+plausibleHitpointsPercent : Int -> Maybe Int
+plausibleHitpointsPercent value =
+    if value < 0 || 100 < value then
+        Nothing
+
+    else
+        Just value
+
+
+initHitpointsGaugeMemory : HitpointsGaugeMemory
+initHitpointsGaugeMemory =
+    { previousReading = Nothing
+    , believed = Nothing
+    }
+
+
+{-| Fold one reading into what this gauge is willing to be believed about.
+
+`believed` is the healthier of the last two believable readings, so a drop has
+to survive a second look before the low-water mark or the retreat sees it. A
+single corrupt reading of `0` is as reachable as one of `21328.22` and is the
+worst value to be wrong about, since it clears every threshold at once: the
+mission runner's run 11 printed `Armor reached 0%` forty times with the armour
+really at 82-96%.
+
+An unbelievable value -- or a reading with no ship UI at all -- is `Nothing`
+here and leaves `Nothing` behind for the next reading to confirm against, which
+is what stops values either side of a gap in the gauge vouching for each other.
+
+**It delays; it cannot suppress.** On any non-increasing series the believed
+value is the previous reading's, whatever the size of the step, so a hull
+losing armour retreats one reading later than it used to and a hull genuinely
+at 0% still retreats.
+
+-}
+updateHitpointsGaugeMemory : Maybe Int -> HitpointsGaugeMemory -> HitpointsGaugeMemory
+updateHitpointsGaugeMemory reading memoryBefore =
+    { previousReading = reading
+    , believed =
+        case memoryBefore.previousReading of
+            -- Nothing to confirm against: the session's first reading, or the
+            -- one after a gap. The reading stands on its own rather than being
+            -- withheld indefinitely -- a gauge readable only every other
+            -- reading would otherwise never be believed at all, and a hull
+            -- really at 0% would never retreat.
+            Nothing ->
+                reading
+
+            Just previous ->
+                reading |> Maybe.map (max previous)
+    }
+
+
+{-| The lowest believed value seen, until the ship recovers or docks.
+
+Docking forgets outright -- there is no ship UI to read and the next undock is
+a fresh hull. In space it is kept until the gauge reads at or above
+`runAwayRearmPercent`, which is what gives the retreat hysteresis: without it a
+single live threshold flips back the moment a repairer catches up, and the ship
+oscillates between fleeing and returning.
+
+Takes what a reading says about the ship UI rather than the reading, so a case
+can execute it -- the shape `weaponsStep` and `accelerationGateActivationStep`
+already use in this file.
+
+-}
+lowWaterMarkAfterReading : { shipUIIsShowing : Bool, believed : Maybe Int, previous : Int } -> Int
+lowWaterMarkAfterReading markCase =
+    if not markCase.shipUIIsShowing then
+        100
+
+    else
+        case markCase.believed of
+            Nothing ->
+                markCase.previous
+
+            Just current ->
+                if runAwayRearmPercent <= current then
+                    100
+
+                else
+                    min markCase.previous current
+
+
+{-| Where the mark is released. Above every sane trip level, or it would never
+release at all.
+-}
+runAwayRearmPercent : Int
+runAwayRearmPercent =
+    90
+
+
+{-| The low-water mark the retreat compares, folding in this reading's own value.
+
+The mark alone is one reading behind: `lowWaterMarkAfterReading` folds a
+reading in after the decision has read it, so a gauge that has just dropped is
+not in the mark yet. Taking the `min` of the two is what makes the retreat act
+on the reading the drop arrives on rather than the one after.
+
+-}
+lowestPercentSinceHealthy : Maybe Int -> Int -> Int
+lowestPercentSinceHealthy believed markSinceHealthy =
+    believed
+        |> Maybe.map (\current -> min current markSinceHealthy)
+        |> Maybe.withDefault markSinceHealthy
+
+
+incomingDamageInWindow : IncomingDamageMemory -> Int
+incomingDamageInWindow memory =
+    memory.samples |> List.map .damage |> List.sum
+
+
+{-| The window the damage guard sums over.
+
+45 seconds is where the mission runner's corpus put the separation widest: at
+four minutes the worst session the ship survived and the one it was lost in are
+8689 against 9286, which no threshold could tell apart.
+
+-}
+incomingDamageWindowSeconds : Int
+incomingDamageWindowSeconds =
+    45
+
+
+incomingDamageSampleLimit : Int
+incomingDamageSampleLimit =
+    200
+
+
+{-| Fold this reading's combat-log total into the rolling window, and latch.
+
+**The latch is the point, not the live comparison.** The moment the ship warps
+clear, the window starts draining -- so a guard that re-asked "is the window
+still over the threshold" on every reading would cancel its own retreat
+halfway through it. Released only by a window that is completely empty.
+
+-}
+updateIncomingDamageMemory : UpdateMemoryContext BotSettings -> IncomingDamageMemory -> IncomingDamageMemory
+updateIncomingDamageMemory context memoryBefore =
+    let
+        keptSamples =
+            memoryBefore.samples
+                |> List.filter
+                    (\sample ->
+                        context.timeInMilliseconds
+                            - sample.atMilliseconds
+                            < incomingDamageWindowSeconds
+                            * 1000
+                    )
+                |> List.take incomingDamageSampleLimit
+
+        samples =
+            case context.readingFromGameClient.incomingDamageSinceLastReading of
+                Nothing ->
+                    keptSamples
+
+                Just reading ->
+                    { atMilliseconds = context.timeInMilliseconds
+                    , damage = reading.damage
+                    }
+                        :: keptSamples
+
+        updated =
+            { samples = samples
+            , hostCarriesTheChannel =
+                context.readingFromGameClient.incomingDamageSinceLastReading /= Nothing
+            , retreating = memoryBefore.retreating
+            }
+    in
+    { updated
+        | retreating =
+            incomingDamageLatchAfterReading
+                { damageInWindow = incomingDamageInWindow updated
+                , threshold = context.botSettings.runAwayIncomingDamageThreshold
+                , latchedBefore = memoryBefore.retreating
+                }
+    }
+
+
+{-| The damage guard's verdict after one more reading, as a rule a case can run.
+
+Set once the window reaches the threshold, released only by a window that is
+completely empty, and never set at all by a negative threshold -- which is what
+`-1` means and what this bot ships with.
+
+-}
+incomingDamageLatchAfterReading : { damageInWindow : Int, threshold : Int, latchedBefore : Bool } -> Bool
+incomingDamageLatchAfterReading latchCase =
+    if latchCase.damageInWindow <= 0 then
+        False
+
+    else if 0 <= latchCase.threshold && latchCase.threshold <= latchCase.damageInWindow then
+        True
+
+    else
+        latchCase.latchedBefore
 
 
 getCurrentAnomalyIDAsSeenInProbeScanner : ReadingFromGameClient -> Maybe String
@@ -3958,7 +4387,8 @@ wingmanDecisionRootBeforeApplyingSettings context =
 
 
 {-| The order the operator asked for (#349): undock, activate always-on
-modules, act on the broadcast, drones assist the commander, everything else.
+modules, act on the broadcast, drones assist the commander, everything else --
+with the health retreat inserted at the top of the fighting half (#364).
 Accepting a fleet invite sits ahead of all of it, in `generalSetupInUserInterface`,
 since that can land while still docked.
 -}
@@ -3969,68 +4399,110 @@ wingmanDecisionRootInSpace context shipUI =
             goHome
 
         Nothing ->
-            case activateAlwaysOnModules context of
-                Just activate ->
-                    activate
+            case retreatToTheCommander context of
+                Just breakOff ->
+                    -- #364. Above every arm that fights and below the one arm
+                    -- that has a deadline, and both halves of that are
+                    -- measured rather than chosen for symmetry.
+                    --
+                    -- **Above the fighting arms**, because each of them
+                    -- answers `Just` for the whole of a fight and the first
+                    -- arm to answer ends the reading: the broadcast banner
+                    -- does not clear while a target is called (#360), the
+                    -- drone arm answers on every reading a drone idles
+                    -- (#326), and the guns answer on every reading a weapon
+                    -- is not cycling. A retreat placed under any of them is
+                    -- reachable only on the readings the fleet is doing
+                    -- nothing, which is every reading except the ones it
+                    -- exists for. `activateAlwaysOnModules` is above the
+                    -- fight in #349's order and still below this: a hardener
+                    -- click is worth a reading when the ship is staying and
+                    -- is not when it is leaving.
+                    --
+                    -- **Above the broadcast arm in particular** is saxrat's
+                    -- own ordering, and it recorded why: its retreat used to
+                    -- sit below `respondToFleetBackupBroadcast`, so a
+                    -- critically damaged ship would warp *toward* a
+                    -- fleet-mate's fight rather than away from its own. This
+                    -- bot is that failure by construction, since following
+                    -- broadcasts is the whole job.
+                    --
+                    -- **Below `sessionIsEnding`**, because that is the only
+                    -- arm here carrying a hard deadline -- #350's stall, and
+                    -- `tripHomeSecondsPastSessionEnd` bounding the trip home
+                    -- past it. The retreat's verdict latches until the gauge
+                    -- recovers past `runAwayRearmPercent` or the window
+                    -- empties, and `retreatAskedReadings` resets on every
+                    -- reading the ship is in warp, so a retreat placed above
+                    -- the wind-down could warp a damaged ship back to its
+                    -- commander for the rest of a session that was supposed
+                    -- to be ending. Saxrat's `endSessionOnAnExpiredBound`
+                    -- sits above its retreat for the same reason.
+                    breakOff
 
                 Nothing ->
-                    case actOnFleetBroadcast context shipUI of
-                        Just actOnBroadcast ->
-                            actOnBroadcast
+                    case activateAlwaysOnModules context of
+                        Just activate ->
+                            activate
 
                         Nothing ->
-                            case dronesAssistTheCommander context of
-                                Just assist ->
-                                    assist
+                            case actOnFleetBroadcast context shipUI of
+                                Just actOnBroadcast ->
+                                    actOnBroadcast
 
                                 Nothing ->
-                                    case fireOnActiveTarget context of
-                                        Just fire ->
-                                            -- Strictly below the drone arm and
-                                            -- strictly above the gate: a locked
-                                            -- target means a fight, and a bot
-                                            -- that would rather take a gate
-                                            -- than shoot what the commander
-                                            -- called has left the fleet a ship
-                                            -- short in the pocket it just left.
-                                            fire
+                                    case dronesAssistTheCommander context of
+                                        Just assist ->
+                                            assist
 
                                         Nothing ->
-                                            case accelerationGateStep context of
-                                                Just takeTheGate ->
-                                                    -- #348. Sits after the
-                                                    -- drone arm and after the
-                                                    -- guns, never before
-                                                    -- them, so a gate this
-                                                    -- bot can see is never
-                                                    -- taken while drones are
-                                                    -- still owed a command on
-                                                    -- a live grid -- the same
-                                                    -- ordering argument #326
-                                                    -- established for the
-                                                    -- drone arm itself.
-                                                    takeTheGate
+                                            case fireOnActiveTarget context of
+                                                Just fire ->
+                                                    -- Strictly below the drone arm and
+                                                    -- strictly above the gate: a locked
+                                                    -- target means a fight, and a bot
+                                                    -- that would rather take a gate
+                                                    -- than shoot what the commander
+                                                    -- called has left the fleet a ship
+                                                    -- short in the pocket it just left.
+                                                    fire
 
                                                 Nothing ->
-                                                    {- The inherited
-                                                       combat-anomaly-bot arm
-                                                       is gone from here
-                                                       (#349): it hunted
-                                                       anomalies on an idle
-                                                       grid, which is not
-                                                       following a commander.
-                                                       What remains is
-                                                       self-defense only --
-                                                       and it is now genuinely
-                                                       the last resort it
-                                                       reads as, because
-                                                       `fireOnActiveTarget`
-                                                       above it fires on
-                                                       anything locked whether
-                                                       or not a rat has
-                                                       pointed this ship.
-                                                    -}
-                                                    fightPointedRatsOrReturnDrones context shipUI
+                                                    case accelerationGateStep context of
+                                                        Just takeTheGate ->
+                                                            -- #348. Sits after the
+                                                            -- drone arm and after the
+                                                            -- guns, never before
+                                                            -- them, so a gate this
+                                                            -- bot can see is never
+                                                            -- taken while drones are
+                                                            -- still owed a command on
+                                                            -- a live grid -- the same
+                                                            -- ordering argument #326
+                                                            -- established for the
+                                                            -- drone arm itself.
+                                                            takeTheGate
+
+                                                        Nothing ->
+                                                            {- The inherited
+                                                               combat-anomaly-bot arm
+                                                               is gone from here
+                                                               (#349): it hunted
+                                                               anomalies on an idle
+                                                               grid, which is not
+                                                               following a commander.
+                                                               What remains is
+                                                               self-defense only --
+                                                               and it is now genuinely
+                                                               the last resort it
+                                                               reads as, because
+                                                               `fireOnActiveTarget`
+                                                               above it fires on
+                                                               anything locked whether
+                                                               or not a rat has
+                                                               pointed this ship.
+                                                            -}
+                                                            fightPointedRatsOrReturnDrones context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
@@ -4704,9 +5176,10 @@ entry.
 
 The out-of-system half hands the place name to `@host set-destination`, the
 same ESI directive the travel broadcast already uses. **`needs backup` carries
-no place**, so there is nothing to route to and it says so rather than routing
-somewhere arbitrary -- saxrat found the client refuses a waypoint to a member's
-live position on every one of several hundred attempts.
+no place**, and neither does `retreatToTheCommander`, so there is nothing to
+route to and it says so rather than routing somewhere arbitrary -- saxrat found
+the client refuses a waypoint to a member's live position on every one of
+several hundred attempts.
 
 -}
 goToFleetMate : BotDecisionContext -> String -> String -> String -> DecisionPathNode
@@ -4740,7 +5213,7 @@ goToFleetMate context pilot place calledIt =
                         ++ pilot
                         ++ "' "
                         ++ calledIt
-                        ++ " and is not on this grid. That broadcast names no"
+                        ++ " and is not on this grid, and nothing names a"
                         ++ " place to route to, so there is nothing to fly toward."
                     )
                     waitForProgressInGame
@@ -4932,6 +5405,385 @@ dronesAssistTheCommander context =
 
             _ ->
                 Nothing
+
+
+{-| Break off and rejoin the fleet commander, on the strongest instruments
+this bot can read rather than on the weakest.
+
+**`runAway` in this file is not this, and that is the trap #364 names.** That
+name belongs to the neutral-in-local hiding logic reached through
+`continueIfShouldHide` -- it docks or warps to a configured hide location and
+never reads a hitpoint. Until this function there was no health guard here at
+all: the only gauge this bot ever touched was the raw live shield percentage
+printed once in the status line, read by no decision.
+
+**Two instruments, and they fail in different directions on purpose.** The two
+percentage thresholds read `lowestPercentSinceHealthy` over the _believed_
+gauge, never the live reading, for the reason CLAUDE.md's "Retreating: the HUD
+hitpoint gauge is the weakest instrument here" sets out at length. The damage
+window reads the client's own combat log and needs no gauge at all, so a gauge
+that starts lying mid-session cannot disarm it.
+
+**Somewhere to run to, not only something to run from.** A wingman's answer to
+"where" is the fleet, so this hands `goToFleetMate` the commander's name and
+takes whichever half of it applies: the client's own "Warp to Member" when the
+commander is on this grid, the `@host set-destination` route the travel
+broadcast already uses when they are not. No new mechanism, and nothing here
+picks a celestial or a station of its own.
+
+**The manoeuvre is saxrat's `respondToFleetBackupBroadcast` and the reason is
+its opposite.** That bot puts its own retreat _above_ the backup broadcast
+precisely so a critically damaged ship does not warp toward a fleet-mate's
+fight instead of away from its own. The same warp is the right answer here
+because the ship is not answering a call -- it is leaving one, toward the only
+pilot in the game this bot is configured to trust.
+
+**Bounded, and the bound is on the readings the retreat spends dispatching
+nothing.** The mission runner deliberately has no give-up in its retreat: the
+leaf it would branch to dispatches no effects, so taking it would stop the bot
+commanding the warp, which is the one thing that must not happen while the ship
+is in the pocket. That argument does not carry over unchanged, because this
+bot's run-to _can_ dispatch nothing -- `goToFleetMate` with a commander who is
+neither on the overview nor routable ends in `waitForProgressInGame`, and an
+arm this high in the tree parked there owns the whole bot (#321, and #348's own
+give-up for the same reason). Past `retreatAskedReadingsBound` this hands the
+reading back so the drones and the guns at least fight, and `describeRetreat`
+keeps the give-up in the status line on every reading.
+
+-}
+retreatToTheCommander : BotDecisionContext -> Maybe DecisionPathNode
+retreatToTheCommander context =
+    case retreatStep (retreatCaseFromMemory context.eventContext.botSettings context.memory) of
+        NoRetreat ->
+            Nothing
+
+        GaveUpOnRejoining _ ->
+            Nothing
+
+        RejoinTheCommander reason ->
+            Just
+                (describeBranch
+                    (describeRetreatReason context reason)
+                    (case fleetCommanderName context of
+                        Nothing ->
+                            describeBranch
+                                ("Nothing names the fleet commander -- 'follow-fleet-broadcast-from' is unset,"
+                                    ++ " so this ship has no fleet-mate to run to."
+                                )
+                                waitForProgressInGame
+
+                        Just commander ->
+                            goToFleetMate context commander "" "is this fleet's commander and this ship is breaking off"
+                    )
+                )
+
+
+{-| Which guard says leave, in the order they are asked.
+
+**Extracted so the memory update can ask the same question the decision asks**,
+which is the mission runner's #136: `retreatAskedReadings` has to be written in
+`updateMemoryForNewReadingFromGame`, the one place that runs on every reading
+and the one place that never sees the decision. A second copy of "is the
+retreat firing" there would be two definitions of the most consequential
+condition in this file, drifting silently, and the one that drifted would be
+the instrument rather than the guard.
+
+The order decides which reason an operator reads on a reading where two guards
+agree, and it is saxrat's own: shield, then armour, then the damage window.
+
+-}
+type RetreatReason
+    = RetreatOnShieldMark
+    | RetreatOnArmorMark
+    | RetreatOnDamageWindow
+
+
+{-| Everything the retreat decides from, as one record a test can build by hand.
+
+Holds what the memory and the settings say and nothing else -- module constants
+are referenced by the rules rather than carried here, so a case constructs one
+without knowing them.
+
+-}
+type alias RetreatCase =
+    { lowestShieldPercent : Int
+    , shieldThresholdPercent : Int
+    , lowestArmorPercent : Int
+    , armorThresholdPercent : Int
+
+    -- The latch, not the live comparison. Set and released in
+    -- `updateIncomingDamageMemory`, which is the only place that can hold a
+    -- verdict across readings -- and holding it is the whole point: the moment
+    -- the ship warps clear the window starts draining, so a live comparison
+    -- would cancel its own retreat halfway through.
+    , damageLatchIsRetreating : Bool
+    , askedReadings : Int
+    }
+
+
+retreatReason : RetreatCase -> Maybe RetreatReason
+retreatReason retreatCase =
+    if retreatCase.lowestShieldPercent < retreatCase.shieldThresholdPercent then
+        Just RetreatOnShieldMark
+
+    else if retreatCase.lowestArmorPercent < retreatCase.armorThresholdPercent then
+        Just RetreatOnArmorMark
+
+    else if retreatCase.damageLatchIsRetreating then
+        Just RetreatOnDamageWindow
+
+    else
+        Nothing
+
+
+type RetreatStep
+    = NoRetreat
+    | RejoinTheCommander RetreatReason
+    | GaveUpOnRejoining RetreatReason
+
+
+{-| The retreat decision on its own, as three named answers over one record --
+the same shape as `weaponsStep` and `accelerationGateActivationStep`, and for
+the same reason: a rule reachable only through a full `BotDecisionContext` is a
+rule nothing can execute in a test.
+
+**"Is a retreat wanted" is asked before the bound, which is the opposite order
+from `weaponsStep`**, and the difference is deliberate. There a give-up must be
+reported even on a reading where the guns happen to be fine, because the
+counter only advances while the guns are being asked. Here the counter advances
+only while a retreat is decided, so asking the bound first would report a
+give-up on a healthy ship that had merely once been hurt -- a status line
+saying the retreat has been abandoned when no retreat was ever wanted.
+
+-}
+retreatStep : RetreatCase -> RetreatStep
+retreatStep retreatCase =
+    case retreatReason retreatCase of
+        Nothing ->
+            NoRetreat
+
+        Just reason ->
+            if retreatHasBeenGivenUpOn retreatCase.askedReadings then
+                GaveUpOnRejoining reason
+
+            else
+                RejoinTheCommander reason
+
+
+{-| Whether the budget for getting this ship out has been spent. One comparison
+with two readers -- the step rule and the status clause -- so a give-up decided
+in one place and reported in another cannot disagree about whether it happened.
+-}
+retreatHasBeenGivenUpOn : Int -> Bool
+retreatHasBeenGivenUpOn askedReadings =
+    retreatAskedReadingsBound <= askedReadings
+
+
+{-| How many readings the retreat may be decided while the ship is not in warp
+before this arm hands the reading back.
+
+Taken from `eve-online-mission-runner`'s `retreatNotExecutingAlarmReadings`,
+which is where that bot's own corpus puts a commanded warp that is not
+happening: three times the twelve readings it will keep one celestial selected
+for. **This bot has no corpus of its own** -- no recorded wingman run exists on
+any of these machines -- so this is a borrowed number, exactly as
+`accelerationGateRefusesThisShipTicks` is. See WINGMAN.md's "Not verified".
+
+The mission runner's own measurement says retreats of 30, 89 and 142 readings
+have happened there and eventually worked, so a bound of 36 will sometimes hand
+back a retreat that was still going to succeed. That direction was chosen on
+purpose: what this bot falls through to is its drones and its guns, which is
+fighting back, where the mission runner's give-up leaf would have been silence.
+
+-}
+retreatAskedReadingsBound : Int
+retreatAskedReadingsBound =
+    36
+
+
+{-| The line the operator reads on the reading the ship decides to leave.
+
+Prints the mark and the threshold together, because "Armor reached 4%" without
+the number it was compared against leaves an operator unable to tell a genuine
+decline from a threshold set too high.
+
+-}
+describeRetreatReason : BotDecisionContext -> RetreatReason -> String
+describeRetreatReason context reason =
+    let
+        retreatCase : RetreatCase
+        retreatCase =
+            retreatCaseFromMemory context.eventContext.botSettings context.memory
+    in
+    case reason of
+        RetreatOnShieldMark ->
+            "Shield reached "
+                ++ (retreatCase.lowestShieldPercent |> String.fromInt)
+                ++ "% against a threshold of "
+                ++ (retreatCase.shieldThresholdPercent |> String.fromInt)
+                ++ "% -- break off and rejoin the fleet commander."
+
+        RetreatOnArmorMark ->
+            "Armor reached "
+                ++ (retreatCase.lowestArmorPercent |> String.fromInt)
+                ++ "% against a threshold of "
+                ++ (retreatCase.armorThresholdPercent |> String.fromInt)
+                ++ "% -- break off and rejoin the fleet commander."
+
+        RetreatOnDamageWindow ->
+            "The client's combat log says this ship has taken "
+                ++ (incomingDamageInWindow context.memory.incomingDamage |> String.fromInt)
+                ++ " hitpoints in the last "
+                ++ (incomingDamageWindowSeconds |> String.fromInt)
+                ++ " s, against a threshold of "
+                ++ (context.eventContext.botSettings.runAwayIncomingDamageThreshold |> String.fromInt)
+                ++ " -- break off and rejoin the fleet commander. This does not depend on the HUD gauge."
+
+
+{-| The retreat's inputs, gathered from a memory this reading has updated.
+
+Built twice from two different contexts -- the decision has a
+`BotDecisionContext` and the memory update has an `UpdateMemoryContext` -- so
+this takes the two records both can produce rather than either context. The
+_rule_ is `retreatReason` and there is one of it; only the gathering happens in
+two places, and the gathering is a field read.
+
+-}
+retreatCaseFromMemory : BotSettings -> BotMemory -> RetreatCase
+retreatCaseFromMemory botSettings memory =
+    { lowestShieldPercent =
+        lowestPercentSinceHealthy memory.hitpoints.shield.believed
+            memory.lowestShieldPercentSinceHealthy
+    , shieldThresholdPercent = botSettings.runAwayShieldHitpointsThresholdPercent
+    , lowestArmorPercent =
+        lowestPercentSinceHealthy memory.hitpoints.armor.believed
+            memory.lowestArmorPercentSinceHealthy
+    , armorThresholdPercent = botSettings.runAwayArmorHitpointsThresholdPercent
+    , damageLatchIsRetreating = memory.incomingDamage.retreating
+    , askedReadings = memory.retreatAskedReadings
+    }
+
+
+{-| Whether any of the three guards is armed at all.
+
+**This bot ships with all three disabled**, which makes the clause below the
+normal case rather than the exceptional one. The bound is read off
+`retreatReason`'s own `mark < threshold` comparison rather than off the `-1`
+convention, so a threshold of `0` -- a keystroke away, and equally unable to
+fire, since a percentage never goes below zero -- reads as uncovered too. The
+two cannot drift apart.
+
+-}
+retreatIsDisarmed : { shieldThresholdPercent : Int, armorThresholdPercent : Int, damageThreshold : Int } -> Bool
+retreatIsDisarmed coverCase =
+    (coverCase.shieldThresholdPercent <= 0)
+        && (coverCase.armorThresholdPercent <= 0)
+        && (coverCase.damageThreshold < 0)
+
+
+{-| What the retreat is going by, in one line, on every reading.
+
+Exists for the same reason `describeWeaponsAsk` does: this arm answers
+`Nothing` both when nothing is wrong and when it has given up, and those two
+must not read the same from a console. It also carries the disarmed case, which
+is what this bot does by default -- a run whose thresholds were never set would
+otherwise look exactly like a run whose ship is fine.
+
+-}
+describeRetreat : BotDecisionContext -> String
+describeRetreat context =
+    let
+        settings : BotSettings
+        settings =
+            context.eventContext.botSettings
+
+        retreatCase : RetreatCase
+        retreatCase =
+            retreatCaseFromMemory settings context.memory
+
+        marks : String
+        marks =
+            "Retreat marks: shield "
+                ++ (retreatCase.lowestShieldPercent |> String.fromInt)
+                ++ "% / armor "
+                ++ (retreatCase.lowestArmorPercent |> String.fromInt)
+                ++ "% since healthy, thresholds "
+                ++ (retreatCase.shieldThresholdPercent |> String.fromInt)
+                ++ "/"
+                ++ (retreatCase.armorThresholdPercent |> String.fromInt)
+                ++ ". "
+                ++ describeIncomingDamage context
+    in
+    if
+        retreatIsDisarmed
+            { shieldThresholdPercent = settings.runAwayShieldHitpointsThresholdPercent
+            , armorThresholdPercent = settings.runAwayArmorHitpointsThresholdPercent
+            , damageThreshold = settings.runAwayIncomingDamageThreshold
+            }
+    then
+        "Retreat: DISARMED -- no run-away-* threshold is set, so nothing is watching this ship's health. "
+            ++ marks
+
+    else
+        case retreatStep retreatCase of
+            NoRetreat ->
+                "Retreat: armed, not firing. " ++ marks
+
+            RejoinTheCommander _ ->
+                "Retreat: FIRING, "
+                    ++ (retreatCase.askedReadings |> String.fromInt)
+                    ++ " of "
+                    ++ (retreatAskedReadingsBound |> String.fromInt)
+                    ++ " readings decided to leave with the ship not in warp. "
+                    ++ marks
+
+            GaveUpOnRejoining _ ->
+                "Retreat: GAVE UP after "
+                    ++ (retreatCase.askedReadings |> String.fromInt)
+                    ++ " readings deciding to leave with the ship not in warp. The verdict stands; this arm has stopped holding the reading. "
+                    ++ marks
+
+
+{-| The window, the threshold, and whether the host carries the channel at all.
+
+That last clause is what makes reading this guard's silence safe: "0 hitpoints
+in the last 45 s" reads identically whether the grid is quiet or nothing is
+listening, and only one of those means the ship is fine.
+
+-}
+describeIncomingDamage : BotDecisionContext -> String
+describeIncomingDamage context =
+    let
+        memory : IncomingDamageMemory
+        memory =
+            context.memory.incomingDamage
+
+        threshold : Int
+        threshold =
+            context.eventContext.botSettings.runAwayIncomingDamageThreshold
+    in
+    if not memory.hostCarriesTheChannel then
+        "Incoming damage: NO COMBAT LOG -- this host does not carry the channel, so the gauge-free guard is blind."
+
+    else
+        "Incoming damage: "
+            ++ (incomingDamageInWindow memory |> String.fromInt)
+            ++ "/"
+            ++ (if threshold < 0 then
+                    "off"
+
+                else
+                    String.fromInt threshold
+               )
+            ++ " over "
+            ++ (incomingDamageWindowSeconds |> String.fromInt)
+            ++ " s"
+            ++ (if memory.retreating then
+                    ", LATCHED."
+
+                else
+                    "."
+               )
 
 
 {-| How many readings in a row this bot will go on clicking a weapon that

@@ -13,12 +13,15 @@
 # [run number] is optional and auto-increments from the highest
 # wingman_run<N>.log already in LOGDIR, same as run_saxrat.sh's own lookup.
 #
-# WINGMAN.md is explicit that nothing here has flown yet, and that it carries
-# no health-based retreat guard at all -- unlike every saxrat hull profile,
-# `defaultBotSettings` has no `run-away-*` field and `Bot.elm` has no retreat
-# logic beyond a shield-percent status line. That is why MINUTES defaults
-# short here (40) rather than to saxrat's 360: this is a first flight, meant
-# to be watched, not an unattended six-hour session.
+# `Bot.elm` has carried a health retreat since #364 -- `retreatToTheCommander`,
+# with the same two instruments saxrat uses -- but **it is not armed here and
+# no `run-away-*` line is written into the settings block below**. Those
+# thresholds are facts about a hull and no wingman run has recorded what this
+# one does under fire, so they default to -1 and stay there until a fought run
+# supplies the numbers WINGMAN.md's "Not verified" lists. Until then this ship
+# still flies with nothing watching its health, which is why MINUTES defaults
+# short here (40) rather than to saxrat's 360: a session meant to be watched,
+# not an unattended six-hour tour.
 #
 # `--session-duration-minutes` is required for a different reason too:
 # WINGMAN.md says the trip home only fires once `secondsToSessionEnd` is set,
