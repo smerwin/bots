@@ -579,6 +579,13 @@ type alias BotMemory =
     -- still on the grid, and resets the moment the ship reads as orbiting or
     -- the commander leaves the overview.
     , orbitFleetCommanderAskedReadings : Int
+
+    -- Readings in a row spent right-clicking a locked fleet pilot's target-bar
+    -- entry to unlock it, bounded like the three counters above -- see
+    -- `unlockFleetPilotAskedReadingsBound`. The bound stops the *asking* only:
+    -- `friendlyFireStep` keeps vetoing the guns for as long as that pilot is
+    -- locked, spent budget or not.
+    , unlockFleetPilotAskedReadings : Int
     }
 
 
@@ -1703,23 +1710,36 @@ fightPointedRatsOrReturnDrones :
     -> EveOnline.ParseUserInterface.ShipUI
     -> DecisionPathNode
 fightPointedRatsOrReturnDrones context shipUI =
-    case fightRatsIfShipIsPointed context shipUI of
-        Just fightPointingRats ->
-            fightPointingRats
+    if friendlyFireVetoesTheGuns (friendlyFireStepFromContext context) then
+        -- #367. The other trigger in this file, and the one whose lock is made
+        -- by ctrl-clicking a buff button that names nobody:
+        -- `fightRatsIfShipIsPointed` locks whoever is pointing this ship and
+        -- hands straight to `fightUsingDronesAndModules`. Self-defense is
+        -- still self-defense when the thing shooting back would be a
+        -- fleetmate, so the veto is asked here too -- see
+        -- `describeFriendlyFireGuard` for what is holding it.
+        describeBranch
+            "Holding fire: the friendly fire guard is refusing this lock bar."
+            waitForProgressInGame
 
-        Nothing ->
-            if not (List.isEmpty context.readingFromGameClient.targets) then
-                -- Something is still locked, so this is a fight in progress
-                -- that simply is not pointing this ship -- which is the normal
-                -- case for a target the commander called. Recalling the drones
-                -- here would undo `dronesAssistTheCommander`'s work on the very
-                -- next reading and leave the bot pulling its drones in and
-                -- sending them back out for as long as the target lived.
-                describeBranch "A target is locked -- leaving the drones out." waitForProgressInGame
+    else
+        case fightRatsIfShipIsPointed context shipUI of
+            Just fightPointingRats ->
+                fightPointingRats
 
-            else
-                returnDronesToBay context
-                    |> Maybe.withDefault (describeBranch "Nothing to do. Wait." waitForProgressInGame)
+            Nothing ->
+                if not (List.isEmpty context.readingFromGameClient.targets) then
+                    -- Something is still locked, so this is a fight in progress
+                    -- that simply is not pointing this ship -- which is the normal
+                    -- case for a target the commander called. Recalling the drones
+                    -- here would undo `dronesAssistTheCommander`'s work on the very
+                    -- next reading and leave the bot pulling its drones in and
+                    -- sending them back out for as long as the target lived.
+                    describeBranch "A target is locked -- leaving the drones out." waitForProgressInGame
+
+                else
+                    returnDronesToBay context
+                        |> Maybe.withDefault (describeBranch "Nothing to do. Wait." waitForProgressInGame)
 
 
 undockUsingStationWindow :
@@ -2547,6 +2567,7 @@ initBotMemory =
     , gateAskedReadings = 0
     , weaponsAskedReadings = 0
     , orbitFleetCommanderAskedReadings = 0
+    , unlockFleetPilotAskedReadings = 0
     }
 
 
@@ -2658,6 +2679,7 @@ statusTextFromState context =
                     , [ describeDrones ]
                     , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
                     , [ describeRetreat context ]
+                    , [ describeFleetMembership context, describeFriendlyFireGuard context ]
                     , [ describeAccelerationGateAsk context ]
                     , [ describeWeaponsAsk context ]
                     , [ describeOrbitFleetCommanderAsk context ]
@@ -3161,6 +3183,17 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     }
                 )
                 orbitFleetCommanderAnswersThatSpendAReading
+
+        -- Taken from the shipped rule rather than restated beside it, the same
+        -- arrangement as `askingTheCommanderForAnOrbit` above and for #102's
+        -- reason: a counter advanced by one condition and read by another is
+        -- two rules on two schedules.
+        friendlyFireNow : FriendlyFireStep
+        friendlyFireNow =
+            friendlyFireStepFromReading
+                context.botSettings.followFleetBroadcastFrom
+                botMemoryBefore.unlockFleetPilotAskedReadings
+                context.readingFromGameClient
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -3254,6 +3287,25 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , unlockFleetPilotAskedReadings =
+        case friendlyFireNow of
+            UnlockAFleetPilot _ ->
+                botMemoryBefore.unlockFleetPilotAskedReadings + 1
+
+            GaveUpUnlockingAFleetPilot _ ->
+                -- Held rather than advanced: the pilot is still locked and the
+                -- guns are still refused, and a counter that ran away would
+                -- make the status line's "after N readings" meaningless.
+                botMemoryBefore.unlockFleetPilotAskedReadings
+
+            NothingIsLocked ->
+                0
+
+            HoldFireOnAnUnverifiedPilot _ ->
+                0
+
+            ClearToFire ->
+                0
     }
 
 
@@ -3770,28 +3822,120 @@ fleetMemberNames readingFromGameClient =
         |> List.filter (String.isEmpty >> not)
 
 
-{-| Everyone this bot must not shoot: the member rows plus the commander.
+{-| The pilots local chat's own standing icons mark as fleetmates.
+
+The client answers this per pilot, in real time, with no window open -- it is
+the same `Pilot is in your fleet` hint `getNamesOfOtherPilotsInOverview`
+already filters _out_, read here for who it names rather than for who it
+excludes. #367 is what put it on this side: with the Fleet window shut, a
+fleetmate the icon does mark would otherwise have been absent from
+`fleetPilotNames` _and_ absent from the overview's "other pilots" list, which
+is the one combination that reads as "a stranger, shoot away".
+
+**It adds names and cannot certify a list.** `chatUserIsKnownFleetmate`
+answers `False` for a row with no hint at all -- deliberately, so absent
+evidence never reads as "fleetmate" -- so a fleet whose icons this bot cannot
+resolve looks exactly like no fleet. That is why `fleetMembershipIsVerifiable`
+asks the Fleet window and not this.
+
 -}
+fleetmateNamesFromLocalChat : ReadingFromGameClient -> List String
+fleetmateNamesFromLocalChat readingFromGameClient =
+    readingFromGameClient
+        |> localChatWindowFromUserInterface
+        |> Maybe.andThen .userlist
+        |> Maybe.map .visibleUsers
+        |> Maybe.withDefault []
+        |> List.filter chatUserIsKnownFleetmate
+        |> List.filterMap .name
+
+
+{-| Whether anything on this reading is in a position to answer "who is in
+this fleet" completely.
+
+**The distinction this whole guard rests on.** `fleetMemberNames` answers `[]`
+for a fleet of forty whose window is shut exactly as it does for a pilot flying
+alone, and `List.member` over `[]` is `False` for everybody -- so a guard that
+only asked `fleetPilotNames` would pass every target through and look
+identical to a guard that had checked. The Fleet window being open is what
+makes an empty answer mean "nobody", and while it is shut `friendlyFireStep`
+refuses to fire on any _pilot_ rather than inferring anything from silence.
+
+Deliberately the window's presence rather than its row count: a fleet of one
+is a real reading, and requiring a row would put this back to reasoning from
+an empty list.
+
+-}
+fleetMembershipIsVerifiable : ReadingFromGameClient -> Bool
+fleetMembershipIsVerifiable readingFromGameClient =
+    readingFromGameClient.fleetWindow /= Nothing
+
+
+{-| Everyone this bot must not shoot: the member rows, the commander, and
+whoever local chat's standing icons mark as a fleetmate.
+
+Empty names are dropped because the matcher contains rather than equals, and
+`""` is contained in every target's text -- an empty entry would answer "that
+is a fleetmate" for the whole lock bar.
+
+-}
+fleetPilotNamesFromReading : List String -> ReadingFromGameClient -> List String
+fleetPilotNamesFromReading followFleetBroadcastFrom readingFromGameClient =
+    [ fleetMemberNames readingFromGameClient
+    , fleetCommanderNameFromReading followFleetBroadcastFrom readingFromGameClient
+        |> Maybe.map List.singleton
+        |> Maybe.withDefault []
+    , fleetmateNamesFromLocalChat readingFromGameClient
+    ]
+        |> List.concat
+        |> List.map String.trim
+        |> List.filter (String.isEmpty >> not)
+
+
 fleetPilotNames : BotDecisionContext -> List String
 fleetPilotNames context =
-    fleetMemberNames context.readingFromGameClient
-        ++ (context |> fleetCommanderName |> Maybe.map List.singleton |> Maybe.withDefault [])
+    fleetPilotNamesFromReading
+        context.eventContext.botSettings.followFleetBroadcastFrom
+        context.readingFromGameClient
 
 
-{-| Who the fleet commander is, read from the window rather than configured.
+{-| Who the fleet commander is: the fleet window's own header, and the
+`follow-fleet-broadcast-from` setting only when the header gives no answer.
 
-**Not yet implemented, and stated rather than guessed at.** The header carries
-the name (`Gal Bistot`) beside a `Fleet Commander` icon and a `Boss` icon, so
-the reading is available -- but which label belongs to which role was not
-established from the one capture this was written against, and a wrong answer
-here points the drones at the wrong pilot. Until it is read live, the commander
-is whoever `follow-fleet-broadcast-from` names first, which is the pilot the
-operator has already said they trust with this ship.
+**This is #367's unification and there used to be three of these.** The header
+read landed with #365's orbit as `fleetCommanderNameFromPanel`, while this
+function stayed settings-only and #364's `retreatToTheCommander` ran to it --
+so on a reading where the window named one pilot and the setting named another,
+the retreat and the orbit were about different ships. Preferring the header
+here and deleting the panel sibling leaves two: this one, and
+`fleetCommanderNameFromFleetWindowHeader`, which is the header half alone and
+exists because `updateMemoryForNewReadingFromGame`'s
+`fleetCommanderOverviewEntry` asks the question over a reading.
+
+**It also fixes what #369 flagged rather than only tidying names.** The retreat
+used to answer `Nothing` whenever `follow-fleet-broadcast-from` was unset,
+which is a break-off decided with nowhere to run to; a fleet window that is
+open now answers it whether or not the operator filled the setting in.
+
+The header inference is stated in `fleetCommanderNameFromFleetWindowHeader` and
+is not repeated here.
 
 -}
+fleetCommanderNameFromReading : List String -> ReadingFromGameClient -> Maybe String
+fleetCommanderNameFromReading followFleetBroadcastFrom readingFromGameClient =
+    case fleetCommanderNameFromFleetWindowHeader readingFromGameClient of
+        Just fromHeader ->
+            Just fromHeader
+
+        Nothing ->
+            List.head followFleetBroadcastFrom
+
+
 fleetCommanderName : BotDecisionContext -> Maybe String
 fleetCommanderName context =
-    context.eventContext.botSettings.followFleetBroadcastFrom |> List.head
+    fleetCommanderNameFromReading
+        context.eventContext.botSettings.followFleetBroadcastFrom
+        context.readingFromGameClient
 
 
 {-| The target a `Target` broadcast names, if the current banner is one.
@@ -4565,92 +4709,107 @@ wingmanDecisionRootInSpace context shipUI =
                     breakOff
 
                 Nothing ->
-                    case activateAlwaysOnModules context of
-                        Just activate ->
-                            activate
+                    case unlockFleetPilotInTargetBar context of
+                        Just unlockFleetmate ->
+                            -- #367. A fleet member in the target bar is a
+                            -- safety condition, so this outranks every arm
+                            -- that would rather be doing something else --
+                            -- each of which answers `Just` for the whole of a
+                            -- fight, which is precisely when a friendly is in
+                            -- there. Below the retreat only: a ship past its
+                            -- threshold leaves the grid, which ends the
+                            -- engagement more thoroughly than an unlock does.
+                            -- The full argument is in
+                            -- `unlockFleetPilotInTargetBar`.
+                            unlockFleetmate
 
                         Nothing ->
-                            case actOnFleetBroadcast context shipUI of
-                                Just actOnBroadcast ->
-                                    actOnBroadcast
+                            case activateAlwaysOnModules context of
+                                Just activate ->
+                                    activate
 
                                 Nothing ->
-                                    case dronesAssistTheCommander context of
-                                        Just assist ->
-                                            assist
+                                    case actOnFleetBroadcast context shipUI of
+                                        Just actOnBroadcast ->
+                                            actOnBroadcast
 
                                         Nothing ->
-                                            case fireOnActiveTarget context of
-                                                Just fire ->
-                                                    -- Strictly below the drone arm and
-                                                    -- strictly above the gate: a locked
-                                                    -- target means a fight, and a bot
-                                                    -- that would rather take a gate
-                                                    -- than shoot what the commander
-                                                    -- called has left the fleet a ship
-                                                    -- short in the pocket it just left.
-                                                    fire
+                                            case dronesAssistTheCommander context of
+                                                Just assist ->
+                                                    assist
 
                                                 Nothing ->
-                                                    case orbitTheFleetCommander context shipUI of
-                                                        Just orbitTheCommander ->
-                                                            -- #365. Below the drone arm
-                                                            -- and below the guns so it
-                                                            -- can starve neither
-                                                            -- (#326), and above the
-                                                            -- gate so the gate arm's
-                                                            -- own "rats are still on
-                                                            -- the grid" wait cannot
-                                                            -- starve it in the one
-                                                            -- state it is most for.
-                                                            -- Below #364's retreat by
-                                                            -- the whole tree: a damaged
-                                                            -- ship breaks off rather
-                                                            -- than holds station, so
-                                                            -- nothing that keeps this
-                                                            -- ship on the grid may ever
-                                                            -- answer before that arm
-                                                            -- does. The full argument
-                                                            -- is in
-                                                            -- `orbitTheFleetCommander`.
-                                                            orbitTheCommander
+                                                    case fireOnActiveTarget context of
+                                                        Just fire ->
+                                                            -- Strictly below the drone arm and
+                                                            -- strictly above the gate: a locked
+                                                            -- target means a fight, and a bot
+                                                            -- that would rather take a gate
+                                                            -- than shoot what the commander
+                                                            -- called has left the fleet a ship
+                                                            -- short in the pocket it just left.
+                                                            fire
 
                                                         Nothing ->
-                                                            case accelerationGateStep context of
-                                                                Just takeTheGate ->
-                                                                    -- #348. Sits after the
-                                                                    -- drone arm and after the
-                                                                    -- guns, never before
-                                                                    -- them, so a gate this
-                                                                    -- bot can see is never
-                                                                    -- taken while drones are
-                                                                    -- still owed a command on
-                                                                    -- a live grid -- the same
-                                                                    -- ordering argument #326
-                                                                    -- established for the
-                                                                    -- drone arm itself.
-                                                                    takeTheGate
+                                                            case orbitTheFleetCommander context shipUI of
+                                                                Just orbitTheCommander ->
+                                                                    -- #365. Below the drone arm
+                                                                    -- and below the guns so it
+                                                                    -- can starve neither
+                                                                    -- (#326), and above the
+                                                                    -- gate so the gate arm's
+                                                                    -- own "rats are still on
+                                                                    -- the grid" wait cannot
+                                                                    -- starve it in the one
+                                                                    -- state it is most for.
+                                                                    -- Below #364's retreat by
+                                                                    -- the whole tree: a damaged
+                                                                    -- ship breaks off rather
+                                                                    -- than holds station, so
+                                                                    -- nothing that keeps this
+                                                                    -- ship on the grid may ever
+                                                                    -- answer before that arm
+                                                                    -- does. The full argument
+                                                                    -- is in
+                                                                    -- `orbitTheFleetCommander`.
+                                                                    orbitTheCommander
 
                                                                 Nothing ->
-                                                                    {- The inherited
-                                                                       combat-anomaly-bot arm
-                                                                       is gone from here
-                                                                       (#349): it hunted
-                                                                       anomalies on an idle
-                                                                       grid, which is not
-                                                                       following a commander.
-                                                                       What remains is
-                                                                       self-defense only --
-                                                                       and it is now genuinely
-                                                                       the last resort it
-                                                                       reads as, because
-                                                                       `fireOnActiveTarget`
-                                                                       above it fires on
-                                                                       anything locked whether
-                                                                       or not a rat has
-                                                                       pointed this ship.
-                                                                    -}
-                                                                    fightPointedRatsOrReturnDrones context shipUI
+                                                                    case accelerationGateStep context of
+                                                                        Just takeTheGate ->
+                                                                            -- #348. Sits after the
+                                                                            -- drone arm and after the
+                                                                            -- guns, never before
+                                                                            -- them, so a gate this
+                                                                            -- bot can see is never
+                                                                            -- taken while drones are
+                                                                            -- still owed a command on
+                                                                            -- a live grid -- the same
+                                                                            -- ordering argument #326
+                                                                            -- established for the
+                                                                            -- drone arm itself.
+                                                                            takeTheGate
+
+                                                                        Nothing ->
+                                                                            {- The inherited
+                                                                               combat-anomaly-bot arm
+                                                                               is gone from here
+                                                                               (#349): it hunted
+                                                                               anomalies on an idle
+                                                                               grid, which is not
+                                                                               following a commander.
+                                                                               What remains is
+                                                                               self-defense only --
+                                                                               and it is now genuinely
+                                                                               the last resort it
+                                                                               reads as, because
+                                                                               `fireOnActiveTarget`
+                                                                               above it fires on
+                                                                               anything locked whether
+                                                                               or not a rat has
+                                                                               pointed this ship.
+                                                                            -}
+                                                                            fightPointedRatsOrReturnDrones context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
@@ -4778,8 +4937,26 @@ decoration alongside the name, so this contains rather than equals.
 lockedTargetNamed : String -> ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.Target
 lockedTargetNamed name reading =
     reading.targets
-        |> List.filter (.textsTopToBottom >> List.any (stringContainsIgnoringCase name))
+        |> List.filter (.textsTopToBottom >> targetTextsCarryName name)
         |> List.head
+
+
+{-| The comparison `lockedTargetNamed` is, over the texts alone.
+
+**Lifted out so there is exactly one of it.** #367's guard has to ask the same
+question of every locked target on every reading, and a second matcher that
+can disagree with this one is the defect that guard exists to avoid: a lock bar
+the guard reads as clean and `lockedTargetNamed` reads as holding the pilot
+would fire on somebody nobody could then find. It is also what lets
+`friendlyFireStep` be a rule over plain lists rather than over a reading.
+
+An empty `name` would contain into every text, so callers building the name
+list filter empties out -- see `fleetPilotNamesFromReading`.
+
+-}
+targetTextsCarryName : String -> List String -> Bool
+targetTextsCarryName name textsTopToBottom =
+    textsTopToBottom |> List.any (stringContainsIgnoringCase name)
 
 
 {-| Lock the pilot a `Target` broadcast named, from their overview row.
@@ -5424,7 +5601,11 @@ fleetBroadcastBannerElement readingFromGameClient =
         |> List.head
 
 
-{-| The fleet commander's name, read from the fleet window's own header.
+{-| The fleet commander's name as the fleet window's own header writes it, and
+nothing else -- the header half of `fleetCommanderName`, over a reading rather
+than a decision, which is the divergence `selectedItemIsOverviewEntry`'s own
+comment records and for the same reason: `updateMemoryForNewReadingFromGame`
+has to ask this question too and never sees a decision.
 
 **Inferred from the header's shape, and that inference is stated rather than
 buried.** The captured header carried five labels beside a `Boss` icon and a
@@ -5438,42 +5619,12 @@ rather than reading the icons -- which would be better evidence, but which
 label belongs to which icon was not established from the capture, and a wrong
 answer here points the drones at the wrong pilot.
 
-Falls back to the first pilot in `follow-fleet-broadcast-from`, which is a
-pilot the operator has already said they trust with this ship.
-
--}
-fleetCommanderNameFromPanel : BotDecisionContext -> Maybe String
-fleetCommanderNameFromPanel context =
-    case fleetCommanderNameFromFleetWindowHeader context.readingFromGameClient of
-        Just name ->
-            Just name
-
-        Nothing ->
-            context.eventContext.botSettings.followFleetBroadcastFrom |> List.head
-
-
-{-| The header half of `fleetCommanderNameFromPanel`, over a reading rather
-than a decision -- the divergence `selectedItemIsOverviewEntry`'s own comment
-records, and for the same reason: `updateMemoryForNewReadingFromGame` has to
-ask this question too and never sees a decision.
-
-**`orbitTheFleetCommander` asks it in this form and not the other**, which is
-the one place in this bot that reads the commander without the
+**`fleetCommanderOverviewEntry` asks it in this form and not the other**, which
+is the one place in this bot that reads the commander without the
 `follow-fleet-broadcast-from` fall-back behind it. That is deliberate: the
 orbit is issued against the commander's _overview row_, so a name the client
 itself did not write is a name there may be no row for, and the status line
 says the header gave no answer rather than letting the ship drift silently.
-
-**This bot now has three answers to "who is the commander", and they can
-disagree.** `fleetCommanderName` is the settings-only one -- the first pilot in
-`follow-fleet-broadcast-from` -- and is what #364's `retreatToTheCommander`
-runs to, which its own author flagged as answering `Nothing` when that setting
-is unset, so a retreat can be decided with nowhere to go.
-`fleetCommanderNameFromPanel` reads this header and falls back to that setting;
-this function is the header alone. A reading where the fleet window names one
-pilot and the setting names another is a reading where the retreat and the
-orbit are about different ships. **Unifying them is #367 and is deliberately
-not done here** -- this note exists so whoever takes it finds all three.
 
 -}
 fleetCommanderNameFromFleetWindowHeader : ReadingFromGameClient -> Maybe String
@@ -5520,7 +5671,7 @@ dronesAssistTheCommander context =
         Nothing
 
     else
-        case ( context.readingFromGameClient.dronesWindow, fleetCommanderNameFromPanel context ) of
+        case ( context.readingFromGameClient.dronesWindow, fleetCommanderName context ) of
             ( Just dronesWindow, Just commander ) ->
                 case dronesWindow.droneGroupInSpace of
                     Nothing ->
@@ -5993,43 +6144,53 @@ here regardless of what the guns do.
 -}
 fireOnActiveTarget : BotDecisionContext -> Maybe DecisionPathNode
 fireOnActiveTarget context =
-    case context.readingFromGameClient.shipUI of
-        Nothing ->
-            Nothing
+    if friendlyFireVetoesTheGuns (friendlyFireStepFromContext context) then
+        -- #367. Deliberately asked here and not only where the lock is made.
+        -- This arm is what shot Sonya Spodumain in run 9, and it did so
+        -- through a lock no fleet check ever saw: `weaponsStep` reads
+        -- `targetLocked` and nothing about who is locked, so the one guard
+        -- that existed -- on the broadcast path, before the lock -- was
+        -- bypassed by every other way a target reaches the bar.
+        Nothing
 
-        Just shipUI ->
-            let
-                inactiveWeapon : Maybe ShipUIModuleButton
-                inactiveWeapon =
-                    shipUI
-                        |> shipUIModulesToActivateOnTarget
-                        |> List.filter (.isActive >> Maybe.withDefault False >> not)
-                        |> List.head
-            in
-            case
-                weaponsStep
-                    { targetLocked = not (List.isEmpty context.readingFromGameClient.targets)
-                    , inactiveWeaponPresent = inactiveWeapon /= Nothing
-                    , askedReadings = context.memory.weaponsAskedReadings
-                    }
-            of
-                NoTargetToFireOn ->
-                    Nothing
+    else
+        case context.readingFromGameClient.shipUI of
+            Nothing ->
+                Nothing
 
-                AllWeaponsCycling ->
-                    Nothing
+            Just shipUI ->
+                let
+                    inactiveWeapon : Maybe ShipUIModuleButton
+                    inactiveWeapon =
+                        shipUI
+                            |> shipUIModulesToActivateOnTarget
+                            |> List.filter (.isActive >> Maybe.withDefault False >> not)
+                            |> List.head
+                in
+                case
+                    weaponsStep
+                        { targetLocked = not (List.isEmpty context.readingFromGameClient.targets)
+                        , inactiveWeaponPresent = inactiveWeapon /= Nothing
+                        , askedReadings = context.memory.weaponsAskedReadings
+                        }
+                of
+                    NoTargetToFireOn ->
+                        Nothing
 
-                GaveUpOnWeapons ->
-                    Nothing
+                    AllWeaponsCycling ->
+                        Nothing
 
-                ActivateAWeapon ->
-                    inactiveWeapon
-                        |> Maybe.map
-                            (\inactiveModule ->
-                                describeBranch
-                                    "I see a locked target and a weapon that is not cycling. Activate it."
-                                    (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
-                            )
+                    GaveUpOnWeapons ->
+                        Nothing
+
+                    ActivateAWeapon ->
+                        inactiveWeapon
+                            |> Maybe.map
+                                (\inactiveModule ->
+                                    describeBranch
+                                        "I see a locked target and a weapon that is not cycling. Activate it."
+                                        (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
+                                )
 
 
 {-| The weapon decision on its own, as four named answers over three facts --
@@ -6065,6 +6226,229 @@ type WeaponsStep
     | AllWeaponsCycling
     | GaveUpOnWeapons
     | ActivateAWeapon
+
+
+{-| How many readings the unlock cascade gets before this bot stops asking.
+
+Twenty, the same allowance `weaponsAskedReadingsBound` gives the other
+per-reading ask in this file, and for the same reason: a context-menu cascade
+that is going to work does so in a handful of readings, and twenty is far short
+of a session while being several attempts' worth.
+
+**What the bound stops is the asking, and only the asking.** Every other
+give-up in this file hands the reading back to the arms below it;
+`GaveUpUnlockingAFleetPilot` still vetoes the guns, because the reason not to
+shoot a fleetmate does not expire when a context menu turns out to be
+unclickable. Spending the budget makes the bot quiet about the lock bar, not
+willing to fire into it.
+
+-}
+unlockFleetPilotAskedReadingsBound : Int
+unlockFleetPilotAskedReadingsBound =
+    20
+
+
+{-| The friendly-fire rule, over plain lists so a case can execute it -- the
+same shape as `weaponsStep` and `accelerationGateActivationStep`, and #367 is
+the reason there is one rule rather than a check per firing arm.
+
+**Three answers refuse, and the third is the one worth reading twice.**
+
+`UnlockAFleetPilot` and `GaveUpUnlockingAFleetPilot` are the ordinary case: a
+locked target carries the name of somebody `fleetPilotNames` lists, so it comes
+out of the lock bar and nothing fires at it meanwhile.
+
+`HoldFireOnAnUnverifiedPilot` is the case that would otherwise be invisible.
+With the Fleet window shut, `fleetMemberNames` answers `[]` -- a fleet of forty
+and a pilot flying alone produce the same empty list, and `List.member` over it
+is `False` for everybody. A guard that stopped at the membership list would
+therefore pass every target through while looking exactly like a guard that had
+checked, which is the "reasoning from silence" #367 was filed on. So when
+membership is not verifiable this asks a different question the client can
+still answer: is the locked thing a _pilot_? `getNamesOfOtherPilotsInOverview`
+is how this bot independently named Sonya Spodumain twice in the very run that
+shot her. **NPC rats are not in that list**, so a PvE fight is unaffected and
+the cost of the refusal falls entirely on shooting players with the Fleet
+window shut -- which is the shot nobody can currently justify having taken.
+
+**It refuses rather than unlocking in that case**, because the evidence is
+asymmetric: "this is a pilot and I cannot check whether they are a fleetmate"
+is a reason to hold the trigger, not a reason to drop a lock that may be a
+genuine hostile the fleet is engaging.
+
+**What it does not close**, stated because it is the same shape as the defect
+above: `getNamesOfOtherPilotsInOverview` needs the local chat window's user
+list as well as the overview, and answers `[]` when that window is not
+rendering one. A reading with the Fleet window shut _and_ local chat unread
+therefore falls back to `ClearToFire`, which is the original hole in a
+narrower place. Nothing in the recorded runs says how often chat is unread --
+`Seeing N other pilots in the overview` is printed on every reading and is the
+line to count it from.
+
+The bound is checked after the membership match and before anything is asked
+of the client, so a give-up is reported as a give-up rather than as a clean
+lock bar.
+
+-}
+friendlyFireStep :
+    { lockedTargetTexts : List (List String)
+    , fleetPilots : List String
+    , membershipIsVerifiable : Bool
+    , otherPilotsOnOverview : List String
+    , askedReadings : Int
+    }
+    -> FriendlyFireStep
+friendlyFireStep { lockedTargetTexts, fleetPilots, membershipIsVerifiable, otherPilotsOnOverview, askedReadings } =
+    if List.isEmpty lockedTargetTexts then
+        NothingIsLocked
+
+    else
+        case firstNameCarriedByALockedTarget fleetPilots lockedTargetTexts of
+            Just fleetPilot ->
+                if unlockFleetPilotAskedReadingsBound <= askedReadings then
+                    GaveUpUnlockingAFleetPilot fleetPilot
+
+                else
+                    UnlockAFleetPilot fleetPilot
+
+            Nothing ->
+                if membershipIsVerifiable then
+                    ClearToFire
+
+                else
+                    case firstNameCarriedByALockedTarget otherPilotsOnOverview lockedTargetTexts of
+                        Just pilot ->
+                            HoldFireOnAnUnverifiedPilot pilot
+
+                        Nothing ->
+                            ClearToFire
+
+
+type FriendlyFireStep
+    = NothingIsLocked
+    | UnlockAFleetPilot String
+    | GaveUpUnlockingAFleetPilot String
+    | HoldFireOnAnUnverifiedPilot String
+    | ClearToFire
+
+
+{-| The first of `names` that any locked target's text carries, through the
+one matcher `lockedTargetNamed` uses.
+-}
+firstNameCarriedByALockedTarget : List String -> List (List String) -> Maybe String
+firstNameCarriedByALockedTarget names lockedTargetTexts =
+    names
+        |> List.filter (\name -> lockedTargetTexts |> List.any (targetTextsCarryName name))
+        |> List.head
+
+
+{-| The rule above, asked of a reading and the settings behind it, so that
+`updateMemoryForNewReadingFromGame` can advance the counter from the shipped
+rule rather than from a restatement of it -- #102's arrangement, the same one
+`askingTheCommanderForAnOrbit` uses.
+-}
+friendlyFireStepFromReading : List String -> Int -> ReadingFromGameClient -> FriendlyFireStep
+friendlyFireStepFromReading followFleetBroadcastFrom askedReadings readingFromGameClient =
+    friendlyFireStep
+        { lockedTargetTexts = readingFromGameClient.targets |> List.map .textsTopToBottom
+        , fleetPilots = fleetPilotNamesFromReading followFleetBroadcastFrom readingFromGameClient
+        , membershipIsVerifiable = fleetMembershipIsVerifiable readingFromGameClient
+        , otherPilotsOnOverview = getNamesOfOtherPilotsInOverview readingFromGameClient
+        , askedReadings = askedReadings
+        }
+
+
+friendlyFireStepFromContext : BotDecisionContext -> FriendlyFireStep
+friendlyFireStepFromContext context =
+    friendlyFireStepFromReading
+        context.eventContext.botSettings.followFleetBroadcastFrom
+        context.memory.unlockFleetPilotAskedReadings
+        context.readingFromGameClient
+
+
+{-| Whether the guns must stay silent this reading.
+
+**Independent of the unlock arm on purpose.** #367's own comment on the
+incident: guarding the lock is not enough, because two paths put a target in
+the bar without asking anybody -- `fightRatsIfShipIsPointed` ctrl-clicks
+whoever is pointing this ship, and a hand-locked target was never asked about
+at all. Every arm that can pull a trigger consults this, so a friendly takes
+damage only if the unlock _and_ this both fail on the same reading.
+
+-}
+friendlyFireVetoesTheGuns : FriendlyFireStep -> Bool
+friendlyFireVetoesTheGuns step =
+    case step of
+        NothingIsLocked ->
+            False
+
+        ClearToFire ->
+            False
+
+        UnlockAFleetPilot _ ->
+            True
+
+        GaveUpUnlockingAFleetPilot _ ->
+            True
+
+        HoldFireOnAnUnverifiedPilot _ ->
+            True
+
+
+{-| Take a locked fleet pilot back out of the target bar.
+
+**Where it sits, and why it is that high.** Third in
+`wingmanDecisionRootInSpace`, under `sessionIsEnding` and `retreatToTheCommander`
+and above everything else. Above the broadcast arm, the drones and the guns
+because each of those answers `Just` for the whole of a fight -- the banner does
+not clear while a target is called (#360), the drone arm answers on every
+reading a drone idles (#326), the guns on every reading a weapon is not
+cycling -- so an unlock placed under any of them would be reachable only on the
+readings the fleet is doing nothing, which is every reading except the ones it
+exists for. Below the retreat because a ship past its threshold is leaving the
+grid, which settles the lock bar more thoroughly than a context menu can.
+
+The cascade is the one `decideActionInAnomaly` sketched and nothing reachable
+ever ran: right-click the target-bar entry, take the entry containing
+`unlock`.
+
+-}
+unlockFleetPilotInTargetBar : BotDecisionContext -> Maybe DecisionPathNode
+unlockFleetPilotInTargetBar context =
+    case friendlyFireStepFromContext context of
+        UnlockAFleetPilot fleetPilot ->
+            -- `friendlyFireStep` matched this name with `targetTextsCarryName`
+            -- and `lockedTargetNamed` is the same matcher over the same
+            -- targets, so the lookup answers `Just` whenever this arm is
+            -- reached. Written as a `Maybe.map` rather than asserted.
+            lockedTargetNamed fleetPilot context.readingFromGameClient
+                |> Maybe.map
+                    (\targetToUnlock ->
+                        describeBranch
+                            ("'"
+                                ++ fleetPilot
+                                ++ "' is in this fleet and is locked. Unlocking, and holding fire meanwhile."
+                            )
+                            (useContextMenuCascade
+                                ( "locked target"
+                                , targetToUnlock.barAndImageCont |> Maybe.withDefault targetToUnlock.uiNode
+                                )
+                                (useMenuEntryWithTextContaining "unlock" menuCascadeCompleted)
+                                context
+                            )
+                    )
+
+        NothingIsLocked ->
+            Nothing
+
+        GaveUpUnlockingAFleetPilot _ ->
+            Nothing
+
+        HoldFireOnAnUnverifiedPilot _ ->
+            Nothing
+
+        ClearToFire ->
+            Nothing
 
 
 {-| Keep this ship in close orbit around the fleet commander, at the distance
@@ -6675,7 +7059,10 @@ a console in the first place.
 -}
 describeWeaponsAsk : BotDecisionContext -> String
 describeWeaponsAsk context =
-    if List.isEmpty context.readingFromGameClient.targets then
+    if friendlyFireVetoesTheGuns (friendlyFireStepFromContext context) then
+        "Weapons: HELD by the friendly fire guard."
+
+    else if List.isEmpty context.readingFromGameClient.targets then
         "Weapons: nothing locked."
 
     else if weaponsAskedReadingsBound <= context.memory.weaponsAskedReadings then
@@ -6796,6 +7183,128 @@ describeOrbitFleetCommanderAsk context =
                                         ++ window.uiNode.pythonObjectTypeName
                                         ++ "' is still open over the client."
                            )
+           )
+
+
+{-| Where "who is in this fleet" was answered from this reading, and what it
+answered -- printed on every reading, whether or not anything is locked.
+
+**This line is half of #367.** Its report was written on a 18,974-line run in
+which `grep "is in this fleet"` returned nothing at all, and from outside
+there was no way to tell whether the guard had never had a candidate or had
+never had a fleet list to check one against. `fleetMemberNames` answers `[]`
+for a shut window exactly as it does for a pilot flying alone, so the two
+states are one line of log unless the source itself is named.
+
+The Fleet window's absence is shouted rather than mentioned, because it is the
+operator's own remedy: opening it is what lets this bot tell a fleetmate from
+a stranger, and while it is shut the guns are refused on every pilot on the
+overview.
+
+-}
+describeFleetMembership : BotDecisionContext -> String
+describeFleetMembership context =
+    let
+        reading : ReadingFromGameClient
+        reading =
+            context.readingFromGameClient
+
+        namesOrNone : List String -> String
+        namesOrNone names =
+            if List.isEmpty names then
+                "none"
+
+            else
+                String.join ", " names
+
+        memberRows : List String
+        memberRows =
+            fleetMemberNames reading
+
+        chatFleetmates : List String
+        chatFleetmates =
+            fleetmateNamesFromLocalChat reading
+
+        describeCommander : String
+        describeCommander =
+            case fleetCommanderNameFromFleetWindowHeader reading of
+                Just fromHeader ->
+                    "'" ++ fromHeader ++ "' (fleet window header)"
+
+                Nothing ->
+                    case List.head context.eventContext.botSettings.followFleetBroadcastFrom of
+                        Just fromSetting ->
+                            "'" ++ fromSetting ++ "' ('follow-fleet-broadcast-from', the header named nobody)"
+
+                        Nothing ->
+                            "NOT NAMED -- the header gave no answer and 'follow-fleet-broadcast-from' is unset"
+    in
+    "Fleet membership: "
+        ++ (if fleetMembershipIsVerifiable reading then
+                "the Fleet window is open and lists "
+                    ++ String.fromInt (List.length memberRows)
+                    ++ " member rows: "
+                    ++ namesOrNone memberRows
+                    ++ "."
+
+            else
+                "THE FLEET WINDOW IS NOT OPEN, so the member list is unverifiable"
+                    ++ " -- an empty one would otherwise read as 'nobody here is a fleetmate'."
+           )
+        ++ " Commander: "
+        ++ describeCommander
+        ++ ". Local chat's standing icons mark "
+        ++ String.fromInt (List.length chatFleetmates)
+        ++ ": "
+        ++ namesOrNone chatFleetmates
+        ++ "."
+
+
+{-| What the friendly fire guard did with the lock bar this reading.
+
+The other half of #367, and the reason it is separate from
+`describeFleetMembership`: that line says what could be known, this one says
+what was decided with it. Every answer but `UnlockAFleetPilot` leaves the
+decision tree looking like a bot with nothing to do.
+
+-}
+describeFriendlyFireGuard : BotDecisionContext -> String
+describeFriendlyFireGuard context =
+    let
+        askedReadings : Int
+        askedReadings =
+            context.memory.unlockFleetPilotAskedReadings
+    in
+    "Friendly fire guard: "
+        ++ (case friendlyFireStepFromContext context of
+                NothingIsLocked ->
+                    "nothing is locked."
+
+                UnlockAFleetPilot fleetPilot ->
+                    "'"
+                        ++ fleetPilot
+                        ++ "' is locked and is in this fleet -- UNLOCKING, guns held. Readings spent: "
+                        ++ String.fromInt askedReadings
+                        ++ " of "
+                        ++ String.fromInt unlockFleetPilotAskedReadingsBound
+                        ++ "."
+
+                GaveUpUnlockingAFleetPilot fleetPilot ->
+                    "GAVE UP unlocking '"
+                        ++ fleetPilot
+                        ++ "' after "
+                        ++ String.fromInt askedReadings
+                        ++ " readings. The guns stay held for as long as that lock is there."
+
+                HoldFireOnAnUnverifiedPilot pilot ->
+                    "HOLDING FIRE on '"
+                        ++ pilot
+                        ++ "' -- a pilot on the overview, and with the Fleet window shut this bot"
+                        ++ " cannot tell whether they are a fleetmate. Open it to fire on players again."
+
+                ClearToFire ->
+                    String.fromInt (List.length context.readingFromGameClient.targets)
+                        ++ " locked, none of them a fleet pilot -- clear to fire."
            )
 
 

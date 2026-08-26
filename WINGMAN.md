@@ -41,15 +41,22 @@ nothing to do.
 3. **Break off and rejoin the commander** if this ship's health or the
    incoming damage rate says to, through `retreatToTheCommander`. **Off in the
    shipped settings** — see below.
-4. **Activate the always-on modules** named in `activate-module-always`.
-5. **Act on the fleet broadcast** — in practice only the `Target …` form,
+4. **Unlock a fleet member sitting in the target bar**, through
+   `unlockFleetPilotInTargetBar`. See "Never shooting the fleet" below for why
+   it is this high.
+5. **Activate the always-on modules** named in `activate-module-always`.
+6. **Act on the fleet broadcast** — in practice only the `Target …` form,
    which is the one and only form that reaches a branch. Everything else the
    fleet broadcasts falls into a named wait. See "Live runs".
-6. **Drones assist the commander**, `F` on the locked target as the fallback.
-7. **Fire on whatever is locked**, through `fireOnActiveTarget`.
-8. **Take the acceleration gate**, but only with the overview clear of rats.
-9. **Self-defense**, through `fightPointedRatsOrReturnDrones` — fight back
-   only if a rat has actually pointed this ship, otherwise sit still.
+7. **Drones assist the commander**, `F` on the locked target as the fallback.
+8. **Fire on whatever is locked**, through `fireOnActiveTarget` — unless the
+   friendly fire guard is holding the trigger.
+9. **Orbit the commander** at `orbit-fc-range`, through
+   `orbitTheFleetCommander` (#365).
+10. **Take the acceleration gate**, but only with the overview clear of rats.
+11. **Self-defense**, through `fightPointedRatsOrReturnDrones` — fight back
+    only if a rat has actually pointed this ship, otherwise sit still, and
+    never while the friendly fire guard is holding the trigger.
 
 ### Why the guns are their own arm, below the drones
 
@@ -304,6 +311,114 @@ unions them.
 member list. A wingman that locked and fired on whatever a Target broadcast
 named would have shot her.
 
+## Never shooting the fleet
+
+**It stopped being hypothetical in run 9.** This bot fired `Small Focused Beam
+Laser II` at `Sonya Spodumain[MNRLG](Imperial Navy Slicer)` — a real player,
+named twice by this bot's own "other pilots" line — in two clusters of hits,
+penetrations and grazes about thirty seconds each. #367 is the write-up; what
+landed for it is three guards and a status line, and the third guard is the one
+worth reading twice.
+
+**The trigger refuses on its own, not only the lock.** `fireOnActiveTarget`
+consults `friendlyFireVetoesTheGuns` before it consults `weaponsStep`, and so
+does `fightPointedRatsOrReturnDrones`. Guarding the lock could never have been
+enough: `weaponsStep` reads `targetLocked` and three other facts, none of them
+a name, and two paths put a target in the bar without passing the one fleet
+check that existed — `fightRatsIfShipIsPointed` ctrl-clicks whoever is pointing
+this ship, and a hand-locked target was never asked about at all. Both failures
+now have to coincide before a friendly takes damage.
+
+**The lock bar is scanned every reading.** `unlockFleetPilotInTargetBar` walks
+`readingFromGameClient.targets`, matches each one's rendered text through
+`targetTextsCarryName` — `lockedTargetNamed`'s own matcher, so there is exactly
+one comparison and it cannot disagree with itself — and right-clicks a match
+for the client's `Unlock` entry. That cascade existed only as a sketch inside
+`decideActionInAnomaly`, which nothing on the live decision path calls. It sits
+fourth in the root, above the broadcast arm and above the drones and the guns,
+because each of those answers `Just` for the whole of a fight and an unlock
+below them would be reachable only on the readings nothing is happening.
+
+**An empty membership list is not a clean bill of health.** This is the half
+that makes the rest mean anything. `fleetMemberNames` reads the Fleet window
+and answers `[]` when it is shut — a fleet of forty and a pilot flying alone
+produce the same empty list — and `List.member` over `[]` is `False` for
+everybody. A guard that stopped there would pass every target through while
+leaving a log indistinguishable from one where the check had run, which is
+exactly the silence #367 was filed on. So `friendlyFireStep` asks two questions,
+not one:
+
+| the Fleet window | a locked pilot | a locked NPC |
+|---|---|---|
+| open | checked: shot unless the list names them | shot |
+| **shut** | **held, and the status line says why** | shot |
+
+With membership unverifiable it falls back to a question the client can still
+answer — is the locked thing a *pilot*? — against
+`getNamesOfOtherPilotsInOverview`, which is how this bot independently named
+Sonya twice in the run that shot her. **NPC rats are never in that list**, so
+PvE is untouched; the whole cost of the refusal falls on shooting players with
+the Fleet window shut.
+
+**What the fallback does not close.** `getNamesOfOtherPilotsInOverview` needs
+local chat's user list as well as the overview, and answers `[]` when that
+window is not rendering one — so a reading with the Fleet window shut *and*
+local chat unread falls back to "clear to fire", which is the original hole in
+a narrower place. `Seeing N other pilots in the overview` is printed on every
+reading and is the line to count that from. It has not been counted: no
+`wingman_run*.log` is in this Mac's `~/eve-bot-logs`, and run 9 lives on the
+Windows host that flew it.
+
+**The bound stops the asking and not the refusal.** Every other give-up in this
+file hands the reading back to the arms below it.
+`unlockFleetPilotAskedReadingsBound` (20) does not: a context menu that will
+not open is no reason at all to start shooting the pilot it would have
+unlocked, so `GaveUpUnlockingAFleetPilot` still vetoes the guns.
+
+**And it is loud.** Two clauses on every reading, whether or not anything is
+locked — because run 9's whole problem was that `grep "is in this fleet"` over
+18,974 lines returned nothing, and from outside there was no telling whether
+the guard had never had a candidate or never had a list:
+
+```
+Fleet membership: the Fleet window is open and lists 4 member rows: Greta
+Gneiss, ... Commander: 'Gal Bistot' (fleet window header). Local chat's
+standing icons mark 2: ...
+Friendly fire guard: 3 locked, none of them a fleet pilot -- clear to fire.
+```
+
+```
+Fleet membership: THE FLEET WINDOW IS NOT OPEN, so the member list is
+unverifiable -- an empty one would otherwise read as 'nobody here is a
+fleetmate'. ...
+Friendly fire guard: HOLDING FIRE on 'Sonya Spodumain' -- a pilot on the
+overview, and with the Fleet window shut this bot cannot tell whether they
+are a fleetmate. Open it to fire on players again.
+```
+
+### Local chat's standing icons add names and cannot certify a list
+
+#367 asked whether `chatUserIsKnownFleetmate` — the client's own per-pilot
+`Pilot is in your fleet` hint, already computed, needing no window open —
+should feed membership. **It does now, on the naming side**, through
+`fleetmateNamesFromLocalChat`, and the reason is a hole rather than a
+preference: `getNamesOfOtherPilotsInOverview` *excludes* known fleetmates, so a
+fleetmate the icon does mark would have been absent from `fleetPilotNames` with
+the window shut **and** absent from the overview list the fallback checks —
+the one combination that reads as "a stranger, shoot away".
+
+**It is not what decides whether membership is verifiable**, and that is
+deliberate. `chatUserIsKnownFleetmate` answers `False` for a chat row carrying
+no hint at all — correctly, since absent evidence must not read as "fleetmate"
+— so a fleet whose icons this bot cannot resolve looks exactly like no fleet.
+That is the same collapse the Fleet window's `[]` makes, so it cannot be the
+thing that rules it out. The window's presence is.
+
+**What nobody has measured** is how promptly that icon updates when a pilot
+joins or leaves a fleet mid-session, which is what would be needed before it
+could be trusted as the primary source rather than an additive one. Run 9 is
+two sampled readings, not a series.
+
 ## What is deliberately unfinished
 
 Each of these answers a *named* branch rather than doing something plausible,
@@ -323,11 +438,13 @@ because a bot that guesses reads exactly like one that knows.
 - **The trip home.** It returns a branch naming what is missing rather than
   `Nothing`, because `Nothing` reads as "nothing to do" and would fly past the
   session's end in silence.
-- **`fleetCommanderName`** answers the first pilot in
-  `follow-fleet-broadcast-from`. The header carries the real name beside `Boss`
-  and `Fleet Commander` icons, but which label belongs to which role was not
-  established from one capture, and a wrong answer points the drones at the
-  wrong pilot.
+- **Which header label is the commander.** `fleetCommanderName` now prefers the
+  fleet window's own header and falls back to `follow-fleet-broadcast-from`
+  (#367 unified the three resolvers this bot had grown), but the header read
+  itself is still an inference from shape: the pilot is the one label that
+  carries no parenthesis. The `Boss` and `Fleet Commander` icons are better
+  evidence and which label belongs to which was never established from the one
+  capture.
 
 ## Live runs
 
@@ -590,13 +707,15 @@ Only after this bot has flown. See the top of this file.
 | setting | what it does |
 |---|---|
 | `accept-fleet-invite-from` | Pilot whose invitations to accept, exactly as the client writes it. Repeatable. **This is where the trust is**: accepting means the fleet can warp this ship and call its targets. |
-| `follow-fleet-broadcast-from` | Pilot whose travel broadcasts to follow. Repeatable, matched exactly. Does **not** gate target broadcasts, which carry no sender. **Not yet matched against a broadcast at all — see "First live run".** Currently only feeds `fleetCommanderName`'s fallback guess. |
+| `follow-fleet-broadcast-from` | Pilot whose travel broadcasts to follow. Repeatable, matched exactly. Does **not** gate target broadcasts, which carry no sender. Also the fallback behind `fleetCommanderName` when the fleet window's header names nobody — which since #367 is the only time it is consulted for that. |
 | `activate-module-always` | Tooltip text of modules to keep active. |
 | `home-station` | Station to return to when the session ends. Defaults to `Amarr VIII (Oris) - Emperor Family Academy`. |
 | `assist-fleet-commander` | `no` keeps drones on this ship's own target. Defaults to `yes`. |
 | `run-away-shield-hitpoints-threshold-percent`, `run-away-armor-hitpoints-threshold-percent` | Percentages below which the bot breaks off and warps back to the commander, read through the believed gauge behind a low-water mark. **Both default to -1, which is off.** |
 | `run-away-incoming-damage-threshold` | Hitpoints of incoming damage over a rolling 45-second window, past which the bot breaks off. Needs no HUD gauge. **Defaults to -1, which is off.** |
-| `orbit-in-combat`, `deactivate-module-on-warp` | Inherited, unchanged. |
+| `orbit-fc`, `orbit-fc-range` | Keep this ship orbiting the fleet commander's overview row at the named range (#365, #368). `orbit-fc` defaults to `yes`. |
+| `orbit-in-combat` | Inherited, and **superseded by `orbit-fc` rather than sitting beside it** (#368): with `orbit-fc=yes`, `decideActionInAnomaly` does not issue its own orbit at all. |
+| `deactivate-module-on-warp` | Inherited, unchanged. |
 
 **These live in the launcher's profile, not in the console.** A settings change
 applied through the web console lasts exactly as long as the session: it is
@@ -635,14 +754,29 @@ restart.
     "Warp to Member" cascade is proven for the broadcast arms, not for this
     caller, and the off-grid half has never flown at all (see below). Nothing
     has watched this bot warp to anybody because it was hurt.
-- **Whether `fleetCommanderName` is good enough for the retreat to aim at.** It
-  answers whoever `follow-fleet-broadcast-from` names first, and returns
-  `Nothing` when that setting is unset — in which case the retreat fires, says
-  so, and has nowhere to go. The sibling `fleetCommanderNameFromPanel` reads
-  the fleet window's own header and falls back to the same setting; which of
-  the two this arm should use is a question about the header inference (see
-  "Which header label is the commander") and was left alone rather than changed
-  on the retreat path.
+- **Whether the unified `fleetCommanderName` aims the retreat at the right
+  pilot.** #367 made it prefer the fleet window's header and keep
+  `follow-fleet-broadcast-from` as the fallback, which fixes the case #369
+  flagged — a retreat decided with nowhere to go because the setting was unset
+  — but it also means the retreat now inherits the header inference (see
+  "Which header label is the commander"). Nothing has watched a retreat aim at
+  a header-derived name.
+- **Everything about the friendly fire guard, on a live client.** `elm make`
+  and `test_wingman_holds_fire_on_fleetmates.py` prove the rule and its
+  placement; no client has been watched. What to watch on the first run:
+  whether `Fleet membership:` ever reads `THE FLEET WINDOW IS NOT OPEN` for a
+  session that was in a fleet the whole time (which would mean the guard is
+  running in its degraded mode by default and the launcher profile should open
+  the window), whether `Friendly fire guard: UNLOCKING` is ever followed by the
+  same name still being locked on the next reading, and whether
+  `GAVE UP unlocking` appears at all — which would mean the `Unlock` menu entry
+  is worded differently from the sketch that was ported.
+- **Whether refusing to fire on any overview pilot with the window shut costs
+  a real fight.** The refusal is deliberate and its remedy is documented, but
+  nobody has flown a session where a genuine hostile went unengaged because of
+  it.
+- **How fast local chat's fleetmate icon reacts to a join or a leave.** See
+  "Local chat's standing icons add names and cannot certify a list".
 - **Whether a target broadcast can name something that is not a pilot** — a
   structure, a wreck. Only a pilot has been observed, and the overview match
   would simply fail on anything else, which is the safe direction.
@@ -659,9 +793,11 @@ restart.
   activates weapons on whatever the client considers active; it does not force
   the called target into that slot. In practice a fresh lock becomes active on
   its own, but a ship that already had something else locked may fire on the
-  wrong thing, and nothing has watched this happen either way.
-- **The rest past the broadcast**: unlocking a locked fleet member and the
-  trip home. Neither has flown.
+  wrong thing, and nothing has watched this happen either way. **This was
+  filed as an accuracy caveat and that was the wrong frame** — the same gap is
+  how a fleet member gets shot, which is a safety property. #367 is what
+  closed the safety half; the accuracy half is still open.
+- **The trip home.** Has not flown.
 - **Navigating to the commander when out of system.** `elm make` proves the
   types; nothing has proven a jump. See "Navigating to the fleet commander
   when out of system" above for what to watch on the first run that reaches

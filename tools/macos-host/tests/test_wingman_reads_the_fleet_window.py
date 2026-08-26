@@ -296,12 +296,17 @@ class TheDronesAssistTheCommanderTest(unittest.TestCase):
         with open(WINGMAN_BOT_ELM, encoding="utf-8") as handle:
             cls.source = handle.read()
 
-    def test_the_commander_is_read_from_the_panel_not_hardcoded(self):
+    def test_the_commander_is_read_from_the_client_not_hardcoded(self):
         """saxrat's version named `Gal Bistot` in the source.
 
         A wingman that only ever assists one pilot is a wingman for one fleet.
+        The resolver was `fleetCommanderNameFromPanel` until #367 unified the
+        three of them into `fleetCommanderName`.
         """
-        self.assertIn("fleetCommanderNameFromPanel", self.source)
+        drones = self.source[self.source.index(
+            "dronesAssistTheCommander context ="):]
+        drones = drones[:drones.index("\n\n\n")]
+        self.assertIn("fleetCommanderName context", drones)
         self.assertNotIn('useMenuEntryWithTextContaining "Gal Bistot"', self.source)
 
     def test_it_falls_back_to_engage_target_in_the_same_reading(self):
