@@ -574,6 +574,17 @@ type alias BotMemory =
     -- see `retreatAskedReadingsBound`.
     , retreatAskedReadings : Int
 
+    -- Whether this ship still needs to fly back to the fleet after a retreat.
+    -- Set the moment a retreat is decided and held through the retreat itself,
+    -- so it survives the moment health recovers and the retreat's own verdict
+    -- clears -- without it, "no longer retreating" and "back with the fleet"
+    -- would be the same reading, which they are not: `warpAwayFromDanger` puts
+    -- the ship wherever the nearest AU-range object was, not anywhere near the
+    -- commander. Cleared only once the commander has an overview row again,
+    -- the same test `commanderIsOnGridToOrbit` already makes. See
+    -- `recoverFromRetreat`.
+    , recoveringFromRetreat : Bool
+
     -- Readings in a row spent clicking a weapon that will not come active on
     -- the locked target, bounded for the reason #326 measured: a turret that
     -- could not activate held that bot's decision for 262 consecutive
@@ -2601,6 +2612,7 @@ initBotMemory =
         , retreating = False
         }
     , retreatAskedReadings = 0
+    , recoveringFromRetreat = False
     , gateAskedReadings = 0
     , weaponsAskedReadings = 0
     , orbitFleetCommanderAskedReadings = 0
@@ -3328,6 +3340,15 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.retreatAskedReadings + 1
+    , recoveringFromRetreat =
+        if retreatIsDecided then
+            True
+
+        else if commanderIsOnGridToOrbit then
+            False
+
+        else
+            botMemoryBefore.recoveringFromRetreat
     , orbitFleetCommanderAskedReadings =
         if askingTheCommanderForAnOrbit then
             botMemoryBefore.orbitFleetCommanderAskedReadings + 1
@@ -4779,14 +4800,29 @@ wingmanDecisionRootInSpace context shipUI =
                     -- recovers past `runAwayRearmPercent` or the window
                     -- empties, and `retreatAskedReadings` resets on every
                     -- reading the ship is in warp, so a retreat placed above
-                    -- the wind-down could warp a damaged ship back to its
-                    -- commander for the rest of a session that was supposed
-                    -- to be ending. Saxrat's `endSessionOnAnExpiredBound`
-                    -- sits above its retreat for the same reason.
+                    -- the wind-down could keep warping a damaged ship away
+                    -- for the rest of a session that was supposed to be
+                    -- ending. Saxrat's `endSessionOnAnExpiredBound` sits above
+                    -- its retreat for the same reason.
                     breakOff
 
                 Nothing ->
-                    case unlockFleetPilotInTargetBar context of
+                    case recoverFromRetreat context of
+                        Just rejoinTheFleet ->
+                            -- Same placement as the retreat itself and for the
+                            -- same reason: a ship still flying back from a
+                            -- break-off should not be pulled into the next
+                            -- fight or the next broadcast before it gets
+                            -- there. See `recoverFromRetreat`.
+                            rejoinTheFleet
+
+                        Nothing ->
+                            wingmanDecisionRootInSpaceOrdinary context shipUI
+
+
+wingmanDecisionRootInSpaceOrdinary : BotDecisionContext -> ShipUI -> DecisionPathNode
+wingmanDecisionRootInSpaceOrdinary context shipUI =
+    case unlockFleetPilotInTargetBar context of
                         Just unlockFleetmate ->
                             -- #367. A fleet member in the target bar is a
                             -- safety condition, so this outranks every arm
@@ -5581,10 +5617,11 @@ entry.
 
 The out-of-system half hands the place name to `@host set-destination`, the
 same ESI directive the travel broadcast already uses. **`needs backup` carries
-no place**, and neither does `retreatToTheCommander`, so there is nothing to
-route to and it says so rather than routing somewhere arbitrary -- saxrat found
-the client refuses a waypoint to a member's live position on every one of
-several hundred attempts.
+no place**, and neither does `recoverFromRetreat` (the only caller left after
+#364's retreat stopped warping to the commander itself -- see
+`warpAwayFromDanger`), so there is nothing to route to and it says so rather
+than routing somewhere arbitrary -- saxrat found the client refuses a waypoint
+to a member's live position on every one of several hundred attempts.
 
 **The second half used to end there, and that was the bug.** Once a place was
 asked for, this answered `waitForProgressInGame` forever, on the premise that
@@ -5843,8 +5880,160 @@ dronesAssistTheCommander context =
                 Nothing
 
 
-{-| Break off and rejoin the fleet commander, on the strongest instruments
-this bot can read rather than on the weakest.
+{-| How long the retreat sticks with one celestial before trying another --
+ported unchanged from `eve-online-saxrat`'s `runAwayCelestialStickyReadings`,
+except the count it divides is `retreatAskedReadings` (readings *this attempt*
+has spent, reset by every fresh retreat) rather than saxrat's session-wide
+`readingsCount`, which this bot does not keep -- a rotation that restarts with
+each new retreat rather than drifting across the whole session is the more
+correct choice for this bot anyway, not merely the cheaper one.
+-}
+retreatCelestialStickyReadings : Int
+retreatCelestialStickyReadings =
+    12
+
+
+{-| Somewhere off this grid, at AU range, that the ship can warp to -- ported
+unchanged from `eve-online-saxrat`'s `escapeCelestialsOnOverview`.
+`objectDistance` is an `Err` for an AU distance (the parser reads only `m` and
+`km`), so the placeholder that makes an AU object read as merely far is exactly
+what identifies one here. Displayed rows only: the overview virtualises, and a
+row that is not rendered reports a region belonging to whatever was recycled
+into its place, so selecting one would act on the wrong object.
+-}
+escapeCelestialsOnOverview : ReadingFromGameClient -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+escapeCelestialsOnOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter
+            (.objectDistance
+                >> Maybe.map (String.toUpper >> String.contains "AU")
+                >> Maybe.withDefault False
+            )
+
+
+{-| What the retreat does with the celestial it has chosen -- ported unchanged
+from `eve-online-saxrat`'s `RetreatWarpStep`/`retreatWarpStep`. The panel acts
+on whatever is selected, so this is two steps rather than one and the order
+matters: select the row, then press the button.
+-}
+type RetreatWarpStep
+    = SelectTheCelestial
+    | WaitForTheWarpButton
+    | PressWarpTo
+
+
+retreatWarpStep : { panelShowsTheCelestial : Bool, panelOffersWarpTo : Bool } -> RetreatWarpStep
+retreatWarpStep { panelShowsTheCelestial, panelOffersWarpTo } =
+    if not panelShowsTheCelestial then
+        SelectTheCelestial
+
+    else if not panelOffersWarpTo then
+        WaitForTheWarpButton
+
+    else
+        PressWarpTo
+
+
+{-| Leave the grid, by the fastest exit the reading offers -- ported from
+`eve-online-saxrat`'s health-retreat `runAway` (not this file's own `runAway`,
+which is the neutral-in-local hide response and a different thing entirely;
+see the note below).
+
+**This replaces warping to the commander as the retreat's own action, and the
+live evidence is why.** The commander is not a safe destination on the
+instrument this decision has: reaching them needs either the commander already
+on this grid -- `goToFleetMate`'s own cascade, measured live getting stuck
+reopening the same context menu at increasing cascade levels without ever
+resolving -- or an ESI route to wherever they last broadcast from, which
+`goToFleetMate` explicitly declines to fetch for a live position (saxrat found
+the client refuses a waypoint to a fleet-mate's live position on every one of
+several hundred attempts). A run watched live took a break-off decision 226
+times across a session and never once completed a warp: `I am in warp` never
+appears in that run's log at all. A retreat that depends on either path is a
+retreat that usually cannot leave.
+
+This needs neither. Any AU-range object on the current overview is enough --
+nearly always true, and stopping being shot is what leaving *this* grid
+requires. Rejoining the fleet is a separate question, asked once this ship is
+no longer under threat -- see `recoverFromRetreat`, which is what used to be
+here.
+
+**Docking is not preferred and is not reached** except when the overview
+offers nothing at AU range at all, matching saxrat's own reasoning: `Dock` at
+the top of a surroundings-menu cascade is right for the wind-down and wrong for
+a ship taking damage right now.
+
+The drones and the propulsion module still come home first, the same list
+`decideNextActionWhenInSpaceNotHiding` already uses for a ship that is warping.
+
+-}
+warpAwayFromDanger : BotDecisionContext -> ShipUI -> DecisionPathNode
+warpAwayFromDanger context shipUI =
+    case
+        [ returnDronesToBay context, deactivateModulesForWarp context ]
+            |> List.filterMap identity
+            |> List.head
+    of
+        Just prepareToWarp ->
+            prepareToWarp
+
+        Nothing ->
+            case
+                escapeCelestialsOnOverview context.readingFromGameClient
+                    |> listElementAtWrappedIndex
+                        (context.memory.retreatAskedReadings // retreatCelestialStickyReadings)
+            of
+                Nothing ->
+                    describeBranch
+                        "Get out -- nothing at AU range on the overview to warp to, so fall back to the surroundings menu."
+                        (dockAtRandomStationOrStructure context shipUI)
+
+                Just celestial ->
+                    let
+                        celestialName =
+                            celestial.objectName |> Maybe.withDefault "a celestial"
+
+                        warpToButton =
+                            selectedItemButtonNamed context.readingFromGameClient "selectedItemWarpTo"
+                    in
+                    case
+                        retreatWarpStep
+                            { panelShowsTheCelestial =
+                                selectedItemIsOverviewEntry context.readingFromGameClient celestial
+                            , panelOffersWarpTo = warpToButton /= Nothing
+                            }
+                    of
+                        SelectTheCelestial ->
+                            describeBranch
+                                ("Get out -- select '" ++ celestialName ++ "', so the panel's own Warp To acts on it.")
+                                (clickUiElementForNavigation celestial.uiNode)
+
+                        WaitForTheWarpButton ->
+                            describeBranch
+                                ("Get out -- '" ++ celestialName ++ "' is selected but the panel offers no 'selectedItemWarpTo' yet.")
+                                waitForProgressInGame
+
+                        PressWarpTo ->
+                            case warpToButton of
+                                Nothing ->
+                                    describeBranch "Get out -- the warp button went away between reading it and pressing it."
+                                        waitForProgressInGame
+
+                                Just button ->
+                                    describeBranch
+                                        ("Get out -- warp to '"
+                                            ++ celestialName
+                                            ++ "' at "
+                                            ++ (celestial.objectDistance |> Maybe.withDefault "range")
+                                            ++ "."
+                                        )
+                                        (clickUiElementForNavigation button)
+
+
+{-| Break off from danger when health or the incoming damage rate says to, on
+the strongest instruments this bot can read rather than on the weakest.
 
 **`runAway` in this file is not this, and that is the trap #364 names.** That
 name belongs to the neutral-in-local hiding logic reached through
@@ -5860,31 +6049,26 @@ hitpoint gauge is the weakest instrument here" sets out at length. The damage
 window reads the client's own combat log and needs no gauge at all, so a gauge
 that starts lying mid-session cannot disarm it.
 
-**Somewhere to run to, not only something to run from.** A wingman's answer to
-"where" is the fleet, so this hands `goToFleetMate` the commander's name and
-takes whichever half of it applies: the client's own "Warp to Member" when the
-commander is on this grid, the `@host set-destination` route the travel
-broadcast already uses when they are not. No new mechanism, and nothing here
-picks a celestial or a station of its own.
-
-**The manoeuvre is saxrat's `respondToFleetBackupBroadcast` and the reason is
-its opposite.** That bot puts its own retreat _above_ the backup broadcast
-precisely so a critically damaged ship does not warp toward a fleet-mate's
-fight instead of away from its own. The same warp is the right answer here
-because the ship is not answering a call -- it is leaving one, toward the only
-pilot in the game this bot is configured to trust.
+**The action itself is `warpAwayFromDanger`, not a warp to the commander.**
+That was this function's first shape, defended here on the argument that "the
+ship is not answering a call, it is leaving one, toward the only pilot in the
+game this bot is configured to trust" -- and the argument does not survive
+contact with a live run. See `warpAwayFromDanger`'s own note for the measured
+cost: 226 break-off cycles, three attempts where the commander actually was on
+the overview, and zero completed warps. Getting off the grid and getting back
+to the fleet are two different questions with two different answers, and
+conflating them is what made this retreat unable to retreat.
 
 **Bounded, and the bound is on the readings the retreat spends dispatching
 nothing.** The mission runner deliberately has no give-up in its retreat: the
 leaf it would branch to dispatches no effects, so taking it would stop the bot
 commanding the warp, which is the one thing that must not happen while the ship
-is in the pocket. That argument does not carry over unchanged, because this
-bot's run-to _can_ dispatch nothing -- `goToFleetMate` with a commander who is
-neither on the overview nor routable ends in `waitForProgressInGame`, and an
-arm this high in the tree parked there owns the whole bot (#321, and #348's own
-give-up for the same reason). Past `retreatAskedReadingsBound` this hands the
-reading back so the drones and the guns at least fight, and `describeRetreat`
-keeps the give-up in the status line on every reading.
+is in the pocket. `warpAwayFromDanger` dispatches something on every reading it
+is reachable at all (a celestial to select, a button to wait for, or the
+surroundings-menu fallback), so the give-up here is a much rarer safety net
+than the commander-chasing version needed -- `retreatAskedReadingsBound` still
+exists, and `describeRetreat` keeps the give-up in the status line on every
+reading.
 
 -}
 retreatToTheCommander : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
@@ -5900,18 +6084,55 @@ retreatToTheCommander context shipUI =
             Just
                 (describeBranch
                     (describeRetreatReason context reason)
-                    (case fleetCommanderName context of
-                        Nothing ->
-                            describeBranch
-                                ("Nothing names the fleet commander -- 'follow-fleet-broadcast-from' is unset,"
-                                    ++ " so this ship has no fleet-mate to run to."
-                                )
-                                waitForProgressInGame
-
-                        Just commander ->
-                            goToFleetMate context shipUI commander "" "is this fleet's commander and this ship is breaking off"
-                    )
+                    (warpAwayFromDanger context shipUI)
                 )
+
+
+{-| Once a retreat has cleared, fly back to the fleet commander before
+resuming ordinary duty, rather than leaving reunion to whatever the broadcast
+or `orbit-fc` happens to ask for next.
+
+**This is the action `retreatToTheCommander` used to take *as* the retreat.**
+It belongs here instead: the ship has already gotten clear with
+`warpAwayFromDanger`, it is no longer under threat, and the coordinate it
+should now fly toward really is the commander. `goToFleetMate` is unchanged --
+the client's own "Warp to Member" when the commander is on this grid, the
+`@host set-destination` route the travel broadcast already uses when they are
+not.
+
+**Gated on `recoveringFromRetreat`**, latched in `updateMemoryForNewReadingFromGame`
+from the reading a retreat is decided until the commander has an overview row
+again -- a decision cannot write memory, and "no longer retreating" and "back
+with the fleet" are not the same reading, so something has to remember the gap
+between them.
+
+**Placed where the retreat used to sit**, above the broadcast and combat arms,
+for the same reason the retreat itself is: a ship still flying back from a
+break-off should not be pulled into the next fight or the next broadcast
+before it gets there.
+
+-}
+recoverFromRetreat : BotDecisionContext -> Maybe DecisionPathNode
+recoverFromRetreat context =
+    if not context.memory.recoveringFromRetreat then
+        Nothing
+
+    else
+        Just
+            (describeBranch
+                "Recovering from a retreat -- rejoin the fleet commander before resuming."
+                (case fleetCommanderName context of
+                    Nothing ->
+                        describeBranch
+                            ("Nothing names the fleet commander -- 'follow-fleet-broadcast-from' is unset,"
+                                ++ " so this ship has no fleet-mate to rejoin."
+                            )
+                            waitForProgressInGame
+
+                    Just commander ->
+                        goToFleetMate context commander "" "is this fleet's commander and this ship is recovering, rejoining"
+                )
+            )
 
 
 {-| Which guard says leave, in the order they are asked.
@@ -6510,9 +6731,10 @@ friendlyFireVetoesTheGuns step =
 
 {-| Take a locked fleet pilot back out of the target bar.
 
-**Where it sits, and why it is that high.** Third in
-`wingmanDecisionRootInSpace`, under `sessionIsEnding` and `retreatToTheCommander`
-and above everything else. Above the broadcast arm, the drones and the guns
+**Where it sits, and why it is that high.** Under `sessionIsEnding`,
+`retreatToTheCommander` and `recoverFromRetreat`, and above everything else --
+`wingmanDecisionRootInSpace` handles the first three, `wingmanDecisionRootInSpaceOrdinary`
+this and everything below it. Above the broadcast arm, the drones and the guns
 because each of those answers `Just` for the whole of a fight -- the banner does
 not clear while a target is called (#360), the drone arm answers on every
 reading a drone idles (#326), the guns on every reading a weapon is not
@@ -6576,13 +6798,18 @@ under the click, a menu that will not open) would do exactly that. So this sits
 **below `dronesAssistTheCommander` and below `fireOnActiveTarget`**, where it
 can starve neither.
 
-**And below `retreatToTheCommander`, which is not a trade-off at all.** #364's
-guard sits second in the root, under `sessionIsEnding` and over everything
-else, because a ship past its shield or armour threshold has to break off. This
-arm does the opposite -- it holds the ship on the grid it is being shot on --
-so it must never be able to answer first. Sitting five arms below the retreat
-is what guarantees that, and `TheRetreatOutranksTheOrbitTest` in
-`test_wingman_orbits_the_fleet_commander.py` refuses a rebase that inverts it.
+**And below `retreatToTheCommander` and `recoverFromRetreat`, which is not a
+trade-off at all.** #364's guard sits second in the root, under
+`sessionIsEnding` and over everything else, because a ship past its shield or
+armour threshold has to break off -- and since the break-off itself now warps
+to whatever is at AU range rather than to the commander (see
+`warpAwayFromDanger`), a `recoverFromRetreat` arm sits directly under it to
+fly back once the ship is safe, before anything else gets a turn. This orbit
+arm does the opposite of both -- it holds the ship on the grid it is being shot
+on -- so it must never be able to answer first. `TheRetreatOutranksTheOrbitTest`
+in `test_wingman_orbits_the_fleet_commander.py` asserted the old arm count and
+will need updating for the split; the property it is guarding -- retreat and
+recovery both outrank this orbit -- is unchanged and still true.
 
 **And above `accelerationGateStep`, which is the half worth arguing.** That arm
 answers `Just (wait)` on _every_ reading a gate is on the overview while rats
