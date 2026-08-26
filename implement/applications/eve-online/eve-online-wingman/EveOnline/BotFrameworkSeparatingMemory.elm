@@ -63,10 +63,22 @@ type alias DecisionPathNode =
     Common.DecisionPath.DecisionPathNode EndDecisionPathStructure
 
 
-type alias UpdateMemoryContext =
+type alias UpdateMemoryContext botSettings =
     { timeInMilliseconds : Int
     , readingFromGameClient : ReadingFromGameClient
     , screenshot : ReadingFromGameClientScreenshot
+
+    -- Some readings only mean something against the settings, and the retreat
+    -- is the case this was widened for: a counter measuring how long a decided
+    -- retreat has failed to execute has to be written here, the only place that
+    -- runs on every reading whatever the decision tree is doing, and "is the
+    -- retreat decided" is not a question a reading answers on its own. The
+    -- alternative was a second copy of the retreat's condition over some
+    -- settings-free proxy, which is two definitions of the most consequential
+    -- condition in `Bot.elm` drifting apart -- the mission runner's #136
+    -- rejected exactly that. The copies in `eve-online-saxrat` and
+    -- `eve-online-mission-runner` already carry this field.
+    , botSettings : botSettings
     }
 
 
@@ -102,7 +114,7 @@ type alias BotState botMemory =
 type alias BotConfiguration botSettings botMemory =
     { parseBotSettings : String -> Result String botSettings
     , selectGameClientInstance : Maybe botSettings -> List EveOnline.BotFramework.GameClientProcessSummary -> Result String { selectedProcess : EveOnline.BotFramework.GameClientProcessSummary, report : List String }
-    , updateMemoryForNewReadingFromGame : UpdateMemoryContext -> botMemory -> botMemory
+    , updateMemoryForNewReadingFromGame : UpdateMemoryContext botSettings -> botMemory -> botMemory
     , statusTextFromDecisionContext : StepDecisionContext botSettings botMemory -> String
     , decideNextStep : StepDecisionContext botSettings botMemory -> DecisionPathNode
     }
@@ -161,7 +173,7 @@ processEvent botConfiguration =
 
 
 processEventInBaseFramework :
-    { updateMemoryForNewReadingFromGame : UpdateMemoryContext -> botMemory -> botMemory
+    { updateMemoryForNewReadingFromGame : UpdateMemoryContext botSettings -> botMemory -> botMemory
     , statusTextFromDecisionContext : StepDecisionContext botSettings botMemory -> String
     , decideNextStep : StepDecisionContext botSettings botMemory -> DecisionPathNode
     }
@@ -184,6 +196,7 @@ processEventInBaseFramework config eventContext event stateBefore =
                     { timeInMilliseconds = eventContext.timeInMilliseconds
                     , readingFromGameClient = readingFromGameClient
                     , screenshot = screenshot
+                    , botSettings = eventContext.botSettings
                     }
 
                 botMemory : botMemory

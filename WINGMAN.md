@@ -38,14 +38,17 @@ nothing to do.
    forever until this was added.
 1. **Undock** if docked, through `undockUsingStationWindow`.
 2. **Head home** if the session is ending, through `sessionIsEnding`.
-3. **Activate the always-on modules** named in `activate-module-always`.
-4. **Act on the fleet broadcast** — in practice only the `Target …` form,
+3. **Break off and rejoin the commander** if this ship's health or the
+   incoming damage rate says to, through `retreatToTheCommander`. **Off in the
+   shipped settings** — see below.
+4. **Activate the always-on modules** named in `activate-module-always`.
+5. **Act on the fleet broadcast** — in practice only the `Target …` form,
    which is the one and only form that reaches a branch. Everything else the
    fleet broadcasts falls into a named wait. See "Live runs".
-5. **Drones assist the commander**, `F` on the locked target as the fallback.
-6. **Fire on whatever is locked**, through `fireOnActiveTarget`.
-7. **Take the acceleration gate**, but only with the overview clear of rats.
-8. **Self-defense**, through `fightPointedRatsOrReturnDrones` — fight back
+6. **Drones assist the commander**, `F` on the locked target as the fallback.
+7. **Fire on whatever is locked**, through `fireOnActiveTarget`.
+8. **Take the acceleration gate**, but only with the overview clear of rats.
+9. **Self-defense**, through `fightPointedRatsOrReturnDrones` — fight back
    only if a rat has actually pointed this ship, otherwise sit still.
 
 ### Why the guns are their own arm, below the drones
@@ -80,6 +83,74 @@ One more thing had to change with it: `fightPointedRatsOrReturnDrones`
 recalled the drones whenever the ship was not pointed, which with a called
 target locked would have fought the assist on every reading and left the bot
 pulling drones in and sending them back out for as long as the target lived.
+
+### The health retreat, and why it ships switched off
+
+Until #364 this bot had **no health-based retreat of any kind**. The only place
+it touched a hitpoint gauge was one raw live shield percentage printed in the
+status line, read by no decision. `runAway` in `Bot.elm` reads like saxrat's
+`runAwayIfLowHealth` and is not it — it is the neutral-in-local hiding logic
+reached through `continueIfShouldHide`, and it docks or warps to a configured
+hide location without ever looking at a hitpoint. So the ship flew hour-long
+and six-hour fleet tours with nothing watching its health at all.
+
+`retreatToTheCommander` is the guard, ported from saxrat and the mission runner,
+and it reads **two instruments that fail in different directions**:
+
+- **The two percentage thresholds** read the *believed* gauge behind a
+  low-water mark, never the live reading. CLAUDE.md's "Retreating: the HUD
+  hitpoint gauge is the weakest instrument here" is the full argument; the
+  short version is that the gauge is scraped out of the client's live memory
+  and has produced `2132822%` and, worse, a spurious `0%` that clears every
+  threshold at once. `believed` is the healthier of the last two believable
+  readings, so a drop has to survive a second look. It delays a retreat by one
+  reading; it cannot suppress one.
+- **The damage window** sums the client's own combat log over a rolling 45
+  seconds and needs no gauge, which is the point of it: a HUD that starts lying
+  mid-session cannot disarm it. The verdict is latched in the memory update and
+  released only by a window that is completely empty — a live comparison would
+  cancel its own retreat, since the window starts draining the moment the ship
+  warps clear.
+
+**Where it runs to is the fleet.** It hands `goToFleetMate` the commander's
+name, which is the mechanism the broadcast arms already use: "Warp to Member"
+when the commander is on this grid, `@host set-destination` when they are not.
+Nothing new was invented for it, and it picks no celestial or station of its
+own. That manoeuvre is exactly the one saxrat's retreat is placed *above*
+`respondToFleetBackupBroadcast` to prevent — a damaged ship warping toward
+someone else's fight. The difference is the reason: this ship is not answering
+a call, it is leaving one.
+
+**Where it sits: below `sessionIsEnding`, above everything that fights.** Every
+arm below it answers `Just` for the whole of a fight — the target banner does
+not clear (#360), the drone arm answers whenever a drone idles (#326), the guns
+answer whenever a weapon is not cycling — and the first arm to answer ends the
+reading. A retreat under any of them is reachable only on the readings the
+fleet is doing nothing, which is every reading except the ones it exists for.
+It stays below `sessionIsEnding` because that is the only arm here carrying a
+hard deadline (#350, and `tripHomeSecondsPastSessionEnd` bounding the trip home
+past it), and a latched retreat above it could warp a damaged ship back to its
+commander for the rest of a session that was supposed to be over.
+
+**Bounded by `retreatAskedReadingsBound` (36 readings).** The mission runner
+deliberately has *no* give-up in its retreat, because the leaf it would branch
+to dispatches no effects and taking it would stop the bot commanding the warp.
+That argument does not carry over unchanged: this bot's run-to can itself
+dispatch nothing, since `goToFleetMate` with a commander who is neither on the
+overview nor routable ends in a wait, and an arm this high in the tree parked
+there owns the whole bot (#321). Past the bound the arm hands the reading back
+so the drones and the guns at least fight, and the status line carries the
+give-up on every reading.
+
+**All three thresholds default to `-1`, which is off, and that is the point of
+this entry.** A threshold is a fact about a hull. Saxrat's numbers — armour 70,
+incoming damage 3500 — were calibrated against sixteen recorded sessions of an
+Omen Navy Issue, and its shield threshold is `-1` precisely *because* that hull
+was measured and found to rest near 0% shield. **There is no recorded wingman
+corpus anywhere**, so carrying any of those numbers here would be a guess
+wearing a measurement's clothes. What ships is the mechanism, disarmed, with
+`Retreat: DISARMED` on the status line of every reading so a run that was never
+armed cannot be mistaken for a healthy one.
 
 ## The fleet window, as the client actually draws it
 
@@ -133,6 +204,12 @@ copy of `EveOnline.BotFrameworkSeparatingMemory` was extended to parameterize
 not, so the latch is computed unfiltered by `follow-fleet-broadcast-from` and
 permission is checked only where the memory update cannot reach — in
 `fleetTravelBroadcast` itself, at decision time.
+
+**That last difference is gone as of #364.** This copy now carries
+`botSettings` too, because the retreat's give-up counter has to be written in
+the memory update and "is the retreat decided" is not a question a reading
+answers on its own. The travel latch was left exactly as it is: it works, and
+moving the permission check is a change with its own evidence to gather.
 
 Verified live end to end: the banner `Gal Bistot: Travel to Bhizheba` (no
 timestamp — the marker is an infix, matched the same way on the timestamped
@@ -517,6 +594,8 @@ Only after this bot has flown. See the top of this file.
 | `activate-module-always` | Tooltip text of modules to keep active. |
 | `home-station` | Station to return to when the session ends. Defaults to `Amarr VIII (Oris) - Emperor Family Academy`. |
 | `assist-fleet-commander` | `no` keeps drones on this ship's own target. Defaults to `yes`. |
+| `run-away-shield-hitpoints-threshold-percent`, `run-away-armor-hitpoints-threshold-percent` | Percentages below which the bot breaks off and warps back to the commander, read through the believed gauge behind a low-water mark. **Both default to -1, which is off.** |
+| `run-away-incoming-damage-threshold` | Hitpoints of incoming damage over a rolling 45-second window, past which the bot breaks off. Needs no HUD gauge. **Defaults to -1, which is off.** |
 | `orbit-in-combat`, `deactivate-module-on-warp` | Inherited, unchanged. |
 
 **These live in the launcher's profile, not in the console.** A settings change
@@ -528,6 +607,42 @@ restart.
 
 ## Not verified
 
+- **Every number the health retreat would need (#364).** The mechanism is
+  built and proven by `elm make` and by
+  `test_wingman_retreats_to_the_commander.py`; **none of its thresholds has a
+  measurement behind it**, which is why all three ship at `-1`. What a run has
+  to record before any of them can be set:
+  - **What this hull's shield actually does under fire.** Saxrat's hull rests
+    at or below 5% shield on 60% of the readings it takes under fire, with the
+    armour still at 98-100%, which is why its shield threshold is `-1` rather
+    than a number — 0% shield is that ship's resting condition, not a warning.
+    Whether that is true here is a fact about *this* hull and nobody has looked.
+    Watch `Believed hitpoints:` in the status line across a fought run.
+  - **What the armour threshold should be**, from the same series. Saxrat's 70
+    was set from a corpus of fourteen runs; there is no wingman equivalent.
+  - **The incoming-damage number.** Saxrat's 3500 sits between the 3114 the
+    worst surviving session absorbed and the 4101 the session it lost the ship
+    in peaked at — *on an Omen Navy Issue*. Carrying it to another hull fails
+    silently in whichever direction that hull is different. Watch
+    `Incoming damage: N/off over 45 s` and take the peak from a fought run.
+  - **Whether `retreatAskedReadingsBound` (36) is right here.** Borrowed from
+    the mission runner's `retreatNotExecutingAlarmReadings`, the same way
+    `accelerationGateRefusesThisShipTicks` borrowed its 40. That bot has
+    recorded retreats of 30, 89 and 142 readings that eventually worked, so
+    this bound will sometimes hand back a retreat that was still going to
+    succeed. Watch for `Retreat: GAVE UP` in the status line.
+  - **Whether the retreat's own warp works at all.** `goToFleetMate`'s
+    "Warp to Member" cascade is proven for the broadcast arms, not for this
+    caller, and the off-grid half has never flown at all (see below). Nothing
+    has watched this bot warp to anybody because it was hurt.
+- **Whether `fleetCommanderName` is good enough for the retreat to aim at.** It
+  answers whoever `follow-fleet-broadcast-from` names first, and returns
+  `Nothing` when that setting is unset — in which case the retreat fires, says
+  so, and has nowhere to go. The sibling `fleetCommanderNameFromPanel` reads
+  the fleet window's own header and falls back to the same setting; which of
+  the two this arm should use is a question about the header inference (see
+  "Which header label is the commander") and was left alone rather than changed
+  on the retreat path.
 - **Whether a target broadcast can name something that is not a pilot** — a
   structure, a wreck. Only a pilot has been observed, and the overview match
   would simply fail on anything else, which is the safe direction.
