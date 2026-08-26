@@ -121,14 +121,19 @@ forward, and verifies it got there before clicking.
 
 ### The easy path
 
-Two bots have launcher scripts that carry known-good settings:
+Three bots have launcher scripts:
 
 ```
 cd tools/macos-host
 ./run_mission.sh          # eve-online-mission-runner
 ./run_saxrat.sh           # eve-online-saxrat
+./run_autopilot.sh        # eve-online-warp-to-0-autopilot
 ./run_mission.sh --help   # this bot's settings, and the host's flags
 ```
+
+The first two carry known-good settings. `run_autopilot.sh` deliberately
+carries none: every setting that bot has is optional, so the useful default is
+none at all — it simply travels the route already set in the game client.
 
 `--help` is worth reading before the first run: it prints the bot's own
 documented settings, any settings its `parseBotSettings` accepts that the
@@ -136,8 +141,26 @@ documentation omits, the defaults the launcher passes, and the host's flags.
 It is answered before the launcher's one-bot-at-a-time guard runs, so asking
 never disturbs a session already going.
 
-Both launchers pass `--execute-input`, so they drive the real mouse and
-keyboard, and both kill any bot session already running first.
+All three pass `--execute-input`, so they drive the real mouse and keyboard,
+and each kills any bot session already running first.
+
+#### Starting the autopilot from Spotlight
+
+`./install_autopilot_app.sh` installs `~/Applications/Autopilot.app`, so
+Cmd-Space "autopilot" starts a trip on whatever route is set in game. Run it
+once, and again after moving this checkout — the path to `run_autopilot.sh` is
+baked into the bundle at install time. `--uninstall` removes it.
+
+**The bundle asks Terminal to run the script rather than running the bot
+itself**, and that is not incidental. Screen Recording and Accessibility are
+granted per application; an app that ran `botlab_host.py` directly would be a
+new application to macOS, would need its own two grants, and until it had them
+would launch, read nothing useful and click nothing — the silent failure
+described under "Nothing happens with `--execute-input`" below. Going through
+Terminal runs the bot under the application whose grants are already in place.
+The visible window is the second reason: this bot takes the real mouse, so
+being able to watch it and stop it with Ctrl-C matters more than a tidy
+launch.
 
 ### The general path
 

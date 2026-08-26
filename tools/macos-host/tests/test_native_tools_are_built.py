@@ -35,12 +35,26 @@ MACOS_HOST = os.path.dirname(HERE)
 REPO = os.path.dirname(os.path.dirname(MACOS_HOST))
 BUILD_TOOLS = os.path.join(MACOS_HOST, "build_tools.sh")
 MACOS_MD = os.path.join(REPO, "MACOS.md")
-LAUNCHERS = ("run_mission.sh", "run_saxrat.sh")
-
-
 def source_of(path):
     with open(path, encoding="utf-8") as handle:
         return handle.read()
+
+
+def launchers():
+    """Every bot launcher in `tools/macos-host`.
+
+    Computed from the filesystem for the same reason `tool_directories` below
+    is: a fourth launcher must not be able to appear without the cases in
+    `TheLaunchersCallIt` noticing. A hardcoded list would have let one ship
+    that never rebuilds the native tools, which is exactly the state those
+    cases replaced.
+    """
+    return tuple(sorted(
+        name for name in os.listdir(MACOS_HOST)
+        if name.startswith("run_") and name.endswith(".sh")))
+
+
+LAUNCHERS = launchers()
 
 
 def tool_directories():
