@@ -108,6 +108,21 @@ def step(setting_is_yes=True, commander_on_grid=True, warping=False,
                stray_window, asked))
 
 
+def wingman_root_body(source):
+    """Both halves of the in-space decision root, spliced in source order.
+
+    #378 split it: `wingmanDecisionRootInSpace` keeps only the arms that take
+    the ship off the grid, and `wingmanDecisionRootInSpaceOrdinary` holds the
+    rest. The orbit is in the second half and the retreat in the first, and
+    the ordering between them is the whole point of this file's last case.
+    """
+    root = source[source.index("wingmanDecisionRootInSpace context shipUI ="):]
+    ordinary = root[root.index(
+        "wingmanDecisionRootInSpaceOrdinary context shipUI ="):]
+    return (root[:root.index("\n\n\n")] + "\n"
+            + ordinary[:ordinary.index("\n\n\n")])
+
+
 def elm_bool(value):
     return "True" if value else "False"
 
@@ -578,10 +593,7 @@ class TheRetreatOutranksTheOrbitTest(unittest.TestCase):
         """Not merely 'above the orbit'. Everything between `sessionIsEnding`
         and the retreat would be an arm that can hold a reading away from it,
         so the two have to stay adjacent."""
-        root = self.source[self.source.index(
-            "wingmanDecisionRootInSpace context shipUI ="):]
-        root = root[:root.index("\n\n\n")]
-        arms = re.findall(r"case (\w+) context", root)
+        arms = re.findall(r"case (\w+) context", wingman_root_body(self.source))
         self.assertEqual(arms[:2],
                          ["sessionIsEnding", "retreatToTheCommander"])
         self.assertIn("orbitTheFleetCommander", arms)

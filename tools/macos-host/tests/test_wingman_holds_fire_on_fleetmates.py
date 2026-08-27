@@ -400,6 +400,21 @@ class TheMembershipSourceIsReadTest(unittest.TestCase):
             [True])
 
 
+def wingman_root_body(source):
+    """Both halves of the in-space decision root, spliced in source order.
+
+    #378 split it: `wingmanDecisionRootInSpace` keeps only the arms that take
+    the ship off the grid -- the session wind-down, the retreat, the recovery
+    -- and hands every other arm, the unlock included, to
+    `wingmanDecisionRootInSpaceOrdinary`.
+    """
+    root = source[source.index("wingmanDecisionRootInSpace context shipUI ="):]
+    ordinary = root[root.index(
+        "wingmanDecisionRootInSpaceOrdinary context shipUI ="):]
+    return (root[:root.index("\n\n\n")] + "\n"
+            + ordinary[:ordinary.index("\n\n\n")])
+
+
 def collapsed(text):
     """Whitespace flattened, so `elm-format` cannot break a structural check."""
     return re.sub(r"\s+", " ", text)
@@ -453,19 +468,21 @@ class TheGuardsAreOnEveryFiringPathTest(unittest.TestCase):
         """Each arm below answers `Just` for the whole of a fight -- the
         broadcast banner does not clear (#360), the drone arm answers on every
         idle drone (#326), the guns on every silent weapon. An unlock under any
-        of them is reachable only on the readings nothing is happening."""
-        root = self.source[self.source.index(
-            "wingmanDecisionRootInSpace context shipUI ="):]
-        root = root[:root.index("\n\n\n")]
-        arms = re.findall(r"case (\w+) context", root)
+        of them is reachable only on the readings nothing is happening.
+
+        The three arms allowed above it all end with the ship leaving, which
+        settles an engagement more thoroughly than an unlock does: the session
+        wind-down, #364's retreat, and #378's recovery flight back.
+        """
+        arms = re.findall(r"case (\w+) context", wingman_root_body(self.source))
         self.assertEqual(
-            arms[:3],
-            ["sessionIsEnding", "retreatToTheCommander",
+            arms[:4],
+            ["sessionIsEnding", "retreatToTheCommander", "recoverFromRetreat",
              "unlockFleetPilotInTargetBar"])
         for below in ["activateAlwaysOnModules", "actOnFleetBroadcast",
                       "dronesAssistTheCommander", "fireOnActiveTarget",
                       "accelerationGateStep"]:
-            self.assertGreater(arms.index(below), 2, below)
+            self.assertGreater(arms.index(below), 3, below)
 
     def test_the_unlock_counter_is_advanced_by_the_shipped_rule(self):
         """#102: a counter advanced by one condition and read by another is two
@@ -522,17 +539,37 @@ class TheThreeCommanderResolversAreTwoTest(unittest.TestCase):
         self.assertNotIn("fleetCommanderNameFromPanel :", self.source)
         self.assertNotIn("fleetCommanderNameFromPanel context", self.source)
 
-    def test_the_retreat_and_the_drones_ask_the_same_question(self):
+    def test_every_arm_that_names_a_commander_asks_the_same_question(self):
         """They ran to different resolvers, so a reading where the window and
-        the setting disagreed had the two arms about different ships."""
+        the setting disagreed had the arms about different ships.
+
+        #364's retreat was one of the two arms here until #378 took the
+        commander out of it: it now warps away from danger and names nobody,
+        and the flight back is `recoverFromRetreat`. The property did not go
+        with it -- the two arms that still resolve a commander on the decision
+        path have to agree, or a ship rejoins one pilot while its drones assist
+        another. The retreat is asserted to have left rather than dropped from
+        the case, since re-resolving a commander in there is exactly the
+        regression #377 measured.
+
+        `fleetCommanderNameFromFleetWindowHeader` is the reading-only half and
+        belongs to `updateMemoryForNewReadingFromGame` and the status line.
+        A decision arm reaching it directly is the divergence coming back.
+        """
         retreat = self.source[self.source.index(
             "\nretreatToTheCommander context"):]
         retreat = retreat[:retreat.index("\n\n\n")]
+        recover = self.source[self.source.index(
+            "\nrecoverFromRetreat context"):]
+        recover = recover[:recover.index("\n\n\n")]
         drones = self.source[self.source.index(
             "dronesAssistTheCommander context ="):]
         drones = drones[:drones.index("\n\n\n")]
-        self.assertIn("fleetCommanderName context", retreat)
+        self.assertIn("fleetCommanderName context", recover)
         self.assertIn("fleetCommanderName context", drones)
+        self.assertNotIn("fleetCommanderName", retreat)
+        for arm in [recover, drones]:
+            self.assertNotIn("fleetCommanderNameFromFleetWindowHeader", arm)
 
 
 if __name__ == "__main__":

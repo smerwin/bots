@@ -59,6 +59,22 @@ TARGET_HISTORY = "02:59:30 - Target Heather Hemorphite (Tristan)"
 MEMBER_ROW = "Greta Gneiss"
 
 
+def wingman_root_body(source):
+    """Both halves of the in-space decision root, spliced in source order.
+
+    #378 split it: `wingmanDecisionRootInSpace` keeps only the arms that take
+    the ship off the grid -- the session wind-down, the retreat, the recovery
+    -- and hands every other arm to `wingmanDecisionRootInSpaceOrdinary`. The
+    orderings pinned against this text are between arms and never were between
+    halves, so they are read across both.
+    """
+    root = source[source.index("wingmanDecisionRootInSpace context shipUI ="):]
+    ordinary = root[root.index(
+        "wingmanDecisionRootInSpaceOrdinary context shipUI ="):]
+    return (root[:root.index("\n\n\n")] + "\n"
+            + ordinary[:ordinary.index("\n\n\n")])
+
+
 class WingmanRepl(ElmRepl):
     def __init__(self, **kwargs):
         kwargs.setdefault("prefix", "wingman-fleet-repl-")
@@ -320,11 +336,10 @@ class TheDronesAssistTheCommanderTest(unittest.TestCase):
         """#326: a turret that could not activate held the decision on the
         other arm of that `case` for 262 consecutive readings, drones out and
         idle, nothing landing. So the drone arm must not sit behind it."""
-        root = self.source[self.source.index("wingmanDecisionRootInSpace context shipUI ="):]
-        root = root[:root.index("\n\n\n")]
+        root = wingman_root_body(self.source)
         self.assertLess(
-            root.index("dronesAssistTheCommander"),
-            root.index("fightPointedRatsOrReturnDrones"),
+            root.index("case dronesAssistTheCommander context"),
+            root.index("fightPointedRatsOrReturnDrones context"),
             "the drone arm is behind the inherited combat arm again")
 
     def test_the_assist_can_be_turned_off(self):
@@ -404,15 +419,14 @@ class TheAccelerationGateStepTest(unittest.TestCase):
             [True])
 
     def test_it_sits_after_the_drone_arm_and_before_the_inherited_combat_arm(self):
-        root = self.source[self.source.index("wingmanDecisionRootInSpace context shipUI ="):]
-        root = root[:root.index("\n\n\n")]
+        root = wingman_root_body(self.source)
         self.assertLess(
-            root.index("dronesAssistTheCommander"),
-            root.index("accelerationGateStep"),
+            root.index("case dronesAssistTheCommander context"),
+            root.index("case accelerationGateStep context"),
             "the gate arm must not preempt drones still assisting on a live grid")
         self.assertLess(
-            root.index("accelerationGateStep"),
-            root.index("fightPointedRatsOrReturnDrones"))
+            root.index("case accelerationGateStep context"),
+            root.index("fightPointedRatsOrReturnDrones context"))
 
     def test_the_ask_is_reported_in_the_status_line(self):
         # #343's own review caught a single "waiting" line covering two
@@ -435,24 +449,24 @@ class TheModuleActivationSplitTest(unittest.TestCase):
         with open(WINGMAN_BOT_ELM, encoding="utf-8") as handle:
             cls.source = handle.read()
 
-    def _wingman_root_body(self):
-        root = self.source[self.source.index("wingmanDecisionRootInSpace context shipUI ="):]
-        return root[:root.index("\n\n\n")]
-
     def test_module_activation_is_its_own_step_ahead_of_the_broadcast(self):
-        root = self._wingman_root_body()
-        self.assertIn("activateAlwaysOnModules", root)
-        self.assertIn("actOnFleetBroadcast", root)
+        # The needles stop at the scrutinee on purpose: the retreat's own
+        # comment in the first half of the root names `activateAlwaysOnModules`
+        # in prose, and a bare-name search would read that mention instead of
+        # the arm and pass whatever the real order was.
+        root = wingman_root_body(self.source)
+        self.assertIn("case activateAlwaysOnModules context", root)
+        self.assertIn("case actOnFleetBroadcast context", root)
         self.assertLess(
-            root.index("activateAlwaysOnModules"),
-            root.index("actOnFleetBroadcast"),
+            root.index("case activateAlwaysOnModules context"),
+            root.index("case actOnFleetBroadcast context"),
             "module activation is not ahead of the broadcast")
 
     def test_the_wingman_s_own_root_no_longer_reaches_anomaly_hunting(self):
         """`enterAnomaly` / `decideActionInAnomaly` still exist in this file,
         for the inherited `anomalyBotDecisionRoot` -- but nothing reachable
         from `wingmanDecisionRootInSpace` may call them."""
-        root = self._wingman_root_body()
+        root = wingman_root_body(self.source)
         self.assertNotIn("enterAnomaly", root)
         self.assertNotIn("decideActionInAnomaly", root)
         self.assertNotIn("modulesToActivateAlwaysActivated", root)

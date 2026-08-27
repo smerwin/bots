@@ -363,18 +363,30 @@ class TheRetreatIsReachableTest(unittest.TestCase):
             "case retreatToTheCommander context")
         self.assertLess(ending, retreat)
 
-    def test_the_retreat_runs_to_the_fleet_and_not_to_the_hide_logic(self):
-        """`runAway` in this file is the neutral-in-local hiding logic. The
-        retreat must not reach it -- it docks or warps to a configured hide
-        location, which is not the fleet and is not what a wingman needs."""
+    def test_the_retreat_gets_off_the_grid_and_does_not_fly_to_the_commander(self):
+        """#377 measured what this case used to require. The retreat escaped by
+        warping *to the fleet commander*, and over a six-hour run `I am in warp`
+        appeared zero times while the give-up cycled 226 times: the commander
+        has an overview row only when they are on this grid, which is the grid
+        the ship is being shot on and the one it is trying to leave. Getting
+        clear and getting back to the fleet are two questions, and answering
+        them with one warp is what left this retreat unable to retreat.
+
+        So the escape is `warpAwayFromDanger` -- a celestial at AU range, and
+        `dockAtRandomStationOrStructure` when the overview offers nothing --
+        and rejoining is `recoverFromRetreat`'s job afterwards. `goToFleetMate`
+        must not appear here at all, or the old design is back.
+
+        `runAway` stays excluded for #364's original reason, which is
+        untouched: that name belongs to the neutral-in-local hiding logic,
+        which warps to a configured hide location and reads no hitpoint.
+        """
         body = self.source[
             self.source.index("\nretreatToTheCommander context"):]
         body = body[:body.index("\n\n\n")]
-        self.assertIn("goToFleetMate context", body)
-        self.assertIn("commander", body)
-        self.assertIn("fleetCommanderName context", body)
+        self.assertIn("warpAwayFromDanger context", body)
+        self.assertNotIn("goToFleetMate", body)
         self.assertNotIn("runAway ", body)
-        self.assertNotIn("dockAtRandomStationOrStructure", body)
 
     def test_the_hide_logic_still_owns_its_own_name(self):
         """The collision #364 warns about, asserted rather than assumed: the
