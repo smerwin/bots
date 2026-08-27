@@ -4807,7 +4807,7 @@ wingmanDecisionRootInSpace context shipUI =
                     breakOff
 
                 Nothing ->
-                    case recoverFromRetreat context of
+                    case recoverFromRetreat context shipUI of
                         Just rejoinTheFleet ->
                             -- Same placement as the retreat itself and for the
                             -- same reason: a ship still flying back from a
@@ -4823,106 +4823,106 @@ wingmanDecisionRootInSpace context shipUI =
 wingmanDecisionRootInSpaceOrdinary : BotDecisionContext -> ShipUI -> DecisionPathNode
 wingmanDecisionRootInSpaceOrdinary context shipUI =
     case unlockFleetPilotInTargetBar context of
-                        Just unlockFleetmate ->
-                            -- #367. A fleet member in the target bar is a
-                            -- safety condition, so this outranks every arm
-                            -- that would rather be doing something else --
-                            -- each of which answers `Just` for the whole of a
-                            -- fight, which is precisely when a friendly is in
-                            -- there. Below the retreat only: a ship past its
-                            -- threshold leaves the grid, which ends the
-                            -- engagement more thoroughly than an unlock does.
-                            -- The full argument is in
-                            -- `unlockFleetPilotInTargetBar`.
-                            unlockFleetmate
+        Just unlockFleetmate ->
+            -- #367. A fleet member in the target bar is a
+            -- safety condition, so this outranks every arm
+            -- that would rather be doing something else --
+            -- each of which answers `Just` for the whole of a
+            -- fight, which is precisely when a friendly is in
+            -- there. Below the retreat only: a ship past its
+            -- threshold leaves the grid, which ends the
+            -- engagement more thoroughly than an unlock does.
+            -- The full argument is in
+            -- `unlockFleetPilotInTargetBar`.
+            unlockFleetmate
+
+        Nothing ->
+            case activateAlwaysOnModules context of
+                Just activate ->
+                    activate
+
+                Nothing ->
+                    case actOnFleetBroadcast context shipUI of
+                        Just actOnBroadcast ->
+                            actOnBroadcast
 
                         Nothing ->
-                            case activateAlwaysOnModules context of
-                                Just activate ->
-                                    activate
+                            case dronesAssistTheCommander context of
+                                Just assist ->
+                                    assist
 
                                 Nothing ->
-                                    case actOnFleetBroadcast context shipUI of
-                                        Just actOnBroadcast ->
-                                            actOnBroadcast
+                                    case fireOnActiveTarget context of
+                                        Just fire ->
+                                            -- Strictly below the drone arm and
+                                            -- strictly above the gate: a locked
+                                            -- target means a fight, and a bot
+                                            -- that would rather take a gate
+                                            -- than shoot what the commander
+                                            -- called has left the fleet a ship
+                                            -- short in the pocket it just left.
+                                            fire
 
                                         Nothing ->
-                                            case dronesAssistTheCommander context of
-                                                Just assist ->
-                                                    assist
+                                            case orbitTheFleetCommander context shipUI of
+                                                Just orbitTheCommander ->
+                                                    -- #365. Below the drone arm
+                                                    -- and below the guns so it
+                                                    -- can starve neither
+                                                    -- (#326), and above the
+                                                    -- gate so the gate arm's
+                                                    -- own "rats are still on
+                                                    -- the grid" wait cannot
+                                                    -- starve it in the one
+                                                    -- state it is most for.
+                                                    -- Below #364's retreat by
+                                                    -- the whole tree: a damaged
+                                                    -- ship breaks off rather
+                                                    -- than holds station, so
+                                                    -- nothing that keeps this
+                                                    -- ship on the grid may ever
+                                                    -- answer before that arm
+                                                    -- does. The full argument
+                                                    -- is in
+                                                    -- `orbitTheFleetCommander`.
+                                                    orbitTheCommander
 
                                                 Nothing ->
-                                                    case fireOnActiveTarget context of
-                                                        Just fire ->
-                                                            -- Strictly below the drone arm and
-                                                            -- strictly above the gate: a locked
-                                                            -- target means a fight, and a bot
-                                                            -- that would rather take a gate
-                                                            -- than shoot what the commander
-                                                            -- called has left the fleet a ship
-                                                            -- short in the pocket it just left.
-                                                            fire
+                                                    case accelerationGateStep context of
+                                                        Just takeTheGate ->
+                                                            -- #348. Sits after the
+                                                            -- drone arm and after the
+                                                            -- guns, never before
+                                                            -- them, so a gate this
+                                                            -- bot can see is never
+                                                            -- taken while drones are
+                                                            -- still owed a command on
+                                                            -- a live grid -- the same
+                                                            -- ordering argument #326
+                                                            -- established for the
+                                                            -- drone arm itself.
+                                                            takeTheGate
 
                                                         Nothing ->
-                                                            case orbitTheFleetCommander context shipUI of
-                                                                Just orbitTheCommander ->
-                                                                    -- #365. Below the drone arm
-                                                                    -- and below the guns so it
-                                                                    -- can starve neither
-                                                                    -- (#326), and above the
-                                                                    -- gate so the gate arm's
-                                                                    -- own "rats are still on
-                                                                    -- the grid" wait cannot
-                                                                    -- starve it in the one
-                                                                    -- state it is most for.
-                                                                    -- Below #364's retreat by
-                                                                    -- the whole tree: a damaged
-                                                                    -- ship breaks off rather
-                                                                    -- than holds station, so
-                                                                    -- nothing that keeps this
-                                                                    -- ship on the grid may ever
-                                                                    -- answer before that arm
-                                                                    -- does. The full argument
-                                                                    -- is in
-                                                                    -- `orbitTheFleetCommander`.
-                                                                    orbitTheCommander
-
-                                                                Nothing ->
-                                                                    case accelerationGateStep context of
-                                                                        Just takeTheGate ->
-                                                                            -- #348. Sits after the
-                                                                            -- drone arm and after the
-                                                                            -- guns, never before
-                                                                            -- them, so a gate this
-                                                                            -- bot can see is never
-                                                                            -- taken while drones are
-                                                                            -- still owed a command on
-                                                                            -- a live grid -- the same
-                                                                            -- ordering argument #326
-                                                                            -- established for the
-                                                                            -- drone arm itself.
-                                                                            takeTheGate
-
-                                                                        Nothing ->
-                                                                            {- The inherited
-                                                                               combat-anomaly-bot arm
-                                                                               is gone from here
-                                                                               (#349): it hunted
-                                                                               anomalies on an idle
-                                                                               grid, which is not
-                                                                               following a commander.
-                                                                               What remains is
-                                                                               self-defense only --
-                                                                               and it is now genuinely
-                                                                               the last resort it
-                                                                               reads as, because
-                                                                               `fireOnActiveTarget`
-                                                                               above it fires on
-                                                                               anything locked whether
-                                                                               or not a rat has
-                                                                               pointed this ship.
-                                                                            -}
-                                                                            fightPointedRatsOrReturnDrones context shipUI
+                                                            {- The inherited
+                                                               combat-anomaly-bot arm
+                                                               is gone from here
+                                                               (#349): it hunted
+                                                               anomalies on an idle
+                                                               grid, which is not
+                                                               following a commander.
+                                                               What remains is
+                                                               self-defense only --
+                                                               and it is now genuinely
+                                                               the last resort it
+                                                               reads as, because
+                                                               `fireOnActiveTarget`
+                                                               above it fires on
+                                                               anything locked whether
+                                                               or not a rat has
+                                                               pointed this ship.
+                                                            -}
+                                                            fightPointedRatsOrReturnDrones context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
@@ -5882,7 +5882,7 @@ dronesAssistTheCommander context =
 
 {-| How long the retreat sticks with one celestial before trying another --
 ported unchanged from `eve-online-saxrat`'s `runAwayCelestialStickyReadings`,
-except the count it divides is `retreatAskedReadings` (readings *this attempt*
+except the count it divides is `retreatAskedReadings` (readings _this attempt_
 has spent, reset by every fresh retreat) rather than saxrat's session-wide
 `readingsCount`, which this bot does not keep -- a rotation that restarts with
 each new retreat rather than drifting across the whole session is the more
@@ -5955,7 +5955,7 @@ appears in that run's log at all. A retreat that depends on either path is a
 retreat that usually cannot leave.
 
 This needs neither. Any AU-range object on the current overview is enough --
-nearly always true, and stopping being shot is what leaving *this* grid
+nearly always true, and stopping being shot is what leaving _this_ grid
 requires. Rejoining the fleet is a separate question, asked once this ship is
 no longer under threat -- see `recoverFromRetreat`, which is what used to be
 here.
@@ -6092,7 +6092,7 @@ retreatToTheCommander context shipUI =
 resuming ordinary duty, rather than leaving reunion to whatever the broadcast
 or `orbit-fc` happens to ask for next.
 
-**This is the action `retreatToTheCommander` used to take *as* the retreat.**
+**This is the action `retreatToTheCommander` used to take _as_ the retreat.**
 It belongs here instead: the ship has already gotten clear with
 `warpAwayFromDanger`, it is no longer under threat, and the coordinate it
 should now fly toward really is the commander. `goToFleetMate` is unchanged --
@@ -6112,8 +6112,8 @@ break-off should not be pulled into the next fight or the next broadcast
 before it gets there.
 
 -}
-recoverFromRetreat : BotDecisionContext -> Maybe DecisionPathNode
-recoverFromRetreat context =
+recoverFromRetreat : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
+recoverFromRetreat context shipUI =
     if not context.memory.recoveringFromRetreat then
         Nothing
 
@@ -6130,7 +6130,7 @@ recoverFromRetreat context =
                             waitForProgressInGame
 
                     Just commander ->
-                        goToFleetMate context commander "" "is this fleet's commander and this ship is recovering, rejoining"
+                        goToFleetMate context shipUI commander "" "is this fleet's commander and this ship is recovering, rejoining"
                 )
             )
 
