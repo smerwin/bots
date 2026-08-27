@@ -53,7 +53,17 @@ DEFAULT_CONSOLES = [
 # the operator to compare numbers between refreshes.
 TICK_STALL_SECONDS = 300.0
 
-POLL_TIMEOUT = 4.0
+# Generous on purpose: abandoning a slow response is what produced broken
+# pipes in the consoles' own logs. Better to wait than to hang up on a bot.
+POLL_TIMEOUT = 10.0
+
+# Past any sequence number a session will reach, so `/api/state` returns no
+# scrollback at all. See `poll_one`.
+SINCE_NO_LINES = 2 ** 62
+
+# Seconds between rounds. Five bots at this interval is a request every two
+# seconds across the whole fleet, regardless of how many pages are open.
+DEFAULT_POLL_SECONDS = 10.0
 
 
 class Fleet:
@@ -78,16 +88,20 @@ class Fleet:
     def poll_one(self, host):
         now = time.time()
         try:
-            with urllib.request.urlopen(self.url(host, "/api/state"),
-                                        timeout=POLL_TIMEOUT) as response:
+            # `?since=` is why this is cheap. Without it `/api/state` carries
+            # the console's entire scrollback -- measured at 73 KB against a
+            # running saxrat, versus 3 KB with it, and nothing here draws a
+            # single one of those lines. Asking for lines after a sequence
+            # number nothing will ever reach is how you ask for none.
+            with urllib.request.urlopen(
+                    self.url(host, "/api/state?since=%d" % SINCE_NO_LINES),
+                    timeout=POLL_TIMEOUT) as response:
                 state = json.loads(response.read().decode("utf-8", "replace"))
         except (urllib.error.URLError, OSError, ValueError, TimeoutError) as exc:
             with self.lock:
                 self.by_host[host]["error"] = str(exc) or exc.__class__.__name__
             return
 
-        # `lines` is the console's whole scrollback and is far and away the
-        # biggest field; nothing here shows it, so it never crosses the wire.
         state.pop("lines", None)
 
         with self.lock:
@@ -101,14 +115,37 @@ class Fleet:
             entry["last_ok"] = now
 
     def poll_all(self):
+        """One round, all hosts in parallel, waited for.
+
+        Only the background loop calls this. A request must never call it --
+        see `run_forever`.
+        """
         threads = [threading.Thread(target=self.poll_one, args=(h,), daemon=True)
                    for h in self.hosts]
         for thread in threads:
             thread.start()
-        # Bounded by the per-request timeout, plus a little: one unreachable
-        # console must not hold up the four that answered.
+        # One unreachable console must not hold up the ones that answered.
         for thread in threads:
             thread.join(timeout=POLL_TIMEOUT + 1.0)
+
+    def run_forever(self, interval):
+        """Poll on a clock, never on demand.
+
+        **This is the whole reason the loop exists.** The first version polled
+        inside the `/api/fleet` handler, so every browser refresh -- every tab,
+        every few seconds -- fired five requests at live bots. Requests
+        overlapped, connections were abandoned mid-response, and the consoles
+        logged `BrokenPipeError` writing to a client that had gone: a
+        monitoring page filling the logs of the thing it was monitoring, and
+        the load scaling with how many people were watching rather than with
+        how many bots there are.
+
+        Polling on a clock instead means the outbound rate is fixed and known.
+        Watchers are then free: they read a cached snapshot and touch nothing.
+        """
+        while True:
+            self.poll_all()
+            time.sleep(interval)
 
     def snapshot(self):
         now = time.time()
@@ -243,7 +280,7 @@ def make_handler(fleet):
 
         def do_GET(self):
             if self.path.startswith("/api/fleet"):
-                fleet.poll_all()
+                # Cache only. Never polls -- see `Fleet.run_forever`.
                 self._send(json.dumps(fleet.snapshot()), "application/json")
                 return
             if self.path == "/" or self.path.startswith("/?"):
@@ -265,6 +302,9 @@ def main(argv=None):
                         help="port the consoles listen on (default: 8787)")
     parser.add_argument("--port", type=int, default=8080,
                         help="port to serve this page on (default: 8080)")
+    parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS,
+                        help="seconds between polling rounds (default: %d)"
+                             % DEFAULT_POLL_SECONDS)
     args = parser.parse_args(argv)
 
     try:
@@ -274,9 +314,11 @@ def main(argv=None):
         return 1
 
     fleet = Fleet(args.consoles, args.console_port)
+    threading.Thread(target=fleet.run_forever, args=(args.poll_seconds,),
+                     daemon=True, name="fleet-poll").start()
     httpd = ThreadingHTTPServer((address, args.port), make_handler(fleet))
-    print("fleet console on http://%s:%d  fronting %d consoles"
-          % (address, args.port, len(args.consoles)))
+    print("fleet console on http://%s:%d  fronting %d consoles, polling every %gs"
+          % (address, args.port, len(args.consoles), args.poll_seconds))
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
