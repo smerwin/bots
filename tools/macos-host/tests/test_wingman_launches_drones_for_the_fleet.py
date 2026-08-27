@@ -27,7 +27,7 @@ redirects idling drones is what puts drones out in the first place.
 Two things need pinning here, and neither needs a full UI-tree fixture for a
 `DronesWindow` (which `dronesAssistTheCommander` reaches through a whole
 `BotDecisionContext` it takes no pure step function out of, unlike
-`weaponsStep` or `orbitFleetCommanderStep` next door -- building one well
+`weaponsStep` or `approachFleetCommanderStep` next door -- building one well
 enough to be worth trusting is its own change).
 
 **The wiring**, read out of `dronesAssistTheCommander`'s own body through a

@@ -156,7 +156,7 @@ class TheFleetMateWarpDecisionTest(unittest.TestCase):
             [True, True, True])
 
     def test_the_give_up_is_asked_before_every_fact(self):
-        """`orbitFleetCommanderStep`'s ordering, for its reason: a spent budget
+        """`approachFleetCommanderStep`'s ordering, for its reason: a spent budget
         must never be masked by a moment that happens to look actionable. Every
         one of the eight fact combinations gives up once the budget is gone."""
         combinations = list(itertools.product([False, True], repeat=3))
