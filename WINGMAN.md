@@ -51,12 +51,69 @@ nothing to do.
 7. **Drones assist the commander**, `F` on the locked target as the fallback.
 8. **Fire on whatever is locked**, through `fireOnActiveTarget` — unless the
    friendly fire guard is holding the trigger.
-9. **Orbit the commander** at `orbit-fc-range`, through
-   `orbitTheFleetCommander` (#365).
+9. **Keep station on the commander** by approaching their overview row,
+   through `approachTheFleetCommander` (#365). See below.
 10. **Take the acceleration gate**, but only with the overview clear of rats.
 11. **Self-defense**, through `fightPointedRatsOrReturnDrones` — fight back
     only if a rat has actually pointed this ship, otherwise sit still, and
     never while the friendly fire guard is holding the trigger.
+
+### Keeping station on the commander is an approach, not an orbit
+
+It started as an orbit at a distance the operator chose, taken from the
+overview row's own `Orbit` context-menu flyout — that being the only way to
+command a distance without changing the client's persistent default, which
+#359 made a thing nothing here may touch. **That flyout does not drive.**
+PILOT.md recorded it mis-clicking when a person glided into it by hand, and on
+2026-08-27 all four pilots reproduced it at once: gliding into the flyout
+collapsed it and the click landed on a neighbour, **Kara opened an `InfoWindow`
+and Heather a `LoggerWindow`**, and every pilot spent its whole 30-reading menu
+budget and fell back to the key. Per-command range is not achievable from here.
+
+So the manoeuvre is an **approach**, commanded the way the client commands one:
+hold `Q`, click the commander's overview row, release. One reading per ask, no
+menu to open, nothing to mis-click into. It closes to the client's own approach
+distance — which is why the operator's call was that an approach is close
+enough for station-keeping, and why `orbit-fc-range` no longer means anything.
+
+**Behind it is a better-evidenced half.** The *shape* is proven — the corpus
+carries `Press the 'W' key and click on the overview entry` 40,648 times, so
+hold-key-click-release on an overview row is what this repo does routinely —
+but `Q` itself appears **nowhere** in 1.8 GB of logs. So past
+`approachFleetCommanderKeyAskedReadingsBound` (20) the arm selects the
+commander's row and presses the Selected Item panel's own
+`selectedItemApproach` instead. That name is not invented here: it is
+`eve-online-mission-runner`'s, and that bot's `selectThenPanelAction` note
+records it live, taking a ship from 0.0 to 585 m/s after a cascade had achieved
+nothing across 180 decisions.
+
+**Be precise about what the corpus does and does not say about that button.**
+`selectedItemApproach` appears three times in the logs and *all three are the
+mission runner reporting the panel offered none* — for an acceleration gate
+5,843 m away. That is a statement about range, not about the name. The corpus
+holds no parsed UI trees at all, so it cannot confirm any `_name`;
+`selectedItemActivateGate` has zero occurrences and is shipped and working.
+The evidence for the name is the sibling bot's recorded live use, and nothing
+stronger is available without a run.
+
+The unproven mechanism is primary because it costs one reading against the
+panel's two; a run that has to fall back prints `FELL BACK to the panel's
+Approach button`, which is the measurement that would swap them.
+
+**This needs the commander to be on the active overview preset.** The click
+lands on an overview row, so a preset that hides fleet members leaves the arm
+with nothing to click — and that is indistinguishable from a commander who is
+genuinely off the grid. The bot cannot change the preset and does not pretend
+to know which case it is in: the status line says `has NO OVERVIEW ROW` and
+names the preset as a possible cause.
+
+**Success is the client's own word and nothing else.** The ship UI's manoeuvre
+indication reading `Approach` is what stops the ask; a dispatched click never
+counts. Past `approachFleetCommanderAskedReadingsBound` (40 — twenty for the
+key and twenty for the panel, both being this file's key-over-a-click
+allowance `weaponsAskedReadingsBound`) the arm hands the reading back and the
+status line says `GAVE UP`, so a mechanism that turns out not to work is
+visible and bounded rather than a bot that believes it is on station.
 
 ### Why the guns are their own arm, below the drones
 
@@ -120,10 +177,13 @@ and it reads **two instruments that fail in different directions**:
   warps clear.
 
 **Where it runs to is the fleet.** It hands `goToFleetMate` the commander's
-name, which is the mechanism the broadcast arms already use: "Warp to Member"
-when the commander is on this grid, `@host set-destination` when they are not.
-Nothing new was invented for it, and it picks no celestial or station of its
-own. That manoeuvre is exactly the one saxrat's retreat is placed *above*
+name, which is the mechanism the broadcast arms already use: the Selected Item
+panel's own Warp To on the commander's overview row when they are on this grid
+and no broadcast of theirs is on the banner, `@host set-destination` when they
+are not. (Until #373 this said "Warp to Member" here, and that cascade was
+being driven from the wrong element — see "Not verified" below.) Nothing new
+was invented for it, and it picks no celestial or station of its own. That
+manoeuvre is exactly the one saxrat's retreat is placed *above*
 `respondToFleetBackupBroadcast` to prevent — a damaged ship warping toward
 someone else's fight. The difference is the reason: this ship is not answering
 a call, it is leaving one.
@@ -713,7 +773,8 @@ Only after this bot has flown. See the top of this file.
 | `assist-fleet-commander` | `no` keeps drones on this ship's own target. Defaults to `yes`. |
 | `run-away-shield-hitpoints-threshold-percent`, `run-away-armor-hitpoints-threshold-percent` | Percentages below which the bot breaks off and warps back to the commander, read through the believed gauge behind a low-water mark. **Both default to -1, which is off.** |
 | `run-away-incoming-damage-threshold` | Hitpoints of incoming damage over a rolling 45-second window, past which the bot breaks off. Needs no HUD gauge. **Defaults to -1, which is off.** |
-| `orbit-fc`, `orbit-fc-range` | Keep this ship orbiting the fleet commander's overview row at the named range (#365, #368). `orbit-fc` defaults to `yes`. |
+| `orbit-fc` | Keep this ship on station beside the fleet commander by approaching their overview row (#365, #368). Defaults to `yes`. Also spelled `approach-fc`; the `orbit` spelling is kept so a settings string written for an earlier version still starts a session. |
+| `orbit-fc-range` | **Accepted and ignored.** It named a rung of the client's `Orbit` submenu, which this bot no longer drives. Still parsed so a settings string carrying it does not end the session before it starts (#161), and named as ignored in the status line whenever it is set to anything but `500 m`. |
 | `orbit-in-combat` | Inherited, and **superseded by `orbit-fc` rather than sitting beside it** (#368): with `orbit-fc=yes`, `decideActionInAnomaly` does not issue its own orbit at all. |
 | `deactivate-module-on-warp` | Inherited, unchanged. |
 
@@ -750,10 +811,40 @@ restart.
     recorded retreats of 30, 89 and 142 readings that eventually worked, so
     this bound will sometimes hand back a retreat that was still going to
     succeed. Watch for `Retreat: GAVE UP` in the status line.
-  - **Whether the retreat's own warp works at all.** `goToFleetMate`'s
-    "Warp to Member" cascade is proven for the broadcast arms, not for this
-    caller, and the off-grid half has never flown at all (see below). Nothing
-    has watched this bot warp to anybody because it was hurt.
+  - **Whether the retreat's own warp works at all.** This entry used to read
+    that `goToFleetMate`'s "Warp to Member" cascade was "proven for the
+    broadcast arms, not for this caller" — and #373 established that it was not
+    proven for *either*, because it was attached to the wrong element. That
+    cascade belongs to the fleet broadcast banner's menu, not to a pilot's
+    overview row, and driving it from a row could never resolve at any range.
+    The banner cascade is now used only where a banner from that pilot is up;
+    the recovery path presses the Selected Item panel's own Warp To instead.
+    Nothing has yet watched either half fly for a ship that was hurt.
+- **Whether a `Q` modifier-click commands an approach at all.** The proven
+  usage of that shape in this repo is `W` for an orbit
+  (`ensureShipIsOrbiting`, inherited); `Q` and `Approach` were substituted into
+  it and nothing has watched the result. A first run either shows
+  `Approach on the commander: approaching, commander at N m`, or falls back and
+  prints `FELL BACK to the panel's Approach button`, or spends both budgets and
+  prints `GAVE UP after 40 readings`. It cannot fail silently, because a
+  dispatched click is never counted as success — and if the fall-back is what
+  carries the session, the fix is to swap the two, which is a reordering of one
+  `if`.
+- **Whether `selectedItemApproach` is offered for a *pilot* row, and at what
+  range.** The name is not a guess — `eve-online-mission-runner` reaches the
+  button by it and its own note records it working — but the only live use
+  recorded is on a **drone row**, not another player's ship, and every one of
+  the three corpus mentions is that bot reporting the panel offered **none**,
+  for a gate 5,843 m away. So the button may well be range-gated. If the client
+  offers no Approach for the commander, the status line says
+  `the panel offers no 'selectedItemApproach' yet` for the twenty readings the
+  fall-back gets and then gives up — which is the bounded, visible failure, not
+  a silent one.
+- **Whether the commander's overview row is there to be clicked.** The
+  approach acts on an overview row, so the active overview preset has to show
+  fleet members. Nobody has confirmed which preset the four pilots are flying,
+  and the bot cannot tell a hidden fleet member from an absent one — see
+  "Keeping station on the commander is an approach, not an orbit".
 - **Whether the unified `fleetCommanderName` aims the retreat at the right
   pilot.** #367 made it prefer the fleet window's header and keep
   `follow-fleet-broadcast-from` as the fallback, which fixes the case #369

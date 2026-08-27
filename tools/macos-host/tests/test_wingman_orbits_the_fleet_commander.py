@@ -1,61 +1,56 @@
-"""Tests for the wingman holding a close orbit on its fleet commander.
+"""Tests for the wingman keeping station on its fleet commander.
 
-Issue #365. A fleet follow bot that flies its own kiting pattern against
-whatever it is shooting drifts off the commander's grid, which is the one place
-it is supposed to be -- and a called target it has drifted out of range of is a
-broadcast it cannot act on. So `orbit-fc` defaults to 'yes' and supersedes
-`orbit-in-combat` rather than sitting beside it.
+Issue #365 asked for this, and the mechanism has since been replaced. A fleet
+follow bot that flies its own kiting pattern against whatever it is shooting
+drifts off the commander's grid, which is the one place it is supposed to be --
+and a called target it has drifted out of range of is a broadcast it cannot act
+on. So `orbit-fc` defaults to 'yes' and supersedes `orbit-in-combat` rather
+than sitting beside it.
 
-Three things need pinning and each has cases here.
+**What changed, and why these cases were re-expressed rather than deleted.**
+The first shape right-clicked the commander's overview row, hovered `Orbit`,
+and clicked the `orbit-fc-range` rung, so that the range came from the menu
+rather than from the client's persistent default -- and every case in this file
+was written against that. PILOT.md already recorded that flyout mis-clicking
+when driven by hand; all four wingman pilots then reproduced it live on the
+same day, with Kara opening an `InfoWindow` and Heather a `LoggerWindow` while
+the cascade ran, and every pilot spending the whole 30-reading menu budget and
+falling back to the key. Per-command range through that flyout is not
+achievable from here.
 
-**The rule itself**, as `orbitFleetCommanderStep` -- a pure function over five
-facts and a counter, executed through the real `Bot.elm` in `elm repl`. The
-ordering inside it carries four arguments and each has a case: the commander is
-checked before anything counted, the give-up is checked before the stray-window
-close (an unbounded rescue is #321's failure), the stray window is checked
-before "already orbiting", and the two bounds are what make the fall-back a
-fall-back.
+So the manoeuvre is now **Approach**, commanded the way the client commands it:
+hold `Q`, click the commander's overview row, release. That is
+`ensureShipIsOrbiting`'s shape with the key and the manoeuvre swapped, which is
+why both now come from `commandManeuverByModifierClick` rather than from two
+hand-written copies.
 
-**The two bounds**, because this is a repeated ask: open the commander's
-overview row's context menu, hover `Orbit`, click the `orbit-fc-range` rung,
-every reading, until the client names the manoeuvre `Orbit`. #326 is what an
-unbounded one costs: a turret that could not activate held that bot's decision
-for 262 consecutive readings with the drones out and idle. Past
-`orbitFleetCommanderMenuAskedReadingsBound` the arm stops opening menus and
-falls back to the 'W' key, which orbits at the client's own default distance --
-a wrong distance beats poking at a menu that will not drive. Past
-`orbitFleetCommanderAskedReadingsBound` it answers `Nothing` and
-`describeOrbitFleetCommanderAsk` carries the give-up in the status line, the
-arrangement `accelerationGateStep` and `fireOnActiveTarget` already use.
+The properties these cases were guarding are unchanged and still asserted --
+the placement in the decision tree, the supersession of `orbit-in-combat`, the
+counter advanced by the shipped rule, the bound, the give-up reaching the tree,
+the stray-window close being itself bounded, and the prohibition on touching
+the client's default distance. What changed is the mechanism they are asserted
+against. The two cases that could not survive the change are the ones that
+asserted the cascade itself -- that it took `Orbit` and then the configured
+rung, and that the fall-back reused the key -- and they are replaced by cases
+on the two mechanisms that took their place.
 
-**The placement**, which is a shape and not a value, and which a case over the
-step function alone would pass on a bot that could never reach it. The arm sits
-below `dronesAssistTheCommander` and below `fireOnActiveTarget` so it can
-starve neither (#326), and above `accelerationGateStep` because that arm
-answers `Just (wait)` on every reading a gate is on the overview while rats are
-still on the grid (#348) -- exactly the state this ship most needs to be beside
-its commander in. `TheRetreatOutranksTheOrbitTest` covers the one ordering that
-is not a trade-off: #364's retreat has to answer before this arm ever can,
-because a damaged ship breaks off rather than holds station.
+**One thing is deliberately not asserted here: that `Q` works.** Nothing in
+this repo has watched a `Q` modifier-click command an approach; the proven
+usage of that shape is `W` for an orbit. What is asserted instead is that
+success is read from the client's own word -- the ship UI naming
+`ManeuverApproach` -- and never from a dispatched click, so a `Q` that does not
+work spends its budget and falls back rather than leaving a bot that believes
+it is keeping station.
 
-**The mechanism, and what this bot must never do to get a distance.** The
-range comes from the context menu, per command. It does **not** come from the
-client's default Orbit distance, and nothing here may change that default:
-PILOT.md records it as a client setting that survives losing the hull, and #359
-hard-linked `core_char_*.dat` across six characters, so a default changed while
-flying one follows the others -- including any that later fly saxrat into a
-belt at 500 m. `TheClientDefaultIsNeverTouchedTest` refuses the modal route in
-source.
-
-**And the mis-click**, which is why this path was thought undrivable. PILOT.md
-records gliding to the distance flyout by hand, passing through the parent,
-collapsing it, and landing on `Show Info`. The framework does not glide and
-click in one motion -- every non-final entry gets `mouseMoveToUIElement` and
-nothing else, and only the final entry is clicked, from a node matched in that
-reading's own parsed menu. `windowOpenedOverTheClient` is the belt to that
-braces: if a window this bot neither opened nor uses appears while the ask is
-in flight, the arm closes it by its own close button and the attempt counts
-against the budget.
+**The fall-back it falls back to is the proven half.** Past
+`approachFleetCommanderKeyAskedReadingsBound` the arm selects the commander's
+row and presses the Selected Item panel's `selectedItemApproach` --
+`eve-online-mission-runner` reaches that button by that name, its note records
+it taking a ship from 0.0 to 585 m/s after a cascade had achieved nothing
+across 180 decisions, and the recorded corpus carries the name in that bot's
+own status line. It is a port, not a guess, which is what separates it from
+the `Warp to Within` flyout text that is still refused elsewhere in this
+branch.
 
 The cases run the real `Bot.elm` through `elm repl` and read its source.
 Nothing here reads a live client, the recorded corpus, or a running bot.
@@ -96,16 +91,19 @@ class WingmanRepl(ElmRepl):
 
 
 def step(setting_is_yes=True, commander_on_grid=True, warping=False,
-         orbiting=False, stray_window=False, asked=0):
+         approaching=False, stray_window=False, panel_shows=False,
+         panel_offers=False, asked=0):
     """The shipped rule, asked about one reading."""
-    return ("orbitFleetCommanderStep { settingIsYes = %s"
+    return ("approachFleetCommanderStep { settingIsYes = %s"
             ", commanderOnGrid = %s"
             ", shipIsWarpingOrJumping = %s"
-            ", shipIsOrbiting = %s"
+            ", shipIsApproaching = %s"
             ", strayWindowIsOpen = %s"
+            ", panelShowsTheCommander = %s"
+            ", panelOffersApproach = %s"
             ", askedReadings = %s }"
-            % (setting_is_yes, commander_on_grid, warping, orbiting,
-               stray_window, asked))
+            % (setting_is_yes, commander_on_grid, warping, approaching,
+               stray_window, panel_shows, panel_offers, asked))
 
 
 def wingman_root_body(source):
@@ -113,8 +111,9 @@ def wingman_root_body(source):
 
     #378 split it: `wingmanDecisionRootInSpace` keeps only the arms that take
     the ship off the grid, and `wingmanDecisionRootInSpaceOrdinary` holds the
-    rest. The orbit is in the second half and the retreat in the first, and
-    the ordering between them is the whole point of this file's last case.
+    rest. The station-keeping arm is in the second half and the retreat in the
+    first, and the ordering between them is the whole point of this file's last
+    case.
     """
     root = source[source.index("wingmanDecisionRootInSpace context shipUI ="):]
     ordinary = root[root.index(
@@ -127,7 +126,7 @@ def elm_bool(value):
     return "True" if value else "False"
 
 
-class TheOrbitDecisionTest(unittest.TestCase):
+class TheStationKeepingDecisionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.repl = open_repl(WingmanRepl)
@@ -140,80 +139,143 @@ class TheOrbitDecisionTest(unittest.TestCase):
         """`orbit-fc=no` falls back to the saxrat-style movement settings."""
         self.assertEqual(
             self.repl.evaluate(
-                ["%s == OrbitFleetCommanderIsOff"
+                ["%s == ApproachFleetCommanderIsOff"
                  % step(setting_is_yes=False)]),
             [True])
 
-    def test_only_a_commander_on_the_overview_can_be_orbited(self):
-        """A manoeuvre is issued against a row; off grid there is no row."""
+    def test_only_a_commander_on_the_overview_can_be_approached(self):
+        """A manoeuvre is issued against a row; with no row -- off grid, or an
+        overview preset that hides fleet members -- there is nothing to
+        click."""
         self.assertEqual(
             self.repl.evaluate(
                 ["%s == NoCommanderOnGrid" % step(commander_on_grid=False)]),
             [True])
 
-    def test_a_ship_in_warp_is_not_asked_to_orbit(self):
+    def test_a_ship_in_warp_is_not_asked_to_approach(self):
         self.assertEqual(
             self.repl.evaluate(["%s == ShipIsWarpingOrJumping"
                                 % step(warping=True)]),
             [True])
 
-    def test_a_commander_on_grid_and_a_ship_not_orbiting_opens_the_menu(self):
+    def test_a_commander_on_grid_and_a_ship_not_approaching_presses_the_key(
+            self):
         """The whole point: no fight, no broadcast and no rat is required
-        first, and the first thing tried is the menu that carries a range."""
+        first, and the first thing tried is the keypress."""
         self.assertEqual(
-            self.repl.evaluate(
-                ["%s == OrbitAtRangeViaTheMenu" % step()]),
+            self.repl.evaluate(["%s == ApproachWithTheKey" % step()]),
             [True])
 
-    def test_a_ship_already_orbiting_is_left_alone(self):
+    def test_the_key_gives_way_to_the_panel_and_then_to_nothing(self):
+        """Both bounds in one place, because what matters is the sequence: the
+        modifier click, then the panel's own Approach button in its two ticks,
+        then a reading handed back. The panel half is the proven one -- it is
+        `eve-online-mission-runner`'s `selectedItemApproach` -- so a `Q` that
+        does not command anything costs twenty readings rather than a
+        session."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == ApproachWithTheKey"
+                 % step(asked="approachFleetCommanderKeyAskedReadingsBound - 1"),
+                 "%s == SelectTheCommandersRow"
+                 % step(asked="approachFleetCommanderKeyAskedReadingsBound"),
+                 "%s == PressTheApproachButton"
+                 % step(panel_shows=True, panel_offers=True,
+                        asked="approachFleetCommanderKeyAskedReadingsBound"),
+                 "%s == WaitForTheApproachButton"
+                 % step(panel_shows=True,
+                        asked="approachFleetCommanderKeyAskedReadingsBound"),
+                 "%s == PressTheApproachButton"
+                 % step(panel_shows=True, panel_offers=True,
+                        asked="approachFleetCommanderAskedReadingsBound - 1"),
+                 "%s == GaveUpOnTheApproach"
+                 % step(panel_shows=True, panel_offers=True,
+                        asked="approachFleetCommanderAskedReadingsBound")]),
+            [True, True, True, True, True, True])
+
+    def test_the_row_is_selected_before_the_button_is_pressed(self):
+        """The panel acts on whatever is *currently* selected, which is the
+        hazard `selectThenPanelAction` was written around. A panel showing some
+        other object while offering an Approach button is the state where
+        pressing first would send this ship at the wrong thing -- so the row is
+        selected first even when the button is right there."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == SelectTheCommandersRow"
+                 % step(panel_shows=False, panel_offers=True,
+                        asked="approachFleetCommanderKeyAskedReadingsBound"),
+                 "%s == SelectTheCommandersRow"
+                 % step(panel_shows=False, panel_offers=False,
+                        asked="approachFleetCommanderKeyAskedReadingsBound")]),
+            [True, True])
+
+    def test_the_panel_is_never_touched_while_the_key_still_has_budget(self):
+        """The fall-back is a fall-back. A panel that happens to be showing the
+        commander with its Approach button up must not pre-empt the key, or the
+        key would never be exercised and the thing this run exists to measure
+        would never be measured."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == ApproachWithTheKey"
+                 % step(panel_shows=True, panel_offers=True),
+                 "%s == ApproachWithTheKey"
+                 % step(panel_shows=True, panel_offers=True,
+                        asked="approachFleetCommanderKeyAskedReadingsBound"
+                              " - 1")]),
+            [True, True])
+
+    def test_a_ship_already_approaching_is_left_alone(self):
         """The confirmation the operator asked for is this and only this: the
         ship UI's own manoeuvre indication, never a dispatched click."""
         self.assertEqual(
             self.repl.evaluate(
-                ["%s == AlreadyOrbiting" % step(orbiting=True)]),
+                ["%s == AlreadyApproaching" % step(approaching=True)]),
             [True])
 
-    def test_the_menu_gives_way_to_the_key_and_then_to_nothing(self):
-        """Both bounds in one place, because what matters is the sequence: the
-        cascade, then the 'W' key at the client's default distance, then a
-        reading handed back. #326 is what leaving either end unbounded costs."""
+    def test_past_the_total_budget_the_reading_is_handed_back(self):
+        """The arm answers `Nothing` and
+        `describeApproachFleetCommanderAsk` carries the give-up -- #326 is what
+        leaving it unbounded costs: a turret that could not activate held that
+        bot's decision for 262 consecutive readings."""
         self.assertEqual(
             self.repl.evaluate(
-                ["%s == OrbitAtRangeViaTheMenu"
-                 % step(asked="orbitFleetCommanderMenuAskedReadingsBound - 1"),
-                 "%s == OrbitAtTheClientDefaultWithTheKey"
-                 % step(asked="orbitFleetCommanderMenuAskedReadingsBound"),
-                 "%s == OrbitAtTheClientDefaultWithTheKey"
-                 % step(asked="orbitFleetCommanderAskedReadingsBound - 1"),
-                 "%s == GaveUpOnTheOrbit"
-                 % step(asked="orbitFleetCommanderAskedReadingsBound"),
-                 "%s == GaveUpOnTheOrbit"
-                 % step(asked="orbitFleetCommanderAskedReadingsBound + 50")]),
-            [True, True, True, True, True])
-
-    def test_the_bounds_leave_the_key_a_real_allowance(self):
-        """The total is written as the menu bound plus the same 20 the other
-        key-over-a-click ask in this file gets, so the fall-back cannot be
-        squeezed to nothing by moving one end."""
-        self.assertEqual(
-            self.repl.evaluate(
-                ["orbitFleetCommanderMenuAskedReadingsBound == 30",
-                 "orbitFleetCommanderAskedReadingsBound == 50",
-                 "orbitFleetCommanderAskedReadingsBound"
-                 " - orbitFleetCommanderMenuAskedReadingsBound"
-                 " == weaponsAskedReadingsBound"]),
+                ["%s == GaveUpOnTheApproach"
+                 % step(asked="approachFleetCommanderAskedReadingsBound"),
+                 "%s == GaveUpOnTheApproach"
+                 % step(asked="approachFleetCommanderAskedReadingsBound + 50"),
+                 "%s == GaveUpOnTheApproach"
+                 % step(panel_shows=True, panel_offers=True,
+                        asked="approachFleetCommanderAskedReadingsBound + 50")]),
             [True, True, True])
 
-    def test_a_window_the_cascade_opened_is_closed_before_asking_again(self):
-        """PILOT.md's recorded mis-click opened a Database Information window.
-        Leaving one on top of the client is not acceptable, so this outranks
-        both 'already orbiting' and another attempt."""
+    def test_the_bounds_leave_the_fall_back_a_real_allowance(self):
+        """Twenty for the key, twenty for the panel, the total written as the
+        sum so neither end can be squeezed to nothing by moving the other --
+        the arrangement the two bounds this replaced already had. Both halves
+        are this file's key-over-a-click allowance, `weaponsAskedReadingsBound`,
+        because both are a key or a click rather than a cascade."""
         self.assertEqual(
             self.repl.evaluate(
-                ["%s == CloseAWindowTheCascadeOpened"
+                ["approachFleetCommanderKeyAskedReadingsBound"
+                 " == weaponsAskedReadingsBound",
+                 "approachFleetCommanderKeyAskedReadingsBound == 20",
+                 "approachFleetCommanderAskedReadingsBound == 40",
+                 "approachFleetCommanderAskedReadingsBound"
+                 " - approachFleetCommanderKeyAskedReadingsBound"
+                 " == weaponsAskedReadingsBound"]),
+            [True, True, True, True])
+
+    def test_a_window_over_the_client_is_closed_before_asking_again(self):
+        """PILOT.md's recorded mis-click opened a Database Information window,
+        and the live run that removed the cascade opened an `InfoWindow` and a
+        `LoggerWindow`. Leaving one on top of the client is not acceptable, so
+        this outranks both 'already approaching' and another attempt."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == CloseAWindowLeftOverTheClient"
                  % step(stray_window=True, asked=1),
-                 "%s == CloseAWindowTheCascadeOpened"
-                 % step(stray_window=True, orbiting=True, asked=1)]),
+                 "%s == CloseAWindowLeftOverTheClient"
+                 % step(stray_window=True, approaching=True, asked=1)]),
             [True, True])
 
     def test_a_window_open_before_the_ask_started_is_not_this_bots_to_close(
@@ -223,29 +285,30 @@ class TheOrbitDecisionTest(unittest.TestCase):
         anything."""
         self.assertEqual(
             self.repl.evaluate(
-                ["%s == OrbitAtRangeViaTheMenu"
+                ["%s == ApproachWithTheKey"
                  % step(stray_window=True, asked=0)]),
             [True])
 
     def test_the_window_close_is_itself_bounded(self):
         """A close that does not land is the unbounded rescue #321 names -- one
-        run pressed at a stray menu 16,791 times. Past the total budget the
-        window is reported and no longer poked at."""
+        run pressed at a stray menu 16,791 times. Past the budget the window is
+        reported and no longer poked at."""
         self.assertEqual(
             self.repl.evaluate(
-                ["%s == GaveUpOnTheOrbit"
+                ["%s == GaveUpOnTheApproach"
                  % step(stray_window=True,
-                        asked="orbitFleetCommanderAskedReadingsBound")]),
+                        asked="approachFleetCommanderAskedReadingsBound")]),
             [True])
 
-    def test_the_give_up_is_reported_even_if_the_ship_reads_as_orbiting(self):
+    def test_the_give_up_is_reported_even_if_the_ship_reads_as_approaching(
+            self):
         """The bound is checked before the state, `weaponsStep`'s ordering, so
         a spent budget is never masked by a moment that happens to look fine."""
         self.assertEqual(
             self.repl.evaluate(
-                ["%s == GaveUpOnTheOrbit"
-                 % step(orbiting=True,
-                        asked="orbitFleetCommanderAskedReadingsBound")]),
+                ["%s == GaveUpOnTheApproach"
+                 % step(approaching=True,
+                        asked="approachFleetCommanderAskedReadingsBound")]),
             [True])
 
     def test_a_session_without_the_commander_never_reads_as_a_give_up(self):
@@ -256,30 +319,32 @@ class TheOrbitDecisionTest(unittest.TestCase):
             self.repl.evaluate(
                 ["%s == NoCommanderOnGrid"
                  % step(commander_on_grid=False,
-                        asked="orbitFleetCommanderAskedReadingsBound + 1"),
-                 "%s == OrbitFleetCommanderIsOff"
+                        asked="approachFleetCommanderAskedReadingsBound + 1"),
+                 "%s == ApproachFleetCommanderIsOff"
                  % step(setting_is_yes=False,
-                        asked="orbitFleetCommanderAskedReadingsBound + 1")]),
+                        asked="approachFleetCommanderAskedReadingsBound + 1")]),
             [True, True])
 
-    def test_the_menu_is_asked_exactly_when_all_five_facts_line_up(self):
+    def test_the_key_is_pressed_exactly_when_all_five_facts_line_up(self):
         """Every combination of the five facts at a fresh counter, so a swapped
         or dropped condition is caught rather than only the combinations
         somebody thought to write down. `askedReadings = 1` so the stray-window
         guard is armed."""
         combinations = list(itertools.product([False, True], repeat=5))
         expressions = [
-            "%s == OrbitAtRangeViaTheMenu"
+            "%s == ApproachWithTheKey"
             % step(setting_is_yes=elm_bool(setting),
                    commander_on_grid=elm_bool(on_grid),
                    warping=elm_bool(warping),
-                   orbiting=elm_bool(orbiting),
+                   approaching=elm_bool(approaching),
                    stray_window=elm_bool(stray),
+                   panel_shows="True",
+                   panel_offers="True",
                    asked=1)
-            for setting, on_grid, warping, orbiting, stray in combinations]
-        expected = [setting and on_grid and not warping and not orbiting
+            for setting, on_grid, warping, approaching, stray in combinations]
+        expected = [setting and on_grid and not warping and not approaching
                     and not stray
-                    for setting, on_grid, warping, orbiting, stray
+                    for setting, on_grid, warping, approaching, stray
                     in combinations]
         self.assertEqual(self.repl.evaluate(expressions), expected)
 
@@ -300,7 +365,7 @@ class TheSettingTest(unittest.TestCase):
                 ' == Ok Common.PromptParser.%s'
                 % (settings_string, expected))
 
-    def test_an_unconfigured_wingman_orbits_its_commander(self):
+    def test_an_unconfigured_wingman_keeps_station_on_its_commander(self):
         """#365 asks for this on by default, not opt-in."""
         self.assertEqual(
             self.repl.evaluate(
@@ -314,21 +379,6 @@ class TheSettingTest(unittest.TestCase):
             self.repl.evaluate([self.parses_to("orbit-fc=no", "No")]),
             [True])
 
-    def test_the_range_defaults_to_the_bottom_rung(self):
-        """Menu text rather than a number -- `warp-to-anomaly-distance`'s own
-        arrangement -- so an operator who reads a different spelling off their
-        client can just write it."""
-        self.assertEqual(
-            self.repl.evaluate(
-                ['defaultOrbitFleetCommanderRange == "500 m"',
-                 '(parseBotSettings "" |> Result.map .orbitFleetCommanderRange)'
-                 ' == Ok "500 m"',
-                 '(parseBotSettings "orbit-fc-range=5 km"'
-                 ' |> Result.map .orbitFleetCommanderRange) == Ok "5 km"',
-                 '(parseBotSettings "orbit-fc-range =  2,500 m "'
-                 ' |> Result.map .orbitFleetCommanderRange) == Ok "2,500 m"']),
-            [True, True, True, True])
-
     def test_the_spelling_the_issue_uses_is_accepted(self):
         """Setting names are matched case-sensitively -- `getSettingByNameOrGuide`
         is a `Dict.get` -- so #365's own `orbit-FC` has to be an alternative
@@ -340,12 +390,201 @@ class TheSettingTest(unittest.TestCase):
                  self.parses_to("orbit-fleet-commander=no", "No")]),
             [True, True])
 
+    def test_the_manoeuvre_it_actually_commands_can_also_be_spelled(self):
+        """The key is still called `orbit-fc` so a settings string written for
+        an earlier version starts a session, but what it commands is an
+        approach -- so the honest spelling has to work too."""
+        self.assertEqual(
+            self.repl.evaluate(
+                [self.parses_to("approach-fc=no", "No"),
+                 self.parses_to("approach-FC=no", "No")]),
+            [True, True])
+
+    def test_the_range_key_still_parses_and_no_longer_decides_anything(self):
+        """`orbit-fc-range` named a rung of the Orbit flyout this bot no longer
+        drives. Deleting it would end a session that has it set, which is
+        #161's failure, so it still parses -- and nothing reads it to decide
+        anything, which is what `TheRangeKeyIsAcceptedAndIgnoredTest` pins in
+        source."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ['defaultOrbitFleetCommanderRange == "500 m"',
+                 '(parseBotSettings "" |> Result.map .orbitFleetCommanderRange)'
+                 ' == Ok "500 m"',
+                 '(parseBotSettings "orbit-fc-range=5 km"'
+                 ' |> Result.map .orbitFleetCommanderRange) == Ok "5 km"',
+                 '(parseBotSettings "orbit-FC-range =  2,500 m "'
+                 ' |> Result.map .orbitFleetCommanderRange) == Ok "2,500 m"']),
+            [True, True, True, True])
+
+
+class TheMechanismTest(unittest.TestCase):
+    """How the manoeuvre is commanded, source-pinned.
+
+    Needles are taken from slices that start at a definition line or a `case`
+    arm rather than from the whole file: the doc comment on
+    `approachTheFleetCommander` narrates the cascade it replaced, so a needle
+    allowed to match a comment would find the old mechanism in exactly the
+    function that must no longer contain it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(WINGMAN_BOT_ELM, encoding="utf-8") as handle:
+            cls.source = handle.read()
+
+    def body_of(self, definition_line):
+        anchor = "\n" + definition_line
+        self.assertIn(anchor, self.source)
+        start = self.source.index(anchor) + 1
+        return self.source[start:self.source.index("\n\n\n", start)]
+
+    def test_the_arm_opens_no_context_menu_at_all(self):
+        """The cascade is what mis-clicked. Nothing in this arm reopens one."""
+        body = self.body_of("approachTheFleetCommander context shipUI =")
+        for cascade in ("useContextMenuCascadeOnOverviewEntry",
+                        "useContextMenuCascade",
+                        "useMenuEntryWithTextContaining",
+                        "menuCascadeCompleted"):
+            with self.subTest(cascade=cascade):
+                self.assertNotIn(cascade, body)
+
+    def test_the_arm_commands_the_approach_through_the_shared_helper(self):
+        """`ensureShipIsApproaching`, which is `ensureShipIsOrbiting`'s shape
+        with the key and the manoeuvre swapped. Nothing posts a key code
+        directly from the arm."""
+        body = self.body_of("approachTheFleetCommander context shipUI =")
+        self.assertIn("ensureShipIsApproaching shipUI", body)
+        self.assertIsNone(re.search(r"vkey_\w+", body))
+
+    def test_the_two_manoeuvres_come_from_one_helper(self):
+        """The key and the manoeuvre it commands are one pairing. Two
+        hand-written copies is how a `Q` that stopped meaning approach would
+        take the orbit with it."""
+        for definition, key, maneuver in (
+                ("ensureShipIsOrbiting =", "vkey_W", "ManeuverOrbit"),
+                ("ensureShipIsApproaching =", "vkey_Q", "ManeuverApproach")):
+            with self.subTest(definition=definition):
+                body = self.body_of(definition)
+                self.assertIn("commandManeuverByModifierClick", body)
+                self.assertIn("EffectOnWindow." + key, body)
+                self.assertIn(
+                    "EveOnline.ParseUserInterface." + maneuver, body)
+
+    def test_the_key_is_held_down_around_the_click_and_released(self):
+        """The client's own modifier shape: down, click, up. A click with no
+        key is a plain selection and commands nothing."""
+        body = self.body_of(
+            "commandManeuverByModifierClick command shipUI overviewEntry =")
+        # From the effect list itself, not from the `Ok effectToClick ->`
+        # pattern that binds it -- the binding is above the list and would
+        # make any ordering look right.
+        effects = body[body.index("decideActionForCurrentStep"):]
+        self.assertLess(effects.index("EffectOnWindow.KeyDown command.key"),
+                        effects.index("effectToClick"))
+        self.assertLess(effects.index("effectToClick"),
+                        effects.index("EffectOnWindow.KeyUp command.key"))
+
+    def test_only_the_clients_own_word_counts_as_success(self):
+        """A dispatched click is not a manoeuvre. This is the whole reason a
+        `Q` that turns out not to work is visible rather than silent."""
+        body = self.body_of(
+            "commandManeuverByModifierClick command shipUI overviewEntry =")
+        self.assertIn(".maneuverType) == Just command.maneuver", body)
+        reader = self.body_of(
+            "shipIsApproachingFromReading readingFromGameClient =")
+        self.assertIn(
+            "== Just EveOnline.ParseUserInterface.ManeuverApproach", reader)
+
+    def test_the_fall_back_presses_the_panels_own_approach_button(self):
+        """Two ticks, and the order matters: the panel acts on whatever is
+        selected, so the row is selected first and the button pressed after."""
+        body = self.body_of("approachTheFleetCommander context shipUI =")
+        select = body[body.index("SelectTheCommandersRow ->"):
+                      body.index("WaitForTheApproachButton ->")]
+        self.assertIn("clickUiElementForNavigation entry.uiNode", select)
+        press = body[body.index("PressTheApproachButton ->"):]
+        self.assertIn("clickUiElementForNavigation button", press)
+        self.assertIn("selectedItemApproachButtonName", body)
+
+    def test_the_button_name_is_a_port_and_not_a_guess(self):
+        """`eve-online-mission-runner` reaches this button by this name, and
+        its own note records the live result. Every other `selectedItem` name
+        in this file was read the same way -- none of them is invented, which
+        is what #42 asks of a matcher."""
+        block = self.body_of("selectedItemApproachButtonName =")
+        self.assertIn('"selectedItemApproach"', block)
+        with open(os.path.join(
+                REPO_DIR, "implement", "applications", "eve-online",
+                "eve-online-mission-runner", "Bot.elm"),
+                encoding="utf-8") as handle:
+            mission_runner = handle.read()
+        self.assertIn('"selectedItemApproach"', mission_runner)
+        names = set(re.findall(r'"(selectedItem\w+)"', self.source))
+        self.assertEqual(
+            names,
+            {"selectedItemActivateGate", "selectedItemJump",
+             "selectedItemWarpTo", "selectedItemApproach"})
+
+
+class TheRangeKeyIsAcceptedAndIgnoredTest(unittest.TestCase):
+    """A setting that silently does nothing is the thing that must not exist.
+
+    `orbit-fc-range` named a rung of a flyout this bot no longer drives, so it
+    cannot decide anything any more. Deleting it would end a session that has
+    it set (#161); leaving it to be quietly ignored is worse. So it parses, no
+    decision reads it, and the status line names it whenever an operator has
+    set it to something other than the default.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(WINGMAN_BOT_ELM, encoding="utf-8") as handle:
+            cls.source = handle.read()
+
+    def test_no_decision_reads_the_range(self):
+        """The only readers left are the describer's clause and the default it
+        compares against."""
+        readers = [self.source.count(needle) for needle in
+                   ("orbitFleetCommanderRange",)]
+        self.assertTrue(readers[0] >= 1)
+        arm_start = self.source.index(
+            "\napproachTheFleetCommander context shipUI =")
+        arm = self.source[arm_start:self.source.index("\n\n\n", arm_start)]
+        self.assertNotIn("orbitFleetCommanderRange", arm)
+        step_start = self.source.index(
+            "\napproachFleetCommanderStep approachCase =")
+        step_body = self.source[
+            step_start:self.source.index("\n\n\n", step_start)]
+        self.assertNotIn("orbitFleetCommanderRange", step_body)
+
+    def test_the_status_line_names_it_as_ignored(self):
+        start = self.source.index(
+            "\ndescribeApproachFleetCommanderAsk context =")
+        body = self.source[start:self.source.index("\n\n\n", start)]
+        self.assertIn("IGNORED", body)
+        self.assertIn("defaultOrbitFleetCommanderRange", body)
+
+    def test_the_header_says_it_is_ignored_too(self):
+        """`--help` reads the header, and an operator who set the key has to
+        find out there rather than by watching the ship."""
+        header = self.source[:self.source.index("\nmodule Bot exposing")]
+        self.assertIn("`orbit-fc-range`", header)
+        self.assertIn("Accepted and ignored", header)
+        self.assertIn("ACCEPTED AND IGNORED", self.source)
+
+    def test_the_orbit_menu_matcher_is_gone(self):
+        """Nothing matches an `Orbit` menu entry any more, because nothing
+        opens that menu."""
+        self.assertNotIn("orbitMenuEntryText", self.source)
+
 
 class ThePlacementAndTheSupersessionTest(unittest.TestCase):
     """Source-pinned, because each of these is a shape rather than a value.
 
-    A suite that only exercised `orbitFleetCommanderStep` would pass on a bot
-    whose arm nothing could reach, which is exactly the defect #360 shipped.
+    A suite that only exercised `approachFleetCommanderStep` would pass on a
+    bot whose arm nothing could reach, which is exactly the defect #360
+    shipped.
     """
 
     @classmethod
@@ -358,24 +597,24 @@ class ThePlacementAndTheSupersessionTest(unittest.TestCase):
             self.assertIn(needle, self.source)
         return [self.source.index(needle) for needle in needles]
 
-    def test_the_orbit_sits_below_the_drones_and_the_guns(self):
+    def test_it_sits_below_the_drones_and_the_guns(self):
         """#326's rule: reaching the drones or the guns must never require a
         manoeuvre to land first."""
-        drones, guns, orbit = self.order_of(
+        drones, guns, approach = self.order_of(
             "case dronesAssistTheCommander context of",
             "case fireOnActiveTarget context of",
-            "case orbitTheFleetCommander context shipUI of")
+            "case approachTheFleetCommander context shipUI of")
         self.assertLess(drones, guns)
-        self.assertLess(guns, orbit)
+        self.assertLess(guns, approach)
 
-    def test_the_orbit_sits_above_the_gate(self):
+    def test_it_sits_above_the_gate(self):
         """#348's arm answers `Just (wait)` on every reading a gate is on the
-        overview with rats still around. Below it, the orbit would be starved
-        in the one state it exists for."""
-        orbit, gate = self.order_of(
-            "case orbitTheFleetCommander context shipUI of",
+        overview with rats still around. Below it, station-keeping would be
+        starved in the one state it exists for."""
+        approach, gate = self.order_of(
+            "case approachTheFleetCommander context shipUI of",
             "case accelerationGateStep context of")
-        self.assertLess(orbit, gate)
+        self.assertLess(approach, gate)
 
     def test_orbit_fc_supersedes_orbit_in_combat(self):
         """#365 is explicit that this is not a third option beside the other
@@ -393,19 +632,29 @@ class ThePlacementAndTheSupersessionTest(unittest.TestCase):
 
     def test_the_counter_is_advanced_by_the_shipped_rule_itself(self):
         """#102's defect is a counter advanced by one condition and read by
-        another. The memory update calls `orbitFleetCommanderStep` rather than
-        restating it, so the two cannot drift apart."""
+        another. The memory update calls `approachFleetCommanderStep` rather
+        than restating it, so the two cannot drift apart."""
         update = self.source[self.source.index(
             "updateMemoryForNewReadingFromGame context botMemoryBefore ="):]
         update = update[:update.index(
             "\n\n\ngetCurrentAnomalyIDAsSeenInProbeScanner")]
-        self.assertIn("orbitFleetCommanderStep", update)
-        self.assertIn("orbitFleetCommanderAnswersThatSpendAReading", update)
-        self.assertIn("orbitFleetCommanderAskedReadings + 1", update)
+        self.assertIn("approachFleetCommanderStep", update)
+        self.assertIn("approachFleetCommanderAnswersThatSpendAReading", update)
+        self.assertIn("approachFleetCommanderAskedReadings + 1", update)
+
+    def test_the_counter_is_advanced_by_the_shipped_rule_and_the_memory_field(
+            self):
+        """The other half of #102: the memory update writes the field the
+        decision reads, and by name."""
+        update = self.source[self.source.index(
+            "updateMemoryForNewReadingFromGame context botMemoryBefore ="):]
+        update = update[:update.index(
+            "\n\n\ngetCurrentAnomalyIDAsSeenInProbeScanner")]
+        self.assertIn("approachFleetCommanderAskedReadings + 1", update)
 
     def test_the_commander_is_read_the_one_way_both_sides_can_read_him(self):
         """The arm and the counter resolve the commander through the same
-        reading-only function. The orbit is issued against the commander's
+        reading-only function. The manoeuvre is issued against the commander's
         overview row, so a name the client itself did not write is a name there
         may be no row for -- `fleetCommanderName`'s fall-back to
         `follow-fleet-broadcast-from` belongs to the arms that run *to* him
@@ -416,12 +665,26 @@ class ThePlacementAndTheSupersessionTest(unittest.TestCase):
         self.assertIn("fleetCommanderNameFromFleetWindowHeader", entry)
         self.assertNotIn("fleetCommanderName context", entry)
 
-    def test_a_give_up_on_the_orbit_is_visible_in_the_status_line(self):
+    def test_a_give_up_is_visible_in_the_status_line(self):
         """The arm answers `Nothing` when it gives up, so without this a ship
-        that stopped trying reads exactly like a ship that is orbiting fine."""
-        self.assertIn("describeOrbitFleetCommanderAsk context", self.source)
-        self.assertIn("Orbit on the commander: ", self.source)
+        that stopped trying reads exactly like a ship keeping station fine."""
+        self.assertIn("describeApproachFleetCommanderAsk context", self.source)
+        self.assertIn("Approach on the commander: ", self.source)
         self.assertIn("GAVE UP after ", self.source)
+
+    def test_a_missing_overview_row_names_the_preset_as_a_cause(self):
+        """The bot clicks the commander's overview row, so an overview preset
+        that hides fleet members leaves it with nothing to click -- and that is
+        indistinguishable from a commander who is off the grid. Reporting only
+        'not on this grid' would send an operator looking in the wrong place."""
+        start = self.source.index(
+            "\ndescribeApproachFleetCommanderAsk context =")
+        body = self.source[start:self.source.index("\n\n\n", start)]
+        self.assertIn("NO OVERVIEW ROW", body)
+        self.assertIn("preset", body)
+        header = self.source[:self.source.index("\nmodule Bot exposing")]
+        self.assertIn("Show fleet members on the active overview preset",
+                      header)
 
     def test_the_header_offers_both_keys(self):
         """`--help` reads the header, and #161's failure is a header that
@@ -433,42 +696,10 @@ class ThePlacementAndTheSupersessionTest(unittest.TestCase):
         self.assertIn('( "orbit-fc"', self.source)
         self.assertIn('( "orbit-fc-range"', self.source)
 
-    def test_the_cascade_takes_orbit_and_then_the_configured_rung(self):
-        """The mechanism, in the order the client renders it. A cascade that
-        stopped at `Orbit` would orbit at the client's default and read as
-        working, which is the failure this whole change exists to avoid."""
-        arm = self.source[self.source.index(
-            "orbitTheFleetCommander context shipUI ="):]
-        arm = arm[:arm.index("\n\n\n")]
-        # Bounded at the *next* answer, so the range named in the fall-back
-        # branch's own message cannot stand in for the rung the cascade takes.
-        cascade = arm[arm.index("useContextMenuCascadeOnOverviewEntry"):
-                      arm.index("OrbitAtTheClientDefaultWithTheKey ->")]
-        self.assertEqual(cascade.count("useMenuEntryWithTextContaining"), 2)
-        self.assertLess(
-            cascade.index("useMenuEntryWithTextContaining orbitMenuEntryText"),
-            cascade.index("orbitFleetCommanderRange"))
-        self.assertIn("menuCascadeCompleted", cascade)
-
-    def test_the_range_default_is_a_round_choice_and_says_so(self):
-        """`orbit-fc-range` carries menu text, not a number, because what the
-        client offers is a fixed list and this repo has never read it. The
-        default is documented as a round operator choice rather than as a
-        measurement."""
-        block = self.source[self.source.index(
-            "defaultOrbitFleetCommanderRange : String"):]
-        block = block[:block.index("\n\n\n")]
-        self.assertIn('"500 m"', block)
-        doc = self.source[:self.source.index(
-            "defaultOrbitFleetCommanderRange : String")]
-        doc = doc[doc.rindex("{-|"):]
-        self.assertIn("round choice", doc)
-        self.assertIn("not measured against anything", doc)
-
-    def test_the_orbit_is_below_every_arm_that_fights(self):
+    def test_the_arm_is_below_every_arm_that_fights(self):
         """Restating the whole chain in one place, so a rebase that moved the
         arm to a plausible-looking spot still has to move it past a case."""
-        ending, retreat, modules, broadcast, drones, guns, orbit, gate = \
+        ending, retreat, modules, broadcast, drones, guns, approach, gate = \
             self.order_of(
                 "case sessionIsEnding context shipUI of",
                 "case retreatToTheCommander context",
@@ -476,22 +707,90 @@ class ThePlacementAndTheSupersessionTest(unittest.TestCase):
                 "case actOnFleetBroadcast context shipUI of",
                 "case dronesAssistTheCommander context of",
                 "case fireOnActiveTarget context of",
-                "case orbitTheFleetCommander context shipUI of",
+                "case approachTheFleetCommander context shipUI of",
                 "case accelerationGateStep context of")
         self.assertEqual(
-            [ending, retreat, modules, broadcast, drones, guns, orbit, gate],
-            sorted([ending, retreat, modules, broadcast, drones, guns, orbit,
-                    gate]))
+            [ending, retreat, modules, broadcast, drones, guns, approach,
+             gate],
+            sorted([ending, retreat, modules, broadcast, drones, guns,
+                    approach, gate]))
 
-    def test_the_fall_back_reuses_the_established_key_over_a_click(self):
-        """`ensureShipIsOrbiting` is saxrat's mechanism, already in this file,
-        and it is what the give-up path degrades to. Nothing here invents a
-        second way to command a manoeuvre, and nothing posts a key directly."""
-        arm = self.source[self.source.index(
-            "orbitTheFleetCommander context shipUI ="):]
-        arm = arm[:arm.index("\n\n\n")]
-        self.assertIn("ensureShipIsOrbiting shipUI", arm)
-        self.assertIsNone(re.search(r"vkey_\w+", arm))
+
+class TheAnswersThatSpendAReadingTest(unittest.TestCase):
+    """Which answers the counter advances on -- executed, not read.
+
+    **This class exists because a source pin here had a hole.** The first
+    version required `ApproachWithTheKey` and `CloseAWindowLeftOverTheClient`
+    to be in the list and forbade the five silent answers, and said nothing
+    about the three the panel fall-back uses. Deleting all three from
+    `approachFleetCommanderAnswersThatSpendAReading` broke nothing: the counter
+    would then never advance while the fall-back ran, so
+    `approachFleetCommanderAskedReadingsBound` could never be reached from that
+    state and the fall-back would poke at the panel forever. That is #34's
+    shape -- a bound whose counter cannot reach it -- sitting inside the very
+    change that exists to bound this arm.
+
+    So the question is asked exhaustively and of every constructor, which is
+    the only form that cannot go quiet when a constructor is added.
+    """
+
+    ADVANCES = ("ApproachWithTheKey", "SelectTheCommandersRow",
+                "PressTheApproachButton", "WaitForTheApproachButton",
+                "CloseAWindowLeftOverTheClient")
+    SILENT = ("ApproachFleetCommanderIsOff", "NoCommanderOnGrid",
+              "ShipIsWarpingOrJumping", "AlreadyApproaching",
+              "GaveUpOnTheApproach")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_every_answer_that_spends_a_reading_is_counted(self):
+        """Each of the five dispatches an effect or holds the reading in this
+        arm. `WaitForTheApproachButton` counts for the reason
+        `askingTheGateToOpen` counts its own wait: a panel that showed the row
+        and never produced the button would otherwise buy unlimited readings by
+        doing nothing."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["List.member %s approachFleetCommanderAnswersThatSpendAReading"
+                 % answer for answer in self.ADVANCES]),
+            [True] * len(self.ADVANCES))
+
+    def test_no_answer_that_does_nothing_is_counted(self):
+        """A session that never has the commander on grid must not read as a
+        give-up, and a give-up must not go on advancing the number it reports."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["List.member %s approachFleetCommanderAnswersThatSpendAReading"
+                 % answer for answer in self.SILENT]),
+            [False] * len(self.SILENT))
+
+    def test_the_list_holds_those_five_and_nothing_else(self):
+        """Length as well as membership, so a constructor added to the list
+        without being thought about is caught rather than absorbed."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["List.length approachFleetCommanderAnswersThatSpendAReading"
+                 " == 5"]),
+            [True])
+
+    def test_the_bound_is_reachable_from_the_fall_back(self):
+        """The property all of the above exists to protect, stated directly:
+        every answer the arm can give between the key bound and the total bound
+        advances the counter, so the total bound is reachable rather than
+        decorative (#34)."""
+        reachable = [
+            "List.member (%s) approachFleetCommanderAnswersThatSpendAReading"
+            % step(panel_shows=shows, panel_offers=offers,
+                   asked="approachFleetCommanderKeyAskedReadingsBound")
+            for shows, offers in
+            (("False", "False"), ("True", "False"), ("True", "True"))]
+        self.assertEqual(self.repl.evaluate(reachable), [True, True, True])
 
 
 class TheClientDefaultIsNeverTouchedTest(unittest.TestCase):
@@ -501,14 +800,14 @@ class TheClientDefaultIsNeverTouchedTest(unittest.TestCase):
     surviving the loss of a hull and applying to whatever is boarded next --
     and #359 hard-linked `core_char_*.dat` across six characters, so a default
     changed while flying one of them follows the others, including any that
-    later fly `eve-online-saxrat` into a belt at 500 m. A per-command range off
-    the context menu mutates nothing, which is the whole reason the operator
-    asked for that path.
+    later fly `eve-online-saxrat` into a belt at 500 m.
 
-    The route being refused here is a real one and was this PR's earlier plan:
+    The route being refused here is a real one and was an earlier plan:
     right-click the Selected Item panel's Orbit button, take `Set Default
     "Orbit" Distance`, and type into the modal's `edit_qty`. That modal is
-    recorded in `saxrat_run15.log`. Nothing in this bot may drive it.
+    recorded in `saxrat_run15.log`. Nothing in this bot may drive it. The same
+    prohibition now covers the Approach distance, which is the client's own
+    setting for exactly the same reasons.
     """
 
     @classmethod
@@ -518,38 +817,39 @@ class TheClientDefaultIsNeverTouchedTest(unittest.TestCase):
 
     def test_nothing_drives_the_set_default_modal(self):
         for forbidden in ('Set Default "Orbit"', "Set default \"Orbit\" distance",
+                          'Set Default "Approach"',
                           "edit_qty", "selectedItemOrbit",
                           "ok_dialog_button"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, self.source)
 
     def test_the_stray_window_reader_names_no_unread_literal(self):
-        """No run in `~/eve-bot-logs` carries the Show Info window's type name,
-        so a matcher written for it would be a matcher on a channel nothing has
-        read -- #42's shape. The reader is structural instead, and prints
-        whatever type name it meets so the first run that hits one records the
-        literal."""
+        """The reader is structural, and it is what *recorded* the two window
+        type names the corpus lacked -- naming them in the matcher now would
+        make it go quiet the next time the client invents a third."""
         block = self.source[self.source.index(
             "windowOpenedOverTheClient readingFromGameClient ="):]
         block = block[:block.index("\n\n\n")]
-        for invented in ("ShowInfo", "Database Information", "InfoWindow"):
+        for invented in ("ShowInfo", "Database Information", "InfoWindow",
+                         "LoggerWindow"):
             with self.subTest(invented=invented):
                 self.assertNotIn(invented, block)
         self.assertIn('String.endsWith "Window"', block)
         self.assertIn("closeButton", block)
-        self.assertIn("pythonObjectTypeName", self.source[
-            self.source.index("describeOrbitFleetCommanderAsk context ="):
-            self.source.index("{-| The acceleration-gate ask")])
+        start = self.source.index(
+            "\ndescribeApproachFleetCommanderAsk context =")
+        self.assertIn("pythonObjectTypeName",
+                      self.source[start:self.source.index("\n\n\n", start)])
 
     def test_nothing_is_clicked_at_a_guessed_point(self):
         """#321's stray-menu rescue right-clicked a computed location 16,791
         times in one run and created the menu it was clearing. The window this
         arm closes is closed by its own close button or not at all."""
         arm = self.source[self.source.index(
-            "orbitTheFleetCommander context shipUI ="):]
+            "\napproachTheFleetCommander context shipUI ="):]
         arm = arm[:arm.index("\n\n\n")]
-        close = arm[arm.index("CloseAWindowTheCascadeOpened ->"):]
-        close = close[:close.index("OrbitAtRangeViaTheMenu ->")]
+        close = arm[arm.index("CloseAWindowLeftOverTheClient ->"):]
+        close = close[:close.index("ApproachWithTheKey ->")]
         self.assertIn("closeButton", close)
         self.assertIn("clickUiElementForNavigation closeButton", close)
         self.assertNotIn("effectsMouseClickAtLocation", close)
@@ -561,21 +861,21 @@ class TheClientDefaultIsNeverTouchedTest(unittest.TestCase):
         self.assertIn("core_char_", header)
 
 
-class TheRetreatOutranksTheOrbitTest(unittest.TestCase):
+class TheRetreatOutranksStationKeepingTest(unittest.TestCase):
     """#364's retreat must always answer before this arm can.
 
     The two changes landed on parallel branches and this is where they meet.
     `retreatToTheCommander` sits second in `wingmanDecisionRootInSpace`, under
     `sessionIsEnding` and over everything else, because a ship past its shield
-    or armour threshold has to break off. The orbit does the opposite -- it
-    holds the ship on the grid it is being shot on -- so an ordering that let
-    it answer first would keep a dying ship on station while the guard that
+    or armour threshold has to break off. Station-keeping does the opposite --
+    it holds the ship on the grid it is being shot on -- so an ordering that
+    let it answer first would keep a dying ship on station while the guard that
     exists to save it never got the reading.
 
     Neither branch's own cases could have caught an inversion: #364's pin the
-    retreat against the arms that existed when it was written, and the orbit
-    arm is not one of them. Nothing but a case naming both refuses a future
-    rebase that reorders them, and a rebase is exactly how this one arrived.
+    retreat against the arms that existed when it was written, and this arm is
+    not one of them. Nothing but a case naming both refuses a future rebase
+    that reorders them, and a rebase is exactly how this one arrived.
     """
 
     @classmethod
@@ -585,19 +885,19 @@ class TheRetreatOutranksTheOrbitTest(unittest.TestCase):
 
     def test_the_retreat_arm_comes_first(self):
         retreat = self.source.index("case retreatToTheCommander context")
-        orbit = self.source.index(
-            "case orbitTheFleetCommander context shipUI of")
-        self.assertLess(retreat, orbit)
+        approach = self.source.index(
+            "case approachTheFleetCommander context shipUI of")
+        self.assertLess(retreat, approach)
 
     def test_the_retreat_is_still_the_second_arm_in_the_root(self):
-        """Not merely 'above the orbit'. Everything between `sessionIsEnding`
+        """Not merely 'above the approach'. Everything between `sessionIsEnding`
         and the retreat would be an arm that can hold a reading away from it,
         so the two have to stay adjacent."""
         arms = re.findall(r"case (\w+) context", wingman_root_body(self.source))
         self.assertEqual(arms[:2],
                          ["sessionIsEnding", "retreatToTheCommander"])
-        self.assertIn("orbitTheFleetCommander", arms)
-        self.assertGreater(arms.index("orbitTheFleetCommander"), 1)
+        self.assertIn("approachTheFleetCommander", arms)
+        self.assertGreater(arms.index("approachTheFleetCommander"), 1)
 
 
 if __name__ == "__main__":

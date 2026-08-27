@@ -53,18 +53,21 @@
    + In the ship UI, arrange the modules:
      + Place the modules to use in combat (to activate on targets) in the top row.
      + Hide passive modules by disabling the check-box `Display Passive Modules`.
-   + Configure the keyboard key 'W' to make the ship orbit. This bot orbits the
-     fleet commander through the overview row's own context menu, which carries
-     a distance; the 'W' key is only the fall-back it degrades to if that menu
-     will not drive, and it orbits at the client's default distance instead of
-     the one asked for.
-   + **Nothing here changes the client's default Orbit distance, and nothing
-     should.** That default lives in the client rather than the ship, so it
-     survives losing the hull and applies to whatever is boarded next -- and
-     since #359 hard-linked `core_char_*.dat` across six characters, a default
-     changed while flying one of them follows the others, including any that
-     later fly `eve-online-saxrat` into a belt. `orbit-fc-range` is a
-     per-command distance and mutates nothing.
+   + **Show fleet members on the active overview preset.** This bot keeps
+     station on the fleet commander by clicking the commander's *overview row*,
+     so a preset that hides fleet members leaves it with nothing to click. It
+     cannot change the preset and cannot tell that case apart from a commander
+     who is genuinely off the grid -- the status line says so and names this
+     as a possible cause.
+   + Configure the keyboard keys 'Q' (approach) and 'W' (orbit) to their
+     defaults. 'Q' is what this bot holds while clicking the commander's
+     overview row; 'W' is used by the `orbit-in-combat` path.
+   + **Nothing here changes the client's default Orbit or Approach distance,
+     and nothing should.** Those defaults live in the client rather than the
+     ship, so they survive losing the hull and apply to whatever is boarded
+     next -- and since #359 hard-linked `core_char_*.dat` across six
+     characters, a default changed while flying one of them follows the others,
+     including any that later fly `eve-online-saxrat` into a belt.
 
    ## Configuration Settings
 
@@ -86,17 +89,19 @@
      `Amarr VIII (Oris) - Emperor Family Academy`.
    + `assist-fleet-commander` : Set to 'no' to keep drones on this ship's own
      locked target instead of assisting the commander. Defaults to 'yes'.
-   + `orbit-fc` : Set to 'no' to stop orbiting the fleet commander. Defaults to
-     'yes', which **supersedes `orbit-in-combat`**: a wingman that orbits
-     whatever it is shooting drifts off the commander's grid, which is the one
-     place it is supposed to be.
-   + `orbit-fc-range` : The distance to orbit the fleet commander at, written
-     exactly as the client's own Orbit submenu writes it. Defaults to `500 m`.
-     This is menu text rather than a number, the same arrangement
-     `warp-to-anomaly-distance` uses, because what the client offers is a fixed
-     list (`500 m` up to `30 km`) and it -- not this bot -- decides whether a
-     given rung reads as metres or kilometres. Right-click anything on the
-     overview and read the Orbit entry's submenu to see the list.
+   + `orbit-fc` : Set to 'no' to stop keeping station on the fleet commander.
+     Defaults to 'yes', which **supersedes `orbit-in-combat`**: a wingman that
+     orbits whatever it is shooting drifts off the commander's grid, which is
+     the one place it is supposed to be. Also spelled `approach-fc`, which is
+     the manoeuvre it actually commands: the orbit spelling is kept so a
+     settings string written for an earlier version still starts a session.
+   + `orbit-fc-range` : **Accepted and ignored.** It named a rung of the
+     client's Orbit submenu, and this bot no longer drives that submenu --
+     keeping station is an approach at the client's own approach distance, and
+     nothing here can ask for a distance. The key still parses so that a
+     settings string carrying it does not end a session before it starts, and
+     the status line names it as ignored on every reading it is set to anything
+     other than `500 m`.
    + `orbit-in-combat` : Set to 'no' to stop orbiting the target. Read only
      when `orbit-fc` is 'no'.
    + `deactivate-module-on-warp` : Name of a module to deactivate when warping.
@@ -356,8 +361,8 @@ parseBotSettings =
              }
            )
          , ( "orbit-fc"
-           , { alternativeNames = [ "orbit-FC", "orbit-fleet-commander" ]
-             , description = "Whether to keep the ship orbiting the fleet commander. Defaults to 'yes', and supersedes 'orbit-in-combat'. The distance is the client's own default Orbit distance."
+           , { alternativeNames = [ "orbit-FC", "orbit-fleet-commander", "approach-fc", "approach-FC" ]
+             , description = "Whether to keep the ship on station beside the fleet commander, by approaching their overview row. Defaults to 'yes', and supersedes 'orbit-in-combat'. The distance is the client's own default Approach distance."
              , valueParser =
                 PromptParser.valueTypeYesOrNo
                     (\orbitFleetCommander settings ->
@@ -367,7 +372,7 @@ parseBotSettings =
            )
          , ( "orbit-fc-range"
            , { alternativeNames = [ "orbit-FC-range" ]
-             , description = "The distance to orbit the fleet commander at, written exactly as the client's own Orbit submenu writes it. Defaults to '500 m'."
+             , description = "ACCEPTED AND IGNORED. It named a rung of the client's Orbit submenu, which this bot no longer drives; keeping station is now an approach at the client's own distance. Still parsed so a settings string carrying it does not end the session, and named as ignored in the status line."
              , valueParser =
                 PromptParser.valueTypeString
                     (\orbitRange settings ->
@@ -536,6 +541,15 @@ type alias BotMemory =
     , goToFleetMatePlaceSeen : Maybe String
     , goToFleetMateDestinationAsked : Maybe String
 
+    -- Readings in a row spent asking the client to warp this ship to a
+    -- fleet-mate who already has a row on this overview, bounded for #373's
+    -- reason: the cascade this used to drive could never resolve, and an arm
+    -- this high in the tree with no bound owns the whole bot (#321). Advances
+    -- while a mate this ship is flying to is on the grid, holds once the
+    -- budget is spent, and resets the moment there is no such mate. See
+    -- `fleetMateWarpStep`.
+    , goToFleetMateWarpAskedReadings : Int
+
     -- Ported from `eve-online-warp-to-0-autopilot`'s fields of the same name
     -- -- see `navigateTowardFleetCommander` for what they drive. Not renamed,
     -- so a reader who knows that bot recognises them immediately. That bot's
@@ -593,14 +607,14 @@ type alias BotMemory =
     -- target gets the full allowance again.
     , weaponsAskedReadings : Int
 
-    -- Readings in a row spent pressing orbit at the fleet commander's overview
-    -- row without the client ever naming the manoeuvre `Orbit`, bounded for
-    -- the same reason as the two counters above -- see
-    -- `orbitFleetCommanderAskedReadingsBound`. Advances only while the ask is
-    -- actually going out, holds once the budget is spent and the commander is
-    -- still on the grid, and resets the moment the ship reads as orbiting or
-    -- the commander leaves the overview.
-    , orbitFleetCommanderAskedReadings : Int
+    -- Readings in a row spent asking this ship to approach the fleet
+    -- commander's overview row without the client ever naming the manoeuvre
+    -- `Approach`, bounded for the same reason as the two counters above -- see
+    -- `approachFleetCommanderAskedReadingsBound`. Advances only while the ask
+    -- is actually going out, holds once the budget is spent and the commander
+    -- is still on the grid, and resets the moment the ship reads as
+    -- approaching or the commander leaves the overview.
+    , approachFleetCommanderAskedReadings : Int
 
     -- Readings in a row spent right-clicking a locked fleet pilot's target-bar
     -- entry to unlock it, bounded like the three counters above -- see
@@ -1908,9 +1922,12 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context shipUI continueIfCo
     if context.eventContext.botSettings.orbitFleetCommander == PromptParser.Yes then
         {- #365: `orbit-fc` supersedes `orbit-in-combat` rather than sitting
            beside it. Orbiting the rat this ship happens to be shooting is what
-           walks a wingman off the commander's grid, and `orbitTheFleetCommander`
-           is already holding the ship on the commander -- issuing a second
-           orbit at a different object from here would fight it every reading.
+           walks a wingman off the commander's grid, and
+           `approachTheFleetCommander` is already holding the ship on the
+           commander -- issuing an orbit at a different object from here would
+           fight it every reading. The setting is still spelled `orbit-fc`
+           though the manoeuvre it commands is now an approach; see that
+           function.
         -}
         decisionToKillRats
 
@@ -2214,30 +2231,74 @@ ratsToAttackByPriorityFromContext context =
     }
 
 
-ensureShipIsOrbiting : ShipUI -> OverviewWindowEntry -> Maybe (Result String DecisionPathNode)
-ensureShipIsOrbiting shipUI overviewEntryToOrbit =
-    if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverOrbit then
+{-| Command a manoeuvre the way the client's own modifier keys command it: hold
+the key down, click the object's overview row, release.
+
+**Extracted from `ensureShipIsOrbiting`, which is the inherited shape and had
+`W` and `Orbit` written into it.** `approachTheFleetCommander` needs the same
+three effects with `Q` and `Approach`, and a second hand-written copy is how
+the two would drift -- the key and the manoeuvre it commands are one pairing
+and belong in one argument.
+
+**The manoeuvre check is the client's own word and the only thing that stops
+the ask.** A dispatched click is not a manoeuvre: the ship UI's indication
+naming `command.maneuver` is, which is what `approachFleetCommanderStep`
+rests on.
+
+-}
+commandManeuverByModifierClick :
+    { key : EffectOnWindow.VirtualKeyCode
+    , maneuver : EveOnline.ParseUserInterface.ShipManeuverType
+    , describe : String
+    }
+    -> ShipUI
+    -> OverviewWindowEntry
+    -> Maybe (Result String DecisionPathNode)
+commandManeuverByModifierClick command shipUI overviewEntry =
+    if (shipUI.indication |> Maybe.andThen .maneuverType) == Just command.maneuver then
         Nothing
 
     else
         Just
-            (case mouseClickOnUIElement MouseButtonLeft overviewEntryToOrbit.uiNode of
+            (case mouseClickOnUIElement MouseButtonLeft overviewEntry.uiNode of
                 Err _ ->
                     Err "Failed to click"
 
                 Ok effectToClick ->
                     Ok
-                        (describeBranch "Press the 'W' key and click on the overview entry."
+                        (describeBranch command.describe
                             (decideActionForCurrentStep
-                                ([ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_W ]
+                                ([ [ EffectOnWindow.KeyDown command.key ]
                                  , effectToClick
-                                 , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_W ]
+                                 , [ EffectOnWindow.KeyUp command.key ]
                                  ]
                                     |> List.concat
                                 )
                             )
                         )
             )
+
+
+ensureShipIsOrbiting : ShipUI -> OverviewWindowEntry -> Maybe (Result String DecisionPathNode)
+ensureShipIsOrbiting =
+    commandManeuverByModifierClick
+        { key = EffectOnWindow.vkey_W
+        , maneuver = EveOnline.ParseUserInterface.ManeuverOrbit
+        , describe = "Press the 'W' key and click on the overview entry."
+        }
+
+
+{-| The same thing with the client's approach modifier -- `Q` rather than `W`,
+and the client naming the manoeuvre `Approach` rather than `Orbit`. See
+`approachTheFleetCommander` for why this bot commands an approach at all.
+-}
+ensureShipIsApproaching : ShipUI -> OverviewWindowEntry -> Maybe (Result String DecisionPathNode)
+ensureShipIsApproaching =
+    commandManeuverByModifierClick
+        { key = EffectOnWindow.vkey_Q
+        , maneuver = EveOnline.ParseUserInterface.ManeuverApproach
+        , describe = "Press the 'Q' key and click on the overview entry."
+        }
 
 
 launchAndEngageDrones :
@@ -2598,6 +2659,7 @@ initBotMemory =
     , fleetBroadcastFollowed = Nothing
     , goToFleetMatePlaceSeen = Nothing
     , goToFleetMateDestinationAsked = Nothing
+    , goToFleetMateWarpAskedReadings = 0
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
     , hitpoints =
@@ -2615,7 +2677,7 @@ initBotMemory =
     , recoveringFromRetreat = False
     , gateAskedReadings = 0
     , weaponsAskedReadings = 0
-    , orbitFleetCommanderAskedReadings = 0
+    , approachFleetCommanderAskedReadings = 0
     , unlockFleetPilotAskedReadings = 0
     }
 
@@ -2731,7 +2793,8 @@ statusTextFromState context =
                     , [ describeFleetMembership context, describeFriendlyFireGuard context ]
                     , [ describeAccelerationGateAsk context ]
                     , [ describeWeaponsAsk context ]
-                    , [ describeOrbitFleetCommanderAsk context ]
+                    , [ describeApproachFleetCommanderAsk context ]
+                    , [ describeFleetMateWarp context ]
                     ]
                         |> List.map (String.join " ")
     in
@@ -3202,36 +3265,54 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                         /= Nothing
                    )
 
-        commanderIsOnGridToOrbit : Bool
-        commanderIsOnGridToOrbit =
+        commanderIsOnGrid : Bool
+        commanderIsOnGrid =
             fleetCommanderOverviewEntry context.readingFromGameClient /= Nothing
 
-        shipIsOrbitingNow : Bool
-        shipIsOrbitingNow =
-            shipIsOrbitingFromReading context.readingFromGameClient
+        shipIsApproachingNow : Bool
+        shipIsApproachingNow =
+            shipIsApproachingFromReading context.readingFromGameClient
 
         -- The same shape as `askingTheGateToOpen` and `askingAWeaponToActivate`,
         -- and taken from the shipped rule itself rather than restated beside
         -- it: a counter advanced by one condition and read by another is
-        -- #102's defect, and `orbitFleetCommanderStep` is the only thing that
-        -- decides whether an orbit ask goes out. `retreatIsDecided` above is
+        -- #102's defect, and `approachFleetCommanderStep` is the only thing
+        -- that decides whether the ask goes out. `retreatIsDecided` above is
         -- the same arrangement, and #364 is what made it possible here --
         -- `UpdateMemoryContext` carries the settings since that change, so
         -- this reads the real `orbit-fc` rather than the `True` it had to
         -- assume when the settings were not visible from a memory update.
-        askingTheCommanderForAnOrbit : Bool
-        askingTheCommanderForAnOrbit =
+        askingTheCommanderForAnApproach : Bool
+        askingTheCommanderForAnApproach =
             List.member
-                (orbitFleetCommanderStep
+                (approachFleetCommanderStep
                     { settingIsYes = context.botSettings.orbitFleetCommander == PromptParser.Yes
-                    , commanderOnGrid = commanderIsOnGridToOrbit
+                    , commanderOnGrid = commanderIsOnGrid
                     , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
-                    , shipIsOrbiting = shipIsOrbitingNow
+                    , shipIsApproaching = shipIsApproachingNow
                     , strayWindowIsOpen = windowOpenedOverTheClient context.readingFromGameClient /= Nothing
-                    , askedReadings = botMemoryBefore.orbitFleetCommanderAskedReadings
+                    , panelShowsTheCommander = panelIsShowingTheFleetCommander context.readingFromGameClient
+                    , panelOffersApproach =
+                        selectedItemButtonNamed context.readingFromGameClient selectedItemApproachButtonName /= Nothing
+                    , askedReadings = botMemoryBefore.approachFleetCommanderAskedReadings
                     }
                 )
-                orbitFleetCommanderAnswersThatSpendAReading
+                approachFleetCommanderAnswersThatSpendAReading
+
+        -- The same shape as `askingTheGateToOpen`, and asked through the rule
+        -- the decision itself asks rather than restated beside it: a fleet-mate
+        -- this ship is flying to has a row on this overview, which is exactly
+        -- the state `warpToFleetMateOnThisGrid` spends a reading in. It counts
+        -- a reading an arm *above* the broadcast happened to take, so it
+        -- over-counts rather than under-counts -- the safe direction for a
+        -- bound whose whole job is to end #373's loop.
+        fleetMateOnThisGrid : Maybe String
+        fleetMateOnThisGrid =
+            fleetMateToWarpToOnThisGrid
+                { followFleetBroadcastFrom = context.botSettings.followFleetBroadcastFrom
+                , recoveringFromRetreat = botMemoryBefore.recoveringFromRetreat
+                }
+                context.readingFromGameClient
 
         -- Taken from the shipped rule rather than restated beside it, the same
         -- arrangement as `askingTheCommanderForAnOrbit` above and for #102's
@@ -3295,6 +3376,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
                 else
                     botMemoryBefore.goToFleetMateDestinationAsked
+    , goToFleetMateWarpAskedReadings =
+        if fleetMateOnThisGrid == Nothing then
+            0
+
+        else if fleetMateWarpHasBeenGivenUpOn botMemoryBefore.goToFleetMateWarpAskedReadings then
+            -- Held rather than advanced, `unlockFleetPilotAskedReadings`'s own
+            -- arrangement: the mate is still there and this bot has stopped
+            -- asking, and a counter that ran away would make the status line's
+            -- "after N readings" meaningless.
+            botMemoryBefore.goToFleetMateWarpAskedReadings
+
+        else
+            botMemoryBefore.goToFleetMateWarpAskedReadings + 1
     , routeFirstMarkerRegion = currentRouteFirstMarkerRegion
     , routeFirstMarkerUnchangedTicks =
         if currentRouteFirstMarkerRegion == Nothing then
@@ -3344,17 +3438,17 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         if retreatIsDecided then
             True
 
-        else if commanderIsOnGridToOrbit then
+        else if commanderIsOnGrid then
             False
 
         else
             botMemoryBefore.recoveringFromRetreat
-    , orbitFleetCommanderAskedReadings =
-        if askingTheCommanderForAnOrbit then
-            botMemoryBefore.orbitFleetCommanderAskedReadings + 1
+    , approachFleetCommanderAskedReadings =
+        if askingTheCommanderForAnApproach then
+            botMemoryBefore.approachFleetCommanderAskedReadings + 1
 
-        else if commanderIsOnGridToOrbit && not shipIsOrbitingNow then
-            botMemoryBefore.orbitFleetCommanderAskedReadings
+        else if commanderIsOnGrid && not shipIsApproachingNow then
+            botMemoryBefore.approachFleetCommanderAskedReadings
 
         else
             0
@@ -4864,8 +4958,8 @@ wingmanDecisionRootInSpaceOrdinary context shipUI =
                                             fire
 
                                         Nothing ->
-                                            case orbitTheFleetCommander context shipUI of
-                                                Just orbitTheCommander ->
+                                            case approachTheFleetCommander context shipUI of
+                                                Just approachTheCommander ->
                                                     -- #365. Below the drone arm
                                                     -- and below the guns so it
                                                     -- can starve neither
@@ -4884,8 +4978,8 @@ wingmanDecisionRootInSpaceOrdinary context shipUI =
                                                     -- answer before that arm
                                                     -- does. The full argument
                                                     -- is in
-                                                    -- `orbitTheFleetCommander`.
-                                                    orbitTheCommander
+                                                    -- `approachTheFleetCommander`.
+                                                    approachTheCommander
 
                                                 Nothing ->
                                                     case accelerationGateStep context of
@@ -5004,7 +5098,7 @@ actOnFleetBroadcast context shipUI =
                                     )
 
                         Nothing ->
-                            Just (actOnBroadcastVerb context shipUI bannerText)
+                            actOnBroadcastVerb context shipUI bannerText
 
 
 {-| Lock the called target, then get out of the way.
@@ -5512,110 +5606,104 @@ It costs a right-click on a UI element this bot already has, and the cascade's
 own discard rule closes it again if nothing matches.
 
 -}
-actOnBroadcastVerb : BotDecisionContext -> ShipUI -> String -> DecisionPathNode
+actOnBroadcastVerb : BotDecisionContext -> ShipUI -> String -> Maybe DecisionPathNode
 actOnBroadcastVerb context shipUI bannerText =
     let
         permitted : String -> Bool
         permitted pilot =
             List.member pilot context.eventContext.botSettings.followFleetBroadcastFrom
+
+        say : String -> Maybe DecisionPathNode
+        say reason =
+            Just (describeBranch reason waitForProgressInGame)
     in
     case parseFleetBroadcast bannerText of
         CalledTarget _ ->
-            describeBranch
-                "Handled above -- a called target reaches its own branch."
-                waitForProgressInGame
+            say "Handled above -- a called target reaches its own branch."
 
         TravelTo _ ->
-            describeBranch
-                "Handled above -- a travel destination reaches its own branch."
-                waitForProgressInGame
+            say "Handled above -- a travel destination reaches its own branch."
 
         AtLocation { pilot, system } ->
             if not (permitted pilot) then
-                describeBranch
+                say
                     ("'"
                         ++ pilot
                         ++ "' is at "
                         ++ system
                         ++ " but is not named in 'follow-fleet-broadcast-from'."
                     )
-                    waitForProgressInGame
 
             else
                 goToFleetMate context shipUI pilot system "is at location"
 
         InPositionAt { pilot, gate } ->
             if not (permitted pilot) then
-                describeBranch
+                say
                     ("'"
                         ++ pilot
                         ++ "' is in position at "
                         ++ gate
                         ++ " but is not named in 'follow-fleet-broadcast-from'."
                     )
-                    waitForProgressInGame
 
             else
                 goToFleetMate context shipUI pilot gate "is in position at"
 
         NeedBackup { pilot } ->
             if not (permitted pilot) then
-                describeBranch
+                say
                     ("'"
                         ++ pilot
                         ++ "' needs backup but is not named in"
                         ++ " 'follow-fleet-broadcast-from'."
                     )
-                    waitForProgressInGame
 
             else
                 goToFleetMate context shipUI pilot "" "needs backup"
 
         JumpGate { pilot, gate } ->
             if not (permitted pilot) then
-                describeBranch
+                say
                     ("'"
                         ++ pilot
                         ++ "' called a jump at "
                         ++ gate
                         ++ " but is not named in 'follow-fleet-broadcast-from'."
                     )
-                    waitForProgressInGame
 
             else
-                describeBranch
-                    ("'" ++ pilot ++ "' called a jump at '" ++ gate ++ "'.")
-                    (jumpToCalledGate context gate)
+                Just
+                    (describeBranch
+                        ("'" ++ pilot ++ "' called a jump at '" ++ gate ++ "'.")
+                        (jumpToCalledGate context gate)
+                    )
 
         AlignGate { pilot, gate } ->
             if not (permitted pilot) then
-                describeBranch
+                say
                     ("'"
                         ++ pilot
                         ++ "' called an align at "
                         ++ gate
                         ++ " but is not named in 'follow-fleet-broadcast-from'."
                     )
-                    waitForProgressInGame
 
             else
-                describeBranch
-                    ("'" ++ pilot ++ "' called an align at '" ++ gate ++ "'.")
-                    (alignToCalledGate context gate)
+                Just
+                    (describeBranch
+                        ("'" ++ pilot ++ "' called an align at '" ++ gate ++ "'.")
+                        (alignToCalledGate context gate)
+                    )
 
         Unrecognized text ->
-            openTheBroadcastsOwnMenu context text
+            Just (openTheBroadcastsOwnMenu context text)
 
 
 {-| Warp to a fleet-mate who is on this grid, or route toward them if not.
 
-The in-system half is the cascade saxrat drives: right-click the pilot's
-overview row, `Fleet Member`, then `Warp to Member` -- matched with
-`useMenuEntryWithTextEqual` at both steps, because `"Warp to Member"` is a
-substring of `"Warp to Member Within"` and a containing match takes the wrong
-entry.
-
-The out-of-system half hands the place name to `@host set-destination`, the
+The in-system half is `warpToFleetMateOnThisGrid`, and #373 is what it cost to
+get wrong. The out-of-system half hands the place name to `@host set-destination`, the
 same ESI directive the travel broadcast already uses. **`needs backup` carries
 no place**, and neither does `recoverFromRetreat` (the only caller left after
 #364's retreat stopped warping to the commander itself -- see
@@ -5635,67 +5723,375 @@ showing a destination nothing here ever looked at again.
 exactly once per place and every reading after it drives the route through
 `navigateTowardFleetCommander` instead of repeating the ask.
 
+**`Nothing` is the give-up and nothing else.** Every branch below answers
+`Just`; the one answer that does not is `warpToFleetMateOnThisGrid`'s spent
+budget, which hands the reading back to the arms under the broadcast rather
+than parking on a wait. That is `accelerationGateStep`'s own arrangement, and
+`describeFleetMateWarp` is what keeps the give-up visible.
+
 -}
-goToFleetMate : BotDecisionContext -> ShipUI -> String -> String -> String -> DecisionPathNode
+goToFleetMate : BotDecisionContext -> ShipUI -> String -> String -> String -> Maybe DecisionPathNode
 goToFleetMate context shipUI pilot place calledIt =
-    case
-        context.readingFromGameClient.overviewWindows
-            |> List.concatMap .entries
-            |> List.filter (.objectName >> (==) (Just pilot))
-            |> List.head
-    of
+    case overviewEntryForPilot pilot context.readingFromGameClient of
         Just overviewEntry ->
-            describeBranch
-                ("'"
-                    ++ pilot
-                    ++ "' "
-                    ++ calledIt
-                    ++ " and is on this grid -- warping to them."
-                )
-                (useContextMenuCascadeOnOverviewEntry
-                    (useMenuEntryWithTextEqual "Fleet Member"
-                        (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
-                    )
-                    overviewEntry
-                    context
-                )
+            warpToFleetMateOnThisGrid context pilot calledIt overviewEntry
 
         Nothing ->
-            if String.isEmpty place then
-                describeBranch
-                    ("'"
-                        ++ pilot
-                        ++ "' "
-                        ++ calledIt
-                        ++ " and is not on this grid, and nothing names a"
-                        ++ " place to route to, so there is nothing to fly toward."
-                    )
-                    waitForProgressInGame
+            Just
+                (if String.isEmpty place then
+                    describeBranch
+                        ("'"
+                            ++ pilot
+                            ++ "' "
+                            ++ calledIt
+                            ++ " and is not on this grid, and nothing names a"
+                            ++ " place to route to, so there is nothing to fly toward."
+                        )
+                        waitForProgressInGame
 
-            else if context.memory.goToFleetMateDestinationAsked == Just place then
-                describeBranch
-                    ("'"
-                        ++ pilot
-                        ++ "' "
-                        ++ calledIt
-                        ++ " '"
-                        ++ place
-                        ++ "' and is not on this grid -- navigating toward the route."
-                    )
-                    (navigateTowardFleetCommander context shipUI)
+                 else if context.memory.goToFleetMateDestinationAsked == Just place then
+                    describeBranch
+                        ("'"
+                            ++ pilot
+                            ++ "' "
+                            ++ calledIt
+                            ++ " '"
+                            ++ place
+                            ++ "' and is not on this grid -- navigating toward the route."
+                        )
+                        (navigateTowardFleetCommander context shipUI)
+
+                 else
+                    describeBranch
+                        ("'"
+                            ++ pilot
+                            ++ "' "
+                            ++ calledIt
+                            ++ " '"
+                            ++ place
+                            ++ "' and is not on this grid -- asking the host for the route. "
+                            ++ hostDirectiveSetDestination place
+                        )
+                        waitForProgressInGame
+                )
+
+
+{-| Warp to a fleet-mate whose overview row is right there, by whichever of the
+two mechanisms this reading actually offers.
+
+**#373 is what one mechanism cost.** This drove saxrat's
+`Fleet Member` -> `Warp to Member` cascade from the pilot's _overview row_, and
+that entry is not in an overview row's menu -- it is a submenu of the fleet
+**broadcast banner's** menu, which is where
+`eve-online-saxrat`'s `respondToFleetBackupBroadcast` right-clicks it. #373's
+live capture of a pilot's overview-row menu is the whole list and `Fleet
+Member` is not in it:
+
+    Warp to Within (0 m), Approach, Orbit (5,000 m), Keep at Range (5,000 m),
+    Look at, Look At My Ship, Show Info, Overview visibility for Frigate,
+    Pilot (Gal Bistot), Broadcast: Target, Broadcast: Repair Target
+
+So the cascade could not resolve at any range, on any reading, and with no
+bound it reopened the same menu for hundreds of readings on all four wingman
+pilots at once, with nothing else in the bot running.
+
+**Two callers reach here and they get two different mechanisms**, because only
+one of them has a banner to right-click.
+
+_A broadcast from this pilot is on the banner_ -- `is at location`,
+`is in position at`, `needs backup`. Then saxrat's cascade is available exactly
+as saxrat drives it, from `fleetMateBroadcastBannerElement`.
+`useMenuEntryWithTextEqual` stays at both rungs: `"Warp to Member"` is a prefix
+of `"Warp to Member Within"`, and a containing match takes the wrong entry.
+
+_No banner names this pilot_ -- `recoverFromRetreat`'s path. Then no context
+menu is opened at all. The overview row is selected and the Selected Item
+panel's own `selectedItemWarpTo` is pressed, which is what `warpAwayFromDanger`
+already does for a celestial in this same file: a proven path here, needing no
+flyout. **The overview row's `Warp to Within` distance flyout is deliberately
+not driven**, and the corpus draws that line exactly where it matters: the
+parent entry `Warp to Within` is recorded 3,918 times, hovered by saxrat's own
+cascade, while its distance rung is recorded **zero** times. The rung is the
+channel nothing has read (#42); the panel button needs no rung, which is why
+this path takes it.
+
+**Bounded either way**, which is the half #373 asked for and the half neither
+mechanism supplies on its own. The banner persists after a broadcast is
+answered, so a ship that arrives beside its mate goes on being told to warp to
+them; a mate at 0 m is a warp the client will not offer at all. Past
+`fleetMateWarpAskedReadingsBound` this answers `Nothing` and the drones, the
+guns, the orbit and the gate get their readings back.
+
+-}
+warpToFleetMateOnThisGrid : BotDecisionContext -> String -> String -> OverviewWindowEntry -> Maybe DecisionPathNode
+warpToFleetMateOnThisGrid context pilot calledIt overviewEntry =
+    let
+        preamble : String
+        preamble =
+            "'" ++ pilot ++ "' " ++ calledIt ++ " and is on this grid -- "
+
+        bannerElement : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        bannerElement =
+            fleetMateBroadcastBannerElement
+                context.eventContext.botSettings.followFleetBroadcastFrom
+                pilot
+                context.readingFromGameClient
+
+        warpToButton : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        warpToButton =
+            selectedItemButtonNamed context.readingFromGameClient "selectedItemWarpTo"
+
+        waitForTheWarpToButton : DecisionPathNode
+        waitForTheWarpToButton =
+            describeBranch
+                (preamble ++ "their row is selected but the panel offers no 'selectedItemWarpTo' yet.")
+                waitForProgressInGame
+    in
+    case
+        fleetMateWarpStep
+            { broadcastBannerNamesThisMate = bannerElement /= Nothing
+            , panelShowsTheMate = selectedItemIsOverviewEntry context.readingFromGameClient overviewEntry
+            , panelOffersWarpTo = warpToButton /= Nothing
+            , askedReadings = context.memory.goToFleetMateWarpAskedReadings
+            }
+    of
+        GaveUpOnReachingTheMate ->
+            -- Hand the reading back rather than wait on it. This arm sits
+            -- above the drones, the guns, the orbit and the gate, so a wait
+            -- here is not a give-up at all -- it is #321's "a branch at the
+            -- head of the tree with no bound owns the whole bot" with a
+            -- politer status line. `describeFleetMateWarp` carries the give-up
+            -- instead, on every reading.
+            Nothing
+
+        WarpToTheMateFromTheBroadcast ->
+            Just
+                (bannerElement
+                    |> Maybe.map
+                        (\banner ->
+                            describeBranch
+                                (preamble ++ "warping to them from the broadcast banner's own menu.")
+                                (useContextMenuCascade
+                                    ( "fleet broadcast", banner )
+                                    (useMenuEntryWithTextEqual "Fleet Member"
+                                        (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
+                                    )
+                                    context
+                                )
+                        )
+                    |> Maybe.withDefault
+                        (describeBranch
+                            (preamble ++ "the broadcast banner went away between reading it and clicking it.")
+                            waitForProgressInGame
+                        )
+                )
+
+        SelectTheMate ->
+            Just
+                (describeBranch
+                    (preamble ++ "select their overview row, so the panel's own Warp To acts on it.")
+                    (clickUiElementForNavigation overviewEntry.uiNode)
+                )
+
+        WaitForTheMatesWarpButton ->
+            Just waitForTheWarpToButton
+
+        PressWarpToTheMate ->
+            Just
+                (warpToButton
+                    |> Maybe.map
+                        (\button ->
+                            describeBranch
+                                (preamble ++ "warp to them with the panel's own Warp To.")
+                                (clickUiElementForNavigation button)
+                        )
+                    |> Maybe.withDefault waitForTheWarpToButton
+                )
+
+
+{-| The broadcast banner as a clickable element, but only while the broadcast
+it is showing is this pilot's own call for company.
+
+**The banner persists** -- `fleetBroadcastBannerText` records it still reading
+`Gal Bistot: Travel to Riramia` long after that broadcast -- so "a banner is
+present" is not "this pilot is calling". Driving the banner's `Fleet Member`
+cascade off a stale banner would warp this ship to whoever last broadcast, and
+`recoverFromRetreat` is exactly the caller that arrives with somebody else's
+banner still up.
+
+-}
+fleetMateBroadcastBannerElement :
+    List String
+    -> String
+    -> ReadingFromGameClient
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+fleetMateBroadcastBannerElement followFleetBroadcastFrom pilot readingFromGameClient =
+    if fleetMateCallingForCompany followFleetBroadcastFrom readingFromGameClient == Just pilot then
+        fleetBroadcastBannerElement readingFromGameClient
+
+    else
+        Nothing
+
+
+{-| The fleet-mate whose current broadcast asks this ship to come to them.
+
+The three verbs `actOnBroadcastVerb` hands to `goToFleetMate`, filtered by
+`follow-fleet-broadcast-from` the same way that function filters them -- an
+exact match, never a substring, `fleetInviteSenderFromMessageBox`'s reason:
+this decides which pilot this ship flies to.
+
+-}
+fleetMateCallingForCompany : List String -> ReadingFromGameClient -> Maybe String
+fleetMateCallingForCompany followFleetBroadcastFrom readingFromGameClient =
+    fleetBroadcastBannerText readingFromGameClient
+        |> Maybe.andThen
+            (\bannerText ->
+                case parseFleetBroadcast bannerText of
+                    AtLocation { pilot } ->
+                        Just pilot
+
+                    InPositionAt { pilot } ->
+                        Just pilot
+
+                    NeedBackup { pilot } ->
+                        Just pilot
+
+                    _ ->
+                        Nothing
+            )
+        |> Maybe.andThen
+            (\pilot ->
+                if List.member pilot followFleetBroadcastFrom then
+                    Just pilot
+
+                else
+                    Nothing
+            )
+
+
+{-| Which fleet-mate this ship is trying to reach on this grid, if any.
+
+One question with two readers -- `warpToFleetMateOnThisGrid` and the counter in
+`updateMemoryForNewReadingFromGame` that bounds it -- rather than a condition
+restated beside the rule, which is #102's defect.
+
+The order is the decision root's own: `recoverFromRetreat` sits directly under
+the retreat and above `actOnFleetBroadcast`, so a ship still flying back from a
+break-off is rejoining its commander whatever the banner currently says.
+
+**What makes the recovery arm reachable here at all is worth stating**, since a
+counter for a state that cannot be entered is #34's shape.
+`updateMemoryForNewReadingFromGame` clears `recoveringFromRetreat` on the same
+reading the commander gets an overview row -- but it resolves the commander
+through `fleetCommanderNameFromFleetWindowHeader` alone, while
+`recoverFromRetreat` resolves him through `fleetCommanderName`, which falls
+back to `follow-fleet-broadcast-from`. So the recovery reaches the on-grid
+branch exactly when the fleet window's header names nobody and the setting
+names the commander, and that is the state the panel path exists for.
+
+-}
+fleetMateToWarpToOnThisGrid :
+    { followFleetBroadcastFrom : List String, recoveringFromRetreat : Bool }
+    -> ReadingFromGameClient
+    -> Maybe String
+fleetMateToWarpToOnThisGrid { followFleetBroadcastFrom, recoveringFromRetreat } readingFromGameClient =
+    let
+        onThisGrid : String -> Maybe String
+        onThisGrid pilot =
+            if pilotIsOnOverview pilot readingFromGameClient then
+                Just pilot
 
             else
-                describeBranch
-                    ("'"
-                        ++ pilot
-                        ++ "' "
-                        ++ calledIt
-                        ++ " '"
-                        ++ place
-                        ++ "' and is not on this grid -- asking the host for the route. "
-                        ++ hostDirectiveSetDestination place
-                    )
-                    waitForProgressInGame
+                Nothing
+    in
+    case
+        ( recoveringFromRetreat
+        , fleetCommanderNameFromReading followFleetBroadcastFrom readingFromGameClient
+        )
+    of
+        ( True, Just commander ) ->
+            onThisGrid commander
+
+        _ ->
+            fleetMateCallingForCompany followFleetBroadcastFrom readingFromGameClient
+                |> Maybe.andThen onThisGrid
+
+
+{-| What to do about a fleet-mate on this grid, as five named answers over
+three facts and a counter -- the shape `accelerationGateActivationStep` and
+`approachFleetCommanderStep` already use here, and for the stated reason: a rule
+reachable only through a full `BotDecisionContext` is a rule nothing can
+execute in a test.
+
+**The give-up is asked first**, before any of the three facts, which is
+`approachFleetCommanderStep`'s ordering and for its reason: a spent budget must
+never be masked by a moment that happens to look actionable.
+
+**The banner is asked before the panel.** Where a broadcast from this pilot is
+up, the client's own `Warp to Member` is the mechanism saxrat has flown for
+several hundred broadcasts, and it needs no row selected first.
+
+-}
+fleetMateWarpStep :
+    { broadcastBannerNamesThisMate : Bool
+    , panelShowsTheMate : Bool
+    , panelOffersWarpTo : Bool
+    , askedReadings : Int
+    }
+    -> FleetMateWarpStep
+fleetMateWarpStep mateCase =
+    if fleetMateWarpHasBeenGivenUpOn mateCase.askedReadings then
+        GaveUpOnReachingTheMate
+
+    else if mateCase.broadcastBannerNamesThisMate then
+        WarpToTheMateFromTheBroadcast
+
+    else if not mateCase.panelShowsTheMate then
+        SelectTheMate
+
+    else if mateCase.panelOffersWarpTo then
+        PressWarpToTheMate
+
+    else
+        WaitForTheMatesWarpButton
+
+
+type FleetMateWarpStep
+    = GaveUpOnReachingTheMate
+    | WarpToTheMateFromTheBroadcast
+    | SelectTheMate
+    | WaitForTheMatesWarpButton
+    | PressWarpToTheMate
+
+
+{-| Whether the budget for getting one warp to a fleet-mate started has been
+spent. One comparison with two readers -- the step rule and the status clause
+-- `accelerationGateHasBeenGivenUpOn`'s arrangement, for its reason.
+-}
+fleetMateWarpHasBeenGivenUpOn : Int -> Bool
+fleetMateWarpHasBeenGivenUpOn askedReadings =
+    fleetMateWarpAskedReadingsBound <= askedReadings
+
+
+{-| How many readings this bot spends trying to warp to one fleet-mate on this
+grid before it stops asking.
+
+**Thirty, and not a measurement.** A cascade costs several readings --
+right-click, wait for the menu, hover `Fleet Member`, wait for the flyout,
+click `Warp to Member` -- and `useContextMenuCascadeWithCustomConfig` waits up
+to `readingsToWaitForAFirstContextMenu` for a slow render before it even
+reopens, so thirty leaves room for a handful of complete cycles. It is the same
+allowance the commander-orbit cascade got before that cascade was removed for
+mis-clicking (see `approachTheFleetCommander`), written out rather than shared
+with anything, because the two ends have nothing to do with each other and a
+shared name would say they did. This bot still has no corpus of its own; see
+WINGMAN.md. A run that spends this says so in the status line, which is what
+would replace it with a measured value.
+
+-}
+fleetMateWarpAskedReadingsBound : Int
+fleetMateWarpAskedReadingsBound =
+    30
 
 
 {-| Right-click a broadcast nobody has read, so the next reading records its menu.
@@ -6095,10 +6491,12 @@ or `orbit-fc` happens to ask for next.
 **This is the action `retreatToTheCommander` used to take _as_ the retreat.**
 It belongs here instead: the ship has already gotten clear with
 `warpAwayFromDanger`, it is no longer under threat, and the coordinate it
-should now fly toward really is the commander. `goToFleetMate` is unchanged --
-the client's own "Warp to Member" when the commander is on this grid, the
-`@host set-destination` route the travel broadcast already uses when they are
-not.
+should now fly toward really is the commander. `goToFleetMate` does the flying
+-- the Selected Item panel's own Warp To when the commander is on this grid and
+no broadcast of his is on the banner, the `@host set-destination` route the
+travel broadcast already uses when he is not. **This is the caller #373's
+banner-less path exists for**, and `fleetMateToWarpToOnThisGrid` states what
+makes it reachable.
 
 **Gated on `recoveringFromRetreat`**, latched in `updateMemoryForNewReadingFromGame`
 from the reading a retreat is decided until the commander has an overview row
@@ -6118,21 +6516,25 @@ recoverFromRetreat context shipUI =
         Nothing
 
     else
-        Just
-            (describeBranch
-                "Recovering from a retreat -- rejoin the fleet commander before resuming."
-                (case fleetCommanderName context of
-                    Nothing ->
-                        describeBranch
-                            ("Nothing names the fleet commander -- 'follow-fleet-broadcast-from' is unset,"
-                                ++ " so this ship has no fleet-mate to rejoin."
-                            )
-                            waitForProgressInGame
+        (case fleetCommanderName context of
+            Nothing ->
+                Just
+                    (describeBranch
+                        ("Nothing names the fleet commander -- 'follow-fleet-broadcast-from' is unset,"
+                            ++ " so this ship has no fleet-mate to rejoin."
+                        )
+                        waitForProgressInGame
+                    )
 
-                    Just commander ->
-                        goToFleetMate context shipUI commander "" "is this fleet's commander and this ship is recovering, rejoining"
-                )
-            )
+            Just commander ->
+                -- `Nothing` here is `goToFleetMate`'s give-up and passes
+                -- straight through, so a rejoin this bot has stopped asking
+                -- for does not hold the readings the arms below it need. See
+                -- `warpToFleetMateOnThisGrid`.
+                goToFleetMate context shipUI commander "" "is this fleet's commander and this ship is recovering, rejoining"
+        )
+            |> Maybe.map
+                (describeBranch "Recovering from a retreat -- rejoin the fleet commander before resuming.")
 
 
 {-| Which guard says leave, in the order they are asked.
@@ -6786,94 +7188,133 @@ unlockFleetPilotInTargetBar context =
             Nothing
 
 
-{-| Keep this ship in close orbit around the fleet commander, at the distance
-`orbit-fc-range` asks for. #365.
+{-| Keep this ship next to the fleet commander, by commanding an **approach**
+on the commander's overview row. #365, and #373's sibling change.
+
+**This replaced a two-rung context-menu cascade, and the live evidence is
+why.** The first shape right-clicked the commander's overview row, hovered
+`Orbit`, and clicked the `orbit-fc-range` rung, so that the range came from the
+menu rather than from the client's persistent default. PILOT.md already
+recorded that flyout mis-clicking when driven by hand, and every wingman pilot
+reproduced it on the same day: gliding into the flyout collapsed it, the click
+landed on a neighbouring entry, **Kara opened an `InfoWindow` and Heather a
+`LoggerWindow`**, and all four pilots spent the whole 30-reading menu budget
+and fell back to the key. Per-command range through that flyout is not
+achievable from here, and the operator's call is that an approach is close
+enough for keeping station.
+
+**So the manoeuvre is Approach and the mechanism is the client's own modifier
+key**: hold `Q`, click the commander's overview row, release --
+`ensureShipIsApproaching`, which is `ensureShipIsOrbiting`'s `W` with the key
+and the manoeuvre swapped. One reading per ask, no menu to open, and nothing
+to mis-click into.
+
+**The shape is proven; the key is the substitution.** `Press the 'W' key and
+click on the overview entry` appears 40,648 times in `~/eve-bot-logs`, so
+hold-key-click-release on an overview row is what this repo does routinely --
+but `Q` appears **nowhere** in that corpus, and neither does `ManeuverApproach`.
+What is ported is the mechanism; what is new is the key and the manoeuvre it is
+claimed to command.
+
+**So the fall-back behind it is the better-evidenced half.** Past
+`approachFleetCommanderKeyAskedReadingsBound` this selects the commander's row
+and presses the Selected Item panel's own `selectedItemApproach` --
+`eve-online-mission-runner`'s `selectThenPanelAction`, whose note records that
+exact button taking a ship from 0.0 to 585 m/s after a cascade had achieved
+nothing across 180 decisions. The unproven mechanism is primary because it
+costs one reading against the panel's two, and a run that has to fall back says
+so in the status line, which is what would justify swapping them.
+
+**Be exact about what the corpus says about that button, because it is not what
+it looks like.** `selectedItemApproach` does appear in `~/eve-bot-logs` -- three
+times, and all three are the mission runner reporting that the panel offered
+**none**, for an acceleration gate 5,843 m away. That is evidence about range,
+not about the name. The corpus holds no parsed UI trees at all, so it can
+confirm no `_name` whatever: `selectedItemActivateGate` has zero occurrences
+and is shipped and working elsewhere in this file. The evidence for the name is
+the sibling bot's recorded live use, and the risk that leaves open is that the
+button may not be offered for a _pilot_ row, or at range -- which
+`WaitForTheApproachButton` absorbs, bounded and named.
+
+The check that decides between them is the client's own word -- the ship UI's
+indication naming `ManeuverApproach` -- so a first run either shows the
+manoeuvre, or falls back and says so, or spends both budgets and says that.
+
+**Nothing here reads the Selected Item panel to decide the commander is
+reachable.** `panelIsShowingTheFleetCommander` only says whether the panel is
+already showing his row, which is what decides between the fall-back's two
+ticks; the manoeuvre is still confirmed by the ship UI and nothing else.
+
+**`orbit-fc-range` is accepted and ignored, and says so.** Removing the key
+would end a session that has it set, which is #161's failure -- so it still
+parses, and `describeApproachFleetCommanderAsk` names it as ignored on every
+reading an operator has set it to something other than the default. Nothing
+here changes the client's default Orbit distance either; that prohibition is
+unchanged and `TheClientDefaultIsNeverTouchedTest` still refuses the modal
+route.
+
+**The commander must be on an overview preset that shows fleet members**, which
+this bot cannot arrange -- see WINGMAN.md's setup section. `NoCommanderOnGrid`
+therefore reads as "no overview row", naming the preset as a possible cause,
+rather than asserting the commander is not on this grid.
 
 **Where it sits, and why that is not the obvious place.** A wingman's whole job
 is to be where the commander is, so the tempting placement is at the head of
 the decision root -- and that is the placement #326 spent 262 readings proving
 wrong for the guns. Anything above the drone arm can hold the reading while the
-drones sit idle, and an orbit that cannot be established (a row that shifts
-under the click, a menu that will not open) would do exactly that. So this sits
-**below `dronesAssistTheCommander` and below `fireOnActiveTarget`**, where it
-can starve neither.
+drones sit idle, and a manoeuvre that cannot be established would do exactly
+that. So this sits **below `dronesAssistTheCommander` and below
+`fireOnActiveTarget`**, where it can starve neither.
 
 **And below `retreatToTheCommander` and `recoverFromRetreat`, which is not a
 trade-off at all.** #364's guard sits second in the root, under
 `sessionIsEnding` and over everything else, because a ship past its shield or
 armour threshold has to break off -- and since the break-off itself now warps
 to whatever is at AU range rather than to the commander (see
-`warpAwayFromDanger`), a `recoverFromRetreat` arm sits directly under it to
-fly back once the ship is safe, before anything else gets a turn. This orbit
-arm does the opposite of both -- it holds the ship on the grid it is being shot
-on -- so it must never be able to answer first. `TheRetreatOutranksTheOrbitTest`
-in `test_wingman_orbits_the_fleet_commander.py` asserted the old arm count and
-will need updating for the split; the property it is guarding -- retreat and
-recovery both outrank this orbit -- is unchanged and still true.
+`warpAwayFromDanger`), a `recoverFromRetreat` arm sits directly under it to fly
+back once the ship is safe, before anything else gets a turn. This arm does the
+opposite of both -- it holds the ship on the grid it is being shot on -- so it
+must never be able to answer first.
 
 **And above `accelerationGateStep`, which is the half worth arguing.** That arm
 answers `Just (wait)` on _every_ reading a gate is on the overview while rats
 are still on the grid -- #348's deliberate refusal to abandon a fight. That is
 precisely the state this bot most needs to be next to its commander in, so
-putting the orbit below the gate would starve it in the one situation it exists
-for. Above the gate the cost is bounded and small in the other direction: a
-gate is taken a few readings later than it might have been, and the fleet's
-pocket does not move.
+putting this below the gate would starve it in the one situation it exists for.
+Above the gate the cost is bounded and small in the other direction: a gate is
+taken a few readings later than it might have been, and the fleet's pocket does
+not move.
 
 **It supersedes `orbit-in-combat` rather than sitting beside it.** With
 `orbit-fc=yes`, `decideActionInAnomaly` does not issue its own orbit at all --
 orbiting whatever this ship is shooting is what pulls a wingman off the
 commander's grid, which is the drift the issue was filed on.
 
-**The distance comes from the context menu, not from the client's default.**
-The 'W' key orbits at whatever default the client holds, and that default is a
-_persistent client-side_ setting: PILOT.md records that it survives losing the
-hull and applies to whatever is boarded next, and #359 hard-linked
-`core_char_*.dat` across six characters, so a default changed while flying one
-of them follows the others -- including any that later fly saxrat into a belt
-at 500 m. A distance taken from the menu mutates nothing, which is why this
-path is the one the operator asked for even though it is the harder one to
-drive.
-
-**PILOT.md records this exact path failing, and what makes it tractable here is
-the framework rather than optimism.** That note is about driving the flyout by
-hand: gliding the cursor to one of its entries passed through the parent menu,
-collapsed it, and the click landed on `Show Info`. `getNextContextMenu` does
-not move-and-click in one motion. For every entry that is not the last it
-dispatches `mouseMoveToUIElement` and **nothing else** -- a hover, then the
-reading ends -- and only the final entry is clicked, from a node it matched in
-_that_ reading's parsed menu at the expected cascade depth. It never clicks a
-location it did not match. That is the same two-level distance flyout
-`enterAnomaly` drives in production as `Warp to Within` -> `Within 0 m`, and
-`useContextMenuCascadeWithCustomConfig`'s own comments name that one as a
-"hover-triggered Photon-UI flyout submenu" and record widening the no-progress
-lookback to 8 readings for it.
-
-**What is still unverified is whether the Orbit submenu is that same ordinary
-flyout.** Nothing in `~/eve-bot-logs` carries an `Orbit (N km)` menu entry, so
-no run in this repo has read that list. If it is, this is routine; if it is
-not, the failure is visible and bounded rather than silent -- see the three
-answers below.
-
 -}
-orbitTheFleetCommander : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
-orbitTheFleetCommander context shipUI =
+approachTheFleetCommander : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
+approachTheFleetCommander context shipUI =
     let
         commanderEntry : Maybe OverviewWindowEntry
         commanderEntry =
             fleetCommanderOverviewEntry context.readingFromGameClient
+
+        approachButton : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        approachButton =
+            selectedItemButtonNamed context.readingFromGameClient selectedItemApproachButtonName
     in
     case
-        orbitFleetCommanderStep
+        approachFleetCommanderStep
             { settingIsYes = context.eventContext.botSettings.orbitFleetCommander == PromptParser.Yes
             , commanderOnGrid = commanderEntry /= Nothing
             , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
-            , shipIsOrbiting = shipIsOrbitingFromReading context.readingFromGameClient
+            , shipIsApproaching = shipIsApproachingFromReading context.readingFromGameClient
             , strayWindowIsOpen = windowOpenedOverTheClient context.readingFromGameClient /= Nothing
-            , askedReadings = context.memory.orbitFleetCommanderAskedReadings
+            , panelShowsTheCommander = panelIsShowingTheFleetCommander context.readingFromGameClient
+            , panelOffersApproach = approachButton /= Nothing
+            , askedReadings = context.memory.approachFleetCommanderAskedReadings
             }
     of
-        OrbitFleetCommanderIsOff ->
+        ApproachFleetCommanderIsOff ->
             Nothing
 
         NoCommanderOnGrid ->
@@ -6882,23 +7323,23 @@ orbitTheFleetCommander context shipUI =
         ShipIsWarpingOrJumping ->
             Nothing
 
-        AlreadyOrbiting ->
+        AlreadyApproaching ->
             -- The confirmation, and it is the client's own word rather than
-            -- ours: nothing here counts a dispatched click as an orbit. The
-            -- ship UI's manoeuvre indication reading `Orbit` is the only thing
-            -- that stops the ask, and `updateMemoryForNewReadingFromGame`
-            -- clears the counter on the same reading it does.
+            -- ours: nothing here counts a dispatched click as a manoeuvre. The
+            -- ship UI's indication reading `Approach` is the only thing that
+            -- stops the ask, and `updateMemoryForNewReadingFromGame` clears the
+            -- counter on the same reading it does.
             Nothing
 
-        GaveUpOnTheOrbit ->
+        GaveUpOnTheApproach ->
             -- Hand the reading back rather than park on
             -- `askForHelpToGetUnstuck`, the answer `accelerationGateStep` and
             -- `fireOnActiveTarget` both give at their own give-ups: the gate
             -- and the trip home still have to run.
-            -- `describeOrbitFleetCommanderAsk` is what keeps this visible.
+            -- `describeApproachFleetCommanderAsk` is what keeps this visible.
             Nothing
 
-        CloseAWindowTheCascadeOpened ->
+        CloseAWindowLeftOverTheClient ->
             case windowOpenedOverTheClient context.readingFromGameClient of
                 Nothing ->
                     Nothing
@@ -6918,79 +7359,73 @@ orbitTheFleetCommander context shipUI =
                                 (describeBranch
                                     ("A '"
                                         ++ strayWindow.uiNode.pythonObjectTypeName
-                                        ++ "' opened over the client while the orbit cascade was running"
-                                        ++ " -- the mis-click PILOT.md records. Close it before asking again."
+                                        ++ "' is sitting over the client while this ship is being asked to"
+                                        ++ " approach -- the mis-click PILOT.md records. Close it before"
+                                        ++ " asking again."
                                     )
                                     (clickUiElementForNavigation closeButton)
                                 )
 
-        OrbitAtRangeViaTheMenu ->
+        ApproachWithTheKey ->
             commanderEntry
-                |> Maybe.map
-                    (\entry ->
-                        describeBranch
-                            ("Orbit the fleet commander at '"
-                                ++ context.eventContext.botSettings.orbitFleetCommanderRange
-                                ++ "' from the overview row's own context menu."
-                            )
-                            (useContextMenuCascadeOnOverviewEntry
-                                (useMenuEntryWithTextContaining orbitMenuEntryText
-                                    (useMenuEntryWithTextContaining
-                                        context.eventContext.botSettings.orbitFleetCommanderRange
-                                        menuCascadeCompleted
-                                    )
-                                )
-                                entry
-                                context
-                            )
-                    )
-
-        OrbitAtTheClientDefaultWithTheKey ->
-            commanderEntry
-                |> Maybe.andThen (ensureShipIsOrbiting shipUI)
+                |> Maybe.andThen (ensureShipIsApproaching shipUI)
                 |> Maybe.map
                     (Result.Extra.unpack
                         (\error ->
                             describeBranch
-                                ("Could not orbit the fleet commander: " ++ error)
+                                ("Could not approach the fleet commander: " ++ error)
                                 waitForProgressInGame
                         )
                         (describeBranch
-                            ("The context menu spent its budget without the client naming the manoeuvre"
-                                ++ " -- falling back to the 'W' key, which orbits at the client's own"
-                                ++ " default distance rather than '"
-                                ++ context.eventContext.botSettings.orbitFleetCommanderRange
-                                ++ "'."
-                            )
+                            "Approach the fleet commander -- hold 'Q' and click their overview row."
                         )
                     )
 
+        SelectTheCommandersRow ->
+            commanderEntry
+                |> Maybe.map
+                    (\entry ->
+                        describeBranch
+                            ("The 'Q' click spent its budget without the client naming the manoeuvre"
+                                ++ " -- select the commander's row, so the panel's own Approach acts on it."
+                            )
+                            (clickUiElementForNavigation entry.uiNode)
+                    )
 
-{-| The text the Orbit entry is matched on in the overview row's context menu.
+        WaitForTheApproachButton ->
+            Just
+                (describeBranch
+                    ("The commander's row is selected but the panel offers no '"
+                        ++ selectedItemApproachButtonName
+                        ++ "' yet."
+                    )
+                    waitForProgressInGame
+                )
 
-Matched as a substring rather than an equality, because the client writes its
-own current default into the entry -- `Orbit (30 km)` in the shape saxrat run
-15's modal implies -- and that number is not this bot's to predict.
-`useMenuEntryWithTextContaining` breaks a tie by taking the **shortest**
-matching entry, which is also what keeps `orbit-fc-range`'s `500 m` from
-selecting a `2,500 m` rung if the client's list carries one.
-
--}
-orbitMenuEntryText : String
-orbitMenuEntryText =
-    "Orbit"
+        PressTheApproachButton ->
+            approachButton
+                |> Maybe.map
+                    (\button ->
+                        describeBranch
+                            "Approach the fleet commander with the panel's own Approach button."
+                            (clickUiElementForNavigation button)
+                    )
 
 
-{-| The distance `orbit-fc-range` defaults to, as the client's own menu writes
-it.
+{-| The value `orbit-fc-range` holds when nobody has set it.
 
-500 m is a round choice an operator can hold in their head, and it is the
-bottom rung of the list PILOT.md recorded (`500 m` ... `30 km`) as well as the
-least the client's own modal will accept (`between 500 and 1,000,000 meters`,
-captured in saxrat run 15). It is not measured against anything, and no run in
-this repo has yet read the Orbit submenu to confirm the rung is spelled this
-way -- which is why the setting takes menu text rather than a number, so an
-operator who sees a different spelling can just write it.
+**Nothing reads this to decide anything any more**, and that is the point of
+keeping it. The key used to carry the rung of the Orbit flyout this bot took;
+`approachTheFleetCommander` no longer drives that flyout, so the range is not
+this bot's to choose. Deleting the key would end a session that has it set,
+which is #161's failure, so it still parses and this default is what
+`describeApproachFleetCommanderAsk` compares against to decide whether an
+operator asked for a range that is being ignored -- a setting that silently
+does nothing is the thing that must not exist.
+
+500 m is the value it has always had: the bottom rung of the list PILOT.md
+recorded (`500 m` ... `30 km`) and the least the client's own modal will accept
+(`between 500 and 1,000,000 meters`, captured in saxrat run 15).
 
 -}
 defaultOrbitFleetCommanderRange : String
@@ -7002,24 +7437,33 @@ defaultOrbitFleetCommanderRange =
 
 **Structural rather than named, and that is deliberate.** PILOT.md records the
 mis-click this exists for: the flyout collapsed mid-glide and the click landed
-on `Show Info`, opening a Database Information window. **No run in
-`~/eve-bot-logs` carries that window's type name** -- grepping the corpus for
-it finds nothing -- so a matcher written for the literal would be a matcher on
-a channel nothing has read, which is #42's shape and this file's signature
-failure. So this asks the tree: a node whose type name ends in `Window`, that
-carries its own close button, and that is neither one of the windows the parser
-already accounts for nor inside one.
+on `Show Info`, opening a Database Information window. No run in
+`~/eve-bot-logs` carried that window's type name when this was written, so a
+matcher on the literal would have been a matcher on a channel nothing has read,
+which is #42's shape and this file's signature failure. So this asks the tree
+instead: a node whose type name ends in `Window`, that carries its own close
+button, and that is neither one of the windows the parser already accounts for
+nor inside one.
+
+**The structural reader is what recorded the two names the corpus lacked**,
+which is the arrangement working rather than a reason to replace it: driving
+the Orbit flyout live opened windows on two of the four wingman pilots, and
+this printed both type names into the status line. They stay out of the matcher
+-- a third one is exactly as likely as the first two were, and a list of names
+is a reader that goes quiet the next time the client invents one.
 
 **Two guards keep it from closing something that matters.** The close button
 requirement means nothing is ever clicked at a guessed point -- #321's
-stray-menu rescue is what that costs. And `orbitFleetCommanderStep` only ever
-consults this while the orbit ask is already in flight: a window an operator
-opened on a healthy session is not this bot's to close.
+stray-menu rescue is what that costs. And `approachFleetCommanderStep` only
+ever consults this while the ask is already in flight: a window an operator
+opened on a healthy session is not this bot's to close. That the cascade which
+produced the two recorded windows is gone does not make the arm unreachable --
+this bot still drives a context menu for `warpToFleetMateOnThisGrid`'s banner
+cascade, on the arm directly above.
 
-`describeOrbitFleetCommanderAsk` prints the type name of whatever this finds,
-so the first run that meets one records the literal -- the same arrangement the
-overview's `rightAlignedIconsHints` and the client's quick messages got, and
-the thing that would let a later change name this window properly.
+`describeApproachFleetCommanderAsk` prints the type name of whatever this
+finds, the same arrangement the overview's `rightAlignedIconsHints` and the
+client's quick messages got.
 
 -}
 windowOpenedOverTheClient : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
@@ -7076,68 +7520,80 @@ windowOpenedOverTheClient readingFromGameClient =
         |> List.head
 
 
-{-| The orbit decision on its own, as eight named answers over five facts and a
-counter -- the shape `weaponsStep` and `accelerationGateActivationStep` already
-use here, and for the stated reason: a rule reachable only through a full
-`BotDecisionContext` is a rule nothing can execute in a test.
+{-| The approach decision on its own, as seven named answers over five facts
+and a counter -- the shape `weaponsStep` and `accelerationGateActivationStep`
+already use here, and for the stated reason: a rule reachable only through a
+full `BotDecisionContext` is a rule nothing can execute in a test.
 
 **The order carries four arguments.**
 
 The commander is checked before anything counted, so a session that never has
 the commander on grid does not read as a give-up.
 
-`GaveUpOnTheOrbit` is checked before the stray-window close, not after. Closing
-a window is itself a click that repeats every reading, and a close that does
-not land would otherwise be the unbounded rescue #321 names -- a branch at the
-head of a tree with no bound owns the whole bot. Past the total budget the
-status line still names the window; nothing goes on poking at it.
+`GaveUpOnTheApproach` is checked before the stray-window close, not after.
+Closing a window is itself a click that repeats every reading, and a close that
+does not land would otherwise be the unbounded rescue #321 names -- a branch at
+the head of a tree with no bound owns the whole bot. Past the budget the status
+line still names the window; nothing goes on poking at it.
 
-The stray window is checked before "already orbiting", because a window left
+The stray window is checked before "already approaching", because a window left
 over the client is a problem whatever the ship is doing, and it is only
 consulted at all once `0 < askedReadings` -- a window an operator opened on a
 healthy session is not this bot's to close.
 
-The two bounds are what makes the fall-back a fall-back:
-`orbitFleetCommanderMenuAskedReadingsBound` ends the cascade and
-`orbitFleetCommanderAskedReadingsBound` ends the whole ask, so the readings
-between them go to `ensureShipIsOrbiting`'s 'W' key. Degrading to "orbiting at
-the client's default distance" is a wrong distance; going on poking at a menu
-that will not drive is a bot that does nothing else.
+**Two mechanisms and two bounds, and the fall-back is the proven half.**
+`approachFleetCommanderKeyAskedReadingsBound` ends the modifier click and
+`approachFleetCommanderAskedReadingsBound` ends the whole ask, so the readings
+between them go to the Selected Item panel's own Approach button --
+`selectedItemApproach`, which `eve-online-mission-runner` drives and whose own
+note records it taking a ship from 0.0 to 585 m/s after a cascade had achieved
+nothing across 180 decisions. The unproven mechanism is the primary on purpose:
+the key costs one reading against the panel's two, and a run that has to fall
+back says so in the status line, which is exactly the measurement that would
+swap them.
 
 -}
-orbitFleetCommanderStep :
+approachFleetCommanderStep :
     { settingIsYes : Bool
     , commanderOnGrid : Bool
     , shipIsWarpingOrJumping : Bool
-    , shipIsOrbiting : Bool
+    , shipIsApproaching : Bool
     , strayWindowIsOpen : Bool
+    , panelShowsTheCommander : Bool
+    , panelOffersApproach : Bool
     , askedReadings : Int
     }
-    -> OrbitFleetCommanderStep
-orbitFleetCommanderStep orbitCase =
-    if not orbitCase.settingIsYes then
-        OrbitFleetCommanderIsOff
+    -> ApproachFleetCommanderStep
+approachFleetCommanderStep approachCase =
+    if not approachCase.settingIsYes then
+        ApproachFleetCommanderIsOff
 
-    else if not orbitCase.commanderOnGrid then
+    else if not approachCase.commanderOnGrid then
         NoCommanderOnGrid
 
-    else if orbitCase.shipIsWarpingOrJumping then
+    else if approachCase.shipIsWarpingOrJumping then
         ShipIsWarpingOrJumping
 
-    else if orbitFleetCommanderHasBeenGivenUpOn orbitCase.askedReadings then
-        GaveUpOnTheOrbit
+    else if approachFleetCommanderHasBeenGivenUpOn approachCase.askedReadings then
+        GaveUpOnTheApproach
 
-    else if orbitCase.strayWindowIsOpen && 0 < orbitCase.askedReadings then
-        CloseAWindowTheCascadeOpened
+    else if approachCase.strayWindowIsOpen && 0 < approachCase.askedReadings then
+        CloseAWindowLeftOverTheClient
 
-    else if orbitCase.shipIsOrbiting then
-        AlreadyOrbiting
+    else if approachCase.shipIsApproaching then
+        AlreadyApproaching
 
-    else if orbitFleetCommanderMenuAskedReadingsBound <= orbitCase.askedReadings then
-        OrbitAtTheClientDefaultWithTheKey
+    else if approachCase.askedReadings < approachFleetCommanderKeyAskedReadingsBound then
+        ApproachWithTheKey
+
+    else if not approachCase.panelShowsTheCommander then
+        SelectTheCommandersRow
+
+    else if approachCase.panelOffersApproach then
+        PressTheApproachButton
 
     else
-        OrbitAtRangeViaTheMenu
+        WaitForTheApproachButton
 
 
 {-| The answers on which this arm actually spends a reading, and therefore the
@@ -7145,70 +7601,82 @@ answers the counter advances on.
 
 One list with two readers -- `updateMemoryForNewReadingFromGame` and the cases
 that check it -- rather than a condition restated beside the rule, which is
-#102's defect. The three here are the three that dispatch effects: the cascade,
-the 'W'-key fall-back, and the click that closes a window the cascade opened.
-The close counts against the same budget on purpose, so a rescue that does not
-land cannot outlive the ask it is rescuing.
+#102's defect. Five of the seven answers are here: the modifier click, both
+ticks of the panel fall-back, the reading the panel spends not yet offering its
+button, and the click that closes a window sitting over the client. The close
+counts against the same budget on purpose, so a rescue that does not land
+cannot outlive the ask it is rescuing, and `WaitForTheApproachButton` counts
+for the reason `askingTheGateToOpen` counts its own wait: a panel that showed
+the row and never produced the button would otherwise buy unlimited readings by
+doing nothing.
 
 -}
-orbitFleetCommanderAnswersThatSpendAReading : List OrbitFleetCommanderStep
-orbitFleetCommanderAnswersThatSpendAReading =
-    [ OrbitAtRangeViaTheMenu
-    , OrbitAtTheClientDefaultWithTheKey
-    , CloseAWindowTheCascadeOpened
+approachFleetCommanderAnswersThatSpendAReading : List ApproachFleetCommanderStep
+approachFleetCommanderAnswersThatSpendAReading =
+    [ ApproachWithTheKey
+    , SelectTheCommandersRow
+    , PressTheApproachButton
+    , WaitForTheApproachButton
+    , CloseAWindowLeftOverTheClient
     ]
 
 
-type OrbitFleetCommanderStep
-    = OrbitFleetCommanderIsOff
+type ApproachFleetCommanderStep
+    = ApproachFleetCommanderIsOff
     | NoCommanderOnGrid
     | ShipIsWarpingOrJumping
-    | AlreadyOrbiting
-    | CloseAWindowTheCascadeOpened
-    | GaveUpOnTheOrbit
-    | OrbitAtRangeViaTheMenu
-    | OrbitAtTheClientDefaultWithTheKey
+    | AlreadyApproaching
+    | CloseAWindowLeftOverTheClient
+    | GaveUpOnTheApproach
+    | ApproachWithTheKey
+    | SelectTheCommandersRow
+    | PressTheApproachButton
+    | WaitForTheApproachButton
 
 
-{-| Whether the budget for getting one orbit started has been spent at all. One
-comparison with two readers -- the step rule and the status clause --
+{-| Whether the budget for getting one approach started has been spent at all.
+One comparison with two readers -- the step rule and the status clause --
 `accelerationGateHasBeenGivenUpOn`'s arrangement, for its reason.
 -}
-orbitFleetCommanderHasBeenGivenUpOn : Int -> Bool
-orbitFleetCommanderHasBeenGivenUpOn askedReadings =
-    orbitFleetCommanderAskedReadingsBound <= askedReadings
+approachFleetCommanderHasBeenGivenUpOn : Int -> Bool
+approachFleetCommanderHasBeenGivenUpOn askedReadings =
+    approachFleetCommanderAskedReadingsBound <= askedReadings
 
 
-{-| How many readings the context-menu path gets before this bot stops opening
-menus and falls back to the 'W' key.
+{-| How many readings the `Q` modifier click gets before this bot stops
+pressing the key and falls back to the Selected Item panel's own button.
 
-**Thirty, composed from `weaponsAskedReadingsBound` rather than measured.** A
-keypress costs one reading; a cascade costs several -- right-click, wait for
-the menu to render, hover `Orbit`, wait for the flyout, click the rung -- and
-`useContextMenuCascadeWithCustomConfig` will wait up to
-`readingsToWaitForAFirstContextMenu` readings for a slow render before it even
-reopens. Thirty leaves room for a handful of complete cycles and is a round
-number, not a measurement; this bot still has no corpus of its own (see
-WINGMAN.md). A run that spends it says so in the status line, which is what
-would replace this with a measured value.
+**Twenty, written as `weaponsAskedReadingsBound` rather than as a number**:
+this file's allowance for an ask that is a key or a click rather than a
+cascade. A keypress costs one reading, so this is twenty complete attempts
+against the one thing that can stop them -- the client naming the manoeuvre
+`Approach`.
 
 -}
-orbitFleetCommanderMenuAskedReadingsBound : Int
-orbitFleetCommanderMenuAskedReadingsBound =
-    30
+approachFleetCommanderKeyAskedReadingsBound : Int
+approachFleetCommanderKeyAskedReadingsBound =
+    weaponsAskedReadingsBound
 
 
-{-| How many readings the whole ask gets, cascade and 'W' key together, before
+{-| How many readings the whole ask gets, key and panel button together, before
 this bot hands the reading back for good.
 
-Fifty: the thirty above plus the same twenty `weaponsAskedReadingsBound` gives
-the other key-over-a-click ask in this file. Written as a sum of the two so the
-fall-back's own allowance cannot be changed by accident when either end moves.
+Forty: the twenty above plus the same twenty again for the panel. Written as a
+sum of the two so the fall-back's own allowance cannot be squeezed to nothing
+by moving either end -- the arrangement the two bounds this replaced already
+had. The panel path costs two readings per attempt rather than one (select the
+row, then press), so twenty is ten attempts, and a panel that shows the row and
+never offers the button spends the same budget rather than waiting for free.
+
+Round rather than measured, and this bot still has no corpus of its own (see
+WINGMAN.md). A run that spends it says so in the status line, which is where a
+first run also reports whether `Q` on an overview row commands an approach at
+all, and whether the fall-back had to carry the session.
 
 -}
-orbitFleetCommanderAskedReadingsBound : Int
-orbitFleetCommanderAskedReadingsBound =
-    orbitFleetCommanderMenuAskedReadingsBound + weaponsAskedReadingsBound
+approachFleetCommanderAskedReadingsBound : Int
+approachFleetCommanderAskedReadingsBound =
+    approachFleetCommanderKeyAskedReadingsBound + weaponsAskedReadingsBound
 
 
 {-| The commander's overview row, resolved the one way the memory update can
@@ -7220,25 +7688,67 @@ fleetCommanderOverviewEntry readingFromGameClient =
         |> Maybe.andThen (\commander -> overviewEntryForPilot commander readingFromGameClient)
 
 
-{-| Whether the client is naming this ship's manoeuvre `Orbit`.
+{-| The Selected Item panel's Approach button, by its own `_name`.
 
-The same question `ensureShipIsOrbiting` asks before deciding it has nothing to
-do, over a reading rather than a `ShipUI` so that the memory update can ask it
-as well. An absent ship UI answers `False`, which is right for both readers:
-nothing that is not in space is orbiting.
+**Not a guess, and not corpus-confirmed either** -- see
+`approachTheFleetCommander` for why those are different things.
+`eve-online-mission-runner` reaches this button by this name, and its own note
+records the live result: selecting a row and pressing `selectedItemApproach`
+took that ship from 0.0 to 585 m/s after a context-menu cascade had achieved
+nothing across 180 decisions. That is the evidence. The three times the name
+appears in `~/eve-bot-logs` are that same bot reporting the panel offered none,
+which says nothing about the name.
+
+Named here rather than written inline because the status line prints it -- a
+run where the panel never offers it says which name it was looking for, which
+is what would settle the question for a pilot row.
 
 -}
-shipIsOrbitingFromReading : ReadingFromGameClient -> Bool
-shipIsOrbitingFromReading readingFromGameClient =
+selectedItemApproachButtonName : String
+selectedItemApproachButtonName =
+    "selectedItemApproach"
+
+
+{-| Whether the Selected Item panel is showing the fleet commander's row.
+
+Resolved through `fleetCommanderOverviewEntry` so that the arm, the status
+clause and the memory update all ask it the same way -- and answering `False`
+when there is no commander row at all is right for every reader: a panel
+showing something else is not showing him.
+
+-}
+panelIsShowingTheFleetCommander : ReadingFromGameClient -> Bool
+panelIsShowingTheFleetCommander readingFromGameClient =
+    fleetCommanderOverviewEntry readingFromGameClient
+        |> Maybe.map (selectedItemIsOverviewEntry readingFromGameClient)
+        |> Maybe.withDefault False
+
+
+{-| Whether the client is naming this ship's manoeuvre `Approach`.
+
+The same question `ensureShipIsApproaching` asks before deciding it has nothing
+to do, over a reading rather than a `ShipUI` so that the memory update can ask
+it as well. An absent ship UI answers `False`, which is right for both readers:
+nothing that is not in space is approaching anything.
+
+**This is the only thing that counts as success**, and it is the client's own
+word. `approachTheFleetCommander` never treats a dispatched click as a
+manoeuvre, which is what makes a `Q` modifier-click that turns out not to work
+show up as a spent budget in the status line rather than as a bot that believes
+it is keeping station.
+
+-}
+shipIsApproachingFromReading : ReadingFromGameClient -> Bool
+shipIsApproachingFromReading readingFromGameClient =
     (readingFromGameClient.shipUI
         |> Maybe.andThen .indication
         |> Maybe.andThen .maneuverType
     )
-        == Just EveOnline.ParseUserInterface.ManeuverOrbit
+        == Just EveOnline.ParseUserInterface.ManeuverApproach
 
 
 {-| `shipUIIndicatesShipIsWarpingOrJumping` over a reading, for the same reason
-as `shipIsOrbitingFromReading`. Distinct from `shipWarpingFromReading`, which
+as `shipIsApproachingFromReading`. Distinct from `shipWarpingFromReading`, which
 answers about warping only and in three values; a ship in a jump tunnel is no
 more able to start an orbit than one in warp.
 -}
@@ -7416,22 +7926,35 @@ describeWeaponsAsk context =
             ++ " readings spent asking one to activate."
 
 
-{-| What the orbit on the commander is doing, in one line.
+{-| What the approach on the commander is doing, in one line.
 
 Exists for the reason `describeWeaponsAsk` and `describeAccelerationGateAsk`
-do: every answer `orbitTheFleetCommander` gives other than "press it" is
+do: every answer `approachTheFleetCommander` gives other than "press it" is
 `Nothing`, and from outside the decision tree a give-up, a commander this bot
-cannot name, and a ship that is already orbiting are the same silence.
+cannot name, and a ship that is already approaching are the same silence.
 
-The commander's rendered distance is printed because the orbit _range_ is the
-client's setting and not this bot's -- see `orbitTheFleetCommander`. A client
-still holding its shipped default reads here as a commander sitting tens of
-kilometres away while this bot reports a healthy orbit, which is the only
-evidence available that the game-client setup step was skipped.
+**This line is where a first live run reports on what is unverified.** Nothing
+in this repo has watched `Q` command an approach; the fall-back it degrades to
+is the proven half, `eve-online-mission-runner`'s `selectedItemApproach`. So
+`FELL BACK to the panel's Approach button` here is the measurement that would
+swap the two, and `GAVE UP after N readings` is what it looks like when neither
+works -- a spent budget and a named cause, rather than a bot that quietly
+believes it is keeping station.
+
+**It also names `orbit-fc-range` when an operator has set it**, because that
+key no longer decides anything: `approachTheFleetCommander` does not drive the
+Orbit flyout it used to name a rung of. A setting that silently does nothing is
+the failure this clause exists to prevent, and deleting the key instead would
+end a session that has it set (#161).
+
+The commander's rendered distance is printed because an approach closes to the
+client's own default approach distance rather than to anything this bot asks
+for, so the distance is the only evidence available of where this ship actually
+ended up.
 
 -}
-describeOrbitFleetCommanderAsk : BotDecisionContext -> String
-describeOrbitFleetCommanderAsk context =
+describeApproachFleetCommanderAsk : BotDecisionContext -> String
+describeApproachFleetCommanderAsk context =
     let
         commanderEntry : Maybe OverviewWindowEntry
         commanderEntry =
@@ -7443,77 +7966,114 @@ describeOrbitFleetCommanderAsk context =
 
         askedReadings : Int
         askedReadings =
-            context.memory.orbitFleetCommanderAskedReadings
+            context.memory.approachFleetCommanderAskedReadings
 
         spentOf : String
         spentOf =
             String.fromInt askedReadings
                 ++ " of "
-                ++ String.fromInt orbitFleetCommanderMenuAskedReadingsBound
-                ++ " on the menu, "
-                ++ String.fromInt orbitFleetCommanderAskedReadingsBound
+                ++ String.fromInt approachFleetCommanderKeyAskedReadingsBound
+                ++ " on the key, "
+                ++ String.fromInt approachFleetCommanderAskedReadingsBound
                 ++ " in all."
+
+        commanderDistance : String
+        commanderDistance =
+            commanderEntry
+                |> Maybe.andThen .objectDistance
+                |> Maybe.withDefault "an unread distance"
+
+        rangeSettingClause : String
+        rangeSettingClause =
+            if context.eventContext.botSettings.orbitFleetCommanderRange == defaultOrbitFleetCommanderRange then
+                ""
+
+            else
+                " ('orbit-fc-range="
+                    ++ context.eventContext.botSettings.orbitFleetCommanderRange
+                    ++ "' is accepted and IGNORED: this bot commands an approach"
+                    ++ " and no longer drives the Orbit menu that key named a rung of.)"
     in
-    "Orbit on the commander: "
+    "Approach on the commander: "
         ++ (case
-                orbitFleetCommanderStep
+                approachFleetCommanderStep
                     { settingIsYes = context.eventContext.botSettings.orbitFleetCommander == PromptParser.Yes
                     , commanderOnGrid = commanderEntry /= Nothing
                     , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
-                    , shipIsOrbiting = shipIsOrbitingFromReading context.readingFromGameClient
+                    , shipIsApproaching = shipIsApproachingFromReading context.readingFromGameClient
                     , strayWindowIsOpen = strayWindow /= Nothing
+                    , panelShowsTheCommander = panelIsShowingTheFleetCommander context.readingFromGameClient
+                    , panelOffersApproach =
+                        selectedItemButtonNamed context.readingFromGameClient selectedItemApproachButtonName /= Nothing
                     , askedReadings = askedReadings
                     }
             of
-                OrbitFleetCommanderIsOff ->
+                ApproachFleetCommanderIsOff ->
                     "off ('orbit-fc=no')."
 
                 NoCommanderOnGrid ->
                     case fleetCommanderNameFromFleetWindowHeader context.readingFromGameClient of
                         Nothing ->
-                            "the fleet window's header names no commander, so there is nothing to orbit."
+                            "the fleet window's header names no commander, so there is nothing to approach."
 
                         Just commander ->
-                            "'" ++ commander ++ "' has no overview row -- not on this grid."
+                            "'"
+                                ++ commander
+                                ++ "' has NO OVERVIEW ROW. Either they are not on this grid, or the"
+                                ++ " active overview preset does not show fleet members -- this bot"
+                                ++ " cannot tell those apart and cannot change the preset. See"
+                                ++ " WINGMAN.md's setup section."
 
                 ShipIsWarpingOrJumping ->
                     "the ship is warping or jumping."
 
-                AlreadyOrbiting ->
-                    "orbiting, commander at "
-                        ++ (commanderEntry
-                                |> Maybe.andThen .objectDistance
-                                |> Maybe.withDefault "an unread distance"
-                           )
-                        ++ "."
+                AlreadyApproaching ->
+                    "approaching, commander at " ++ commanderDistance ++ "." ++ rangeSettingClause
 
-                CloseAWindowTheCascadeOpened ->
+                CloseAWindowLeftOverTheClient ->
                     "a '"
                         ++ (strayWindow
                                 |> Maybe.map (.uiNode >> .pythonObjectTypeName)
                                 |> Maybe.withDefault "?"
                            )
-                        ++ "' opened over the client while asking -- closing it. Readings spent: "
+                        ++ "' is over the client while asking -- closing it. Readings spent: "
                         ++ spentOf
 
-                OrbitAtRangeViaTheMenu ->
-                    "asking the overview row's context menu for '"
-                        ++ context.eventContext.botSettings.orbitFleetCommanderRange
-                        ++ "'. Readings spent: "
+                ApproachWithTheKey ->
+                    "holding 'Q' and clicking the commander's overview row, commander at "
+                        ++ commanderDistance
+                        ++ ". Readings spent: "
+                        ++ spentOf
+                        ++ rangeSettingClause
+
+                SelectTheCommandersRow ->
+                    "FELL BACK to the panel's Approach button after "
+                        ++ String.fromInt approachFleetCommanderKeyAskedReadingsBound
+                        ++ " readings of 'Q' -- selecting the commander's row first. Readings spent: "
                         ++ spentOf
 
-                OrbitAtTheClientDefaultWithTheKey ->
-                    "FELL BACK to the 'W' key after "
-                        ++ String.fromInt orbitFleetCommanderMenuAskedReadingsBound
-                        ++ " readings of context menu -- orbiting at the CLIENT'S default distance, not '"
-                        ++ context.eventContext.botSettings.orbitFleetCommanderRange
-                        ++ "'. Readings spent: "
+                WaitForTheApproachButton ->
+                    "FELL BACK to the panel's Approach button, the commander's row is selected and"
+                        ++ " the panel offers no '"
+                        ++ selectedItemApproachButtonName
+                        ++ "' yet. Readings spent: "
                         ++ spentOf
 
-                GaveUpOnTheOrbit ->
+                PressTheApproachButton ->
+                    "FELL BACK to the panel's Approach button after "
+                        ++ String.fromInt approachFleetCommanderKeyAskedReadingsBound
+                        ++ " readings of 'Q' -- pressing it, commander at "
+                        ++ commanderDistance
+                        ++ ". Readings spent: "
+                        ++ spentOf
+
+                GaveUpOnTheApproach ->
                     "GAVE UP after "
                         ++ String.fromInt askedReadings
-                        ++ " readings, menu and 'W' key both, with the client never naming the manoeuvre."
+                        ++ " readings, 'Q' and the panel's Approach button both, with the client"
+                        ++ " never naming the manoeuvre 'Approach'. Commander at "
+                        ++ commanderDistance
+                        ++ "."
                         ++ (case strayWindow of
                                 Nothing ->
                                     ""
@@ -7523,6 +8083,94 @@ describeOrbitFleetCommanderAsk context =
                                         ++ window.uiNode.pythonObjectTypeName
                                         ++ "' is still open over the client."
                            )
+           )
+
+
+{-| What the warp to a fleet-mate on this grid is doing, in one line.
+
+Exists for the reason `describeWeaponsAsk`, `describeAccelerationGateAsk` and
+`describeApproachFleetCommanderAsk` do, and #373 is the issue that proves the
+need: `warpToFleetMateOnThisGrid` answers `Nothing` when it gives up, and from
+outside the decision tree a spent budget and a grid with no fleet-mate on it
+are the same silence. This is also the only place a run says which of the two
+mechanisms it took, which is what would turn `warpToFleetMateOnThisGrid`'s
+round bound into a measured one.
+
+-}
+describeFleetMateWarp : BotDecisionContext -> String
+describeFleetMateWarp context =
+    "Warp to a fleet-mate: "
+        ++ (case
+                fleetMateToWarpToOnThisGrid
+                    { followFleetBroadcastFrom = context.eventContext.botSettings.followFleetBroadcastFrom
+                    , recoveringFromRetreat = context.memory.recoveringFromRetreat
+                    }
+                    context.readingFromGameClient
+            of
+                Nothing ->
+                    "nobody this ship is flying to has a row on this overview."
+
+                Just pilot ->
+                    let
+                        askedReadings : Int
+                        askedReadings =
+                            context.memory.goToFleetMateWarpAskedReadings
+
+                        spentOf : String
+                        spentOf =
+                            " Readings spent: "
+                                ++ String.fromInt askedReadings
+                                ++ " of "
+                                ++ String.fromInt fleetMateWarpAskedReadingsBound
+                                ++ "."
+                    in
+                    case
+                        fleetMateWarpStep
+                            { broadcastBannerNamesThisMate =
+                                fleetMateBroadcastBannerElement
+                                    context.eventContext.botSettings.followFleetBroadcastFrom
+                                    pilot
+                                    context.readingFromGameClient
+                                    /= Nothing
+                            , panelShowsTheMate =
+                                overviewEntryForPilot pilot context.readingFromGameClient
+                                    |> Maybe.map (selectedItemIsOverviewEntry context.readingFromGameClient)
+                                    |> Maybe.withDefault False
+                            , panelOffersWarpTo =
+                                selectedItemButtonNamed context.readingFromGameClient "selectedItemWarpTo" /= Nothing
+                            , askedReadings = askedReadings
+                            }
+                    of
+                        GaveUpOnReachingTheMate ->
+                            "GAVE UP after "
+                                ++ String.fromInt askedReadings
+                                ++ " readings asking to warp to '"
+                                ++ pilot
+                                ++ "', who is on this grid."
+
+                        WarpToTheMateFromTheBroadcast ->
+                            "'"
+                                ++ pilot
+                                ++ "' is broadcasting -- warping from the banner's own 'Fleet Member' menu."
+                                ++ spentOf
+
+                        SelectTheMate ->
+                            "selecting '"
+                                ++ pilot
+                                ++ "''s overview row, so the panel's own Warp To acts on it."
+                                ++ spentOf
+
+                        WaitForTheMatesWarpButton ->
+                            "'"
+                                ++ pilot
+                                ++ "' is selected and the panel offers no 'selectedItemWarpTo' yet."
+                                ++ spentOf
+
+                        PressWarpToTheMate ->
+                            "pressing the panel's own Warp To at '"
+                                ++ pilot
+                                ++ "'."
+                                ++ spentOf
            )
 
 
