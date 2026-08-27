@@ -1746,7 +1746,19 @@ fightPointedRatsOrReturnDrones context shipUI =
                     -- here would undo `dronesAssistTheCommander`'s work on the very
                     -- next reading and leave the bot pulling its drones in and
                     -- sending them back out for as long as the target lived.
-                    describeBranch "A target is locked -- leaving the drones out." waitForProgressInGame
+                    if dronesAreInSpace context.readingFromGameClient then
+                        describeBranch "A target is locked -- leaving the drones out." waitForProgressInGame
+
+                    else
+                        -- #374 is what this wording is for. The branch above
+                        -- said "leaving the drones out" whether or not any
+                        -- were, and run 12 printed it four times with fifteen
+                        -- drones in the bay and none in space -- a line that
+                        -- reads like a bot deliberately holding its drones on
+                        -- the field, describing a bay that never opened.
+                        describeBranch
+                            "A target is locked, and no drones are in space -- nothing to recall."
+                            waitForProgressInGame
 
                 else
                     returnDronesToBay context
@@ -2443,6 +2455,24 @@ assumeNotEnoughBandwidthToLaunchDrone context =
                 || (limitFromPreviousEvents <= inSpaceQuantity.current)
 
 
+{-| Whether any drone is actually in space right now.
+
+One definition, used by both the recall and the branch that declines to
+recall. They asked the same question in two places before #374, and only one
+of them was asking it -- the decline said "leaving the drones out" without
+looking, so a session that never launched a drone logged as one that was
+deliberately keeping them deployed.
+
+-}
+dronesAreInSpace : ReadingFromGameClient -> Bool
+dronesAreInSpace readingFromGameClient =
+    readingFromGameClient.dronesWindow
+        |> Maybe.andThen .droneGroupInSpace
+        |> Maybe.andThen (.header >> .quantityFromTitle)
+        |> Maybe.map (.current >> (<) 0)
+        |> Maybe.withDefault False
+
+
 returnDronesToBay : BotDecisionContext -> Maybe DecisionPathNode
 returnDronesToBay context =
     case context.readingFromGameClient.dronesWindow of
@@ -2455,13 +2485,7 @@ returnDronesToBay context =
                     Nothing
 
                 Just droneGroupInLocalSpace ->
-                    if
-                        (droneGroupInLocalSpace.header.quantityFromTitle
-                            |> Maybe.map .current
-                            |> Maybe.withDefault 0
-                        )
-                            < 1
-                    then
+                    if not (dronesAreInSpace context.readingFromGameClient) then
                         Nothing
 
                     else
