@@ -44,14 +44,21 @@ def launchers():
     """Every bot launcher in `tools/macos-host`.
 
     Computed from the filesystem for the same reason `tool_directories` below
-    is: a fourth launcher must not be able to appear without the cases in
+    is: a new launcher must not be able to appear without the cases in
     `TheLaunchersCallIt` noticing. A hardcoded list would have let one ship
     that never rebuilds the native tools, which is exactly the state those
     cases replaced.
+
+    `fly.sh` is named explicitly rather than matched by prefix. It launches a
+    bot and so must obey the same two rules -- rebuild the tools, and do not
+    kill a running session before finding out whether the new one builds --
+    but it is a develop-and-fly loop rather than a per-bot launcher, so it
+    does not carry the `run_` name.
     """
     return tuple(sorted(
         name for name in os.listdir(MACOS_HOST)
-        if name.startswith("run_") and name.endswith(".sh")))
+        if name.endswith(".sh")
+        and (name.startswith("run_") or name == "fly.sh")))
 
 
 LAUNCHERS = launchers()
