@@ -536,6 +536,15 @@ type alias BotMemory =
     , goToFleetMatePlaceSeen : Maybe String
     , goToFleetMateDestinationAsked : Maybe String
 
+    -- Readings in a row spent asking the client to warp this ship to a
+    -- fleet-mate who already has a row on this overview, bounded for #373's
+    -- reason: the cascade this used to drive could never resolve, and an arm
+    -- this high in the tree with no bound owns the whole bot (#321). Advances
+    -- while a mate this ship is flying to is on the grid, holds once the
+    -- budget is spent, and resets the moment there is no such mate. See
+    -- `fleetMateWarpStep`.
+    , goToFleetMateWarpAskedReadings : Int
+
     -- Ported from `eve-online-warp-to-0-autopilot`'s fields of the same name
     -- -- see `navigateTowardFleetCommander` for what they drive. Not renamed,
     -- so a reader who knows that bot recognises them immediately. That bot's
@@ -2598,6 +2607,7 @@ initBotMemory =
     , fleetBroadcastFollowed = Nothing
     , goToFleetMatePlaceSeen = Nothing
     , goToFleetMateDestinationAsked = Nothing
+    , goToFleetMateWarpAskedReadings = 0
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
     , hitpoints =
@@ -2732,6 +2742,7 @@ statusTextFromState context =
                     , [ describeAccelerationGateAsk context ]
                     , [ describeWeaponsAsk context ]
                     , [ describeOrbitFleetCommanderAsk context ]
+                    , [ describeFleetMateWarp context ]
                     ]
                         |> List.map (String.join " ")
     in
@@ -3233,6 +3244,21 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 )
                 orbitFleetCommanderAnswersThatSpendAReading
 
+        -- The same shape as `askingTheGateToOpen`, and asked through the rule
+        -- the decision itself asks rather than restated beside it: a fleet-mate
+        -- this ship is flying to has a row on this overview, which is exactly
+        -- the state `warpToFleetMateOnThisGrid` spends a reading in. It counts
+        -- a reading an arm *above* the broadcast happened to take, so it
+        -- over-counts rather than under-counts -- the safe direction for a
+        -- bound whose whole job is to end #373's loop.
+        fleetMateOnThisGrid : Maybe String
+        fleetMateOnThisGrid =
+            fleetMateToWarpToOnThisGrid
+                { followFleetBroadcastFrom = context.botSettings.followFleetBroadcastFrom
+                , recoveringFromRetreat = botMemoryBefore.recoveringFromRetreat
+                }
+                context.readingFromGameClient
+
         -- Taken from the shipped rule rather than restated beside it, the same
         -- arrangement as `askingTheCommanderForAnOrbit` above and for #102's
         -- reason: a counter advanced by one condition and read by another is
@@ -3295,6 +3321,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
                 else
                     botMemoryBefore.goToFleetMateDestinationAsked
+    , goToFleetMateWarpAskedReadings =
+        if fleetMateOnThisGrid == Nothing then
+            0
+
+        else if fleetMateWarpHasBeenGivenUpOn botMemoryBefore.goToFleetMateWarpAskedReadings then
+            -- Held rather than advanced, `unlockFleetPilotAskedReadings`'s own
+            -- arrangement: the mate is still there and this bot has stopped
+            -- asking, and a counter that ran away would make the status line's
+            -- "after N readings" meaningless.
+            botMemoryBefore.goToFleetMateWarpAskedReadings
+
+        else
+            botMemoryBefore.goToFleetMateWarpAskedReadings + 1
     , routeFirstMarkerRegion = currentRouteFirstMarkerRegion
     , routeFirstMarkerUnchangedTicks =
         if currentRouteFirstMarkerRegion == Nothing then
@@ -5004,7 +5043,7 @@ actOnFleetBroadcast context shipUI =
                                     )
 
                         Nothing ->
-                            Just (actOnBroadcastVerb context shipUI bannerText)
+                            actOnBroadcastVerb context shipUI bannerText
 
 
 {-| Lock the called target, then get out of the way.
@@ -5512,110 +5551,104 @@ It costs a right-click on a UI element this bot already has, and the cascade's
 own discard rule closes it again if nothing matches.
 
 -}
-actOnBroadcastVerb : BotDecisionContext -> ShipUI -> String -> DecisionPathNode
+actOnBroadcastVerb : BotDecisionContext -> ShipUI -> String -> Maybe DecisionPathNode
 actOnBroadcastVerb context shipUI bannerText =
     let
         permitted : String -> Bool
         permitted pilot =
             List.member pilot context.eventContext.botSettings.followFleetBroadcastFrom
+
+        say : String -> Maybe DecisionPathNode
+        say reason =
+            Just (describeBranch reason waitForProgressInGame)
     in
     case parseFleetBroadcast bannerText of
         CalledTarget _ ->
-            describeBranch
-                "Handled above -- a called target reaches its own branch."
-                waitForProgressInGame
+            say "Handled above -- a called target reaches its own branch."
 
         TravelTo _ ->
-            describeBranch
-                "Handled above -- a travel destination reaches its own branch."
-                waitForProgressInGame
+            say "Handled above -- a travel destination reaches its own branch."
 
         AtLocation { pilot, system } ->
             if not (permitted pilot) then
-                describeBranch
+                say
                     ("'"
                         ++ pilot
                         ++ "' is at "
                         ++ system
                         ++ " but is not named in 'follow-fleet-broadcast-from'."
                     )
-                    waitForProgressInGame
 
             else
                 goToFleetMate context shipUI pilot system "is at location"
 
         InPositionAt { pilot, gate } ->
             if not (permitted pilot) then
-                describeBranch
+                say
                     ("'"
                         ++ pilot
                         ++ "' is in position at "
                         ++ gate
                         ++ " but is not named in 'follow-fleet-broadcast-from'."
                     )
-                    waitForProgressInGame
 
             else
                 goToFleetMate context shipUI pilot gate "is in position at"
 
         NeedBackup { pilot } ->
             if not (permitted pilot) then
-                describeBranch
+                say
                     ("'"
                         ++ pilot
                         ++ "' needs backup but is not named in"
                         ++ " 'follow-fleet-broadcast-from'."
                     )
-                    waitForProgressInGame
 
             else
                 goToFleetMate context shipUI pilot "" "needs backup"
 
         JumpGate { pilot, gate } ->
             if not (permitted pilot) then
-                describeBranch
+                say
                     ("'"
                         ++ pilot
                         ++ "' called a jump at "
                         ++ gate
                         ++ " but is not named in 'follow-fleet-broadcast-from'."
                     )
-                    waitForProgressInGame
 
             else
-                describeBranch
-                    ("'" ++ pilot ++ "' called a jump at '" ++ gate ++ "'.")
-                    (jumpToCalledGate context gate)
+                Just
+                    (describeBranch
+                        ("'" ++ pilot ++ "' called a jump at '" ++ gate ++ "'.")
+                        (jumpToCalledGate context gate)
+                    )
 
         AlignGate { pilot, gate } ->
             if not (permitted pilot) then
-                describeBranch
+                say
                     ("'"
                         ++ pilot
                         ++ "' called an align at "
                         ++ gate
                         ++ " but is not named in 'follow-fleet-broadcast-from'."
                     )
-                    waitForProgressInGame
 
             else
-                describeBranch
-                    ("'" ++ pilot ++ "' called an align at '" ++ gate ++ "'.")
-                    (alignToCalledGate context gate)
+                Just
+                    (describeBranch
+                        ("'" ++ pilot ++ "' called an align at '" ++ gate ++ "'.")
+                        (alignToCalledGate context gate)
+                    )
 
         Unrecognized text ->
-            openTheBroadcastsOwnMenu context text
+            Just (openTheBroadcastsOwnMenu context text)
 
 
 {-| Warp to a fleet-mate who is on this grid, or route toward them if not.
 
-The in-system half is the cascade saxrat drives: right-click the pilot's
-overview row, `Fleet Member`, then `Warp to Member` -- matched with
-`useMenuEntryWithTextEqual` at both steps, because `"Warp to Member"` is a
-substring of `"Warp to Member Within"` and a containing match takes the wrong
-entry.
-
-The out-of-system half hands the place name to `@host set-destination`, the
+The in-system half is `warpToFleetMateOnThisGrid`, and #373 is what it cost to
+get wrong. The out-of-system half hands the place name to `@host set-destination`, the
 same ESI directive the travel broadcast already uses. **`needs backup` carries
 no place**, and neither does `recoverFromRetreat` (the only caller left after
 #364's retreat stopped warping to the commander itself -- see
@@ -5635,67 +5668,373 @@ showing a destination nothing here ever looked at again.
 exactly once per place and every reading after it drives the route through
 `navigateTowardFleetCommander` instead of repeating the ask.
 
+**`Nothing` is the give-up and nothing else.** Every branch below answers
+`Just`; the one answer that does not is `warpToFleetMateOnThisGrid`'s spent
+budget, which hands the reading back to the arms under the broadcast rather
+than parking on a wait. That is `accelerationGateStep`'s own arrangement, and
+`describeFleetMateWarp` is what keeps the give-up visible.
+
 -}
-goToFleetMate : BotDecisionContext -> ShipUI -> String -> String -> String -> DecisionPathNode
+goToFleetMate : BotDecisionContext -> ShipUI -> String -> String -> String -> Maybe DecisionPathNode
 goToFleetMate context shipUI pilot place calledIt =
-    case
-        context.readingFromGameClient.overviewWindows
-            |> List.concatMap .entries
-            |> List.filter (.objectName >> (==) (Just pilot))
-            |> List.head
-    of
+    case overviewEntryForPilot pilot context.readingFromGameClient of
         Just overviewEntry ->
-            describeBranch
-                ("'"
-                    ++ pilot
-                    ++ "' "
-                    ++ calledIt
-                    ++ " and is on this grid -- warping to them."
-                )
-                (useContextMenuCascadeOnOverviewEntry
-                    (useMenuEntryWithTextEqual "Fleet Member"
-                        (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
-                    )
-                    overviewEntry
-                    context
-                )
+            warpToFleetMateOnThisGrid context pilot calledIt overviewEntry
 
         Nothing ->
-            if String.isEmpty place then
-                describeBranch
-                    ("'"
-                        ++ pilot
-                        ++ "' "
-                        ++ calledIt
-                        ++ " and is not on this grid, and nothing names a"
-                        ++ " place to route to, so there is nothing to fly toward."
-                    )
-                    waitForProgressInGame
+            Just
+                (if String.isEmpty place then
+                    describeBranch
+                        ("'"
+                            ++ pilot
+                            ++ "' "
+                            ++ calledIt
+                            ++ " and is not on this grid, and nothing names a"
+                            ++ " place to route to, so there is nothing to fly toward."
+                        )
+                        waitForProgressInGame
 
-            else if context.memory.goToFleetMateDestinationAsked == Just place then
-                describeBranch
-                    ("'"
-                        ++ pilot
-                        ++ "' "
-                        ++ calledIt
-                        ++ " '"
-                        ++ place
-                        ++ "' and is not on this grid -- navigating toward the route."
-                    )
-                    (navigateTowardFleetCommander context shipUI)
+                 else if context.memory.goToFleetMateDestinationAsked == Just place then
+                    describeBranch
+                        ("'"
+                            ++ pilot
+                            ++ "' "
+                            ++ calledIt
+                            ++ " '"
+                            ++ place
+                            ++ "' and is not on this grid -- navigating toward the route."
+                        )
+                        (navigateTowardFleetCommander context shipUI)
+
+                 else
+                    describeBranch
+                        ("'"
+                            ++ pilot
+                            ++ "' "
+                            ++ calledIt
+                            ++ " '"
+                            ++ place
+                            ++ "' and is not on this grid -- asking the host for the route. "
+                            ++ hostDirectiveSetDestination place
+                        )
+                        waitForProgressInGame
+                )
+
+
+{-| Warp to a fleet-mate whose overview row is right there, by whichever of the
+two mechanisms this reading actually offers.
+
+**#373 is what one mechanism cost.** This drove saxrat's
+`Fleet Member` -> `Warp to Member` cascade from the pilot's _overview row_, and
+that entry is not in an overview row's menu -- it is a submenu of the fleet
+**broadcast banner's** menu, which is where
+`eve-online-saxrat`'s `respondToFleetBackupBroadcast` right-clicks it. #373's
+live capture of a pilot's overview-row menu is the whole list and `Fleet
+Member` is not in it:
+
+    Warp to Within (0 m), Approach, Orbit (5,000 m), Keep at Range (5,000 m),
+    Look at, Look At My Ship, Show Info, Overview visibility for Frigate,
+    Pilot (Gal Bistot), Broadcast: Target, Broadcast: Repair Target
+
+So the cascade could not resolve at any range, on any reading, and with no
+bound it reopened the same menu for hundreds of readings on all four wingman
+pilots at once, with nothing else in the bot running.
+
+**Two callers reach here and they get two different mechanisms**, because only
+one of them has a banner to right-click.
+
+_A broadcast from this pilot is on the banner_ -- `is at location`,
+`is in position at`, `needs backup`. Then saxrat's cascade is available exactly
+as saxrat drives it, from `fleetMateBroadcastBannerElement`.
+`useMenuEntryWithTextEqual` stays at both rungs: `"Warp to Member"` is a prefix
+of `"Warp to Member Within"`, and a containing match takes the wrong entry.
+
+_No banner names this pilot_ -- `recoverFromRetreat`'s path. Then no context
+menu is opened at all. The overview row is selected and the Selected Item
+panel's own `selectedItemWarpTo` is pressed, which is what `warpAwayFromDanger`
+already does for a celestial in this same file: a proven path here, needing no
+flyout. **The overview row's `Warp to Within` distance flyout is deliberately
+not driven** -- no run in `~/eve-bot-logs` records that flyout's entry text, so
+a matcher for it would be a matcher on a channel nothing has read (#42), and
+the panel button exists precisely so nobody has to guess it.
+
+**Bounded either way**, which is the half #373 asked for and the half neither
+mechanism supplies on its own. The banner persists after a broadcast is
+answered, so a ship that arrives beside its mate goes on being told to warp to
+them; a mate at 0 m is a warp the client will not offer at all. Past
+`fleetMateWarpAskedReadingsBound` this answers `Nothing` and the drones, the
+guns, the orbit and the gate get their readings back.
+
+-}
+warpToFleetMateOnThisGrid : BotDecisionContext -> String -> String -> OverviewWindowEntry -> Maybe DecisionPathNode
+warpToFleetMateOnThisGrid context pilot calledIt overviewEntry =
+    let
+        preamble : String
+        preamble =
+            "'" ++ pilot ++ "' " ++ calledIt ++ " and is on this grid -- "
+
+        bannerElement : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        bannerElement =
+            fleetMateBroadcastBannerElement
+                context.eventContext.botSettings.followFleetBroadcastFrom
+                pilot
+                context.readingFromGameClient
+
+        warpToButton : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        warpToButton =
+            selectedItemButtonNamed context.readingFromGameClient "selectedItemWarpTo"
+
+        waitForTheWarpToButton : DecisionPathNode
+        waitForTheWarpToButton =
+            describeBranch
+                (preamble ++ "their row is selected but the panel offers no 'selectedItemWarpTo' yet.")
+                waitForProgressInGame
+    in
+    case
+        fleetMateWarpStep
+            { broadcastBannerNamesThisMate = bannerElement /= Nothing
+            , panelShowsTheMate = selectedItemIsOverviewEntry context.readingFromGameClient overviewEntry
+            , panelOffersWarpTo = warpToButton /= Nothing
+            , askedReadings = context.memory.goToFleetMateWarpAskedReadings
+            }
+    of
+        GaveUpOnReachingTheMate ->
+            -- Hand the reading back rather than wait on it. This arm sits
+            -- above the drones, the guns, the orbit and the gate, so a wait
+            -- here is not a give-up at all -- it is #321's "a branch at the
+            -- head of the tree with no bound owns the whole bot" with a
+            -- politer status line. `describeFleetMateWarp` carries the give-up
+            -- instead, on every reading.
+            Nothing
+
+        WarpToTheMateFromTheBroadcast ->
+            Just
+                (bannerElement
+                    |> Maybe.map
+                        (\banner ->
+                            describeBranch
+                                (preamble ++ "warping to them from the broadcast banner's own menu.")
+                                (useContextMenuCascade
+                                    ( "fleet broadcast", banner )
+                                    (useMenuEntryWithTextEqual "Fleet Member"
+                                        (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
+                                    )
+                                    context
+                                )
+                        )
+                    |> Maybe.withDefault
+                        (describeBranch
+                            (preamble ++ "the broadcast banner went away between reading it and clicking it.")
+                            waitForProgressInGame
+                        )
+                )
+
+        SelectTheMate ->
+            Just
+                (describeBranch
+                    (preamble ++ "select their overview row, so the panel's own Warp To acts on it.")
+                    (clickUiElementForNavigation overviewEntry.uiNode)
+                )
+
+        WaitForTheMatesWarpButton ->
+            Just waitForTheWarpToButton
+
+        PressWarpToTheMate ->
+            Just
+                (warpToButton
+                    |> Maybe.map
+                        (\button ->
+                            describeBranch
+                                (preamble ++ "warp to them with the panel's own Warp To.")
+                                (clickUiElementForNavigation button)
+                        )
+                    |> Maybe.withDefault waitForTheWarpToButton
+                )
+
+
+{-| The broadcast banner as a clickable element, but only while the broadcast
+it is showing is this pilot's own call for company.
+
+**The banner persists** -- `fleetBroadcastBannerText` records it still reading
+`Gal Bistot: Travel to Riramia` long after that broadcast -- so "a banner is
+present" is not "this pilot is calling". Driving the banner's `Fleet Member`
+cascade off a stale banner would warp this ship to whoever last broadcast, and
+`recoverFromRetreat` is exactly the caller that arrives with somebody else's
+banner still up.
+
+-}
+fleetMateBroadcastBannerElement :
+    List String
+    -> String
+    -> ReadingFromGameClient
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+fleetMateBroadcastBannerElement followFleetBroadcastFrom pilot readingFromGameClient =
+    if fleetMateCallingForCompany followFleetBroadcastFrom readingFromGameClient == Just pilot then
+        fleetBroadcastBannerElement readingFromGameClient
+
+    else
+        Nothing
+
+
+{-| The fleet-mate whose current broadcast asks this ship to come to them.
+
+The three verbs `actOnBroadcastVerb` hands to `goToFleetMate`, filtered by
+`follow-fleet-broadcast-from` the same way that function filters them -- an
+exact match, never a substring, `fleetInviteSenderFromMessageBox`'s reason:
+this decides which pilot this ship flies to.
+
+-}
+fleetMateCallingForCompany : List String -> ReadingFromGameClient -> Maybe String
+fleetMateCallingForCompany followFleetBroadcastFrom readingFromGameClient =
+    fleetBroadcastBannerText readingFromGameClient
+        |> Maybe.andThen
+            (\bannerText ->
+                case parseFleetBroadcast bannerText of
+                    AtLocation { pilot } ->
+                        Just pilot
+
+                    InPositionAt { pilot } ->
+                        Just pilot
+
+                    NeedBackup { pilot } ->
+                        Just pilot
+
+                    _ ->
+                        Nothing
+            )
+        |> Maybe.andThen
+            (\pilot ->
+                if List.member pilot followFleetBroadcastFrom then
+                    Just pilot
+
+                else
+                    Nothing
+            )
+
+
+{-| Which fleet-mate this ship is trying to reach on this grid, if any.
+
+One question with two readers -- `warpToFleetMateOnThisGrid` and the counter in
+`updateMemoryForNewReadingFromGame` that bounds it -- rather than a condition
+restated beside the rule, which is #102's defect.
+
+The order is the decision root's own: `recoverFromRetreat` sits directly under
+the retreat and above `actOnFleetBroadcast`, so a ship still flying back from a
+break-off is rejoining its commander whatever the banner currently says.
+
+**What makes the recovery arm reachable here at all is worth stating**, since a
+counter for a state that cannot be entered is #34's shape.
+`updateMemoryForNewReadingFromGame` clears `recoveringFromRetreat` on the same
+reading the commander gets an overview row -- but it resolves the commander
+through `fleetCommanderNameFromFleetWindowHeader` alone, while
+`recoverFromRetreat` resolves him through `fleetCommanderName`, which falls
+back to `follow-fleet-broadcast-from`. So the recovery reaches the on-grid
+branch exactly when the fleet window's header names nobody and the setting
+names the commander, and that is the state the panel path exists for.
+
+-}
+fleetMateToWarpToOnThisGrid :
+    { followFleetBroadcastFrom : List String, recoveringFromRetreat : Bool }
+    -> ReadingFromGameClient
+    -> Maybe String
+fleetMateToWarpToOnThisGrid { followFleetBroadcastFrom, recoveringFromRetreat } readingFromGameClient =
+    let
+        onThisGrid : String -> Maybe String
+        onThisGrid pilot =
+            if pilotIsOnOverview pilot readingFromGameClient then
+                Just pilot
 
             else
-                describeBranch
-                    ("'"
-                        ++ pilot
-                        ++ "' "
-                        ++ calledIt
-                        ++ " '"
-                        ++ place
-                        ++ "' and is not on this grid -- asking the host for the route. "
-                        ++ hostDirectiveSetDestination place
-                    )
-                    waitForProgressInGame
+                Nothing
+    in
+    case
+        ( recoveringFromRetreat
+        , fleetCommanderNameFromReading followFleetBroadcastFrom readingFromGameClient
+        )
+    of
+        ( True, Just commander ) ->
+            onThisGrid commander
+
+        _ ->
+            fleetMateCallingForCompany followFleetBroadcastFrom readingFromGameClient
+                |> Maybe.andThen onThisGrid
+
+
+{-| What to do about a fleet-mate on this grid, as five named answers over
+three facts and a counter -- the shape `accelerationGateActivationStep` and
+`orbitFleetCommanderStep` already use here, and for the stated reason: a rule
+reachable only through a full `BotDecisionContext` is a rule nothing can
+execute in a test.
+
+**The give-up is asked first**, before any of the three facts, which is
+`orbitFleetCommanderStep`'s ordering and for its reason: a spent budget must
+never be masked by a moment that happens to look actionable.
+
+**The banner is asked before the panel.** Where a broadcast from this pilot is
+up, the client's own `Warp to Member` is the mechanism saxrat has flown for
+several hundred broadcasts, and it needs no row selected first.
+
+-}
+fleetMateWarpStep :
+    { broadcastBannerNamesThisMate : Bool
+    , panelShowsTheMate : Bool
+    , panelOffersWarpTo : Bool
+    , askedReadings : Int
+    }
+    -> FleetMateWarpStep
+fleetMateWarpStep mateCase =
+    if fleetMateWarpHasBeenGivenUpOn mateCase.askedReadings then
+        GaveUpOnReachingTheMate
+
+    else if mateCase.broadcastBannerNamesThisMate then
+        WarpToTheMateFromTheBroadcast
+
+    else if not mateCase.panelShowsTheMate then
+        SelectTheMate
+
+    else if mateCase.panelOffersWarpTo then
+        PressWarpToTheMate
+
+    else
+        WaitForTheMatesWarpButton
+
+
+type FleetMateWarpStep
+    = GaveUpOnReachingTheMate
+    | WarpToTheMateFromTheBroadcast
+    | SelectTheMate
+    | WaitForTheMatesWarpButton
+    | PressWarpToTheMate
+
+
+{-| Whether the budget for getting one warp to a fleet-mate started has been
+spent. One comparison with two readers -- the step rule and the status clause
+-- `accelerationGateHasBeenGivenUpOn`'s arrangement, for its reason.
+-}
+fleetMateWarpHasBeenGivenUpOn : Int -> Bool
+fleetMateWarpHasBeenGivenUpOn askedReadings =
+    fleetMateWarpAskedReadingsBound <= askedReadings
+
+
+{-| How many readings this bot spends trying to warp to one fleet-mate on this
+grid before it stops asking.
+
+**Thirty, the same round number `orbitFleetCommanderMenuAskedReadingsBound`
+gives the other two-rung cascade in this file, and not a measurement.** A
+cascade costs several readings -- right-click, wait for the menu, hover
+`Fleet Member`, wait for the flyout, click `Warp to Member` -- and
+`useContextMenuCascadeWithCustomConfig` waits up to
+`readingsToWaitForAFirstContextMenu` for a slow render before it even reopens,
+so thirty leaves room for a handful of complete cycles. Written out rather than
+composed from that other bound, because the two ends have nothing to do with
+each other and a shared name would say they did. This bot still has no corpus
+of its own; see WINGMAN.md. A run that spends this says so in the status line,
+which is what would replace it with a measured value.
+
+-}
+fleetMateWarpAskedReadingsBound : Int
+fleetMateWarpAskedReadingsBound =
+    30
 
 
 {-| Right-click a broadcast nobody has read, so the next reading records its menu.
@@ -6095,10 +6434,12 @@ or `orbit-fc` happens to ask for next.
 **This is the action `retreatToTheCommander` used to take _as_ the retreat.**
 It belongs here instead: the ship has already gotten clear with
 `warpAwayFromDanger`, it is no longer under threat, and the coordinate it
-should now fly toward really is the commander. `goToFleetMate` is unchanged --
-the client's own "Warp to Member" when the commander is on this grid, the
-`@host set-destination` route the travel broadcast already uses when they are
-not.
+should now fly toward really is the commander. `goToFleetMate` does the flying
+-- the Selected Item panel's own Warp To when the commander is on this grid and
+no broadcast of his is on the banner, the `@host set-destination` route the
+travel broadcast already uses when he is not. **This is the caller #373's
+banner-less path exists for**, and `fleetMateToWarpToOnThisGrid` states what
+makes it reachable.
 
 **Gated on `recoveringFromRetreat`**, latched in `updateMemoryForNewReadingFromGame`
 from the reading a retreat is decided until the commander has an overview row
@@ -6118,21 +6459,25 @@ recoverFromRetreat context shipUI =
         Nothing
 
     else
-        Just
-            (describeBranch
-                "Recovering from a retreat -- rejoin the fleet commander before resuming."
-                (case fleetCommanderName context of
-                    Nothing ->
-                        describeBranch
-                            ("Nothing names the fleet commander -- 'follow-fleet-broadcast-from' is unset,"
-                                ++ " so this ship has no fleet-mate to rejoin."
-                            )
-                            waitForProgressInGame
+        (case fleetCommanderName context of
+            Nothing ->
+                Just
+                    (describeBranch
+                        ("Nothing names the fleet commander -- 'follow-fleet-broadcast-from' is unset,"
+                            ++ " so this ship has no fleet-mate to rejoin."
+                        )
+                        waitForProgressInGame
+                    )
 
-                    Just commander ->
-                        goToFleetMate context shipUI commander "" "is this fleet's commander and this ship is recovering, rejoining"
-                )
-            )
+            Just commander ->
+                -- `Nothing` here is `goToFleetMate`'s give-up and passes
+                -- straight through, so a rejoin this bot has stopped asking
+                -- for does not hold the readings the arms below it need. See
+                -- `warpToFleetMateOnThisGrid`.
+                goToFleetMate context shipUI commander "" "is this fleet's commander and this ship is recovering, rejoining"
+        )
+            |> Maybe.map
+                (describeBranch "Recovering from a retreat -- rejoin the fleet commander before resuming.")
 
 
 {-| Which guard says leave, in the order they are asked.
@@ -7523,6 +7868,94 @@ describeOrbitFleetCommanderAsk context =
                                         ++ window.uiNode.pythonObjectTypeName
                                         ++ "' is still open over the client."
                            )
+           )
+
+
+{-| What the warp to a fleet-mate on this grid is doing, in one line.
+
+Exists for the reason `describeWeaponsAsk`, `describeAccelerationGateAsk` and
+`describeOrbitFleetCommanderAsk` do, and #373 is the issue that proves the
+need: `warpToFleetMateOnThisGrid` answers `Nothing` when it gives up, and from
+outside the decision tree a spent budget and a grid with no fleet-mate on it
+are the same silence. This is also the only place a run says which of the two
+mechanisms it took, which is what would turn `warpToFleetMateOnThisGrid`'s
+round bound into a measured one.
+
+-}
+describeFleetMateWarp : BotDecisionContext -> String
+describeFleetMateWarp context =
+    "Warp to a fleet-mate: "
+        ++ (case
+                fleetMateToWarpToOnThisGrid
+                    { followFleetBroadcastFrom = context.eventContext.botSettings.followFleetBroadcastFrom
+                    , recoveringFromRetreat = context.memory.recoveringFromRetreat
+                    }
+                    context.readingFromGameClient
+            of
+                Nothing ->
+                    "nobody this ship is flying to has a row on this overview."
+
+                Just pilot ->
+                    let
+                        askedReadings : Int
+                        askedReadings =
+                            context.memory.goToFleetMateWarpAskedReadings
+
+                        spentOf : String
+                        spentOf =
+                            " Readings spent: "
+                                ++ String.fromInt askedReadings
+                                ++ " of "
+                                ++ String.fromInt fleetMateWarpAskedReadingsBound
+                                ++ "."
+                    in
+                    case
+                        fleetMateWarpStep
+                            { broadcastBannerNamesThisMate =
+                                fleetMateBroadcastBannerElement
+                                    context.eventContext.botSettings.followFleetBroadcastFrom
+                                    pilot
+                                    context.readingFromGameClient
+                                    /= Nothing
+                            , panelShowsTheMate =
+                                overviewEntryForPilot pilot context.readingFromGameClient
+                                    |> Maybe.map (selectedItemIsOverviewEntry context.readingFromGameClient)
+                                    |> Maybe.withDefault False
+                            , panelOffersWarpTo =
+                                selectedItemButtonNamed context.readingFromGameClient "selectedItemWarpTo" /= Nothing
+                            , askedReadings = askedReadings
+                            }
+                    of
+                        GaveUpOnReachingTheMate ->
+                            "GAVE UP after "
+                                ++ String.fromInt askedReadings
+                                ++ " readings asking to warp to '"
+                                ++ pilot
+                                ++ "', who is on this grid."
+
+                        WarpToTheMateFromTheBroadcast ->
+                            "'"
+                                ++ pilot
+                                ++ "' is broadcasting -- warping from the banner's own 'Fleet Member' menu."
+                                ++ spentOf
+
+                        SelectTheMate ->
+                            "selecting '"
+                                ++ pilot
+                                ++ "''s overview row, so the panel's own Warp To acts on it."
+                                ++ spentOf
+
+                        WaitForTheMatesWarpButton ->
+                            "'"
+                                ++ pilot
+                                ++ "' is selected and the panel offers no 'selectedItemWarpTo' yet."
+                                ++ spentOf
+
+                        PressWarpToTheMate ->
+                            "pressing the panel's own Warp To at '"
+                                ++ pilot
+                                ++ "'."
+                                ++ spentOf
            )
 
 
