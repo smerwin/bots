@@ -1068,6 +1068,221 @@ wearing a measurement's clothes. What ships is the mechanism, disarmed, with
 `Retreat: DISARMED` on the status line of every reading so a run that was never
 armed cannot be mistaken for a healthy one.
 
+### The arm reached after every retreat was the one arm that could never act
+
+Issue #381. Three of four wingmen parked, all healthy, all saying the same
+thing:
+
+```
++ Recovering from a retreat -- rejoin the fleet commander before resuming.
+++ 'Gal Bistot' is this fleet's commander and this ship is recovering,
+   rejoining and is not on this grid, and nothing names a place to route to,
+   so there is nothing to fly toward.
++++ Wait for progress in game
+```
+
+`recoverFromRetreat` handed `goToFleetMate` the **empty string** as the place to
+route to, and that function's off-grid half needs a place name — so it took the
+branch that says so and waited. `goToFleetMate`'s own doc comment already
+recorded that branch as deliberate. What was not thought through is that it is
+not an edge case: **the retreat is what puts the commander off grid.**
+`warpAwayFromDanger` warps to a celestial at AU range or docks, so by the time
+recovery begins the commander is off grid essentially by construction.
+
+And it was not merely idle. This arm sits above the broadcast and combat arms —
+deliberately, so a ship flying back is not pulled into the next fight — and
+answered `Just` for as long as `recoveringFromRetreat` was latched. **A ship
+that could not rejoin did not fight either**: Greta at tick 706, Heather at 464,
+Kara at 749, all at 86-100% shield, for tens of readings each. That is #321's
+shape, an unbounded arm at the head of the tree owning the whole bot.
+
+**Routing to the commander's live position is not the fix**, and saxrat settled
+that: the client refuses a waypoint to a fleet-mate's live position, on every
+one of several hundred attempts. That is why `goToFleetMate` declines to fetch
+one, and nothing here changes it.
+
+#### Two levers, and they answer different questions
+
+`retreatRecoveryStep` is the rule — eight named answers over five facts and a
+counter, `backupCallStep`'s shape and for its reason: a rule reachable only
+through a whole `BotDecisionContext` is a rule nothing can execute in a test.
+Two of its answers act on something new:
+
+- **`Fleet Member` -> `Warp to Member` off the broadcast banner**, where the
+  banner is the commander's own call for company. A *live* signal — he is
+  broadcasting from where he is now — and one action that lands this ship on his
+  grid. It is the cascade `answerTheBackupCall` already drives off the banner
+  for a caller with no overview row, so it works off grid, and
+  `fleetMateBroadcastBannerElement` is what keeps it off a stale banner:
+  `recoverFromRetreat` is exactly the caller that arrives with somebody else's
+  banner still up.
+- **Where the commander last said he was**, carried across the retreat in
+  `BotMemory.fleetPlaceBroadcast` and handed to `goToFleetMate` as a real place.
+  A *historical* signal, and the cross-system one.
+
+**The banner is asked first**, because after `warpAwayFromDanger` this ship is
+usually in the same system as its commander and on a different grid — where the
+banner's warp is exactly right and a route to a system the ship is already in is
+an empty route `navigateTowardFleetCommander` has nothing to click. It is also
+the cheaper of the two: one cascade against a host round trip and a multi-jump
+flight.
+
+#### Where the place comes from, and what invalidates it
+
+`fleetPlaceBroadcastAnyPilot` reads the three broadcast forms that carry a place
+— `Travel to`, `is at location`, `is in position at` — with the pilot who named
+it. `TravelTo` is in that list because the issue's own reading is the proof the
+place was there: on the same reading three wingmen had nothing to fly to, Olivia
+was routing toward `'Madirmilire'` off `Gal Bistot: Travel to Madirmilire`.
+`fleetMatePlaceAnyPilot` next door deliberately does **not** read that form —
+what it feeds is the ask that goes out when a mate calls this ship to *them*,
+and a travel broadcast is not that call.
+
+**The pilot travels with the place and the decision does the filtering.** The
+memory update *could* filter — `UpdateMemoryContext` carries `botSettings` here,
+and the comment on `fleetTravelBroadcastAnyPilot` saying otherwise is stale —
+but `fleetCommanderNameFromReading`'s primary source is the fleet window's own
+header, which comes and goes. A place filtered in at a moment the header was
+readable and refused at a moment it was not would be a memory whose contents
+depend on a transient. Storing the sender means one reading's answer decides
+both halves, and the status line can say whose place it is when the answer is
+"not the commander's".
+
+**Three rules clear it**, and the second is the invalidation the arm needs:
+
+- a place named on this reading replaces whatever was remembered, whoever named
+  it;
+- **the reunion drops it**, on the same reading `recoveringFromRetreat` clears —
+  wherever the commander last said he was is superseded by his being right
+  there. So no place this arm ever routes to was broadcast before the last time
+  this ship was with its commander;
+- otherwise it is held, because the banner persists between broadcasts and a
+  reading naming no place is not a reading saying the fleet moved.
+
+A place seen *this* reading beats the reunion, which is the ordering rather than
+a detail of it: a commander who broadcasts `Travel to X` on the very reading
+this ship rejoins him has said where the fleet is going next.
+
+**The cost of one slot is stated rather than hidden**: another pilot's place
+displaces the commander's, the recovery then has nothing, and it gives up rather
+than routing somewhere arbitrary — which is the refusal `goToFleetMate`'s own
+doc comment already makes. There is **no age bound**: this bot has no corpus to
+place one against, and the arm's give-up is what stops a stale place costing a
+session.
+
+#### The bound counts asks, and the give-up does not clear the latch
+
+`retreatRecoveryAskedReadingsBound` is `fleetMateWarpAskedReadingsBound` (30)
+written as that constant, `backupCallAskedReadingsBound`'s arrangement: this arm
+drives the same banner cascade that bound was sized for and the route half
+drives `routeMarkerCascade`, so a second number would be two opinions about the
+same two mechanisms on a bot with no corpus of its own.
+
+**It counts only the answers that dispatch.** `retreatRecoveryAnswersThatSpendAReading`
+is the list, and `NowhereToRejoinTheCommander` is deliberately not in it: that
+answer dispatches nothing, so charging it would be #389 exactly — a counter
+advanced from state alone reporting a give-up at 46 readings against a bound of
+20 with the arm never having been asked. It needs no budget either, because it
+already hands the reading back.
+
+**It is not a bound on the flight**, which is what makes thirty enough for a
+multi-jump route. `AlreadyOnTheWayBackToTheCommander` sits above every
+actionable answer, so every reading the ship is actually warping or jumping
+resets the count — `retreatAskedReadings`' own rule. What accumulates is
+readings spent clicking with the ship standing still, which is the only shape
+that can run forever. A warp cannot undo a spent budget, because the rule asks
+the give-up before it asks the warp.
+
+**And a reading the retreat itself is holding spends nothing.**
+`recoveringFromRetreat` is set on the reading the retreat is *decided*, and
+`retreatToTheCommander` sits directly above this arm and answers `Just` for as
+long as its verdict is latched — so every reading of the retreat is one where
+the rule answers something actionable and the arm was never reached. Charging
+them is #389 again, and worse than in #389: a retreat long enough to spend
+thirty readings out of warp (the mission runner's corpus has one at 44) would
+hand the recovery a spent budget and a give-up on its first reading. It is a
+**reset** rather than a hold, because the recovery has not begun — the reading
+the retreat clears is the reading this arm first gets, and it gets the whole
+allowance. `retreatIsDecided` is the memory update's own binding, the one the
+arm above reads through `retreatReason`, rather than a second condition beside
+it.
+
+**The give-up hands the reading back and does not clear
+`recoveringFromRetreat`.** Clearing it would report this ship as rejoined when it
+is not — this repo's signature failure — and would silently change what
+`fleetMateToWarpToOnThisGrid` answers, which reads the latch to decide which mate
+this ship is trying to reach on this grid. So the counter is **held** past the
+bound rather than reset, or the give-up would un-give-up on the next reading, and
+the one thing that clears the latch is what always cleared it: the commander
+getting an overview row. A second retreat gets a fresh budget; one recovery does
+not get two.
+
+**Nothing is lost by keeping the latch**, which is what makes that choice cheap:
+a commander who broadcasts a new place after the budget is spent is followed by
+`actOnFleetBroadcast` below, which is reachable precisely because the give-up
+handed the reading back.
+
+**Everything that is not an action hands the reading back**, refusals included —
+#360's lesson and #385's arrangement. A commander nothing names, a budget spent,
+a ship already in warp and a grid with nowhere to rejoin are each *nothing more
+to do about the recovery*, not a reason to spend the reading saying so.
+`describeRetreatRecovery` says it instead, on every reading, since a `Nothing`
+cannot carry a decision line.
+
+#### Verified without a live client
+
+`tools/macos-host/tests/test_wingman_recovers_from_a_retreat.py`, 58 cases. The
+rules are executed through the real `Bot.elm` in `elm repl` — the step rule
+rendered as one constructor name per case, so a rule answering two things at
+once or none fails rather than passing on whichever one a case named; the bound
+at both sides *and* against fixed values either side, since a case asking only
+`constant - 1` and `constant` passes for any constant; and the place memory
+folded over the readings a session passes through. The readings come from the
+real `EveOnline.ParseUserInterface`.
+
+**The control is run rather than asserted.** The arm answering `Nothing` is only
+worth anything if something below it then acts, so
+`TheArmsBelowGetTheirReadingsBackTest` runs the real
+`wingmanDecisionRootInSpace` on one reading and compares the give-up's answer
+against the same root with nothing recovering at all — with a positive control
+beside it that must still act, and a negative one where a recovery that *can* act
+still owns the reading.
+
+Confirmed by mutation, **twenty** of them, each failing a named case, listed in
+that file — including the bound removed, the counter advanced from state alone,
+the give-up parking instead of handing back, a stale place never invalidated,
+the arm hoisted above the retreat itself, and the retreat-holding clause dropped
+so the retreat spends the recovery's budget before the recovery starts. **Three survived a
+first version of a case and each hole was real**: a question asked of the
+reading where the arm answers `Nothing` whatever it is handed, a status-line
+assertion satisfied by the clause's own definition head, and an equality between
+two roots that a give-up satisfies by breaking both — which is what the positive
+control beside it is for, and that control is what killed it.
+
+#### Unverified: any of it running
+
+No run has been flown. What to watch on the first retreat: `Retreat recovery:`
+on every reading, then — once the retreat clears — either `warping from the
+commander's own broadcast banner` or `routing to where the commander last said
+he was` with `Last place broadcast:` naming a place and the commander.
+
+The failure to watch for is `Nowhere remembered: no broadcast has named a place
+since this ship was last with its commander.` on every reading of a run whose
+commander has been broadcasting — that would mean `fleetPlaceBroadcastAnyPilot`
+is not reaching the memory, and it is the direction this fails silently in. A
+clause naming a place `by` somebody who is not the commander, with
+`which is not this fleet's commander, so it is not routed to.` beside it, is the
+one-slot cost above behaving as designed rather than a fault. And
+`GAVE UP after N readings` on a run whose commander is on the grid would mean
+the reunion is not clearing the latch.
+
+**Two things are unmeasured and stay so.** How often the commander's banner is
+up while this ship is recovering — which decides whether the banner lever or the
+place lever is the one that carries the arm — and whether the banner's
+`Warp to Member` is offered at all for a mate on another grid in the same
+system. Both fail safe: an unavailable cascade spends the bound and falls to the
+give-up, which hands the reading back.
+
 ## The fleet window, as the client actually draws it
 
 Read off Gal Bistot's live client through `eve_read.py` — read-only, no input,
@@ -1830,6 +2045,15 @@ restart.
 
 ## Not verified
 
+- **Any of the retreat-recovery arm running** (#381), and two things about the
+  situation it acts in. How often the commander's banner is up while this ship
+  is recovering decides which of the arm's two levers carries it, and whether
+  the banner's `Warp to Member` is offered for a mate on another grid in the
+  same system has never been read. Both fail safe: an unavailable cascade
+  spends the bound and falls to the give-up, which hands the reading back. What
+  to watch is in that section; the direction it fails silently in is
+  `Nowhere remembered:` on every reading of a run whose commander has been
+  broadcasting.
 - **Any of the backup-call arm running, and what the banner actually says.**
   #385's matcher is written from the issue's own live sighting, `...needs
   backup`, whose sender is elided — so **which of the two shapes this client

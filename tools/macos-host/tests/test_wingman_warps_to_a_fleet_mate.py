@@ -386,13 +386,22 @@ class TheGiveUpReachesTheTreeTest(unittest.TestCase):
     def test_the_recovery_arm_does_not_re_wrap_it_either(self):
         """`recoverFromRetreat` describes the branch by mapping over the
         answer, so a `Nothing` stays a `Nothing` and the arms below it get the
-        reading."""
+        reading.
+
+        The **property** rather than one spelling of it. #381 rewrote this arm
+        around a step rule with five answers that hand the reading back, and
+        the version that spelled the naming as one `Maybe.map` over a nested
+        `case` is gone -- so what is asserted is that the naming still runs
+        through `Maybe`, that the arm still reaches `goToFleetMate`, and that
+        nothing in it parks on `waitForProgressInGame`. That last clause is
+        what a re-wrap would have to break, and it is stronger than the string
+        it replaces: the old shape could have wrapped a wait and passed.
+        """
         body = self.body_of("recoverFromRetreat context shipUI =")
         self.assertIn("goToFleetMate context shipUI commander", body)
-        self.assertIn("Maybe.map", body)
-        self.assertIn(
-            'Maybe.map\n                (describeBranch "Recovering from a'
-            ' retreat', body)
+        self.assertIn('describeBranch "Recovering from a retreat', body)
+        self.assertRegex(body, r"Maybe\.(map|andThen)")
+        self.assertNotIn("waitForProgressInGame", body)
 
 
 class TheCounterTest(unittest.TestCase):
