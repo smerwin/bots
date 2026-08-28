@@ -3026,6 +3026,19 @@ Written as a shape rather than inline because #414 puts the identical ordering
 into `eve-online-saxrat`'s three arms, and an ordering copied per arm is an
 ordering that can end up with a press ahead of its selection in one of them.
 
+**The cost is a reading, not a click, and that is the form that matters here.**
+The selection is dispatched on one reading and the panel only shows it on the
+_next_, so the orbit now starts one reading later than the `W` chord did --
+one reading of transversal not being held.
+
+What the reading buys is the check that cannot be made without it. The chord
+commanded immediately, on a screen position computed from a reading the
+overview had already re-sorted under -- so a selection that went astray was
+discovered by the ship orbiting the wrong object, which for a wingman is the
+fleet commander's neighbour. Spending the reading puts
+`selectedItemIsOverviewEntry` between the two, so a selection that landed on
+someone else is caught _before_ anything is commanded rather than after.
+
 -}
 commandManoeuvreFromSelectedItemPanel :
     { button : SelectedItemPanelButton

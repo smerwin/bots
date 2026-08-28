@@ -1218,10 +1218,20 @@ class TheClientDefaultIsNeverTouchedTest(unittest.TestCase):
         which uses whatever default the client already holds. What opens the
         modal is a **right** click on it, so that is what is refused -- and the
         two are different effects rather than different spellings.
+
+        The left-ness is asserted where it is written rather than in this body,
+        because the body names a helper: `clickUiElementOrSayItCannotBeClicked`
+        is the one #414 added, and it is left by construction. Asserting the
+        helper's name alone would pass for a helper that had been changed to
+        right-click, so both halves are read.
         """
         press = block_of(WINGMAN_BOT_ELM,
                          "\ncommandManoeuvreFromSelectedItemPanel command")
-        self.assertIn("clickUiElementForNavigation", press)
+        self.assertIn("clickUiElementOrSayItCannotBeClicked", press)
+        helper = block_of(WINGMAN_BOT_ELM,
+                          "\nclickUiElementOrSayItCannotBeClicked uiElement =")
+        self.assertIn("MouseButtonLeft", helper)
+        self.assertNotIn("MouseButtonRight", helper)
         for cascade in ("useContextMenuCascade", "MouseButtonRight",
                         "useMenuEntryWithTextContaining"):
             with self.subTest(forbidden=cascade):

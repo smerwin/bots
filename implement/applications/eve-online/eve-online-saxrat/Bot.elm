@@ -7322,6 +7322,21 @@ they press, the manoeuvre the client has to name back and the words they log --
 and three copies of the ordering would be three places for a press to end up
 ahead of its selection.
 
+**The cost is a reading, not a click, and that is the form that matters here.**
+The selection is dispatched on one reading and the panel only shows it on the
+_next_, so every manoeuvre now starts one reading later than the chord or the
+double click did -- for the approach that is latency in a fight, and for the
+orbit it is one reading of transversal not being held.
+
+What the reading buys is the check that cannot be made without it. The chord
+commanded immediately, on a screen position computed from a reading the
+overview had already re-sorted under -- so a selection that went astray was
+discovered by the ship manoeuvring on the wrong object. Spending the reading
+puts `selectedItemIsOverviewEntry` between the two, so a selection that landed
+on a neighbour is caught _before_ anything is commanded rather than after. A
+reading of latency against a manoeuvre aimed at the wrong rat is the trade, and
+it is the same one `dockAtDestinationStation` makes.
+
 -}
 commandManoeuvreFromSelectedItemPanel :
     { button : SelectedItemPanelButton
