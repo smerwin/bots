@@ -47,7 +47,9 @@ nothing to do.
 5. **Activate the always-on modules** named in `activate-module-always`.
 6. **Act on the fleet broadcast** — in practice only the `Target …` form,
    which is the one and only form that reaches a branch. Everything else the
-   fleet broadcasts falls into a named wait. See "Live runs".
+   fleet broadcasts falls into a named wait. See "Live runs". It stands down
+   the moment the called target is locked, which the client's own overview
+   indicator decides (#389) — see below.
 7. **Drones assist the commander**, `F` on the locked target as the fallback.
 8. **Fire on whatever is locked**, through `fireOnActiveTarget` — unless the
    friendly fire guard is holding the trigger.
@@ -164,6 +166,85 @@ One more thing had to change with it: `fightPointedRatsOrReturnDrones`
 recalled the drones whenever the ship was not pointed, which with a called
 target locked would have fought the assist on every reading and left the bot
 pulling drones in and sending them back out for as long as the target lived.
+
+### "Already locked" is a question for the overview, not the target bar
+
+#360 fixed the ordering above by standing the broadcast arm down once the
+called target was locked. **#361 then decided "locked" the wrong way and #389
+is what that cost.** On 2026-08-27 all four pilots looped on
+
+```
++ Lock the called target 'Centus Black Ops Agent'.
+++ Failed to continue context menu for now (Could not find menu entry with
+   text equal 'Lock Target'.)
+```
+
+while the same status lines reported **3, 2 and 1 targets already locked**. One
+cause, two symptoms: the arm asked `lockedTargetNamed`, which matches the
+broadcast's name against the *target bar's* rendered labels; the match failed;
+so the arm answered "lock it" every reading — and the cascade could not
+succeed, because the thing was already locked and the client offers `Unlock
+Target` for something in the bar. Everything below the broadcast arm — the
+drones, the guns — was unreachable for the whole call, which is #360's defect
+arriving by a different route.
+
+**The bar cannot answer that question and #303 already knew why.** Read off a
+live client with a rat locked:
+
+```
+TargetInBar -> ['Tower Sentry', 'Sansha I', '20 km']
+```
+
+The name is **split across labels at a wrap point**, and `targetTextsCarryName`
+asks whether any *one* label carries the whole name. A two-word name — which is
+most of them, `Centus Black Ops Agent` included — is invisible to it however
+long it sits in the bar.
+
+**So the recognition asks the client instead.** `OverviewWindowEntry.commonIndications.targetedByMe`
+is set from the `targetedByMeIndicator` icon the client draws on a row this
+ship has locked, and `calledTargetIsLocked` reads it off the row the broadcast
+named — the same row `lockCalledTarget` right-clicks, through the same
+`overviewEntryForPilot`, so the half that decides and the half that acts cannot
+end up on two different objects. That is #303's own prescription, applied here.
+
+The bar is kept as a *second opinion* rather than dropped: either signal alone
+stands the arm down. The two go quiet in opposite directions — the bar on a
+wrapped name, the icon if this client draws it under some other name, which
+nothing here has yet watched — and a false stand-down costs one reading falling
+through to the drones and the guns, which is where the reading was wanted
+anyway.
+
+### The weapons budget counts asks, not readings
+
+The same run reported
+
+```
+Weapons: GAVE UP after 46 readings asking a weapon to come active on a
+locked target.
+```
+
+on three pilots — 46, 36 and 50 against a bound of 20 — **for guns that had
+never been asked once**. `weaponsAskedReadings` advanced from state alone
+(something locked, some top-row module not cycling) without asking whether
+`fireOnActiveTarget` had run, so while the broadcast arm above held every
+reading the budget drained anyway and the arm was given up on before it was
+ever reached.
+
+The fix is the discipline #382's approach arm already uses, and its own
+mutation matrix had caught this exact hole: the counter advances only on
+`weaponsAnswersThatSpendAReading`, which is `[ ActivateAWeapon ]` — the one
+answer of `weaponsStep` that dispatches anything. The friendly-fire veto and
+"is there a ship UI" became answers of that rule rather than conditions wrapped
+around it, because a refusal the counter cannot see is a reading charged to a
+budget nobody spent. `describeWeaponsAsk` cases over the same six answers, so
+the status line reports the decision taken rather than a fourth restatement of
+it, and prints the bound beside the count.
+
+What this still cannot see is a reading taken by an arm *above* the guns: the
+memory update runs before the decision and has no view of it, so the drone arm
+holding a reading still charges the budget when a weapon happens to be silent
+at the same moment. That over-counts rather than under-counts, which is the
+safe direction for a bound whose job is to stop an unbounded ask.
 
 ### The health retreat, and why it ships switched off
 
@@ -445,6 +526,25 @@ a narrower place. `Seeing N other pilots in the overview` is printed on every
 reading and is the line to count that from. It has not been counted: no
 `wingman_run*.log` is in this Mac's `~/eve-bot-logs`, and run 9 lives on the
 Windows host that flew it.
+
+**The matcher this guard shares with the lock is weaker than it reads, and
+#389 is where that surfaced.** `firstNameCarriedByALockedTarget` asks
+`targetTextsCarryName` of each locked target's rendered labels — and the bar
+wraps a long name across labels, which is what made the called-target
+recognition fail on four pilots at once (see "Already locked" above). A
+fleetmate whose name the bar wraps is therefore **not recognised as locked**,
+and the guard's membership half falls through to `ClearToFire`. That fails in
+the firing direction, which is the one direction #367 exists to prevent.
+
+It is **not changed here.** #389 moved the called-target arm onto the
+overview's own `targetedByMe`, which is per-row and answers "has this ship
+locked *that object*"; the guard asks a different question — "is anything in
+the bar a fleet pilot" — and answering it from the overview means asking it of
+every name in `fleetPilotNames` and `getNamesOfOtherPilotsInOverview` instead,
+which is a change of what the rule reads and a widening of when it holds fire.
+The unlock arm needs the bar entry regardless, because it right-clicks a
+`Target`. A safety rule is not the place for a change folded into somebody
+else's fix, so it is **#390**, claimed on its own, rather than made quietly.
 
 **The bound stops the asking and not the refusal.** Every other give-up in this
 file hands the reading back to the arms below it.
@@ -804,6 +904,26 @@ restart.
 
 ## Not verified
 
+- **Whether this client draws `targetedByMeIndicator` at all.** #389's fix
+  decides "the called target is already locked" from
+  `OverviewWindowEntry.commonIndications.targetedByMe`, which the vendored
+  parser sets from a sprite of that name under the row's space-object icon. The
+  field and the icon name are the parser's, unchanged and shared by all six
+  apps, but **nothing in `~/eve-bot-logs` records the flag coming back true**,
+  and no `wingman_run*.log` is on this Mac to look in. The target-bar matcher is
+  kept beside it precisely so a client that names the icon something else
+  degrades to the old behaviour rather than to a bot that never stands down.
+  What a run shows: `Lock the called target 'X'.` appearing **once** and then
+  the reading reaching `dronesAssistTheCommander` and `Weapons:` — against the
+  #389 signature, which is that line every reading with targets locked in the
+  same status block.
+- **How often the friendly-fire guard is defeated by a wrapped name.** The
+  weakness is established (#303's live read; see "Never shooting the fleet"),
+  the frequency is not: it depends on how the client wraps the pilot names this
+  fleet actually flies with, and no wingman log on this machine holds a locked
+  player. `Friendly fire guard: N locked, none of them a fleet pilot -- clear
+  to fire.` printed while the Fleet window names somebody who *is* in the bar is
+  what it looks like.
 - **Every number the health retreat would need (#364).** The mechanism is
   built and proven by `elm make` and by
   `test_wingman_retreats_to_the_commander.py`; **none of its thresholds has a
