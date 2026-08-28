@@ -527,24 +527,51 @@ reading and is the line to count that from. It has not been counted: no
 `wingman_run*.log` is in this Mac's `~/eve-bot-logs`, and run 9 lives on the
 Windows host that flew it.
 
-**The matcher this guard shares with the lock is weaker than it reads, and
-#389 is where that surfaced.** `firstNameCarriedByALockedTarget` asks
-`targetTextsCarryName` of each locked target's rendered labels — and the bar
-wraps a long name across labels, which is what made the called-target
+**The guard asks two instruments, because the one it had was defeated by the
+client's own line wrapping.** Until #390 it decided "is this pilot locked" from
+the target bar's rendered labels alone, through `targetTextsCarryName` — and
+the bar wraps a long name across labels, which is what made the called-target
 recognition fail on four pilots at once (see "Already locked" above). A
-fleetmate whose name the bar wraps is therefore **not recognised as locked**,
-and the guard's membership half falls through to `ClearToFire`. That fails in
-the firing direction, which is the one direction #367 exists to prevent.
+fleetmate whose name the bar wraps was therefore **not recognised as locked**,
+the membership branch answered `Nothing`, and with the Fleet window open that
+fell through to `ClearToFire`. It failed in the *firing* direction — the one
+direction #367 exists to prevent — on two-word character names, which is most
+of them and `Sonya Spodumain` among them.
 
-It is **not changed here.** #389 moved the called-target arm onto the
-overview's own `targetedByMe`, which is per-row and answers "has this ship
-locked *that object*"; the guard asks a different question — "is anything in
-the bar a fleet pilot" — and answering it from the overview means asking it of
-every name in `fleetPilotNames` and `getNamesOfOtherPilotsInOverview` instead,
-which is a change of what the rule reads and a widening of when it holds fire.
-The unlock arm needs the bar entry regardless, because it right-clicks a
-`Target`. A safety rule is not the place for a change folded into somebody
-else's fix, so it is **#390**, claimed on its own, rather than made quietly.
+So the rule now asks both and **holds fire if either answers**:
+
+| | the bar's labels | the pilot's overview row |
+|---|---|---|
+| what it reads | `textsTopToBottom`, as rendered | `commonIndications.targetedByMe`, the client's own icon |
+| goes quiet when | the name wraps across labels | the pilot has no row here at all |
+
+`lockSignalForPilot` is that union — the two questions and which of them
+answered — and `&&` in its place would be the defect rather than a variation:
+it would hold fire only where the two agreed, which is every case except the
+ones this rule exists for. The second column goes quiet on an overview preset
+that hides fleet members (already a recorded hazard for
+`approachTheFleetCommander`) and on a pilot who left the grid still holding a
+lock, so it is *added* to the first and never put in its place. **An added
+signal can only add refusals.** `NothingIsLocked` needs both to be empty for the
+same reason: a row carrying the indicator with nothing parsed in the bar is a
+lock, and calling it "nothing is locked" would release the guns.
+
+`unlockFleetPilotInTargetBar` still needs the bar entry, because it right-clicks
+a `Target`. A pilot seen only by the row indicator gives it nothing to click, so
+it hands the reading on and the veto holds the guns without an unlock — and
+`targetBarSawThePilot` keeps `unlockFleetPilotAskedReadingsBound` from being
+charged for the ask that could not be made, which is #389's second defect
+arriving in this counter.
+
+**The rule is still a function of plain values.** The overview signal reaches it
+as a list of names, built by `friendlyFireStepFromReading` from
+`overviewRowSaysThisShipHasItLocked`, so a case still executes the guard against
+six plain facts without constructing a reading — the property every case in
+`test_wingman_holds_fire_on_fleetmates.py` rests on.
+
+**What #390 does not close**, stated because both instruments can go quiet on
+one reading: a name the bar wraps *and* a row with no indicator drawn (or no row
+at all) reads exactly as it did before. That is `test_what_this_change_still_does_not_close`.
 
 **The bound stops the asking and not the refusal.** Every other give-up in this
 file hands the reading back to the arms below it.
@@ -569,9 +596,17 @@ Fleet membership: THE FLEET WINDOW IS NOT OPEN, so the member list is
 unverifiable -- an empty one would otherwise read as 'nobody here is a
 fleetmate'. ...
 Friendly fire guard: HOLDING FIRE on 'Sonya Spodumain' -- a pilot on the
-overview, and with the Fleet window shut this bot cannot tell whether they
-are a fleetmate. Open it to fire on players again.
+overview, seen by the overview row's lock indicator, and with the Fleet
+window shut this bot cannot tell whether they are a fleetmate. Open it to
+fire on players again.
 ```
+
+**And every refusal names the instrument that saw the pilot**, which is #390's
+half of the same argument one level down: two signals that fail in opposite
+directions means a line saying only "held" leaves the next incident reasoning
+from silence about which one was working. `the target bar's labels`, `the
+overview row's lock indicator`, or both — and the two together are what a run
+would have to print before either could be trusted alone.
 
 ### Local chat's standing icons add names and cannot certify a list
 
@@ -851,6 +886,14 @@ throughout. Porting the mechanism without porting a fix inherits that: **the
 thing that decides to unlock must read the same source as the thing that
 notices the problem.**
 
+#390 is the deliberate exception and the difference is worth being precise
+about. The guard now reads *both* sources and refuses on either, while
+`unlockFleetPilotInTargetBar` still reads the bar alone, because it right-clicks
+a bar entry and nothing else can be right-clicked. The two do not disagree about
+what is locked: when only the row saw the pilot, the guard holds the guns and
+the unlock arm simply has nothing to click, which is the safe half of #303's
+divergence rather than a repeat of it.
+
 **Logi is the exception and needs a setting.** A logistics pilot locks fleet
 members deliberately — that is the job. So this cannot be an unconditional rule;
 it wants a setting defaulting to unlock, which a logi fit turns off, in the
@@ -907,23 +950,30 @@ restart.
 - **Whether this client draws `targetedByMeIndicator` at all.** #389's fix
   decides "the called target is already locked" from
   `OverviewWindowEntry.commonIndications.targetedByMe`, which the vendored
-  parser sets from a sprite of that name under the row's space-object icon. The
-  field and the icon name are the parser's, unchanged and shared by all six
-  apps, but **nothing in `~/eve-bot-logs` records the flag coming back true**,
-  and no `wingman_run*.log` is on this Mac to look in. The target-bar matcher is
-  kept beside it precisely so a client that names the icon something else
-  degrades to the old behaviour rather than to a bot that never stands down.
+  parser sets from a sprite of that name under the row's space-object icon, and
+  **#390 put the friendly-fire guard on the same icon** — so two arms now
+  depend on a flag nothing here has watched come back. The field and the icon
+  name are the parser's, unchanged and shared by all six apps, but **nothing in
+  `~/eve-bot-logs` records the flag coming back true**, and no
+  `wingman_run*.log` is on this Mac to look in. The target-bar matcher is kept
+  beside it in both places precisely so a client that names the icon something
+  else degrades to the old behaviour rather than to a bot that never stands
+  down — and, for the guard, so the added signal can only add refusals.
   What a run shows: `Lock the called target 'X'.` appearing **once** and then
   the reading reaching `dronesAssistTheCommander` and `Weapons:` — against the
   #389 signature, which is that line every reading with targets locked in the
-  same status block.
-- **How often the friendly-fire guard is defeated by a wrapped name.** The
-  weakness is established (#303's live read; see "Never shooting the fleet"),
-  the frequency is not: it depends on how the client wraps the pilot names this
-  fleet actually flies with, and no wingman log on this machine holds a locked
-  player. `Friendly fire guard: N locked, none of them a fleet pilot -- clear
-  to fire.` printed while the Fleet window names somebody who *is* in the bar is
-  what it looks like.
+  same status block. One run settles it for both arms.
+- **How often the friendly-fire guard is defeated by a wrapped name, and
+  whether #390's second signal catches it in the field.** The weakness is
+  established (#303's live read; see "Never shooting the fleet") and the fix is
+  executed against a reading the real parser produced, but the frequency is
+  not: it depends on how the client wraps the pilot names this fleet actually
+  flies with, and no wingman log on this machine holds a locked player.
+  `Friendly fire guard: ... UNLOCKING, guns held. Seen by the overview row's
+  lock indicator.` is the line that says the second signal did the work the bar
+  could not; `... Seen by the target bar's labels and the overview row's lock
+  indicator.` is the two agreeing, which is what has to be seen before either
+  could be trusted alone.
 - **Every number the health retreat would need (#364).** The mechanism is
   built and proven by `elm make` and by
   `test_wingman_retreats_to_the_commander.py`; **none of its thresholds has a
