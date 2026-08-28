@@ -573,6 +573,22 @@ class TheGuardActsOnTheVerdictTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.repl.close()
 
+    def test_the_guard_is_told_the_real_verdict(self):
+        """The wiring, read out of the source, because the executed cases below
+        cannot see it: `friendlyFireStep` is handed `membershipIsVerifiable` as
+        a plain `Bool` (#396's own property, which keeps the rule executable
+        without a reading), so a caller passing a literal answers every
+        plain-list case correctly while the bot ships the defect."""
+        binding = collapsed(
+            declaration(wingman_source(), "friendlyFireStepFromReading"))
+        self.assertIn(
+            "membershipIsVerifiable ="
+            " fleetMembershipIsVerifiable followFleetBroadcastFrom"
+            " readingFromGameClient",
+            binding)
+        self.assertNotIn("membershipIsVerifiable = True", binding)
+        self.assertNotIn("membershipIsVerifiable = False", binding)
+
     def test_the_lock_fixtures_arrived(self):
         self.assertEqual(
             self.repl.evaluate(
