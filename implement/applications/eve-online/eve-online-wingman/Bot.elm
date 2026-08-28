@@ -623,6 +623,17 @@ type alias BotMemory =
     -- no gate is on the overview at all.
     , gateAskedReadings : Int
 
+    -- Readings in a row spent ctrl-clicking the fleet broadcast banner to lock
+    -- the called target, carried with the name being clicked at. #366. Advances
+    -- only on readings the click is actually asked on, holds while the same
+    -- call is the lock's question and this reading did not ask, and clears the
+    -- moment the lock is no longer the question -- the target coming up locked,
+    -- the commander calling something else, the call turning out to be a gate
+    -- or a fleetmate, or #395 giving up on it. Past
+    -- `bannerCtrlClickAskedReadingsBound` the overview cascade has the lock
+    -- instead; see `bannerCtrlClickAfterReading`.
+    , bannerCtrlClick : Maybe BannerCtrlClickAsk
+
     -- Readings in a row spent asking the drones home before taking a gate the
     -- commander broadcast a `Target` on, ported from `eve-online-saxrat`'s
     -- `droneRecallUnansweredTicks` -- see `calledGateDroneRecall`. Counts from
@@ -778,6 +789,21 @@ about as well as this record and refuses to answer for any other.
 
 -}
 type alias CalledTargetGone =
+    { calledTarget : String
+    , readings : Int
+    }
+
+
+{-| How many readings in a row the ctrl-click on the broadcast banner has been
+asked to lock this call, carried with the name it is counting for.
+
+`CalledTargetGone`'s shape and for its reason: a bare counter would hand one
+call's arrears to the next, so a second target called while the first was still
+being clicked at would go straight to the cascade with none of its own readings
+spent. See `bannerCtrlClickAfterReading`.
+
+-}
+type alias BannerCtrlClickAsk =
     { calledTarget : String
     , readings : Int
     }
@@ -2603,21 +2629,18 @@ fightRatsIfShipIsPointed context shipUI =
         firstPointingBuffButton :: _ ->
             let
                 lockTarget =
-                    case mouseClickOnUIElement MouseButtonLeft firstPointingBuffButton of
-                        Err _ ->
+                    -- The chord itself is `ctrlClickEffects`, shared with
+                    -- `lockCalledTarget` since #366 rather than written out
+                    -- twice. This caller's own answer to an element too small
+                    -- to click is unchanged.
+                    case ctrlClickEffects firstPointingBuffButton of
+                        Nothing ->
                             describeBranch "Failed to click"
                                 askForHelpToGetUnstuck
 
-                        Ok effectToClick ->
+                        Just effectToClick ->
                             describeBranch "hold the 'ctrl' key while left clicking the 'pointed' symbol"
-                                (decideActionForCurrentStep
-                                    (List.concat
-                                        [ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL ]
-                                        , effectToClick
-                                        , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]
-                                        ]
-                                    )
-                                )
+                                (decideActionForCurrentStep effectToClick)
             in
             Just
                 (describeBranch "I see a buff indicating the ship is pointed."
@@ -3249,6 +3272,7 @@ initBotMemory =
     , recoveringFromRetreat = False
     , gateAskedReadings = 0
     , calledTargetGone = Nothing
+    , bannerCtrlClick = Nothing
     , calledGateRecallAskedReadings = 0
     , dronesInSpaceCountLastReading = 0
     , weaponsAskedReadings = 0
@@ -4137,6 +4161,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             botMemoryBefore.calledTargetGone
             (calledTargetWithNoOverviewRow
                 context.botSettings.followFleetBroadcastFrom
+                context.readingFromGameClient
+            )
+    , bannerCtrlClick =
+        -- #366. The rule the arm itself asks, rather than a restatement of when
+        -- it might have asked -- `calledTargetGone` above takes the same shape
+        -- and #389 is what the other one cost.
+        bannerCtrlClickAfterReading
+            botMemoryBefore.bannerCtrlClick
+            (bannerCtrlClickThisReading
+                { followFleetBroadcastFrom = context.botSettings.followFleetBroadcastFrom
+                , calledTargetGone = botMemoryBefore.calledTargetGone
+                , bannerCtrlClick = botMemoryBefore.bannerCtrlClick
+                }
                 context.readingFromGameClient
             )
     , goToFleetMatePlaceSeen =
@@ -6494,39 +6531,422 @@ targetTextsCarryName name textsTopToBottom =
     textsTopToBottom |> List.any (stringContainsIgnoringCase name)
 
 
-{-| Lock the pilot a `Target` broadcast named, from their overview row.
+{-| Lock the object a `Target` broadcast named.
 
-The row is resolved through `overviewEntryForPilot`, which is what
-`calledTargetIsLocked` reads the lock indicator off -- one lookup, so the arm
-that decides the target is not locked and the arm that clicks it cannot end up
-on two different rows.
+**Ctrl-clicking the broadcast banner is what does it, and #366 is why.** Holding
+Ctrl over the banner's own `Target:` display locks the object the broadcast
+refers to: one dispatch, no context menu, and no overview lookup at all. What it
+replaces is a `Lock Target` cascade on a row found by matching
+`targetBroadcastPilotName`'s parse of the banner against `objectName` by exact
+equality -- two string derivations that both have to agree, about an object the
+client itself already knows the identity of. Three costs go with them: a target
+outside the active overview preset was one this bot simply never shot, a
+rendering the parse and the Name cell spell differently was the same, and a
+cascade is where this bot's readings and its bugs go (#329's `entryLabel`
+collision, `contextMenuStuckTicks`, #285's unbounded loot-window branch).
 
-**The no-row branch is a wait this function cannot bound**, since it answers a
-`DecisionPathNode` and a `DecisionPathNode` cannot decline a reading. #395 is
-what that cost while nothing above it bounded one either: three wingmen stopped
-together on `'Centus Black Ops Veteran' is not on the overview.` when the
-commander's called target died, and stayed there. `bringCalledTargetUnderFire`
-is what bounds it now -- the only state this branch is reachable from is
-`CalledNameNamesNoOverviewRow`, which that arm answers on before the lock is
-ever issued.
+**The two guards that must be ahead of the click are ahead of it by placement,
+and neither of them is in here.** A ctrl-click locks a fleet member as happily
+as a rat, so `actOnFleetBroadcast` refuses a called target named in
+`fleetPilotNames` before this function is reached at all -- which is why
+`targetBroadcastPilotName` is still needed for the _decision_ long after the
+lock stopped needing it. And a ctrl-click locks a gate as happily as a ship, so
+`bringCalledTargetUnderFire` dispatches on `calledObjectOnOverviewFromReading`
+and hands a called acceleration gate to the gate machinery before it builds the
+lock at all (#393). Both are placements rather than conditions, which is what
+`test_the_gate_check_is_what_the_arm_dispatches_on` already pins.
+
+**The cascade is kept as the fall-back rather than deleted**, and the reason is
+an unknown rather than caution: what the client does with a ctrl-click on the
+banner when the object is out of lock range, already locked, or a structure
+rather than a ship is **not established** -- nobody has captured it and there is
+no client here to capture it with. So the fall-back is reachable on _any_
+failure to lock rather than on a diagnosis this bot cannot make.
+`bannerCtrlClickAskedReadingsBound` readings of clicking with the target still
+not reading locked hands it to the cascade, and so does a reading whose banner
+offers nothing to click.
+
+**What a called target with no overview row does now, and it is the case this
+change is for.** The click is attempted -- the banner is on screen whatever the
+overview is showing -- and it is attempted **because** there is no row rather
+than in spite of one. Nothing here is gated on finding one: written as "find the
+row, and ctrl-click the banner if there is one", the whole defect would survive
+and only the gesture would change.
+
+**A missing row is not evidence that the target is dead**, and reading it that
+way is the mistake this paragraph exists to stop. Three states produce it and
+only one of them is death: the object really is gone, _this pilot's overview
+preset does not show it_ (four characters, non-identical presets), or the
+wording the banner carries is not the overview's Name cell. In the second and
+third the ctrl-click is the only thing in this bot that can lock the target at
+all, because the cascade needs the row it has not got.
+
+**The ordering against #395 is what that buys.** That give-up is asked in
+`bringCalledTargetUnderFire`, before the lock, and fires at
+`calledTargetGoneReadings` -- below this bound, so every reading it allows is a
+reading the click is attempted on. It comes to mean _the banner was tried too
+and nothing locked_ rather than _there was no row, so we assumed it died_, and
+it still hands the reading back, which is still right once there is nothing left
+to try.
 
 -}
 lockCalledTarget : BotDecisionContext -> String -> DecisionPathNode
 lockCalledTarget context calledTarget =
-    case overviewEntryForPilot calledTarget context.readingFromGameClient of
-        Nothing ->
+    let
+        nothingToLockItWith : DecisionPathNode
+        nothingToLockItWith =
             describeBranch
                 ("'"
                     ++ calledTarget
-                    ++ "' is not on the overview. Giving the client a few readings to draw it, then leaving this call alone."
+                    ++ "' is not on the overview and its broadcast banner is not in this reading either, so there is nothing here to lock it with."
                 )
                 waitForProgressInGame
+    in
+    case lockCalledTargetStepFromReading context.memory.bannerCtrlClick context.readingFromGameClient calledTarget of
+        CtrlClickTheBroadcastBanner ->
+            -- One lookup with two readers -- the rule's own
+            -- `bannerOffersACtrlClick` and the click made here -- so the rule
+            -- cannot decide to click a banner this branch then fails to find.
+            -- `inactiveWeaponFromReading`'s arrangement, and the fall-back
+            -- below is what makes the impossible case honest rather than
+            -- silent.
+            calledTargetBannerCtrlClick context.readingFromGameClient
+                |> Maybe.map
+                    (\effectsToClick ->
+                        describeBranch
+                            ("Ctrl-click the fleet broadcast banner to lock '"
+                                ++ calledTarget
+                                ++ "' -- one dispatch, no context menu and no overview row needed."
+                            )
+                            (decideActionForCurrentStep effectsToClick)
+                    )
+                |> Maybe.withDefault nothingToLockItWith
 
-        Just overviewEntry ->
-            useContextMenuCascadeOnOverviewEntry
-                (useMenuEntryWithTextEqual "Lock Target" menuCascadeCompleted)
-                overviewEntry
-                context
+        LockFromTheOverviewRow ->
+            overviewEntryForPilot calledTarget context.readingFromGameClient
+                |> Maybe.map
+                    (\overviewEntry ->
+                        describeBranch
+                            ("Lock '"
+                                ++ calledTarget
+                                ++ "' from its overview row, which is the fall-back for a banner this bot could not lock it with."
+                            )
+                            (useContextMenuCascadeOnOverviewEntry
+                                (useMenuEntryWithTextEqual "Lock Target" menuCascadeCompleted)
+                                overviewEntry
+                                context
+                            )
+                    )
+                |> Maybe.withDefault nothingToLockItWith
+
+        NoWayToLockTheCalledTarget ->
+            nothingToLockItWith
+
+
+{-| Which of the two ways of locking a called target this reading offers, as
+three named answers over two facts and a counter -- `weaponsStep`'s shape, for
+its reason: a rule reachable only through a whole `BotDecisionContext` is a rule
+nothing can execute in a test, and this one is asked by three readers.
+
+**The bound is asked with the banner rather than after it**, so a click that has
+been given up on hands the reading to the cascade instead of being re-issued
+forever. That ordering is the whole of the fall-back: `weaponsStep` puts its own
+give-up above "is there anything to do" for the same reason.
+
+**`NoWayToLockTheCalledTarget` is not a third mechanism**, it is the state in
+which neither exists on this reading -- the banner absent and no overview row
+carrying the name. The arm speaks it and waits, and what bounds that wait is
+#395's give-up in `bringCalledTargetUnderFire`, unchanged: the only route to
+this answer is `CalledNameNamesNoOverviewRow`, since the other caller of the
+lock has a row by construction.
+
+-}
+lockCalledTargetStep :
+    { bannerOffersACtrlClick : Bool
+    , overviewRowIsInTheReading : Bool
+    , askedReadings : Int
+    }
+    -> LockCalledTargetStep
+lockCalledTargetStep { bannerOffersACtrlClick, overviewRowIsInTheReading, askedReadings } =
+    if bannerOffersACtrlClick && not (bannerCtrlClickHasBeenGivenUpOn askedReadings) then
+        CtrlClickTheBroadcastBanner
+
+    else if overviewRowIsInTheReading then
+        LockFromTheOverviewRow
+
+    else
+        NoWayToLockTheCalledTarget
+
+
+type LockCalledTargetStep
+    = CtrlClickTheBroadcastBanner
+    | LockFromTheOverviewRow
+    | NoWayToLockTheCalledTarget
+
+
+{-| The rule above, asked of a reading and a memory, so the arm, the counter and
+the status clause are all reading one decision -- `weaponsStepFromReading`'s
+arrangement, for #102's reason.
+-}
+lockCalledTargetStepFromReading : Maybe BannerCtrlClickAsk -> ReadingFromGameClient -> String -> LockCalledTargetStep
+lockCalledTargetStepFromReading bannerCtrlClick readingFromGameClient calledTarget =
+    lockCalledTargetStep
+        { bannerOffersACtrlClick = calledTargetBannerCtrlClick readingFromGameClient /= Nothing
+        , overviewRowIsInTheReading = overviewEntryForPilot calledTarget readingFromGameClient /= Nothing
+        , askedReadings = bannerCtrlClickAskedReadings calledTarget bannerCtrlClick
+        }
+
+
+{-| The ctrl-click on the broadcast banner, as the effects that dispatch it.
+
+One lookup answering both "is there a banner to click" and "what does clicking
+it dispatch", so the rule and the arm cannot disagree -- and `Nothing` covers
+the element being absent from the reading _and_ its visible region being too
+small to click, which are two ways of failing to click that want one answer.
+
+-}
+calledTargetBannerCtrlClick : ReadingFromGameClient -> Maybe (List EffectOnWindow.EffectOnWindowStruct)
+calledTargetBannerCtrlClick readingFromGameClient =
+    fleetBroadcastBannerElement readingFromGameClient
+        |> Maybe.andThen ctrlClickEffects
+
+
+{-| EVE's own shortcut for acting on an object directly: hold Ctrl and left
+click it, no context menu involved.
+
+**One copy of the chord, because it was written twice.**
+`fightRatsIfShipIsPointed` has held Ctrl over the pointed buff since the
+original skeleton and `lockCalledTarget` holds it over the broadcast banner
+since #366; saxrat's `ctrlShiftClickUiElement` is the two-modifier version of
+the same gesture. A chord built wrong is one the client reads as a plain click,
+which locks nothing and says nothing, so two copies are two chances for one of
+them to drift.
+
+**`Nothing` is a decline the caller has to speak, not an empty effect list.**
+`mouseClickOnUIElement` answers `Err` for an element whose visible region is too
+small to click, and dispatching `[]` on that is a branch that prints an action
+and dispatches nothing -- this repo's signature failure, and what saxrat's copy
+of this gesture still does. Each caller answers it in its own words because the
+two want different answers: the pointed path asks for help, the lock path falls
+back to the cascade.
+
+-}
+ctrlClickEffects : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Maybe (List EffectOnWindow.EffectOnWindowStruct)
+ctrlClickEffects uiElement =
+    case mouseClickOnUIElement MouseButtonLeft uiElement of
+        Err _ ->
+            Nothing
+
+        Ok effectToClick ->
+            Just
+                (List.concat
+                    [ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL ]
+                    , effectToClick
+                    , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]
+                    ]
+                )
+
+
+{-| How many readings in a row this bot ctrl-clicks the broadcast banner for one
+called target before it stops and lets the overview cascade have it.
+
+**Five, and it is not a measurement.** This bot has no corpus of its own; see
+WINGMAN.md. What sizes it is what the click _is_: one dispatch with no menu to
+render and no flyout to wait on, so unlike a cascade it either reaches the
+client or it does not, and what the readings are for is the client's own lock-in
+time -- a lock takes seconds and a reading is one to eight. So it sits far below
+the three bounds in this file that budget a cascade the client keeps refusing
+(`weaponsAskedReadingsBound` 20, `fleetMateWarpAskedReadingsBound` 30,
+`accelerationGateRefusesThisShipTicks` 40), which have a menu to open on every
+attempt.
+
+**Above `calledTargetGoneReadings` (3) deliberately, and the ordering is the
+point rather than the arithmetic.** #395's give-up is asked before the lock, on
+exactly the state where there is no overview row -- so with this bound above it,
+**every reading that give-up allows is a reading the banner was clicked on**.
+That is what turns it from _there was no row, so we assumed it died_ into _the
+banner was tried too and nothing locked_. The other order would have this budget
+run out first and hand a no-row call to a cascade that has no row to open a menu
+on, which is a fall-back that cannot work; see `lockCalledTarget` for why a
+missing row is not evidence the target is dead.
+
+So what this bound is really for is the other case: a call that **does** have a
+row, on which the click does not land. That is the one thing about the
+ctrl-click nobody has watched, and the cascade is a mechanism that can serve it.
+
+Past it `lockCalledTargetStep` answers `LockFromTheOverviewRow` rather than
+handing the reading back, because there is a second mechanism here to try --
+which is what makes this bound unlike every other give-up in this file.
+
+-}
+bannerCtrlClickAskedReadingsBound : Int
+bannerCtrlClickAskedReadingsBound =
+    5
+
+
+{-| Whether the banner click has been given up on for this call. One comparison
+with two readers -- the step rule and the status clause --
+`accelerationGateHasBeenGivenUpOn`'s arrangement, for its reason.
+-}
+bannerCtrlClickHasBeenGivenUpOn : Int -> Bool
+bannerCtrlClickHasBeenGivenUpOn askedReadings =
+    bannerCtrlClickAskedReadingsBound <= askedReadings
+
+
+{-| How many readings the banner click has been asked on for this call.
+
+**It refuses to answer for any name but its own**, which is
+`calledTargetHasBeenGivenUpOn`'s posture and for the same reason: a record about
+the last call must not spend the next call's budget, which is the shape #145's
+gate counter was filed on.
+
+-}
+bannerCtrlClickAskedReadings : String -> Maybe BannerCtrlClickAsk -> Int
+bannerCtrlClickAskedReadings calledTarget bannerCtrlClick =
+    case bannerCtrlClick of
+        Nothing ->
+            0
+
+        Just ask ->
+            if ask.calledTarget == calledTarget then
+                ask.readings
+
+            else
+                0
+
+
+{-| The counter behind that bound, folded one reading at a time.
+
+**It advances only on the readings the click is actually asked on**, which is
+#389's lesson and this file has already paid for it once: `weaponsAskedReadings`
+advanced from state alone and reported `GAVE UP after 46 readings` on an arm
+that had never been asked, on three pilots at 46, 36 and 50 against a bound
+of 20. `asked` here is the shipped rule answering `CtrlClickTheBroadcastBanner`,
+not a restatement of when it might.
+
+**It holds rather than clearing on a reading that did not ask**, while the same
+call is still the lock's question -- `weaponsAskedReadings`' own arrangement. A
+counter that cleared there would clear on the very reading the bound was
+reached, since past the bound the rule stops asking: the fall-back would last
+exactly one reading and the click would be re-issued for ever.
+
+**It clears when the lock is no longer the question at all**, which is one
+clause covering every way this ends: the target coming up locked (the click
+worked), the commander calling something else, the call turning out to be a
+gate or a fleetmate, #395 giving up on it, and the banner going away. A
+different call starts from its own first reading rather than inheriting the last
+one's arrears.
+
+-}
+bannerCtrlClickAfterReading :
+    Maybe BannerCtrlClickAsk
+    -> { calledTarget : Maybe String, asked : Bool }
+    -> Maybe BannerCtrlClickAsk
+bannerCtrlClickAfterReading before thisReading =
+    case thisReading.calledTarget of
+        Nothing ->
+            Nothing
+
+        Just calledTarget ->
+            let
+                spent : Int
+                spent =
+                    if thisReading.asked then
+                        1
+
+                    else
+                        0
+            in
+            case before of
+                Just ask ->
+                    if ask.calledTarget == calledTarget then
+                        Just { ask | readings = ask.readings + spent }
+
+                    else
+                        Just { calledTarget = calledTarget, readings = spent }
+
+                Nothing ->
+                    Just { calledTarget = calledTarget, readings = spent }
+
+
+{-| What this reading is, to the counter above: which call the lock is working
+on, and whether the click was asked for it.
+
+**One rule, both readers**, the arrangement `calledTargetWithNoOverviewRow`
+already uses next door and for #145's reason: `updateMemoryForNewReadingFromGame`
+never sees a decision, so without this it would restate the arm's precondition
+and the two restatements would drift.
+
+Every one of the arm's own conditions is here, and each is a way the budget
+could be charged for a reading nothing spent. The fleet-member guard in
+`actOnFleetBroadcast` answers above this arm; `bringCalledTargetUnderFire`
+answers `Nothing` for a target already locked and hands a called gate to the
+gate machinery; and #395's give-up answers before the lock. All four are asked
+through the shipped rules rather than restated.
+
+-}
+bannerCtrlClickThisReading :
+    { followFleetBroadcastFrom : List String
+    , calledTargetGone : Maybe CalledTargetGone
+    , bannerCtrlClick : Maybe BannerCtrlClickAsk
+    }
+    -> ReadingFromGameClient
+    -> { calledTarget : Maybe String, asked : Bool }
+bannerCtrlClickThisReading state readingFromGameClient =
+    case calledTargetTheLockIsWorkingOn state.followFleetBroadcastFrom state.calledTargetGone readingFromGameClient of
+        Nothing ->
+            { calledTarget = Nothing, asked = False }
+
+        Just calledTarget ->
+            { calledTarget = Just calledTarget
+            , asked =
+                lockCalledTargetStepFromReading state.bannerCtrlClick readingFromGameClient calledTarget
+                    == CtrlClickTheBroadcastBanner
+            }
+
+
+{-| The called target `lockCalledTarget` is being asked to lock on this reading,
+if there is one.
+
+The arm's route to the lock, over a reading rather than a decision, so the
+counter and the status clause can ask it. Everything it declines is a reading on
+which no lock is issued: a call on a fleetmate (refused above this arm), a call
+on an acceleration gate or one whose gate row is not drawn (#393 answers both),
+a target already locked (#360's stand-down, read through the client's own
+indicator since #389), and a call #395 has given up on.
+
+-}
+calledTargetTheLockIsWorkingOn : List String -> Maybe CalledTargetGone -> ReadingFromGameClient -> Maybe String
+calledTargetTheLockIsWorkingOn followFleetBroadcastFrom calledTargetGone readingFromGameClient =
+    fleetBroadcastBannerText readingFromGameClient
+        |> Maybe.andThen targetBroadcastPilotName
+        |> Maybe.andThen
+            (\calledTarget ->
+                if
+                    List.member calledTarget
+                        (fleetPilotNamesFromReading followFleetBroadcastFrom readingFromGameClient)
+                        || calledTargetIsLocked calledTarget readingFromGameClient
+                then
+                    Nothing
+
+                else
+                    case calledObjectOnOverviewFromReading calledTarget readingFromGameClient of
+                        CalledObjectIsAnAccelerationGate _ ->
+                            Nothing
+
+                        CalledGateIsNotDisplayed ->
+                            Nothing
+
+                        CalledObjectIsNotAGate ->
+                            Just calledTarget
+
+                        CalledNameNamesNoOverviewRow ->
+                            if calledTargetHasBeenGivenUpOn calledTarget calledTargetGone then
+                                Nothing
+
+                            else
+                                Just calledTarget
+            )
 
 
 {-| Launch drones from the bay, with nothing yet to redirect them to.
@@ -10879,10 +11299,41 @@ describeCalledObject context =
             "Called target: none on the banner."
 
         Just calledTarget ->
+            let
+                -- Bound once and handed to both clauses, so this function's
+                -- read of the gone verdict stays the one read the status line
+                -- makes of it.
+                gone : Maybe CalledTargetGone
+                gone =
+                    context.memory.calledTargetGone
+            in
             describeCalledObjectOnOverview
                 calledTarget
                 (calledObjectOnOverviewFromReading calledTarget context.readingFromGameClient)
-                ++ describeCalledTargetGone calledTarget context.memory.calledTargetGone
+                ++ describeCalledTargetGone calledTarget gone
+                ++ (case
+                        calledTargetTheLockIsWorkingOn
+                            context.eventContext.botSettings.followFleetBroadcastFrom
+                            gone
+                            context.readingFromGameClient
+                    of
+                        Nothing ->
+                            -- The lock is not this reading's question -- the
+                            -- target is locked, or the call is a gate, a
+                            -- fleetmate or one #395 has given up on -- and a
+                            -- clause claiming a click on any of those would be
+                            -- a decision this bot did not take.
+                            ""
+
+                        Just _ ->
+                            describeCalledTargetLock
+                                (bannerCtrlClickAskedReadings calledTarget context.memory.bannerCtrlClick)
+                                (lockCalledTargetStepFromReading
+                                    context.memory.bannerCtrlClick
+                                    context.readingFromGameClient
+                                    calledTarget
+                                )
+                   )
 
 
 {-| The clause above, as a function of the name and the rule's own answer, so a
@@ -10905,7 +11356,7 @@ describeCalledObjectOnOverview calledTarget calledObject =
                     "an overview row names it and it is not an acceleration gate, so it is a target to shoot."
 
                 CalledNameNamesNoOverviewRow ->
-                    "NO OVERVIEW ROW names it, so nothing here can lock it and nothing here can tell whether it is an acceleration gate. The active overview preset may be hiding it, or the banner's own wording may not be the overview's Name cell."
+                    "NO OVERVIEW ROW names it, so nothing here can tell whether it is an acceleration gate and no context menu can be opened on it -- but the broadcast banner can still be ctrl-clicked, which is the case that mechanism exists for. It may be dead, this pilot's overview preset may not show it, or the banner's own wording may not be the overview's Name cell."
            )
 
 
@@ -10942,3 +11393,44 @@ describeCalledTargetGone calledTarget gone =
                     ++ " of "
                     ++ String.fromInt calledTargetGoneReadings
                     ++ " readings; past that this call is left alone."
+
+
+{-| Which of the two mechanisms is being used to lock this call, and why.
+
+**Rendered from the rule's own answer** rather than written inline in the status
+line, so a case executes what an operator reads -- `describeWeaponsAsk`'s
+arrangement, and the one #109 records a status clause passing a case while
+printing nothing at all.
+
+**Which path was taken is the whole point of the clause**, because #366 ships
+with the client's answer to a banner ctrl-click unknown: a run that never leaves
+the cascade and a run that never reaches it are the two things to tell apart on
+the first run that meets a call, and from a decision line alone they read the
+same. The count is printed beside the bound for the reason every other budget in
+this file prints one -- a give-up whose arithmetic nobody can see is a give-up
+nobody can size.
+
+-}
+describeCalledTargetLock : Int -> LockCalledTargetStep -> String
+describeCalledTargetLock askedReadings step =
+    " Lock: "
+        ++ (case step of
+                CtrlClickTheBroadcastBanner ->
+                    "CTRL-CLICKING THE BROADCAST BANNER, asked on "
+                        ++ String.fromInt askedReadings
+                        ++ " of "
+                        ++ String.fromInt bannerCtrlClickAskedReadingsBound
+                        ++ " readings -- one dispatch, no context menu and no overview row needed."
+
+                LockFromTheOverviewRow ->
+                    if bannerCtrlClickHasBeenGivenUpOn askedReadings then
+                        "THE BANNER CLICK DID NOT LOCK IT in "
+                            ++ String.fromInt askedReadings
+                            ++ " readings, so the overview row's own 'Lock Target' cascade has it instead. A new call starts the click over."
+
+                    else
+                        "no banner in this reading to click, so the overview row's own 'Lock Target' cascade has it."
+
+                NoWayToLockTheCalledTarget ->
+                    "NOTHING HERE CAN LOCK IT -- no broadcast banner to click and no overview row to open a menu on."
+           )

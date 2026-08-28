@@ -719,14 +719,43 @@ next, which is the shape #145's gate counter was filed on.
 the commander calling something else, and the banner going away. A different call
 starts from one rather than inheriting.
 
+#### No overview row is not evidence the target is dead
+
+This section's own title says *a called target that dies*, and that is the
+incident rather than the state. **Three things produce `CalledNameNamesNoOverviewRow`
+and only one of them is death:**
+
+1. the object really is gone — run 395's rat, killed by the fleet;
+2. **this pilot's overview preset does not show it.** Four characters fly this
+   bot and their presets are not identical, so a target one wingman can see is
+   one another has no row for at all;
+3. the wording the banner carries is not the overview's Name cell, which is
+   #393's own unverified premise about a called gate.
+
+The give-up is correct for all three — there is nothing more this arm can do
+about the call, whichever it is — but **what it means is "nothing here can act
+on this", not "it died"**, and reading it as the second is what would make a
+wingman that cannot see a target conclude the fleet had killed it. #366 is the
+change that acts on that distinction: ctrl-clicking the broadcast banner needs
+no row, so causes 2 and 3 stop being dead ends and the give-up comes to mean
+*the banner was tried too and nothing locked*. See "The banner is ctrl-clicked
+to lock, and it is tried precisely when there is no row" below.
+
+**The virtualised row is a fourth case and it lands elsewhere.** A row scrolled
+out of view is still in the tree and `overviewRowsForPilot` filters on the Name
+cell rather than on `_display`, so it answers `CalledObjectIsNotAGate` and the
+lock has a row to work with — one whose region belongs to whatever was recycled
+into its place, which is CLAUDE.md's "worse than a no-op". That is a hazard for
+the *cascade* rather than for this counter, and it is one more reason the
+ctrl-click is the primary path rather than the fall-back.
+
 #### The bound is three, and what it bounds is a parse rather than a range
 
-`CalledNameNamesNoOverviewRow` is **not the overview virtualising**. A row
-scrolled out of view is still in the tree, and `overviewRowsForPilot` filters on
-the Name cell rather than on `_display`, so a hidden row still answers
-`CalledObjectIsNotAGate`. This state is the stronger one — no window holds a row
+`CalledNameNamesNoOverviewRow` is **not the overview virtualising**, as above.
+This state is the stronger one — no window holds a row
 with that name at all — which a live target reaches only by leaving the
-overview's own range filter, or through a reading whose overview did not parse.
+overview's own range filter, through a preset that does not carry it, or through
+a reading whose overview did not parse.
 
 So the number bounds a parse that missed, and three is the count this repo
 already gives that doubt: CLAUDE.md's ship-loss signal wants three consecutive
@@ -792,6 +821,181 @@ the row was there and `overviewRowsForPilot` did not match it. And **whether a
 live target's row can vanish and return at all** is still unread; if it can, the
 tell is the count climbing to 1 or 2 and resetting over and over while the bot
 goes on locking the target normally.
+
+### The banner is ctrl-clicked to lock, and it is tried precisely when there is no row
+
+#366. Holding Ctrl over the fleet broadcast's `Target:` display locks the object
+the broadcast refers to — one dispatch, no context menu, no overview lookup.
+What it replaces is `lockCalledTarget`'s long way round: find the row by matching
+`targetBroadcastPilotName`'s parse of the banner against `objectName` by **exact
+equality**, then run a `Lock Target` cascade on it.
+
+Three costs went with that:
+
+- **it needed the target on the overview**, so a target outside this pilot's
+  active preset was one this wingman simply never shot;
+- **it matched by exact string equality** between two derivations that both have
+  to agree, about an object the client itself already knows the identity of;
+- **it spent a cascade**, which is where this bot's readings and its bugs go —
+  #329's `entryLabel` collision, `contextMenuStuckTicks`, #285's unbounded
+  loot-window branch.
+
+#### It is attempted *because* there is no row, not in spite of one
+
+The rule is `lockCalledTargetStep` and its first clause asks only whether the
+banner offers a click and whether the budget is spent. **It does not ask whether
+a row exists**, and a version that did — "find the row, and ctrl-click the banner
+if there is one" — would change the gesture and leave the defect exactly where it
+was: causes 2 and 3 above are precisely the readings that have no row, and they
+are the readings this exists for.
+
+So a call whose name no overview row carries is now **clicked** rather than
+waited on, for every reading #395's give-up allows. That give-up is asked in
+`bringCalledTargetUnderFire`, before the lock, and fires at
+`calledTargetGoneReadings` (3) — which sits *below*
+`bannerCtrlClickAskedReadingsBound` (5), so every reading it allows is a reading
+the banner was clicked on, and it comes to mean *the banner was tried too and
+nothing locked* rather than *there was no row, so we assumed it died*. It still
+hands the reading back, which is still right once there is nothing left to try.
+
+#### The two guards stay ahead of the click, by placement
+
+A ctrl-click locks a **fleet member** as happily as a rat, and it locks an
+**acceleration gate** as happily as a ship. Both checks are ahead of the click
+because of where they sit rather than because the lock consults them:
+
+- `actOnFleetBroadcast` refuses a called target named in `fleetPilotNames`
+  before `bringCalledTargetUnderFire` is called at all — which is why
+  `targetBroadcastPilotName` is still needed for the *decision* long after the
+  lock stopped needing it;
+- `bringCalledTargetUnderFire` dispatches on `calledObjectOnOverviewFromReading`
+  and hands a called gate to the gate machinery before it builds the lock (#393,
+  whose own text says a gate check placed behind the lock "would be dead the
+  moment that lands").
+
+`lockCalledTarget` names neither, and a case asserts that: a copy of either
+inside it would be a second answer that could disagree with the first.
+
+#### The cascade is kept as the fall-back, because of what is unknown
+
+**Whether the ctrl-click works when the object is out of lock range, already
+locked, or is a structure rather than a ship is not established** — nobody has
+captured it, and there was no client on the machine this was written on. #366
+asks for a capture pass with `eve_read.py` before the fall-back is wired, and
+that pass has not happened.
+
+So the fall-back is reachable on **any** failure to lock rather than on a
+diagnosis this bot cannot make. Two ways in: the banner offering nothing to
+click (absent from the reading, or a visible region too small for
+`mouseClickOnUIElement`), and `bannerCtrlClickAskedReadingsBound` readings of
+clicking with the target still not reading locked. *Nothing happened* and
+*cannot be locked* want different answers and this bot cannot tell them apart,
+so it treats both as the first and says which path it is on.
+
+**The cascade cannot serve a call with no row**, which is why the two dead ends
+are separate clauses in the status line rather than one:
+
+```
+Lock: CTRL-CLICKING THE BROADCAST BANNER, asked on 2 of 5 readings -- one dispatch, no context menu and no overview row needed.
+Lock: THE BANNER CLICK DID NOT LOCK IT in 5 readings, so the overview row's own 'Lock Target' cascade has it instead. A new call starts the click over.
+Lock: no banner in this reading to click, so the overview row's own 'Lock Target' cascade has it.
+Lock: NOTHING HERE CAN LOCK IT -- no broadcast banner to click and no overview row to open a menu on.
+```
+
+The clause speaks only on readings the lock is actually the question — not on a
+locked target, a called gate, a fleetmate, or a call #395 has given up on —
+because a clause claiming a click on any of those is a decision this bot did not
+take.
+
+#### Five, and the budget counts asks
+
+`bannerCtrlClickAskedReadingsBound` is not a measurement; this bot still has no
+corpus of its own. What sizes it is what the click *is*: one dispatch with no
+menu to render and no flyout to wait on, so unlike a cascade it either reaches
+the client or it does not, and the readings are for the client's own lock-in
+time. It sits far below the three bounds here that budget a cascade
+(`weaponsAskedReadingsBound` 20, `fleetMateWarpAskedReadingsBound` 30,
+`accelerationGateRefusesThisShipTicks` 40) and above `calledTargetGoneReadings`
+(3), for the ordering reason above.
+
+**The counter advances only on readings the click is asked on**, which is #389's
+lesson and this bot has already paid for it once — `weaponsAskedReadings`
+advanced from state alone and reported `GAVE UP after 46 readings` on an arm that
+had never been asked. `bannerCtrlClickThisReading` is the shipped rule answering
+`CtrlClickTheBroadcastBanner`, asked by `updateMemoryForNewReadingFromGame`
+rather than restated beside it.
+
+It **holds** rather than clearing on a reading that did not ask, which is the one
+place it differs from `calledTargetGone`'s shape: past the bound the rule stops
+asking, so a counter that cleared there would clear on the very reading the bound
+was reached, and the fall-back would last exactly one reading before the click
+was re-issued for ever. It clears when the lock is no longer the question at all
+— the target coming up locked, a different call, a gate, a fleetmate, #395's
+give-up, or the banner going away — and the name travels with the count, so a
+second call is never sent straight to the cascade on the first call's arrears.
+
+#### The chord has one copy now
+
+`ctrlClickEffects` is the gesture: `KeyDown` Ctrl, the click, `KeyUp` Ctrl. It
+was written inline in `fightRatsIfShipIsPointed` (the pointed-buff path) and that
+copy is folded into it rather than left beside it — a chord built wrong is one
+the client reads as a plain click, which locks nothing and says nothing, so two
+copies are two chances for one to drift. saxrat's `ctrlShiftClickUiElement` is
+the two-modifier version of the same gesture and is the *unlock*, which is what a
+Shift creeping in here would turn this into.
+
+It answers `Maybe` rather than dispatching `[]` on an element too small to click,
+because dispatching nothing while printing an action is this repo's signature
+failure — and what saxrat's copy still does. Each caller answers the decline in
+its own words: the pointed path asks for help, the lock path falls back to the
+cascade.
+
+#### Verified without a live client
+
+`tools/macos-host/tests/test_wingman_banner_ctrl_click.py` (45 cases). The rules
+are executed through the real `Bot.elm` in `elm repl` and the readings they are
+asked about go through the real `EveOnline.ParseUserInterface`; the counter is
+folded through the shipped `updateMemoryForNewReadingFromGame` over whole
+sessions rather than asked once. The strongest cases read the **effects the arm
+would dispatch** off the decision's own leaf rather than its description, since
+a branch that prints an action and dispatches nothing is exactly what this repo
+keeps finding — so "the fleet-member guard is ahead of the click" and "a called
+gate is taken rather than clicked" are shown by there being no `CTRL-DOWN` in
+what the arm would put on the client, not by an ordering read out of the source.
+
+Confirmed by mutation, seventeen of them, each failing a named case, listed in
+that file — including **the guard moved behind the click**, **the gate check
+bypassed**, **the bound removed**, **the fall-back made unreachable** and **the
+counter advanced from state alone**.
+
+**One survived the first pass and the hole was in the fixture.** Aiming the
+click at the head of `fleetWindowDescendants` rather than at the banner element
+changed nothing any case could see, because the fixture's fleet window had the
+banner label as its first child — so the two were one node. A clickable decoy
+drawn first, at a different point, is what discriminates them now. And one
+mutation was applied to `Bot.elm` for real, by a run this container killed before
+it could restore the file; the two cases named for it are what found it.
+
+#### Unverified
+
+**Any of it running.** No wingman run has been flown since. What to watch on the
+first call: `Ctrl-click the fleet broadcast banner to lock '<name>'` in the
+decision log and `Lock: CTRL-CLICKING THE BROADCAST BANNER, asked on 1 of 5` in
+the status line, then the target reading locked on the next reading or two and
+the clause going away.
+
+A run that clicks and clicks and always ends at `THE BANNER CLICK DID NOT LOCK
+IT in 5 readings` means the gesture does not do what #366 says it does, and the
+bot falls back to the cascade it used before — which is the direction this fails
+safely in, and costs five readings a call. A run that *never* prints the
+ctrl-click clause at all means the banner element is not being found, which is
+the other safe direction and reads as the old behaviour exactly.
+
+**What the client does with a ctrl-click on an object out of lock range, already
+locked, or a structure.** The capture that would settle it: broadcast a `Target`
+on each of those in turn and read the banner element and the target bar either
+side of one ctrl-click with `eve_read.py`. Until then the bound is what covers
+all three, and it cannot tell them apart.
 
 ### The health retreat, and why it ships switched off
 
