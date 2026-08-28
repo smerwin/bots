@@ -10096,9 +10096,11 @@ genuine hostile the fleet is engaging.
 **What it does not close**, stated because it is the same shape as the defect
 above: `getNamesOfOtherPilotsInOverview` needs the local chat window's user
 list as well as the overview, and answers `[]` when that window is not
-rendering one. A reading with the Fleet window shut _and_ local chat unread
-therefore falls back to `ClearToFire`, which is the original hole in a
-narrower place. Nothing in the recorded runs says how often chat is unread --
+rendering one. A reading whose roster is not corroborated _and_ whose local
+chat is unread therefore falls back to `ClearToFire`, which is the original
+hole in a narrower place -- and #380 widened the first half of that condition
+without touching the second. Nothing in the recorded runs says how often chat
+is unread --
 `Seeing N other pilots in the overview` is printed on every reading and is the
 line to count it from.
 
