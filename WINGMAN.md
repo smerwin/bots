@@ -44,7 +44,9 @@ nothing to do.
 4. **Unlock a fleet member sitting in the target bar**, through
    `unlockFleetPilotInTargetBar`. See "Never shooting the fleet" below for why
    it is this high.
-5. **Activate the always-on modules** named in `activate-module-always`.
+5. **Activate the always-on modules** named in `activate-module-always`, and
+   then **manage the middle row by position** — `manageMiddleRowModules`
+   (#394). See below.
 6. **Act on the fleet broadcast** — in practice only the `Target …` form,
    which is the one and only form that reaches a branch. Everything else the
    fleet broadcasts falls into a named wait. See "Live runs". It stands down
@@ -133,6 +135,88 @@ double click and twenty for the panel, both being this file's key-over-a-click
 allowance `weaponsAskedReadingsBound`) the arm hands the reading back and the
 status line says `GAVE UP`, so a mechanism that turns out not to work is
 visible and bounded rather than a bot that believes it is on station.
+
+### The middle row is switched on by position, not by tooltip (#394)
+
+**No wingman was activating any module at all**, and nothing in the bot was
+defective. The settings block the four pilots are actually launched with, read
+off Greta Gneiss's console on 2026-08-27, carries no `activate-module-always`
+line:
+
+    accept-fleet-invite-from=Gal Bistot
+    follow-fleet-broadcast-from=Gal Bistot
+    approach-fc=yes
+    run-away-shield-hitpoints-threshold-percent=-1
+    run-away-armor-hitpoints-threshold-percent=90
+    run-away-incoming-damage-threshold=600
+
+So `knownModulesToActivateAlways` was empty and `activateAlwaysOnModules`
+correctly did nothing. Note what that failure looks like from outside: a bot
+doing exactly what it was told, on a setting nobody passed, with nothing on the
+bot side able to report a key that never arrived.
+
+**And the setting was the wrong instrument anyway.** It matches tooltip text,
+so it needs `readShipUIModuleButtonTooltips` to have run first, and it cannot
+express either of the two things this ship wants — "everything except the
+propulsion module", and "this one only while moving".
+
+`eve-online-saxrat` already had the shape, and it is ported here whole:
+
+    shipUIModulesToActivateAlways = middleRowLeftToRight >> List.drop 1
+    propulsionModuleButton        = middleRowLeftToRight >> List.head
+
+**The x-sort inside `middleRowLeftToRight` is the load-bearing half and is
+ported rather than simplified.** `moduleButtonsRows.middle` arrives in UI-tree
+order, and while that traversal is a stable depth-first walk the list it
+produces is not a stable index space: the parser drops any node whose display
+region it cannot read, so a slot can leave and rejoin the list without anything
+moving on screen. saxrat recorded what taking "the first slot" by index cost
+live — with both tank modules already running it decided three times in a row
+to switch on the propulsion module, the propulsion module never came on, and a
+*tank* module went off instead. An odd number of toggles landing on a
+neighbour. `List.sortBy (.uiNode >> .totalDisplayRegion >> .x)` is what makes
+"first in the middle row" mean the slot the setup instructions point at.
+
+**The always-on half is not gated on a fight, and that was decided rather than
+inherited.** saxrat gates its own set on `anyAttackableInOverview`, because a
+rat-hunter spends most of a session crossing empty belts where a hardener buys
+nothing for its capacitor. Three things make a wingman the other case. It sits
+on the commander's grid rather than crossing to the next one, so the empty
+stretches that gate is worth having for are not what this bot's session is made
+of. It does not choose its fights — the fleet does, and the first this bot
+learns of one can be a broadcast or a volley landing. And what is shooting it
+may never appear on its own overview at all: the preset this bot depends on is
+the one that shows *fleet members*, and `shouldAttackOverviewEntry` answers
+about rats this ship would attack rather than about anything attacking it. A
+hardener switched on once damage is already landing is on for the readings
+after the ones that mattered, and those are exactly the readings the health
+retreat is measured over. So the row is held on and the capacitor is spent.
+
+**The propulsion module runs while approaching the commander and not
+otherwise.** That is narrower than saxrat's `propulsionModuleShouldBeRunning`,
+which reasons about crossing distance generally, and it is the operator's own
+rule: on the instant after the ship starts approaching, off when it is not.
+It reads `shipIsApproachingFromReading` — the client's own manoeuvre indication
+naming `Approach` — rather than whether `approachTheFleetCommander` decided to
+ask for one, so the module follows what the ship is doing rather than what the
+bot last intended. That matters because that arm treats no dispatched click as
+a manoeuvre either: a module tied to the ask would run through every reading of
+a double click that commanded nothing. It also means an orbit is not an
+approach, so a ship the client says is orbiting has the module shut down —
+where saxrat's `shipIsUnderway` would keep it running.
+
+**Client setup requirement.** The leftmost slot of the middle row **must be the
+propulsion module**, and the modules to keep running go in the rest of that
+row. Nothing reads a tooltip to check this, so whatever is in that slot is
+treated as the propulsion module: put a hardener there and it is switched on
+and off with the approaches instead of being held on. The status line prints
+the row it resolved on every reading — `Middle row: prop mod off and this ship
+is not approaching, keep-active [on, on].` — including the case where it found
+no slots at all, so the console can tell an unfound row from a row that needs
+nothing.
+
+`activate-module-always` still works and is unchanged, for anything genuinely
+tooltip-matched outside that row.
 
 ### Why the guns are their own arm, below the drones
 
@@ -885,7 +969,7 @@ Only after this bot has flown. See the top of this file.
 |---|---|
 | `accept-fleet-invite-from` | Pilot whose invitations to accept, exactly as the client writes it. Repeatable. **This is where the trust is**: accepting means the fleet can warp this ship and call its targets. |
 | `follow-fleet-broadcast-from` | Pilot whose travel broadcasts to follow. Repeatable, matched exactly. Does **not** gate target broadcasts, which carry no sender. Also the fallback behind `fleetCommanderName` when the fleet window's header names nobody — which since #367 is the only time it is consulted for that. |
-| `activate-module-always` | Tooltip text of modules to keep active. |
+| `activate-module-always` | Tooltip text of modules to keep active. **Optional and usually unnecessary since #394**: the middle row right of the propulsion module is already held on by position. Use it only for a module outside that row, and note it acts only once the bot has read that module's tooltip. |
 | `home-station` | Station to return to when the session ends. Defaults to `Amarr VIII (Oris) - Emperor Family Academy`. |
 | `assist-fleet-commander` | `no` keeps drones on this ship's own target. Defaults to `yes`. |
 | `run-away-shield-hitpoints-threshold-percent`, `run-away-armor-hitpoints-threshold-percent` | Percentages below which the bot breaks off and warps back to the commander, read through the believed gauge behind a low-water mark. **Both default to -1, which is off.** |
@@ -979,6 +1063,27 @@ restart.
   `the panel offers no 'selectedItemApproach' yet` for the twenty readings the
   fall-back gets and then gives up — which is the bounded, visible failure, not
   a silent one.
+- **What the four pilots actually have in the middle row (#394).** The rule
+  reads the row by position and cannot check what is fitted, so the whole thing
+  rests on the leftmost middle slot being the propulsion module on every ship.
+  Nobody has looked at the four fits, and a ship with a hardener in that slot
+  gets it cycled with the approaches rather than held on. What a run shows: the
+  status line's `Middle row:` clause names the row it resolved, so one console
+  reading per pilot settles it — `keep-active []` with modules visibly fitted
+  means one slot was found and the rest were not, and `no module slots read`
+  means the middle row was not resolved at all.
+- **That the propulsion module comes on at all, and comes off again (#394).**
+  `ManeuverApproach` still appears nowhere in `~/eve-bot-logs`, which is the
+  same gap `approachTheFleetCommander` has: if the client never names the
+  manoeuvre, this module never runs, and the failure is silent apart from
+  `this ship is not approaching` sitting in the status line while the ship
+  visibly moves. The shutdown direction is the one to watch on arrival — the
+  module has to come off when the approach ends, and nothing has watched a
+  reading where it does.
+- **Whether the middle row's capacitor cost is bearable ungated.** The choice
+  not to gate the always-on set on a fight is argued rather than measured, and
+  the counter-evidence would be a wingman running its capacitor dry sitting on
+  station. Nothing has watched the capacitor gauge over a session.
 - **Whether the commander's overview row is there to be clicked.** The
   approach acts on an overview row, so the active overview preset has to show
   fleet members. Nobody has confirmed which preset the four pilots are flying,
