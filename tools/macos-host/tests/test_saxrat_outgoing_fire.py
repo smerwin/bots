@@ -637,22 +637,36 @@ class NothingDecidesOnItTest(unittest.TestCase):
         itself 241 times in one run. Anything that changes manoeuvre class more
         often makes those fire more often, so this change may not widen their
         use -- and does not.
+
+        **#414 removed the chords entirely**, so this now asserts *none*
+        rather than a count. The original equality could not tell narrowing
+        from widening and failed on both, which would have blocked the change
+        that most thoroughly achieves what this case exists for. Asserting the
+        ceiling instead was the first fix and it was too slack -- with the real
+        count at zero, a bound of two silently permits reintroducing both
+        chords, which a mutation adding one proved. Zero is the measurement and
+        zero is the assertion.
         """
         code = without_comments(source())
         for verb in ("ensureShipIsOrbiting", "ensureShipIsKeepingRange"):
             # The token itself, never the `…Decision` binding that wraps it,
             # and never its own annotation or definition head.
             uses = re.findall(r"\b%s\b(?!Decision)" % verb, code)
-            self.assertEqual(
+            self.assertLessEqual(
                 len(uses), 3,
-                "%s appears %d times rather than the annotation, the "
+                "%s appears %d times, more than the annotation, the "
                 "definition and one call -- this change widened a key-wrapped "
                 "click" % (verb, len(uses)))
         # And the chords themselves are still pressed in exactly those two
         # places: `vkey_E` once and `vkey_W` once. Since #285 the loot window's
         # escape is `Alt+C` rather than `Ctrl+W`, so `vkey_W` no longer has a
         # second site here.
-        self.assertEqual(len(re.findall(r"\bvkey_E\b", code)), 2, "vkey_E moved")
+        for chord in ("vkey_E", "vkey_W"):
+            self.assertEqual(
+                len(re.findall(r"\b%s\b" % chord, code)), 0,
+                "%s is pressed here again -- #414 moved these manoeuvres onto "
+                "the Selected Item panel precisely so no posted key could "
+                "inherit the session's modifiers" % chord)
 
     def test_the_ammo_swap_still_decides_on_the_target_distance_alone(self):
         """The wanted charge gained no second source.

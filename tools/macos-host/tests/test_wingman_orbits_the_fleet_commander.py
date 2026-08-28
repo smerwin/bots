@@ -45,12 +45,17 @@ the stray-window close being itself bounded, and the prohibition on touching
 the client's default distance. What changed is the mechanism they are asserted
 against, twice now.
 
-**The orbit keeps `commandManeuverByModifierClick` and the approach no longer
-shares it.** An approach that presses no key does not fit an argument list
-whose first field is a key, so `ensureShipIsApproaching` is its own function
-and `ensureShipIsOrbiting` is the helper's only caller. The cases that asserted
-the two came from one shape are re-expressed as cases that assert the split,
-rather than deleted.
+**Neither manoeuvre posts a key any more, and `commandManeuverByModifierClick`
+is gone.** #387 took the approach off it, leaving the orbit as its only caller;
+#414 then took the orbit off it too, because a `W` held over a click on an
+overview row is a gesture aimed at a position and the row order changes between
+the reading and the click (#413). `ensureShipIsOrbiting` selects the row and
+presses the Selected Item panel's own Orbit, so the helper had no callers left.
+The cases that asserted the chord are re-expressed as cases that assert its
+absence and the select-then-press that replaced it, rather than deleted -- and
+what *executes* the panel rule is `test_selected_item_panel_manoeuvres`, since
+`ensureShipIsOrbiting` now takes a whole `BotDecisionContext` and cannot be
+handed a ship and a row the way the approach still can.
 
 **One thing is deliberately not asserted here: that the double click commands
 an approach.** saxrat double clicks a *rat's* row for exactly this and no run
@@ -80,9 +85,11 @@ Confirmed by mutation, five of them, each failing named cases:
    `test_a_row_too_small_to_click_dispatches_nothing`, which is the whole
    point: an empty list and a spoken decline dispatch alike, so only the
    saying-so half can tell them apart;
-5. the orbit's own `W` dropped -- `test_the_orbit_still_holds_w_over_a_click`,
-   which is also what makes the approach cases a measurement rather than a repl
-   answering `[]` to everything.
+5. a chord put back into either manoeuvre --
+   `test_neither_manoeuvre_posts_a_chord_any_more`. What now makes the approach
+   cases a measurement rather than a repl answering `[]` to everything is
+   `test_the_approach_dispatches_a_double_click`, which asks for an exact
+   five-effect list rather than for a non-empty one.
 
 **The fall-back it falls back to is the proven half.** Past
 `approachFleetCommanderDoubleClickAskedReadingsBound` the arm selects the
@@ -210,13 +217,14 @@ class WingmanManeuverRepl(WingmanRepl):
         "        EveOnline.BotFrameworkSeparatingMemory.FinishSession ->\n"
         "            []",
         # The manoeuvre, asked about the ship and the first overview row of a
-        # really parsed reading.
+        # really parsed reading. Only the approach is asked this way now: since
+        # #414 `ensureShipIsOrbiting` takes a whole `BotDecisionContext`, which
+        # is what `test_selected_item_panel_manoeuvres` executes it through.
         "maneuverFor = \\command parsed -> parsed"
         " |> Maybe.andThen (\\p -> Maybe.map2 command p.shipUI"
         " (p.overviewWindows |> List.concatMap .entries |> List.head))"
         " |> Maybe.andThen identity",
         "approachFor = maneuverFor ensureShipIsApproaching",
-        "orbitFor = maneuverFor ensureShipIsOrbiting",
         "effectsOfResult = \\result -> result"
         " |> Result.map (unpack >> Tuple.second >> effectsOfLeaf)"
         " |> Result.withDefault []",
@@ -717,27 +725,20 @@ class TheApproachIsADoubleClickTest(unittest.TestCase):
                 definitions=self.definitions),
             [True, True])
 
-    def test_the_orbit_still_holds_w_over_a_click(self):
-        """The control, twice over.
+    def test_the_orbit_now_goes_through_the_panel_instead(self):
+        """#414, and the reason the chord case above it is gone.
 
-        `orbit-in-combat` still commands its orbit the client's own way -- hold
-        `W`, click, release -- and #387 is scoped to the approach. It is also
-        what makes the cases above a measurement: a repl answering `[]` to
-        everything, or a fixture whose ship UI never arrived, would satisfy
-        every one of them.
+        `orbit-in-combat` held `W` over a click on the overview row until
+        #414 -- a gesture aimed at a position, on a list the client reorders
+        between one reading and the next. It selects the row and presses the
+        panel's own Orbit now, which is a source read here because
+        `ensureShipIsOrbiting` takes a whole `BotDecisionContext`; the rule
+        itself is executed in `test_selected_item_panel_manoeuvres`.
         """
-        x, y = row_center(0)
-        self.assertEqual(
-            self.repl.evaluate(
-                ["effectsFor ensureShipIsOrbiting idle =="
-                 " ([ EffectOnWindow.KeyDown EffectOnWindow.vkey_W ]"
-                 " ++ EffectOnWindow.effectsMouseClickAtLocation"
-                 " EffectOnWindow.MouseButtonLeft { x = %d, y = %d }"
-                 " ++ [ EffectOnWindow.KeyUp EffectOnWindow.vkey_W ])"
-                 % (x, y),
-                 "keysIn (effectsFor ensureShipIsOrbiting idle) /= []"],
-                definitions=self.definitions),
-            [True, True])
+        orbit = block_of(WINGMAN_BOT_ELM, "\nensureShipIsOrbiting =")
+        self.assertIn("commandManoeuvreFromSelectedItemPanel", orbit)
+        self.assertIn("selectedItemOrbitButton", orbit)
+        self.assertIsNone(re.search(r"vkey_\w+", orbit))
 
 
 class TheMechanismTest(unittest.TestCase):
@@ -778,36 +779,45 @@ class TheMechanismTest(unittest.TestCase):
         self.assertIn("ensureShipIsApproaching shipUI", body)
         self.assertIsNone(re.search(r"vkey_\w+", body))
 
-    def test_nothing_in_this_bot_posts_an_approach_chord(self):
+    def test_neither_manoeuvre_posts_a_chord_any_more(self):
         """The needle is the qualified name, so it matches an effect and not
-        the paragraph in `ensureShipIsApproaching`'s own doc comment that
-        explains why the chord is gone. `W` is still posted for the orbit, and
-        `Q` is now posted nowhere."""
-        self.assertEqual(
-            re.findall(r"EffectOnWindow\.vkey_Q\b", self.source), [])
-        self.assertNotEqual(
-            re.findall(r"EffectOnWindow\.vkey_W\b", self.source), [])
+        the paragraphs in either doc comment that explain why the chords are
+        gone.
 
-    def test_the_approach_double_clicks_and_the_orbit_holds_its_key(self):
+        `Q` went in #387 and `W` in #414, and with it
+        `commandManeuverByModifierClick`, whose only caller the orbit had
+        become. A posted key carries whatever modifier state the session
+        happens to hold, which is what both changes removed this bot's last
+        dependence on.
+        """
+        for chord in ("vkey_Q", "vkey_W", "vkey_E"):
+            with self.subTest(chord=chord):
+                self.assertEqual(
+                    re.findall(r"EffectOnWindow\.%s\b" % chord, self.source),
+                    [])
+        self.assertNotIn("commandManeuverByModifierClick", self.source)
+
+    def test_the_approach_double_clicks_and_the_orbit_presses_the_panel(self):
         """The two manoeuvres came from one helper until #387 and no longer do.
 
-        An approach that presses no key does not fit an argument list whose
-        first field is a key, so `ensureShipIsApproaching` is its own function
-        rather than a call with the key argument bent into something harmless.
-        `commandManeuverByModifierClick` survives with the orbit as its only
-        caller, which `test_the_orbit_still_holds_w_over_a_click` executes.
+        An approach that presses no key did not fit an argument list whose
+        first field is a key, so `ensureShipIsApproaching` became its own
+        function; #414 then moved the orbit onto the Selected Item panel, which
+        left `commandManeuverByModifierClick` with no callers at all. Both
+        halves are asserted, because a bot that dropped one of them would still
+        satisfy a case that only looked at the other.
         """
         orbit = self.body_of("ensureShipIsOrbiting =")
-        self.assertIn("commandManeuverByModifierClick", orbit)
-        self.assertIn("EffectOnWindow.vkey_W", orbit)
+        self.assertIn("commandManoeuvreFromSelectedItemPanel", orbit)
+        self.assertIn("selectedItemOrbitButton", orbit)
         self.assertIn("EveOnline.ParseUserInterface.ManeuverOrbit", orbit)
+        self.assertIsNone(re.search(r"vkey_\w+", orbit))
 
         approach = self.body_of(
             "ensureShipIsApproaching shipUI overviewEntry =")
         self.assertIn("mouseDoubleClickOnUIElement MouseButtonLeft", approach)
         self.assertIn(
             "EveOnline.ParseUserInterface.ManeuverApproach", approach)
-        self.assertNotIn("commandManeuverByModifierClick", approach)
         self.assertIsNone(re.search(r"vkey_\w+", approach))
 
     def test_the_double_click_is_the_frameworks_and_not_a_local_copy(self):
@@ -827,19 +837,23 @@ class TheMechanismTest(unittest.TestCase):
                     block_of(os.path.join(WINGMAN_DIR, relative_path), needle),
                     block_of(os.path.join(SAXRAT_DIR, relative_path), needle))
 
-    def test_the_key_is_held_down_around_the_click_and_released(self):
-        """The orbit's own shape, which #387 does not touch: down, click, up.
-        A click with no key is a plain selection and commands nothing."""
+    def test_the_row_is_selected_before_the_panel_button_is_pressed(self):
+        """The orbit's own shape since #414, and the order is load-bearing.
+
+        The panel acts on whatever is *selected*, so pressing first would orbit
+        whatever the panel happened to be showing. This replaces the case that
+        pinned the chord's down/click/up ordering, which pinned the same
+        property of the mechanism this one replaced.
+        """
         body = self.body_of(
-            "commandManeuverByModifierClick command shipUI overviewEntry =")
-        # From the effect list itself, not from the `Ok effectToClick ->`
-        # pattern that binds it -- the binding is above the list and would
-        # make any ordering look right.
-        effects = body[body.index("decideActionForCurrentStep"):]
-        self.assertLess(effects.index("EffectOnWindow.KeyDown command.key"),
-                        effects.index("effectToClick"))
-        self.assertLess(effects.index("effectToClick"),
-                        effects.index("EffectOnWindow.KeyUp command.key"))
+            "commandManoeuvreFromSelectedItemPanel command context shipUI"
+            " overviewEntry =")
+        select = body.index("SelectTheRowFirst ->")
+        press = body.index("PressThePanelButton ->")
+        self.assertLess(select, press)
+        self.assertIn("overviewEntry.uiNode", body[select:press])
+        self.assertNotIn("overviewEntry.uiNode",
+                         body[press:body.index("WaitForThePanelButton ->")])
 
     def test_only_the_clients_own_word_counts_as_success(self):
         """A dispatched click is not a manoeuvre. This is the whole reason a
@@ -854,7 +868,8 @@ class TheMechanismTest(unittest.TestCase):
         self.assertIn(
             "== Just EveOnline.ParseUserInterface.ManeuverApproach", approach)
         orbit = self.body_of(
-            "commandManeuverByModifierClick command shipUI overviewEntry =")
+            "commandManoeuvreFromSelectedItemPanel command context shipUI"
+            " overviewEntry =")
         self.assertIn(".maneuverType) == Just command.maneuver", orbit)
         reader = self.body_of(
             "shipIsApproachingFromReading readingFromGameClient =")
@@ -889,7 +904,14 @@ class TheMechanismTest(unittest.TestCase):
         self.assertEqual(
             names,
             {"selectedItemActivateGate", "selectedItemJump",
-             "selectedItemWarpTo", "selectedItemApproach"})
+             "selectedItemWarpTo", "selectedItemApproach",
+             # #414's own live pass, five readings alongside a running saxrat.
+             "selectedItemOrbit", "selectedItemUnLockTarget"})
+        # The one of the six a guess gets wrong: `selectedItemUnLockTarget`
+        # carries a capital `L` its Lock sibling does not, and the lower-case
+        # spelling matches nothing while reading exactly like an object that is
+        # not locked.
+        self.assertNotIn("selectedItemUnlockTarget", names)
 
 
 class TheRangeKeyIsAcceptedAndIgnoredTest(unittest.TestCase):
@@ -1183,10 +1205,37 @@ class TheClientDefaultIsNeverTouchedTest(unittest.TestCase):
     def test_nothing_drives_the_set_default_modal(self):
         for forbidden in ('Set Default "Orbit"', "Set default \"Orbit\" distance",
                           'Set Default "Approach"',
-                          "edit_qty", "selectedItemOrbit",
+                          "edit_qty",
                           "ok_dialog_button"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, self.source)
+
+    def test_the_panels_orbit_button_is_pressed_and_never_right_clicked(self):
+        """#414 introduced `selectedItemOrbit`, which this case used to forbid.
+
+        The name alone was the wrong thing to forbid and forbidding it is no
+        longer possible: the orbit is commanded by *left*-clicking that button,
+        which uses whatever default the client already holds. What opens the
+        modal is a **right** click on it, so that is what is refused -- and the
+        two are different effects rather than different spellings.
+
+        The left-ness is asserted where it is written rather than in this body,
+        because the body names a helper: `clickUiElementOrSayItCannotBeClicked`
+        is the one #414 added, and it is left by construction. Asserting the
+        helper's name alone would pass for a helper that had been changed to
+        right-click, so both halves are read.
+        """
+        press = block_of(WINGMAN_BOT_ELM,
+                         "\ncommandManoeuvreFromSelectedItemPanel command")
+        self.assertIn("clickUiElementOrSayItCannotBeClicked", press)
+        helper = block_of(WINGMAN_BOT_ELM,
+                          "\nclickUiElementOrSayItCannotBeClicked uiElement =")
+        self.assertIn("MouseButtonLeft", helper)
+        self.assertNotIn("MouseButtonRight", helper)
+        for cascade in ("useContextMenuCascade", "MouseButtonRight",
+                        "useMenuEntryWithTextContaining"):
+            with self.subTest(forbidden=cascade):
+                self.assertNotIn(cascade, press)
 
     def test_the_stray_window_reader_names_no_unread_literal(self):
         """The reader is structural, and it is what *recorded* the two window

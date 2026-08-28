@@ -216,6 +216,24 @@ class ApproachRepl(SaxratRepl):
     """
 
     BINDINGS = (
+        # Since #414 the arm takes a whole `BotDecisionContext`. Every field of
+        # it is either the shipped default (`defaultBotSettings`,
+        # `initBotMemory`) or the emptiest value its type has, so nothing in
+        # the fixture can decide an answer except the reading -- the
+        # arrangement `test_saxrat_approach_by_double_click` already uses.
+        "context = \\parsed ->"
+        " { eventContext ="
+        " { timeInMilliseconds = 0"
+        " , botSettings = defaultBotSettings"
+        " , sessionTimeLimitInMilliseconds = Nothing }"
+        " , readingFromGameClient = parsed"
+        " , screenshot = { pixels_1x1 = always Nothing, pixels_2x2 = always Nothing }"
+        " , memory = initBotMemory"
+        " , previousStepsEffects = []"
+        " , previousReadingsFromGameClient = []"
+        " , readingsWithoutShipUIOrStationWindow = 0"
+        " , contextMenuCascadeLevel = 0"
+        " , randomIntegers = [] }",
         "shipUIOf = \\parsed -> parsed |> Maybe.andThen .shipUI",
         "rowOf = \\parsed -> parsed"
         " |> Maybe.map (.overviewWindows >> List.concatMap .entries)"
@@ -224,8 +242,9 @@ class ApproachRepl(SaxratRepl):
         # half of the reading is reported as `NO READING` rather than as the
         # rule declining, so a fixture that never arrived cannot pass for a rule
         # that answered nothing -- #174's lesson, applied to a two-part input.
-        "armFor = \\parsed ->"
-        " Maybe.map2 ensureShipIsApproaching (shipUIOf parsed) (rowOf parsed)",
+        "armFor = \\parsed -> parsed |> Maybe.andThen (\\p ->"
+        " Maybe.map2 (ensureShipIsApproaching (context p))"
+        " (shipUIOf parsed) (rowOf parsed))",
         "unpack = Common.DecisionPath.unpackToDecisionStagesDescriptionsAndLeaf",
         "describeFor = \\parsed ->\n"
         "    case armFor parsed of\n"
@@ -499,10 +518,17 @@ class TheApproachIsCommandedUntilTheClientAnswersTest(unittest.TestCase):
             [True] * 6)
 
     def test_a_ship_not_manoeuvring_is_told_to_approach(self):
+        """The first of the two steps #414 made this, and it names the row.
+
+        These fixtures carry no Selected Item panel, so the panel is showing
+        something other than the row and the arm selects it -- which is the
+        state every reading is in before the first press.
+        """
         answer = self.repl.strings(["describeFor idle"],
                                    definitions=self.definitions)[0]
-        self.assertIn("Approach the target", answer)
+        self.assertIn("Approach", answer)
         self.assertIn(RAT, answer)
+        self.assertIn("panel", answer)
 
     def test_the_client_s_own_manoeuvre_is_what_stops_the_commanding(self):
         """`ManeuverApproach` and nothing else.
@@ -520,7 +546,7 @@ class TheApproachIsCommandedUntilTheClientAnswersTest(unittest.TestCase):
         for answer in self.repl.strings(
                 ["describeFor orbiting", "describeFor keepingRange"],
                 definitions=self.definitions):
-            self.assertIn("Approach the target", answer)
+            self.assertIn("Approach", answer)
 
     def test_a_dispatched_click_is_not_the_confirmation(self):
         """The click goes out and the client does not answer: keep commanding.
@@ -551,19 +577,24 @@ class TheApproachIsCommandedUntilTheClientAnswersTest(unittest.TestCase):
                                definitions=self.definitions),
             [True])
 
-    def test_the_approach_dispatches_a_double_click(self):
-        """Two press/release pairs with nothing between them, and the move.
+    def test_the_selection_is_a_single_click_on_the_row(self):
+        """#414 replaced the double click, and this is what it dispatches now.
 
-        That exact shape is what `botlab_host.py` collapses into `cg_input`'s
-        dedicated `doubleclick` command, which exists because macOS only reads
-        the second press as a double click when it carries
-        `kCGMouseEventClickState = 2`. A single click here would be dispatched
-        happily and would open no cargo and approach nothing.
+        The double click *was* the command: EVE answers one on a hostile ship
+        with an approach, so it acted on whatever the row's position held. The
+        click here only **selects**, and the command is the panel button on the
+        reading after -- so the exposure that remains is one the panel's own
+        naming of the selected object then catches.
+
+        The exact effect list is asked for rather than a non-empty one, which
+        is what makes the cases in this class a measurement rather than a repl
+        answering `[]` to everything.
         """
         x, y = row_center(0)
         self.assertEqual(
             self.repl.evaluate(
-                ["effectsFor idle == doubleClickAt %d %d" % (x, y)],
+                ["effectsFor idle == EffectOnWindow.effectsMouseClickAtLocation"
+                 " EffectOnWindow.MouseButtonLeft { x = %d, y = %d }" % (x, y)],
                 definitions=self.definitions),
             [True])
 
@@ -582,11 +613,16 @@ class TheApproachIsCommandedUntilTheClientAnswersTest(unittest.TestCase):
 class ARowTooSmallToClickSaysSoTest(unittest.TestCase):
     """The regression the shared helper already refuses, re-asked here.
 
-    `doubleClickUiElement` ends in a spoken decline rather than
+    `doubleClickUiElement` ended in a spoken decline rather than
     `Result.withDefault []`, because a branch that prints "Approach." over an
-    empty effect list is this repo's signature failure. The manoeuvre arm reaches
-    that helper, so a later change that gave it its own gesture would lose the
-    decline without any case noticing -- unless one asks here.
+    empty effect list is this repo's signature failure.
+
+    **#414 changed which helper that is and nearly lost the property.** The arm
+    selects the row with a single click now, and both of this bot's single-click
+    helpers answer `Result.withDefault []` -- so the select-then-press would
+    have printed its line over nothing for a row too small to click.
+    `clickUiElementOrSayItCannotBeClicked` is the answer, in
+    `doubleClickUiElement`'s own words, and this class is what noticed.
     """
 
     @classmethod
@@ -617,7 +653,7 @@ class ARowTooSmallToClickSaysSoTest(unittest.TestCase):
     def test_a_row_too_small_to_click_says_so(self):
         answer = self.repl.strings(["describeFor tiny"],
                                    definitions=self.definitions)[0]
-        self.assertIn("Approach the target", answer)
+        self.assertIn("Approach", answer)
         self.assertIn("too small to click", answer)
 
     def test_a_row_too_small_to_click_dispatches_nothing(self):
@@ -734,16 +770,20 @@ class TheWiringIsWhatTheRuleSaysTest(unittest.TestCase):
                 "%s -> %s |> Maybe.withDefault decisionToFight" % (arm, decision),
                 self.flat, "%s does not take %s" % (arm, decision))
 
-    def test_the_approach_arm_reaches_the_shared_double_click_helper(self):
-        """One helper rather than a second copy of the gesture.
+    def test_the_approach_arm_reaches_the_shared_panel_shape(self):
+        """One shape rather than three copies of the ordering.
 
-        The gesture and its decline live in `doubleClickUiElement`, which the
-        lock-range approach and the wreck path already use, so there is one place
-        where a double click this bot cannot build is answered.
+        Since #414 all three manoeuvre arms are the same select-then-press with
+        a different button, a different manoeuvre to read back and different
+        words -- and three copies of that ordering would be three places a
+        press could end up ahead of its selection. What executes the shape is
+        `test_selected_item_panel_manoeuvres`.
         """
-        self.assertIn(
-            "doubleClickUiElement overviewEntryToApproach.uiNode",
-            collapsed(declaration(self.source, "ensureShipIsApproaching")))
+        arm = collapsed(declaration(self.source, "ensureShipIsApproaching"))
+        self.assertIn("commandManoeuvreFromSelectedItemPanel", arm)
+        self.assertIn("selectedItemApproachButton", arm)
+        self.assertIn("ManeuverApproach", arm)
+        self.assertNotIn("doubleClickUiElement", arm)
 
     def test_the_approach_arm_presses_no_key(self):
         """Read as well as executed, so a chord added under a settings branch
@@ -772,25 +812,30 @@ class TheWiringIsWhatTheRuleSaysTest(unittest.TestCase):
         self.assertEqual(
             re.findall(r"EffectOnWindow\.vkey_Q\b", self.source), [])
 
-    def test_the_two_siblings_still_hold_their_keys_over_a_click(self):
-        """Recorded rather than fixed, so a later change has to notice them.
+    def test_the_two_siblings_no_longer_hold_their_keys_over_a_click(self):
+        """This case said the opposite until #414, and the claim it recorded
+        has now come true.
 
-        `vkey_E` for keep-at-range and `vkey_W` for orbit are the last two
-        key-wrapped clicks on this hot path. Issue #386 is scoped to the approach
-        and does not touch them, and the reason to write that down is that
-        "saxrat presses no movement key any more" is the claim somebody will make
-        next, and it is false.
+        `vkey_E` for keep-at-range and `vkey_W` for orbit were the last two
+        key-wrapped clicks on this hot path, and #386 was scoped to the
+        approach. The sentence written here then -- that "saxrat presses no
+        movement key any more" is the claim somebody will make next, and it is
+        false -- is what a later reader would have gone on believing, so the
+        case is inverted rather than deleted. All three arms take the panel
+        now, and no movement key is posted anywhere in this bot.
         """
-        self.assertIn(
-            "[ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_E ]"
-            " , overviewEntryToKAR.uiNode |> mouseClickOnUIElement"
-            " MouseButtonLeft |> Result.withDefault []"
-            " , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_E ]", self.flat)
-        self.assertIn(
-            "[ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_W ]"
-            " , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement"
-            " MouseButtonLeft |> Result.withDefault []"
-            " , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_W ]", self.flat)
+        for chord in ("vkey_E", "vkey_W", "vkey_Q"):
+            with self.subTest(chord=chord):
+                self.assertEqual(
+                    re.findall(r"EffectOnWindow\.%s\b" % chord, self.source),
+                    [])
+        for arm, button in (("ensureShipIsKeepingRange",
+                             "selectedItemKeepAtRangeButton"),
+                            ("ensureShipIsOrbiting", "selectedItemOrbitButton")):
+            with self.subTest(arm=arm):
+                body = collapsed(declaration(self.source, arm))
+                self.assertIn("commandManoeuvreFromSelectedItemPanel", body)
+                self.assertIn(button, body)
 
     def test_the_arm_is_reached_from_the_active_target(self):
         """The row approached is the one the guns are on, like its siblings."""
@@ -799,7 +844,7 @@ class TheWiringIsWhatTheRuleSaysTest(unittest.TestCase):
         flat = collapsed(body)
         self.assertIn("List.filter overviewEntryIsActiveTarget", flat)
         self.assertIn(
-            "ensureShipIsApproaching seeUndockingComplete.shipUI"
+            "ensureShipIsApproaching context seeUndockingComplete.shipUI"
             " overviewEntryToAttack", flat)
 
     def test_the_doc_comment_states_the_cost_and_declines_a_range(self):

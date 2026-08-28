@@ -733,6 +733,12 @@ type alias BotMemory =
     -- approaching or the commander leaves the overview.
     , approachFleetCommanderAskedReadings : Int
 
+    -- Readings in a row the Selected Item panel has not come to show the object
+    -- `ensureShipIsOrbiting` wants to orbit, which is what bounds that arm's
+    -- selection click. See `panelSelectReadingsAfterReading` and
+    -- `panelManoeuvreStep`.
+    , panelSelectUnansweredReadings : Int
+
     -- Whether this ship has landed on a grid and has not since been seen
     -- closing on the fleet commander. #397. Opened on the reading a warp ends
     -- (`warpJustEnded`) and closed by the client naming the manoeuvre
@@ -2423,17 +2429,12 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context shipUI continueIfCo
             else
                 context.readingFromGameClient.targets |> List.filter .isActiveTarget
 
-        overviewsAllEntries =
-            context.readingFromGameClient.overviewWindows
-                |> List.concatMap .entries
-
         maybeObjectToOrbit =
-            case findObjectToOrbitByName context.eventContext.botSettings.orbitObjectNames overviewsAllEntries of
-                Just fromName ->
-                    Just fromName
-
-                Nothing ->
-                    List.Extra.last overviewEntriesToAttack
+            objectToOrbitFromReading
+                { orbitObjectNames = context.eventContext.botSettings.orbitObjectNames
+                , prioritizeRats = context.eventContext.botSettings.prioritizeRats
+                }
+                context.readingFromGameClient
 
         ensureShipIsOrbitingDecision =
             case maybeObjectToOrbit of
@@ -2441,7 +2442,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context shipUI continueIfCo
                     Nothing
 
                 Just objectToOrbit ->
-                    ensureShipIsOrbiting shipUI objectToOrbit
+                    ensureShipIsOrbiting context shipUI objectToOrbit
 
         waitTimeRemainingSeconds =
             context.eventContext.botSettings.anomalyWaitTimeSeconds - arrivalInAnomalyAgeSeconds
@@ -2510,10 +2511,7 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context shipUI continueIfCo
 
     else if context.eventContext.botSettings.orbitInCombat == PromptParser.Yes then
         ensureShipIsOrbitingDecision
-            |> Maybe.withDefault (Ok decisionToKillRats)
-            |> Result.Extra.unpack
-                (describeBranch >> (|>) decisionToKillRats)
-                identity
+            |> Maybe.withDefault decisionToKillRats
 
     else
         decisionToKillRats
@@ -2750,10 +2748,28 @@ fightUsingDronesAndModules config context shipUI =
 
 ratsToAttackByPriorityFromContext : BotDecisionContext -> RatsByAttackPriority
 ratsToAttackByPriorityFromContext context =
+    ratsToAttackByPriorityFrom
+        { prioritizeRats = context.eventContext.botSettings.prioritizeRats }
+        context.readingFromGameClient
+
+
+{-| The same answer over the reading and the one setting it consults.
+
+Split out for `objectToOrbitFromReading`, which `updateMemoryForNewReadingFromGame`
+has to ask and which never sees a decision -- the divergence
+`selectedItemIsOverviewEntry`'s own comment records, and the reason a counter and
+the branch that reads it cannot come to disagree about what was counted (#102).
+
+-}
+ratsToAttackByPriorityFrom : { prioritizeRats : List String } -> ReadingFromGameClient -> RatsByAttackPriority
+ratsToAttackByPriorityFrom config readingFromGameClient =
     let
+        context =
+            { readingFromGameClient = readingFromGameClient }
+
         prioritizedRatsPatterns : List String
         prioritizedRatsPatterns =
-            List.map String.toLower context.eventContext.botSettings.prioritizeRats
+            List.map String.toLower config.prioritizeRats
 
         isPriorityRat : { a | labelText : String } -> Bool
         isPriorityRat objectInSpace =
@@ -2805,63 +2821,314 @@ ratsToAttackByPriorityFromContext context =
     }
 
 
-{-| Command a manoeuvre the way the client's own modifier keys command it: hold
-the key down, click the object's overview row, release.
+{-| The object `ensureShipIsOrbiting` would be asked to orbit on this reading.
 
-**The orbit is the only caller left, and that is the honest state of it.** It
-was written as a shared shape because `approachTheFleetCommander` was to reach
-it with `Q` and `Approach`; #387 took the approach off it, because a posted key
-is what `eve-online-saxrat` removed for cause -- see `ensureShipIsApproaching`.
-An approach that presses no key does not fit an argument list whose first field
-is a key, so the two stopped being one shape rather than one of them being bent
-to look like it still was.
-
-**The manoeuvre check is the client's own word and the only thing that stops
-the ask.** A dispatched click is not a manoeuvre: the ship UI's indication
-naming `command.maneuver` is, which is what `approachFleetCommanderStep`
-rests on.
+One definition, asked by the arm and by the counter that bounds it, because two
+copies of "what is being orbited" would be two answers about whether a reading
+was spent asking for it -- and a counter that resets on a reading the arm was
+asking on is a bound the arm can never reach.
 
 -}
-commandManeuverByModifierClick :
-    { key : EffectOnWindow.VirtualKeyCode
+objectToOrbitFromReading :
+    { orbitObjectNames : List String, prioritizeRats : List String }
+    -> ReadingFromGameClient
+    -> Maybe OverviewWindowEntry
+objectToOrbitFromReading config readingFromGameClient =
+    let
+        overviewsAllEntries =
+            readingFromGameClient.overviewWindows
+                |> List.concatMap .entries
+    in
+    case findObjectToOrbitByName config.orbitObjectNames overviewsAllEntries of
+        Just fromName ->
+            Just fromName
+
+        Nothing ->
+            ratsToAttackByPriorityFrom { prioritizeRats = config.prioritizeRats } readingFromGameClient
+                |> .overviewEntriesByPrio
+                |> List.concatMap (\( first, rest ) -> first :: rest)
+                |> List.Extra.last
+
+
+{-| Whether this reading is one spent asking the panel to show the object to
+orbit.
+
+Reading-and-settings only, so this and the arm read the same thing.
+
+-}
+askingThePanelToShowTheObjectToOrbit :
+    { orbitObjectNames : List String, prioritizeRats : List String }
+    -> ReadingFromGameClient
+    -> Bool
+askingThePanelToShowTheObjectToOrbit config readingFromGameClient =
+    case objectToOrbitFromReading config readingFromGameClient of
+        Nothing ->
+            False
+
+        Just entry ->
+            not (selectedItemIsOverviewEntry readingFromGameClient entry)
+
+
+{-| What to do about a manoeuvre the ship is not making yet, given a row to make
+it on. A pure function over a record so a case can execute it rather than
+describe it.
+-}
+type PanelManoeuvreStep
+    = ManoeuvreIsAlreadyRunning
+    | SelectTheRowFirst
+    | PressThePanelButton
+    | WaitForThePanelButton
+    | GaveUpOnSelectingTheRow
+
+
+{-| Command a manoeuvre through the Selected Item panel rather than by clicking
+the row that names it.
+
+**Why this is not the chord it replaces.** The orbit held `W` down over a click
+on the overview row, and that click is a screen position computed from a
+reading. The overview is sorted by distance and rats move, so the row order
+changes between the reading and the click, and with two identically named rats
+the chord lands on the neighbour and _commands the orbit on it_. That is #413.
+
+**The panel acts on the selected object rather than on a position**, so the
+command half of the exposure is gone outright: the button sits in the panel and
+is found by name in the same reading it is pressed in. What remains is the
+selection click, which lands on whatever the row's position now holds -- and the
+difference is that the panel then **names what was selected**, so
+`selectedItemIsOverviewEntry` catches a click that went astray _before_ the
+manoeuvre is commanded. The chord had no such check: it commanded immediately.
+
+**It does not eliminate the exposure for two identically named rats**, and that
+is stated rather than implied: the panel names the object, and two rats of one
+type share a name, so a selection that lands on the neighbour reads as correct.
+It is the shape `warpAwayFromDanger` and the gate arm already accept.
+
+**It also takes the last modifier chord off this bot's hot path.** #387 removed
+the approach's `Q` because `cg_input` posts a key event without stamping flags
+on it, so a posted key carries whatever modifier state the session happens to
+hold -- with the Fn bit set that is macOS Quick Note, and one recorded saxrat
+run took that branch 1,571 times while Notes came to the front 241 times with
+nobody at the machine. PR #241 fixed the stamping; this removes the last place
+this bot depended on it.
+
+**The distance is unchanged.** The panel's Orbit uses the client's own default
+distance -- and so did the `W` chord it replaces. WINGMAN.md and PILOT.md are
+explicit that no bot setting carries an engagement distance (`orbit-fc-range` is
+accepted and ignored, and says so), so this changes the gesture and not the
+range.
+
+**Absence is normal, not a failure.** The panel's button set is contextual, and
+a ship in warp offers less again. So a reading whose panel shows the row and
+offers no button hands the reading **back to the fight** rather than waiting on
+it. Nothing is retried, nothing is counted against it, and the next reading asks
+again.
+
+**The selection is what needs the bound.** A panel that never comes to show the
+row would otherwise be clicked at every reading forever while the guns never
+fire. `selectionUnansweredReadings` is that counter, and past
+`panelSelectGiveUpReadings` this answers `GaveUpOnSelectingTheRow`, which also
+hands the reading to the fight -- which is exactly what a bot with
+`orbit-in-combat` unset already does, so the give-up degrades to a shipped
+configuration rather than to a stall.
+
+**Success is the client's own word and never the press.** The greyed-out state
+is not readable -- every button in every reading #414 recorded carried
+`isDisabled = None` and full opacity -- so a dimmed button and a live one are
+indistinguishable, and only the ship UI's indication naming `command.maneuver`
+stops the ask, exactly as `approachFleetCommanderStep` rests on it.
+
+-}
+panelManoeuvreStep :
+    { manoeuvreIsRunning : Bool
+    , panelShowsTheRow : Bool
+    , panelOffersTheButton : Bool
+    , selectionUnansweredReadings : Int
+    }
+    -> PanelManoeuvreStep
+panelManoeuvreStep manoeuvreCase =
+    if manoeuvreCase.manoeuvreIsRunning then
+        ManoeuvreIsAlreadyRunning
+
+    else if manoeuvreCase.panelShowsTheRow then
+        if manoeuvreCase.panelOffersTheButton then
+            PressThePanelButton
+
+        else
+            WaitForThePanelButton
+
+    else if manoeuvreCase.selectionUnansweredReadings >= panelSelectGiveUpReadings then
+        GaveUpOnSelectingTheRow
+
+    else
+        SelectTheRowFirst
+
+
+{-| Readings in a row with an object to manoeuvre on that the Selected Item
+panel is not showing, before the manoeuvre arm stops asking for it.
+
+The selection lands on the next reading when it works at all, so this is an order
+of magnitude more than the one reading it should take -- and small enough that a
+panel that never answers costs the fight a handful of readings rather than a
+session. **It is not calibrated against a corpus**, because no recorded run has
+ever driven a manoeuvre through the panel; what the direction rests on is that
+expiry hands the reading to the fight, so being early costs a manoeuvre and being
+late costs readings the guns would have had.
+
+It clears itself: the counter resets on any reading where the panel _is_ showing
+the object to orbit, or where there is none, and rats die constantly.
+
+-}
+panelSelectGiveUpReadings : Int
+panelSelectGiveUpReadings =
+    10
+
+
+{-| Readings in a row the panel has not come to show the object to orbit.
+
+Advances on a reading that was asking, resets on anything else -- including a
+reading with nothing to orbit, which is not the ship failing to select one.
+
+-}
+panelSelectReadingsAfterReading : { asking : Bool, before : Int } -> Int
+panelSelectReadingsAfterReading readingCase =
+    if readingCase.asking then
+        readingCase.before + 1
+
+    else
+        0
+
+
+{-| A left click that declines out loud rather than dispatching nothing.
+
+`clickUiElement` and `clickUiElementForNavigation` answers `Result.withDefault []` for an element whose visible
+part is too small to click, which prints a decision line over an empty effect
+list -- this repo's signature failure, and the one `doubleClickUiElement`
+already refuses in exactly these words. The select-then-press of #414 makes two
+clicks per manoeuvre where the gesture it replaced made one, so both go through
+here.
+
+-}
+clickUiElementOrSayItCannotBeClicked : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> DecisionPathNode
+clickUiElementOrSayItCannotBeClicked uiElement =
+    case mouseClickOnUIElement MouseButtonLeft uiElement of
+        Ok clickEffects ->
+            decideActionForCurrentStep clickEffects
+
+        Err () ->
+            describeBranch
+                "The visible part of this element is too small to click, so there is nothing to dispatch."
+                waitForProgressInGame
+
+
+{-| The shared select-then-press body the manoeuvre arm takes.
+
+Written as a shape rather than inline because #414 puts the identical ordering
+into `eve-online-saxrat`'s three arms, and an ordering copied per arm is an
+ordering that can end up with a press ahead of its selection in one of them.
+
+**The cost is a reading, not a click, and that is the form that matters here.**
+The selection is dispatched on one reading and the panel only shows it on the
+_next_, so the orbit now starts one reading later than the `W` chord did --
+one reading of transversal not being held.
+
+What the reading buys is the check that cannot be made without it. The chord
+commanded immediately, on a screen position computed from a reading the
+overview had already re-sorted under -- so a selection that went astray was
+discovered by the ship orbiting the wrong object, which for a wingman is the
+fleet commander's neighbour. Spending the reading puts
+`selectedItemIsOverviewEntry` between the two, so a selection that landed on
+someone else is caught _before_ anything is commanded rather than after.
+
+-}
+commandManoeuvreFromSelectedItemPanel :
+    { button : SelectedItemPanelButton
     , maneuver : EveOnline.ParseUserInterface.ShipManeuverType
     , describe : String
     }
+    -> BotDecisionContext
     -> ShipUI
     -> OverviewWindowEntry
-    -> Maybe (Result String DecisionPathNode)
-commandManeuverByModifierClick command shipUI overviewEntry =
-    if (shipUI.indication |> Maybe.andThen .maneuverType) == Just command.maneuver then
-        Nothing
+    -> Maybe DecisionPathNode
+commandManoeuvreFromSelectedItemPanel command context shipUI overviewEntry =
+    let
+        name =
+            overviewEntry.objectName |> Maybe.withDefault "it"
 
-    else
-        Just
-            (case mouseClickOnUIElement MouseButtonLeft overviewEntry.uiNode of
-                Err _ ->
-                    Err "Failed to click"
+        button =
+            selectedItemPanelButton context.readingFromGameClient command.button
+    in
+    case
+        panelManoeuvreStep
+            { manoeuvreIsRunning = (shipUI.indication |> Maybe.andThen .maneuverType) == Just command.maneuver
+            , panelShowsTheRow = selectedItemIsOverviewEntry context.readingFromGameClient overviewEntry
+            , panelOffersTheButton = button /= Nothing
+            , selectionUnansweredReadings = context.memory.panelSelectUnansweredReadings
+            }
+    of
+        ManoeuvreIsAlreadyRunning ->
+            Nothing
 
-                Ok effectToClick ->
-                    Ok
-                        (describeBranch command.describe
-                            (decideActionForCurrentStep
-                                ([ [ EffectOnWindow.KeyDown command.key ]
-                                 , effectToClick
-                                 , [ EffectOnWindow.KeyUp command.key ]
-                                 ]
-                                    |> List.concat
-                                )
-                            )
-                        )
-            )
+        SelectTheRowFirst ->
+            Just
+                (describeBranch
+                    ("Select '" ++ name ++ "', so the panel's own " ++ command.describe ++ " acts on it.")
+                    (clickUiElementOrSayItCannotBeClicked overviewEntry.uiNode)
+                )
+
+        PressThePanelButton ->
+            button
+                |> Maybe.map
+                    (\buttonNode ->
+                        describeBranch
+                            (command.describe ++ " '" ++ name ++ "' with the selected-item panel's own button.")
+                            (clickUiElementOrSayItCannotBeClicked buttonNode)
+                    )
+
+        WaitForThePanelButton ->
+            -- Absence is not a failure: the panel's button set is contextual and
+            -- a ship in warp offers fewer. Hand the reading to the fight and ask
+            -- again next reading rather than spending readings on a button that
+            -- may simply not belong to this object.
+            Nothing
+
+        GaveUpOnSelectingTheRow ->
+            Nothing
 
 
-ensureShipIsOrbiting : ShipUI -> OverviewWindowEntry -> Maybe (Result String DecisionPathNode)
+ensureShipIsOrbiting : BotDecisionContext -> ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
 ensureShipIsOrbiting =
-    commandManeuverByModifierClick
-        { key = EffectOnWindow.vkey_W
+    commandManoeuvreFromSelectedItemPanel
+        { button = selectedItemOrbitButton
         , maneuver = EveOnline.ParseUserInterface.ManeuverOrbit
-        , describe = "Press the 'W' key and click on the overview entry."
+        , describe = "Orbit"
         }
+
+
+{-| What the manoeuvre arm's select-then-press is doing on this reading.
+
+A rule over the record rather than text built inline in the status line, so a
+case executes what an operator reads. Without it the whole select-then-press has
+no reading in the log at all: `WaitForThePanelButton` and
+`GaveUpOnSelectingTheRow` both answer `Nothing`, which cannot carry a decision
+line, so a panel that never offers the button and a manoeuvre that is running
+happily print identically.
+
+-}
+describePanelManoeuvreSelection : { asking : Bool, unansweredReadings : Int } -> String
+describePanelManoeuvreSelection selectionCase =
+    "panel "
+        ++ (selectionCase.unansweredReadings |> String.fromInt)
+        ++ "/"
+        ++ (panelSelectGiveUpReadings |> String.fromInt)
+        ++ (if selectionCase.unansweredReadings >= panelSelectGiveUpReadings then
+                " (GIVEN UP on selecting the object to manoeuvre on -- fighting without a manoeuvre)"
+
+            else if selectionCase.asking then
+                " (selecting the object to manoeuvre on)"
+
+            else
+                ""
+           )
 
 
 {-| Ask the client to approach an object by **double clicking its overview
@@ -3315,6 +3582,7 @@ initBotMemory =
     , dronesInSpaceCountLastReading = 0
     , weaponsAskedReadings = 0
     , approachFleetCommanderAskedReadings = 0
+    , panelSelectUnansweredReadings = 0
     , closingOnTheCommanderSinceLanding = False
     , backupCallAskedReadings = 0
     , unlockFleetPilotAskedReadings = 0
@@ -3436,6 +3704,16 @@ statusTextFromState context =
                     , [ describeCalledObject context ]
                     , [ describeWeaponsAsk context ]
                     , [ describeApproachFleetCommanderAsk context ]
+                    , [ describePanelManoeuvreSelection
+                            { asking =
+                                askingThePanelToShowTheObjectToOrbit
+                                    { orbitObjectNames = context.eventContext.botSettings.orbitObjectNames
+                                    , prioritizeRats = context.eventContext.botSettings.prioritizeRats
+                                    }
+                                    context.readingFromGameClient
+                            , unansweredReadings = context.memory.panelSelectUnansweredReadings
+                            }
+                      ]
                     , [ describeFleetMateWarp context ]
                     , [ describeBackupCall context ]
                     ]
@@ -4392,6 +4670,20 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             -- reading -- and it keeps the status line's "after N readings"
             -- meaningful, which is #389's own lesson.
             botMemoryBefore.retreatRecoveryAskedReadings
+    , panelSelectUnansweredReadings =
+        -- Readings in a row the panel has not come to show the object to orbit.
+        -- Asked through `objectToOrbitFromReading`, the rule the arm itself
+        -- asks, rather than restated here: a counter advanced by one condition
+        -- and read by another is #102's defect.
+        panelSelectReadingsAfterReading
+            { asking =
+                askingThePanelToShowTheObjectToOrbit
+                    { orbitObjectNames = context.botSettings.orbitObjectNames
+                    , prioritizeRats = context.botSettings.prioritizeRats
+                    }
+                    context.readingFromGameClient
+            , before = botMemoryBefore.panelSelectUnansweredReadings
+            }
     , approachFleetCommanderAskedReadings =
         if askingTheCommanderForAnApproach then
             botMemoryBefore.approachFleetCommanderAskedReadings + 1
@@ -5577,7 +5869,8 @@ pilotIsOnOverview pilotName readingFromGameClient =
 
 {-| The overview row whose Name cell is exactly this string -- a pilot's, or a
 called target's -- which is the thing a manoeuvre or a lock is issued against.
-`ensureShipIsOrbiting` clicks it, and so does `lockCalledTarget`.
+`ensureShipIsOrbiting` selects it before pressing the panel's own Orbit, and
+`lockCalledTarget` clicks it.
 
 `pilotIsOnOverview` is this same question with the row thrown away, and asks it
 through here rather than beside it: a bot that decides "the commander is on the
@@ -6042,6 +6335,151 @@ selectedItemButtonNamed readingFromGameClient name =
         |> List.filter
             (\node ->
                 (node.uiNode |> EveOnline.ParseUserInterface.getNameFromDictEntries) == Just name
+            )
+        |> List.head
+
+
+{-| One of the Selected Item panel's buttons, by **both** the identifiers the
+client carries for it.
+
+The client writes an id on the node (`_name` / `_elementId`, which read alike on
+every panel button this bot has ever pressed) and a `cmdName` beside it --
+`selectedItemOrbit` and `CmdOrbitItem` name the same button. Matching either
+survives a rename of one, which is cheap insurance on a widget name: that is the
+class of thing that has cost this repo several sessions, and #414's own
+`selectedItemUnLockTarget` -- a capital `L` its Lock sibling does not have -- is
+what a guessed name looks like when it is wrong.
+
+-}
+type alias SelectedItemPanelButton =
+    { elementId : String, cmdName : String }
+
+
+selectedItemOrbitButton : SelectedItemPanelButton
+selectedItemOrbitButton =
+    { elementId = "selectedItemOrbit", cmdName = "CmdOrbitItem" }
+
+
+{-| The panel's Unlock, which is **not** `selectedItemLockTarget` with a prefix.
+
+`selectedItemUnLockTarget` carries a capital `L` in the middle that its Lock
+sibling does not, read off a live client with a locked target selected. A
+guessed `selectedItemUnlockTarget` matches nothing -- and "no button" is
+indistinguishable here from "nothing to unlock", so the guess would have failed
+silently, in a guard whose whole job is not to.
+
+Lock and Unlock occupy the **same slot** and swap with the target's lock state,
+so the panel offering this one is the client saying the object is locked.
+
+-}
+selectedItemUnLockTargetButton : SelectedItemPanelButton
+selectedItemUnLockTargetButton =
+    { elementId = "selectedItemUnLockTarget", cmdName = "CmdUnlockTargetItem" }
+
+
+{-| Free a lock slot with the panel's own Unlock, where the panel is showing the
+pilot to unlock.
+
+**Why this is worth having beside the cascade it does not replace.**
+`unlockFleetPilotInTargetBar` right-clicks the _target bar's_ own entry and takes
+an `unlock` menu entry, which is a screen position computed from a reading plus a
+flyout that has to render -- and the bar reorders as targets are taken and lost,
+so it carries #413's exposure as the overview does. The panel button does not: it
+is found by name in the same reading it is pressed in, and it acts on the
+selected object.
+
+**And it needs no bar entry.** #390 kept `lockedTargetNamed` alive precisely
+because the cascade has to right-click something in the bar, after the overview's
+own indicator became the deciding signal. A panel press needs neither a bar entry
+nor a menu -- so where the panel is showing the pilot this fires with the bar
+never consulted. `lockedTargetNamed` stays because it is still the fall-back's
+only way to find something to right-click, and because #389's own reason for it
+is unchanged.
+
+**It adds no way to select and so cannot loop.** This answers `Nothing` unless
+the panel is _already_ showing the pilot, and the caller then does exactly what
+it always did. No reading is ever spent selecting for the unlock, no new bound is
+needed, and a client that never selects the pilot costs nothing at all.
+
+**Which makes the cascade's own right-click the thing that reaches this
+branch**, and that is stated rather than assumed: right-clicking a target-bar
+entry is expected to select the object as well as opening the menu, so a cascade
+that does not land should leave the panel showing the pilot and the next reading
+presses the button. **No reading has ever confirmed that**, and the direction it
+fails in is the safe one -- the panel path never fires and the cascade goes on
+being the only mechanism.
+
+**The panel offering Unlock is the client saying this object is locked**, since
+Lock and Unlock share the slot, so the press is declined outright where the panel
+offers Lock instead.
+
+-}
+unlockFromSelectedItemPanel : BotDecisionContext -> String -> Maybe DecisionPathNode
+unlockFromSelectedItemPanel context pilotName =
+    if not (panelIsShowingText context.readingFromGameClient pilotName) then
+        Nothing
+
+    else
+        selectedItemPanelButton context.readingFromGameClient selectedItemUnLockTargetButton
+            |> Maybe.map clickUiElementOrSayItCannotBeClicked
+
+
+{-| Whether the Selected Item panel's own texts carry this string.
+
+`selectedItemIsOverviewEntry` asks the same question of an overview row; a
+target-bar entry is not one, so this is the half of that rule that takes the
+text. One `containsWords` test, so the two cannot come to disagree about what
+"the panel is showing it" means -- and an empty name matches nothing rather than
+everything, which is `valueTypeNonEmptyString`'s register applied to a lookup.
+
+-}
+panelIsShowingText : ReadingFromGameClient -> String -> Bool
+panelIsShowingText readingFromGameClient text =
+    case ( readingFromGameClient.selectedItemWindow, String.trim text ) of
+        ( _, "" ) ->
+            False
+
+        ( Just window, trimmed ) ->
+            EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode.uiNode
+                |> List.any (containsWords trimmed)
+
+        ( Nothing, _ ) ->
+            False
+
+
+{-| Find one of those buttons in **this** reading, by name and never by
+position.
+
+`selectedItemOrbit` was read live at x=1515 in one reading and x=1551 in another
+moments later, because two buttons left the row and everything shifted -- so an
+arm that remembers where a button was, or picks by index, is pressing a
+different command a reading later. Nothing here may be optimised into a
+position.
+
+Absence is a normal answer, not an error: the panel's button set is contextual
+(a station offers Dock and Align To, a gate offers Jump and Approach, a rat
+offers Approach), and a ship in warp offers less again.
+
+-}
+selectedItemPanelButton :
+    ReadingFromGameClient
+    -> SelectedItemPanelButton
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+selectedItemPanelButton readingFromGameClient button =
+    let
+        property name node =
+            node.uiNode |> EveOnline.ParseUserInterface.getStringPropertyFromDictEntries name
+    in
+    readingFromGameClient.selectedItemWindow
+        |> Maybe.map (.uiNode >> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion)
+        |> Maybe.withDefault []
+        |> List.filter
+            (\node ->
+                [ property "_name" node
+                , property "_elementId" node
+                ]
+                    |> List.member (Just button.elementId)
+                    |> (||) (property "cmdName" node == Just button.cmdName)
             )
         |> List.head
 
@@ -6709,8 +7147,8 @@ row.
 
 `targetedByMe` is set from the `targetedByMeIndicator` sprite, and the row is
 resolved through `overviewEntryForPilot` -- the same lookup `lockCalledTarget`
-and `ensureShipIsOrbiting` click, so the half that decides and the half that
-acts cannot end up on two different objects.
+clicks and `ensureShipIsOrbiting` selects, so the half that decides and the half
+that acts cannot end up on two different objects.
 
 **Lifted out by #390 so there is exactly one of it**, the same argument
 `targetTextsCarryName`'s own note makes for the bar: `calledTargetIsLocked` asks
@@ -10360,22 +10798,34 @@ unlockFleetPilotInTargetBar : BotDecisionContext -> Maybe DecisionPathNode
 unlockFleetPilotInTargetBar context =
     case friendlyFireStepFromContext context of
         UnlockAFleetPilot fleetPilot _ ->
-            lockedTargetNamed fleetPilot context.readingFromGameClient
-                |> Maybe.map
-                    (\targetToUnlock ->
-                        describeBranch
+            case unlockFromSelectedItemPanel context fleetPilot of
+                Just pressThePanelButton ->
+                    Just
+                        (describeBranch
                             ("'"
                                 ++ fleetPilot
                                 ++ "' is in this fleet and is locked. Unlocking, and holding fire meanwhile."
                             )
-                            (useContextMenuCascade
-                                ( "locked target"
-                                , targetToUnlock.barAndImageCont |> Maybe.withDefault targetToUnlock.uiNode
-                                )
-                                (useMenuEntryWithTextContaining "unlock" menuCascadeCompleted)
-                                context
+                            pressThePanelButton
+                        )
+
+                Nothing ->
+                    lockedTargetNamed fleetPilot context.readingFromGameClient
+                        |> Maybe.map
+                            (\targetToUnlock ->
+                                describeBranch
+                                    ("'"
+                                        ++ fleetPilot
+                                        ++ "' is in this fleet and is locked. Unlocking, and holding fire meanwhile."
+                                    )
+                                    (useContextMenuCascade
+                                        ( "locked target"
+                                        , targetToUnlock.barAndImageCont |> Maybe.withDefault targetToUnlock.uiNode
+                                        )
+                                        (useMenuEntryWithTextContaining "unlock" menuCascadeCompleted)
+                                        context
+                                    )
                             )
-                    )
 
         NothingIsLocked ->
             Nothing

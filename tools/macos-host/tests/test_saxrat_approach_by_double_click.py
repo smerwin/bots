@@ -406,33 +406,51 @@ class TheChordIsGoneTest(unittest.TestCase):
         self.assertIn("`vkey_R` is used for nothing else in this bot", doc)
 
 
-class TheOtherKeyWrappedClicksAreStillHereTest(unittest.TestCase):
-    """Recorded rather than fixed, so a later change has to notice them.
+class TheOtherKeyWrappedClicksAreGoneTooTest(unittest.TestCase):
+    """This class recorded the two that were left, and #414 took them.
 
-    saxrat still wraps a click in a key at two more places -- `vkey_E` for
-    keep-at-range and `vkey_W` for orbit, both reached from
-    `decideActionInAnomaly` on the same hot path this change cleared. Issue
-    #243 is scoped to the approach and does not touch them, and the reason to
-    write that down rather than leave it is that "saxrat presses no movement
-    key any more" is the claim somebody will make next, and it is false.
+    It said saxrat still wraps a click in a key at two more places -- `vkey_E`
+    for keep-at-range and `vkey_W` for orbit, both reached from
+    `decideActionInAnomaly` on the same hot path #243 cleared -- and that
+    "saxrat presses no movement key any more" was the claim somebody would make
+    next, and was false.
+
+    It is true now, and the case is inverted rather than deleted so that a
+    reader who finds this class does not go on believing the sentence it used
+    to carry. Both arms select the row and press the Selected Item panel's own
+    button, because a chord held over a click on an overview row is a gesture
+    aimed at a position on a list the client reorders (#413).
     """
 
     def setUp(self):
         self.source = collapsed(source_of(SAXRAT_BOT_ELM))
 
-    def test_keep_at_range_still_holds_e_over_a_click(self):
-        self.assertIn(
-            "[ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_E ]"
-            " , overviewEntryToKAR.uiNode |> mouseClickOnUIElement"
-            " MouseButtonLeft |> Result.withDefault []"
-            " , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_E ]", self.source)
+    def test_no_movement_key_is_posted_anywhere_in_this_bot(self):
+        # A word boundary, because `vkey_ESCAPE` starts with `vkey_E` and is
+        # still pressed at a stray menu -- a substring test here would go red
+        # for a key this change never touched.
+        for chord in ("vkey_E", "vkey_W", "vkey_Q"):
+            with self.subTest(chord=chord):
+                self.assertEqual(
+                    re.findall(r"EffectOnWindow\.%s\b" % chord, self.source),
+                    [])
 
-    def test_orbit_still_holds_w_over_a_click(self):
-        self.assertIn(
-            "[ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_W ]"
-            " , overviewEntryToOrbit.uiNode |> mouseClickOnUIElement"
-            " MouseButtonLeft |> Result.withDefault []"
-            " , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_W ]", self.source)
+    def test_both_siblings_take_the_panel_now(self):
+        """The other half: a bot that had simply deleted the arms would satisfy
+        the case above and command no manoeuvre at all."""
+        for arm, button, maneuver in (
+                ("ensureShipIsKeepingRange", "selectedItemKeepAtRangeButton",
+                 "ManeuverRange"),
+                ("ensureShipIsOrbiting", "selectedItemOrbitButton",
+                 "ManeuverOrbit")):
+            with self.subTest(arm=arm):
+                paired = ("commandManoeuvreFromSelectedItemPanel"
+                          " { button = %s , maneuver ="
+                          " EveOnline.ParseUserInterface.%s" % (button, maneuver))
+                self.assertTrue(
+                    paired in self.source,
+                    "%s no longer presses %s through the shared shape"
+                    % (arm, button))
 
 
 if __name__ == "__main__":
