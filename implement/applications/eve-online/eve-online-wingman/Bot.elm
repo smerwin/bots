@@ -3503,10 +3503,20 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             0
     , unlockFleetPilotAskedReadings =
         case friendlyFireNow of
-            UnlockAFleetPilot _ ->
-                botMemoryBefore.unlockFleetPilotAskedReadings + 1
+            UnlockAFleetPilot _ signal ->
+                if targetBarSawThePilot signal then
+                    botMemoryBefore.unlockFleetPilotAskedReadings + 1
 
-            GaveUpUnlockingAFleetPilot _ ->
+                else
+                    -- Held for the same reason as the give-up below, and for
+                    -- #389's: only the overview row saw this pilot, so there is
+                    -- no bar entry for `unlockFleetPilotInTargetBar` to
+                    -- right-click and no ask goes out. A budget charged for
+                    -- asks nobody made reports a give-up on an arm that was
+                    -- never reached.
+                    botMemoryBefore.unlockFleetPilotAskedReadings
+
+            GaveUpUnlockingAFleetPilot _ _ ->
                 -- Held rather than advanced: the pilot is still locked and the
                 -- guns are still refused, and a counter that ran away would
                 -- make the status line's "after N readings" meaningless.
@@ -3515,7 +3525,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             NothingIsLocked ->
                 0
 
-            HoldFireOnAnUnverifiedPilot _ ->
+            HoldFireOnAnUnverifiedPilot _ _ ->
                 0
 
             ClearToFire ->
@@ -5221,14 +5231,36 @@ anyway, while a false "not locked" is the loop above.
 -}
 calledTargetIsLocked : String -> ReadingFromGameClient -> Bool
 calledTargetIsLocked calledTarget reading =
-    let
-        overviewRowSaysSo : Bool
-        overviewRowSaysSo =
-            overviewEntryForPilot calledTarget reading
-                |> Maybe.map (.commonIndications >> .targetedByMe)
-                |> Maybe.withDefault False
-    in
-    overviewRowSaysSo || (lockedTargetNamed calledTarget reading /= Nothing)
+    overviewRowSaysThisShipHasItLocked calledTarget reading
+        || (lockedTargetNamed calledTarget reading /= Nothing)
+
+
+{-| Whether the client draws its own lock indicator on this pilot's overview
+row.
+
+`targetedByMe` is set from the `targetedByMeIndicator` sprite, and the row is
+resolved through `overviewEntryForPilot` -- the same lookup `lockCalledTarget`
+and `ensureShipIsOrbiting` click, so the half that decides and the half that
+acts cannot end up on two different objects.
+
+**Lifted out by #390 so there is exactly one of it**, the same argument
+`targetTextsCarryName`'s own note makes for the bar: `calledTargetIsLocked` asks
+this of the broadcast's name, and `friendlyFireStepFromReading` asks it of every
+name in the two no-shoot lists. A second copy is a second instrument that can
+disagree with the first.
+
+**It needs the pilot to have a row on this overview**, which is why it is only
+ever _added_ to the target bar's answer and never put in its place: an overview
+preset that hides fleet members is already a recorded hazard for
+`approachTheFleetCommander`, and a locked pilot who has left the grid is
+another.
+
+-}
+overviewRowSaysThisShipHasItLocked : String -> ReadingFromGameClient -> Bool
+overviewRowSaysThisShipHasItLocked pilotName reading =
+    overviewEntryForPilot pilotName reading
+        |> Maybe.map (.commonIndications >> .targetedByMe)
+        |> Maybe.withDefault False
 
 
 {-| The locked target whose target-bar text carries this name, if it is
@@ -5268,12 +5300,16 @@ list filter empties out -- see `fleetPilotNamesFromReading`.
 long name across labels -- a live read in #303 with a rat locked returned
 `['Tower Sentry', 'Sansha I', '20 km']` -- and this asks whether any _one_ label
 carries the whole name, so a wrapped name is not matched at all. #389 moved the
-called-target recognition off this and onto the overview's own
-`targetedByMe` for that reason. `friendlyFireStep` still asks its question here,
-and this weakens it in the direction of firing: a fleetmate whose name the bar
-wraps is not recognised as locked. That is not changed here -- the guard is a
-safety rule and the change it needs is its own claimed piece of work, #390,
-rather than something folded into this one.
+called-target recognition off this and onto the overview's own `targetedByMe`
+for that reason, and #390 did the same for the friendly-fire guard -- a
+fleetmate whose name the bar wraps was not recognised as locked, and the guard
+fell through to `ClearToFire`, which fails in the direction #367 exists to
+prevent.
+
+**Neither of them dropped this.** Both ask it _and_ the row indicator and take
+the answer that refuses, because the two go quiet in opposite directions: this
+one on a wrapped name, the row when the pilot has no row on this overview at
+all. See `lockSignalForPilot`.
 
 -}
 targetTextsCarryName : String -> List String -> Bool
@@ -7223,36 +7259,49 @@ The bound is checked after the membership match and before anything is asked
 of the client, so a give-up is reported as a give-up rather than as a clean
 lock bar.
 
+**Two instruments answer "is this pilot locked", and #390 is why there are
+two.** `lockSignalForPilot` is that argument; the short of it is that the
+target bar wraps a long name across labels, so the bar alone did not recognise
+a two-word character name -- `Sonya Spodumain` included, the pilot run 9 shot --
+and the rule fell through to `ClearToFire`. It asks the pilot's overview row for
+the client's own lock indicator beside it and refuses if _either_ answers. An
+added signal can only add refusals.
+
+`NothingIsLocked` therefore needs both to be empty. A row carrying the
+indicator with nothing parsed in the bar is still a lock, and answering "nothing
+is locked" to it would be the guard going quiet in the firing direction again.
+
 -}
 friendlyFireStep :
     { lockedTargetTexts : List (List String)
+    , pilotsLockedOnTheOverview : List String
     , fleetPilots : List String
     , membershipIsVerifiable : Bool
     , otherPilotsOnOverview : List String
     , askedReadings : Int
     }
     -> FriendlyFireStep
-friendlyFireStep { lockedTargetTexts, fleetPilots, membershipIsVerifiable, otherPilotsOnOverview, askedReadings } =
-    if List.isEmpty lockedTargetTexts then
+friendlyFireStep { lockedTargetTexts, pilotsLockedOnTheOverview, fleetPilots, membershipIsVerifiable, otherPilotsOnOverview, askedReadings } =
+    if List.isEmpty lockedTargetTexts && List.isEmpty pilotsLockedOnTheOverview then
         NothingIsLocked
 
     else
-        case firstNameCarriedByALockedTarget fleetPilots lockedTargetTexts of
-            Just fleetPilot ->
+        case firstLockedPilotAmong lockedTargetTexts pilotsLockedOnTheOverview fleetPilots of
+            Just ( fleetPilot, signal ) ->
                 if unlockFleetPilotAskedReadingsBound <= askedReadings then
-                    GaveUpUnlockingAFleetPilot fleetPilot
+                    GaveUpUnlockingAFleetPilot fleetPilot signal
 
                 else
-                    UnlockAFleetPilot fleetPilot
+                    UnlockAFleetPilot fleetPilot signal
 
             Nothing ->
                 if membershipIsVerifiable then
                     ClearToFire
 
                 else
-                    case firstNameCarriedByALockedTarget otherPilotsOnOverview lockedTargetTexts of
-                        Just pilot ->
-                            HoldFireOnAnUnverifiedPilot pilot
+                    case firstLockedPilotAmong lockedTargetTexts pilotsLockedOnTheOverview otherPilotsOnOverview of
+                        Just ( pilot, signal ) ->
+                            HoldFireOnAnUnverifiedPilot pilot signal
 
                         Nothing ->
                             ClearToFire
@@ -7260,34 +7309,135 @@ friendlyFireStep { lockedTargetTexts, fleetPilots, membershipIsVerifiable, other
 
 type FriendlyFireStep
     = NothingIsLocked
-    | UnlockAFleetPilot String
-    | GaveUpUnlockingAFleetPilot String
-    | HoldFireOnAnUnverifiedPilot String
+    | UnlockAFleetPilot String LockedPilotSignal
+    | GaveUpUnlockingAFleetPilot String LockedPilotSignal
+    | HoldFireOnAnUnverifiedPilot String LockedPilotSignal
     | ClearToFire
 
 
-{-| The first of `names` that any locked target's text carries, through the
-one matcher `lockedTargetNamed` uses.
+{-| Which instrument saw the pilot in this ship's lock, carried on the answer so
+the status line reports it rather than a future incident having to reason from
+silence about which one was working.
 -}
-firstNameCarriedByALockedTarget : List String -> List (List String) -> Maybe String
-firstNameCarriedByALockedTarget names lockedTargetTexts =
+type LockedPilotSignal
+    = TargetBarLabels
+    | OverviewRowIndicator
+    | BothSignals
+
+
+{-| The first of `names` this ship has locked, and what saw it.
+
+**Two questions, and the answer is the union -- this is #390.** The bar renders
+a name across as many labels as it needs, and `targetTextsCarryName` asks
+whether any _one_ label carries the whole of it, so a two-word character name
+was invisible to it: #303 read `['Tower Sentry', 'Sansha I', '20 km']` off a
+live client and #389 measured the same failure on every reading of four
+sessions. The row indicator is the client's own answer and does not care how the
+bar wrapped anything.
+
+They go quiet in opposite directions and neither is sound alone: the bar on a
+wrapped name, the row when the pilot has no row on this overview -- a preset
+that hides fleet members, or a pilot who left the grid still holding a lock. So
+this refuses on either, which is the only combination that cannot make the guard
+quieter than one instrument already made it. **`&&` here would be the defect,
+not a variation**: it would hold fire only when both agreed, and the case that
+matters is exactly the one where they do not.
+
+-}
+firstLockedPilotAmong : List (List String) -> List String -> List String -> Maybe ( String, LockedPilotSignal )
+firstLockedPilotAmong lockedTargetTexts pilotsLockedOnTheOverview names =
     names
-        |> List.filter (\name -> lockedTargetTexts |> List.any (targetTextsCarryName name))
+        |> List.filterMap
+            (\name ->
+                lockSignalForPilot lockedTargetTexts pilotsLockedOnTheOverview name
+                    |> Maybe.map (Tuple.pair name)
+            )
         |> List.head
+
+
+{-| What, if anything, says this ship has that pilot locked.
+
+The bar is matched through `targetTextsCarryName`, which is `lockedTargetNamed`'s
+own comparison so the guard and the unlock cannot disagree about the bar. The
+overview side is a list of names built by `friendlyFireStepFromReading` from
+`overviewRowSaysThisShipHasItLocked`, so the rule stays a function of plain
+values and a case can execute it without constructing a reading.
+
+-}
+lockSignalForPilot : List (List String) -> List String -> String -> Maybe LockedPilotSignal
+lockSignalForPilot lockedTargetTexts pilotsLockedOnTheOverview name =
+    case
+        ( lockedTargetTexts |> List.any (targetTextsCarryName name)
+        , pilotsLockedOnTheOverview |> List.member name
+        )
+    of
+        ( True, True ) ->
+            Just BothSignals
+
+        ( True, False ) ->
+            Just TargetBarLabels
+
+        ( False, True ) ->
+            Just OverviewRowIndicator
+
+        ( False, False ) ->
+            Nothing
+
+
+{-| Whether the target bar is one of the instruments that saw this pilot, which
+is the same question as "is there a bar entry to right-click".
+
+`unlockFleetPilotInTargetBar` needs one, and so does the counter behind
+`unlockFleetPilotAskedReadingsBound`: a pilot held on the row indicator alone
+gives that arm nothing to ask for, and a budget charged for asks nobody made is
+#389's second defect.
+
+-}
+targetBarSawThePilot : LockedPilotSignal -> Bool
+targetBarSawThePilot signal =
+    case signal of
+        TargetBarLabels ->
+            True
+
+        BothSignals ->
+            True
+
+        OverviewRowIndicator ->
+            False
 
 
 {-| The rule above, asked of a reading and the settings behind it, so that
 `updateMemoryForNewReadingFromGame` can advance the counter from the shipped
 rule rather than from a restatement of it -- #102's arrangement, the same one
 `askingTheCommanderForAnOrbit` uses.
+
+**This is also where the reading becomes plain values**, and deliberately all of
+it: #390 gave the rule a second signal that lives on the overview, and putting
+the reading into `friendlyFireStep` to get it would have cost the property that
+a case can execute the guard against five lists. Only the names already on one
+of the two no-shoot lists are asked about, because those are the only names the
+rule can refuse on.
+
 -}
 friendlyFireStepFromReading : List String -> Int -> ReadingFromGameClient -> FriendlyFireStep
 friendlyFireStepFromReading followFleetBroadcastFrom askedReadings readingFromGameClient =
+    let
+        fleetPilots : List String
+        fleetPilots =
+            fleetPilotNamesFromReading followFleetBroadcastFrom readingFromGameClient
+
+        otherPilotsOnOverview : List String
+        otherPilotsOnOverview =
+            getNamesOfOtherPilotsInOverview readingFromGameClient
+    in
     friendlyFireStep
         { lockedTargetTexts = readingFromGameClient.targets |> List.map .textsTopToBottom
-        , fleetPilots = fleetPilotNamesFromReading followFleetBroadcastFrom readingFromGameClient
+        , pilotsLockedOnTheOverview =
+            (fleetPilots ++ otherPilotsOnOverview)
+                |> List.filter (\name -> overviewRowSaysThisShipHasItLocked name readingFromGameClient)
+        , fleetPilots = fleetPilots
         , membershipIsVerifiable = fleetMembershipIsVerifiable readingFromGameClient
-        , otherPilotsOnOverview = getNamesOfOtherPilotsInOverview readingFromGameClient
+        , otherPilotsOnOverview = otherPilotsOnOverview
         , askedReadings = askedReadings
         }
 
@@ -7319,13 +7469,13 @@ friendlyFireVetoesTheGuns step =
         ClearToFire ->
             False
 
-        UnlockAFleetPilot _ ->
+        UnlockAFleetPilot _ _ ->
             True
 
-        GaveUpUnlockingAFleetPilot _ ->
+        GaveUpUnlockingAFleetPilot _ _ ->
             True
 
-        HoldFireOnAnUnverifiedPilot _ ->
+        HoldFireOnAnUnverifiedPilot _ _ ->
             True
 
 
@@ -7347,15 +7497,19 @@ The cascade is the one `decideActionInAnomaly` sketched and nothing reachable
 ever ran: right-click the target-bar entry, take the entry containing
 `unlock`.
 
+**It needs the bar entry and the guard no longer does**, which is #390: the
+guard holds fire on the overview row's lock indicator too, and a name the bar
+wraps across labels is not found here at all. `lockedTargetNamed` answering
+`Nothing` is then this arm having nothing to right-click rather than the two
+halves disagreeing -- the veto holds the guns for that reading either way, and
+`targetBarSawThePilot` is what keeps the unlock budget from being charged for
+the ask that could not be made.
+
 -}
 unlockFleetPilotInTargetBar : BotDecisionContext -> Maybe DecisionPathNode
 unlockFleetPilotInTargetBar context =
     case friendlyFireStepFromContext context of
-        UnlockAFleetPilot fleetPilot ->
-            -- `friendlyFireStep` matched this name with `targetTextsCarryName`
-            -- and `lockedTargetNamed` is the same matcher over the same
-            -- targets, so the lookup answers `Just` whenever this arm is
-            -- reached. Written as a `Maybe.map` rather than asserted.
+        UnlockAFleetPilot fleetPilot _ ->
             lockedTargetNamed fleetPilot context.readingFromGameClient
                 |> Maybe.map
                     (\targetToUnlock ->
@@ -7376,10 +7530,10 @@ unlockFleetPilotInTargetBar context =
         NothingIsLocked ->
             Nothing
 
-        GaveUpUnlockingAFleetPilot _ ->
+        GaveUpUnlockingAFleetPilot _ _ ->
             Nothing
 
-        HoldFireOnAnUnverifiedPilot _ ->
+        HoldFireOnAnUnverifiedPilot _ _ ->
             Nothing
 
         ClearToFire ->
@@ -8487,6 +8641,12 @@ The other half of #367, and the reason it is separate from
 what was decided with it. Every answer but `UnlockAFleetPilot` leaves the
 decision tree looking like a bot with nothing to do.
 
+**Every refusal names the instrument that saw the pilot**, which is #390's half
+of it. The guard reads two of them and they fail in opposite directions, so a
+log that only said "held" would leave the next incident reasoning from silence
+about which one was working -- the same reasoning-from-silence #367 was filed
+on, one level down.
+
 -}
 describeFriendlyFireGuard : BotDecisionContext -> String
 describeFriendlyFireGuard context =
@@ -8500,32 +8660,60 @@ describeFriendlyFireGuard context =
                 NothingIsLocked ->
                     "nothing is locked."
 
-                UnlockAFleetPilot fleetPilot ->
-                    "'"
-                        ++ fleetPilot
-                        ++ "' is locked and is in this fleet -- UNLOCKING, guns held. Readings spent: "
-                        ++ String.fromInt askedReadings
-                        ++ " of "
-                        ++ String.fromInt unlockFleetPilotAskedReadingsBound
-                        ++ "."
+                UnlockAFleetPilot fleetPilot signal ->
+                    if targetBarSawThePilot signal then
+                        "'"
+                            ++ fleetPilot
+                            ++ "' is locked and is in this fleet -- UNLOCKING, guns held. Seen by "
+                            ++ describeLockedPilotSignal signal
+                            ++ ". Readings spent: "
+                            ++ String.fromInt askedReadings
+                            ++ " of "
+                            ++ String.fromInt unlockFleetPilotAskedReadingsBound
+                            ++ "."
 
-                GaveUpUnlockingAFleetPilot fleetPilot ->
+                    else
+                        "'"
+                            ++ fleetPilot
+                            ++ "' is locked and is in this fleet -- guns held. Seen by "
+                            ++ describeLockedPilotSignal signal
+                            ++ " alone, which names no target-bar entry to right-click,"
+                            ++ " so there is nothing to unlock."
+
+                GaveUpUnlockingAFleetPilot fleetPilot signal ->
                     "GAVE UP unlocking '"
                         ++ fleetPilot
                         ++ "' after "
                         ++ String.fromInt askedReadings
-                        ++ " readings. The guns stay held for as long as that lock is there."
+                        ++ " readings. Seen by "
+                        ++ describeLockedPilotSignal signal
+                        ++ ". The guns stay held for as long as that lock is there."
 
-                HoldFireOnAnUnverifiedPilot pilot ->
+                HoldFireOnAnUnverifiedPilot pilot signal ->
                     "HOLDING FIRE on '"
                         ++ pilot
-                        ++ "' -- a pilot on the overview, and with the Fleet window shut this bot"
+                        ++ "' -- a pilot on the overview, seen by "
+                        ++ describeLockedPilotSignal signal
+                        ++ ", and with the Fleet window shut this bot"
                         ++ " cannot tell whether they are a fleetmate. Open it to fire on players again."
 
                 ClearToFire ->
                     String.fromInt (List.length context.readingFromGameClient.targets)
                         ++ " locked, none of them a fleet pilot -- clear to fire."
            )
+
+
+describeLockedPilotSignal : LockedPilotSignal -> String
+describeLockedPilotSignal signal =
+    case signal of
+        TargetBarLabels ->
+            "the target bar's labels"
+
+        OverviewRowIndicator ->
+            "the overview row's lock indicator"
+
+        BothSignals ->
+            "the target bar's labels and the overview row's lock indicator"
 
 
 {-| The acceleration-gate ask, for the status line -- printed on every reading

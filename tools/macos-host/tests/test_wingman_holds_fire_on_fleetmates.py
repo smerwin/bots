@@ -25,6 +25,72 @@ exactly like a guard that had checked. That is the case this file cares about
 most: `test_an_empty_membership_list_is_not_a_clean_bill_of_health` and its
 neighbours.
 
+## #390: the guard asked one instrument, and the client defeated it
+
+`friendlyFireStep` decided "is this pilot locked" from the target bar's rendered
+labels alone, through `targetTextsCarryName` -- and the bar **wraps a name
+across labels**. #303 read `['Tower Sentry', 'Sansha I', '20 km']` off a live
+client, and #389 measured the same failure on every reading of four sessions. A
+two-word character name -- most of them, `Sonya Spodumain` included -- was
+therefore not recognised as locked, the membership branch answered `Nothing`,
+and with the Fleet window open that fell through to `ClearToFire`. It failed in
+the *firing* direction, which is the one direction #367 exists to prevent.
+
+The rule now asks two instruments and refuses if **either** answers: the bar's
+labels, and the named pilot's overview row carrying the client's own
+`targetedByMe`. They go quiet in opposite directions -- the bar on a wrapped
+name, the row when the pilot has no row on this overview -- so the union is the
+only combination that cannot make the guard quieter than it already was. Each
+answer carries which instrument saw the pilot, and the status line prints it.
+
+Confirmed by mutation, eleven of them, each failing named cases. The bar-only
+and row-only cases are named separately throughout because a mutation that
+survives one of them is the guard going quiet on exactly one instrument, which
+is the whole subject:
+
+1. `lockSignalForPilot` reduced to the bar (`( False, True ) -> Nothing`),
+   which is the shipped defect restored exactly -- eight cases, including
+   `test_a_name_the_bar_wraps_is_caught_by_the_overview_row`,
+   `test_the_two_signals_are_a_union_and_not_an_intersection`,
+   `test_the_unverified_pilot_branch_asks_both_instruments_too`,
+   `test_the_guard_holds_fire_on_the_reading_that_used_to_fire`, and
+   #389's `test_a_wrapped_name_is_invisible_to_the_target_bar_matcher` in
+   `test_wingman_engages_the_called_target`, which is the case that measured
+   the failure and now executes it being caught;
+2. `lockSignalForPilot` reduced to the row (`( True, False ) -> Nothing`) --
+   nine cases, including `test_a_locked_fleet_pilot_is_unlocked_and_named`,
+   `test_either_instrument_refuses_and_both_are_reported`, the truth table, and
+   `test_the_bar_is_still_a_signal_and_not_leftovers`, which is what keeps the
+   bar a decision rather than leftovers on a client that never draws the icon;
+3. the union made an intersection -- only `( True, True )` answering `Just` --
+   fifteen cases, being (1) and (2) together. This is the mutation the whole
+   change is about: `&&` makes the guard *quieter* than either instrument
+   alone, which is the one direction a safety rule must not move;
+4. `NothingIsLocked` gated on the bar alone --
+   `test_a_lock_the_bar_never_rendered_is_still_a_lock` and
+   `test_a_row_with_no_bar_parsed_is_not_a_clean_lock_bar`;
+5. the row check made "is anything row-locked" rather than "is *this* name" --
+   `test_the_row_signal_answers_about_a_named_pilot_and_not_a_lock_count`, the
+   case against a guard that never lets the bot fire;
+6. the unverifiable-membership branch left on the bar alone --
+   `test_the_unverified_pilot_branch_asks_both_instruments_too`;
+7. `overviewRowSaysThisShipHasItLocked` reading the neighbouring `.targeting`
+   -- three cases in `TheGuardReadsBothInstrumentsTest`, starting with
+   `test_the_fixtures_arrived`, plus #389's four in the other file, which share
+   the helper;
+8. the unlock budget charged on every `UnlockAFleetPilot` again --
+   `test_the_unlock_counter_is_advanced_by_the_shipped_rule`;
+9. `targetBarSawThePilot` answering `True` for `OverviewRowIndicator`, which is
+   the same defect one step earlier --
+   `test_the_unlock_budget_is_spent_only_where_there_is_an_entry_to_click`;
+10. `friendlyFireStepFromReading` no longer asking the overview
+    (`pilotsLockedOnTheOverview = []`) --
+    `test_the_rule_is_still_a_function_of_plain_values` and the three executed
+    readings, which is the one mutation that leaves the rule itself perfect and
+    the bot shipping the old behaviour;
+11. the signal dropped from the status line --
+    `test_every_refusal_names_the_instrument_that_saw_the_pilot`.
+
 The cases run the real `Bot.elm` through `elm repl`. Nothing here reads a live
 client, the recorded corpus, or a running bot.
 
@@ -114,6 +180,72 @@ def fleet_window(header_labels, member_rows):
     return node("FleetWindow", {}, [header] + rows, region=(0, 0, 300, 400))
 
 
+ROW_HEIGHT = 16
+ROW_PITCH = 20
+ROW_TOP = 20
+
+
+def overview_window(rows):
+    """An overview window whose rows carry the client's own lock indicator.
+
+    Each row is `(name, distance, targeted)`. `targeted` puts a
+    `targetedByMeIndicator` under the row's `SpaceObjectIcon`, which is where
+    `parseOverviewWindowEntry` reads `commonIndications.targetedByMe` from --
+    so what the rules are handed is the icon the client draws rather than a
+    boolean this file decided.
+
+    It arrived with #389 in `test_wingman_engages_the_called_target`, which is
+    where the called-target arm reads that indicator. #390 put the friendly-fire
+    guard on the same indicator, so the builder moved here beside `node`,
+    `label` and `fleet_window` rather than being copied into a second file --
+    two fixtures for one icon is how two files come to disagree about what the
+    client draws.
+    """
+    headers = node("Headers", {}, [
+        label("Distance", (0, 0, 100, 16)),
+        label("Name", (100, 0, 200, 16)),
+        label("Type", (300, 0, 200, 16)),
+    ], region=(0, 0, 500, 16))
+
+    entries = []
+    for index, (name, distance, targeted) in enumerate(rows):
+        y = ROW_TOP + index * ROW_PITCH
+        icon_children = []
+        if targeted:
+            icon_children.append(
+                node("Sprite", {"_name": "targetedByMeIndicator"}))
+        entries.append(node("OverviewScrollEntry", {"_name": "overviewEntry"}, [
+            label(distance, (10, y, 50, ROW_HEIGHT)),
+            label(name, (110, y, 150, ROW_HEIGHT)),
+            label(name, (310, y, 150, ROW_HEIGHT)),
+            node("SpaceObjectIcon", {}, icon_children,
+                 region=(2, y, 12, ROW_HEIGHT)),
+        ], region=(0, y, 500, ROW_HEIGHT)))
+
+    return node("OverviewWindow", {}, [
+        node("Scroll", {}, [headers] + entries, region=(0, 0, 500, 300)),
+    ], region=(0, 0, 500, 300))
+
+
+def target_bar(targets):
+    """The locked-target bar, one `TargetInBar` per entry.
+
+    Each entry is the list of labels the client draws for it, top to bottom --
+    which is the field `textsTopToBottom` is built from, and the field whose
+    wrapping is what #389 and #390 both turned on.
+    """
+    bars = []
+    for index, texts in enumerate(targets):
+        x = 600 + index * 90
+        bars.append(node("TargetInBar", {}, [
+            node("Container", {"_name": "barAndImageCont"}, [
+                label(text, (x, 40 + line * 12, 80, 12))
+                for line, text in enumerate(texts)
+            ], region=(x, 40, 80, 60)),
+        ], region=(x, 30, 80, 80)))
+    return node("TargetsContainer", {}, bars, region=(600, 30, 400, 80))
+
+
 def tree_with(children):
     return node("UIRoot", {}, children, region=(0, 0, 1920, 1080))
 
@@ -149,19 +281,35 @@ def elm_string_lists(values):
     return "[ %s ]" % ", ".join(elm_strings(value) for value in values)
 
 
-def friendly_fire_step(locked, fleet, verifiable, others, asked=0):
-    """The shipped rule, as one expression over five plain facts."""
-    return ("friendlyFireStep { lockedTargetTexts = %s, fleetPilots = %s"
+def friendly_fire_step(locked, fleet, verifiable, others, asked=0,
+                       row_locked=()):
+    """The shipped rule, as one expression over six plain facts.
+
+    `row_locked` is #390's second signal: the names whose *overview row* carries
+    the client's `targetedByMeIndicator`. It is a plain list here for the same
+    reason the target bar's labels are -- `friendlyFireStepFromReading` is what
+    turns a reading into both, so a case can execute the rule itself without
+    constructing one.
+    """
+    return ("friendlyFireStep { lockedTargetTexts = %s"
+            ", pilotsLockedOnTheOverview = %s, fleetPilots = %s"
             ", membershipIsVerifiable = %s, otherPilotsOnOverview = %s"
             ", askedReadings = %s }"
-            % (elm_string_lists(locked), elm_strings(fleet),
-               verifiable, elm_strings(others), asked))
+            % (elm_string_lists(locked), elm_strings(row_locked),
+               elm_strings(fleet), verifiable, elm_strings(others), asked))
 
 
 # The target bar decorates a name with distance and hull, which is why the
 # matcher contains rather than equals.
 SONYA_LOCKED = [[SONYA + " [MNRLG]", "13 km", "Imperial Navy Slicer"]]
 RAT_LOCKED = [["Centior Monster", "8 km"]]
+
+# The same lock, drawn the way the client actually draws a two-word name: #303
+# read `['Tower Sentry', 'Sansha I', '20 km']` off a live bar, the name split
+# at a wrap point. `targetTextsCarryName` asks whether any *one* label carries
+# the whole name, so this is the bar holding Sonya and saying nothing about it
+# -- which is #390, and which is most character names.
+SONYA_WRAPPED = [["Sonya", "Spodumain [MNRLG]", "13 km"]]
 
 
 class WingmanRepl(ElmRepl):
@@ -193,7 +341,7 @@ class TheFriendlyFireRuleTest(unittest.TestCase):
     def test_a_locked_fleet_pilot_is_unlocked_and_named(self):
         self.assertEqual(
             self.repl.evaluate([
-                '%s == UnlockAFleetPilot "%s"'
+                '%s == UnlockAFleetPilot "%s" TargetBarLabels'
                 % (friendly_fire_step(SONYA_LOCKED, [SONYA], "True", []),
                    SONYA)]),
             [True])
@@ -203,7 +351,7 @@ class TheFriendlyFireRuleTest(unittest.TestCase):
         is the one pilot it matters most not to shoot."""
         self.assertEqual(
             self.repl.evaluate([
-                '%s == UnlockAFleetPilot "%s"'
+                '%s == UnlockAFleetPilot "%s" TargetBarLabels'
                 % (friendly_fire_step([[COMMANDER, "4 km"]],
                                       [MEMBER_ROW, COMMANDER], "True", []),
                    COMMANDER)]),
@@ -220,6 +368,120 @@ class TheFriendlyFireRuleTest(unittest.TestCase):
                 'targetTextsCarryName "%s" %s' % (
                     SONYA, elm_strings(RAT_LOCKED[0]))]),
             [True, False])
+
+    def test_a_name_the_bar_wraps_is_caught_by_the_overview_row(self):
+        """#390's defect, executed. The bar holds Sonya and cannot say so --
+        the client wrapped her name at the space and `targetTextsCarryName`
+        asks whether any one label carries the whole of it -- so before this
+        the membership branch answered `Nothing` and, with the Fleet window
+        open, fell through to `ClearToFire`. It failed in the *firing*
+        direction, which is the direction #367 exists to prevent.
+
+        The first assertion is the instrument going quiet; the second is the
+        rule refusing anyway, on the overview row's own lock indicator.
+        """
+        self.assertEqual(
+            self.repl.evaluate([
+                'targetTextsCarryName "%s" %s'
+                % (SONYA, elm_strings(SONYA_WRAPPED[0])),
+                '%s == UnlockAFleetPilot "%s" OverviewRowIndicator'
+                % (friendly_fire_step(SONYA_WRAPPED, [SONYA], "True", [],
+                                      row_locked=[SONYA]), SONYA)]),
+            [False, True])
+
+    def test_either_instrument_refuses_and_both_are_reported(self):
+        """The shape of the fix: two signals OR-ed, never swapped one for the
+        other. The bar goes quiet on a wrapped name; the row goes quiet when
+        the pilot has no row on this overview at all -- a preset that hides
+        fleet members, or a pilot who left the grid still holding a lock. An
+        `&&` here would hold fire only where they agreed, which is every case
+        except the ones this rule is for.
+
+        The three refusals are one case together because it is their
+        *combination* that is the property. Each names the instrument it came
+        from, so a log settles which one was working.
+        """
+        self.assertEqual(
+            self.repl.evaluate([
+                '%s == UnlockAFleetPilot "%s" TargetBarLabels'
+                % (friendly_fire_step(SONYA_LOCKED, [SONYA], "True", []),
+                   SONYA),
+                '%s == UnlockAFleetPilot "%s" OverviewRowIndicator'
+                % (friendly_fire_step(SONYA_WRAPPED, [SONYA], "True", [],
+                                      row_locked=[SONYA]), SONYA),
+                '%s == UnlockAFleetPilot "%s" BothSignals'
+                % (friendly_fire_step(SONYA_LOCKED, [SONYA], "True", [],
+                                      row_locked=[SONYA]), SONYA)]),
+            [True, True, True])
+
+    def test_the_two_signals_are_a_union_and_not_an_intersection(self):
+        """The same property one level down, as `lockSignalForPilot`'s whole
+        truth table. Four rows, and the two middle ones are the fix."""
+        def signal(locked, row_locked):
+            return "lockSignalForPilot %s %s \"%s\"" % (
+                elm_string_lists(locked), elm_strings(row_locked), SONYA)
+
+        self.assertEqual(
+            self.repl.evaluate([
+                "%s == Nothing" % signal(SONYA_WRAPPED, []),
+                "%s == Just TargetBarLabels" % signal(SONYA_LOCKED, []),
+                "%s == Just OverviewRowIndicator"
+                % signal(SONYA_WRAPPED, [SONYA]),
+                "%s == Just BothSignals" % signal(SONYA_LOCKED, [SONYA])]),
+            [True, True, True, True])
+
+    def test_a_lock_the_bar_never_rendered_is_still_a_lock(self):
+        """`NothingIsLocked` releases the guns, so it has to mean *neither*
+        instrument sees anything. A row carrying the client's indicator with
+        nothing parsed in the bar is a lock, and answering "nothing is locked"
+        to it would be this guard going quiet in the firing direction by the
+        one route the rest of the fix does not cover."""
+        self.assertEqual(
+            self.repl.evaluate([
+                '%s == UnlockAFleetPilot "%s" OverviewRowIndicator'
+                % (friendly_fire_step([], [SONYA], "True", [],
+                                      row_locked=[SONYA]), SONYA),
+                "%s == NothingIsLocked"
+                % friendly_fire_step([], [SONYA], "True", [])]),
+            [True, True])
+
+    def test_the_unverified_pilot_branch_asks_both_instruments_too(self):
+        """The Fleet-window-shut fallback runs the same two signals over
+        `getNamesOfOtherPilotsInOverview`. A fix applied to the membership
+        branch alone would leave the wrapped name firing here."""
+        self.assertEqual(
+            self.repl.evaluate([
+                '%s == HoldFireOnAnUnverifiedPilot "%s" OverviewRowIndicator'
+                % (friendly_fire_step(SONYA_WRAPPED, [], "False", [SONYA],
+                                      row_locked=[SONYA]), SONYA)]),
+            [True])
+
+    def test_the_row_signal_answers_about_a_named_pilot_and_not_a_lock_count(
+            self):
+        """It has to stay a question about *this* name. A row signal that only
+        asked "is anything row-locked" would refuse on every reading where the
+        fleet is engaging something, which is a bot that never fires -- the
+        failure mode that looks like safety."""
+        self.assertEqual(
+            self.repl.evaluate([
+                "%s == ClearToFire"
+                % friendly_fire_step(RAT_LOCKED, [SONYA], "True", [],
+                                     row_locked=[COMMANDER])]),
+            [True])
+
+    def test_the_unlock_budget_is_spent_only_where_there_is_an_entry_to_click(
+            self):
+        """`unlockFleetPilotInTargetBar` right-clicks a `Target`, so a pilot
+        held on the row indicator alone gives it nothing to ask for. #389's
+        second defect was a budget charged for asks nobody made, reporting a
+        give-up on an arm that had never been reached; `targetBarSawThePilot`
+        is what keeps this counter off that path."""
+        self.assertEqual(
+            self.repl.evaluate([
+                "targetBarSawThePilot TargetBarLabels",
+                "targetBarSawThePilot BothSignals",
+                "targetBarSawThePilot OverviewRowIndicator"]),
+            [True, True, False])
 
     def test_a_stranger_is_shot_once_membership_really_was_checked(self):
         """The other half of the guard: with the Fleet window open, an empty
@@ -245,7 +507,7 @@ class TheFriendlyFireRuleTest(unittest.TestCase):
         """
         self.assertEqual(
             self.repl.evaluate([
-                '%s == HoldFireOnAnUnverifiedPilot "%s"'
+                '%s == HoldFireOnAnUnverifiedPilot "%s" TargetBarLabels'
                 % (friendly_fire_step(SONYA_LOCKED, [], "False", [SONYA]),
                    SONYA),
                 "%s == ClearToFire"
@@ -268,7 +530,7 @@ class TheFriendlyFireRuleTest(unittest.TestCase):
         usable even when the source cannot certify itself."""
         self.assertEqual(
             self.repl.evaluate([
-                '%s == UnlockAFleetPilot "%s"'
+                '%s == UnlockAFleetPilot "%s" TargetBarLabels'
                 % (friendly_fire_step(SONYA_LOCKED, [SONYA], "False", [SONYA]),
                    SONYA)]),
             [True])
@@ -276,11 +538,11 @@ class TheFriendlyFireRuleTest(unittest.TestCase):
     def test_the_unlock_ask_gives_up_at_the_bound(self):
         self.assertEqual(
             self.repl.evaluate([
-                '%s == UnlockAFleetPilot "%s"'
+                '%s == UnlockAFleetPilot "%s" TargetBarLabels'
                 % (friendly_fire_step(
                     SONYA_LOCKED, [SONYA], "True", [],
                     "unlockFleetPilotAskedReadingsBound - 1"), SONYA),
-                '%s == GaveUpUnlockingAFleetPilot "%s"'
+                '%s == GaveUpUnlockingAFleetPilot "%s" TargetBarLabels'
                 % (friendly_fire_step(
                     SONYA_LOCKED, [SONYA], "True", [],
                     "unlockFleetPilotAskedReadingsBound"), SONYA),
@@ -307,9 +569,12 @@ class TheFriendlyFireRuleTest(unittest.TestCase):
             self.repl.evaluate([
                 "friendlyFireVetoesTheGuns NothingIsLocked",
                 "friendlyFireVetoesTheGuns ClearToFire",
-                'friendlyFireVetoesTheGuns (UnlockAFleetPilot "x")',
-                'friendlyFireVetoesTheGuns (GaveUpUnlockingAFleetPilot "x")',
-                'friendlyFireVetoesTheGuns (HoldFireOnAnUnverifiedPilot "x")']),
+                'friendlyFireVetoesTheGuns'
+                ' (UnlockAFleetPilot "x" TargetBarLabels)',
+                'friendlyFireVetoesTheGuns'
+                ' (GaveUpUnlockingAFleetPilot "x" OverviewRowIndicator)',
+                'friendlyFireVetoesTheGuns'
+                ' (HoldFireOnAnUnverifiedPilot "x" BothSignals)']),
             [False, False, True, True, True])
 
 
@@ -397,6 +662,143 @@ class TheMembershipSourceIsReadTest(unittest.TestCase):
                  ' (fleetPilotNamesFromReading [ "", "  " ])'
                  ' |> Maybe.withDefault [ "x" ]) == []'],
                 definitions=[FLEET_SHUT]),
+            [True])
+
+
+def guard_reading(name, row_is_targeted, bar):
+    """Run 9's own shape, through the real parser.
+
+    The Fleet window lists Sonya, her overview row is there either carrying the
+    client's lock indicator or not, and the target bar holds whatever labels the
+    client is said to have drawn -- or is absent entirely, which is a reading
+    where nothing parsed a bar and the row is the only thing that knows.
+
+    `bar` is one entry per locked target, each a list of the labels the client
+    drew for it, which is `target_bar`'s own shape.
+    """
+    return reading_binding(name, [
+        fleet_window(HEADER_LABELS, [SONYA]),
+        overview_window([(SONYA, "13 km", row_is_targeted)]),
+    ] + ([target_bar(bar)] if bar else []))
+
+
+class TheGuardReadsBothInstrumentsTest(unittest.TestCase):
+    """#390, executed against readings the real parser produced.
+
+    The rule above is a function of plain lists and these are the readings that
+    become them, so what is checked here is the half a plain-list case cannot
+    see: that `friendlyFireStepFromReading` finds the client's lock indicator on
+    the row it should, beside the bar it always read.
+
+    - `wrappedRowLocked`: the incident's shape. The bar wraps `Sonya
+      Spodumain` at the space -- #303's live reading -- and her row carries
+      `targetedByMeIndicator`.
+    - `barNamesHer`: no indicator, and a bar entry whose one label carries the
+      whole name. The case that keeps the bar a decision rather than leftovers.
+    - `rowLockedNoBar`: the indicator with no target bar parsed at all.
+    - `wrappedRowClear`: neither instrument sees her, which is the hole this
+      change does *not* close and is named rather than left to be discovered.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+        cls.definitions = [
+            guard_reading("wrappedRowLocked", True, SONYA_WRAPPED),
+            guard_reading("barNamesHer", False, SONYA_LOCKED),
+            guard_reading("rowLockedNoBar", True, None),
+            guard_reading("wrappedRowClear", False, SONYA_WRAPPED),
+        ]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_the_fixtures_arrived(self):
+        """A tree the parser made nothing of answers every question below the
+        same way an absent rule would."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["(wrappedRowLocked |> Maybe.andThen .fleetWindow) /= Nothing",
+                 '(wrappedRowLocked |> Maybe.map'
+                 ' (fleetPilotNamesFromReading []))'
+                 ' == Just [ "%s", "%s" ]' % (SONYA, COMMANDER),
+                 "(wrappedRowLocked |> Maybe.map (.targets >> List.length))"
+                 " == Just 1",
+                 "(rowLockedNoBar |> Maybe.map (.targets >> List.length))"
+                 " == Just 0",
+                 '(wrappedRowLocked |> Maybe.map'
+                 ' (overviewRowSaysThisShipHasItLocked "%s")) == Just True'
+                 % SONYA,
+                 '(barNamesHer |> Maybe.map'
+                 ' (overviewRowSaysThisShipHasItLocked "%s")) == Just False'
+                 % SONYA],
+                definitions=self.definitions),
+            [True] * 6)
+
+    def test_the_bar_still_cannot_see_her_on_the_reading_that_matters(self):
+        """The measurement the fix rests on, on this file's own fixture: the
+        pilot run 9 shot is in the lock bar and `lockedTargetNamed` -- the
+        matcher the guard used to decide with -- answers `Nothing`."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ['(wrappedRowLocked |> Maybe.andThen (lockedTargetNamed "%s"))'
+                 " == Nothing" % SONYA,
+                 '(barNamesHer |> Maybe.andThen (lockedTargetNamed "%s"))'
+                 " /= Nothing" % SONYA],
+                definitions=self.definitions),
+            [True, True])
+
+    def test_the_guard_holds_fire_on_the_reading_that_used_to_fire(self):
+        """The whole of #390 in one line: this reading answered `ClearToFire`
+        before, because the only instrument the guard had was the one the
+        client's wrapping defeats."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ['(wrappedRowLocked |> Maybe.map (friendlyFireStepFromReading'
+                 ' [] 0)) == Just (UnlockAFleetPilot "%s"'
+                 " OverviewRowIndicator)" % SONYA,
+                 "(wrappedRowLocked |> Maybe.map (friendlyFireStepFromReading"
+                 " [] 0 >> friendlyFireVetoesTheGuns)) == Just True"],
+                definitions=self.definitions),
+            [True, True])
+
+    def test_the_bar_is_still_a_signal_and_not_leftovers(self):
+        """Replacing one instrument with the other would pass every case
+        above. This is the reading where only the bar can answer -- an overview
+        row without the indicator drawn on it, which is what a client that
+        never draws it looks like, and nothing in this repo has yet watched one
+        come back."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ['(barNamesHer |> Maybe.map (friendlyFireStepFromReading [] 0))'
+                 ' == Just (UnlockAFleetPilot "%s" TargetBarLabels)' % SONYA],
+                definitions=self.definitions),
+            [True])
+
+    def test_a_row_with_no_bar_parsed_is_not_a_clean_lock_bar(self):
+        self.assertEqual(
+            self.repl.evaluate(
+                ['(rowLockedNoBar |> Maybe.map (friendlyFireStepFromReading'
+                 ' [] 0)) == Just (UnlockAFleetPilot "%s"'
+                 " OverviewRowIndicator)" % SONYA],
+                definitions=self.definitions),
+            [True])
+
+    def test_what_this_change_still_does_not_close(self):
+        """Named rather than left to be found. Both instruments can go quiet on
+        the same reading: the bar wraps her name *and* the row carries no
+        indicator -- a client that does not draw one, an overview preset that
+        hides fleet members so there is no row at all, or a pilot who left the
+        grid still holding a lock. The guard then reads exactly as it did
+        before this change, which is why the row signal was added to the bar's
+        answer and not put in its place.
+        """
+        self.assertEqual(
+            self.repl.evaluate(
+                ["(wrappedRowClear |> Maybe.map (friendlyFireStepFromReading"
+                 " [] 0)) == Just ClearToFire"],
+                definitions=self.definitions),
             [True])
 
 
@@ -506,6 +908,19 @@ class TheGuardsAreOnEveryFiringPathTest(unittest.TestCase):
             "\n\n\n{-| The values this gauge is allowed to have at all.")]
         self.assertIn("friendlyFireStepFromReading", update)
         self.assertIn("unlockFleetPilotAskedReadings + 1", update)
+        self.assertIn("targetBarSawThePilot signal", update)
+
+    def test_the_rule_is_still_a_function_of_plain_values(self):
+        """What makes every case in `TheFriendlyFireRuleTest` possible, and
+        the property #390 was most at risk of spending: the second signal lives
+        on the overview, and reading it inside the rule would have meant no
+        case could execute the guard without constructing a reading.
+        `friendlyFireStepFromReading` is the whole of the reading half."""
+        rule = self.declaration("friendlyFireStep")
+        self.assertIn("pilotsLockedOnTheOverview : List String", rule)
+        self.assertNotIn("ReadingFromGameClient", rule)
+        self.assertIn("overviewRowSaysThisShipHasItLocked", self.declaration(
+            "friendlyFireStepFromReading"))
 
     def test_the_membership_source_is_named_every_reading(self):
         """The half of #367 that is about the log rather than the trigger:
@@ -528,6 +943,18 @@ class TheGuardsAreOnEveryFiringPathTest(unittest.TestCase):
         self.assertIn("GAVE UP unlocking ", guard)
         self.assertIn("HOLDING FIRE on ", guard)
         self.assertIn("UNLOCKING, guns held", guard)
+
+    def test_every_refusal_names_the_instrument_that_saw_the_pilot(self):
+        """#390's own status-line half. Two instruments that fail in opposite
+        directions means a line saying only "held" leaves the next incident
+        reasoning from silence about which one was working -- which is the
+        shape of #367 itself, one level down."""
+        guard = self.declaration("describeFriendlyFireGuard")
+        self.assertEqual(guard.count("describeLockedPilotSignal signal"), 4)
+        signals = self.declaration("describeLockedPilotSignal")
+        for phrase in ("the target bar's labels",
+                       "the overview row's lock indicator"):
+            self.assertIn(phrase, signals)
 
 
 class TheThreeCommanderResolversAreTwoTest(unittest.TestCase):
