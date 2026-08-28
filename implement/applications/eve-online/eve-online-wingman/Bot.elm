@@ -669,6 +669,42 @@ type alias BotMemory =
     -- `recoverFromRetreat`.
     , recoveringFromRetreat : Bool
 
+    -- Where a fleet-mate last said they were, and who said it: the place a
+    -- `Travel to`/`is at location`/`is in position at` broadcast named, carried
+    -- across the retreat so `recoverFromRetreat` has somewhere to fly to.
+    -- #381 is what its absence cost -- the retreat is what puts the commander
+    -- off grid, so the one arm reached after every successful retreat was the
+    -- one arm that could never do anything, and three of four live wingmen sat
+    -- in it healthy while the fleet fought.
+    --
+    -- **Unfiltered by `follow-fleet-broadcast-from`, and the pilot travels with
+    -- the place**, which is what lets the decision ask the question rather than
+    -- the memory. `fleetCommanderNameFromReading`'s primary source is the fleet
+    -- window's own header, which comes and goes; a place filtered in at a moment
+    -- the header was readable and refused at a moment it was not would be a
+    -- memory whose contents depend on a transient. Storing the sender means one
+    -- reading's answer decides both halves, and the status line can say whose
+    -- place this is when the answer is "not the commander's".
+    --
+    -- **What clears it**: a newer place broadcast replaces it, from any pilot;
+    -- and the reunion drops it, on the same reading `recoveringFromRetreat`
+    -- clears, because "he is right here" supersedes wherever he last said he
+    -- was. So a place this arm routes to was always broadcast since the last
+    -- time this ship was with its commander. There is no age bound, because
+    -- there is no wingman corpus to place one against (WINGMAN.md) and the
+    -- arm's own give-up is what stops a stale place costing a session. See
+    -- `fleetPlaceBroadcastAfterReading`.
+    , fleetPlaceBroadcast : Maybe { pilot : String, place : String }
+
+    -- Readings in a row spent by `recoverFromRetreat` asking the client to get
+    -- this ship back to its commander, bounded for #321's reason: an arm this
+    -- high in the tree that answers `Just` forever owns the whole bot.
+    -- Advances only on the answers that dispatch, resets on a reading the ship
+    -- is warping or jumping (the ask worked -- the ship is moving, which is
+    -- `retreatAskedReadings`' own rule), holds once spent, and resets to zero
+    -- when the recovery ends. See `retreatRecoveryStep`.
+    , retreatRecoveryAskedReadings : Int
+
     -- Readings in a row spent clicking a weapon that will not come active on
     -- the locked target, bounded for the reason #326 measured: a turret that
     -- could not activate held that bot's decision for 262 consecutive
@@ -3247,6 +3283,8 @@ initBotMemory =
         }
     , retreatAskedReadings = 0
     , recoveringFromRetreat = False
+    , fleetPlaceBroadcast = Nothing
+    , retreatRecoveryAskedReadings = 0
     , gateAskedReadings = 0
     , calledTargetGone = Nothing
     , calledGateRecallAskedReadings = 0
@@ -3368,7 +3406,7 @@ statusTextFromState context =
                     , [ describeDrones ]
                     , [ describeMiddleRowModules context, describeMiddleRowAsk context ]
                     , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
-                    , [ describeRetreat context ]
+                    , [ describeRetreat context, describeRetreatRecovery context ]
                     , [ describeFleetMembership context, describeFriendlyFireGuard context ]
                     , [ describeAccelerationGateAsk context ]
                     , [ describeCalledObject context ]
@@ -3975,6 +4013,50 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         commanderIsOnGrid =
             fleetCommanderOverviewEntry context.readingFromGameClient /= Nothing
 
+        recoveringFromRetreatNow : Bool
+        recoveringFromRetreatNow =
+            if retreatIsDecided then
+                True
+
+            else if commanderIsOnGrid then
+                False
+
+            else
+                botMemoryBefore.recoveringFromRetreat
+
+        -- #381. The place travels with the pilot who named it and the reunion
+        -- drops it, both stated in `fleetPlaceBroadcastAfterReading`. The clear
+        -- is keyed on the same `commanderIsOnGrid` that clears
+        -- `recoveringFromRetreat` one binding up, deliberately: the two are one
+        -- event -- this ship is back with its commander -- and two conditions
+        -- for it would be two definitions drifting apart.
+        fleetPlaceBroadcastNow : Maybe { pilot : String, place : String }
+        fleetPlaceBroadcastNow =
+            fleetPlaceBroadcastAfterReading
+                { seenThisReading = fleetPlaceBroadcastAnyPilot context.readingFromGameClient
+                , commanderIsOnGrid = commanderIsOnGrid
+                , before = botMemoryBefore.fleetPlaceBroadcast
+                }
+
+        -- Taken from the shipped rule rather than restated beside it, the same
+        -- arrangement as `answeringABackupCall` and for its reason: the arm and
+        -- this counter ask one rule, so they cannot disagree about which
+        -- reading was spent. `retreatRecoveryAnswersThatSpendAReading` is the
+        -- list, so an answer that dispatches nothing -- no commander named, a
+        -- budget already spent, a ship already in warp, and above all a grid
+        -- with nowhere to rejoin -- spends none of the budget. Charging that
+        -- last one would be #389 exactly: a give-up counted out of state the
+        -- arm never acted on.
+        recoveringStepNow : RetreatRecoveryStep
+        recoveringStepNow =
+            retreatRecoveryStepFromReading
+                context.botSettings.followFleetBroadcastFrom
+                { recovering = recoveringFromRetreatNow
+                , fleetPlaceBroadcast = fleetPlaceBroadcastNow
+                , askedReadings = botMemoryBefore.retreatRecoveryAskedReadings
+                }
+                context.readingFromGameClient
+
         shipIsApproachingNow : Bool
         shipIsApproachingNow =
             shipIsApproachingFromReading context.readingFromGameClient
@@ -4227,15 +4309,34 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.retreatAskedReadings + 1
-    , recoveringFromRetreat =
-        if retreatIsDecided then
-            True
+    , recoveringFromRetreat = recoveringFromRetreatNow
+    , fleetPlaceBroadcast = fleetPlaceBroadcastNow
+    , retreatRecoveryAskedReadings =
+        if recoveringStepNow == NotRecoveringFromARetreat then
+            -- The episode is over -- the ship is back with its commander, or a
+            -- fresh retreat has not started one yet. A second retreat gets a
+            -- fresh budget; one recovery does not get two.
+            0
 
-        else if commanderIsOnGrid then
-            False
+        else if recoveringStepNow == AlreadyOnTheWayBackToTheCommander then
+            -- The ship is warping or jumping, so the recovery is executing
+            -- however long it takes -- `retreatAskedReadings`' own rule, and
+            -- what keeps a legitimate multi-jump route off a bound sized for a
+            -- cascade. It cannot undo a spent budget, because the rule asks the
+            -- give-up before it asks this.
+            0
+
+        else if List.member recoveringStepNow retreatRecoveryAnswersThatSpendAReading then
+            botMemoryBefore.retreatRecoveryAskedReadings + 1
 
         else
-            botMemoryBefore.recoveringFromRetreat
+            -- Held rather than advanced, `goToFleetMateWarpAskedReadings`'s own
+            -- arrangement: this ship is still away from its commander and this
+            -- arm did not ask this reading. Holding is also what makes the
+            -- give-up stick -- a reset here would un-give-up on the very next
+            -- reading -- and it keeps the status line's "after N readings"
+            -- meaningful, which is #389's own lesson.
+            botMemoryBefore.retreatRecoveryAskedReadings
     , approachFleetCommanderAskedReadings =
         if askingTheCommanderForAnApproach then
             botMemoryBefore.approachFleetCommanderAskedReadings + 1
@@ -5112,6 +5213,102 @@ fleetMatePlaceAnyPilot readingFromGameClient =
 
                 _ ->
                     Nothing
+
+
+{-| Every place a broadcast can name, with whoever named it -- the three forms
+that carry one, in one answer.
+
+`fleetMatePlaceAnyPilot` above is deliberately **not** this function narrowed:
+it answers the two _company_ verbs only, because what it feeds
+(`goToFleetMateDestinationAsked`) is the ask that goes out when a mate calls
+this ship to them, and a travel broadcast is not that call -- it reaches
+`actOnFleetBroadcast`'s own branch. This one answers "where did anybody last
+say they were", which is a different question with a different consumer
+(`recoverFromRetreat`), and the Olivia reading in #381 is why it has to include
+`TravelTo`: the place that was demonstrably available on the very reading three
+wingmen had nothing to fly to was `Gal Bistot: Travel to Madirmilire`.
+
+Both drop the pilot's own ship type and neither trims anything else -- the place
+is handed to `@host set-destination` and to ESI beyond it, so a normalisation
+applied here is one nothing downstream can undo.
+
+-}
+fleetPlaceBroadcastAnyPilot : ReadingFromGameClient -> Maybe { pilot : String, place : String }
+fleetPlaceBroadcastAnyPilot readingFromGameClient =
+    fleetBroadcastBannerText readingFromGameClient
+        |> Maybe.andThen
+            (\bannerText ->
+                case parseFleetBroadcast bannerText of
+                    TravelTo { pilot, destination } ->
+                        Just { pilot = pilot, place = destination }
+
+                    AtLocation { pilot, system } ->
+                        Just { pilot = pilot, place = system }
+
+                    InPositionAt { pilot, gate } ->
+                        Just { pilot = pilot, place = gate }
+
+                    _ ->
+                        Nothing
+            )
+        |> Maybe.andThen
+            (\seen ->
+                if String.isEmpty seen.pilot || String.isEmpty seen.place then
+                    Nothing
+
+                else
+                    Just seen
+            )
+
+
+{-| What this ship remembers about where its fleet last said it was, after one
+reading.
+
+Three rules, and the second is the one that keeps a remembered place from
+outliving its usefulness silently:
+
+  - **A place named on this reading replaces whatever was remembered**, whoever
+    named it. Latest wins, and the decision -- not this -- is what refuses a
+    place the commander did not name; see `fleetPlaceBroadcast`'s own comment.
+    That the new place can be somebody else's is a real cost: Olivia broadcasting
+    `is in position at` displaces the commander's travel destination, and the
+    recovery then has nothing and gives up rather than routing somewhere
+    arbitrary, which is the refusal `goToFleetMate`'s own doc comment already
+    makes.
+
+  - **The reunion drops it.** On the reading the commander gets an overview row
+    -- the same reading `recoveringFromRetreat` clears -- wherever he last said
+    he was is superseded by his being right there. So no place this arm ever
+    routes to was broadcast before the last time this ship was with its
+    commander, which is the invalidation `recoverFromRetreat` needs and the one
+    an age bound would only approximate.
+
+  - **Otherwise it is held**, because the banner persists between broadcasts and
+    a reading that names no place is not a reading that says the fleet moved.
+
+**A place seen this reading beats the reunion**, which is the ordering rather
+than a detail of it: a commander who broadcasts `Travel to X` on the very
+reading this ship rejoins him has said where the fleet is going next, and that
+is the most useful thing this memory ever holds.
+
+-}
+fleetPlaceBroadcastAfterReading :
+    { seenThisReading : Maybe { pilot : String, place : String }
+    , commanderIsOnGrid : Bool
+    , before : Maybe { pilot : String, place : String }
+    }
+    -> Maybe { pilot : String, place : String }
+fleetPlaceBroadcastAfterReading placeCase =
+    case placeCase.seenThisReading of
+        Just seen ->
+            Just seen
+
+        Nothing ->
+            if placeCase.commanderIsOnGrid then
+                Nothing
+
+            else
+                placeCase.before
 
 
 {-| The same broadcast, filtered against the pilots this bot trusts with its
@@ -8288,34 +8485,416 @@ between them.
 **Placed where the retreat used to sit**, above the broadcast and combat arms,
 for the same reason the retreat itself is: a ship still flying back from a
 break-off should not be pulled into the next fight or the next broadcast
-before it gets there.
+before it gets there. **Never above the retreat**, which is the one arm that
+outranks it: a ship whose health says leave must leave, and a recovery that
+outranked the retreat would fly a damaged ship back toward the fight it just
+broke off from.
+
+**#381 is what this arm cost as first written.** It handed `goToFleetMate` the
+empty string as the place to route to, and that function's off-grid half needs
+a place name -- so it took the branch that says so and waited. That branch is
+not an edge case here: `warpAwayFromDanger` warps to a celestial at AU range or
+docks, so **the retreat is what puts the commander off grid**, and the arm
+reached after every successful retreat was the one arm that could never do
+anything. It is not merely idle either, since this arm answers `Just` for as
+long as `recoveringFromRetreat` is latched and sits above the broadcast and
+combat arms: three of four live wingmen sat here healthy, at 86-100% shield,
+for tens of readings each, not fighting.
+
+**Two levers, and they answer different questions**, which is why both are
+here and why neither replaces the other:
+
+  - `Fleet Member` -> `Warp to Member` **from the broadcast banner**, where the
+    banner is the commander's own call for company. That is a _live_ signal --
+    he is broadcasting from where he is now -- and it is one action that lands
+    this ship on his grid. It is the same cascade `answerTheBackupCall` drives
+    off the banner for a caller with no overview row, so it works off grid, and
+    `fleetMateBroadcastBannerElement` is what keeps it off a stale banner: this
+    is exactly the caller that arrives with somebody else's banner still up.
+
+  - **Where the commander last said he was**, remembered across the retreat in
+    `fleetPlaceBroadcast` and handed to `goToFleetMate` as a real place. That is
+    a _historical_ signal and it is the cross-system one.
+
+**The banner is asked first**, because after `warpAwayFromDanger` this ship is
+usually in the same system as its commander and on a different grid -- where the
+banner's warp is exactly right and a route to a system the ship is already in is
+an empty route `navigateTowardFleetCommander` has nothing to click. It is also
+the cheaper of the two: one cascade against a host round trip and a multi-jump
+flight.
+
+**A place another pilot named is refused**, not used. `fleetPlaceBroadcast`
+carries the sender for exactly this, and routing to wherever anybody last
+broadcast is the "somewhere arbitrary" `goToFleetMate`'s own doc comment
+declines to fly to.
+
+**Everything that is not an action hands the reading back**, refusals included
+-- #360's lesson, and #385's arrangement. A commander nothing names, a budget
+spent, a ship already in warp and a grid with nowhere to rejoin are each
+_nothing more to do about the recovery_, not a reason to spend the reading
+saying so. `describeRetreatRecovery` is what says it instead, on every reading,
+since a `Nothing` cannot carry a decision line.
 
 -}
 recoverFromRetreat : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
 recoverFromRetreat context shipUI =
-    if not context.memory.recoveringFromRetreat then
-        Nothing
+    let
+        calledIt : String
+        calledIt =
+            "is this fleet's commander and this ship is recovering, rejoining"
+
+        named : DecisionPathNode -> Maybe DecisionPathNode
+        named =
+            describeBranch "Recovering from a retreat -- rejoin the fleet commander before resuming."
+                >> Just
+    in
+    case ( retreatRecoveryStepNow context, fleetCommanderName context ) of
+        ( RejoinTheCommanderOnThisGrid, Just commander ) ->
+            -- The on-grid half, unchanged and bounded by its own
+            -- `goToFleetMateWarpAskedReadings`. The place is never read down
+            -- this branch, and it is handed over anyway rather than blanked,
+            -- so no caller of `goToFleetMate` has to know which half it will
+            -- take.
+            goToFleetMate context shipUI commander (rememberedCommanderPlace context |> Maybe.withDefault "") calledIt
+                |> Maybe.andThen named
+
+        ( WarpToTheCommanderFromTheBroadcast, Just commander ) ->
+            fleetMateBroadcastBannerElement
+                context.eventContext.botSettings.followFleetBroadcastFrom
+                commander
+                context.readingFromGameClient
+                |> Maybe.map
+                    (\banner ->
+                        describeBranch
+                            ("'"
+                                ++ commander
+                                ++ "' "
+                                ++ calledIt
+                                ++ " -- warping to them from the broadcast banner's own menu."
+                            )
+                            (warpToFleetMateFromTheBroadcastBanner context banner)
+                    )
+                |> Maybe.andThen named
+
+        ( RouteToWhereTheCommanderLastSaidHeWas, Just commander ) ->
+            rememberedCommanderPlace context
+                |> Maybe.andThen (\place -> goToFleetMate context shipUI commander place calledIt)
+                |> Maybe.andThen named
+
+        _ ->
+            -- Every other answer -- not recovering, nothing naming the
+            -- commander, a budget spent, a ship already on its way, and a grid
+            -- with nowhere to rejoin -- hands the reading back so the drones,
+            -- the guns, the gate and the broadcasts below become reachable.
+            Nothing
+
+
+{-| Where this ship's own fleet commander last said he was, if that is who said
+it.
+
+The filter is here rather than in the memory update, and
+`fleetPlaceBroadcast`'s own comment says why: `fleetCommanderNameFromReading`
+reads the fleet window's header first and that header comes and goes, so asking
+once per reading keeps both halves of the question on one answer.
+
+Matched exactly, never as a substring -- `fleetInviteSenderFromMessageBox`'s
+reason, and it decides where this ship flies.
+
+-}
+rememberedCommanderPlace : BotDecisionContext -> Maybe String
+rememberedCommanderPlace context =
+    rememberedCommanderPlaceFromReading
+        context.eventContext.botSettings.followFleetBroadcastFrom
+        context.memory.fleetPlaceBroadcast
+        context.readingFromGameClient
+
+
+{-| The same question over a bare reading, so `updateMemoryForNewReadingFromGame`
+can ask it too -- `backupCallStepFromReading`'s arrangement, for #102's reason.
+-}
+rememberedCommanderPlaceFromReading :
+    List String
+    -> Maybe { pilot : String, place : String }
+    -> ReadingFromGameClient
+    -> Maybe String
+rememberedCommanderPlaceFromReading followFleetBroadcastFrom fleetPlaceBroadcast readingFromGameClient =
+    Maybe.map2 Tuple.pair
+        fleetPlaceBroadcast
+        (fleetCommanderNameFromReading followFleetBroadcastFrom readingFromGameClient)
+        |> Maybe.andThen
+            (\( remembered, commander ) ->
+                if remembered.pilot == commander then
+                    Just remembered.place
+
+                else
+                    Nothing
+            )
+
+
+{-| What to do about getting back to the commander after a retreat, as eight
+named answers over five facts and a counter -- `backupCallStep`'s shape, for its
+reason: a rule reachable only through a whole `BotDecisionContext` is a rule
+nothing can execute in a test.
+
+**A commander nothing names is asked before the give-up**, `backupCallStep`'s
+own ordering: a ship with no fleet-mate to rejoin has not given up on rejoining
+one, and reporting it as a spent budget would send an operator to look at the
+bound when what is wrong is `follow-fleet-broadcast-from`.
+
+**The give-up is asked before every actionable clause**, which is
+`approachFleetCommanderStep`'s ordering and for its reason: a spent budget must
+never be masked by a moment that happens to look actionable.
+
+**A ship in warp or jumping spends nothing and is told to do nothing.** The
+manoeuvre is the recovery executing, and charging it would bill this arm for the
+very flight it asked for -- `retreatAskedReadings`' own rule, and what keeps a
+legitimate multi-jump route from reaching a bound sized for a cascade.
+
+-}
+retreatRecoveryStep :
+    { recovering : Bool
+    , commanderIsNamed : Bool
+    , commanderIsOnThisGrid : Bool
+    , bannerNamesTheCommander : Bool
+    , remembersWhereTheCommanderWas : Bool
+    , shipIsWarpingOrJumping : Bool
+    , askedReadings : Int
+    }
+    -> RetreatRecoveryStep
+retreatRecoveryStep recoveryCase =
+    if not recoveryCase.recovering then
+        NotRecoveringFromARetreat
+
+    else if not recoveryCase.commanderIsNamed then
+        NothingNamesTheCommander
+
+    else if retreatRecoveryHasBeenGivenUpOn recoveryCase.askedReadings then
+        GaveUpOnRejoiningTheCommander
+
+    else if recoveryCase.shipIsWarpingOrJumping then
+        AlreadyOnTheWayBackToTheCommander
+
+    else if recoveryCase.commanderIsOnThisGrid then
+        RejoinTheCommanderOnThisGrid
+
+    else if recoveryCase.bannerNamesTheCommander then
+        WarpToTheCommanderFromTheBroadcast
+
+    else if recoveryCase.remembersWhereTheCommanderWas then
+        RouteToWhereTheCommanderLastSaidHeWas
 
     else
-        (case fleetCommanderName context of
-            Nothing ->
-                Just
-                    (describeBranch
-                        ("Nothing names the fleet commander -- 'follow-fleet-broadcast-from' is unset,"
-                            ++ " so this ship has no fleet-mate to rejoin."
-                        )
-                        waitForProgressInGame
-                    )
+        NowhereToRejoinTheCommander
 
-            Just commander ->
-                -- `Nothing` here is `goToFleetMate`'s give-up and passes
-                -- straight through, so a rejoin this bot has stopped asking
-                -- for does not hold the readings the arms below it need. See
-                -- `warpToFleetMateOnThisGrid`.
-                goToFleetMate context shipUI commander "" "is this fleet's commander and this ship is recovering, rejoining"
-        )
-            |> Maybe.map
-                (describeBranch "Recovering from a retreat -- rejoin the fleet commander before resuming.")
+
+type RetreatRecoveryStep
+    = NotRecoveringFromARetreat
+    | NothingNamesTheCommander
+    | GaveUpOnRejoiningTheCommander
+    | AlreadyOnTheWayBackToTheCommander
+    | RejoinTheCommanderOnThisGrid
+    | WarpToTheCommanderFromTheBroadcast
+    | RouteToWhereTheCommanderLastSaidHeWas
+    | NowhereToRejoinTheCommander
+
+
+{-| The answers on which this arm actually spends a reading, and therefore the
+answers the counter advances on.
+
+One list with two readers -- `updateMemoryForNewReadingFromGame` and the status
+clause -- rather than a condition restated beside the rule, which is #102's
+defect, and #389 is what the wrong half costs: a counter advanced from state
+alone reported a give-up at 46 readings against a bound of 20 with the arm never
+having been asked.
+
+**`NowhereToRejoinTheCommander` is deliberately not here.** It dispatches
+nothing -- it is precisely the reading this arm has nothing to do with -- so
+charging it would be exactly #389's defect, and it needs no budget: it already
+hands the reading back, so the arms below it run whether or not anything is ever
+remembered.
+
+-}
+retreatRecoveryAnswersThatSpendAReading : List RetreatRecoveryStep
+retreatRecoveryAnswersThatSpendAReading =
+    [ RejoinTheCommanderOnThisGrid
+    , WarpToTheCommanderFromTheBroadcast
+    , RouteToWhereTheCommanderLastSaidHeWas
+    ]
+
+
+{-| Whether the budget for getting one ship back to its commander has been
+spent. One comparison with two readers -- the step rule and the status clause --
+`fleetMateWarpHasBeenGivenUpOn`'s arrangement, for its reason.
+-}
+retreatRecoveryHasBeenGivenUpOn : Int -> Bool
+retreatRecoveryHasBeenGivenUpOn askedReadings =
+    retreatRecoveryAskedReadingsBound <= askedReadings
+
+
+{-| How many readings this bot spends getting back to its commander before it
+stops asking.
+
+**`fleetMateWarpAskedReadingsBound`, written as that constant rather than as a
+number**, `backupCallAskedReadingsBound`'s own arrangement and for its reason:
+this arm drives the same banner cascade that bound was sized for, and the route
+half drives `routeMarkerCascade`, so a second number would be two opinions about
+the same two mechanisms on a bot that still has no corpus of its own
+(WINGMAN.md).
+
+**It is not a bound on the flight**, which is what makes thirty enough for a
+multi-jump route: `AlreadyOnTheWayBackToTheCommander` sits above every
+actionable answer, so every reading the ship is actually warping or jumping
+resets the count. What accumulates is readings spent clicking with the ship
+standing still, which is the only shape that can run forever.
+
+-}
+retreatRecoveryAskedReadingsBound : Int
+retreatRecoveryAskedReadingsBound =
+    fleetMateWarpAskedReadingsBound
+
+
+{-| The shipped rule over this reading, for the arm and for the status clause.
+
+Two callers, one question -- `backupCallStepNow`'s arrangement, for #102's
+reason: a status line derived from a second copy of the conditions is a status
+line that can disagree with the decision it is reporting on.
+
+-}
+retreatRecoveryStepNow : BotDecisionContext -> RetreatRecoveryStep
+retreatRecoveryStepNow context =
+    retreatRecoveryStepFromReading
+        context.eventContext.botSettings.followFleetBroadcastFrom
+        { recovering = context.memory.recoveringFromRetreat
+        , fleetPlaceBroadcast = context.memory.fleetPlaceBroadcast
+        , askedReadings = context.memory.retreatRecoveryAskedReadings
+        }
+        context.readingFromGameClient
+
+
+{-| The same rule over a bare reading and the three memory fields it reads.
+
+`updateMemoryForNewReadingFromGame` is the second caller and the reason this
+exists: the counter has to advance on the answers this arm spends a reading on,
+and asking the rule is the only way the counter and the arm cannot come to
+disagree about which reading was spent -- #102's defect, and #389 is the shape
+it takes when the counter is advanced from state instead.
+
+-}
+retreatRecoveryStepFromReading :
+    List String
+    ->
+        { recovering : Bool
+        , fleetPlaceBroadcast : Maybe { pilot : String, place : String }
+        , askedReadings : Int
+        }
+    -> ReadingFromGameClient
+    -> RetreatRecoveryStep
+retreatRecoveryStepFromReading followFleetBroadcastFrom recoveryMemory readingFromGameClient =
+    let
+        commander : Maybe String
+        commander =
+            fleetCommanderNameFromReading followFleetBroadcastFrom readingFromGameClient
+    in
+    retreatRecoveryStep
+        { recovering = recoveryMemory.recovering
+        , commanderIsNamed = commander /= Nothing
+        , commanderIsOnThisGrid =
+            commander
+                |> Maybe.map (\pilot -> pilotIsOnOverview pilot readingFromGameClient)
+                |> Maybe.withDefault False
+        , bannerNamesTheCommander =
+            (commander
+                |> Maybe.andThen
+                    (\pilot ->
+                        fleetMateBroadcastBannerElement
+                            followFleetBroadcastFrom
+                            pilot
+                            readingFromGameClient
+                    )
+            )
+                /= Nothing
+        , remembersWhereTheCommanderWas =
+            rememberedCommanderPlaceFromReading
+                followFleetBroadcastFrom
+                recoveryMemory.fleetPlaceBroadcast
+                readingFromGameClient
+                /= Nothing
+        , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading readingFromGameClient
+        , askedReadings = recoveryMemory.askedReadings
+        }
+
+
+{-| What this bot is doing about getting back to its commander, in one line.
+
+Exists for `describeBackupCall`'s reason, and #381 is the incident that makes it
+load-bearing here: `recoverFromRetreat` now answers `Nothing` for five of its
+eight cases, and from outside the decision tree a ship that is not recovering,
+one with no commander named, one whose budget is spent, one already in warp and
+one with nowhere at all to fly are the same silence. Naming the case on every
+reading is what would have made #381 one line rather than a live read of four
+clients.
+
+-}
+describeRetreatRecovery : BotDecisionContext -> String
+describeRetreatRecovery context =
+    let
+        remembered : String
+        remembered =
+            case context.memory.fleetPlaceBroadcast of
+                Nothing ->
+                    " Nowhere remembered: no broadcast has named a place since this ship was last with its commander."
+
+                Just { pilot, place } ->
+                    " Last place broadcast: '"
+                        ++ place
+                        ++ "' by '"
+                        ++ pilot
+                        ++ "'"
+                        ++ (if rememberedCommanderPlace context == Nothing then
+                                ", which is not this fleet's commander, so it is not routed to."
+
+                            else
+                                "."
+                           )
+
+        spentOf : String
+        spentOf =
+            " Readings spent: "
+                ++ String.fromInt context.memory.retreatRecoveryAskedReadings
+                ++ " of "
+                ++ String.fromInt retreatRecoveryAskedReadingsBound
+                ++ "."
+    in
+    "Retreat recovery: "
+        ++ (case retreatRecoveryStepNow context of
+                NotRecoveringFromARetreat ->
+                    "this ship is not flying back from a retreat."
+
+                NothingNamesTheCommander ->
+                    "nothing names the fleet commander -- 'follow-fleet-broadcast-from' is unset and no fleet window header names one -- so there is no fleet-mate to rejoin, and the reading is handed back."
+
+                GaveUpOnRejoiningTheCommander ->
+                    "GAVE UP after "
+                        ++ String.fromInt context.memory.retreatRecoveryAskedReadings
+                        ++ " readings -- this ship is still away from its commander and is fighting where it is."
+                        ++ remembered
+
+                AlreadyOnTheWayBackToTheCommander ->
+                    "warping or jumping back." ++ spentOf
+
+                RejoinTheCommanderOnThisGrid ->
+                    "the commander is on this grid." ++ spentOf
+
+                WarpToTheCommanderFromTheBroadcast ->
+                    "warping from the commander's own broadcast banner." ++ spentOf
+
+                RouteToWhereTheCommanderLastSaidHeWas ->
+                    "routing to where the commander last said he was." ++ remembered ++ spentOf
+
+                NowhereToRejoinTheCommander ->
+                    "the commander is off this grid and nothing names a place to fly to, so the reading is handed back."
+                        ++ remembered
+           )
 
 
 {-| Which guard says leave, in the order they are asked.
