@@ -845,9 +845,15 @@ class TheArmsBelowGetTheirReadingsBackTest(ReplCase):
 
     def test_the_arms_below_are_reachable_once_the_recovery_gives_up(self):
         """The whole of #381: recovering, nothing to rejoin, and the root
-        reaches the same decision it reaches with no recovery at all. Compared
-        against the control rather than asserted as a shape, so a root that had
-        stopped working entirely could not pass."""
+        reaches the same decision it reaches with no recovery at all.
+
+        Compared against the no-recovery root rather than asserted as a shape,
+        so this case does not have to name whichever arm below happens to
+        answer. What it cannot see on its own is a change that breaks **both**
+        sides identically -- a give-up that parks satisfies it -- which is what
+        `test_the_control_arm_acts_when_the_recovery_stands_down` is beside it
+        for, and that control is what killed the parking mutation.
+        """
         self.assertEqual(self.root(), self.root(recovering="False"))
 
     def test_the_arms_below_are_reachable_once_the_budget_is_spent(self):
