@@ -46,33 +46,40 @@ The give-up **hands the reading back** rather than parking, so everything below
 becomes reachable -- and it does **not** clear `recoveringFromRetreat`, which is
 the only thing that says this ship is still away from its fleet.
 
-Confirmed by mutation, each failing a named case:
+Confirmed by mutation, **eighteen** of them, each failing a named case:
 
- 1. the bound removed, so the arm answers forever --
-    `test_the_bound_is_asked_at_its_boundary` and
-    `test_the_give_up_outranks_every_actionable_moment`;
- 2. the counter advanced from state alone (`recovering` rather than the rule's
-    answer), so a reading with nowhere to rejoin is charged -- #389's own shape
-    -- `test_nowhere_to_rejoin_spends_nothing` and
-    `test_only_the_answers_that_dispatch_are_counted`;
- 3. the give-up made to answer `Just (... waitForProgressInGame)` --
-    `test_the_give_up_hands_the_reading_back` and
-    `test_the_arms_below_are_reachable_once_the_recovery_gives_up`;
+ 1. the bound removed entirely, so the arm answers forever --
+    `test_the_bound_is_asked_at_its_boundary`,
+    `test_the_give_up_outranks_every_actionable_moment`,
+    `test_the_give_up_hands_the_reading_back`,
+    `test_the_arms_below_are_reachable_once_the_budget_is_spent` and
+    `test_the_give_up_names_itself_and_its_count`;
+ 2. the counter advanced from `recoveringFromRetreatNow` rather than from the
+    rule's answer -- #389's own shape -- `test_the_counter_asks_the_shipped_rule`;
+ 3. the give-up made to answer `named waitForProgressInGame` --
+    `test_the_arm_hands_back_rather_than_waiting`,
+    `test_nothing_to_rejoin_hands_the_reading_back`,
+    `test_the_give_up_hands_the_reading_back` and, in the control class,
+    `test_the_control_arm_acts_when_the_recovery_stands_down`;
  4. the reunion clause dropped from `fleetPlaceBroadcastAfterReading`, so a
     place is never invalidated -- `test_the_reunion_drops_the_remembered_place`;
  5. `recoverFromRetreat` hoisted above `retreatToTheCommander` --
     `test_the_arm_sits_below_the_retreat`;
- 6. the empty place handed to `goToFleetMate` again --
-    `test_a_remembered_place_is_flown_to` and
-    `test_the_arm_no_longer_routes_to_the_empty_place`;
+ 6. the empty place handed to `goToFleetMate` again, which restores #381's own
+    decision line -- `test_the_arm_no_longer_routes_to_the_empty_place` and
+    `test_a_remembered_place_is_flown_to`;
  7. `TravelTo` dropped from `fleetPlaceBroadcastAnyPilot`, which is the Olivia
     reading -- `test_the_travel_form_carries_a_place`;
  8. the commander filter dropped, so any pilot's place is flown to --
-    `test_another_pilots_place_is_not_flown_to`;
+    `test_another_pilots_place_is_not_flown_to`,
+    `test_the_commander_is_matched_exactly`,
+    `test_a_place_another_pilot_named_is_not_flown_to` and
+    `test_the_remembered_place_and_its_sender_are_named`;
  9. the commander filter weakened to a substring --
     `test_the_commander_is_matched_exactly`;
-10. the warping reset moved above the give-up, so a warp un-gives-up --
-    `test_a_warp_cannot_undo_a_spent_budget`;
+10. the warping clause asked before the give-up, so a warp un-gives-up --
+    `test_a_warp_cannot_undo_a_spent_budget` and
+    `test_the_give_up_outranks_every_actionable_moment`;
 11. the counter reset rather than held past the bound --
     `test_the_counter_is_held_once_the_budget_is_spent`;
 12. the give-up made to clear `recoveringFromRetreat` --
@@ -80,11 +87,29 @@ Confirmed by mutation, each failing a named case:
 13. permission asked after the give-up --
     `test_a_commander_nothing_names_is_not_a_spent_budget`;
 14. the banner clause dropped, so an in-system commander is routed to instead --
-    `test_the_banner_is_asked_before_the_remembered_place`;
+    `test_the_banner_is_asked_before_the_remembered_place` and
+    `test_the_commanders_own_banner_is_warped_to`;
 15. `describeRetreatRecovery` dropped from the status line --
     `test_the_arm_is_visible_in_the_status_line`;
-16. the counter's rule restated in the memory update rather than asked --
-    `test_the_counter_asks_the_shipped_rule`.
+16. the memory update restating the rule's conditions rather than asking it --
+    `test_the_memory_side_step_is_the_same_function_the_arm_asks`;
+17. `NowhereToRejoinTheCommander` added to the answers that spend a reading,
+    which is #389 exactly -- `test_nowhere_to_rejoin_spends_nothing`;
+18. the remembered place dropping the pilot who named it --
+    `test_the_travel_form_carries_a_place`.
+
+**Three of those survived a first version of a case and each hole was real.**
+`test_the_arm_no_longer_routes_to_the_empty_place` asked its question of the
+reading with *nothing* remembered, where the arm answers `Nothing` whatever it
+hands `goToFleetMate`, so it asserted nothing; it is asked of the reading that
+has somewhere to fly to now. `test_the_arm_is_visible_in_the_status_line`
+asserted the bare name `describeRetreatRecovery context`, which is also the
+definition's own head line, so it passed with the call site deleted; it reads
+the clause's group in `statusTextFromState` now. And
+`test_the_arms_below_are_reachable_once_the_recovery_gives_up` compares two
+roots, so a give-up that parks satisfies it by breaking both -- which is what
+`test_the_control_arm_acts_when_the_recovery_stands_down` is beside it for, and
+that control is what killed mutation 3.
 
 The cases run the real `Bot.elm` through `elm repl`, and the readings they ask
 about come from the real `EveOnline.ParseUserInterface`. Nothing here reads a
@@ -714,9 +739,16 @@ class TheArmActsOnWhatTheRuleSaysTest(ReplCase):
             [True, True, True, True])
 
     def test_the_arm_no_longer_routes_to_the_empty_place(self):
-        """#381's own decision line, gone. It said the ship was "not on this
-        grid, and nothing names a place to route to" and then waited."""
-        self.assertNotIn("nothing names a place to route to", self.arm())
+        """#381's own decision line, gone.
+
+        Asked of the reading that has somewhere to fly to, which is the one a
+        reverted arm would still print it on: with nothing remembered the arm
+        answers `Nothing` whatever it hands `goToFleetMate`, so asking it there
+        would assert nothing. The line is quoted from the issue.
+        """
+        line = self.arm(place='(saidBy "%s" "%s")' % (COMMANDER, PLACE))
+        self.assertNotIn("nothing names a place to route to", line)
+        self.assertNotIn("there is nothing to fly toward", line)
 
     def test_nothing_to_rejoin_hands_the_reading_back(self):
         self.assertEqual(self.arm(), "ARM STOOD DOWN")
@@ -963,8 +995,17 @@ class TheWiringIsWhereItSaysItIsTest(unittest.TestCase):
         self.assertIn("botMemoryBefore.fleetPlaceBroadcast", place)
 
     def test_the_arm_is_visible_in_the_status_line(self):
-        self.assertIn("describeRetreatRecovery context",
-                      collapsed(self.source))
+        """The clause's own group in `statusTextFromState`, not the bare name.
+
+        `describeRetreatRecovery context` is also the **definition's** own head
+        line, so asserting the name alone passes with every call site deleted --
+        which is what a first version of this case did. What is asserted is the
+        group it sits in, beside the retreat's own clause, so the placement is
+        pinned as well as the presence.
+        """
+        self.assertIn(
+            ", [ describeRetreat context, describeRetreatRecovery context ]",
+            collapsed(self.source))
 
     def test_the_arm_hands_back_rather_than_waiting(self):
         """Every answer that is not an action is a `Nothing`, so nothing under
