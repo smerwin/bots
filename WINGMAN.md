@@ -70,18 +70,35 @@ collapsed it and the click landed on a neighbour, **Kara opened an `InfoWindow`
 and Heather a `LoggerWindow`**, and every pilot spent its whole 30-reading menu
 budget and fell back to the key. Per-command range is not achievable from here.
 
-So the manoeuvre is an **approach**, commanded the way the client commands one:
-hold `Q`, click the commander's overview row, release. One reading per ask, no
-menu to open, nothing to mis-click into. It closes to the client's own approach
-distance — which is why the operator's call was that an approach is close
-enough for station-keeping, and why `orbit-fc-range` no longer means anything.
+So the manoeuvre is an **approach**, commanded by a **double click on the
+commander's overview row**. One reading per ask, no menu to open, nothing to
+mis-click into, and no key. It closes to the client's own approach distance —
+which is why the operator's call was that an approach is close enough for
+station-keeping, and why `orbit-fc-range` no longer means anything.
 
-**Behind it is a better-evidenced half.** The *shape* is proven — the corpus
-carries `Press the 'W' key and click on the overview entry` 40,648 times, so
-hold-key-click-release on an overview row is what this repo does routinely —
-but `Q` itself appears **nowhere** in 1.8 GB of logs. So past
-`approachFleetCommanderKeyAskedReadingsBound` (20) the arm selects the
-commander's row and presses the Selected Item panel's own
+**It was a `Q` chord first, and #387 is why it is not.** #384 built the ask as
+`KeyDown vkey_Q`, click, `KeyUp vkey_Q` — the exact mechanism
+`eve-online-saxrat` had deliberately removed. `cg_input` posts a key event
+without stamping flags on it, so a posted `Q` carries whatever modifier state
+the session holds, and with the Fn bit set that is macOS **Quick Note**: one
+recorded saxrat run took the equivalent branch **1,571 times** while Notes came
+to the front **241 times** with nobody at the machine. This arm is reached
+whenever the commander is on grid, so it is on a hot path by exactly the same
+design. The wingmen fly on the Windows hosts today, where Quick Note does not
+exist, but the Mac flies bots too and `ensureShipIsApproaching` is generic.
+
+The gesture is a port rather than an invention: `mouseDoubleClickOnUIElement`
+and `effectsMouseDoubleClickAtLocation` were **absent from this app's vendored
+framework** — three of the six apps had them and this was not one — and were
+copied in from saxrat byte-identical, so the wingman converges on the majority
+rather than growing a fourth dialect. saxrat's own
+`test_saxrat_approach_by_double_click.py` is the authority for all of this.
+
+**Behind it is a better-evidenced half.** What is still unwitnessed is the
+manoeuvre rather than the gesture: saxrat double clicks a *rat's* row for
+exactly this, but `ManeuverApproach` appears **nowhere** in 1.8 GB of logs, on
+any row. So past `approachFleetCommanderDoubleClickAskedReadingsBound` (20) the
+arm selects the commander's row and presses the Selected Item panel's own
 `selectedItemApproach` instead. That name is not invented here: it is
 `eve-online-mission-runner`'s, and that bot's `selectThenPanelAction` note
 records it live, taking a ship from 0.0 to 585 m/s after a cascade had achieved
@@ -100,9 +117,9 @@ The unproven mechanism is primary because it costs one reading against the
 panel's two; a run that has to fall back prints `FELL BACK to the panel's
 Approach button`, which is the measurement that would swap them.
 
-**This needs the commander to be on the active overview preset.** The click
-lands on an overview row, so a preset that hides fleet members leaves the arm
-with nothing to click — and that is indistinguishable from a commander who is
+**This needs the commander to be on the active overview preset.** The double
+click lands on an overview row, so a preset that hides fleet members leaves the
+arm with nothing to click — and that is indistinguishable from a commander who is
 genuinely off the grid. The bot cannot change the preset and does not pretend
 to know which case it is in: the status line says `has NO OVERVIEW ROW` and
 names the preset as a possible cause.
@@ -110,7 +127,7 @@ names the preset as a possible cause.
 **Success is the client's own word and nothing else.** The ship UI's manoeuvre
 indication reading `Approach` is what stops the ask; a dispatched click never
 counts. Past `approachFleetCommanderAskedReadingsBound` (40 — twenty for the
-key and twenty for the panel, both being this file's key-over-a-click
+double click and twenty for the panel, both being this file's key-over-a-click
 allowance `weaponsAskedReadingsBound`) the arm hands the reading back and the
 status line says `GAVE UP`, so a mechanism that turns out not to work is
 visible and bounded rather than a bot that believes it is on station.
@@ -820,10 +837,12 @@ restart.
     The banner cascade is now used only where a banner from that pilot is up;
     the recovery path presses the Selected Item panel's own Warp To instead.
     Nothing has yet watched either half fly for a ship that was hurt.
-- **Whether a `Q` modifier-click commands an approach at all.** The proven
-  usage of that shape in this repo is `W` for an orbit
-  (`ensureShipIsOrbiting`, inherited); `Q` and `Approach` were substituted into
-  it and nothing has watched the result. A first run either shows
+- **Whether a double click on a *pilot's* overview row commands an approach.**
+  The gesture is proven — `eve-online-saxrat` double clicks a rat's row for
+  exactly this, and the framework function is that bot's, ported unchanged —
+  but no run in the corpus has recorded `ManeuverApproach` coming back, on any
+  row, so what the client answers for a fleet member is unwatched. A first run
+  either shows
   `Approach on the commander: approaching, commander at N m`, or falls back and
   prints `FELL BACK to the panel's Approach button`, or spends both budgets and
   prints `GAVE UP after 40 readings`. It cannot fail silently, because a

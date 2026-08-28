@@ -1837,6 +1837,22 @@ mouseClickOnUIElement mouseButton uiElement =
         Err ()
 
 
+mouseDoubleClickOnUIElement :
+    Common.EffectOnWindow.MouseButton
+    -> UIElement
+    -> Result () (List Common.EffectOnWindow.EffectOnWindowStruct)
+mouseDoubleClickOnUIElement mouseButton uiElement =
+    if uiNodeVisibleRegionLargeEnoughForClicking uiElement then
+        Ok
+            (Common.EffectOnWindow.effectsMouseDoubleClickAtLocation
+                mouseButton
+                (uiElement.totalDisplayRegionVisible |> centerFromDisplayRegion)
+            )
+
+    else
+        Err ()
+
+
 {-| Checks if the visible portion of the display region of the given element is large enough for clicking on it.
 Other UI elements like windows or context menus could occlude this UI element, preventing us from a direct click in the current step.
 -}
