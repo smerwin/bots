@@ -3233,19 +3233,6 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     List.isEmpty namesOfRatsInOverview
                         && selectedItemIsOverviewEntry context.readingFromGameClient gateEntry
 
-        -- The same shape as `askingTheGateToOpen`: something is locked and at
-        -- least one weapon is still not cycling, which is exactly the state
-        -- `fireOnActiveTarget` spends a click on. Advancing only here means a
-        -- fight where every weapon does come active leaves the counter alone
-        -- rather than burning the allowance while the guns are working.
-        askingAWeaponToActivate : Bool
-        askingAWeaponToActivate =
-            not (List.isEmpty context.readingFromGameClient.targets)
-                && (context.readingFromGameClient.shipUI
-                        |> Maybe.map (shipUIModulesToActivateOnTarget >> List.any (.isActive >> Maybe.withDefault False >> not))
-                        |> Maybe.withDefault False
-                   )
-
         gaugeReading : (EveOnline.ParseUserInterface.Hitpoints -> Int) -> Maybe Int
         gaugeReading whichGauge =
             context.readingFromGameClient.shipUI
@@ -3314,7 +3301,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         shipIsApproachingNow =
             shipIsApproachingFromReading context.readingFromGameClient
 
-        -- The same shape as `askingTheGateToOpen` and `askingAWeaponToActivate`,
+        -- The same shape as `askingTheGateToOpen` and `weaponsNow`,
         -- and taken from the shipped rule itself rather than restated beside
         -- it: a counter advanced by one condition and read by another is
         -- #102's defect, and `approachFleetCommanderStep` is the only thing
@@ -3364,6 +3351,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             friendlyFireStepFromReading
                 context.botSettings.followFleetBroadcastFrom
                 botMemoryBefore.unlockFleetPilotAskedReadings
+                context.readingFromGameClient
+
+        -- The same arrangement again, and #389 is the reading of it that had a
+        -- hole: this used to be a state test written beside the guns rather
+        -- than the guns' own rule, so it charged the budget on readings
+        -- `fireOnActiveTarget` refused -- and, while an arm above held every
+        -- reading, on readings it never ran at all. See
+        -- `weaponsAnswersThatSpendAReading`.
+        weaponsNow : WeaponsStep
+        weaponsNow =
+            weaponsStepFromReading
+                friendlyFireNow
+                botMemoryBefore.weaponsAskedReadings
                 context.readingFromGameClient
     in
     { lastDockedStationNameFromInfoPanel =
@@ -3451,12 +3451,20 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             0
     , weaponsAskedReadings =
         if List.isEmpty context.readingFromGameClient.targets then
+            -- An empty lock bar ends the episode, so the next fight starts on
+            -- a fresh allowance rather than inheriting the last one's.
             0
 
-        else if askingAWeaponToActivate then
+        else if List.member weaponsNow weaponsAnswersThatSpendAReading then
             botMemoryBefore.weaponsAskedReadings + 1
 
         else
+            -- Held rather than advanced, `unlockFleetPilotAskedReadings`'s own
+            -- arrangement: something is still locked and this arm did not ask
+            -- this reading, and a counter that ran away would make the status
+            -- line's "after N readings" meaningless -- which is exactly what
+            -- #389 read off three pilots at 46, 36 and 50 against a bound
+            -- of 20.
             botMemoryBefore.weaponsAskedReadings
     , hitpoints = hitpointsNow
     , lowestShieldPercentSinceHealthy = lowestShieldNow
@@ -4355,13 +4363,15 @@ pilotIsOnOverview pilotName readingFromGameClient =
     overviewEntryForPilot pilotName readingFromGameClient /= Nothing
 
 
-{-| The named pilot's own overview row, which is the thing a manoeuvre is
-issued against -- `ensureShipIsOrbiting` clicks it.
+{-| The overview row whose Name cell is exactly this string -- a pilot's, or a
+called target's -- which is the thing a manoeuvre or a lock is issued against.
+`ensureShipIsOrbiting` clicks it, and so does `lockCalledTarget`.
 
 `pilotIsOnOverview` is this same question with the row thrown away, and asks it
 through here rather than beside it: a bot that decides "the commander is on the
 grid" one way and then looks for the row another way can answer yes to the
-first and find nothing to click for the second.
+first and find nothing to click for the second. `calledTargetIsLocked` is the
+same argument for the lock indicator.
 
 -}
 overviewEntryForPilot : String -> ReadingFromGameClient -> Maybe OverviewWindowEntry
@@ -5155,31 +5165,84 @@ target was called. It locked what it was told to, correctly and repeatedly,
 and then never shot it: locking read as working, engaging read as broken.
 
 So this answers `Just` only while there is something left to do about the
-lock. Once the target is in the target bar, the reading falls through to the
-drone arm and then to `fireOnActiveTarget`.
+lock. Once the target is locked, the reading falls through to the drone arm and
+then to `fireOnActiveTarget`.
+
+**How "locked" is decided is the whole of #389** -- the first shape of this
+asked the target bar's rendering and got the wrong answer on every reading of
+four live sessions. `calledTargetIsLocked` is that argument.
 
 -}
 bringCalledTargetUnderFire : BotDecisionContext -> String -> Maybe DecisionPathNode
 bringCalledTargetUnderFire context calledTarget =
-    case lockedTargetNamed calledTarget context.readingFromGameClient of
-        Just _ ->
-            Nothing
+    if calledTargetIsLocked calledTarget context.readingFromGameClient then
+        Nothing
 
-        Nothing ->
-            Just
-                (describeBranch
-                    ("Lock the called target '" ++ calledTarget ++ "'.")
-                    (lockCalledTarget context calledTarget)
-                )
+    else
+        Just
+            (describeBranch
+                ("Lock the called target '" ++ calledTarget ++ "'.")
+                (lockCalledTarget context calledTarget)
+            )
+
+
+{-| Whether the called target is already in this ship's lock bar.
+
+**Ask the client, do not pattern-match a name against a rendering.** #361 asked
+this of the target bar alone, through `lockedTargetNamed`, and #389 is what
+that cost: all four pilots looped on `Lock the called target 'Centus Black Ops
+Agent'` while their own status lines reported 3, 2 and 1 targets locked, and
+every cascade died on `Could not find menu entry with text equal 'Lock Target'`
+-- because the thing was already locked and the client was offering `Unlock
+Target`. The arm never stood down, so the drones and the guns below it were
+never reached.
+
+The bar cannot answer this reliably. #303 read one off a live client with a rat
+locked and got `['Tower Sentry', 'Sansha I', '20 km']`: **the name is split
+across labels at a wrap point**, and `targetTextsCarryName` asks whether any one
+label carries the whole name. A called target whose name wraps -- which is most
+of them -- is invisible to that question however long it sits in the bar.
+
+`targetedByMe` is the client's own answer, off the `targetedByMeIndicator` icon
+the overview draws on a row this ship has locked, and it is read from the row
+the broadcast named -- the same row `lockCalledTarget` right-clicks, so the
+thing that decides and the thing that acts cannot disagree about which object
+they mean. That is #303's own prescription, applied here.
+
+**The bar is kept as a second opinion rather than dropped.** Either signal
+standing alone is enough to stand down. Nothing in this repo has yet watched
+`targetedByMeIndicator` come back from a client (see WINGMAN.md), and the two
+fail in opposite directions: the bar goes quiet on a wrapped name, the icon
+would go quiet if this client draws it under a different name. Standing down on
+either is the safe direction -- a false stand-down costs one reading falling
+through to the drones and the guns, which is where the reading is wanted
+anyway, while a false "not locked" is the loop above.
+
+-}
+calledTargetIsLocked : String -> ReadingFromGameClient -> Bool
+calledTargetIsLocked calledTarget reading =
+    let
+        overviewRowSaysSo : Bool
+        overviewRowSaysSo =
+            overviewEntryForPilot calledTarget reading
+                |> Maybe.map (.commonIndications >> .targetedByMe)
+                |> Maybe.withDefault False
+    in
+    overviewRowSaysSo || (lockedTargetNamed calledTarget reading /= Nothing)
 
 
 {-| The locked target whose target-bar text carries this name, if it is
 locked at all.
 
-Matched against `textsTopToBottom` rather than against the overview, because
-the question this answers is "is it already in the target bar", and the
-target bar is the only thing that knows. The texts carry distance and other
-decoration alongside the name, so this contains rather than equals.
+Matched against `textsTopToBottom`, which is the only field that names what is
+in the bar -- and the reason `unlockFleetPilotInTargetBar` has to come through
+here: the unlock right-clicks a `Target`, so it needs the bar entry itself and
+not merely the knowledge that something is locked. The texts carry distance and
+other decoration alongside the name, so this contains rather than equals.
+
+**This is a weak instrument and `calledTargetIsLocked` says why.** A name the
+bar wraps across two labels is not found here at all. Read that note before
+adding a third caller.
 
 -}
 lockedTargetNamed : String -> ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.Target
@@ -5201,6 +5264,17 @@ would fire on somebody nobody could then find. It is also what lets
 An empty `name` would contain into every text, so callers building the name
 list filter empties out -- see `fleetPilotNamesFromReading`.
 
+**What it cannot see, recorded because #389 was filed on it.** The bar wraps a
+long name across labels -- a live read in #303 with a rat locked returned
+`['Tower Sentry', 'Sansha I', '20 km']` -- and this asks whether any _one_ label
+carries the whole name, so a wrapped name is not matched at all. #389 moved the
+called-target recognition off this and onto the overview's own
+`targetedByMe` for that reason. `friendlyFireStep` still asks its question here,
+and this weakens it in the direction of firing: a fleetmate whose name the bar
+wraps is not recognised as locked. That is not changed here -- the guard is a
+safety rule and the change it needs is its own claimed piece of work, #390,
+rather than something folded into this one.
+
 -}
 targetTextsCarryName : String -> List String -> Bool
 targetTextsCarryName name textsTopToBottom =
@@ -5208,15 +5282,16 @@ targetTextsCarryName name textsTopToBottom =
 
 
 {-| Lock the pilot a `Target` broadcast named, from their overview row.
+
+The row is resolved through `overviewEntryForPilot`, which is what
+`calledTargetIsLocked` reads the lock indicator off -- one lookup, so the arm
+that decides the target is not locked and the arm that clicks it cannot end up
+on two different rows.
+
 -}
 lockCalledTarget : BotDecisionContext -> String -> DecisionPathNode
 lockCalledTarget context calledTarget =
-    case
-        context.readingFromGameClient.overviewWindows
-            |> List.concatMap .entries
-            |> List.filter (.objectName >> (==) (Just calledTarget))
-            |> List.head
-    of
+    case overviewEntryForPilot calledTarget context.readingFromGameClient of
         Nothing ->
             describeBranch
                 ("'" ++ calledTarget ++ "' is not on the overview.")
@@ -6921,71 +6996,73 @@ here regardless of what the guns do.
 -}
 fireOnActiveTarget : BotDecisionContext -> Maybe DecisionPathNode
 fireOnActiveTarget context =
-    if friendlyFireVetoesTheGuns (friendlyFireStepFromContext context) then
-        -- #367. Deliberately asked here and not only where the lock is made.
-        -- This arm is what shot Sonya Spodumain in run 9, and it did so
-        -- through a lock no fleet check ever saw: `weaponsStep` reads
-        -- `targetLocked` and nothing about who is locked, so the one guard
-        -- that existed -- on the broadcast path, before the lock -- was
-        -- bypassed by every other way a target reaches the bar.
-        Nothing
+    case weaponsStepFromContext context of
+        FriendlyFireHoldsTheTrigger ->
+            -- #367. Deliberately part of this rule and not only of the arm
+            -- that makes the lock. This arm is what shot Sonya Spodumain in
+            -- run 9, and it did so through a lock no fleet check ever saw:
+            -- the rest of `weaponsStep` reads `targetLocked` and nothing about
+            -- who is locked, so the one guard that existed -- on the broadcast
+            -- path, before the lock -- was bypassed by every other way a
+            -- target reaches the bar.
+            Nothing
 
-    else
-        case context.readingFromGameClient.shipUI of
-            Nothing ->
-                Nothing
+        NoShipUIToFireFrom ->
+            Nothing
 
-            Just shipUI ->
-                let
-                    inactiveWeapon : Maybe ShipUIModuleButton
-                    inactiveWeapon =
-                        shipUI
-                            |> shipUIModulesToActivateOnTarget
-                            |> List.filter (.isActive >> Maybe.withDefault False >> not)
-                            |> List.head
-                in
-                case
-                    weaponsStep
-                        { targetLocked = not (List.isEmpty context.readingFromGameClient.targets)
-                        , inactiveWeaponPresent = inactiveWeapon /= Nothing
-                        , askedReadings = context.memory.weaponsAskedReadings
-                        }
-                of
-                    NoTargetToFireOn ->
-                        Nothing
+        NoTargetToFireOn ->
+            Nothing
 
-                    AllWeaponsCycling ->
-                        Nothing
+        AllWeaponsCycling ->
+            Nothing
 
-                    GaveUpOnWeapons ->
-                        Nothing
+        GaveUpOnWeapons ->
+            Nothing
 
-                    ActivateAWeapon ->
-                        inactiveWeapon
-                            |> Maybe.map
-                                (\inactiveModule ->
-                                    describeBranch
-                                        "I see a locked target and a weapon that is not cycling. Activate it."
-                                        (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
-                                )
+        ActivateAWeapon ->
+            inactiveWeaponFromReading context.readingFromGameClient
+                |> Maybe.map
+                    (\inactiveModule ->
+                        describeBranch
+                            "I see a locked target and a weapon that is not cycling. Activate it."
+                            (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
+                    )
 
 
-{-| The weapon decision on its own, as four named answers over three facts --
-the same shape as `accelerationGateActivationStep`, and for the same reason:
-the interesting rule here is an ordering between a bound and a state check,
-and a rule that can only be reached through a full `BotDecisionContext` is a
-rule nothing can execute in a test.
+{-| The weapon decision on its own, as six named answers over four facts and a
+counter -- the same shape as `approachFleetCommanderStep` and
+`accelerationGateActivationStep`, and for the same reason: the interesting rule
+here is an ordering between a bound and a state check, and a rule that can only
+be reached through a full `BotDecisionContext` is a rule nothing can execute in
+a test.
 
 The bound is checked **before** "are all the weapons already cycling", so a
 give-up is reported as a give-up rather than being masked by a fight that
 happens to be going fine at that moment.
 
+**The friendly-fire veto and the ship UI are answers of this rule rather than
+conditions wrapped around it, and #389 is why.** `updateMemoryForNewReadingFromGame`
+advances `weaponsAskedReadings` from this rule; anything the arm refuses on that
+the rule cannot see is a reading charged to a budget nobody spent. The veto in
+particular held the trigger on readings the old counter still billed for.
+
 -}
 weaponsStep :
-    { targetLocked : Bool, inactiveWeaponPresent : Bool, askedReadings : Int }
+    { friendlyFireHoldsTheTrigger : Bool
+    , shipUIIsShowing : Bool
+    , targetLocked : Bool
+    , inactiveWeaponPresent : Bool
+    , askedReadings : Int
+    }
     -> WeaponsStep
-weaponsStep { targetLocked, inactiveWeaponPresent, askedReadings } =
-    if not targetLocked then
+weaponsStep { friendlyFireHoldsTheTrigger, shipUIIsShowing, targetLocked, inactiveWeaponPresent, askedReadings } =
+    if friendlyFireHoldsTheTrigger then
+        FriendlyFireHoldsTheTrigger
+
+    else if not shipUIIsShowing then
+        NoShipUIToFireFrom
+
+    else if not targetLocked then
         NoTargetToFireOn
 
     else if weaponsAskedReadingsBound <= askedReadings then
@@ -6998,11 +7075,91 @@ weaponsStep { targetLocked, inactiveWeaponPresent, askedReadings } =
         ActivateAWeapon
 
 
+{-| The answers on which this arm actually spends a reading, and therefore the
+answers the counter advances on.
+
+`approachFleetCommanderAnswersThatSpendAReading`'s arrangement, and #389 is the
+hole it closes here. The condition this replaced advanced the counter from state
+alone -- something locked, some top-row module not cycling -- without asking
+whether `fireOnActiveTarget` had run. While #389's broadcast arm held every
+reading above the guns, that counter still climbed past its bound of 20 and
+reported **`GAVE UP after 46 readings`** on an arm that had never once been
+asked. Three pilots reported 46, 36 and 50.
+
+**One answer, not four.** `ActivateAWeapon` is the only one that dispatches
+anything; `AllWeaponsCycling` is a fight going fine, and the other four are the
+arm declining to act at all. Nothing here counts a wait, unlike
+`approachFleetCommanderAnswersThatSpendAReading`'s `WaitForTheApproachButton`,
+because this arm has no wait to buy readings with -- it either clicks a module
+or hands the reading back.
+
+**What it still cannot see** is the reading being taken by an arm _above_ the
+guns: the memory update runs before the decision and has no view of it. So the
+drone arm holding a reading (#326: on every reading a drone idles) still charges
+this budget when a weapon happens to be silent at the same moment. That
+over-counts rather than under-counts, which is the safe direction for a bound
+whose job is to stop an unbounded ask -- the same trade `fleetMateOnThisGrid`
+states. What #389 broke was not that margin but the whole arm being unreachable,
+and the recognition fix is what ends that.
+
+-}
+weaponsAnswersThatSpendAReading : List WeaponsStep
+weaponsAnswersThatSpendAReading =
+    [ ActivateAWeapon ]
+
+
 type WeaponsStep
-    = NoTargetToFireOn
+    = FriendlyFireHoldsTheTrigger
+    | NoShipUIToFireFrom
+    | NoTargetToFireOn
     | AllWeaponsCycling
     | GaveUpOnWeapons
     | ActivateAWeapon
+
+
+{-| The rule above, asked of a reading, so that the memory update, the arm and
+the status line are all reading one decision -- `friendlyFireStepFromReading`'s
+arrangement, for #102's reason.
+
+The friendly-fire verdict is passed in rather than recomputed because
+`updateMemoryForNewReadingFromGame` has already worked it out for its own
+counter, and two evaluations of that rule on one reading are two chances for it
+to be asked with different numbers.
+
+-}
+weaponsStepFromReading : FriendlyFireStep -> Int -> ReadingFromGameClient -> WeaponsStep
+weaponsStepFromReading friendlyFire askedReadings readingFromGameClient =
+    weaponsStep
+        { friendlyFireHoldsTheTrigger = friendlyFireVetoesTheGuns friendlyFire
+        , shipUIIsShowing = readingFromGameClient.shipUI /= Nothing
+        , targetLocked = not (List.isEmpty readingFromGameClient.targets)
+        , inactiveWeaponPresent = inactiveWeaponFromReading readingFromGameClient /= Nothing
+        , askedReadings = askedReadings
+        }
+
+
+weaponsStepFromContext : BotDecisionContext -> WeaponsStep
+weaponsStepFromContext context =
+    weaponsStepFromReading
+        (friendlyFireStepFromContext context)
+        context.memory.weaponsAskedReadings
+        context.readingFromGameClient
+
+
+{-| The first top-row module that is not cycling, if there is one.
+
+One lookup with two readers -- the rule's `inactiveWeaponPresent` and the click
+`ActivateAWeapon` makes -- so the arm cannot decide to activate a weapon and
+then find none to activate.
+
+-}
+inactiveWeaponFromReading : ReadingFromGameClient -> Maybe ShipUIModuleButton
+inactiveWeaponFromReading readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.map shipUIModulesToActivateOnTarget
+        |> Maybe.withDefault []
+        |> List.filter (.isActive >> Maybe.withDefault False >> not)
+        |> List.head
 
 
 {-| How many readings the unlock cascade gets before this bot stops asking.
@@ -7955,24 +8112,48 @@ status line exactly like a bot with nothing to shoot. That is the shape #343's
 review caught, and the one that made this whole class of bug hard to see from
 a console in the first place.
 
+**It reports the rule's own answer, and the number it prints now means what it
+says.** Before #389 this restated the arm's conditions in its own `if` chain
+while a third restatement in `updateMemoryForNewReadingFromGame` advanced the
+number -- three copies, and the counter's copy was the one that was wrong. Every
+line here names a `WeaponsStep`, so a console reads the decision that was taken
+rather than a description of it, and "N readings spent asking" counts only
+readings on which this arm asked.
+
+The bound is printed beside the count on the two lines that are still spending
+it, because "5 readings" means nothing without the allowance beside it.
+
 -}
 describeWeaponsAsk : BotDecisionContext -> String
 describeWeaponsAsk context =
-    if friendlyFireVetoesTheGuns (friendlyFireStepFromContext context) then
-        "Weapons: HELD by the friendly fire guard."
+    let
+        spent : String
+        spent =
+            String.fromInt context.memory.weaponsAskedReadings
+                ++ " of "
+                ++ String.fromInt weaponsAskedReadingsBound
+                ++ " readings spent asking one to activate."
+    in
+    case weaponsStepFromContext context of
+        FriendlyFireHoldsTheTrigger ->
+            "Weapons: HELD by the friendly fire guard."
 
-    else if List.isEmpty context.readingFromGameClient.targets then
-        "Weapons: nothing locked."
+        NoShipUIToFireFrom ->
+            "Weapons: no ship UI in this reading, so nothing to fire with."
 
-    else if weaponsAskedReadingsBound <= context.memory.weaponsAskedReadings then
-        "Weapons: GAVE UP after "
-            ++ String.fromInt context.memory.weaponsAskedReadings
-            ++ " readings asking a weapon to come active on a locked target."
+        NoTargetToFireOn ->
+            "Weapons: nothing locked."
 
-    else
-        "Weapons: target locked, "
-            ++ String.fromInt context.memory.weaponsAskedReadings
-            ++ " readings spent asking one to activate."
+        GaveUpOnWeapons ->
+            "Weapons: GAVE UP after "
+                ++ String.fromInt context.memory.weaponsAskedReadings
+                ++ " readings asking a weapon to come active on a locked target."
+
+        AllWeaponsCycling ->
+            "Weapons: target locked and every weapon cycling, " ++ spent
+
+        ActivateAWeapon ->
+            "Weapons: target locked, " ++ spent
 
 
 {-| What the approach on the commander is doing, in one line.

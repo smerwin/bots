@@ -444,10 +444,22 @@ class TheGuardsAreOnEveryFiringPathTest(unittest.TestCase):
     def test_the_trigger_refuses_on_its_own_and_not_via_the_lock(self):
         """#367's first requirement. `fireOnActiveTarget` is the arm that shot
         Sonya, and it reached her through a lock the one existing fleet check
-        never saw."""
-        body = self.declaration("fireOnActiveTarget")
-        self.assertIn("friendlyFireVetoesTheGuns", body)
-        self.assertIn("weaponsStep", body)
+        never saw.
+
+        Re-expressed for #389, which made the veto an answer of `weaponsStep`
+        rather than a condition wrapped around it -- the counter is advanced
+        from that rule, and a refusal the rule cannot see is a reading charged
+        to a budget nobody spent. The property is unchanged and is now checked
+        along the path the arm actually takes: the arm asks the rule, and the
+        rule asks the guard.
+        """
+        arm = self.declaration("fireOnActiveTarget")
+        self.assertIn("weaponsStepFromContext context", arm)
+        self.assertIn("FriendlyFireHoldsTheTrigger ->", arm)
+        rule = self.declaration("weaponsStepFromReading")
+        self.assertIn("friendlyFireVetoesTheGuns", rule)
+        self.assertIn("friendlyFireHoldsTheTrigger", self.declaration(
+            "weaponsStep"))
 
     def test_the_self_defense_trigger_refuses_too(self):
         """The other arm that activates modules, and the one whose lock is made
