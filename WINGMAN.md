@@ -1669,20 +1669,22 @@ locked — because run 9's whole problem was that `grep "is in this fleet"` over
 the guard had never had a candidate or never had a list:
 
 ```
-Fleet membership: the Fleet window is open and lists 4 member rows: Greta
-Gneiss, ... Commander: 'Gal Bistot' (fleet window header). Local chat's
-standing icons mark 2: ...
+Fleet membership: corroborated -- the Fleet window's header states 5 pilots
+and 5 are resolved. Member rows: 4 (Greta Gneiss, ...). Commander: 'Gal
+Bistot' (fleet window header). Local chat's standing icons mark 2: ...
 Friendly fire guard: 3 locked, none of them a fleet pilot -- clear to fire.
 ```
 
 ```
-Fleet membership: THE FLEET WINDOW IS NOT OPEN, so the member list is
-unverifiable -- an empty one would otherwise read as 'nobody here is a
-fleetmate'. ...
+Fleet membership: NOT CORROBORATED -- the Fleet window's header states 5
+pilots and only 1 could be resolved, so an empty or short member list would
+otherwise read as 'nobody here is a fleetmate'. Open the Fleet window and
+expand its wings and squads to fire on players again. Member rows: 0 (none).
+...
 Friendly fire guard: HOLDING FIRE on 'Sonya Spodumain' -- a pilot on the
-overview, seen by the overview row's lock indicator, and with the Fleet
-window shut this bot cannot tell whether they are a fleetmate. Open it to
-fire on players again.
+overview, seen by the overview row's lock indicator, and this bot cannot tell
+whether they are a fleetmate because the Fleet window's header states 5
+pilots and only 1 could be resolved.
 ```
 
 **And every refusal names the instrument that saw the pilot**, which is #390's
@@ -1708,12 +1710,164 @@ deliberate. `chatUserIsKnownFleetmate` answers `False` for a chat row carrying
 no hint at all — correctly, since absent evidence must not read as "fleetmate"
 — so a fleet whose icons this bot cannot resolve looks exactly like no fleet.
 That is the same collapse the Fleet window's `[]` makes, so it cannot be the
-thing that rules it out. The window's presence is.
+thing that rules it out. **The window's presence is not it either**, which is
+the section below; what rules it out is the size the window's own header
+states.
 
 **What nobody has measured** is how promptly that icon updates when a pilot
 joins or leaves a fleet mid-session, which is what would be needed before it
 could be trusted as the primary source rather than an additive one. Run 9 is
 two sampled readings, not a series.
+
+### An open Fleet window is not a verified roster
+
+Issue #380. Four wingmen read the same fleet at the same moment (console
+readings 2026-08-27 15:23 and 15:31) and reported **different** member lists,
+while every one of them read the commander correctly out of the header:
+
+| pilot | member rows | local chat standing icons |
+|---|---:|---:|
+| Greta Gneiss | **0** | 0 |
+| Kara Kernite | **2** | 4 |
+| Heather Hemorphite | 4 | 4 |
+| Olivia Ochre | 4 | 4 |
+
+`fleetMembershipIsVerifiable` asked whether the Fleet **window was present**,
+deliberately not whether it listed anybody, because a fleet of one is a real
+reading and requiring a row would put the rule back to reasoning from an empty
+list. That argument is right about a fleet of one and wrong about Greta, who
+had a target locked:
+
+```
+Fleet membership: the Fleet window is open and lists 0 member rows: none.
+Friendly fire guard: 1 locked, none of them a fleet pilot -- clear to fire.
+```
+
+**A fleetmate missing from that list is one she would shoot, while the line
+says membership was verified.** It is #367's own incident with the guard
+installed and reporting confidently, and the fallback that would have caught
+it — refusing to fire on any recognised pilot — never runs, because it was
+gated on the window being *absent* and the window was present.
+
+#### Neither of #380's own two shapes catches it
+
+The issue offers corroborating the rows against local chat's icons and treating
+disagreement as unverified, or dropping the boolean and refusing on any
+recognised pilot where the two sources disagree. **Both are keyed on
+disagreement, and Greta's two sources agree — at zero** — so both verify the
+exact reading the issue was filed on. Kara's 2-against-4 is caught by either,
+and #396's union already folds her chat icons in and gives her four names, so
+the half those shapes do catch was largely answered before them.
+`test_the_two_sources_agreeing_at_zero_is_not_corroboration` executes that
+argument rather than asserting it.
+
+Requiring a non-empty row count is the other obvious move and is what the
+existing doc comment already declined: it reintroduces reasoning from an empty
+list, and it breaks a genuine fleet of one, whose window legitimately lists no
+rows because the only pilot is the boss in the header.
+
+#### The window states its own size, and that is the third instrument
+
+The captured header reads `Fleet (5)` beside **four** `FleetMember` rows —
+already recorded under "The member rows are not the whole fleet", where it is
+the evidence for unioning the commander in. Read the other way it is a
+statement of how many pilots there are, which nothing had ever read.
+
+`fleetRosterVerdict` compares that number against the count of **distinct**
+pilots `fleetPilotNamesFromReading` resolved, and answers four things:
+`FleetWindowIsShut`, `FleetSizeNotStated`, `RosterIsShort` and
+`RosterIsComplete`. Only the last lets an empty membership list mean "nobody".
+
+| reading | header | resolved | verdict |
+|---|---|---:|---|
+| Greta | `Fleet (5)` | 1 (the commander) | **short** |
+| Kara | `Fleet (5)` | 4 | **short** |
+| Heather, Olivia | `Fleet (5)` | 5 | complete |
+| a genuine fleet of one | `Fleet (1)` | 1 | complete |
+
+**Greta's reading and a fleet of one are otherwise identical** — window open,
+no member rows, no chat icons, the header naming the boss — so the stated size
+is the only thing on the reading that separates them. The two fixtures in
+`test_wingman_fleet_roster_corroborated.py` differ in one character.
+
+**It needs no theory of _why_ the rows differ**, which is the half #380 says
+nobody has established and this cannot establish either. Every candidate the
+issue names makes the rows a *subset* of the fleet, and a count catches a
+subset however it arose.
+
+**The count folds duplicates and case.** `fleetPilotNamesFromReading`
+concatenates three sources, so a pilot in the rows *and* in the chat icons
+appears twice — Kara's own reading resolves seven entries and four pilots.
+Counting the list would read seven against a stated five and call a roster
+short by two pilots complete. Over-merging two spellings of one name lowers the
+count, which reads as short and refuses; under-merging inflates it and
+verifies a roster that is not there, so the fold is the safe direction.
+
+**Both kinds of not-knowing refuse.** A shut window and a header that states no
+size are each "this reading cannot answer", never "the roster is complete" —
+`loadRefusalFromGameLog`'s register applied to a roster. Refusing is cheap
+here: `getNamesOfOtherPilotsInOverview` is built from local chat's userlist and
+never holds an NPC, so PvE is untouched and the cost falls entirely on shooting
+*players* whose fleet membership this reading cannot certify.
+`test_the_guard_still_fires_on_a_rat_beside_it` shows that with a control on
+the same reading — the same short roster, the same pilot on the same overview
+merely not locked, and a rat in the bar — rather than claiming it.
+
+**Kara now reads as short on a roster that is arguably complete enough**, and
+that is stated rather than hidden: the one name she is missing is *herself*,
+which no source on her own reading carries and which she cannot shoot. So she
+holds fire on strangers for a shortfall that is not dangerous. That is the
+direction chosen, and the header's own count is what would have to change to
+avoid it.
+
+#### What it means for the lock guard
+
+`fleetPilotNames` also feeds "do not lock a called target who is in the fleet",
+and **that list is deliberately untouched** — it is an *input* to the verdict
+and never the other way round, so there is no path by which a verdict can take
+a name off it. The lock guard therefore refuses exactly the names it refused
+before, never fewer; narrowing it by the verdict is the one change that would
+make it *quieter*, on exactly the readings where the roster is least
+trustworthy, and `TheLockGuardsConsumerIsNotQuieterTest` is what refuses that.
+
+What the lock guard gains is only that its shortfall is now named on every
+reading rather than being invisible, which is the evidence a follow-up would
+need. And the consequence is covered downstream: the two lists partition the
+pilots on the overview — a fleetmate the chat icons resolve is in
+`fleetPilotNames` and unlocked, and one they do not is in
+`getNamesOfOtherPilotsInOverview` and held — so a called fleetmate the roster
+missed is still not *fired* on while the roster is short.
+
+#### Verified without a live client
+
+`tools/macos-host/tests/test_wingman_fleet_roster_corroborated.py` (34 cases).
+The rules are executed through the real `Bot.elm` in `elm repl` and the
+readings they are asked about come from the real
+`EveOnline.ParseUserInterface` — **no parser change was required**. The
+issue's own table is read back off those readings before anything rests on
+them, and the comparison is asked at its boundary *and* against fixed values
+well clear of it in both directions, since a case that asks only about
+`constant - 1` and `constant` passes for any constant.
+
+Confirmed by mutation, **fourteen** of them, each failing a named case:
+`fleetMembershipIsVerifiable` reverted to `fleetWindow /= Nothing`, which is
+the shipped defect exactly; `RosterIsShort` made to corroborate; the
+comparison inverted so a fleet of one reads as unverified; a non-empty row
+count used as the rule instead; `FleetSizeNotStated` corroborating, so absent
+evidence reads as a finding; `FleetWindowIsShut` corroborating, which is #367
+undone; the distinct-name fold dropped and, separately, the case fold dropped;
+the guard handed a literal instead of the verdict; **the no-shoot list
+narrowed by the verdict**, which is the lock guard made quieter and fails 24
+cases; the status line still calling an open window verified; the two clauses
+given separate wordings so they can disagree about one reading; the size read
+as any integer in the header, so `Squad 1 (4)` answers; and the marker
+inlined twice so the match and the slice can drift.
+
+**One kill was thin and the case was added rather than accepted.** Handing
+`friendlyFireStep` a literal `membershipIsVerifiable = True` was caught by one
+executed case, because the rule is a function of plain lists (#396's own
+property) and no plain-list case can see its caller. `test_the_guard_is_told_
+the_real_verdict` reads that wiring out of the source.
 
 ## What is deliberately unfinished
 
@@ -2054,6 +2208,40 @@ restart.
   to watch is in that section; the direction it fails silently in is
   `Nowhere remembered:` on every reading of a run whose commander has been
   broadcasting.
+- **Why the four wingmen's member rows differ, which #380 leaves open and this
+  does not close.** The candidates are a window collapsed or scrolled so only
+  rendered rows parse, a fleet in wings and squads with only some branches
+  expanded, and a parse that depends on window size — and `FleetWindow
+  .fleetMembers` being a list of raw unparsed nodes while `fleetMemberNames`
+  scrapes `entryLabel` display texts out of the window's descendants is
+  consistent with all three, since a row that is not rendered contributes
+  nothing. **The roster rule is correct under all three**, because each makes
+  the rows a subset of the fleet and it compares against the header's own
+  count rather than reasoning about rows. What would settle it is one capture
+  per client, side by side at the same moment: `/check-ui-parse` against each
+  wingman's Fleet window with the wings and squads expanded, recording the
+  `FleetMember` node count, the `entryLabel` texts under them, the window's
+  display region, and whether a scrollbar is present. #411 is the separate
+  issue about what else those raw nodes carry; a capture for this one wants
+  the geometry, not the fields.
+- **Any of the roster verdict running.** No wingman log is on this Mac, so
+  nothing has watched the clause. What to watch on the first run: `Fleet
+  membership: corroborated -- the Fleet window's header states N pilots and N
+  are resolved.` on an ordinary reading. `NOT CORROBORATED ... states no fleet
+  size` on **every** reading would mean `Fleet (N)` is not where this parse
+  looks, and the bot would then hold fire on every player all session — safe,
+  visible, and the direction to expect if the capture is unrepresentative.
+  `NOT CORROBORATED ... states N pilots and only M could be resolved` standing
+  all evening with M one short of N is a client whose member rows do not list
+  the reading pilot themselves, which the issue's own arithmetic argues against
+  (Heather reads 4 rows in a five-pilot fleet whose fifth is the boss, which
+  leaves no other assignment) but which nothing has read directly.
+- **Whether the header states a size at genuine fleet sizes other than five.**
+  `Fleet (5)` is the one capture. A fleet of one is the case the rule most
+  needs and the one nobody has read: whether such a window draws `Fleet (1)`,
+  draws nothing, or is not opened at all is unknown, and the middle answer
+  makes a solo pilot hold fire on every player. That fails safe and says so on
+  every reading.
 - **Any of the backup-call arm running, and what the banner actually says.**
   #385's matcher is written from the issue's own live sighting, `...needs
   backup`, whose sender is elided — so **which of the two shapes this client
@@ -2067,7 +2255,9 @@ restart.
   `none on this reading.` while the banner plainly reads `needs backup` means
   the matcher is still not reading the client's wording, and
   `nothing on this reading says they are in this fleet` for a pilot who plainly
-  is means #380's under-reported member rows are costing this arm.
+  is means #380's under-reported member rows are costing this arm — which the
+  roster verdict now *reports* on the same reading without fixing, since
+  `fleetPilotNames` is deliberately untouched.
 - **The five remaining button labels.** A capture pass — one click per button,
   then read the history panel — is what turns them into matchable strings, and
   nothing here should match one before that happens. It would settle whether
@@ -2246,10 +2436,11 @@ restart.
 - **Everything about the friendly fire guard, on a live client.** `elm make`
   and `test_wingman_holds_fire_on_fleetmates.py` prove the rule and its
   placement; no client has been watched. What to watch on the first run:
-  whether `Fleet membership:` ever reads `THE FLEET WINDOW IS NOT OPEN` for a
-  session that was in a fleet the whole time (which would mean the guard is
-  running in its degraded mode by default and the launcher profile should open
-  the window), whether `Friendly fire guard: UNLOCKING` is ever followed by the
+  whether `Fleet membership:` ever reads `NOT CORROBORATED` for a session that
+  was in a fleet the whole time (which would mean the guard is running in its
+  degraded mode by default — since #380 that has three causes and the clause
+  names which, the window being shut being only one of them), whether
+  `Friendly fire guard: UNLOCKING` is ever followed by the
   same name still being locked on the next reading, and whether
   `GAVE UP unlocking` appears at all — which would mean the `Unlock` menu entry
   is worded differently from the sketch that was ported.

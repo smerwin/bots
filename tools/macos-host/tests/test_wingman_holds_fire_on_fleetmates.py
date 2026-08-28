@@ -127,6 +127,19 @@ COMMANDER = "Gal Bistot"
 MEMBER_ROW = "Greta Gneiss"
 HEADER_LABELS = ["Fleet (5)", COMMANDER, "Squad 1 (4)", "Wing 1 (4)"]
 
+
+def header_labels(fleet_size):
+    """The captured header with its stated size varied.
+
+    #380 made that number load-bearing -- `fleetRosterVerdict` compares it
+    against the pilots the bot resolved -- so a fixture stating 5 beside one
+    member row is a client this bot would (correctly) call short. Every fixture
+    below that is meant to read as an ordinary working window therefore states
+    the size its own rows and header add up to, which is what the live client
+    does: `Fleet (5)` was captured beside **four** rows plus the boss.
+    """
+    return ["Fleet (%d)" % fleet_size] + HEADER_LABELS[1:]
+
 PREAMBLE = (
     "import Bot exposing (..)",
     "import EveOnline.MemoryReading",
@@ -269,7 +282,7 @@ def reading_binding(name, children):
 
 
 FLEET_OPEN = reading_binding(
-    "fleetOpen", [fleet_window(HEADER_LABELS, [MEMBER_ROW])])
+    "fleetOpen", [fleet_window(header_labels(2), [MEMBER_ROW])])
 FLEET_SHUT = reading_binding("fleetShut", [])
 
 
@@ -601,14 +614,19 @@ class TheMembershipSourceIsReadTest(unittest.TestCase):
 
     def test_a_shut_fleet_window_is_not_an_empty_fleet(self):
         """The two facts side by side: the member list is empty either way,
-        and only `fleetMembershipIsVerifiable` tells the readings apart."""
+        and only `fleetMembershipIsVerifiable` tells the readings apart.
+
+        Since #380 that rule takes the settings the commander falls back to,
+        because the roster it is judging is `fleetPilotNamesFromReading`'s --
+        see `test_wingman_fleet_roster_corroborated` for what it now judges.
+        """
         self.assertEqual(
             self.repl.evaluate(
                 ["(fleetShut |> Maybe.map fleetMemberNames"
                  " |> Maybe.withDefault []) == []",
-                 "(fleetShut |> Maybe.map fleetMembershipIsVerifiable"
+                 "(fleetShut |> Maybe.map (fleetMembershipIsVerifiable [])"
                  " |> Maybe.withDefault True) == False",
-                 "(fleetOpen |> Maybe.map fleetMembershipIsVerifiable"
+                 "(fleetOpen |> Maybe.map (fleetMembershipIsVerifiable [])"
                  " |> Maybe.withDefault False) == True"],
                 definitions=[FLEET_OPEN, FLEET_SHUT]),
             [True, True, True])
@@ -677,7 +695,7 @@ def guard_reading(name, row_is_targeted, bar):
     drew for it, which is `target_bar`'s own shape.
     """
     return reading_binding(name, [
-        fleet_window(HEADER_LABELS, [SONYA]),
+        fleet_window(header_labels(2), [SONYA]),
         overview_window([(SONYA, "13 km", row_is_targeted)]),
     ] + ([target_bar(bar)] if bar else []))
 
@@ -931,8 +949,9 @@ class TheGuardsAreOnEveryFiringPathTest(unittest.TestCase):
         self.assertIn("describeFriendlyFireGuard context", status)
 
         membership = self.declaration("describeFleetMembership")
-        self.assertIn("THE FLEET WINDOW IS NOT OPEN", membership)
-        self.assertIn("the Fleet window is open and lists ", membership)
+        self.assertIn("describeFleetRosterVerdict", membership)
+        self.assertIn("fleetRosterVerdict", membership)
+        self.assertIn("Member rows: ", membership)
         self.assertIn("fleetCommanderNameFromFleetWindowHeader", membership)
         self.assertIn("fleetmateNamesFromLocalChat", membership)
 
