@@ -107,19 +107,28 @@ class TheTargetBroadcastIsReadTest(unittest.TestCase):
             [True])
 
     def test_a_verb_nobody_has_captured_yet_is_not_guessed_at(self):
-        """The eight remaining broadcasts have no observed wording.
+        """The remaining broadcasts have no observed wording.
 
-        The fleet window's buttons name them -- `Broadcast: Need Backup` and so
-        on -- but the button's words are not the broadcast's, and only two
-        rendered forms have been seen. Matching one on the button's wording
-        would be a guess that reads like a fact.
+        The fleet window's buttons name them -- `Broadcast: Spotted an Enemy`
+        and so on -- but the button's words are not the broadcast's, and
+        matching one on the button's wording would be a guess that reads like a
+        fact.
+
+        **Three names left this list in #385**, and the first makes the point:
+        `Need Backup`'s matcher had been written from the button's first-person
+        label while the client renders `needs backup`, so the list and the
+        parser contradicted each other on every reading. `At Location` and
+        `In Position at` were the same disagreement the other way round --
+        captured, matched and acted on, while the list called them unread. The
+        five that remain have never been seen rendered and are still unwired.
         """
         self.assertEqual(
             self.repl.evaluate(
                 ['targetBroadcastPilotName "Gal Bistot: Need Backup" == Nothing',
-                 'List.member "Need Backup" broadcastVerbsNotYetRead',
-                 'List.length broadcastVerbsNotYetRead == 8']),
-            [True, True, True])
+                 'List.member "Need Backup" broadcastVerbsNotYetRead == False',
+                 'List.member "Spotted an Enemy" broadcastVerbsNotYetRead',
+                 'List.length broadcastVerbsNotYetRead == 5']),
+            [True, True, True, True])
 
 
 class TheHistoryIsToldFromTheMemberRowsTest(unittest.TestCase):

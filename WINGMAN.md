@@ -818,6 +818,124 @@ The trip home below is still exactly the "nothing flies it" posture this
 paragraph used to claim for both; the travel broadcast is not, since
 2026-08-25.
 
+### `needs backup` never matched, because the matcher carried the button's wording
+
+Issue #385, and the defect is one character. `parseBroadcastVerb` tested
+
+```elm
+else if stringContainsIgnoringCase "need backup" rest then
+```
+
+and the client renders **`needs backup`** — third person. `"needs backup"` does
+not contain `"need backup"`, because after `need` comes `s` rather than a
+space, so the test was false on every reading and every backup call this bot has
+ever seen fell through to `Unrecognized`. `Need Backup` is the fleet window's
+own **button** label, and this file's own words two sections down are the rule
+it broke: *a button's wording is not the broadcast's*. It is the one verb
+somebody wired from the button list without a capture to check it against.
+
+**The file was internally inconsistent about it too**, which is the tell that
+was there to be read: `Need Backup` was in `broadcastVerbsNotYetRead` while
+`parseBroadcastVerb` claimed to read it, so one of the two was wrong on every
+reading. It is out of that list now — the list is seven — and the other five
+button labels are still in it, unwired. `Need Armor`, `Need Capacitor`,
+`Need Shield`, `Request That the Fleet Hold Position` and `Spotted an Enemy`
+have never been observed rendered, and wiring one from the button's wording is
+exactly what produced this bug.
+
+**Both shapes are read**, because the issue's own quote elides the sender and
+this client writes both: `<Sender>: Travel to X` beside
+`<Sender> is at location X`. The colon form is tried first, so the no-colon
+matcher can never cut a sender with the colon still stuck to it — and this bot
+matches a pilot name exactly, so `'Gal Bistot:'` would match nobody.
+`needsBackupMarker` is the one constant both halves read, `gateKeyClosingMarker`'s
+arrangement: two copies of a client wording are two things that can drift apart
+silently.
+
+#### What the arm does, and where it sits
+
+`answerTheBackupCall` closes on the caller, by whichever of the two mechanisms
+the reading offers. **This is wiring rather than a new mechanism**: the approach
+is `ensureShipIsApproaching`, the helper `approachTheFleetCommander` already
+drives and with the same confirmation — the client's own `ManeuverApproach`,
+never a dispatched click. The warp is
+`warpToFleetMateFromTheBroadcastBanner`, which is the cascade
+`warpToFleetMateOnThisGrid` was already driving for `is at location` and
+`is in position at`, lifted into a declaration of its own so the two callers
+cannot come to disagree about the rungs.
+
+- **On grid** — approach them.
+- **Not on grid** — the banner's own `Fleet Member` → `Warp to Member`, which
+  needs no overview row and is the only thing that can reach a mate who is in
+  this system and not on this grid.
+
+**It sits above the travel broadcasts in the decision root**, which is #237's
+argument for saxrat: being slow to a backup call costs a ship where being slow
+to an `is at location` costs a few seconds of alignment. Below the retreat, the
+recovery, `sessionIsEnding`, the friendly-fire unlock and the always-on modules
+— a ship past its own threshold leaves rather than joining somebody else's
+fight, and the two above it are a safety condition and one click.
+
+#### The trust boundary is the fleet, not `follow-fleet-broadcast-from`
+
+The old arm refused a caller not named in `follow-fleet-broadcast-from`. Those
+are different policies: that allowlist says whose *travel* this ship follows,
+and a fleet-mate who needs help is not necessarily one of them. So
+`answer-backup-calls` is its own setting, defaulting to **yes**, and the caller
+has to be someone `fleetPilotNames` recognises — the fleet window's own member
+rows, its header's commander, or a pilot local chat's standing icon marks as a
+fleetmate. That is the same boundary the friendly-fire guard already uses.
+
+**The cost is stated rather than hidden**: a wingman now breaks off for *any*
+fleet member's backup call, where before it answered none at all.
+
+**The failure direction is the quiet one, and #380 is why that matters.** Those
+member rows are known to be under-reported — four wingmen in one fleet read 0,
+2, 4 and 4 rows from the same Fleet window at the same moment. Under-reporting
+here declines a call and this ship goes on doing what it was doing; it never
+sends a ship anywhere. Over-reporting would be the dangerous direction and
+nothing in that issue shows it: every source of a name here is the client
+stating fleet membership, and the commander fallback is the operator's own
+setting. So a wingman whose Fleet window lists nobody answers no backup calls at
+all, and `describeBackupCall` says so on every reading.
+
+#### In system only, and every other answer hands the reading back
+
+A backup call names **no place** — the broadcast carries a pilot and nothing
+else — and saxrat found the client refuses a waypoint to a fleet-mate's live
+position, so there is nothing to route to and `goToFleetMate`'s place-less
+branch is deliberately not reached from here. What this bot can do is
+in-system, and an out-of-system caller is indistinguishable from an in-system
+one at the reading: the banner's cascade is tried either way, the client offers
+`Warp to Member` where it can, and the bound ends it. The give-up names
+out-of-system as the likely reason and #381 as what would have to answer first.
+
+**Every answer that is not an action answers `Nothing`**, refusals included, so
+this arm cannot starve what sits under it while a banner that does not clear
+stays up — #360's lesson, which #395 and #397 each paid for again. A call this
+ship will not answer is *nothing more to do about the call*, not a reason to
+spend the reading saying so; `describeBackupCall` is what says it instead, since
+a `Nothing` cannot carry a decision line. Bounded at
+`backupCallAskedReadingsBound`, which is `fleetMateWarpAskedReadingsBound`
+written as that constant rather than as a number, because this arm drives the
+same cascade that bound was sized for.
+
+**`NeedBackup` left `fleetMateCallingForCompany`** with the verb. That function
+feeds `goToFleetMateWarpAskedReadings` and `describeFleetMateWarp`, so leaving
+it would have that counter advancing and that clause reporting a warp no branch
+was attempting — a status line disagreeing with the decision.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_wingman_answers_a_backup_call.py` (43 cases). The
+matcher and the rule are executed through the real `Bot.elm` in `elm repl`, and
+the arm is run over readings the **real** `EveOnline.ParseUserInterface`
+produced from UI trees carrying a fleet window, its banner, its member rows, an
+overview and a ship UI — so what the branch is handed is what the bot would have
+been handed. Confirmed by mutation, sixteen of them, each failing a named case
+and listed in that file — including the matcher reverted to the button's
+wording, the arm holding the reading forever, the trust boundary reverted to the
+travel allowlist, and one of the five unobserved verbs wired on a guess.
+
 ### Navigating to the fleet commander when out of system
 
 `navigateTowardFleetCommander` flies the route the ESI directive above set,
@@ -1059,17 +1177,31 @@ two sampled readings, not a series.
 Each of these answers a *named* branch rather than doing something plausible,
 because a bot that guesses reads exactly like one that knows.
 
-- **Eight of the ten broadcasts.** The window's own buttons enumerate them
+- **Five of the ten broadcasts.** The window's own buttons enumerate them
   (`broadcastVerbsNotYetRead`), but **a button's wording is not the
   broadcast's** — the button says `Broadcast: Spotted an Enemy` and the history
-  says something nobody has observed. Only `Target …` and `…: Travel to …` have
-  ever been seen rendered. An unmatched banner reaches a wait that says so.
-  **A ninth is unmatched too, and for a different reason: see "First live
-  run" below.** `…: Travel to …`'s wording has been known since the capture at
-  the top of this file, but nothing was ever written to dispatch on it —
-  `actOnFleetBroadcast` only calls `targetBroadcastPilotName`. So it currently
-  reaches the same wait as the eight genuinely uncaptured verbs, for the
-  opposite reason: not unknown, just unwritten.
+  says something nobody has observed. An unmatched banner reaches a wait that
+  says so.
+
+  **That list was eight until #385, and the three that left it are the reason
+  it is worth keeping honest.** `Need Backup` was in it *and* claimed by
+  `parseBroadcastVerb`, whose matcher carried the button's first-person wording
+  against a client that renders `needs backup` — so the two contradicted each
+  other on every reading and no backup call was ever read. `At Location` and
+  `In Position at` were the same disagreement with the halves the other way
+  round: both wordings were captured live and both are acted on, while the list
+  went on calling them unread. A list that names a verb the parser reads is a
+  list nobody can check the parser against, which is what let one wrong matcher
+  sit in it unnoticed.
+
+  **`…: Travel to …` is the fourth shape of the same thing, and its own is the
+  opposite: see "First live run" below.** Its wording has been known since the
+  capture at the top of this file, and nothing was written to dispatch on it
+  until 2026-08-25 — `actOnFleetBroadcast` called only
+  `targetBroadcastPilotName` — so it reached the same wait as the genuinely
+  uncaptured verbs while being neither unknown nor, after that, unwritten. The
+  live vocabulary is also *wider* than the buttons: `Jump Stargate` and
+  `Align Stargate` are matched and are on no button at all.
 - **The trip home.** It returns a branch naming what is missing rather than
   `Nothing`, because `Nothing` reads as "nothing to do" and would fly past the
   session's end in silence.
@@ -1370,6 +1502,33 @@ restart.
 
 ## Not verified
 
+- **Any of the backup-call arm running, and what the banner actually says.**
+  #385's matcher is written from the issue's own live sighting, `...needs
+  backup`, whose sender is elided — so **which of the two shapes this client
+  draws is not established**, only that both are read. The rest of the arm has
+  never run either: no wingman log on this Mac records a backup call at all,
+  because until this change none could be read. What to watch on the first run
+  that meets one: `Backup call:` in the status line naming the caller, then
+  either `they are on this grid -- approach them.` or
+  `warp to them from the broadcast banner's own menu.` in the decision log, and
+  then the clause going away. Two failures point in opposite directions —
+  `none on this reading.` while the banner plainly reads `needs backup` means
+  the matcher is still not reading the client's wording, and
+  `nothing on this reading says they are in this fleet` for a pilot who plainly
+  is means #380's under-reported member rows are costing this arm.
+- **The five remaining button labels.** A capture pass — one click per button,
+  then read the history panel — is what turns them into matchable strings, and
+  nothing here should match one before that happens. It would settle whether
+  the `needs` / `Need` split is general (`X needs armor`, `X needs capacitor`)
+  or particular to the backup call, which is the one thing that would let the
+  rest be wired without a capture each.
+- **Whether a backup caller can be out of system at all**, and what the client
+  does with `Fleet Member` → `Warp to Member` when they are. The arm tries the
+  cascade either way and lets the bound end it, because a backup call names no
+  place and #381 is the issue that has to answer routing first. A run that
+  spends the whole bound on one call and gives up is that case; a run that
+  reaches a caller it could not see on the overview is the cascade working
+  across the system.
 - **Whether this client draws `targetedByMeIndicator` at all.** #389's fix
   decides "the called target is already locked" from
   `OverviewWindowEntry.commonIndications.targetedByMe`, which the vendored

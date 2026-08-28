@@ -247,17 +247,29 @@ class TheTwoMechanismsTest(unittest.TestCase):
         """Right-click the banner, `Fleet Member`, `Warp to Member`, matched
         with `useMenuEntryWithTextEqual` at both rungs -- `"Warp to Member"` is
         a prefix of `"Warp to Member Within"` and a containing match takes the
-        wrong entry."""
-        arm = self.arm_of(
-            "warpToFleetMateOnThisGrid context pilot calledIt overviewEntry =",
-            "WarpToTheMateFromTheBroadcast ->",
-            "SelectTheMate ->")
+        wrong entry.
+
+        **The cascade is a declaration of its own since #385**, because the
+        backup-call arm drives the same rungs for a caller who may have no
+        overview row to select. What it must not become is two copies: this
+        asserts the rungs where they now live, and that the branch reaches them
+        rather than writing its own.
+        """
+        arm = self.body_of("warpToFleetMateFromTheBroadcastBanner context banner =")
         self.assertIn('useContextMenuCascade\n', arm)
         self.assertIn('( "fleet broadcast", banner )', arm)
         self.assertEqual(arm.count("useMenuEntryWithTextEqual"), 2)
         self.assertLess(arm.index('useMenuEntryWithTextEqual "Fleet Member"'),
                         arm.index('useMenuEntryWithTextEqual "Warp to Member"'))
         self.assertIn("menuCascadeCompleted", arm)
+        self.assertEqual(
+            self.source.count('useMenuEntryWithTextEqual "Fleet Member"'), 1)
+        self.assertIn(
+            "warpToFleetMateFromTheBroadcastBanner context banner",
+            self.arm_of(
+                "warpToFleetMateOnThisGrid context pilot calledIt overviewEntry =",
+                "WarpToTheMateFromTheBroadcast ->",
+                "SelectTheMate ->"))
 
     def test_the_banner_only_counts_while_it_names_this_mate(self):
         """The banner is a *last broadcast* display and does not clear, so "a
@@ -303,15 +315,22 @@ class TheTwoMechanismsTest(unittest.TestCase):
                                  " calledIt overviewEntry ="))
 
     def test_the_two_callers_get_the_two_paths(self):
-        """The banner path is reached from the three broadcast verbs, which is
-        what puts a banner up; the panel path is what is left for
-        `recoverFromRetreat`, which has none."""
+        """The banner path is reached from the broadcast verbs that put a
+        banner up; the panel path is what is left for `recoverFromRetreat`,
+        which has none.
+
+        **`NeedBackup` is deliberately not among them since #385.** That verb
+        has its own arm, its own bound and its own trust boundary, so leaving
+        it here would advance `goToFleetMateWarpAskedReadings` and make
+        `describeFleetMateWarp` report a warp no branch was attempting.
+        """
         body = self.body_of(
             "fleetMateCallingForCompany followFleetBroadcastFrom"
             " readingFromGameClient =")
-        for verb in ("AtLocation", "InPositionAt", "NeedBackup"):
+        for verb in ("AtLocation", "InPositionAt"):
             with self.subTest(verb=verb):
                 self.assertIn(verb, body)
+        self.assertNotIn("NeedBackup", body)
         self.assertIn("List.member pilot followFleetBroadcastFrom", body)
 
 
