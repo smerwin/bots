@@ -3105,6 +3105,49 @@ already uses reliably -- but that is unread and unverified, and belongs in a
 follow-up built against a live client rather than guessed at again here.
 
 -}
+warpToMemberFromTheBroadcastBanner : UseContextMenuCascadeNode
+warpToMemberFromTheBroadcastBanner =
+    MenuEntryWithCustomChoice
+        { describeChoice = "'Warp to Member' where the first menu offers it, else the 'Fleet Member' submenu"
+        , chooseEntry =
+            \currentMenu ->
+                case currentMenu.entries |> List.filter menuEntryIsWarpToMember |> List.head of
+                    Just direct ->
+                        Just ( direct, menuCascadeCompleted )
+
+                    Nothing ->
+                        currentMenu.entries
+                            |> List.filter (menuEntryTextEquals "Fleet Member")
+                            |> List.head
+                            |> Maybe.map
+                                (\submenu ->
+                                    ( submenu
+                                    , useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted
+                                    )
+                                )
+        }
+
+
+{-| Whether a menu entry is `Warp to Member` and not `Warp to Member Within`.
+
+**Exact, never containing**, and this is the whole reason it is a named
+declaration rather than an inline filter: `"Warp to Member"` is a prefix of
+`"Warp to Member Within"`, confirmed live in the same menu, so a containing
+match silently takes the wrong entry and warps to a range nobody asked for.
+Same comparison `useMenuEntryWithTextEqual` makes -- trimmed and case-folded --
+so the two rungs of this cascade cannot come to disagree about what counts.
+
+-}
+menuEntryIsWarpToMember : { a | text : String } -> Bool
+menuEntryIsWarpToMember =
+    menuEntryTextEquals "Warp to Member"
+
+
+menuEntryTextEquals : String -> { a | text : String } -> Bool
+menuEntryTextEquals expected entry =
+    (entry.text |> String.trim |> String.toLower) == String.toLower expected
+
+
 respondToFleetBackupBroadcast : BotDecisionContext -> Maybe DecisionPathNode
 respondToFleetBackupBroadcast context =
     fleetNeedsBackupBroadcast
@@ -3132,9 +3175,7 @@ respondToFleetBackupBroadcast context =
                                     (ensureDronesRecalledBeforeWarping context
                                         (useContextMenuCascade
                                             ( "fleet broadcast", bannerElement )
-                                            (useMenuEntryWithTextEqual "Fleet Member"
-                                                (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
-                                            )
+                                            warpToMemberFromTheBroadcastBanner
                                             context
                                         )
                                     )
@@ -3205,9 +3246,7 @@ respondToFleetAtLocationBroadcast context =
                                     (ensureDronesRecalledBeforeWarping context
                                         (useContextMenuCascade
                                             ( "fleet broadcast", bannerElement )
-                                            (useMenuEntryWithTextEqual "Fleet Member"
-                                                (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
-                                            )
+                                            warpToMemberFromTheBroadcastBanner
                                             context
                                         )
                                     )
