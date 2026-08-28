@@ -177,6 +177,21 @@ def indented_binding(declaration_name, name, path=SAXRAT_BOT_ELM):
     return collapsed(without_comments("\n".join(lines[start:end])))
 
 
+def verdict_wiring():
+    """What the rule is handed, wherever that construction currently lives.
+
+    It used to be a `let` binding inside `jumpThroughRouteStargate`; #417 lifted
+    it to `routeStargateJumpFromReading` so the fleet-commander arm could ask the
+    same question, because the gate a fleet is told to jump has to be the gate
+    this ship is about to jump. The claims below are unchanged -- they are about
+    what feeds `routeStargateJump`, not about which declaration holds it -- and
+    `TheWiringTest.test_the_branch_builds_its_verdict_from_the_one_declaration`
+    is what stops the lift becoming two constructions that can disagree.
+    """
+    return collapsed(without_comments(
+        body_of(saxrat_source(), "routeStargateJumpFromReading")))
+
+
 def route_panel(label_texts):
     """An `InfoPanelContainer` holding an `InfoPanelRoute` with these labels.
 
@@ -412,7 +427,7 @@ class TheGateNameMatchTest(unittest.TestCase):
             self.matches([("Amarr", "Stargate (Amarr Border)")]), [True],
             "the type text does match by itself, which is why the rule is only "
             "ever handed the Name column")
-        wiring = indented_binding("jumpThroughRouteStargate", "verdict")
+        wiring = verdict_wiring()
         self.assertIn("name = gate.objectName", wiring)
         self.assertNotIn("objectType", wiring)
 
@@ -697,23 +712,22 @@ class TheWiringTest(unittest.TestCase):
             self.jump_leg.index("jumpThroughRouteStargate"))
 
     def test_the_gates_offered_to_the_rule_are_rendered_stargates(self):
-        wiring = indented_binding("jumpThroughRouteStargate", "verdict")
+        wiring = verdict_wiring()
         self.assertIn("overviewEntryIsDisplayed", wiring)
         self.assertIn("overviewEntryIsAStargate", wiring)
 
     def test_each_gate_carries_whether_the_panel_is_showing_that_gate(self):
         """Per row, not once for the whole overview -- a single answer computed
         outside the map would report the same thing about every gate."""
-        wiring = indented_binding("jumpThroughRouteStargate", "verdict")
+        wiring = verdict_wiring()
         self.assertIn("panelIsShowingIt", wiring)
-        self.assertIn("selectedItemIsOverviewEntry context.readingFromGameClient gate",
+        self.assertIn("selectedItemIsOverviewEntry readingFromGameClient gate",
                       wiring)
 
     def test_the_next_system_comes_from_the_route_panel(self):
-        wiring = indented_binding("jumpThroughRouteStargate", "verdict")
         self.assertIn(
             "nextSystemOnRoute = nextSystemOnRouteFromReading"
-            " context.readingFromGameClient", wiring)
+            " readingFromGameClient", verdict_wiring())
 
     def test_the_rule_is_told_whether_the_button_is_really_there(self):
         """The rule's `panelOffersJump` is the lookup, not a constant.
@@ -726,8 +740,25 @@ class TheWiringTest(unittest.TestCase):
         `describeRouteStargateJump` is derived from the verdict to avoid, and it
         survived the first mutation pass.
         """
-        wiring = indented_binding("jumpThroughRouteStargate", "verdict")
-        self.assertIn("panelOffersJump = jumpButton /= Nothing", wiring)
+        self.assertIn(
+            'panelOffersJump = selectedItemButtonNamed readingFromGameClient'
+            ' "%s" /= Nothing' % JUMP_BUTTON, verdict_wiring())
+
+    def test_the_branch_builds_its_verdict_from_the_one_declaration(self):
+        """#417 lifted the construction out; there must still be one of it.
+
+        The fleet-commander arm broadcasts `Broadcast: Jump to` about the gate
+        this verdict names, so a second construction here would let the gate the
+        fleet is told to jump and the gate this ship jumps come apart -- which is
+        the same failure `describeRouteStargateJump` is derived from the verdict
+        to avoid, one level up.
+        """
+        self.assertIn(
+            "verdict = routeStargateJumpFromReading context.readingFromGameClient",
+            indented_binding("jumpThroughRouteStargate", "verdict"))
+        self.assertEqual(
+            len(re.findall(r"routeStargateJump\s*\{", without_comments(
+                self.source))), 1)
 
     def test_the_button_offered_is_the_button_pressed(self):
         """The lookup and the press are the same value, so a press cannot land on
