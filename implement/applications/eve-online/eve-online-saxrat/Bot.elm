@@ -7498,6 +7498,7 @@ unlockFromSelectedItemPanel context targetToUnlock =
     let
         panelIsShowingIt =
             targetToUnlock.textsTopToBottom
+                |> List.filter targetTextCanIdentifyAnObject
                 |> List.any (panelIsShowingText context.readingFromGameClient)
     in
     if not panelIsShowingIt then
@@ -7511,6 +7512,31 @@ unlockFromSelectedItemPanel context targetToUnlock =
                         "I see a target to unlock and the selected-item panel is showing it -- press the panel's own Unlock."
                         (clickUiElementOrSayItCannotBeClicked button)
                 )
+
+
+{-| Whether one of a target-bar entry's texts says *which object* it is.
+
+A bar entry carries more than a name -- the client draws its distance there too,
+and a distance is a string every object at that range shares. So a rule that
+asked "does the panel carry any of this entry's texts" would answer `True` for a
+panel showing an entirely different rat that happens to be 5,000 m away, and the
+Unlock would then free a slot holding something the bot wants locked.
+
+A text with a digit in it is therefore declined, which takes the distances and
+keeps the names: no rat, wreck or container name in any recorded run carries an
+Arabic digit, and a name that did would simply fall through to the mechanism
+this branch is an optimisation over. A text with no letter at all is declined
+for the same reason from the other side.
+
+-}
+targetTextCanIdentifyAnObject : String -> Bool
+targetTextCanIdentifyAnObject text =
+    let
+        characters =
+            String.toList text
+    in
+    List.any Char.isAlpha characters
+        && not (List.any Char.isDigit characters)
 
 
 {-| Whether the Selected Item panel's own texts carry this string.

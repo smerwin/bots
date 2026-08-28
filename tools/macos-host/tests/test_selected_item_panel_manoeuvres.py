@@ -678,6 +678,16 @@ class TheUnlockPressesThePanelWhereItCanTest(unittest.TestCase):
     would be a different change.
     """
 
+    @classmethod
+    def setUpClass(cls):
+        cls.repls = {name: open_repl(repl_class)
+                     for name, repl_class, _ in APPS}
+
+    @classmethod
+    def tearDownClass(cls):
+        for repl in cls.repls.values():
+            repl.close()
+
     def bodies(self, app, names):
         source = source_of(SAXRAT_BOT_ELM if app == "saxrat"
                            else WINGMAN_BOT_ELM)
@@ -718,6 +728,37 @@ class TheUnlockPressesThePanelWhereItCanTest(unittest.TestCase):
         self.assertIn("unlockFromSelectedItemPanel", wingman)
         self.assertIn("lockedTargetNamed", wingman)
         self.assertIn("useContextMenuCascade", wingman)
+
+    def test_a_distance_is_not_an_identity(self):
+        """saxrat's unlock takes a target-bar entry, which carries more than a
+        name: the client draws the object's distance there too.
+
+        "5,000 m" is a string every object at that range shares, so a rule that
+        asked whether the panel carries *any* of the entry's texts would answer
+        `True` for a panel showing an entirely different rat -- and the Unlock
+        would then free a slot holding something the bot wants locked. A text
+        with a digit in it is declined for that reason, and one with no letter
+        at all from the other side.
+        """
+        repl = self.repls["saxrat"]
+        for text, usable in (("Centii Minion", True),
+                             ("Cargo Container", True),
+                             ("Centii Minion Wreck", True),
+                             ("5,000 m", False),
+                             ("12 km", False),
+                             ("", False),
+                             ("   ", False),
+                             ("- - -", False)):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    repl.evaluate(["targetTextCanIdentifyAnObject %s"
+                                   % elm_json_literal(text)])[0],
+                    usable)
+
+    def test_the_unlock_asks_only_the_texts_that_can_identify_one(self):
+        body = collapsed(body_of(source_of(SAXRAT_BOT_ELM),
+                                 "unlockFromSelectedItemPanel"))
+        self.assertIn("List.filter targetTextCanIdentifyAnObject", body)
 
     def test_an_empty_name_matches_nothing_rather_than_everything(self):
         """`valueTypeNonEmptyString`'s register, applied to a lookup."""
