@@ -989,6 +989,20 @@ readings spent clicking with the ship standing still, which is the only shape
 that can run forever. A warp cannot undo a spent budget, because the rule asks
 the give-up before it asks the warp.
 
+**And a reading the retreat itself is holding spends nothing.**
+`recoveringFromRetreat` is set on the reading the retreat is *decided*, and
+`retreatToTheCommander` sits directly above this arm and answers `Just` for as
+long as its verdict is latched — so every reading of the retreat is one where
+the rule answers something actionable and the arm was never reached. Charging
+them is #389 again, and worse than in #389: a retreat long enough to spend
+thirty readings out of warp (the mission runner's corpus has one at 44) would
+hand the recovery a spent budget and a give-up on its first reading. It is a
+**reset** rather than a hold, because the recovery has not begun — the reading
+the retreat clears is the reading this arm first gets, and it gets the whole
+allowance. `retreatIsDecided` is the memory update's own binding, the one the
+arm above reads through `retreatReason`, rather than a second condition beside
+it.
+
 **The give-up hands the reading back and does not clear
 `recoveringFromRetreat`.** Clearing it would report this ship as rejoined when it
 is not — this repo's signature failure — and would silently change what
@@ -1030,10 +1044,11 @@ against the same root with nothing recovering at all — with a positive control
 beside it that must still act, and a negative one where a recovery that *can* act
 still owns the reading.
 
-Confirmed by mutation, **eighteen** of them, each failing a named case, listed
-in that file — including the bound removed, the counter advanced from state
-alone, the give-up parking instead of handing back, a stale place never
-invalidated, and the arm hoisted above the retreat itself. **Three survived a
+Confirmed by mutation, **twenty** of them, each failing a named case, listed in
+that file — including the bound removed, the counter advanced from state alone,
+the give-up parking instead of handing back, a stale place never invalidated,
+the arm hoisted above the retreat itself, and the retreat-holding clause dropped
+so the retreat spends the recovery's budget before the recovery starts. **Three survived a
 first version of a case and each hole was real**: a question asked of the
 reading where the arm answers `Nothing` whatever it is handed, a status-line
 assertion satisfied by the clause's own definition head, and an equality between

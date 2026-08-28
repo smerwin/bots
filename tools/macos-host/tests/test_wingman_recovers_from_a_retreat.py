@@ -46,7 +46,17 @@ The give-up **hands the reading back** rather than parking, so everything below
 becomes reachable -- and it does **not** clear `recoveringFromRetreat`, which is
 the only thing that says this ship is still away from its fleet.
 
-Confirmed by mutation, **eighteen** of them, each failing a named case:
+**And a reading the retreat itself is holding spends nothing**, which the first
+version of that counter got wrong. `recoveringFromRetreat` is set on the reading
+the retreat is *decided*, and `retreatToTheCommander` sits directly above this
+arm and answers `Just` for as long as its verdict is latched -- so every reading
+of the retreat is a reading where the rule answers something actionable and the
+arm was never reached. Charging them is #389 exactly, and a retreat long enough
+to spend thirty readings out of warp (the mission runner's corpus has one at 44)
+would have handed the recovery a spent budget and a give-up on its first
+reading.
+
+Confirmed by mutation, **twenty** of them, each failing a named case:
 
  1. the bound removed entirely, so the arm answers forever --
     `test_the_bound_is_asked_at_its_boundary`,
@@ -96,7 +106,12 @@ Confirmed by mutation, **eighteen** of them, each failing a named case:
 17. `NowhereToRejoinTheCommander` added to the answers that spend a reading,
     which is #389 exactly -- `test_nowhere_to_rejoin_spends_nothing`;
 18. the remembered place dropping the pilot who named it --
-    `test_the_travel_form_carries_a_place`.
+    `test_the_travel_form_carries_a_place`;
+19. the retreat-holding clause dropped from the counter, so the retreat spends
+    the recovery's budget before the recovery starts --
+    `test_a_reading_the_retreat_is_holding_spends_nothing`;
+20. that clause asked *after* the spending clause, so it excludes a reading it
+    has already charged -- the same case.
 
 **Three of those survived a first version of a case and each hole was real.**
 `test_the_arm_no_longer_routes_to_the_empty_place` asked its question of the
@@ -943,10 +958,34 @@ class TheWiringIsWhereItSaysItIsTest(unittest.TestCase):
         self.assertIn("recoveringStepNow", counter)
         self.assertIn("retreatRecoveryAnswersThatSpendAReading", counter)
         # The rule is asked, never restated: none of the facts it reads may
-        # appear as a condition here.
+        # appear as a condition here. `retreatIsDecided` is not one of them --
+        # it is the reachability condition the rule cannot see, and the case
+        # below is what pins it.
         for fact in ["pilotIsOnOverview", "fleetMateBroadcastBannerElement",
                      "recoveringFromRetreatNow ", "fleetPlaceBroadcastNow "]:
             self.assertNotIn(fact, counter)
+
+    def test_a_reading_the_retreat_is_holding_spends_nothing(self):
+        """`retreatToTheCommander` sits directly above this arm and answers
+        `Just` on every reading its verdict is latched, so the recovery cannot
+        have been reached on one -- and `recoveringFromRetreat` is set on the
+        reading the retreat is *decided*, so those readings are the whole of a
+        retreat. Charging them is #389: a budget spent on asks nobody made, and
+        it would hand the recovery a spent budget on its first reading."""
+        counter = collapsed(record_field(
+            self.source, "retreatRecoveryAskedReadings"))
+        self.assertIn("else if retreatIsDecided then", counter)
+        # Before the spending clause, or it charges the reading it excludes.
+        self.assertLess(counter.index("retreatIsDecided"),
+                        counter.index("retreatRecoveryAnswersThatSpendAReading"))
+
+    def test_the_retreat_is_what_the_arm_below_it_is_told_about(self):
+        """One definition of "the retreat is firing", shared by the arm above
+        this one and by the counter -- not a second condition beside it, which
+        is #102's defect and what `retreatReason` was extracted to prevent."""
+        self.assertIn("retreatIsDecided :", self.source)
+        self.assertIn("retreatReason", let_binding(
+            self.source, "retreatIsDecided"))
 
     def test_the_memory_side_step_is_the_same_function_the_arm_asks(self):
         assembled = let_binding(self.source, "recoveringStepNow")

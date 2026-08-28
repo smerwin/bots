@@ -4318,6 +4318,24 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             -- fresh budget; one recovery does not get two.
             0
 
+        else if retreatIsDecided then
+            -- **The retreat is still holding the tree**, so `recoverFromRetreat`
+            -- cannot have been reached on this reading whatever the rule
+            -- answers -- `retreatToTheCommander` sits directly above it and
+            -- answers `Just` on every reading its verdict is latched. Charging
+            -- these is #389 exactly: a budget spent on asks nobody made, and
+            -- worse here than there, because `recoveringFromRetreat` is set on
+            -- the reading the retreat is *decided* and the verdict then latches
+            -- until the gauge recovers past `runAwayRearmPercent`. A retreat
+            -- long enough to spend thirty readings out of warp -- the mission
+            -- runner's corpus has one at 44 -- would hand the recovery a budget
+            -- already gone and a give-up on its first reading.
+            --
+            -- Reset rather than held, because the recovery has not begun: the
+            -- reading the retreat clears is the reading this arm first gets,
+            -- and it gets the whole allowance.
+            0
+
         else if recoveringStepNow == AlreadyOnTheWayBackToTheCommander then
             -- The ship is warping or jumping, so the recovery is executing
             -- however long it takes -- `retreatAskedReadings`' own rule, and
