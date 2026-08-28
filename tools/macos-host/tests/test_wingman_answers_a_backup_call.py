@@ -752,7 +752,7 @@ class TheWiringTest(unittest.TestCase):
                       "recoverFromRetreat context shipUI",
                       "unlockFleetPilotInTargetBar context",
                       "activateAlwaysOnModules context",
-                      "manageMiddleRowModules context shipUI"):
+                      "manageMiddleRowModules context"):
             with self.subTest(above=above):
                 self.assertIn(above, root)
                 self.assertLess(root.index(above),

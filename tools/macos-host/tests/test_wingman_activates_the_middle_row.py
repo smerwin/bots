@@ -96,7 +96,7 @@ FIRST_SLOT_X = 120
 SLOT_PITCH = 60
 
 
-def module_slot(name, x, y, running):
+def module_slot(name, x, y, running, deactivating=None):
     """One `ShipSlot` holding one `ModuleButton`, at a chosen screen position.
 
     `running` is what the client's `ramp_active` entry says, and `None` means
@@ -108,6 +108,14 @@ def module_slot(name, x, y, running):
     Both have to count as "off" or the bot activates nothing, which is saxrat's
     own recorded finding.
 
+    `deactivating` is the client's own `isDeactivating` entry, on the same
+    footing: `None` leaves it out of the tree, which is what a build that does
+    not carry it looks like and is the `Nothing` #408 turns on. It is a
+    separate dictionary key read by a separate `Dict.get`, so a fixture sets
+    the two independently -- which is the whole point, since the bug is a
+    module that reads `ramp_active` on for ten seconds *after* the client has
+    said the switch-off landed.
+
     The `ModuleButton`'s region is (0, 0, ...) because display regions are
     inherited: the button's `totalDisplayRegion.x` is the slot's, which is the
     coordinate `middleRowLeftToRight` sorts on.
@@ -115,6 +123,8 @@ def module_slot(name, x, y, running):
     entries = {"_name": "modulebutton"}
     if running is not None:
         entries["ramp_active"] = running
+    if deactivating is not None:
+        entries["isDeactivating"] = deactivating
     return node("ShipSlot", {"_name": name}, [
         node("ModuleButton", entries, region=(0, 0, SLOT_SIZE, SLOT_SIZE)),
     ], region=(x, y, SLOT_SIZE, SLOT_SIZE))
@@ -123,9 +133,10 @@ def module_slot(name, x, y, running):
 def ship_ui(middle_slots, maneuver=None):
     """A `ShipUI` the real parser accepts, with a chosen middle row.
 
-    `middle_slots` is a list of `(x, running)` **in the order they appear in the
-    tree**, which is the point of the fixture: the tree order and the screen
-    order are set independently so a case can tell the two apart.
+    `middle_slots` is a list of `(x, running)` -- or `(x, running,
+    deactivating)` -- **in the order they appear in the tree**, which is the
+    point of the fixture: the tree order and the screen order are set
+    independently so a case can tell the two apart.
 
     Hitpoints need all three gauges by name, or `parseShipUIFromUITreeRoot`
     answers `Nothing` for the whole ship UI.
@@ -142,8 +153,9 @@ def ship_ui(middle_slots, maneuver=None):
             ], region=(400, 100, 100, 16)))
 
     slots = [
-        module_slot("middle%d" % index, x, MIDDLE_ROW_Y, running)
-        for index, (x, running) in enumerate(middle_slots)]
+        module_slot("middle%d" % index, slot[0], MIDDLE_ROW_Y, slot[1],
+                    *slot[2:])
+        for index, slot in enumerate(middle_slots)]
 
     return node("ShipUI", {}, [
         node("CapacitorContainer", {}, region=CAPACITOR_REGION),
@@ -156,6 +168,14 @@ def ship_ui(middle_slots, maneuver=None):
 
 ON = True
 OFF = None
+
+# What the client's `isDeactivating` entry says about the leftmost slot.
+# `SILENT` leaves the entry out of the tree entirely, and #408 is the whole
+# reason the three are named apart: absent is not `False`, and only one of the
+# three licences another click at a module button that is a toggle.
+SETTLED = False
+SHUTTING_DOWN = True
+SILENT = None
 
 # The middle row as the tree hands it over: **not** in screen order. Sorted by
 # x it is the propulsion module at 120 with two tank modules at 180 and 240,
@@ -184,9 +204,36 @@ READINGS = [
         overview_window([("Greta Gneiss", "12 km", False)]),
     ]),
 
-    # The propulsion module running with the ship not approaching anything.
+    # The propulsion module running with the ship not approaching anything,
+    # and the client saying the module is not in the act of shutting down --
+    # so this is the one shape in which a shutdown click is warranted.
     reading_binding("propulsionModuleLeftRunning",
-                    [ship_ui([(120, ON), (180, ON)])]),
+                    [ship_ui([(120, ON, SETTLED), (180, ON)])]),
+
+    # #408 itself: the same reading, except the client says the module is
+    # already deactivating. `ramp_active` still reads on because the module is
+    # running out a ten-second cycle, and the click that the debounce releases
+    # four seconds in is what switches it back on.
+    reading_binding("propulsionModuleDeactivating",
+                    [ship_ui([(120, ON, SHUTTING_DOWN), (180, ON)])]),
+
+    # The same again with the entry absent from the tree. Not the same fact as
+    # `SETTLED`, and the parser's own doc block is what insists on that.
+    reading_binding("propulsionModuleSilentAboutShuttingDown",
+                    [ship_ui([(120, ON, SILENT), (180, ON)])]),
+
+    # In warp with the module running: "not approaching" is true here too, and
+    # `wingmanDecisionRootInSpaceOrdinary` has no warp gate above this arm.
+    reading_binding("warpingWithTheModuleRunning",
+                    [ship_ui([(120, ON, SETTLED), (180, ON)],
+                             maneuver="Warp")]),
+
+    # Lining up to warp. `ShipManeuverType` has no `Align`, so the client
+    # naming it leaves `maneuverType` at `Nothing` -- the same reading as a
+    # ship sitting still, which is why the arm cannot decline here.
+    reading_binding("aligningWithTheModuleRunning",
+                    [ship_ui([(120, ON, SETTLED), (180, ON)],
+                             maneuver="Align")]),
 
     # The same, while the ship is approaching -- nothing to do.
     reading_binding("propulsionModuleRunningOnTheApproach",
@@ -198,7 +245,8 @@ READINGS = [
 
     # Orbiting, which is a manoeuvre and is not an approach.
     reading_binding("orbitingWithTheModuleRunning",
-                    [ship_ui([(120, ON), (180, ON)], maneuver="Orbit")]),
+                    [ship_ui([(120, ON, SETTLED), (180, ON)],
+                             maneuver="Orbit")]),
 
     # A ship UI whose middle row holds nothing at all.
     reading_binding("emptyMiddleRow", [ship_ui([])]),
@@ -241,8 +289,14 @@ class WingmanRepl(ElmRepl):
         " , contextMenuCascadeLevel = 0"
         " , randomIntegers = [] }",
         "unpack = Common.DecisionPath.unpackToDecisionStagesDescriptionsAndLeaf",
-        "armFor = \\parsed -> parsed |> Maybe.andThen (\\p ->"
-        " p.shipUI |> Maybe.andThen (manageMiddleRowModules (context p)))",
+        # The counter the bound reads, wound to a chosen value. Everything
+        # else in the context stays exactly what `context` builds, so a case
+        # asking about the give-up differs from its own control in one number.
+        "contextAsked = \\spent -> \\p -> (\\base -> { base | memory ="
+        " { initBotMemory | middleRowAskedReadings = spent } }) (context p)",
+        "armFor = \\parsed -> parsed |> Maybe.andThen (context >> manageMiddleRowModules)",
+        "armAsked = \\spent -> \\parsed -> parsed"
+        " |> Maybe.andThen (contextAsked spent >> manageMiddleRowModules)",
         "describeFor = \\parsed -> armFor parsed"
         ' |> Maybe.map (unpack >> Tuple.first >> String.join " | ")'
         ' |> Maybe.withDefault "%s"' % STOOD_DOWN,
@@ -258,11 +312,33 @@ class WingmanRepl(ElmRepl):
         "statusFor = \\parsed -> parsed"
         ' |> Maybe.map (context >> describeMiddleRowModules)'
         ' |> Maybe.withDefault "NO READING"',
+        "askFor = \\parsed -> parsed"
+        ' |> Maybe.map (context >> describeMiddleRowAsk)'
+        ' |> Maybe.withDefault "NO READING"',
+        "askAsked = \\spent -> \\parsed -> parsed"
+        ' |> Maybe.map (contextAsked spent >> describeMiddleRowAsk)'
+        ' |> Maybe.withDefault "NO READING"',
         "rootFor = \\parsed -> parsed |> Maybe.andThen (\\p ->"
         " p.shipUI |> Maybe.map (\\s ->"
         " wingmanDecisionRootInSpaceOrdinary (context p) s"
         ' |> unpack |> Tuple.first |> String.join " | "))'
         ' |> Maybe.withDefault "NO SHIP UI"',
+        "rootAsked = \\spent -> \\parsed -> parsed |> Maybe.andThen (\\p ->"
+        " p.shipUI |> Maybe.map (\\s ->"
+        " wingmanDecisionRootInSpaceOrdinary (contextAsked spent p) s"
+        ' |> unpack |> Tuple.first |> String.join " | "))'
+        ' |> Maybe.withDefault "NO SHIP UI"',
+        # The real memory update over the real reading, so what a case asks
+        # about the counter is what a run would have written -- not a
+        # restatement of the rule beside it, which is #102's own defect.
+        "askedAfter = \\spent -> \\parsed -> parsed |> Maybe.map (\\p ->"
+        " (updateMemoryForNewReadingFromGame"
+        " { timeInMilliseconds = 0, readingFromGameClient = p"
+        " , screenshot ="
+        " { pixels_1x1 = always Nothing, pixels_2x2 = always Nothing }"
+        " , botSettings = defaultBotSettings }"
+        " { initBotMemory | middleRowAskedReadings = spent })"
+        ".middleRowAskedReadings) |> Maybe.withDefault (-1)",
     ) + tuple(READINGS)
 
     def __init__(self, **kwargs):
@@ -273,13 +349,21 @@ class WingmanRepl(ElmRepl):
 
 
 def step(inactive_always_on="False", propulsion_present="True",
-         propulsion_running="False", approaching="False"):
-    """The shipped middle-row rule, as one expression over four plain facts."""
+         propulsion_running="False", deactivating="Just False",
+         approaching="False", warping="False", asked="0"):
+    """The shipped middle-row rule, over six plain facts and a counter.
+
+    `deactivating` is written as the Elm value rather than as a flag, because
+    the three values it can take are the point: `Just True`, `Just False` and
+    `Nothing` are three different facts and a case that could only pass a
+    `Bool` could not tell the last two apart.
+    """
     return ("middleRowStep { inactiveAlwaysOnModulePresent = %s"
             ", propulsionModulePresent = %s, propulsionModuleIsRunning = %s"
-            ", shipIsApproaching = %s }"
+            ", propulsionModuleIsDeactivating = %s, shipIsApproaching = %s"
+            ", shipIsWarpingOrJumping = %s, askedReadings = %s }"
             % (inactive_always_on, propulsion_present, propulsion_running,
-               approaching))
+               deactivating, approaching, warping, asked))
 
 
 class TheMiddleRowRuleTest(unittest.TestCase):
@@ -362,6 +446,191 @@ class TheMiddleRowRuleTest(unittest.TestCase):
                  % step(propulsion_present="False", approaching="True"),
                  "%s == MiddleRowNeedsNothing"
                  % step(propulsion_present="False", propulsion_running="True")]),
+            [True, True])
+
+
+class TheDeactivationTransientTest(unittest.TestCase):
+    """#408's mechanism, as the rule.
+
+    The propulsion module has a ten-second cycle and goes on reading
+    `ramp_active` on for the whole of it after being told to stop, while
+    `clickModuleButtonButWaitIfClickedInPreviousStep` waits two steps --
+    roughly four seconds. So the click landed, the debounce expired inside the
+    cycle, `isActive` still said on, and the next click switched the module
+    back on. Twenty-three of Greta's last twenty-three top-level decisions were
+    that one line, with Heather and Kara word for word the same.
+
+    `isActive` cannot answer "did my click take" during a cycle;
+    `isDeactivating` is the entry that can, and this bot had never read it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_a_module_the_client_says_is_deactivating_is_not_clicked_again(self):
+        """The click that costs a session. `propulsionModuleIsRunning` is still
+        true -- that is the cycle, not the switch -- so a rule reading only
+        `isActive` answers `ShutThePropulsionModuleDown` here and re-arms the
+        module it just switched off."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == PropulsionModuleIsAlreadyShuttingDown"
+                 % step(propulsion_running="True", deactivating="Just True"),
+                 "%s /= ShutThePropulsionModuleDown"
+                 % step(propulsion_running="True", deactivating="Just True")]),
+            [True, True])
+
+    def test_an_absent_entry_is_not_read_as_not_deactivating(self):
+        """The `Maybe`, which is the half of this that is easiest to lose.
+
+        `ParseUserInterface`'s own doc block is explicit that an entry which
+        did not decode is absent rather than false, that absent and `False` are
+        different facts, and that only one of them is safe to act on -- the
+        neighbouring `ramp_active` is a duty cycle rather than an on/off state,
+        and #34 is what reading it as a state cost. Collapse `Nothing` to
+        `False` -- `Maybe.withDefault False` anywhere on this fact -- and this
+        case answers `ShutThePropulsionModuleDown` again.
+        """
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == PropulsionModuleSaysNothingAboutShuttingDown"
+                 % step(propulsion_running="True", deactivating="Nothing"),
+                 "%s /= ShutThePropulsionModuleDown"
+                 % step(propulsion_running="True", deactivating="Nothing")]),
+            [True, True])
+
+    def test_a_client_that_says_the_module_is_settled_still_gets_its_click(self):
+        """The control the two cases above need: `Just False` is the client
+        saying no switch-off is in flight, and that is the one answer which
+        licences a click. A guard that refused on all three values would pass
+        both cases above and never switch a propulsion module off again."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == ShutThePropulsionModuleDown"
+                 % step(propulsion_running="True", deactivating="Just False")]),
+            [True])
+
+    def test_the_guard_is_on_the_shutdown_and_not_on_the_switch_on(self):
+        """Switching a module *on* has no deactivation transient to misread, so
+        a cold propulsion module is clicked whatever this entry says. Widening
+        the guard to both directions would leave a build that does not carry
+        the entry unable to run its propulsion module at all."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == RunThePropulsionModule"
+                 % step(approaching="True", deactivating="Nothing"),
+                 "%s == RunThePropulsionModule"
+                 % step(approaching="True", deactivating="Just True"),
+                 "%s == ActivateAnAlwaysOnModule"
+                 % step(inactive_always_on="True", deactivating="Nothing")]),
+            [True, True, True])
+
+    def test_a_ship_in_warp_is_not_fought(self):
+        """"Not approaching" is true in warp too, and
+        `wingmanDecisionRootInSpaceOrdinary` has no warp gate above this arm.
+        A click there is both wasted -- a module toggled in warp changes
+        nothing about a warp already under way -- and the exact click that
+        re-arms a module still running its cycle out, so the ship would drop
+        out of warp with the propulsion module lit."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == LeaveThePropulsionModuleToTheWarp"
+                 % step(propulsion_running="True", warping="True"),
+                 "%s == LeaveThePropulsionModuleToTheWarp"
+                 % step(propulsion_running="True", warping="True",
+                        deactivating="Just False")]),
+            [True, True])
+
+    def test_aligning_is_not_a_state_the_arm_can_decline_in(self):
+        """Recorded rather than guarded, and asked of the real parser.
+
+        `ShipManeuverType` has `Warp`, `Jump`, `Orbit` and `Approach` and no
+        `Align`, so a client showing "Align" leaves `maneuverType` at `Nothing`
+        -- the same reading as a ship floating still, which the arm must go on
+        shutting the module down in. Aligning is also where shutting it down is
+        worth the most, since an active propulsion module is what makes
+        aligning slow, so the arm is left asking there and what stops it
+        repeating is `isDeactivating` and then the bound.
+        """
+        self.assertEqual(
+            self.repl.evaluate(
+                ["(aligningWithTheModuleRunning |> Maybe.andThen .shipUI"
+                 " |> Maybe.andThen .indication"
+                 " |> Maybe.andThen .maneuverType) == Nothing",
+                 "Maybe.map shipIsWarpingOrJumpingFromReading"
+                 " aligningWithTheModuleRunning == Just False"]),
+            [True, True])
+
+
+class TheMiddleRowBoundTest(unittest.TestCase):
+    """#408's urgent half: the arm sits directly under
+    `activateAlwaysOnModules` and above the broadcast arm, the drones, the
+    guns, the gate and the travel forms, so answering `Just` forever starves
+    all of them. That is #321's shape and the third time it has hit this bot
+    (#360, #395)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_every_click_the_arm_makes_is_bounded(self):
+        """All three, not just the shutdown: any of them repeating forever owns
+        the bot, and the always-on half has the same shape."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == GaveUpOnTheMiddleRow"
+                 % step(propulsion_running="True",
+                        asked="middleRowAskedReadingsBound"),
+                 "%s == GaveUpOnTheMiddleRow"
+                 % step(approaching="True",
+                        asked="middleRowAskedReadingsBound"),
+                 "%s == GaveUpOnTheMiddleRow"
+                 % step(inactive_always_on="True",
+                        asked="middleRowAskedReadingsBound")]),
+            [True, True, True])
+
+    def test_the_last_reading_of_the_budget_still_clicks(self):
+        """The control on the comparison's direction and operands."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == ShutThePropulsionModuleDown"
+                 % step(propulsion_running="True",
+                        asked="(middleRowAskedReadingsBound - 1)"),
+                 "0 < middleRowAskedReadingsBound"]),
+            [True, True])
+
+    def test_the_bound_does_not_mask_the_answers_that_decline_to_click(self):
+        """A give-up in the status line has to mean "this bot clicked a module
+        button and the client never showed the change", so only the clicks may
+        become one. It is also what keeps `MiddleRowNeedsNothing` reachable
+        past the bound, which is what resets the counter."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["%s == PropulsionModuleIsAlreadyShuttingDown"
+                 % step(propulsion_running="True", deactivating="Just True",
+                        asked="9999"),
+                 "%s == LeaveThePropulsionModuleToTheWarp"
+                 % step(propulsion_running="True", warping="True",
+                        asked="9999"),
+                 "%s == MiddleRowNeedsNothing"
+                 % step(approaching="True", propulsion_running="True",
+                        asked="9999")]),
+            [True, True, True])
+
+    def test_the_bound_is_the_allowance_every_other_ask_here_gets(self):
+        self.assertEqual(
+            self.repl.evaluate(
+                ["middleRowAskedReadingsBound == weaponsAskedReadingsBound",
+                 "middleRowAskedReadingsBound == 20"]),
             [True, True])
 
 
@@ -484,6 +753,31 @@ class TheArmOverARealReadingTest(unittest.TestCase):
             "This ship is not approaching anything. Shut the propulsion module"
             " down. | Click on this module button.")
 
+    def test_a_module_running_its_cycle_out_is_left_alone(self):
+        """#408 over a reading the real parser produced. The two readings
+        differ in one dictionary entry, and the whole outage is in it."""
+        self.assertEqual(self.described("propulsionModuleDeactivating"),
+                         STOOD_DOWN)
+
+    def test_a_client_saying_nothing_buys_no_click(self):
+        self.assertEqual(
+            self.described("propulsionModuleSilentAboutShuttingDown"),
+            STOOD_DOWN)
+
+    def test_a_ship_in_warp_keeps_its_readings(self):
+        self.assertEqual(self.described("warpingWithTheModuleRunning"),
+                         STOOD_DOWN)
+
+    def test_a_ship_lining_up_still_sheds_the_module(self):
+        """The align decision, over a reading: the client names the manoeuvre
+        and the parser has no value for it, so this is a ship the arm cannot
+        tell from one sitting still -- and it is where the module costs the
+        most."""
+        self.assertEqual(
+            self.described("aligningWithTheModuleRunning"),
+            "This ship is not approaching anything. Shut the propulsion module"
+            " down. | Click on this module button.")
+
 
 class TheArmIsOnTheLiveDecisionPathTest(unittest.TestCase):
     """#349's finding, which this file must not repeat: `activateAlwaysOnModules`
@@ -524,6 +818,37 @@ class TheArmIsOnTheLiveDecisionPathTest(unittest.TestCase):
         self.assertEqual(self.repl.strings(["rootFor scrambled"]),
                          ["Nothing to do. Wait. | Wait for progress in game"])
 
+    def test_the_give_up_hands_the_reading_back_to_the_arms_below(self):
+        """#408's outage, as one case, and the one that fails if the bound is
+        taken out.
+
+        `propulsionModuleLeftRunning` is the live reading: the module reads on,
+        the ship is not approaching, and the arm wants to click. With the
+        counter wound past the bound the arm must answer `Nothing` and the
+        root must reach something below it -- not park on
+        `askForHelpToGetUnstuck` or on a wait, which would be #321's "a branch
+        at the head of the tree with no bound owns the whole bot" with a
+        politer status line. The control beside it is the same reading with a
+        fresh counter, which still clicks.
+        """
+        self.assertEqual(
+            self.repl.evaluate(
+                ["armAsked middleRowAskedReadingsBound"
+                 " propulsionModuleLeftRunning == Nothing",
+                 "armAsked 0 propulsionModuleLeftRunning /= Nothing"]),
+            [True, True])
+        self.assertEqual(
+            self.repl.strings(
+                ["rootAsked middleRowAskedReadingsBound"
+                 " propulsionModuleLeftRunning"]),
+            ["Nothing to do. Wait. | Wait for progress in game"])
+
+    def test_the_root_still_shuts_a_module_down_inside_the_budget(self):
+        self.assertEqual(
+            self.repl.strings(["rootFor propulsionModuleLeftRunning"]),
+            ["This ship is not approaching anything. Shut the propulsion"
+             " module down. | Click on this module button."])
+
     def test_the_tooltip_path_is_still_consulted_ahead_of_it(self):
         """#394 adds a position-based path; it does not replace the setting.
 
@@ -542,7 +867,7 @@ class TheArmIsOnTheLiveDecisionPathTest(unittest.TestCase):
         with open(os.path.join(WINGMAN_DIR, "Bot.elm"), encoding="utf-8") as f:
             body = wingman_root_body(f.read())
         tooltips = body.index("case activateAlwaysOnModules context of")
-        middleRow = body.index("case manageMiddleRowModules context shipUI of")
+        middleRow = body.index("case manageMiddleRowModules context of")
         self.assertLess(tooltips, middleRow)
         self.assertLess(middleRow,
                         body.index("case actOnFleetBroadcast context"))
@@ -577,6 +902,106 @@ class TheStatusLineTest(unittest.TestCase):
             self.repl.strings(["statusFor emptyMiddleRow"]),
             ["Middle row: no module slots read, so nothing is kept active by"
              " position."])
+
+    def test_the_give_up_is_visible(self):
+        """`manageMiddleRowModules` answers `Nothing` when it gives up, so
+        without this a bot that has stopped managing its middle row reads in
+        the status line exactly like one whose row is already right -- which is
+        the shape that made #408 hard to see from a console."""
+        clause = self.repl.strings(
+            ["askAsked middleRowAskedReadingsBound"
+             " propulsionModuleLeftRunning"])[0]
+        self.assertIn("GAVE UP", clause)
+        self.assertIn(str(20), clause)
+
+    def test_each_refusal_is_named_as_itself(self):
+        """The two `isDeactivating` refusals are named apart on purpose: a
+        console showing the second one for a whole session is a build that does
+        not carry the entry, and that is worth being able to see."""
+        clauses = self.repl.strings(
+            ["askFor propulsionModuleDeactivating",
+             "askFor propulsionModuleSilentAboutShuttingDown",
+             "askFor warpingWithTheModuleRunning",
+             "askFor propulsionModuleLeftRunning",
+             "askFor scrambled"])
+        self.assertIn("already deactivating", clauses[0])
+        self.assertIn("says nothing", clauses[1])
+        self.assertIn("warping or jumping", clauses[2])
+        self.assertIn("Switching the propulsion module off", clauses[3])
+        self.assertEqual(clauses[4], "")
+
+    def test_the_two_clauses_share_a_line_without_a_stray_space(self):
+        """`describeMiddleRowAsk` is empty on most readings and sits in the
+        same status-line group as the row itself, so the group drops empties
+        before joining rather than leaving a gap where a clause was not."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["(scrambled |> Maybe.map (context >> statusTextFromState)"
+                 ' |> Maybe.map (String.contains "keep-active [on, on]."))'
+                 " == Just True",
+                 "(scrambled |> Maybe.map (context >> statusTextFromState)"
+                 ' |> Maybe.map (String.contains "keep-active [on, on]. "))'
+                 " == Just False"]),
+            [True, True])
+
+
+class TheCounterAdvancesFromTheShippedRuleTest(unittest.TestCase):
+    """#102: a counter advanced by one condition and read by another is two
+    rules on two schedules, and #389 is what that costs in this file -- three
+    pilots reporting `GAVE UP after 46 readings` on an arm that had never once
+    been asked.
+
+    So these run the real `updateMemoryForNewReadingFromGame` over the real
+    readings rather than pinning its source, and what they hold down is that
+    only the readings the arm actually clicked on are charged for.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_a_reading_the_arm_clicked_on_is_charged(self):
+        self.assertEqual(
+            self.repl.evaluate(
+                ["askedAfter 4 propulsionModuleLeftRunning == 5",
+                 "askedAfter 4 coldTankModule == 5",
+                 "askedAfter 4 approachingWithTheModuleCold == 5"]),
+            [True, True, True])
+
+    def test_the_readings_the_arm_declined_on_are_not_charged(self):
+        """Each of these leaves the module exactly as it found it, so charging
+        for them would spend the budget on readings nobody clicked and report a
+        give-up on an arm that had stopped asking of its own accord."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["askedAfter 4 propulsionModuleDeactivating == 0",
+                 "askedAfter 4 propulsionModuleSilentAboutShuttingDown == 0",
+                 "askedAfter 4 warpingWithTheModuleRunning == 0",
+                 "askedAfter 4 scrambled == 0"]),
+            [True, True, True, True])
+
+    def test_the_counter_holds_rather_than_running_away_past_the_bound(self):
+        """`unlockFleetPilotAskedReadings`'s own arrangement: the row is still
+        wrong and this bot has stopped clicking at it, and a counter that ran
+        away would make the status line's "after N readings" meaningless."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["askedAfter 9999 propulsionModuleLeftRunning == 9999"]),
+            [True])
+
+    def test_a_row_that_needs_nothing_gives_the_allowance_back(self):
+        """What ends an episode here. A ship that starts approaching again
+        wants the module it already has running, so the row needs nothing and
+        the next stretch of not-approaching starts from a full budget -- which
+        is what keeps a give-up from being permanent."""
+        self.assertEqual(
+            self.repl.evaluate(
+                ["askedAfter 9999 propulsionModuleRunningOnTheApproach == 0"]),
+            [True])
 
 
 if __name__ == "__main__":

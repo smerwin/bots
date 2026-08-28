@@ -46,7 +46,10 @@ nothing to do.
    it is this high.
 5. **Activate the always-on modules** named in `activate-module-always`, and
    then **manage the middle row by position** — `manageMiddleRowModules`
-   (#394). Directly under those, and above everything below them, sits one
+   (#394), bounded by `middleRowAskedReadingsBound` and reading the client's
+   own `isDeactivating` before it clicks anything off (#408). Past the bound it
+   hands the reading back and the status line says `GAVE UP`. Directly under
+   those, and above everything below them, sits one
    window rather than an arm: `closeOnTheCommanderAfterLanding` (#397),
    which outranks 6, 7 and 8 from the reading a warp ends until the client
    reports the manoeuvre. It sits *below* the module arms on purpose —
@@ -227,6 +230,127 @@ nothing.
 
 `activate-module-always` still works and is unchanged, for anything genuinely
 tooltip-matched outside that row.
+
+### The prop mod was being switched back on, not failing to switch off (#408)
+
+**All four pilots stalled on this arm at once.** Twenty-three of Greta's last
+twenty-three top-level decisions were one line, with Heather and Kara word for
+word the same:
+
+    Middle row: prop mod on and this ship is not approaching, keep-active [on].
+    + This ship is not approaching anything. Shut the propulsion module down.
+    ++ I clicked this module button 2 step(s) ago and the client has not shown
+       the change yet
+
+None of them was following the commander, and the travel arm was not at fault:
+it was **unreachable**. `manageMiddleRowModules` sits directly under
+`activateAlwaysOnModules` and above the broadcast arm, the drones, the guns,
+the gate and the travel forms, and #394 shipped it with no bound and no
+give-up, so an arm that answered `Just` on every reading owned the whole bot.
+That is the same shape as the acceleration gate's #321 and the third time it
+has hit this bot (#360, #395).
+
+**The mechanism underneath it is a cycle, not a lost click.** The propulsion
+module has a ten-second cycle and goes on reading `ramp_active` on for the
+whole of it after being told to stop. `clickModuleButtonButWaitIfClickedInPreviousStep`
+waits `moduleButtonClickSettlingSteps` — two steps, roughly four seconds — so
+the debounce expires well inside the cycle, the module still reads on, and the
+arm clicks again. The button is a toggle, so **that second click re-activates
+it**. saxrat's "odd number of toggles" hazard, arriving through timing rather
+than through position.
+
+**The instrument that answers it is `isDeactivating`**, in this app's own
+vendored parser (`ShipUIModuleButton.stateFromDictEntries`) and read by this
+bot zero times before now. `isActive` reads `ramp_active`, which cannot say
+whether a click took while a cycle is running; `isDeactivating` is the client
+saying the switch-off landed. A propulsion module the client reports as
+deactivating is now left to finish, however long `isActive` stays true.
+
+**Absent is not `False`, and the arm has three answers rather than two.** The
+parser's own doc block is explicit that an entry which did not decode is
+missing rather than false, that the two are different facts, and that only one
+of them is safe to act on — the neighbouring `ramp_active` is a duty cycle and
+not an on/off state, and misreading it that way is what #34 cost. So
+`isDeactivating = Nothing` gets its own answer and buys no click. The cost is
+stated: on a build that does not carry the entry the propulsion module is never
+switched off, which loses the module and keeps the bot. The guard is on the
+**shutdown only** — switching a module on has no deactivation transient to
+misread, so a cold module is still clicked whatever the entry says.
+
+**A warp or a jump is left to the manoeuvre.** "Not approaching" is true in
+warp too, and the wingman's own root has no warp gate above this arm, so
+without the guard every reading of a warp met "module on, not approaching, shut
+it down" — clicks that change nothing about a warp already under way and that
+re-arm a module still running its cycle out, so the ship would drop out of warp
+with the prop mod lit.
+
+**Aligning is deliberately not special-cased, because the client does not name
+it.** `ShipManeuverType` has `Warp`, `Jump`, `Orbit` and `Approach` and no
+`Align`: a ship lining up reads no manoeuvre at all, which is the same
+`Nothing` as a ship floating still. It is also the state where shutting the
+module down is worth the most, since the extra mass is what makes aligning
+slow — #394's own argument — so the arm goes on asking there, and what stops it
+repeating is `isDeactivating` and then the bound rather than a manoeuvre test
+that would have to guess.
+
+**And the arm is bounded.** `middleRowAskedReadingsBound` is
+`weaponsAskedReadingsBound` — twenty, the allowance every other per-reading ask
+in this file gets. Past it the arm answers `Nothing` rather than parking on
+`askForHelpToGetUnstuck`, so the broadcast, the drones, the guns, the gate and
+the trip home all still run, and the status line carries the give-up:
+
+    Middle row: prop mod on and this ship is not approaching, keep-active [on].
+    GAVE UP after 20 readings clicking a middle-row module the client never
+    showed the change on.
+
+`middleRowAskedReadings` advances only on the three answers that actually click
+and holds once the budget is spent, so the number in that line counts readings
+this arm asked on rather than readings it happened to be reached on — #389's
+correction, applied here from the start. It resets on every reading the row
+wants nothing, which is what stops a give-up being permanent: a ship that
+starts approaching again wants the module it already has running, so the row
+needs nothing and the next stretch gets the whole allowance back.
+
+**One counter covers both halves of the row, and that couples them.** A tank
+module that can never be switched on spends the budget and the give-up then
+covers the propulsion module too, so such a ship stops managing its prop mod
+for as long as that slot reads inactive. Accepted rather than overlooked: the
+arm answers one `Just` and so needs one give-up, and the cost is a module left
+alone rather than a bot that stops following its commander.
+
+### Clicking a module twice inside its cycle is a toggle, not a retry
+
+#408 is one instance of a general mismatch and only that instance was fixed.
+`clickModuleButtonButWaitIfClickedInPreviousStep` waits
+`moduleButtonClickSettlingSteps` — two steps, roughly four seconds — before it
+will click a module button again, and its own message says what a second click
+does: *"wait rather than click it again, which would toggle it back."* Any
+module whose cycle is longer than that window will still read unchanged when
+the window expires, and the retry is a toggle. Four other arms in this file
+click module buttons through that helper, and none of them was touched:
+
+- **`deactivateModulesForWarp`** is #408's shape exactly, in the other
+  direction. It clicks a module the operator named in `deactivate-module-on-warp`
+  while `.isActive == Just True`, which is the same "still cycling" reading
+  that trapped the propulsion module — so a ten-second module would be switched
+  off, still read active, and be switched back on mid-warp. It is unreached in
+  the shipped settings (`deactivateModuleOnWarp` defaults to `[]`), but it is
+  live code: `warpAwayFromDanger` calls it on the retreat, not only the
+  inherited root. Reading `isDeactivating` there is the same one-line change.
+- **`activateAlwaysOnModules`** and the always-on half of the middle row click
+  in the *activation* direction, gated on `moduleIsActiveOrReloading`. The
+  transient is the other one — a module told to switch on does not carry
+  `ramp_active` until it starts cycling — and nothing has measured how long
+  that takes on these fits. Both are now bounded (the middle row by #408, the
+  tooltip path by its own emptiness in the shipped settings), so the failure
+  costs readings rather than a session.
+- **`fightUsingDronesAndModules`** and **`fireOnActiveTarget`** click top-row
+  weapons whose `isActive` *is* the duty cycle: `ramp_active` reads `False` for
+  part of every cycle on a gun that is firing, which is what saxrat's #76 and
+  #286 measured. So a gun already firing can be clicked and silenced. The guns
+  are bounded by `weaponsAskedReadingsBound`, so this costs twenty readings and
+  a `GAVE UP` rather than a session, and repointing them at `isInActiveState`
+  is a behaviour change on the arm that shoots — deliberately not made here.
 
 ### On landing, closing outranks the fight — for as long as the client is silent
 
@@ -1652,6 +1776,29 @@ restart.
   visibly moves. The shutdown direction is the one to watch on arrival — the
   module has to come off when the approach ends, and nothing has watched a
   reading where it does.
+- **That `isDeactivating` ever reads `True` on these clients (#408).** This is
+  the load-bearing unknown in the fix, and the parser's own doc block says as
+  much: across the 240-second sampling window that mapped these entries,
+  `isDeactivating` was **never once `True`**, because nothing switched a module
+  off while the sampler ran. The complement of it — `isInActiveState` — is
+  measured by saxrat's #286 across 61,948 module observations, and the
+  transient it names is short: median two readings, longest seven. Against a
+  ten-second cycle read every two seconds that is most of the cycle but not all
+  of it, so a reading can land in the gap and buy one more click. What a run
+  shows: the status line now says which of the three answers the client gave.
+  `already deactivating` on the reading after a shutdown click is the fix
+  working. `says nothing about whether the propulsion module is deactivating`
+  for a whole session means this build does not carry the entry at all, and the
+  propulsion module will never be switched off — bot still flying, module
+  stuck on. And a `GAVE UP` after twenty means the click is landing on
+  something that is not the propulsion module, which sends this back to #394's
+  position assumption rather than to the cycle.
+- **Whether twenty readings is the right allowance against a ten-second
+  cycle.** The bound is `weaponsAskedReadingsBound` for consistency, not from a
+  measurement of this arm. Twenty readings is roughly forty seconds, and with
+  the debounce that is about ten clicks — five net toggles of a module the
+  operator would rather have off. With `isDeactivating` read it should never
+  get near that; nothing has watched a run to confirm it does not.
 - **Whether the middle row's capacitor cost is bearable ungated.** The choice
   not to gate the always-on set on a fight is argued rather than measured, and
   the counter-evidence would be a wingman running its capacitor dry sitting on
