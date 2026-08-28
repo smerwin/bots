@@ -1073,11 +1073,21 @@ class TheRecallIsTheOneEveryOtherDepartingArmUsesTest(unittest.TestCase):
             collapsed(self.source))
         self.assertIn("overviewRowsForPilot calledTarget readingFromGameClient",
                       collapsed(self.source))
-        for name in ("\ncalledTargetIsLocked calledTarget reading =",
-                     "\nlockCalledTarget context calledTarget ="):
-            self.assertIn("overviewEntryForPilot",
-                          declaration(self.source, name),
-                          "#389's own pin, which this change must not break")
+        # `lockCalledTarget` reaches the selection directly. `calledTargetIsLocked`
+        # reaches it through `overviewRowSaysThisShipHasItLocked`, which #396
+        # lifted out so the called-target arm and the friendly-fire guard read
+        # `targetedByMe` through one accessor -- so the chain is asserted rather
+        # than the old shape, which named a caller that no longer calls it.
+        self.assertIn("overviewEntryForPilot",
+                      declaration(self.source, "\nlockCalledTarget context calledTarget ="),
+                      "#389's own pin, which this change must not break")
+        self.assertIn("overviewRowSaysThisShipHasItLocked",
+                      declaration(self.source, "\ncalledTargetIsLocked calledTarget reading ="),
+                      "#389's own pin, one level deeper since #396")
+        self.assertIn("overviewEntryForPilot",
+                      declaration(self.source,
+                                  "\noverviewRowSaysThisShipHasItLocked pilotName reading ="),
+                      "the accessor #396 lifted out must still read the one row selection")
 
 
 if __name__ == "__main__":
