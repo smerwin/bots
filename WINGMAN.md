@@ -536,6 +536,139 @@ where the clause reads `NO OVERVIEW ROW names it` while a gate is plainly called
 is the unverified premise failing, and is the one thing a capture pass with
 `eve_read.py` would settle outright.
 
+### A called target that dies leaves the banner naming it
+
+#395, and it is the third variant of one defect. #360 fixed *the banner names a
+target that is already locked*; #389 fixed *the target is locked and not
+recognised as locked*; this is **the target is not there any more**, and that
+branch had never had an answer other than waiting.
+
+On 2026-08-28, on `fbf4c2e`, three of four wingmen killed **37 rats each** and
+stopped together, all repeating
+
+```
++ Lock the called target 'Centus Black Ops Veteran'.
+++ 'Centus Black Ops Veteran' is not on the overview.
++++ Wait for progress in game
+```
+
+25 of each in a 400-line scrollback, `Weapons: nothing locked`, nothing below
+the broadcast arm running. **Identical kill counts across the three is the
+tell** — they stopped at the same moment, when the commander's called target
+died.
+
+**The broadcast banner is a last-broadcast display and never clears**, which is
+the fact all three variants are about. With the rat dead, `calledTargetIsLocked`
+is false because the thing is gone, `bringCalledTargetUnderFire` answered
+`Just (lock it)`, and `lockCalledTarget` — finding no overview row —
+answered `waitForProgressInGame`, a wait with no bound and no give-up. The arm
+sits above the drones, the guns, the gate and the approach, and the first arm to
+answer `Just` ends the reading, so all of them were unreachable for the rest of
+the session or until the FC called something else.
+
+#### Why the counter rather than the latch
+
+The issue offers two shapes and calls the latch — `fleetBroadcastFollowed` for
+the `Target` form — the more general fix. **What shipped is the counter, with
+the latch's identity half folded into it**, and the reason is what the two forms
+ask for.
+
+`fleetBroadcastFollowed` bounds a **one-shot** action: the ESI route ask goes out
+once per banner and repeating it is pure waste, so "this banner has been acted
+on" is a complete answer. A target call is a **standing** instruction. #360's own
+fix is that the arm answers `Nothing` while the target is locked and `Just` again
+the moment it is not, because a lock can break while the call is still live — so
+a latch fired when the arm first acts would stop the bot re-locking a target it
+lost. The only event a latch could honestly fire on here is *this call names
+nothing on the grid*, which is the counter's verdict; the latch and the counter
+are the same rule, one reading apart.
+
+What the latch does contribute is the **name**.
+`BotMemory.calledTargetGone : Maybe { calledTarget, readings }` carries the
+called name beside the count, so a second call is never given up on with none of
+its own readings spent — a bare counter would hand one call's arrears to the
+next, which is the shape #145's gate counter was filed on.
+
+**What clears it** is one clause covering all three ways the state ends:
+`calledTargetGoneAfterReading` answers `Nothing` on any reading
+`calledTargetWithNoOverviewRow` does not answer `Just` for — the row coming back,
+the commander calling something else, and the banner going away. A different call
+starts from one rather than inheriting.
+
+#### The bound is three, and what it bounds is a parse rather than a range
+
+`CalledNameNamesNoOverviewRow` is **not the overview virtualising**. A row
+scrolled out of view is still in the tree, and `overviewRowsForPilot` filters on
+the Name cell rather than on `_display`, so a hidden row still answers
+`CalledObjectIsNotAGate`. This state is the stronger one — no window holds a row
+with that name at all — which a live target reaches only by leaving the
+overview's own range filter, or through a reading whose overview did not parse.
+
+So the number bounds a parse that missed, and three is the count this repo
+already gives that doubt: CLAUDE.md's ship-loss signal wants three consecutive
+readings of an empty module row *"because the parser drops any slot whose display
+region it cannot read, so one reading finding none may be a parse that missed"*.
+Both costs are small and asymmetric — being late costs three readings of this arm
+holding, being early costs one lock not issued on a target whose row is back next
+reading, and the count resets the moment it is, so the arm re-arms itself. It
+sits far below `weaponsAskedReadingsBound` (20) and
+`accelerationGateRefusesThisShipTicks` (40) deliberately: those bound a *click*
+the client keeps refusing, where this bounds a reading with nothing to click.
+
+#### One rule, both readers, and the give-up says so
+
+`calledTargetWithNoOverviewRow` is the arm's own precondition —
+**including the fleet-member guard**, since `actOnFleetBroadcast` refuses a call
+on a fleetmate above this arm and those readings are not readings this arm spent
+— and `updateMemoryForNewReadingFromGame`, which never sees a decision, asks it
+rather than restating it. The same arrangement `askingForTheCalledGateRecall`
+already uses next door, for #145's reason.
+
+**It also makes #393's own stated fall-through true.** That section says a
+called gate whose banner text is not the overview's Name cell "falls through to
+the lock path this bot takes today rather than to a wait" — and the lock path
+*was* a wait, unbounded, for exactly the same reason. So the premise #393 ships
+unverified now costs three readings and a named clause rather than the session.
+
+The give-up hands the reading back, so a `Nothing` carries no decision line and
+`describeCalledObject` is the only thing that says it happened:
+
+```
+Called target 'Centus Black Ops Veteran': NO OVERVIEW ROW names it, ...
+  No row has named it for 2 of 3 readings; past that this call is left alone.
+Called target 'Centus Black Ops Veteran': NO OVERVIEW ROW names it, ...
+  GIVEN UP ON after 4 readings naming no row -- the banner never clears, so this
+  call is left alone and the drones, the guns and the gate get their turn. A new
+  broadcast starts this over.
+```
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_wingman_called_target_gone.py` (34 cases). The rules
+are executed through the real `Bot.elm` in `elm repl` and the readings they are
+asked about go through the real `EveOnline.ParseUserInterface`; the counter is
+folded over whole sessions rather than asked once; and the property asserted is
+#360's own — **the reading falls through the whole broadcast arm** — with a
+control in the same call that must still act, so a rule answering `Nothing` for
+everything cannot pass. The strongest of them folds the shipped
+`updateMemoryForNewReadingFromGame` over a session of #395's own reading and asks
+the shipped arm about the memory that fold produced, so the counter, the verdict
+and the arm are executed together. Confirmed by mutation, eighteen of them, each
+failing a named case, listed in that file — including the give-up dropped, which
+is #395 restored, and the count never cleared, which is the next call ignored.
+**No parser change was required.**
+
+**Unverified: any of it running.** No run has been flown since. What to watch on
+the first one that loses a called target: `No row has named it for N of 3
+readings`, then `GIVEN UP ON after N readings naming no row`, with ordinary
+decisions — drones, guns, the gate — resuming underneath it on the same readings.
+A run that meets one and never prints either clause means the counter is not
+being written, which is the direction this fails silently in. In the other
+direction, the clause appearing on a call the bot could have acted on would mean
+the row was there and `overviewRowsForPilot` did not match it. And **whether a
+live target's row can vanish and return at all** is still unread; if it can, the
+tell is the count climbing to 1 or 2 and resetting over and over while the bot
+goes on locking the target normally.
+
 ### The health retreat, and why it ships switched off
 
 Until #364 this bot had **no health-based retreat of any kind**. The only place
@@ -1422,6 +1555,16 @@ restart.
 - **The trip home (#350).** `elm make` proves the types; nothing has watched
   the ship actually reach `home-station` and stay docked. See
   `notes/350-trip-home.md` for what to watch on the first run.
+- **Whether a *live* called target's overview row can vanish and come back.**
+  #395's bound is three readings, sized against a reading whose overview did not
+  parse rather than against a target drifting, because
+  `CalledNameNamesNoOverviewRow` is not virtualisation — a scrolled-out row is
+  still in the tree. The other way to reach it is the overview's own range
+  filter, and nobody has watched that happen. If it is common, the tell is
+  `No row has named it for 1 of 3 readings` appearing and resetting over and
+  over while the bot goes on locking the target normally; the fix would be a
+  larger bound rather than a different rule. See "A called target that dies
+  leaves the banner naming it".
 
 ## Flown
 

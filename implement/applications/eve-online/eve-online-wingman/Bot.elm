@@ -551,6 +551,17 @@ type alias BotMemory =
     -- rest of the session.
     , fleetBroadcastFollowed : Maybe String
 
+    -- The `Target` form's own answer to the same persistence, and #395 is what
+    -- its absence cost: the banner goes on naming a called target after the
+    -- thing dies, so `bringCalledTargetUnderFire` answered "lock it" forever
+    -- at a name no overview row carried, and every arm below it -- the drones,
+    -- the guns, the gate, the approach -- was unreachable for the rest of the
+    -- session. Which called name, and how many consecutive readings it has
+    -- named no row. `Nothing` on any reading that is not that state, so a row
+    -- coming back, a different call and the banner going away all clear it.
+    -- See `calledTargetGoneAfterReading`.
+    , calledTargetGone : Maybe CalledTargetGone
+
     -- The same two-reading latch as `fleetBroadcastSeen`/`fleetBroadcastFollowed`,
     -- for the place (system or gate) an `AtLocation`/`InPositionAt` broadcast
     -- names -- see `fleetMatePlaceAnyPilot`'s own comment for why this is
@@ -710,6 +721,24 @@ type alias IncomingDamageMemory =
     { samples : List { atMilliseconds : Int, damage : Int }
     , hostCarriesTheChannel : Bool
     , retreating : Bool
+    }
+
+
+{-| A called target the banner still names and no overview row does, and for how
+long.
+
+**The name travels with the count, which is the half `fleetBroadcastFollowed`
+contributes to #395's fix.** A bare counter would carry one call's readings into
+the next one, so a second target called while the first was still missing would
+be given up on with none of its own readings spent -- the "a counter and the
+thing it bounds are measuring different quantities" shape #145's own gate counter
+was filed on. `calledTargetHasBeenGivenUpOn` therefore takes the name being asked
+about as well as this record and refuses to answer for any other.
+
+-}
+type alias CalledTargetGone =
+    { calledTarget : String
+    , readings : Int
     }
 
 
@@ -2976,6 +3005,7 @@ initBotMemory =
     , retreatAskedReadings = 0
     , recoveringFromRetreat = False
     , gateAskedReadings = 0
+    , calledTargetGone = Nothing
     , calledGateRecallAskedReadings = 0
     , dronesInSpaceCountLastReading = 0
     , weaponsAskedReadings = 0
@@ -3772,6 +3802,13 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
                 else
                     botMemoryBefore.fleetBroadcastFollowed
+    , calledTargetGone =
+        calledTargetGoneAfterReading
+            botMemoryBefore.calledTargetGone
+            (calledTargetWithNoOverviewRow
+                context.botSettings.followFleetBroadcastFrom
+                context.readingFromGameClient
+            )
     , goToFleetMatePlaceSeen =
         fleetMatePlaceAnyPilot context.readingFromGameClient
     , goToFleetMateDestinationAsked =
@@ -5658,7 +5695,144 @@ bringCalledTargetUnderFire context calledTarget =
             shootIt
 
         CalledNameNamesNoOverviewRow ->
-            shootIt
+            -- #395: the banner is a last-broadcast display and never clears, so
+            -- a called target that dies leaves this arm asking for a lock at a
+            -- name nothing on the grid carries -- and the drones, the guns, the
+            -- gate and the approach below it are all unreachable while it does.
+            -- Past the bound there is nothing more this arm can do about the
+            -- call, so it hands the reading back; `describeCalledObject` is what
+            -- goes on saying the call is unanswerable, since a `Nothing` carries
+            -- no decision line. Asked before the lock rather than inside it,
+            -- because the give-up is the arm's answer and `lockCalledTarget`
+            -- answers a `DecisionPathNode` that cannot decline.
+            if calledTargetHasBeenGivenUpOn calledTarget context.memory.calledTargetGone then
+                Nothing
+
+            else
+                shootIt
+
+
+{-| The called target this arm would be trying to lock and can find no row for,
+if this reading is one of those.
+
+**One rule, both readers**, which is what keeps #395's counter measuring the
+readings its own give-up bounds. `updateMemoryForNewReadingFromGame` never sees a
+decision, so without this it would have had to restate the arm's precondition --
+and the two restatements drifting is the defect `gateAskedReadings` was filed on
+(#145: a counter advancing on readings spent merely _near_ a gate, against a
+give-up about readings spent _asking_ one).
+
+Both of the arm's own conditions are here. The fleet-member guard in
+`actOnFleetBroadcast` answers above this arm and never reaches it, so a call on a
+fleetmate must spend none of the budget; and the classification is the same
+`calledObjectOnOverviewFromReading` the arm dispatches on, so a called gate whose
+row is merely not drawn is not counted as a name nothing carries.
+
+-}
+calledTargetWithNoOverviewRow : List String -> ReadingFromGameClient -> Maybe String
+calledTargetWithNoOverviewRow followFleetBroadcastFrom readingFromGameClient =
+    fleetBroadcastBannerText readingFromGameClient
+        |> Maybe.andThen targetBroadcastPilotName
+        |> Maybe.andThen
+            (\calledTarget ->
+                if
+                    List.member calledTarget
+                        (fleetPilotNamesFromReading followFleetBroadcastFrom readingFromGameClient)
+                then
+                    Nothing
+
+                else
+                    case calledObjectOnOverviewFromReading calledTarget readingFromGameClient of
+                        CalledNameNamesNoOverviewRow ->
+                            Just calledTarget
+
+                        _ ->
+                            Nothing
+            )
+
+
+{-| How many consecutive readings the banner's called target has named no
+overview row, carried with the name it is counting for.
+
+**What clears it is every one of the three ways the state can end**, and all
+three are the same clause: this reading is not one
+`calledTargetWithNoOverviewRow` answers `Just` for. A row coming back, the
+commander calling something else, and the banner going away are all `Nothing`
+here, so the count starts from one again -- which is what stops a give-up latched
+on a dead target from being spent on the next call the fleet makes.
+
+-}
+calledTargetGoneAfterReading : Maybe CalledTargetGone -> Maybe String -> Maybe CalledTargetGone
+calledTargetGoneAfterReading before calledTargetWithNoRow =
+    case calledTargetWithNoRow of
+        Nothing ->
+            Nothing
+
+        Just calledTarget ->
+            case before of
+                Just gone ->
+                    if gone.calledTarget == calledTarget then
+                        Just { gone | readings = gone.readings + 1 }
+
+                    else
+                        Just { calledTarget = calledTarget, readings = 1 }
+
+                Nothing ->
+                    Just { calledTarget = calledTarget, readings = 1 }
+
+
+{-| How many readings in a row the banner may name a target no overview row
+carries before this arm stops trying to lock it and hands the reading back.
+
+**Three, and what it is protecting against is a reading rather than a range.**
+`CalledNameNamesNoOverviewRow` is not the overview _virtualising_: a row scrolled
+out of view is still in the tree, and `overviewRowsForPilot` filters on the Name
+cell rather than on `_display`, so a hidden row still answers
+`CalledObjectIsNotAGate`. This state is the stronger one -- no window holds a row
+with that name at all -- which a live target reaches only by leaving the
+overview's own range filter, or by a reading whose overview did not parse.
+
+So the number bounds a parse that missed rather than a target drifting, and
+three is the count this repo already gives that doubt: CLAUDE.md's ship-loss
+signal wants three consecutive readings of an empty module row "because the
+parser drops any slot whose display region it cannot read, so one reading
+finding none may be a parse that missed". The two costs are asymmetric and both
+small -- being late costs three readings of this arm holding, being early costs
+one lock not issued on a target whose row is back next reading, and the count
+resets the moment it is, so the arm re-arms itself.
+
+Deliberately far below `weaponsAskedReadingsBound` (20) and
+`accelerationGateRefusesThisShipTicks` (40): those bound a _click_ the client
+keeps refusing, where this bounds a reading in which there is nothing to click.
+
+-}
+calledTargetGoneReadings : Int
+calledTargetGoneReadings =
+    3
+
+
+{-| Whether the call for this name has been given up on. One comparison with two
+readers -- the arm and the status clause -- so a give-up decided in one place and
+reported in another cannot disagree about whether it happened;
+`accelerationGateHasBeenGivenUpOn`'s arrangement, and the same `bound < count`
+so the two bounds are read the same way.
+
+**It refuses to answer for any name but its own.** The memory update runs before
+the decision on the same reading, so the record cannot be about a different call
+than the arm is asking about -- but a rule that would answer anyway is one a
+later caller could ask from somewhere that does not hold, and the name is right
+there.
+
+-}
+calledTargetHasBeenGivenUpOn : String -> Maybe CalledTargetGone -> Bool
+calledTargetHasBeenGivenUpOn calledTarget gone =
+    case gone of
+        Nothing ->
+            False
+
+        Just goneTarget ->
+            (goneTarget.calledTarget == calledTarget)
+                && (calledTargetGoneReadings < goneTarget.readings)
 
 
 {-| Whether the called target is already in this ship's lock bar.
@@ -5894,13 +6068,25 @@ The row is resolved through `overviewEntryForPilot`, which is what
 that decides the target is not locked and the arm that clicks it cannot end up
 on two different rows.
 
+**The no-row branch is a wait this function cannot bound**, since it answers a
+`DecisionPathNode` and a `DecisionPathNode` cannot decline a reading. #395 is
+what that cost while nothing above it bounded one either: three wingmen stopped
+together on `'Centus Black Ops Veteran' is not on the overview.` when the
+commander's called target died, and stayed there. `bringCalledTargetUnderFire`
+is what bounds it now -- the only state this branch is reachable from is
+`CalledNameNamesNoOverviewRow`, which that arm answers on before the lock is
+ever issued.
+
 -}
 lockCalledTarget : BotDecisionContext -> String -> DecisionPathNode
 lockCalledTarget context calledTarget =
     case overviewEntryForPilot calledTarget context.readingFromGameClient of
         Nothing ->
             describeBranch
-                ("'" ++ calledTarget ++ "' is not on the overview.")
+                ("'"
+                    ++ calledTarget
+                    ++ "' is not on the overview. Giving the client a few readings to draw it, then leaving this call alone."
+                )
                 waitForProgressInGame
 
         Just overviewEntry ->
@@ -9807,6 +9993,11 @@ broadcast at all; and a called name no overview row carries reads exactly like a
 called gate whose banner text is not the overview's Name cell -- which is #393's
 own unverified premise and the thing to watch on the first run that meets one.
 
+**And since #395 it is the only thing that reports the give-up**, because that
+one hands the reading back and a `Nothing` carries no decision line: without the
+clause below, a bot that has stopped acting on a stale call and a bot that never
+had one to act on print the same reading.
+
 -}
 describeCalledObject : BotDecisionContext -> String
 describeCalledObject context =
@@ -9818,6 +10009,7 @@ describeCalledObject context =
             describeCalledObjectOnOverview
                 calledTarget
                 (calledObjectOnOverviewFromReading calledTarget context.readingFromGameClient)
+                ++ describeCalledTargetGone calledTarget context.memory.calledTargetGone
 
 
 {-| The clause above, as a function of the name and the rule's own answer, so a
@@ -9842,3 +10034,38 @@ describeCalledObjectOnOverview calledTarget calledObject =
                 CalledNameNamesNoOverviewRow ->
                     "NO OVERVIEW ROW names it, so nothing here can lock it and nothing here can tell whether it is an acceleration gate. The active overview preset may be hiding it, or the banner's own wording may not be the overview's Name cell."
            )
+
+
+{-| How long the current call has named nothing on the grid, and whether this
+bot has stopped acting on it.
+
+Rendered from the record rather than inline in `describeCalledObject` so a case
+executes what an operator reads -- `describeWeaponsAsk`'s arrangement, and the
+one #109 records a status clause passing a case while printing nothing at all.
+
+The commonest reading has no such record and says nothing, so an ordinary call
+is unaffected; the two that do are the whole of what #395 leaves an operator to
+watch, since the give-up itself is a `Nothing` and cannot speak.
+
+-}
+describeCalledTargetGone : String -> Maybe CalledTargetGone -> String
+describeCalledTargetGone calledTarget gone =
+    case gone of
+        Nothing ->
+            ""
+
+        Just goneTarget ->
+            if goneTarget.calledTarget /= calledTarget then
+                ""
+
+            else if calledTargetHasBeenGivenUpOn calledTarget gone then
+                " GIVEN UP ON after "
+                    ++ String.fromInt goneTarget.readings
+                    ++ " readings naming no row -- the banner never clears, so this call is left alone and the drones, the guns and the gate get their turn. A new broadcast starts this over."
+
+            else
+                " No row has named it for "
+                    ++ String.fromInt goneTarget.readings
+                    ++ " of "
+                    ++ String.fromInt calledTargetGoneReadings
+                    ++ " readings; past that this call is left alone."
