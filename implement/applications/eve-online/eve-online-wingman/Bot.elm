@@ -713,6 +713,15 @@ type alias BotMemory =
     -- `friendlyFireStep` keeps vetoing the guns for as long as that pilot is
     -- locked, spent budget or not.
     , unlockFleetPilotAskedReadings : Int
+
+    -- Readings in a row spent clicking a middle-row module the client never
+    -- shows the change on, bounded like the counters above -- see
+    -- `middleRowAskedReadingsBound`. Advances only on the answers that
+    -- actually click (`middleRowAnswersThatSpendAReading`), holds once the
+    -- budget is spent, and resets on every reading the row wants nothing --
+    -- which is what lets a ship that starts approaching again get the whole
+    -- allowance back.
+    , middleRowAskedReadings : Int
     }
 
 
@@ -1873,53 +1882,58 @@ intended. That arm's own success test is the same reading, and it treats no
 dispatched click as a manoeuvre; a module tied to the ask instead would run on
 every reading of a double click that commanded nothing. It also switches the
 module off for free where an active afterburner costs the most, the ship lining
-up to warp: the indication reads `Align` or `Warp` there, not `Approach`.
+up to warp -- see `middleRowStep` for what the client does and does not say
+about that state.
+
+**Bounded, since #408.** This arm sits high enough in
+`wingmanDecisionRootInSpaceOrdinary` that answering `Just` forever starves the
+broadcast, the drones, the guns, the gate and the travel forms -- which is what
+a propulsion module that would not switch off did to all four pilots at once.
+Past `middleRowAskedReadingsBound` it answers `Nothing`, and
+`describeMiddleRowAsk` keeps the give-up visible in the status line.
+
+**Takes no `ShipUI` any more.** Every fact it needs comes off the reading
+through `middleRowStepFromContext`, so the rule the memory update advances the
+counter from, the rule the status line prints and the rule this arm executes
+are one call and cannot be asked with different numbers -- `fireOnActiveTarget`
+and `inactiveWeaponFromReading`'s arrangement, for #102's reason.
 
 -}
-manageMiddleRowModules : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
-manageMiddleRowModules context shipUI =
+manageMiddleRowModules : BotDecisionContext -> Maybe DecisionPathNode
+manageMiddleRowModules context =
     let
-        inactiveAlwaysOnModule : Maybe ShipUIModuleButton
-        inactiveAlwaysOnModule =
-            shipUI
-                |> shipUIModulesToActivateAlways
-                |> List.filter (moduleIsActiveOrReloading >> not)
-                |> List.head
-
-        propulsionModule : Maybe ShipUIModuleButton
-        propulsionModule =
-            propulsionModuleButton shipUI
-
         click description moduleButton =
             describeBranch description
                 (clickModuleButtonButWaitIfClickedInPreviousStep context moduleButton)
     in
-    case
-        middleRowStep
-            { inactiveAlwaysOnModulePresent = inactiveAlwaysOnModule /= Nothing
-            , propulsionModulePresent = propulsionModule /= Nothing
-            , propulsionModuleIsRunning =
-                propulsionModule
-                    |> Maybe.map moduleIsActiveOrReloading
-                    |> Maybe.withDefault False
-            , shipIsApproaching = shipIsApproachingFromReading context.readingFromGameClient
-            }
-    of
+    case middleRowStepFromContext context of
         MiddleRowNeedsNothing ->
             Nothing
 
+        LeaveThePropulsionModuleToTheWarp ->
+            Nothing
+
+        PropulsionModuleIsAlreadyShuttingDown ->
+            Nothing
+
+        PropulsionModuleSaysNothingAboutShuttingDown ->
+            Nothing
+
+        GaveUpOnTheMiddleRow ->
+            Nothing
+
         ActivateAnAlwaysOnModule ->
-            inactiveAlwaysOnModule
+            inactiveAlwaysOnModuleFromReading context.readingFromGameClient
                 |> Maybe.map
                     (click "A middle-row module right of the propulsion module is not running. Switch it on.")
 
         RunThePropulsionModule ->
-            propulsionModule
+            propulsionModuleFromReading context.readingFromGameClient
                 |> Maybe.map
                     (click "This ship is approaching the fleet commander. Run the propulsion module.")
 
         ShutThePropulsionModuleDown ->
-            propulsionModule
+            propulsionModuleFromReading context.readingFromGameClient
                 |> Maybe.map
                     (click "This ship is not approaching anything. Shut the propulsion module down.")
 
@@ -1930,10 +1944,14 @@ type MiddleRowStep
     = ActivateAnAlwaysOnModule
     | RunThePropulsionModule
     | ShutThePropulsionModuleDown
+    | PropulsionModuleIsAlreadyShuttingDown
+    | PropulsionModuleSaysNothingAboutShuttingDown
+    | LeaveThePropulsionModuleToTheWarp
+    | GaveUpOnTheMiddleRow
     | MiddleRowNeedsNothing
 
 
-{-| The middle-row rule, as one expression over four plain facts.
+{-| The middle-row rule, as one expression over six plain facts and a counter.
 
 The always-on modules are answered before the propulsion module, which is
 saxrat's own ordering and holds for the same reason: a tank module that is off
@@ -1952,29 +1970,222 @@ for a click it has no button for: a ship whose middle row is empty, or which is
 still showing an unparsed row, must answer "nothing" rather than fall through
 to a branch that assumes a slot.
 
+**`isDeactivating` is what says whether the last click took, and #408 is what
+not reading it cost.** The propulsion module has a ten-second cycle and goes on
+reading `isActive` for the whole of it after being told to stop, while
+`clickModuleButtonButWaitIfClickedInPreviousStep` waits two steps -- roughly
+four seconds. So the click landed, the debounce expired inside the cycle, the
+module still read on, and the next click switched it **back on**: saxrat's odd
+number of toggles arriving through timing rather than through position. `isActive`
+cannot answer "did my click take" during a cycle and this entry can, so a module
+the client says is deactivating is left to finish however long `isActive` stays
+true.
+
+**`Nothing` is not `False` here, and that is the whole reason this fact is a
+`Maybe` rather than a `Bool`.** `ParseUserInterface`'s own doc block is explicit
+that an entry which did not decode is absent rather than false, that absent and
+`False` are different facts, and that only one of them is safe to act on -- the
+neighbouring `ramp_active` is a duty cycle rather than an on/off state, and #34
+is what reading it as a state cost. Collapsing `Nothing` to "not deactivating"
+would licence exactly the click this rule exists to withhold, so it gets its own
+answer: the client said nothing, so nothing is clicked. The cost is stated
+rather than hidden -- on a build that does not carry the entry the propulsion
+module is never switched off, which loses the module and keeps the bot, and is
+the direction #408 asks for. The guard is on the shutdown only: switching a
+module **on** has no deactivation transient to misread, so a cold module is
+still clicked whatever this entry says.
+
+**A warp or a jump is left alone**, and this is the one manoeuvre state the
+client actually names. `wingmanDecisionRootInSpaceOrdinary` has no warp gate
+above it, so without this the arm meets every reading of a warp with "not
+approaching, module on, shut it down" -- and each of those clicks is both wasted
+(a module toggled in warp changes nothing about a warp already under way) and
+the exact click that re-arms a module still running out its cycle, so the ship
+would drop out of warp with the propulsion module lit.
+
+**Aligning is deliberately not special-cased, because it is not observable.**
+`ShipManeuverType` has `Warp`, `Jump`, `Orbit` and `Approach` and no `Align`: a
+ship lining up reads no manoeuvre at all, which is the same `Nothing` as a ship
+floating still, and a rule cannot decline a state it cannot see. It is also the
+state where shutting the module down is worth the most -- an active propulsion
+module is what makes aligning slow, which is #394's own argument -- so the arm
+goes on asking there, and what stops it repeating is `isDeactivating` and then
+the bound rather than a manoeuvre test that would have to guess.
+
+**The bound is applied to the clicks and to nothing else.** Only
+`ActivateAnAlwaysOnModule`, `RunThePropulsionModule` and
+`ShutThePropulsionModuleDown` can become `GaveUpOnTheMiddleRow`; the answers
+that decline to click are reported as themselves, so a give-up in the status
+line always means "this bot clicked a module button
+`middleRowAskedReadingsBound` times and the client never showed the change".
+That also keeps `MiddleRowNeedsNothing` reachable after a give-up, which is what
+resets the counter -- see `middleRowAskedReadingsBound` for the one coupling
+this costs.
+
 -}
 middleRowStep :
     { inactiveAlwaysOnModulePresent : Bool
     , propulsionModulePresent : Bool
     , propulsionModuleIsRunning : Bool
+    , propulsionModuleIsDeactivating : Maybe Bool
     , shipIsApproaching : Bool
+    , shipIsWarpingOrJumping : Bool
+    , askedReadings : Int
     }
     -> MiddleRowStep
 middleRowStep step =
+    let
+        clickOrGiveUp : MiddleRowStep -> MiddleRowStep
+        clickOrGiveUp answer =
+            if middleRowAskedReadingsBound <= step.askedReadings then
+                GaveUpOnTheMiddleRow
+
+            else
+                answer
+    in
     if step.inactiveAlwaysOnModulePresent then
-        ActivateAnAlwaysOnModule
+        clickOrGiveUp ActivateAnAlwaysOnModule
 
     else if not step.propulsionModulePresent then
         MiddleRowNeedsNothing
 
     else if step.shipIsApproaching && not step.propulsionModuleIsRunning then
-        RunThePropulsionModule
+        clickOrGiveUp RunThePropulsionModule
 
     else if step.propulsionModuleIsRunning && not step.shipIsApproaching then
-        ShutThePropulsionModuleDown
+        if step.shipIsWarpingOrJumping then
+            LeaveThePropulsionModuleToTheWarp
+
+        else if step.propulsionModuleIsDeactivating == Just True then
+            PropulsionModuleIsAlreadyShuttingDown
+
+        else if step.propulsionModuleIsDeactivating == Nothing then
+            PropulsionModuleSaysNothingAboutShuttingDown
+
+        else
+            clickOrGiveUp ShutThePropulsionModuleDown
 
     else
         MiddleRowNeedsNothing
+
+
+{-| How many readings in a row this bot will go on clicking a middle-row module
+button the client never shows the change on, before it stops asking and hands
+the reading back.
+
+**Twenty, written as `weaponsAskedReadingsBound` rather than as a number**, the
+same allowance every other per-reading ask in this file gets and for the same
+reason: a click that is going to land does so in a handful of readings, and
+twenty is several attempts' worth while being nowhere near a session. #408 is
+the measurement it exists for -- 23 of Greta's last 23 top-level decisions were
+this one arm, with Heather and Kara word for word the same, and nothing below it
+ran on any of them.
+
+Past the bound the arm answers `Nothing` rather than parking on
+`askForHelpToGetUnstuck`, for the reason `accelerationGateStep` gives at its own
+give-up: handing the reading back is what lets the broadcast, the drones, the
+guns, the gate and the trip home still run, and `describeMiddleRowAsk` keeps the
+give-up visible instead of hiding it. That is the half of #408 which gets the
+ships moving again whether or not the module ever obeys.
+
+**One counter for both halves of the row, and the coupling is real.** A tank
+module that can never be switched on spends this budget and the give-up then
+covers the propulsion module too, so that ship stops managing its propulsion
+module for as long as the broken slot reads inactive. That is accepted rather
+than overlooked: the arm answers one `Just` and so needs one give-up, the cost
+is a module left unmanaged rather than a bot that stops following its commander,
+and #408 is the second failure and not the first (#321, #360, #395) of an arm
+that had no give-up at all.
+
+-}
+middleRowAskedReadingsBound : Int
+middleRowAskedReadingsBound =
+    weaponsAskedReadingsBound
+
+
+{-| The answers on which this arm actually clicks something, and therefore the
+answers `middleRowAskedReadings` advances on.
+
+`weaponsAnswersThatSpendAReading`'s arrangement, for #389's reason: a counter
+advanced by conditions written beside the arm rather than by the arm's own rule
+charges the budget for readings nobody spent, and then reports a give-up on an
+arm that was never asked. Everything not listed here either declines to click
+(`PropulsionModuleIsAlreadyShuttingDown`,
+`PropulsionModuleSaysNothingAboutShuttingDown`,
+`LeaveThePropulsionModuleToTheWarp`), has already given up, or has nothing to
+do, and none of those may spend a reading of the budget.
+
+-}
+middleRowAnswersThatSpendAReading : List MiddleRowStep
+middleRowAnswersThatSpendAReading =
+    [ ActivateAnAlwaysOnModule
+    , RunThePropulsionModule
+    , ShutThePropulsionModuleDown
+    ]
+
+
+{-| The rule above, asked of a reading, so that the memory update, the arm and
+the status line are all reading one decision -- `weaponsStepFromReading`'s
+arrangement, for #102's reason.
+
+A reading with no ship UI answers `MiddleRowNeedsNothing`: nothing that is not
+in space has a module row to manage, and that is also the answer which resets
+the counter, so a docked stretch hands the next undock a full allowance.
+
+-}
+middleRowStepFromReading : Int -> ReadingFromGameClient -> MiddleRowStep
+middleRowStepFromReading askedReadings readingFromGameClient =
+    let
+        propulsionModule : Maybe ShipUIModuleButton
+        propulsionModule =
+            propulsionModuleFromReading readingFromGameClient
+    in
+    middleRowStep
+        { inactiveAlwaysOnModulePresent =
+            inactiveAlwaysOnModuleFromReading readingFromGameClient /= Nothing
+        , propulsionModulePresent = propulsionModule /= Nothing
+        , propulsionModuleIsRunning =
+            propulsionModule
+                |> Maybe.map moduleIsActiveOrReloading
+                |> Maybe.withDefault False
+        , propulsionModuleIsDeactivating =
+            propulsionModule
+                |> Maybe.andThen (.stateFromDictEntries >> .isDeactivating)
+        , shipIsApproaching = shipIsApproachingFromReading readingFromGameClient
+        , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading readingFromGameClient
+        , askedReadings = askedReadings
+        }
+
+
+middleRowStepFromContext : BotDecisionContext -> MiddleRowStep
+middleRowStepFromContext context =
+    middleRowStepFromReading context.memory.middleRowAskedReadings context.readingFromGameClient
+
+
+{-| The propulsion module of the ship in this reading, if there is one.
+
+One lookup with three readers -- the rule's `propulsionModulePresent`, the two
+facts it reads off the same button, and the click the arm makes -- so the arm
+cannot decide to click the propulsion module and then find none to click.
+`inactiveWeaponFromReading`'s arrangement.
+
+-}
+propulsionModuleFromReading : ReadingFromGameClient -> Maybe ShipUIModuleButton
+propulsionModuleFromReading readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.andThen propulsionModuleButton
+
+
+{-| The first middle-row module right of the propulsion module that is not
+running, if there is one. See `propulsionModuleFromReading`.
+-}
+inactiveAlwaysOnModuleFromReading : ReadingFromGameClient -> Maybe ShipUIModuleButton
+inactiveAlwaysOnModuleFromReading readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.map shipUIModulesToActivateAlways
+        |> Maybe.withDefault []
+        |> List.filter (moduleIsActiveOrReloading >> not)
+        |> List.head
 
 
 {-| The middle row in the order the player sees it, leftmost first.
@@ -3045,6 +3256,7 @@ initBotMemory =
     , closingOnTheCommanderSinceLanding = False
     , backupCallAskedReadings = 0
     , unlockFleetPilotAskedReadings = 0
+    , middleRowAskedReadings = 0
     }
 
 
@@ -3154,7 +3366,7 @@ statusTextFromState context =
                     in
                     [ [ describeShip ]
                     , [ describeDrones ]
-                    , [ describeMiddleRowModules context ]
+                    , [ describeMiddleRowModules context, describeMiddleRowAsk context ]
                     , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
                     , [ describeRetreat context ]
                     , [ describeFleetMembership context, describeFriendlyFireGuard context ]
@@ -3165,7 +3377,10 @@ statusTextFromState context =
                     , [ describeFleetMateWarp context ]
                     , [ describeBackupCall context ]
                     ]
-                        |> List.map (String.join " ")
+                        -- Empties are dropped inside a group as well as
+                        -- between them, so a describer with nothing to say
+                        -- costs no stray space in the line beside it.
+                        |> List.map (List.filter (String.isEmpty >> not) >> String.join " ")
     in
     [ [ describePerformance ]
     , describeCurrentReading
@@ -3224,6 +3439,62 @@ describeMiddleRowModules context =
                         ++ ", keep-active ["
                         ++ (alwaysOn |> List.map describeOne |> String.join ", ")
                         ++ "]."
+
+
+{-| What the middle-row arm is doing about that row, in one clause beside it.
+
+Exists for the reason `describeWeaponsAsk` and `describeAccelerationGateAsk` do,
+and #408 is the reading that needed it: `manageMiddleRowModules` answers
+`Nothing` when it gives up and `Nothing` when it declines to click, and without
+this every one of those looks from a console exactly like a row that is already
+as it should be. It reports `middleRowStep`'s own answer rather than restating
+the conditions beside it, so what an operator reads is the decision that was
+taken.
+
+The two `isDeactivating` lines are named apart on purpose. "The client says the
+module is deactivating" and "the client says nothing about it" are different
+facts -- the parser's doc block is what insists on that -- and only the first of
+them is evidence the last click landed. A console showing the second one for a
+whole session is a build that does not carry the entry, which is worth being
+able to see.
+
+-}
+describeMiddleRowAsk : BotDecisionContext -> String
+describeMiddleRowAsk context =
+    let
+        spent : String
+        spent =
+            String.fromInt context.memory.middleRowAskedReadings
+                ++ " of "
+                ++ String.fromInt middleRowAskedReadingsBound
+                ++ " readings spent clicking."
+    in
+    case middleRowStepFromContext context of
+        MiddleRowNeedsNothing ->
+            ""
+
+        ActivateAnAlwaysOnModule ->
+            "Switching a keep-active module on, " ++ spent
+
+        RunThePropulsionModule ->
+            "Switching the propulsion module on, " ++ spent
+
+        ShutThePropulsionModuleDown ->
+            "Switching the propulsion module off, " ++ spent
+
+        PropulsionModuleIsAlreadyShuttingDown ->
+            "The client says the propulsion module is already deactivating, so it runs its cycle out unclicked."
+
+        PropulsionModuleSaysNothingAboutShuttingDown ->
+            "The client says nothing about whether the propulsion module is deactivating, and absent is not 'not deactivating', so no click goes out."
+
+        LeaveThePropulsionModuleToTheWarp ->
+            "The ship is warping or jumping, so the propulsion module is left to the manoeuvre."
+
+        GaveUpOnTheMiddleRow ->
+            "GAVE UP after "
+                ++ String.fromInt context.memory.middleRowAskedReadings
+                ++ " readings clicking a middle-row module the client never showed the change on."
 
 
 overviewEntryIsTargetedOrTargeting : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
@@ -3812,6 +4083,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 friendlyFireNow
                 botMemoryBefore.weaponsAskedReadings
                 context.readingFromGameClient
+
+        -- The same arrangement once more, and #408 is why this counter exists
+        -- at all: the arm it bounds answered `Just` on every reading a
+        -- propulsion module read on and the ship was not approaching, and
+        -- nothing below it ran for whole sessions.
+        middleRowNow : MiddleRowStep
+        middleRowNow =
+            middleRowStepFromReading
+                botMemoryBefore.middleRowAskedReadings
+                context.readingFromGameClient
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -4019,6 +4300,24 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
             ClearToFire ->
                 0
+    , middleRowAskedReadings =
+        if List.member middleRowNow middleRowAnswersThatSpendAReading then
+            botMemoryBefore.middleRowAskedReadings + 1
+
+        else if middleRowNow == GaveUpOnTheMiddleRow then
+            -- Held rather than advanced, `unlockFleetPilotAskedReadings`'s own
+            -- arrangement: the row is still wrong and this bot has stopped
+            -- clicking at it, and a counter that ran away would make the status
+            -- line's "after N readings" meaningless.
+            botMemoryBefore.middleRowAskedReadings
+
+        else
+            -- Every answer that declined to click, and `MiddleRowNeedsNothing`
+            -- with it. The last of those is what ends an episode here: a ship
+            -- that starts approaching again wants the module it already has
+            -- running, so the row needs nothing and the next stretch of
+            -- not-approaching gets the whole allowance back.
+            0
     }
 
 
@@ -5527,7 +5826,7 @@ wingmanDecisionRootInSpaceOrdinary context shipUI =
                     -- it: a module an operator named by tooltip is one they
                     -- asked for by hand, and the row this finds by position
                     -- is the standing default underneath that.
-                    case manageMiddleRowModules context shipUI of
+                    case manageMiddleRowModules context of
                         Just manageTheMiddleRow ->
                             manageTheMiddleRow
 
