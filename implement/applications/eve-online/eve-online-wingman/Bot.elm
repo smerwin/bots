@@ -54,14 +54,14 @@
      + Place the modules to use in combat (to activate on targets) in the top row.
      + Hide passive modules by disabling the check-box `Display Passive Modules`.
    + **Show fleet members on the active overview preset.** This bot keeps
-     station on the fleet commander by clicking the commander's *overview row*,
-     so a preset that hides fleet members leaves it with nothing to click. It
-     cannot change the preset and cannot tell that case apart from a commander
-     who is genuinely off the grid -- the status line says so and names this
-     as a possible cause.
-   + Configure the keyboard keys 'Q' (approach) and 'W' (orbit) to their
-     defaults. 'Q' is what this bot holds while clicking the commander's
-     overview row; 'W' is used by the `orbit-in-combat` path.
+     station on the fleet commander by double clicking the commander's
+     *overview row*, so a preset that hides fleet members leaves it with
+     nothing to click. It cannot change the preset and cannot tell that case
+     apart from a commander who is genuinely off the grid -- the status line
+     says so and names this as a possible cause.
+   + Configure the keyboard key 'W' (orbit) to its default. It is used by the
+     `orbit-in-combat` path. Keeping station on the commander presses no key
+     at all.
    + **Nothing here changes the client's default Orbit or Approach distance,
      and nothing should.** Those defaults live in the client rather than the
      ship, so they survive losing the hull and apply to whatever is boarded
@@ -160,6 +160,7 @@ import EveOnline.BotFramework
         , localChatWindowFromUserInterface
         , menuCascadeCompleted
         , mouseClickOnUIElement
+        , mouseDoubleClickOnUIElement
         , shipUIIndicatesShipIsWarpingOrJumping
         , uiNodeVisibleRegionLargeEnoughForClicking
         , useMenuEntryInLastContextMenuInCascade
@@ -2234,11 +2235,13 @@ ratsToAttackByPriorityFromContext context =
 {-| Command a manoeuvre the way the client's own modifier keys command it: hold
 the key down, click the object's overview row, release.
 
-**Extracted from `ensureShipIsOrbiting`, which is the inherited shape and had
-`W` and `Orbit` written into it.** `approachTheFleetCommander` needs the same
-three effects with `Q` and `Approach`, and a second hand-written copy is how
-the two would drift -- the key and the manoeuvre it commands are one pairing
-and belong in one argument.
+**The orbit is the only caller left, and that is the honest state of it.** It
+was written as a shared shape because `approachTheFleetCommander` was to reach
+it with `Q` and `Approach`; #387 took the approach off it, because a posted key
+is what `eve-online-saxrat` removed for cause -- see `ensureShipIsApproaching`.
+An approach that presses no key does not fit an argument list whose first field
+is a key, so the two stopped being one shape rather than one of them being bent
+to look like it still was.
 
 **The manoeuvre check is the client's own word and the only thing that stops
 the ask.** A dispatched click is not a manoeuvre: the ship UI's indication
@@ -2288,17 +2291,55 @@ ensureShipIsOrbiting =
         }
 
 
-{-| The same thing with the client's approach modifier -- `Q` rather than `W`,
-and the client naming the manoeuvre `Approach` rather than `Orbit`. See
-`approachTheFleetCommander` for why this bot commands an approach at all.
+{-| Ask the client to approach an object by **double clicking its overview
+row**, which presses no key at all. See `approachTheFleetCommander` for why
+this bot commands an approach in the first place.
+
+**The keystroke this replaces is one `eve-online-saxrat` removed for cause**
+(#387, and saxrat's own #243). `lockTargetFromOverviewEntry` answered a row
+beyond lock range by wrapping a left click in a `Q` chord, exactly as this
+function did until now. `cg_input` posts a key event without stamping flags on
+it, so a posted `Q` carries whatever modifier state the session happens to
+hold; with the Fn bit set that is macOS Quick Note, and one recorded saxrat run
+took that branch 1,571 times while Notes came to the front 241 times with
+nobody at the machine. Fixing the mis-stamping is a separate thing already
+done: this removes the keystroke, which also takes a modifier-timing dependency
+off a station-keeping arm that is on a hot path by design.
+
+**A double click asks the client for the same thing.** It is the gesture
+saxrat's `doubleClickUiElement` already sends on the same kind of row, and
+`mouseDoubleClickOnUIElement` is that bot's framework function ported here
+unchanged rather than reinvented.
+
+**A row too small to click declines out loud rather than dispatching nothing.**
+`Err` reaches `approachTheFleetCommander`, which prints the reason and spends
+the reading -- a branch that says "Approach." over an empty effect list is this
+repo's signature failure, and it would be a total one here where the chord at
+least still sent `Q`.
+
+**Success is still only the client's own word.** The ship UI's indication
+naming `Approach` is what stops the ask; a dispatched double click is no more a
+manoeuvre than a dispatched chord was.
+
 -}
 ensureShipIsApproaching : ShipUI -> OverviewWindowEntry -> Maybe (Result String DecisionPathNode)
-ensureShipIsApproaching =
-    commandManeuverByModifierClick
-        { key = EffectOnWindow.vkey_Q
-        , maneuver = EveOnline.ParseUserInterface.ManeuverApproach
-        , describe = "Press the 'Q' key and click on the overview entry."
-        }
+ensureShipIsApproaching shipUI overviewEntry =
+    if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverApproach then
+        Nothing
+
+    else
+        Just
+            (case mouseDoubleClickOnUIElement MouseButtonLeft overviewEntry.uiNode of
+                Err _ ->
+                    Err "the visible part of the overview row is too small to click"
+
+                Ok effectToDoubleClick ->
+                    Ok
+                        (describeBranch
+                            "Double click on the overview entry."
+                            (decideActionForCurrentStep effectToDoubleClick)
+                        )
+            )
 
 
 launchAndEngageDrones :
@@ -7199,26 +7240,34 @@ recorded that flyout mis-clicking when driven by hand, and every wingman pilot
 reproduced it on the same day: gliding into the flyout collapsed it, the click
 landed on a neighbouring entry, **Kara opened an `InfoWindow` and Heather a
 `LoggerWindow`**, and all four pilots spent the whole 30-reading menu budget
-and fell back to the key. Per-command range through that flyout is not
+and fell back to the orbit key. Per-command range through that flyout is not
 achievable from here, and the operator's call is that an approach is close
 enough for keeping station.
 
-**So the manoeuvre is Approach and the mechanism is the client's own modifier
-key**: hold `Q`, click the commander's overview row, release --
-`ensureShipIsApproaching`, which is `ensureShipIsOrbiting`'s `W` with the key
-and the manoeuvre swapped. One reading per ask, no menu to open, and nothing
-to mis-click into.
+**So the manoeuvre is Approach and the mechanism is a double click on the
+commander's overview row** -- `ensureShipIsApproaching`. One reading per ask,
+no menu to open, nothing to mis-click into, and no key.
 
-**The shape is proven; the key is the substitution.** `Press the 'W' key and
-click on the overview entry` appears 40,648 times in `~/eve-bot-logs`, so
-hold-key-click-release on an overview row is what this repo does routinely --
-but `Q` appears **nowhere** in that corpus, and neither does `ManeuverApproach`.
-What is ported is the mechanism; what is new is the key and the manoeuvre it is
-claimed to command.
+**It was a `Q` chord first, and #387 is why it is not.** That shape --
+`KeyDown vkey_Q`, click, `KeyUp vkey_Q` -- is the one `eve-online-saxrat`
+deliberately removed: `cg_input` posts a key event without stamping flags on
+it, so a posted `Q` carries whatever modifier state the session holds, and with
+the Fn bit set that is macOS Quick Note. One recorded saxrat run took the
+equivalent branch 1,571 times while Notes came to the front 241 times with
+nobody at the machine. This arm is reached whenever the commander is on grid,
+so it is on a hot path by exactly the same design.
+
+**The mechanism is a port, not an invention.** saxrat answers a row beyond lock
+range with `doubleClickUiElement`, over `mouseDoubleClickOnUIElement`, which
+was absent from this app's vendored framework and is now present in it
+unchanged. What remains unwitnessed is the manoeuvre rather than the gesture:
+`ManeuverApproach` appears nowhere in `~/eve-bot-logs`, so what a first run
+still measures is whether the client answers a double click on a _pilot_ row by
+naming the manoeuvre `Approach`.
 
 **So the fall-back behind it is the better-evidenced half.** Past
-`approachFleetCommanderKeyAskedReadingsBound` this selects the commander's row
-and presses the Selected Item panel's own `selectedItemApproach` --
+`approachFleetCommanderDoubleClickAskedReadingsBound` this selects the
+commander's row and presses the Selected Item panel's own `selectedItemApproach` --
 `eve-online-mission-runner`'s `selectThenPanelAction`, whose note records that
 exact button taking a ship from 0.0 to 585 m/s after a cascade had achieved
 nothing across 180 decisions. The unproven mechanism is primary because it
@@ -7366,7 +7415,7 @@ approachTheFleetCommander context shipUI =
                                     (clickUiElementForNavigation closeButton)
                                 )
 
-        ApproachWithTheKey ->
+        ApproachByDoubleClick ->
             commanderEntry
                 |> Maybe.andThen (ensureShipIsApproaching shipUI)
                 |> Maybe.map
@@ -7377,7 +7426,7 @@ approachTheFleetCommander context shipUI =
                                 waitForProgressInGame
                         )
                         (describeBranch
-                            "Approach the fleet commander -- hold 'Q' and click their overview row."
+                            "Approach the fleet commander -- double click their overview row."
                         )
                     )
 
@@ -7386,7 +7435,7 @@ approachTheFleetCommander context shipUI =
                 |> Maybe.map
                     (\entry ->
                         describeBranch
-                            ("The 'Q' click spent its budget without the client naming the manoeuvre"
+                            ("The double click spent its budget without the client naming the manoeuvre"
                                 ++ " -- select the commander's row, so the panel's own Approach acts on it."
                             )
                             (clickUiElementForNavigation entry.uiNode)
@@ -7542,14 +7591,14 @@ consulted at all once `0 < askedReadings` -- a window an operator opened on a
 healthy session is not this bot's to close.
 
 **Two mechanisms and two bounds, and the fall-back is the proven half.**
-`approachFleetCommanderKeyAskedReadingsBound` ends the modifier click and
+`approachFleetCommanderDoubleClickAskedReadingsBound` ends the double click and
 `approachFleetCommanderAskedReadingsBound` ends the whole ask, so the readings
 between them go to the Selected Item panel's own Approach button --
 `selectedItemApproach`, which `eve-online-mission-runner` drives and whose own
 note records it taking a ship from 0.0 to 585 m/s after a cascade had achieved
 nothing across 180 decisions. The unproven mechanism is the primary on purpose:
-the key costs one reading against the panel's two, and a run that has to fall
-back says so in the status line, which is exactly the measurement that would
+the double click costs one reading against the panel's two, and a run that has
+to fall back says so in the status line, which is exactly the measurement that would
 swap them.
 
 -}
@@ -7583,8 +7632,8 @@ approachFleetCommanderStep approachCase =
     else if approachCase.shipIsApproaching then
         AlreadyApproaching
 
-    else if approachCase.askedReadings < approachFleetCommanderKeyAskedReadingsBound then
-        ApproachWithTheKey
+    else if approachCase.askedReadings < approachFleetCommanderDoubleClickAskedReadingsBound then
+        ApproachByDoubleClick
 
     else if not approachCase.panelShowsTheCommander then
         SelectTheCommandersRow
@@ -7601,7 +7650,7 @@ answers the counter advances on.
 
 One list with two readers -- `updateMemoryForNewReadingFromGame` and the cases
 that check it -- rather than a condition restated beside the rule, which is
-#102's defect. Five of the seven answers are here: the modifier click, both
+#102's defect. Five of the seven answers are here: the double click, both
 ticks of the panel fall-back, the reading the panel spends not yet offering its
 button, and the click that closes a window sitting over the client. The close
 counts against the same budget on purpose, so a rescue that does not land
@@ -7613,7 +7662,7 @@ doing nothing.
 -}
 approachFleetCommanderAnswersThatSpendAReading : List ApproachFleetCommanderStep
 approachFleetCommanderAnswersThatSpendAReading =
-    [ ApproachWithTheKey
+    [ ApproachByDoubleClick
     , SelectTheCommandersRow
     , PressTheApproachButton
     , WaitForTheApproachButton
@@ -7628,7 +7677,7 @@ type ApproachFleetCommanderStep
     | AlreadyApproaching
     | CloseAWindowLeftOverTheClient
     | GaveUpOnTheApproach
-    | ApproachWithTheKey
+    | ApproachByDoubleClick
     | SelectTheCommandersRow
     | PressTheApproachButton
     | WaitForTheApproachButton
@@ -7643,23 +7692,23 @@ approachFleetCommanderHasBeenGivenUpOn askedReadings =
     approachFleetCommanderAskedReadingsBound <= askedReadings
 
 
-{-| How many readings the `Q` modifier click gets before this bot stops
-pressing the key and falls back to the Selected Item panel's own button.
+{-| How many readings the double click on the commander's row gets before this
+bot falls back to the Selected Item panel's own button.
 
 **Twenty, written as `weaponsAskedReadingsBound` rather than as a number**:
 this file's allowance for an ask that is a key or a click rather than a
-cascade. A keypress costs one reading, so this is twenty complete attempts
+cascade. A double click costs one reading, so this is twenty complete attempts
 against the one thing that can stop them -- the client naming the manoeuvre
 `Approach`.
 
 -}
-approachFleetCommanderKeyAskedReadingsBound : Int
-approachFleetCommanderKeyAskedReadingsBound =
+approachFleetCommanderDoubleClickAskedReadingsBound : Int
+approachFleetCommanderDoubleClickAskedReadingsBound =
     weaponsAskedReadingsBound
 
 
-{-| How many readings the whole ask gets, key and panel button together, before
-this bot hands the reading back for good.
+{-| How many readings the whole ask gets, double click and panel button
+together, before this bot hands the reading back for good.
 
 Forty: the twenty above plus the same twenty again for the panel. Written as a
 sum of the two so the fall-back's own allowance cannot be squeezed to nothing
@@ -7670,13 +7719,13 @@ never offers the button spends the same budget rather than waiting for free.
 
 Round rather than measured, and this bot still has no corpus of its own (see
 WINGMAN.md). A run that spends it says so in the status line, which is where a
-first run also reports whether `Q` on an overview row commands an approach at
-all, and whether the fall-back had to carry the session.
+first run also reports whether a double click on a pilot's overview row commands
+an approach at all, and whether the fall-back had to carry the session.
 
 -}
 approachFleetCommanderAskedReadingsBound : Int
 approachFleetCommanderAskedReadingsBound =
-    approachFleetCommanderKeyAskedReadingsBound + weaponsAskedReadingsBound
+    approachFleetCommanderDoubleClickAskedReadingsBound + weaponsAskedReadingsBound
 
 
 {-| The commander's overview row, resolved the one way the memory update can
@@ -7733,9 +7782,9 @@ nothing that is not in space is approaching anything.
 
 **This is the only thing that counts as success**, and it is the client's own
 word. `approachTheFleetCommander` never treats a dispatched click as a
-manoeuvre, which is what makes a `Q` modifier-click that turns out not to work
-show up as a spent budget in the status line rather than as a bot that believes
-it is keeping station.
+manoeuvre, which is what makes a double click that turns out not to command
+anything show up as a spent budget in the status line rather than as a bot that
+believes it is keeping station.
 
 -}
 shipIsApproachingFromReading : ReadingFromGameClient -> Bool
@@ -7934,8 +7983,10 @@ do: every answer `approachTheFleetCommander` gives other than "press it" is
 cannot name, and a ship that is already approaching are the same silence.
 
 **This line is where a first live run reports on what is unverified.** Nothing
-in this repo has watched `Q` command an approach; the fall-back it degrades to
-is the proven half, `eve-online-mission-runner`'s `selectedItemApproach`. So
+in this repo has watched a double click on a _pilot's_ overview row command an
+approach -- saxrat double clicks a rat's row for exactly this, but no run has
+recorded `ManeuverApproach` coming back; the fall-back it degrades to is the
+proven half, `eve-online-mission-runner`'s `selectedItemApproach`. So
 `FELL BACK to the panel's Approach button` here is the measurement that would
 swap the two, and `GAVE UP after N readings` is what it looks like when neither
 works -- a spent budget and a named cause, rather than a bot that quietly
@@ -7972,8 +8023,8 @@ describeApproachFleetCommanderAsk context =
         spentOf =
             String.fromInt askedReadings
                 ++ " of "
-                ++ String.fromInt approachFleetCommanderKeyAskedReadingsBound
-                ++ " on the key, "
+                ++ String.fromInt approachFleetCommanderDoubleClickAskedReadingsBound
+                ++ " on the double click, "
                 ++ String.fromInt approachFleetCommanderAskedReadingsBound
                 ++ " in all."
 
@@ -8039,8 +8090,8 @@ describeApproachFleetCommanderAsk context =
                         ++ "' is over the client while asking -- closing it. Readings spent: "
                         ++ spentOf
 
-                ApproachWithTheKey ->
-                    "holding 'Q' and clicking the commander's overview row, commander at "
+                ApproachByDoubleClick ->
+                    "double clicking the commander's overview row, commander at "
                         ++ commanderDistance
                         ++ ". Readings spent: "
                         ++ spentOf
@@ -8048,8 +8099,8 @@ describeApproachFleetCommanderAsk context =
 
                 SelectTheCommandersRow ->
                     "FELL BACK to the panel's Approach button after "
-                        ++ String.fromInt approachFleetCommanderKeyAskedReadingsBound
-                        ++ " readings of 'Q' -- selecting the commander's row first. Readings spent: "
+                        ++ String.fromInt approachFleetCommanderDoubleClickAskedReadingsBound
+                        ++ " double clicks -- selecting the commander's row first. Readings spent: "
                         ++ spentOf
 
                 WaitForTheApproachButton ->
@@ -8061,8 +8112,8 @@ describeApproachFleetCommanderAsk context =
 
                 PressTheApproachButton ->
                     "FELL BACK to the panel's Approach button after "
-                        ++ String.fromInt approachFleetCommanderKeyAskedReadingsBound
-                        ++ " readings of 'Q' -- pressing it, commander at "
+                        ++ String.fromInt approachFleetCommanderDoubleClickAskedReadingsBound
+                        ++ " double clicks -- pressing it, commander at "
                         ++ commanderDistance
                         ++ ". Readings spent: "
                         ++ spentOf
@@ -8070,7 +8121,7 @@ describeApproachFleetCommanderAsk context =
                 GaveUpOnTheApproach ->
                     "GAVE UP after "
                         ++ String.fromInt askedReadings
-                        ++ " readings, 'Q' and the panel's Approach button both, with the client"
+                        ++ " readings, the double click and the panel's Approach button both, with the client"
                         ++ " never naming the manoeuvre 'Approach'. Commander at "
                         ++ commanderDistance
                         ++ "."
