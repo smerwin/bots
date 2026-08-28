@@ -6905,14 +6905,19 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                     -- target isn't necessarily "the same locked target"
                     -- across ticks in any other identifiable way), since a
                     -- freshly-appeared/moved icon may not be click-ready.
-                    if context.memory.targetToUnlockUnchangedTicks < 1 then
-                        describeBranch
-                            "I see a target to unlock, but its position just appeared or changed since the last reading -- wait for it to settle before clicking it."
-                            waitForProgressInGame
+                    case unlockFromSelectedItemPanel context targetToUnlock of
+                        Just pressThePanelButton ->
+                            pressThePanelButton
 
-                    else
-                        describeBranch "I see a target to unlock -- Ctrl+Shift+Click it to unlock directly."
-                            (ctrlShiftClickUiElement (targetToUnlock.barAndImageCont |> Maybe.withDefault targetToUnlock.uiNode))
+                        Nothing ->
+                            if context.memory.targetToUnlockUnchangedTicks < 1 then
+                                describeBranch
+                                    "I see a target to unlock, but its position just appeared or changed since the last reading -- wait for it to settle before clicking it."
+                                    waitForProgressInGame
+
+                            else
+                                describeBranch "I see a target to unlock -- Ctrl+Shift+Click it to unlock directly."
+                                    (ctrlShiftClickUiElement (targetToUnlock.barAndImageCont |> Maybe.withDefault targetToUnlock.uiNode))
 
                 Nothing ->
                     case context.readingFromGameClient.targets |> List.head of
@@ -7288,6 +7293,28 @@ panelSelectReadingsAfterReading readingCase =
         0
 
 
+{-| A left click that declines out loud rather than dispatching nothing.
+
+`clickUiElement` answers `Result.withDefault []` for an element whose visible
+part is too small to click, which prints a decision line over an empty effect
+list -- this repo's signature failure, and the one `doubleClickUiElement`
+already refuses in exactly these words. The select-then-press of #414 makes two
+clicks per manoeuvre where the gesture it replaced made one, so both go through
+here.
+
+-}
+clickUiElementOrSayItCannotBeClicked : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> DecisionPathNode
+clickUiElementOrSayItCannotBeClicked uiElement =
+    case mouseClickOnUIElement MouseButtonLeft uiElement of
+        Ok clickEffects ->
+            decideActionForCurrentStep clickEffects
+
+        Err () ->
+            describeBranch
+                "The visible part of this element is too small to click, so there is nothing to dispatch."
+                waitForProgressInGame
+
+
 {-| The shared select-then-press body all three manoeuvre arms take.
 
 One declaration rather than three, because the three differ only in the button
@@ -7328,7 +7355,7 @@ commandManoeuvreFromSelectedItemPanel command context shipUI overviewEntry =
             Just
                 (describeBranch
                     ("Select '" ++ name ++ "', so the panel's own " ++ command.describe ++ " acts on it.")
-                    (clickUiElement overviewEntry.uiNode)
+                    (clickUiElementOrSayItCannotBeClicked overviewEntry.uiNode)
                 )
 
         PressThePanelButton ->
@@ -7337,7 +7364,7 @@ commandManoeuvreFromSelectedItemPanel command context shipUI overviewEntry =
                     (\buttonNode ->
                         describeBranch
                             (command.describe ++ " '" ++ name ++ "' with the selected-item panel's own button.")
-                            (clickUiElement buttonNode)
+                            (clickUiElementOrSayItCannotBeClicked buttonNode)
                     )
 
         WaitForThePanelButton ->
@@ -7432,6 +7459,80 @@ ensureShipIsOrbiting =
         , maneuver = EveOnline.ParseUserInterface.ManeuverOrbit
         , describe = "Orbit"
         }
+
+
+{-| Free a lock slot with the panel's own Unlock, where the panel is showing the
+thing to unlock.
+
+**Why this is worth having beside the chord it does not replace.** The
+Ctrl+Shift+Click goes at the target bar's own entry, which is a screen position
+computed from a reading -- and the bar reorders as targets are taken and lost,
+so it carries #413's exposure exactly as the overview does. The panel button
+does not: it is found by name in the same reading it is pressed in, and it acts
+on the selected object.
+
+**It adds no way to select and so cannot loop.** This answers `Nothing` unless
+the panel is *already* showing the target, and the caller then does what it
+always did. So no reading is ever spent selecting for the unlock, no new bound is
+needed, and a client that never selects the object costs nothing at all -- the
+bot behaves exactly as it did before #414.
+
+**Which makes the chord the thing that reaches this branch**, and that is
+stated rather than assumed: clicking a target-bar entry is expected to select the
+object as well as carrying the unlock chord, so a chord that does not take should
+leave the panel showing the target and the next reading presses the button. **No
+reading has ever confirmed that**, and the direction it fails in is the safe one:
+the panel path simply never fires and the chord goes on being the only mechanism.
+
+**The panel offering Unlock is the client saying this object is locked**, since
+Lock and Unlock share the slot -- so the press is declined outright where the
+panel offers Lock instead, rather than being aimed at whichever button sits in
+that position.
+
+-}
+unlockFromSelectedItemPanel :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.Target
+    -> Maybe DecisionPathNode
+unlockFromSelectedItemPanel context targetToUnlock =
+    let
+        panelIsShowingIt =
+            targetToUnlock.textsTopToBottom
+                |> List.any (panelIsShowingText context.readingFromGameClient)
+    in
+    if not panelIsShowingIt then
+        Nothing
+
+    else
+        selectedItemPanelButton context.readingFromGameClient selectedItemUnLockTargetButton
+            |> Maybe.map
+                (\button ->
+                    describeBranch
+                        "I see a target to unlock and the selected-item panel is showing it -- press the panel's own Unlock."
+                        (clickUiElementOrSayItCannotBeClicked button)
+                )
+
+
+{-| Whether the Selected Item panel's own texts carry this string.
+
+`selectedItemIsOverviewEntry` asks the same question of an overview row; a
+target-bar entry is not one, so this is the half of that rule that takes the
+text. One `containsWords` test, so the two cannot come to disagree about what
+"the panel is showing it" means.
+
+-}
+panelIsShowingText : ReadingFromGameClient -> String -> Bool
+panelIsShowingText readingFromGameClient text =
+    case ( readingFromGameClient.selectedItemWindow, String.trim text ) of
+        ( _, "" ) ->
+            False
+
+        ( Just window, trimmed ) ->
+            EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode.uiNode
+                |> List.any (containsWords trimmed)
+
+        ( Nothing, _ ) ->
+            False
 
 
 {-| The clause a drone-launch refusal is recognised by, and the one the count is
@@ -7928,10 +8029,11 @@ droneRecallAskedLookbackSteps =
 Read out of the effects rather than the decision, because
 `updateMemoryForNewReadingFromGame` is the only place that can write memory and
 it never sees the decision. `vkey_R` is used for nothing else in this bot --
-`vkey_E` is the keep-at-range, `vkey_W` the orbit and `vkey_C` the loot
-window's Alt+C -- so the chord is unambiguous. It used to be `vkey_Q` that carried the
-approach; that is a double click on the row now and presses no key at all, so
-this argument has one fewer key to be unambiguous against rather than one more.
+`vkey_C` is the loot window's Alt+C and `vkey_ESCAPE` the menu escapes -- so
+the chord is unambiguous, and it has become *more* so rather than less. `vkey_Q`
+carried the approach until PR #243, and #414 took the last two movement keys as
+well: `vkey_E` was the keep-at-range and `vkey_W` the orbit, and both are a
+select-then-press on the Selected Item panel now, pressing no key at all.
 
 -}
 recentStepAskedForDroneRecall : List (List EffectOnWindow.EffectOnWindowStruct) -> Bool
@@ -13673,6 +13775,23 @@ selectedItemKeepAtRangeButton =
     { elementId = "selectedItemKeepAtRange", cmdName = "CmdKeepItemAtRange" }
 
 
+{-| The panel's Unlock, which is **not** `selectedItemLockTarget` with a prefix.
+
+`selectedItemUnLockTarget` carries a capital `L` in the middle that its Lock
+sibling does not, read off a live client with a locked `Centii Minion` selected.
+A guessed `selectedItemUnlockTarget` matches nothing -- and "no button" is
+indistinguishable here from "nothing to unlock", so the guess would have failed
+silently, in a guard whose whole job is not to.
+
+Lock and Unlock occupy the **same slot** and swap with the target's lock state,
+so the panel offering this one is the client saying the object is locked.
+
+-}
+selectedItemUnLockTargetButton : SelectedItemPanelButton
+selectedItemUnLockTargetButton =
+    { elementId = "selectedItemUnLockTarget", cmdName = "CmdUnlockTargetItem" }
+
+
 {-| Find one of those buttons in **this** reading, by name and never by
 position.
 
@@ -14109,10 +14228,10 @@ describePanelManoeuvreSelection selectionCase =
         ++ "/"
         ++ (panelSelectGiveUpReadings |> String.fromInt)
         ++ (if selectionCase.unansweredReadings >= panelSelectGiveUpReadings then
-                " (GIVEN UP on selecting the active target -- fighting without a manoeuvre)"
+                " (GIVEN UP on selecting the object to manoeuvre on -- fighting without a manoeuvre)"
 
             else if selectionCase.asking then
-                " (selecting the active target)"
+                " (selecting the object to manoeuvre on)"
 
             else
                 ""

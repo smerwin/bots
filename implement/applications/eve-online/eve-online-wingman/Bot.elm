@@ -2998,6 +2998,28 @@ panelSelectReadingsAfterReading readingCase =
         0
 
 
+{-| A left click that declines out loud rather than dispatching nothing.
+
+`clickUiElement` and `clickUiElementForNavigation` answers `Result.withDefault []` for an element whose visible
+part is too small to click, which prints a decision line over an empty effect
+list -- this repo's signature failure, and the one `doubleClickUiElement`
+already refuses in exactly these words. The select-then-press of #414 makes two
+clicks per manoeuvre where the gesture it replaced made one, so both go through
+here.
+
+-}
+clickUiElementOrSayItCannotBeClicked : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> DecisionPathNode
+clickUiElementOrSayItCannotBeClicked uiElement =
+    case mouseClickOnUIElement MouseButtonLeft uiElement of
+        Ok clickEffects ->
+            decideActionForCurrentStep clickEffects
+
+        Err () ->
+            describeBranch
+                "The visible part of this element is too small to click, so there is nothing to dispatch."
+                waitForProgressInGame
+
+
 {-| The shared select-then-press body the manoeuvre arm takes.
 
 Written as a shape rather than inline because #414 puts the identical ordering
@@ -3037,7 +3059,7 @@ commandManoeuvreFromSelectedItemPanel command context shipUI overviewEntry =
             Just
                 (describeBranch
                     ("Select '" ++ name ++ "', so the panel's own " ++ command.describe ++ " acts on it.")
-                    (clickUiElementForNavigation overviewEntry.uiNode)
+                    (clickUiElementOrSayItCannotBeClicked overviewEntry.uiNode)
                 )
 
         PressThePanelButton ->
@@ -3046,7 +3068,7 @@ commandManoeuvreFromSelectedItemPanel command context shipUI overviewEntry =
                     (\buttonNode ->
                         describeBranch
                             (command.describe ++ " '" ++ name ++ "' with the selected-item panel's own button.")
-                            (clickUiElementForNavigation buttonNode)
+                            (clickUiElementOrSayItCannotBeClicked buttonNode)
                     )
 
         WaitForThePanelButton ->
@@ -3086,10 +3108,10 @@ describePanelManoeuvreSelection selectionCase =
         ++ "/"
         ++ (panelSelectGiveUpReadings |> String.fromInt)
         ++ (if selectionCase.unansweredReadings >= panelSelectGiveUpReadings then
-                " (GIVEN UP on selecting the object to orbit -- fighting without a manoeuvre)"
+                " (GIVEN UP on selecting the object to manoeuvre on -- fighting without a manoeuvre)"
 
             else if selectionCase.asking then
-                " (selecting the object to orbit)"
+                " (selecting the object to manoeuvre on)"
 
             else
                 ""
@@ -6178,6 +6200,93 @@ type alias SelectedItemPanelButton =
 selectedItemOrbitButton : SelectedItemPanelButton
 selectedItemOrbitButton =
     { elementId = "selectedItemOrbit", cmdName = "CmdOrbitItem" }
+
+
+{-| The panel's Unlock, which is **not** `selectedItemLockTarget` with a prefix.
+
+`selectedItemUnLockTarget` carries a capital `L` in the middle that its Lock
+sibling does not, read off a live client with a locked target selected. A
+guessed `selectedItemUnlockTarget` matches nothing -- and "no button" is
+indistinguishable here from "nothing to unlock", so the guess would have failed
+silently, in a guard whose whole job is not to.
+
+Lock and Unlock occupy the **same slot** and swap with the target's lock state,
+so the panel offering this one is the client saying the object is locked.
+
+-}
+selectedItemUnLockTargetButton : SelectedItemPanelButton
+selectedItemUnLockTargetButton =
+    { elementId = "selectedItemUnLockTarget", cmdName = "CmdUnlockTargetItem" }
+
+
+{-| Free a lock slot with the panel's own Unlock, where the panel is showing the
+pilot to unlock.
+
+**Why this is worth having beside the cascade it does not replace.**
+`unlockFleetPilotInTargetBar` right-clicks the *target bar's* own entry and takes
+an `unlock` menu entry, which is a screen position computed from a reading plus a
+flyout that has to render -- and the bar reorders as targets are taken and lost,
+so it carries #413's exposure as the overview does. The panel button does not: it
+is found by name in the same reading it is pressed in, and it acts on the
+selected object.
+
+**And it needs no bar entry.** #390 kept `lockedTargetNamed` alive precisely
+because the cascade has to right-click something in the bar, after the overview's
+own indicator became the deciding signal. A panel press needs neither a bar entry
+nor a menu -- so where the panel is showing the pilot this fires with the bar
+never consulted. `lockedTargetNamed` stays because it is still the fall-back's
+only way to find something to right-click, and because #389's own reason for it
+is unchanged.
+
+**It adds no way to select and so cannot loop.** This answers `Nothing` unless
+the panel is *already* showing the pilot, and the caller then does exactly what
+it always did. No reading is ever spent selecting for the unlock, no new bound is
+needed, and a client that never selects the pilot costs nothing at all.
+
+**Which makes the cascade's own right-click the thing that reaches this
+branch**, and that is stated rather than assumed: right-clicking a target-bar
+entry is expected to select the object as well as opening the menu, so a cascade
+that does not land should leave the panel showing the pilot and the next reading
+presses the button. **No reading has ever confirmed that**, and the direction it
+fails in is the safe one -- the panel path never fires and the cascade goes on
+being the only mechanism.
+
+**The panel offering Unlock is the client saying this object is locked**, since
+Lock and Unlock share the slot, so the press is declined outright where the panel
+offers Lock instead.
+
+-}
+unlockFromSelectedItemPanel : BotDecisionContext -> String -> Maybe DecisionPathNode
+unlockFromSelectedItemPanel context pilotName =
+    if not (panelIsShowingText context.readingFromGameClient pilotName) then
+        Nothing
+
+    else
+        selectedItemPanelButton context.readingFromGameClient selectedItemUnLockTargetButton
+            |> Maybe.map clickUiElementOrSayItCannotBeClicked
+
+
+{-| Whether the Selected Item panel's own texts carry this string.
+
+`selectedItemIsOverviewEntry` asks the same question of an overview row; a
+target-bar entry is not one, so this is the half of that rule that takes the
+text. One `containsWords` test, so the two cannot come to disagree about what
+"the panel is showing it" means -- and an empty name matches nothing rather than
+everything, which is `valueTypeNonEmptyString`'s register applied to a lookup.
+
+-}
+panelIsShowingText : ReadingFromGameClient -> String -> Bool
+panelIsShowingText readingFromGameClient text =
+    case ( readingFromGameClient.selectedItemWindow, String.trim text ) of
+        ( _, "" ) ->
+            False
+
+        ( Just window, trimmed ) ->
+            EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode.uiNode
+                |> List.any (containsWords trimmed)
+
+        ( Nothing, _ ) ->
+            False
 
 
 {-| Find one of those buttons in **this** reading, by name and never by
@@ -10521,22 +10630,34 @@ unlockFleetPilotInTargetBar : BotDecisionContext -> Maybe DecisionPathNode
 unlockFleetPilotInTargetBar context =
     case friendlyFireStepFromContext context of
         UnlockAFleetPilot fleetPilot _ ->
-            lockedTargetNamed fleetPilot context.readingFromGameClient
-                |> Maybe.map
-                    (\targetToUnlock ->
-                        describeBranch
+            case unlockFromSelectedItemPanel context fleetPilot of
+                Just pressThePanelButton ->
+                    Just
+                        (describeBranch
                             ("'"
                                 ++ fleetPilot
                                 ++ "' is in this fleet and is locked. Unlocking, and holding fire meanwhile."
                             )
-                            (useContextMenuCascade
-                                ( "locked target"
-                                , targetToUnlock.barAndImageCont |> Maybe.withDefault targetToUnlock.uiNode
-                                )
-                                (useMenuEntryWithTextContaining "unlock" menuCascadeCompleted)
-                                context
+                            pressThePanelButton
+                        )
+
+                Nothing ->
+                    lockedTargetNamed fleetPilot context.readingFromGameClient
+                        |> Maybe.map
+                            (\targetToUnlock ->
+                                describeBranch
+                                    ("'"
+                                        ++ fleetPilot
+                                        ++ "' is in this fleet and is locked. Unlocking, and holding fire meanwhile."
+                                    )
+                                    (useContextMenuCascade
+                                        ( "locked target"
+                                        , targetToUnlock.barAndImageCont |> Maybe.withDefault targetToUnlock.uiNode
+                                        )
+                                        (useMenuEntryWithTextContaining "unlock" menuCascadeCompleted)
+                                        context
+                                    )
                             )
-                    )
 
         NothingIsLocked ->
             Nothing
