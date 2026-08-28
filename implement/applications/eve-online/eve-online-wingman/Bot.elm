@@ -568,6 +568,20 @@ type alias BotMemory =
     -- no gate is on the overview at all.
     , gateAskedReadings : Int
 
+    -- Readings in a row spent asking the drones home before taking a gate the
+    -- commander broadcast a `Target` on, ported from `eve-online-saxrat`'s
+    -- `droneRecallUnansweredTicks` -- see `calledGateDroneRecall`. Counts from
+    -- the first recall the client did not answer, resets whenever the in-space
+    -- count falls (a partial recall is the client answering), and holds once
+    -- the give-up is reached, because giving up is what stops the asking.
+    , calledGateRecallAskedReadings : Int
+
+    -- How many drones were in space on the previous reading, which is the only
+    -- thing that can say the count *fell*. `dronesInSpaceCountFromReading`
+    -- answers 0 for a reading with no drones window, so a docked reading resets
+    -- the counter above rather than being read as a recall that landed.
+    , dronesInSpaceCountLastReading : Int
+
     -- What the two HUD hitpoint gauges are willing to be believed about, and
     -- how low each has been since the ship was last healthy. See
     -- `updateHitpointsGaugeMemory` and `lowWaterMarkAfterReading` -- and CLAUDE.md's
@@ -2579,11 +2593,28 @@ deliberately keeping them deployed.
 -}
 dronesAreInSpace : ReadingFromGameClient -> Bool
 dronesAreInSpace readingFromGameClient =
+    0 < dronesInSpaceCountFromReading readingFromGameClient
+
+
+{-| How many drones the client says are in space, or `0` where it does not say.
+
+The same question `dronesAreInSpace` answers, as the number rather than the
+`Bool`, because `calledGateRecallAskedReadings` has to know whether the count
+_fell_ -- a partial recall is the client answering, and only a count can see
+one. `dronesAreInSpace` is expressed in terms of this so the two cannot come
+apart the way the recall and its decline did before #374.
+
+A reading with no drones window answers `0`, which is right for both readers:
+docked, or a client that did not draw it, is not a ship with drones out.
+
+-}
+dronesInSpaceCountFromReading : ReadingFromGameClient -> Int
+dronesInSpaceCountFromReading readingFromGameClient =
     readingFromGameClient.dronesWindow
         |> Maybe.andThen .droneGroupInSpace
         |> Maybe.andThen (.header >> .quantityFromTitle)
-        |> Maybe.map (.current >> (<) 0)
-        |> Maybe.withDefault False
+        |> Maybe.map .current
+        |> Maybe.withDefault 0
 
 
 returnDronesToBay : BotDecisionContext -> Maybe DecisionPathNode
@@ -2717,6 +2748,8 @@ initBotMemory =
     , retreatAskedReadings = 0
     , recoveringFromRetreat = False
     , gateAskedReadings = 0
+    , calledGateRecallAskedReadings = 0
+    , dronesInSpaceCountLastReading = 0
     , weaponsAskedReadings = 0
     , approachFleetCommanderAskedReadings = 0
     , unlockFleetPilotAskedReadings = 0
@@ -2833,6 +2866,7 @@ statusTextFromState context =
                     , [ describeRetreat context ]
                     , [ describeFleetMembership context, describeFriendlyFireGuard context ]
                     , [ describeAccelerationGateAsk context ]
+                    , [ describeCalledObject context ]
                     , [ describeWeaponsAsk context ]
                     , [ describeApproachFleetCommanderAsk context ]
                     , [ describeFleetMateWarp context ]
@@ -3214,24 +3248,58 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             infoPanelRouteFirstMarkerFromReadingFromGameClient context.readingFromGameClient
                 |> Maybe.map (.uiNode >> .totalDisplayRegion)
 
+        -- The gate this bot would act on, and on whose authority -- taken from
+        -- the shipped rule rather than restated beside it, so the counters and
+        -- the arm cannot disagree about which gate is being asked. A gate the
+        -- commander broadcast a `Target` on wins over the nearest one (#393).
+        gateToAct : Maybe AccelerationGateToAct
+        gateToAct =
+            accelerationGateToAct context.readingFromGameClient
+
         gateOnOverview : Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
         gateOnOverview =
-            nearestAccelerationGateOnOverview context.readingFromGameClient
+            gateToAct |> Maybe.map .gate
+
+        -- Whether this reading is one the called gate is being held on for the
+        -- drones, asked through the rule the arm itself asks. Advancing on a
+        -- reading the arm did not spend is #389's second defect, and this is
+        -- narrower than "a called gate exists": with the drones home, or past
+        -- the give-up, no recall goes out and no budget should move.
+        askingForTheCalledGateRecall : Bool
+        askingForTheCalledGateRecall =
+            case gateToAct of
+                Nothing ->
+                    False
+
+                Just gate ->
+                    calledGateDroneRecall
+                        { calledByTheCommander = gate.calledByTheCommander
+                        , dronesAreInSpace = dronesAreInSpace context.readingFromGameClient
+                        , askedReadings = botMemoryBefore.calledGateRecallAskedReadings
+                        }
+                        == RecallTheDronesFirst
 
         -- Same shape as `askingAnAccelerationGateToOpen` in saxrat: the gate
         -- is on the overview, the panel is already showing it, and nothing
         -- else is holding this bot back from pressing it -- rats on the
         -- overview count as holding back, since #348 is what this counter
-        -- exists for.
+        -- exists for, unless the commander called this gate, which is #393's
+        -- override and is asked through `gateMayBeTaken` rather than restated.
+        -- A reading spent recalling drones is not a reading spent asking the
+        -- gate, so it holds the count rather than advancing it.
         askingTheGateToOpen : Bool
         askingTheGateToOpen =
-            case gateOnOverview of
+            case gateToAct of
                 Nothing ->
                     False
 
-                Just gateEntry ->
-                    List.isEmpty namesOfRatsInOverview
-                        && selectedItemIsOverviewEntry context.readingFromGameClient gateEntry
+                Just gate ->
+                    gateMayBeTaken
+                        { ratsOnTheGrid = not (List.isEmpty namesOfRatsInOverview)
+                        , calledByTheCommander = gate.calledByTheCommander
+                        }
+                        && not askingForTheCalledGateRecall
+                        && selectedItemIsOverviewEntry context.readingFromGameClient gate.gate
 
         gaugeReading : (EveOnline.ParseUserInterface.Hitpoints -> Int) -> Maybe Int
         gaugeReading whichGauge =
@@ -3449,6 +3517,15 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , calledGateRecallAskedReadings =
+        calledGateRecallAskedReadingsAfter
+            { askedThisReading = askingForTheCalledGateRecall
+            , dronesInSpaceNow = dronesInSpaceCountFromReading context.readingFromGameClient
+            , dronesInSpaceBefore = botMemoryBefore.dronesInSpaceCountLastReading
+            , before = botMemoryBefore.calledGateRecallAskedReadings
+            }
+    , dronesInSpaceCountLastReading =
+        dronesInSpaceCountFromReading context.readingFromGameClient
     , weaponsAskedReadings =
         if List.isEmpty context.readingFromGameClient.targets then
             -- An empty lock bar ends the episode, so the next fight starts on
@@ -4376,10 +4453,25 @@ same argument for the lock indicator.
 -}
 overviewEntryForPilot : String -> ReadingFromGameClient -> Maybe OverviewWindowEntry
 overviewEntryForPilot pilotName readingFromGameClient =
+    overviewRowsForPilot pilotName readingFromGameClient |> List.head
+
+
+{-| Every overview row whose Name cell is exactly this name.
+
+The selection `overviewEntryForPilot` takes its head of, lifted out because
+#393's `calledObjectOnOverview` needs the whole list -- "does any row naming it
+say acceleration gate" and "is that row drawn" are questions a head cannot
+answer on a grid where the head is something else. One definition with two
+readers, so the rule that classifies the called object and the arm that clicks
+it cannot end up on two different rows, which is #303's lesson and what put the
+lock and its recognition on one lookup in the first place.
+
+-}
+overviewRowsForPilot : String -> ReadingFromGameClient -> List OverviewWindowEntry
+overviewRowsForPilot pilotName readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.filter (.objectName >> (==) (Just pilotName))
-        |> List.head
 
 
 {-| Fly toward the fleet commander's broadcast destination, using
@@ -5172,18 +5264,51 @@ then to `fireOnActiveTarget`.
 asked the target bar's rendering and got the wrong answer on every reading of
 four live sessions. `calledTargetIsLocked` is that argument.
 
+**What the broadcast named is asked before any of that, and #393 is why.** A
+`Target` on an acceleration gate is the commander sending the crew through it
+rather than a call to shoot it, so that case never reaches the lock at all --
+see `calledObjectOnOverview`. The check sits at the head of this function rather
+than behind the lock because #366 replaces the cascade below with a ctrl-click
+on the broadcast banner, and a ctrl-click will lock a gate as happily as the
+cascade does: a gate check placed behind the lock would be dead the moment that
+lands. That is the same reason #366 gives for keeping the fleet-member guard
+ahead of the click, and the fleet-member guard itself is transparent here, since
+a gate is not a pilot.
+
 -}
 bringCalledTargetUnderFire : BotDecisionContext -> String -> Maybe DecisionPathNode
 bringCalledTargetUnderFire context calledTarget =
-    if calledTargetIsLocked calledTarget context.readingFromGameClient then
-        Nothing
+    let
+        shootIt : Maybe DecisionPathNode
+        shootIt =
+            if calledTargetIsLocked calledTarget context.readingFromGameClient then
+                Nothing
 
-    else
-        Just
-            (describeBranch
-                ("Lock the called target '" ++ calledTarget ++ "'.")
-                (lockCalledTarget context calledTarget)
-            )
+            else
+                Just
+                    (describeBranch
+                        ("Lock the called target '" ++ calledTarget ++ "'.")
+                        (lockCalledTarget context calledTarget)
+                    )
+    in
+    case calledObjectOnOverviewFromReading calledTarget context.readingFromGameClient of
+        CalledObjectIsAnAccelerationGate gateEntry ->
+            takeTheCalledAccelerationGate context calledTarget gateEntry
+
+        CalledGateIsNotDisplayed ->
+            -- The row names a gate and is not drawn, so its region belongs to
+            -- whatever was recycled into its place and clicking it is worse
+            -- than a no-op. Hand the reading back rather than park on a wait:
+            -- `describeCalledObject` says so on every reading, and the drones
+            -- and the guns still get their turn -- which is #389's own closing
+            -- note about an arm above them answering `Just` forever.
+            Nothing
+
+        CalledObjectIsNotAGate ->
+            shootIt
+
+        CalledNameNamesNoOverviewRow ->
+            shootIt
 
 
 {-| Whether the called target is already in this ship's lock bar.
@@ -5229,6 +5354,111 @@ calledTargetIsLocked calledTarget reading =
                 |> Maybe.withDefault False
     in
     overviewRowSaysSo || (lockedTargetNamed calledTarget reading /= Nothing)
+
+
+{-| What kind of object the commander's `Target` broadcast named, as four named
+answers over the overview rows carrying that name -- the shape
+`accelerationGateActivationStep` uses, so a case can execute it rather than
+needing a whole `BotDecisionContext` to reach it.
+
+**A gate is licence to activate it, not to shoot it, and only a gate.** There is
+no fleet broadcast that says _take this gate_ -- `Align to` names no object at
+all -- so `Target` is the only form carrying an object's identity, and on an
+acceleration gate it is the commander sending the crew through. That is a
+deliberate reinterpretation of one verb where the named object is a gate, and
+nowhere else: everything that is not a gate still goes to the lock.
+
+**The answer carries the row**, so the press and the classification are about
+one object by construction. A `Bool` beside a second `List.head` is exactly the
+shape #303 and #389 both cost this bot -- a state read off one row while the
+click is aimed at another.
+
+**Four answers rather than two, because the two silences are different
+diagnoses**, and one of them is the risk this change ships with.
+`CalledNameNamesNoOverviewRow` is what a broadcast whose rendering does **not**
+match the overview's Name cell looks like -- and nobody has ever captured a
+`Target` broadcast naming an acceleration gate, so whether
+`targetBroadcastPilotName`'s string and `objectName` agree for a gate is
+**unknown**. It cannot be settled from here: there is no client. So the two are
+kept apart, both are named in the status line by `describeCalledObject`, and the
+failure direction is that a gate reads as an ordinary called target and goes to
+the lock path this bot takes today -- which then says `is not on the overview`,
+loudly.
+
+**`CalledGateIsNotDisplayed` is where a `_display` filter belongs and
+`calledTargetIsLocked` is where it does not.** That one takes a name and an
+indicator off a node and uses no **region**; this one hands a row to a click,
+and CLAUDE.md's rule names the region as what a hidden row makes untrustworthy:
+"a hidden entry reports a plausible region pointing at a row that now belongs to
+something else, so clicking it is worse than a no-op". This click ends in a gate
+being activated.
+
+-}
+calledObjectOnOverview : List OverviewWindowEntry -> CalledObjectOnOverview
+calledObjectOnOverview rowsNamingIt =
+    let
+        gateRows : List OverviewWindowEntry
+        gateRows =
+            rowsNamingIt |> List.filter overviewEntryIsAnAccelerationGate
+    in
+    case gateRows |> List.filter overviewEntryIsDisplayed |> List.head of
+        Just gateEntry ->
+            CalledObjectIsAnAccelerationGate gateEntry
+
+        Nothing ->
+            if not (List.isEmpty gateRows) then
+                CalledGateIsNotDisplayed
+
+            else if List.isEmpty rowsNamingIt then
+                CalledNameNamesNoOverviewRow
+
+            else
+                CalledObjectIsNotAGate
+
+
+type CalledObjectOnOverview
+    = CalledNameNamesNoOverviewRow
+    | CalledObjectIsNotAGate
+    | CalledGateIsNotDisplayed
+    | CalledObjectIsAnAccelerationGate OverviewWindowEntry
+
+
+{-| The rule above, asked of a reading, so the arm and the status clause ask one
+rule rather than two restatements of it. `overviewRowsForPilot` is the same row
+selection `lockCalledTarget` and `calledTargetIsLocked` take their head of.
+-}
+calledObjectOnOverviewFromReading : String -> ReadingFromGameClient -> CalledObjectOnOverview
+calledObjectOnOverviewFromReading calledTarget readingFromGameClient =
+    overviewRowsForPilot calledTarget readingFromGameClient
+        |> calledObjectOnOverview
+
+
+{-| The acceleration gate the current `Target` broadcast names, if it names one.
+
+The same question `bringCalledTargetUnderFire` asks, over a reading rather than
+a name, so that `updateMemoryForNewReadingFromGame` -- which never sees a
+decision -- can ask it too. Both go through `calledObjectOnOverviewFromReading`,
+so the arm and the counters cannot disagree about which gate is called.
+
+The one thing this does not repeat is `actOnFleetBroadcast`'s fleet-member
+guard, which refuses a called target named in `fleetPilotNames`. A gate is not a
+pilot, so the two cannot select the same row unless a fleet member is named
+after an acceleration gate.
+
+-}
+calledAccelerationGateFromReading : ReadingFromGameClient -> Maybe OverviewWindowEntry
+calledAccelerationGateFromReading readingFromGameClient =
+    fleetBroadcastBannerText readingFromGameClient
+        |> Maybe.andThen targetBroadcastPilotName
+        |> Maybe.andThen
+            (\calledTarget ->
+                case calledObjectOnOverviewFromReading calledTarget readingFromGameClient of
+                    CalledObjectIsAnAccelerationGate gateEntry ->
+                        Just gateEntry
+
+                    _ ->
+                        Nothing
+            )
 
 
 {-| The locked target whose target-bar text carries this name, if it is
@@ -7987,6 +8217,13 @@ the shape #343's own review caught elsewhere in this file -- this answers
 `Nothing` for the first, silently, exactly as every other arm in this decision
 root does when it has nothing to do, and describes the second explicitly.
 
+**#393 is the one thing that overrides the rats guard, and it is scoped to the
+gate the commander called.** Absent a `Target` broadcast on a gate,
+`gateMayBeTaken` is handed `calledByTheCommander = False` and #348's guard is
+exactly what it was. This arm never sees the override: it selects the nearest
+gate rather than the called one, and a called gate is taken by
+`bringCalledTargetUnderFire`, which sits above this in the decision root.
+
 -}
 accelerationGateStep : BotDecisionContext -> Maybe DecisionPathNode
 accelerationGateStep context =
@@ -7995,64 +8232,337 @@ accelerationGateStep context =
             Nothing
 
         Just gateEntry ->
-            if not (List.isEmpty (getNamesOfRatsInOverview context.readingFromGameClient)) then
-                Just
-                    (describeBranch
-                        "An acceleration gate is on the overview, but rats are still on the grid -- staying to fight rather than taking it."
-                        waitForProgressInGame
-                    )
+            takeTheAccelerationGate context
+                { gate = gateEntry, calledByTheCommander = False }
 
-            else
-                let
-                    activateGateButton : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
-                    activateGateButton =
-                        selectedItemButtonNamed context.readingFromGameClient "selectedItemActivateGate"
 
-                    waitForTheActivateButton : DecisionPathNode
-                    waitForTheActivateButton =
-                        describeBranch
-                            "The acceleration gate is selected but the panel offers no 'selectedItemActivateGate' yet."
-                            waitForProgressInGame
-                in
-                case
-                    accelerationGateActivationStep
-                        { panelShowsTheGate = selectedItemIsOverviewEntry context.readingFromGameClient gateEntry
-                        , panelOffersActivateGate = activateGateButton /= Nothing
-                        , askedReadings = context.memory.gateAskedReadings
-                        }
-                of
-                    GiveUpOnThisGate ->
-                        -- Hand the reading back rather than park the session --
-                        -- `askForHelpToGetUnstuck` dispatches nothing and
-                        -- waits, which is what cost saxrat run 18 three
-                        -- quarters of a session on a gate that was never going
-                        -- to open (#321's general lesson: a branch at the head
-                        -- of the tree with no bound owns the whole bot).
-                        -- `describeAccelerationGateAsk` carries the give-up in
-                        -- the status line on every reading instead.
-                        Nothing
+{-| Take the acceleration gate the commander broadcast a `Target` on, drones
+first.
 
-                    SelectTheGate ->
+**The rats guard is overridden here and only here.** #348 refuses a gate while
+rats are on the grid, because a wingman taking one mid-fight "abandons whatever
+the fleet is still fighting and leaves the commander a ship short in the pocket
+this bot just left". That guard exists to stop a wingman wandering off on its
+own judgement; the FC calling the gate is the explicit instruction to send the
+crew through, and there are occasions when a fleet must take a gate with rats
+still up. So the call overrules it, and nothing else does.
+
+**The drones come home first, and that is not optional.** `accelerationGateStep`
+recalls nothing, which was survivable only while the guard required a clear
+grid -- with rats up the drones are out essentially by construction, since
+`dronesAssistTheCommander` is what puts them there. Taking a called gate without
+recalling would abandon them every time, and CLAUDE.md records run 1 losing ten
+drones to exactly that shape. The recall is `returnDronesToBay`, the one every
+other departing arm already uses, rather than a second copy of it.
+
+**And the recall is bounded, which is what keeps the FC's call from being
+lost.** See `calledGateDroneRecall`: abandoning drones to make a called gate is
+a real cost and an acceptable one, where abandoning the gate to wait on drones
+that are not coming is not.
+
+-}
+takeTheCalledAccelerationGate :
+    BotDecisionContext
+    -> String
+    -> OverviewWindowEntry
+    -> Maybe DecisionPathNode
+takeTheCalledAccelerationGate context calledTarget gateEntry =
+    takeTheAccelerationGate context
+        { gate = gateEntry, calledByTheCommander = True }
+        |> Maybe.map
+            (describeBranch
+                ("The commander broadcast a Target on the acceleration gate '"
+                    ++ calledTarget
+                    ++ "' -- that is the fleet being sent through it, so take it."
+                )
+            )
+
+
+{-| The gate this bot would act on this reading, and on whose authority.
+
+One derivation with three readers -- this arm, the memory update's counters and
+the status clause -- so they cannot disagree about which gate is being asked or
+about whether the commander called it. A called gate wins over the nearest one,
+which is the ordering the decision root already has structurally:
+`actOnFleetBroadcast` is above `accelerationGateStep`, so a reading with a
+called gate never reaches the nearest-gate arm.
+
+-}
+accelerationGateToAct : ReadingFromGameClient -> Maybe AccelerationGateToAct
+accelerationGateToAct readingFromGameClient =
+    case calledAccelerationGateFromReading readingFromGameClient of
+        Just calledGate ->
+            Just { gate = calledGate, calledByTheCommander = True }
+
+        Nothing ->
+            nearestAccelerationGateOnOverview readingFromGameClient
+                |> Maybe.map (\gate -> { gate = gate, calledByTheCommander = False })
+
+
+type alias AccelerationGateToAct =
+    { gate : OverviewWindowEntry
+    , calledByTheCommander : Bool
+    }
+
+
+{-| Whether this bot may take a gate on this reading -- #348's guard, and the
+one exception to it.
+
+A pure rule over two `Bool`s so a case can execute it, and one declaration so
+the arm, the memory update and the status clause cannot hold three opinions
+about when the guard applies. With `calledByTheCommander = False` it _is_ #348's
+guard, unchanged.
+
+-}
+gateMayBeTaken : { ratsOnTheGrid : Bool, calledByTheCommander : Bool } -> Bool
+gateMayBeTaken gateCase =
+    gateCase.calledByTheCommander || not gateCase.ratsOnTheGrid
+
+
+{-| The select-then-press sequence, shared by the called gate and the nearest
+one, so there is one gate mechanism rather than two that can drift.
+-}
+takeTheAccelerationGate : BotDecisionContext -> AccelerationGateToAct -> Maybe DecisionPathNode
+takeTheAccelerationGate context gateToTake =
+    if
+        not
+            (gateMayBeTaken
+                { ratsOnTheGrid =
+                    not (List.isEmpty (getNamesOfRatsInOverview context.readingFromGameClient))
+                , calledByTheCommander = gateToTake.calledByTheCommander
+                }
+            )
+    then
+        Just
+            (describeBranch
+                "An acceleration gate is on the overview, but rats are still on the grid -- staying to fight rather than taking it."
+                waitForProgressInGame
+            )
+
+    else
+        case
+            calledGateDroneRecall
+                { calledByTheCommander = gateToTake.calledByTheCommander
+                , dronesAreInSpace = dronesAreInSpace context.readingFromGameClient
+                , askedReadings = context.memory.calledGateRecallAskedReadings
+                }
+        of
+            RecallTheDronesFirst ->
+                case returnDronesToBay context of
+                    Just recall ->
                         Just
                             (describeBranch
-                                "I see an acceleration gate -- select it, so the panel's own Activate Gate acts on it."
-                                (clickUiElementForNavigation gateEntry.uiNode)
+                                ("Holding the called acceleration gate until the drones are back -- "
+                                    ++ String.fromInt context.memory.calledGateRecallAskedReadings
+                                    ++ " of "
+                                    ++ String.fromInt calledGateDroneRecallGiveUpReadings
+                                    ++ " readings of recall so far."
+                                )
+                                recall
                             )
 
-                    WaitForTheActivateButton ->
-                        Just waitForTheActivateButton
+                    Nothing ->
+                        pressTheAccelerationGate context gateToTake
 
-                    PressActivateGate ->
-                        Just
-                            (activateGateButton
-                                |> Maybe.map
-                                    (\button ->
-                                        describeBranch
-                                            "The overview is clear of rats -- activate the acceleration gate to move to the next pocket."
-                                            (clickUiElementForNavigation button)
-                                    )
-                                |> Maybe.withDefault waitForTheActivateButton
+            LeaveTheDronesBehind ->
+                -- Named on every reading it declines, which is the other half
+                -- of #11: a give-up that answers `Nothing` silently reads
+                -- exactly like a bot that never had drones out, and #11's own
+                -- first version fired on an equality test and so said nothing
+                -- on any other reading.
+                pressTheAccelerationGate context gateToTake
+                    |> Maybe.map
+                        (describeBranch
+                            ("The drones have not answered "
+                                ++ String.fromInt context.memory.calledGateRecallAskedReadings
+                                ++ " readings of recall and are not coming back -- taking the called gate without them, because losing the commander's gate is worse than losing the drones."
                             )
+                        )
+
+            NoDroneRecallBeforeThisGate ->
+                pressTheAccelerationGate context gateToTake
+
+
+{-| Select the gate, then press the Selected Item panel's own Activate Gate.
+
+The wording says which authority the press is on, because
+`The overview is clear of rats` is **false** on a called gate taken mid-fight,
+and a log claiming a clear grid on readings that had rats on it is worse than no
+line at all.
+
+-}
+pressTheAccelerationGate : BotDecisionContext -> AccelerationGateToAct -> Maybe DecisionPathNode
+pressTheAccelerationGate context gateToTake =
+    let
+        activateGateButton : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        activateGateButton =
+            selectedItemButtonNamed context.readingFromGameClient "selectedItemActivateGate"
+
+        waitForTheActivateButton : DecisionPathNode
+        waitForTheActivateButton =
+            describeBranch
+                "The acceleration gate is selected but the panel offers no 'selectedItemActivateGate' yet."
+                waitForProgressInGame
+    in
+    case
+        accelerationGateActivationStep
+            { panelShowsTheGate = selectedItemIsOverviewEntry context.readingFromGameClient gateToTake.gate
+            , panelOffersActivateGate = activateGateButton /= Nothing
+            , askedReadings = context.memory.gateAskedReadings
+            }
+    of
+        GiveUpOnThisGate ->
+            -- Hand the reading back rather than park the session --
+            -- `askForHelpToGetUnstuck` dispatches nothing and
+            -- waits, which is what cost saxrat run 18 three
+            -- quarters of a session on a gate that was never going
+            -- to open (#321's general lesson: a branch at the head
+            -- of the tree with no bound owns the whole bot).
+            -- `describeAccelerationGateAsk` carries the give-up in
+            -- the status line on every reading instead.
+            Nothing
+
+        SelectTheGate ->
+            Just
+                (describeBranch
+                    "I see an acceleration gate -- select it, so the panel's own Activate Gate acts on it."
+                    (clickUiElementForNavigation gateToTake.gate.uiNode)
+                )
+
+        WaitForTheActivateButton ->
+            Just waitForTheActivateButton
+
+        PressActivateGate ->
+            Just
+                (activateGateButton
+                    |> Maybe.map
+                        (\button ->
+                            describeBranch
+                                (if gateToTake.calledByTheCommander then
+                                    "The commander called this acceleration gate -- activate it and take the fleet through, rats on the grid or not."
+
+                                 else
+                                    "The overview is clear of rats -- activate the acceleration gate to move to the next pocket."
+                                )
+                                (clickUiElementForNavigation button)
+                        )
+                    |> Maybe.withDefault waitForTheActivateButton
+                )
+
+
+{-| Whether to hold a called gate for the drones, as three named answers over
+three facts -- the shape `accelerationGateActivationStep` uses, so a case can
+execute it.
+
+**Scoped to the called gate.** With `calledByTheCommander = False` this always
+answers `NoDroneRecallBeforeThisGate`, so the uncalled arm is exactly what it
+was: #348's guard means its grid is clear, and adding a recall there is a
+behaviour change with its own evidence to gather.
+
+**The bound is what makes the recall safe rather than another way to lose the
+gate.** A recall the client never answers must not hold the ship on the grid
+indefinitely -- that is saxrat's own history, where Shift+R went out on every
+reading for as long as the drones stayed in space and the callers took the
+recall _instead of_ their own next step, so a ship whose drones never came home
+never docked either. Abandoning drones to make a called gate is a certain,
+bounded, recoverable cost; abandoning the commander's gate to wait on drones
+that are not coming is not.
+
+-}
+calledGateDroneRecall :
+    { calledByTheCommander : Bool, dronesAreInSpace : Bool, askedReadings : Int }
+    -> CalledGateDroneRecall
+calledGateDroneRecall recallCase =
+    if not (recallCase.calledByTheCommander && recallCase.dronesAreInSpace) then
+        NoDroneRecallBeforeThisGate
+
+    else if calledGateDroneRecallHasBeenGivenUpOn recallCase.askedReadings then
+        LeaveTheDronesBehind
+
+    else
+        RecallTheDronesFirst
+
+
+type CalledGateDroneRecall
+    = NoDroneRecallBeforeThisGate
+    | RecallTheDronesFirst
+    | LeaveTheDronesBehind
+
+
+{-| Whether the budget for recalling the drones before a called gate is spent.
+One comparison with three readers -- the rule, the counter and the status clause
+-- so a give-up decided in one place and reported in another cannot disagree
+about whether it happened.
+-}
+calledGateDroneRecallHasBeenGivenUpOn : Int -> Bool
+calledGateDroneRecallHasBeenGivenUpOn askedReadings =
+    calledGateDroneRecallGiveUpReadings < askedReadings
+
+
+{-| How many readings to keep asking the drones home before taking the called
+gate without them, taken unchanged from `eve-online-saxrat`'s
+`droneRecallGiveUpTicks`.
+
+**Copied rather than chosen**, because that is the only drone-recall number in
+this repository with any evidence behind it, and CLAUDE.md records it having
+never been reached in any recorded run of either bot that carries it -- a
+give-up that names itself on every reading it declines, so zero is evidence
+rather than silence. This bot has no corpus of its own for it: no wingman run
+has ever recalled drones before a gate, because no wingman has ever taken a
+called one.
+
+**The tension is stated rather than hidden.** 60 readings is a long time to hold
+an FC's gate -- a reading is one to eight seconds by this repo's own two figures
+-- and the direction to move this on evidence is _down_, from a run that shows
+what a recall this fleet's drones actually answer in. What is refused is moving
+it on a guess in either direction: shorter abandons drones the client was about
+to return, longer is the unbounded wait this exists to end.
+
+-}
+calledGateDroneRecallGiveUpReadings : Int
+calledGateDroneRecallGiveUpReadings =
+    60
+
+
+{-| The recall counter after this reading -- saxrat's
+`droneRecallUnansweredTicks` in one rule, over a record so a case can fold a
+whole session through it.
+
+Four cases, in this order, and each is a way it would otherwise be wrong:
+
+  - **no drones in space** resets, because there is nothing to ask for;
+  - **the count fell** resets, because a partial recall is the client answering
+    and patience should start again;
+  - **past the give-up** _holds_ rather than resetting, because giving up is
+    what stops the asking and a reset would unwind it -- the ship would
+    alternate forever between abandoning its drones and recalling them;
+  - **the arm asked on this reading** advances, and anything else holds.
+
+**It counts readings the arm asked on rather than every reading**, taken from
+the shipped rule rather than restated beside it -- #102's defect is a counter
+advanced by one condition and read by another. It over-counts only in the
+direction #393 chose: an arm above the broadcast holding the tree spends budget
+the recall did not use, which gives up on the drones sooner and takes the gate.
+
+-}
+calledGateRecallAskedReadingsAfter :
+    { askedThisReading : Bool, dronesInSpaceNow : Int, dronesInSpaceBefore : Int, before : Int }
+    -> Int
+calledGateRecallAskedReadingsAfter counterCase =
+    if counterCase.dronesInSpaceNow < 1 then
+        0
+
+    else if counterCase.dronesInSpaceNow < counterCase.dronesInSpaceBefore then
+        0
+
+    else if calledGateDroneRecallHasBeenGivenUpOn counterCase.before then
+        counterCase.before
+
+    else if counterCase.askedThisReading then
+        counterCase.before + 1
+
+    else
+        counterCase.before
 
 
 type AccelerationGateActivationStep
@@ -8534,33 +9044,113 @@ that already handed the turn back is still visible.
 -}
 describeAccelerationGateAsk : BotDecisionContext -> String
 describeAccelerationGateAsk context =
-    case nearestAccelerationGateOnOverview context.readingFromGameClient of
+    case accelerationGateToAct context.readingFromGameClient of
         Nothing ->
             "Acceleration gate: none on the overview."
 
-        Just _ ->
+        Just gateToTake ->
             let
                 askedReadings : Int
                 askedReadings =
                     context.memory.gateAskedReadings
 
-                ratsPresent : Bool
-                ratsPresent =
-                    not (List.isEmpty (getNamesOfRatsInOverview context.readingFromGameClient))
+                mayBeTaken : Bool
+                mayBeTaken =
+                    gateMayBeTaken
+                        { ratsOnTheGrid =
+                            not (List.isEmpty (getNamesOfRatsInOverview context.readingFromGameClient))
+                        , calledByTheCommander = gateToTake.calledByTheCommander
+                        }
             in
-            "Acceleration gate: on the overview, "
-                ++ (if ratsPresent then
-                        "rats still on the grid -- not taking it."
-
-                    else if accelerationGateHasBeenGivenUpOn askedReadings then
-                        "GIVEN UP after "
-                            ++ String.fromInt askedReadings
-                            ++ " readings of asking."
+            "Acceleration gate: on the overview"
+                ++ (if gateToTake.calledByTheCommander then
+                        " and CALLED by the commander, "
 
                     else
-                        "readings spent asking: "
-                            ++ String.fromInt askedReadings
-                            ++ " of "
-                            ++ String.fromInt accelerationGateRefusesThisShipTicks
-                            ++ "."
+                        ", "
                    )
+                ++ (if not mayBeTaken then
+                        "rats still on the grid -- not taking it."
+
+                    else
+                        (case
+                            calledGateDroneRecall
+                                { calledByTheCommander = gateToTake.calledByTheCommander
+                                , dronesAreInSpace = dronesAreInSpace context.readingFromGameClient
+                                , askedReadings = context.memory.calledGateRecallAskedReadings
+                                }
+                         of
+                            RecallTheDronesFirst ->
+                                "holding it for the drones ("
+                                    ++ String.fromInt context.memory.calledGateRecallAskedReadings
+                                    ++ " of "
+                                    ++ String.fromInt calledGateDroneRecallGiveUpReadings
+                                    ++ " readings of recall), "
+
+                            LeaveTheDronesBehind ->
+                                "DRONES GIVEN UP ON after "
+                                    ++ String.fromInt context.memory.calledGateRecallAskedReadings
+                                    ++ " readings of recall, "
+
+                            NoDroneRecallBeforeThisGate ->
+                                ""
+                        )
+                            ++ (if accelerationGateHasBeenGivenUpOn askedReadings then
+                                    "GIVEN UP after "
+                                        ++ String.fromInt askedReadings
+                                        ++ " readings of asking."
+
+                                else
+                                    "readings spent asking: "
+                                        ++ String.fromInt askedReadings
+                                        ++ " of "
+                                        ++ String.fromInt accelerationGateRefusesThisShipTicks
+                                        ++ "."
+                               )
+                   )
+
+
+{-| What the commander's `Target` broadcast named, for the status line.
+
+**Printed on every reading a broadcast is up**, because the arm's answers here
+are silences an operator cannot otherwise tell apart. A called gate that is not
+drawn falls through to the drones and the guns, which reads exactly like no
+broadcast at all; and a called name no overview row carries reads exactly like a
+called gate whose banner text is not the overview's Name cell -- which is #393's
+own unverified premise and the thing to watch on the first run that meets one.
+
+-}
+describeCalledObject : BotDecisionContext -> String
+describeCalledObject context =
+    case fleetBroadcastBannerText context.readingFromGameClient |> Maybe.andThen targetBroadcastPilotName of
+        Nothing ->
+            "Called target: none on the banner."
+
+        Just calledTarget ->
+            describeCalledObjectOnOverview
+                calledTarget
+                (calledObjectOnOverviewFromReading calledTarget context.readingFromGameClient)
+
+
+{-| The clause above, as a function of the name and the rule's own answer, so a
+case executes what an operator reads rather than asserting a substring over the
+branch. `describeWeaponsAsk`'s arrangement, for its reason.
+-}
+describeCalledObjectOnOverview : String -> CalledObjectOnOverview -> String
+describeCalledObjectOnOverview calledTarget calledObject =
+    "Called target '"
+        ++ calledTarget
+        ++ "': "
+        ++ (case calledObject of
+                CalledObjectIsAnAccelerationGate _ ->
+                    "it is an ACCELERATION GATE, so this is the commander sending the fleet through rather than a call to shoot it -- taking it, rats on the grid or not."
+
+                CalledGateIsNotDisplayed ->
+                    "it is an ACCELERATION GATE, but its overview row is not drawn -- that row's region belongs to whatever was recycled into its place, so nothing here will click it."
+
+                CalledObjectIsNotAGate ->
+                    "an overview row names it and it is not an acceleration gate, so it is a target to shoot."
+
+                CalledNameNamesNoOverviewRow ->
+                    "NO OVERVIEW ROW names it, so nothing here can lock it and nothing here can tell whether it is an acceleration gate. The active overview preset may be hiding it, or the banner's own wording may not be the overview's Name cell."
+           )
