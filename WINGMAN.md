@@ -51,13 +51,17 @@ nothing to do.
    which is the one and only form that reaches a branch. Everything else the
    fleet broadcasts falls into a named wait. See "Live runs". It stands down
    the moment the called target is locked, which the client's own overview
-   indicator decides (#389) — see below.
+   indicator decides (#389) — see below. A `Target` on an **acceleration gate**
+   is read as the commander sending the fleet through it rather than as a call
+   to shoot it, and is taken from here rather than from arm 10 (#393).
 7. **Drones assist the commander**, `F` on the locked target as the fallback.
 8. **Fire on whatever is locked**, through `fireOnActiveTarget` — unless the
    friendly fire guard is holding the trigger.
 9. **Keep station on the commander** by approaching their overview row,
    through `approachTheFleetCommander` (#365). See below.
-10. **Take the acceleration gate**, but only with the overview clear of rats.
+10. **Take the acceleration gate**, but only with the overview clear of rats —
+    unless the commander broadcast a `Target` on the gate itself, which is
+    taken from arm 6 with the drones recalled first (#393). See below.
 11. **Self-defense**, through `fightPointedRatsOrReturnDrones` — fight back
     only if a rat has actually pointed this ship, otherwise sit still, and
     never while the friendly fire guard is holding the trigger.
@@ -329,6 +333,156 @@ memory update runs before the decision and has no view of it, so the drone arm
 holding a reading still charges the budget when a weapon happens to be silent
 at the same moment. That over-counts rather than under-counts, which is the
 safe direction for a bound whose job is to stop an unbounded ask.
+
+### A `Target` broadcast on a gate is the fleet being sent through it
+
+#393. There is no fleet broadcast that says *take this gate*. `Align to` was
+the first choice and **does not name the gate**, so nothing in the broadcast
+tells a wingman which object was meant; `Target` is the only form carrying an
+object's identity. So on an acceleration gate it is read as licence to
+**activate** the gate rather than as a call to shoot it. That is a deliberate
+reinterpretation of one verb where the named object is a gate, and nowhere
+else — everything that is not a gate still goes to the lock, unchanged.
+
+Pointed at a gate the lock was a wasted cascade at best, and by #389's own
+argument it could not succeed either: a structure that will not lock never
+reads `targetedByMe` and never appears in the bar, so the arm re-asks forever.
+
+**Most of the machinery already existed.** `overviewEntryIsAnAccelerationGate`,
+`nearestAccelerationGateOnOverview` and `accelerationGateStep` — which presses
+the Selected Item panel's own `selectedItemActivateGate` and bounds its asking
+— are all this bot's already. What is new is a branch ahead of the lock that
+recognises the called row as a gate and hands it to that machinery, rather than
+a second copy of it: `takeTheAccelerationGate` is one select-and-press shared by
+the called gate and the nearest one.
+
+**The check is ahead of the lock, and that is about #366 rather than about
+today.** That change replaces the cascade with a ctrl-click on the broadcast
+banner, and a ctrl-click will lock whatever the banner refers to — so a gate
+check placed behind the lock would be dead the moment it lands. Same reason #366
+gives for keeping the fleet-member guard ahead of the click; and that guard is
+transparent here, since it refuses a name in `fleetPilotNames` and a gate is not
+a pilot.
+
+#### The call overrides #348's rats guard, and nothing else does
+
+`accelerationGateStep` refuses a gate while rats are on the grid, because taking
+one mid-fight "abandons whatever the fleet is still fighting and leaves the
+commander a ship short in the pocket this bot just left". **A `Target` broadcast
+on a gate overrides that hold**: there are occasions when the fleet must take a
+gate with rats still up, and the FC calling it is the explicit instruction to
+send the crew through. The guard exists to stop a wingman wandering off on its
+own judgement; it is not there to overrule the FC.
+
+**Scoped to the called gate.** `gateMayBeTaken` is one rule with three readers —
+the arm, the memory update's counter and the status clause — and
+`accelerationGateStep` hands it `calledByTheCommander = False`, so absent a
+broadcast #348's guard is exactly what it was. The discriminating case is one
+grid asked twice: same rats, same gate, same drones, the called arm acting and
+the uncalled arm staying to fight, so what separates the two answers is the
+broadcast rather than the fixture.
+
+#### The drones come home first, and the recall is bounded
+
+`accelerationGateStep` recalls nothing — it presses Activate Gate directly. That
+was survivable only while the guard required a clear grid: with rats up the
+drones are out essentially by construction, since `dronesAssistTheCommander` is
+what puts them there, so taking a called gate without recalling would abandon
+them every time. CLAUDE.md records run 1 losing ten drones to exactly that
+shape.
+
+So the called-gate path recalls first, through the **`returnDronesToBay` every
+other departing arm already uses** rather than a second copy of one.
+
+**The bound is what keeps the FC's call from being lost.**
+`calledGateDroneRecall` is saxrat's `droneRecallUnansweredTicks` in this bot's
+vocabulary: the counter starts from the first recall the client did not answer,
+resets whenever the in-space count falls (a partial recall is the client
+answering), holds once the give-up is reached — because giving up is what stops
+the asking, and a reset would have the ship alternating forever between
+abandoning its drones and recalling them — and the give-up **names itself on
+every reading it declines**, which is the other half of #11. Abandoning drones
+to make a called gate is a certain, bounded, recoverable cost; abandoning the
+commander's gate to wait on drones that are not coming is not.
+
+`calledGateDroneRecallGiveUpReadings` is **60, copied rather than chosen**. It is
+the only drone-recall number in this repository with any evidence behind it, and
+CLAUDE.md records it having never been reached in a recorded run of either bot
+that carries it. This bot has no corpus of its own for it: no wingman run has
+ever recalled drones before a gate. The tension is stated rather than hidden —
+60 readings is a long time to hold an FC's gate — and the direction to move it on
+evidence is *down*, from a run that shows what a recall this fleet's drones
+actually answer in.
+
+**The counter counts readings the arm asked on**, taken from the shipped rule
+rather than restated beside it (#102). It over-counts only in the direction #393
+chose: an arm above the broadcast holding the tree spends budget the recall did
+not use, which gives up on the drones sooner and takes the gate.
+
+#### The decision line says which path it is on
+
+`The overview is clear of rats -- activate the acceleration gate` is **false**
+when the gate was called mid-fight, and a log claiming a clear grid on readings
+that had rats on it is worse than no line at all. So the called press has its own
+wording naming the broadcast as the authority, the uncalled one keeps the
+sentence an operator already greps for, and the recall says it is holding the
+gate for the drones — otherwise the hold is a pause nobody can account for.
+
+```
++ The commander broadcast a Target on the acceleration gate 'X' -- that is the fleet being sent through it, so take it.
+++ Holding the called acceleration gate until the drones are back -- 3 of 60 readings of recall so far.
+++ The commander called this acceleration gate -- activate it and take the fleet through, rats on the grid or not.
+```
+
+#### Unverified, and it is the thing to establish first
+
+**Nobody has captured a `Target` broadcast naming an acceleration gate.** Two
+string derivations have to agree for the row to be found at all —
+`targetBroadcastPilotName` parses the name out of the banner, and
+`overviewRowsForPilot` matches it against `objectName` by exact equality — and
+whether a broadcast on a gate renders the string the overview carries is
+**unknown**. It cannot be settled without a client, so what the change does
+instead is refuse to do nothing silently about it.
+
+`calledObjectOnOverview` answers four things rather than two, and the two
+silences are kept apart: `CalledNameNamesNoOverviewRow` is what a name the
+overview does not carry looks like, and `describeCalledObject` says so in the
+status line on every reading —
+
+```
+Called target 'X': NO OVERVIEW ROW names it, so nothing here can lock it and
+nothing here can tell whether it is an acceleration gate. The active overview
+preset may be hiding it, or the banner's own wording may not be the overview's
+Name cell.
+```
+
+That is the failure direction if the two derivations disagree: the gate reads as
+an ordinary called target, goes to the lock path this bot takes today, and says
+`is not on the overview` — loudly, and no worse than before this change.
+
+The fourth answer is `CalledGateIsNotDisplayed`. A gate row that is in the tree
+and not drawn reports a plausible region belonging to whatever was recycled into
+its place, so this arm will not click it and hands the reading back instead —
+the drones and the guns still get their turn, which is #389's own closing note.
+Note this is the one place a `_display` filter belongs and `calledTargetIsLocked`
+is where it does not: that read uses no region, this one hands a row to a click
+that ends in a gate being activated.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_wingman_called_gate.py` (44 cases). The rules are
+executed through the real `Bot.elm` in `elm repl` and the readings they are asked
+about go through the real `EveOnline.ParseUserInterface`; the classification is
+asked as one equality per answer, so a rule answering two things at once — or
+none, which is what a fixture that never arrived produces — fails rather than
+passing on whichever constructor a case named; and the recall counter is folded
+over whole sessions rather than asked once. **Neither parser needed a change.**
+
+What to watch on the first run that meets one: `Called target 'X': it is an
+ACCELERATION GATE` in the status line, then the recall's own
+`I see there are drones in space. Return those to bay.`, then the press. A run
+where the clause reads `NO OVERVIEW ROW names it` while a gate is plainly called
+is the unverified premise failing, and is the one thing a capture pass with
+`eve_read.py` would settle outright.
 
 ### The health retreat, and why it ships switched off
 
@@ -1046,18 +1200,26 @@ restart.
   What a run shows: `Lock the called target 'X'.` appearing **once** and then
   the reading reaching `dronesAssistTheCommander` and `Weapons:` — against the
   #389 signature, which is that line every reading with targets locked in the
-  same status block. One run settles it for both arms.
-- **How often the friendly-fire guard is defeated by a wrapped name, and
-  whether #390's second signal catches it in the field.** The weakness is
-  established (#303's live read; see "Never shooting the fleet") and the fix is
-  executed against a reading the real parser produced, but the frequency is
-  not: it depends on how the client wraps the pilot names this fleet actually
-  flies with, and no wingman log on this machine holds a locked player.
-  `Friendly fire guard: ... UNLOCKING, guns held. Seen by the overview row's
-  lock indicator.` is the line that says the second signal did the work the bar
-  could not; `... Seen by the target bar's labels and the overview row's lock
-  indicator.` is the two agreeing, which is what has to be seen before either
-  could be trusted alone.
+  same status block.
+- **What a `Target` broadcast on an acceleration gate renders as.** #393 reads
+  one as licence to take the gate, and the row is found by matching the name
+  `targetBroadcastPilotName` parses out of the banner against the overview's
+  `objectName` by exact equality — two string derivations that both have to
+  agree, and **nobody has ever captured such a broadcast**. One capture pass
+  with `eve_read.py` settles it: broadcast a `Target` on a gate and read the
+  banner text beside that row's `objectName` and `objectType`. Until then the
+  recognition is built to say so rather than to do nothing silently — see
+  "A `Target` broadcast on a gate is the fleet being sent through it" for the
+  clause and the failure direction. Also unread: what the client does if a lock
+  is aimed at a gate at all, which is the same question #366 lists for
+  out-of-range and already-locked objects.
+- **How often the friendly-fire guard is defeated by a wrapped name.** The
+  weakness is established (#303's live read; see "Never shooting the fleet"),
+  the frequency is not: it depends on how the client wraps the pilot names this
+  fleet actually flies with, and no wingman log on this machine holds a locked
+  player. `Friendly fire guard: N locked, none of them a fleet pilot -- clear
+  to fire.` printed while the Fleet window names somebody who *is* in the bar is
+  what it looks like.
 - **Every number the health retreat would need (#364).** The mechanism is
   built and proven by `elm make` and by
   `test_wingman_retreats_to_the_commander.py`; **none of its thresholds has a

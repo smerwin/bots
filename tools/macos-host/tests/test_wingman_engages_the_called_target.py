@@ -619,13 +619,26 @@ class TheDecisionRootReachesTheGunsTest(unittest.TestCase):
 
     def test_the_recall_and_the_decline_ask_the_same_question(self):
         """Two copies of "is a drone in space" is how they drift apart, which
-        is the defect above: one of them was not asking at all."""
+        is the defect above: one of them was not asking at all.
+
+        Asked of the two branches by name rather than as a count of the whole
+        file. #393 gave the helper three further readers -- the called gate's
+        own recall, the counter behind its bound, and the status clause -- and
+        a count pinned at two reads as a regression when what it names is
+        satisfied. What has to stay true is that neither of these two branches
+        re-derives the question for itself.
+        """
         self.assertIn("dronesAreInSpace : ReadingFromGameClient -> Bool",
                       self.source)
-        self.assertEqual(
-            self.source.count("dronesAreInSpace context.readingFromGameClient"),
-            2,
-            "the recall and the decline should both go through the one helper")
+        for header in ("\nfightPointedRatsOrReturnDrones context shipUI =",
+                       "\nreturnDronesToBay context ="):
+            body = self.body_of(header)
+            self.assertIn(
+                "dronesAreInSpace context.readingFromGameClient", body,
+                header.strip() + " should go through the one helper")
+            self.assertNotIn(
+                ".droneGroupInSpace\n", body,
+                header.strip() + " should not re-derive the count itself")
 
     def test_a_give_up_on_the_guns_is_visible_in_the_status_line(self):
         """`fireOnActiveTarget` answers `Nothing` when it gives up, so without
