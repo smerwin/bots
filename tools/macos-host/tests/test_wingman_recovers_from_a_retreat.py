@@ -1001,11 +1001,13 @@ class TheWiringIsWhereItSaysItIsTest(unittest.TestCase):
         line, so asserting the name alone passes with every call site deleted --
         which is what a first version of this case did. What is asserted is the
         group it sits in, beside the retreat's own clause, so the placement is
-        pinned as well as the presence.
+        pinned as well as the presence -- with the comma allowed a leading space
+        so a later `elm-format` pass that wraps the list cannot break it, which
+        is the trap #58's own pass sprang on three cases.
         """
-        self.assertIn(
-            ", [ describeRetreat context, describeRetreatRecovery context ]",
-            collapsed(self.source))
+        self.assertRegex(
+            collapsed(self.source),
+            r"\[ describeRetreat context ?, describeRetreatRecovery context \]")
 
     def test_the_arm_hands_back_rather_than_waiting(self):
         """Every answer that is not an action is a `Nothing`, so nothing under
