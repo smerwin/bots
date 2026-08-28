@@ -5018,6 +5018,68 @@ fleetmateNamesFromLocalChat readingFromGameClient =
         |> List.filterMap .name
 
 
+{-| The size the Fleet window's own header states, if it states one.
+
+The captured header carries `Fleet (5)` beside the boss's name and the wing and
+squad labels -- see `fleetCommanderNameFromFleetWindowHeader`, which reads the
+same node and keeps the label _without_ a parenthesis while this one wants the
+one that opens with `Fleet (`.
+
+**`fleetSizeStatedMarker` is the one constant both the match and the slice use**,
+so a number can never be extracted out of a label the match would have rejected
+-- `gateKeyClosingMarker`'s arrangement in the mission runner, for its reason.
+
+`Nothing` is "this header states no size" and is never a zero: it is what makes
+`FleetSizeNotStated` a case of its own rather than a roster that reads complete
+because nothing contradicted it.
+
+-}
+fleetSizeStatedByFleetWindowHeader : ReadingFromGameClient -> Maybe Int
+fleetSizeStatedByFleetWindowHeader readingFromGameClient =
+    readingFromGameClient
+        |> fleetWindowDescendants
+        |> List.filter
+            (.uiNode
+                >> .pythonObjectTypeName
+                >> String.contains "FleetHeader"
+            )
+        |> List.concatMap
+            EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filterMap (.uiNode >> EveOnline.ParseUserInterface.getDisplayText)
+        |> List.map String.trim
+        |> List.filterMap fleetSizeFromHeaderLabel
+        |> List.head
+
+
+{-| The marker the size label opens with, shared by the match and the slice.
+-}
+fleetSizeStatedMarker : String
+fleetSizeStatedMarker =
+    "Fleet ("
+
+
+fleetSizeFromHeaderLabel : String -> Maybe Int
+fleetSizeFromHeaderLabel label =
+    if String.startsWith fleetSizeStatedMarker label && String.endsWith ")" label then
+        label
+            |> String.dropLeft (String.length fleetSizeStatedMarker)
+            |> String.dropRight 1
+            |> String.trim
+            |> String.toInt
+
+    else
+        Nothing
+
+
+{-| What this reading can say about the completeness of the no-shoot list.
+-}
+type FleetRosterVerdict
+    = FleetWindowIsShut
+    | FleetSizeNotStated
+    | RosterIsShort { statedSize : Int, resolvedPilots : Int }
+    | RosterIsComplete { statedSize : Int, resolvedPilots : Int }
+
+
 {-| Whether anything on this reading is in a position to answer "who is in
 this fleet" completely.
 
@@ -5025,18 +5087,101 @@ this fleet" completely.
 for a fleet of forty whose window is shut exactly as it does for a pilot flying
 alone, and `List.member` over `[]` is `False` for everybody -- so a guard that
 only asked `fleetPilotNames` would pass every target through and look
-identical to a guard that had checked. The Fleet window being open is what
-makes an empty answer mean "nobody", and while it is shut `friendlyFireStep`
-refuses to fire on any _pilot_ rather than inferring anything from silence.
+identical to a guard that had checked. While membership is unverifiable
+`friendlyFireStep` refuses to fire on any _pilot_ rather than inferring anything
+from silence.
 
-Deliberately the window's presence rather than its row count: a fleet of one
-is a real reading, and requiring a row would put this back to reasoning from
-an empty list.
+**The window's presence is not that answer, and #380 is the reading that says
+so.** Four wingmen read the same fleet at the same moment and reported member
+rows of 0, 2, 4 and 4; Greta read **zero rows and zero chat icons with the
+window open**, in a four-pilot fleet, with a target locked -- and the guard
+concluded it had checked, found nobody, and reported `clear to fire`. A
+fleetmate missing from that list is one she would shoot while the status line
+says membership was verified.
+
+**Corroborating the rows against local chat's icons does not catch it**, which
+is why #380's own two shapes are both declined here: Greta's two sources
+_agree_, at zero, so a rule that treats disagreement as unverified verifies
+exactly the reading the issue was filed on. Kara's 2-against-4 is caught by
+either, and the union in `fleetPilotNamesFromReading` already folds her chat
+icons in.
+
+**The window states its own size, and that is the third instrument.** The
+captured header reads `Fleet (5)` beside four member rows, the boss being drawn
+in the header instead. So the roster is corroborated when the bot resolved at
+least as many _distinct_ pilots as the window says there are, and short
+otherwise -- which does not need to know **why** the rows differ. Every
+candidate #380 names (a collapsed or scrolled window, a fleet in wings and
+squads with only some branches expanded, a parse that depends on window size)
+makes the rows a subset of the fleet, and a count catches a subset however it
+came about.
+
+**A fleet of one still verifies**, which requiring a non-empty row count would
+have broken: the header states 1, the boss is the pilot themselves, one name is
+resolved, and the roster is complete. Greta's reading states 5 against 1
+resolved and is short. Those two readings are identical in rows and in chat
+icons, so the stated size is the only thing on the reading that separates them.
+
+**Both kinds of not-knowing refuse**, which is `loadRefusalFromGameLog`'s
+register: a window that is shut and a header that states no size are each
+"this reading cannot answer", never "the roster is complete". Refusing to fire
+is cheap here -- this bot shoots rats, `getNamesOfOtherPilotsInOverview` never
+holds an NPC, and a pilot is a rare target -- and firing on a fleetmate is what
+#367 exists to prevent.
 
 -}
-fleetMembershipIsVerifiable : ReadingFromGameClient -> Bool
-fleetMembershipIsVerifiable readingFromGameClient =
-    readingFromGameClient.fleetWindow /= Nothing
+fleetRosterVerdict : List String -> ReadingFromGameClient -> FleetRosterVerdict
+fleetRosterVerdict followFleetBroadcastFrom readingFromGameClient =
+    if readingFromGameClient.fleetWindow == Nothing then
+        FleetWindowIsShut
+
+    else
+        case fleetSizeStatedByFleetWindowHeader readingFromGameClient of
+            Nothing ->
+                FleetSizeNotStated
+
+            Just statedSize ->
+                let
+                    resolvedPilots : Int
+                    resolvedPilots =
+                        fleetPilotNamesFromReading followFleetBroadcastFrom readingFromGameClient
+                            |> List.map String.toLower
+                            |> Set.fromList
+                            |> Set.size
+                in
+                if resolvedPilots < statedSize then
+                    RosterIsShort { statedSize = statedSize, resolvedPilots = resolvedPilots }
+
+                else
+                    RosterIsComplete { statedSize = statedSize, resolvedPilots = resolvedPilots }
+
+
+{-| Whether the verdict above lets an empty membership list mean "nobody".
+
+Only `RosterIsComplete` does. The three others are the reading saying it cannot
+answer, and the guard holds fire on any recognised pilot for each of them.
+
+-}
+fleetRosterIsCorroborated : FleetRosterVerdict -> Bool
+fleetRosterIsCorroborated verdict =
+    case verdict of
+        FleetWindowIsShut ->
+            False
+
+        FleetSizeNotStated ->
+            False
+
+        RosterIsShort _ ->
+            False
+
+        RosterIsComplete _ ->
+            True
+
+
+fleetMembershipIsVerifiable : List String -> ReadingFromGameClient -> Bool
+fleetMembershipIsVerifiable followFleetBroadcastFrom readingFromGameClient =
+    fleetRosterIsCorroborated
+        (fleetRosterVerdict followFleetBroadcastFrom readingFromGameClient)
 
 
 {-| Everyone this bot must not shoot: the member rows, the commander, and
@@ -9924,17 +10069,24 @@ locked target carries the name of somebody `fleetPilotNames` lists, so it comes
 out of the lock bar and nothing fires at it meanwhile.
 
 `HoldFireOnAnUnverifiedPilot` is the case that would otherwise be invisible.
-With the Fleet window shut, `fleetMemberNames` answers `[]` -- a fleet of forty
-and a pilot flying alone produce the same empty list, and `List.member` over it
-is `False` for everybody. A guard that stopped at the membership list would
+`fleetMemberNames` answers `[]` for a fleet of forty whose window is shut
+exactly as it does for a pilot flying alone, and `List.member` over it is
+`False` for everybody. A guard that stopped at the membership list would
 therefore pass every target through while looking exactly like a guard that had
 checked, which is the "reasoning from silence" #367 was filed on. So when
 membership is not verifiable this asks a different question the client can
 still answer: is the locked thing a _pilot_? `getNamesOfOtherPilotsInOverview`
 is how this bot independently named Sonya Spodumain twice in the very run that
 shot her. **NPC rats are not in that list**, so a PvE fight is unaffected and
-the cost of the refusal falls entirely on shooting players with the Fleet
-window shut -- which is the shot nobody can currently justify having taken.
+the cost of the refusal falls entirely on shooting players whose fleet
+membership this reading cannot certify -- which is the shot nobody can
+currently justify having taken.
+
+**What "not verifiable" means is `fleetRosterVerdict`'s and has widened**, which
+is #380: an open window is no longer sufficient. Greta read zero member rows
+with the window open in a four-pilot fleet and this branch was skipped, so the
+bot was clear to fire on a fleetmate while the status line said membership had
+been verified.
 
 **It refuses rather than unlocking in that case**, because the evidence is
 asymmetric: "this is a pilot and I cannot check whether they are a fleetmate"
@@ -10131,7 +10283,8 @@ friendlyFireStepFromReading followFleetBroadcastFrom askedReadings readingFromGa
             (fleetPilots ++ otherPilotsOnOverview)
                 |> List.filter (\name -> overviewRowSaysThisShipHasItLocked name readingFromGameClient)
         , fleetPilots = fleetPilots
-        , membershipIsVerifiable = fleetMembershipIsVerifiable readingFromGameClient
+        , membershipIsVerifiable =
+            fleetMembershipIsVerifiable followFleetBroadcastFrom readingFromGameClient
         , otherPilotsOnOverview = otherPilotsOnOverview
         , askedReadings = askedReadings
         }
@@ -11710,6 +11863,13 @@ operator's own remedy: opening it is what lets this bot tell a fleetmate from
 a stranger, and while it is shut the guns are refused on every pilot on the
 overview.
 
+**Since #380 the clause says which of the four answers the reading gave**,
+through `describeFleetRosterVerdict`, because "the Fleet window is open and
+lists 0 member rows" was printed on the reading Greta would have shot a
+fleetmate on and read exactly like verification. The rows, the commander and
+the chat icons are still all printed beside it: the verdict says whether the
+list may be believed and those say what is in it.
+
 -}
 describeFleetMembership : BotDecisionContext -> String
 describeFleetMembership context =
@@ -11749,24 +11909,70 @@ describeFleetMembership context =
                             "NOT NAMED -- the header gave no answer and 'follow-fleet-broadcast-from' is unset"
     in
     "Fleet membership: "
-        ++ (if fleetMembershipIsVerifiable reading then
-                "the Fleet window is open and lists "
-                    ++ String.fromInt (List.length memberRows)
-                    ++ " member rows: "
-                    ++ namesOrNone memberRows
-                    ++ "."
-
-            else
-                "THE FLEET WINDOW IS NOT OPEN, so the member list is unverifiable"
-                    ++ " -- an empty one would otherwise read as 'nobody here is a fleetmate'."
-           )
-        ++ " Commander: "
+        ++ describeFleetRosterVerdict
+            (fleetRosterVerdict
+                context.eventContext.botSettings.followFleetBroadcastFrom
+                reading
+            )
+        ++ " Member rows: "
+        ++ String.fromInt (List.length memberRows)
+        ++ " ("
+        ++ namesOrNone memberRows
+        ++ "). Commander: "
         ++ describeCommander
         ++ ". Local chat's standing icons mark "
         ++ String.fromInt (List.length chatFleetmates)
         ++ ": "
         ++ namesOrNone chatFleetmates
         ++ "."
+
+
+{-| The verdict in words, for the membership clause and -- through
+`describeFleetRosterVerdictBriefly`, which this contains -- for the guard's own
+`HOLDING FIRE` sentence.
+
+One wording rather than two, because the two clauses are printed side by side
+and a reader comparing them is entitled to assume they are talking about the
+same reading. The remedy is named on every refusing answer, since the operator
+opening the window or expanding its wings is what ends the refusal.
+
+-}
+describeFleetRosterVerdict : FleetRosterVerdict -> String
+describeFleetRosterVerdict verdict =
+    case verdict of
+        RosterIsComplete _ ->
+            "corroborated -- " ++ describeFleetRosterVerdictBriefly verdict ++ "."
+
+        _ ->
+            "NOT CORROBORATED -- "
+                ++ describeFleetRosterVerdictBriefly verdict
+                ++ ", so an empty or short member list would otherwise read as"
+                ++ " 'nobody here is a fleetmate'. Open the Fleet window and expand"
+                ++ " its wings and squads to fire on players again."
+
+
+describeFleetRosterVerdictBriefly : FleetRosterVerdict -> String
+describeFleetRosterVerdictBriefly verdict =
+    case verdict of
+        FleetWindowIsShut ->
+            "the Fleet window is not open"
+
+        FleetSizeNotStated ->
+            "the Fleet window is open but its header states no fleet size"
+
+        RosterIsShort { statedSize, resolvedPilots } ->
+            "the Fleet window's header states "
+                ++ String.fromInt statedSize
+                ++ " pilots and only "
+                ++ String.fromInt resolvedPilots
+                ++ " could be resolved"
+
+        RosterIsComplete { statedSize, resolvedPilots } ->
+            "the Fleet window's header states "
+                ++ String.fromInt statedSize
+                ++ " pilots and "
+                ++ String.fromInt resolvedPilots
+                ++ " are resolved"
 
 
 {-| What the friendly fire guard did with the lock bar this reading.
@@ -11829,8 +12035,13 @@ describeFriendlyFireGuard context =
                         ++ pilot
                         ++ "' -- a pilot on the overview, seen by "
                         ++ describeLockedPilotSignal signal
-                        ++ ", and with the Fleet window shut this bot"
-                        ++ " cannot tell whether they are a fleetmate. Open it to fire on players again."
+                        ++ ", and this bot cannot tell whether they are a fleetmate because "
+                        ++ describeFleetRosterVerdictBriefly
+                            (fleetRosterVerdict
+                                context.eventContext.botSettings.followFleetBroadcastFrom
+                                context.readingFromGameClient
+                            )
+                        ++ "."
 
                 ClearToFire ->
                     String.fromInt (List.length context.readingFromGameClient.targets)
