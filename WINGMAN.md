@@ -46,7 +46,13 @@ nothing to do.
    it is this high.
 5. **Activate the always-on modules** named in `activate-module-always`, and
    then **manage the middle row by position** — `manageMiddleRowModules`
-   (#394). See below.
+   (#394). Directly under those, and above everything below them, sits one
+   window rather than an arm: `closeOnTheCommanderAfterLanding` (#397),
+   which outranks 6, 7 and 8 from the reading a warp ends until the client
+   reports the manoeuvre. It sits *below* the module arms on purpose —
+   #394 ties the propulsion module to the client naming `Approach`, and a
+   window that answers for as long as it is closing would starve the very
+   module the closing is meant to run. See both sections below.
 6. **Act on the fleet broadcast** — in practice only the `Target …` form,
    which is the one and only form that reaches a branch. Everything else the
    fleet broadcasts falls into a named wait. See "Live runs". It stands down
@@ -221,6 +227,52 @@ nothing.
 
 `activate-module-always` still works and is unchanged, for anything genuinely
 tooltip-matched outside that row.
+
+### On landing, closing outranks the fight — for as long as the client is silent
+
+That arm was **last** in the root, and the root's own comment above
+`retreatToTheCommander` already said why that is fatal: each of the fighting
+arms answers `Just` for the whole of a fight and the first arm to answer ends
+the reading — the broadcast banner does not clear while a target is called
+(#360), the drone arm answers on every reading a drone idles (#326), the guns
+answer on every reading a weapon is not cycling. So on any grid worth landing
+on the approach was unreachable, and the ship landed at range, opened fire and
+never closed. A wingman at range on its own is outside logistics and outside
+support; failing to close is what gets it killed.
+
+**A permanent hoist would invert the problem**, since the ship would then never
+fight while the commander was on grid and unapproached. What ships instead is a
+window: from the reading the warp ends (`warpJustEnded`, the corrected trigger
+#205 gave this bot) until the client names the manoeuvre `Approach`, the close
+outranks the three fighting arms. After that the arm keeps the place #365 gave
+it, below the guns and above the gate, and station-keeping is unchanged.
+
+**The window is sized by what ends it rather than by a number**, which is #194's
+own history read as a warning — its arrival window was first sized by guesswork
+and the corpus later contradicted it by a wide margin. The closing condition is
+the client's own word, the same read that already stops the ask. What bounds a
+window nothing ever closes is not a new number either: only the five answers in
+`approachFleetCommanderAnswersThatSpendAReading` can hold a reading in this arm,
+and those are exactly the answers the counter advances on, so the fight can be
+outranked for at most `approachFleetCommanderAskedReadingsBound` readings and
+then the give-up hands every reading back.
+
+**Below the two arms that take the ship off the grid**, which is #364's measured
+ordering: a ship past its threshold breaks off and does not close on anyone
+first. Below `unlockFleetPilotInTargetBar` too, whose veto on the guns is
+independent of its placement, and below `activateAlwaysOnModules`, whose answers
+stop the moment the hardeners are on.
+
+**It does not depend on `orbit-fc`, and that is a behaviour change for every
+existing settings string** — including one that switched the key off
+deliberately. A survival behaviour is not opt-in. With `orbit-fc=no` the bot
+closes once per landing and then leaves station-keeping alone, and the status
+line says so rather than printing a bare `off`.
+
+**The status line carries the window on every reading it is open**, as
+`CLOSING SINCE LANDING (this outranks the fight until the client names the
+manoeuvre 'Approach')`, because from outside the tree a reading in which the
+close outranked the fight and one in which it merely came last read identically.
 
 ### Why the guns are their own arm, below the drones
 
@@ -1171,7 +1223,7 @@ Only after this bot has flown. See the top of this file.
 | `assist-fleet-commander` | `no` keeps drones on this ship's own target. Defaults to `yes`. |
 | `run-away-shield-hitpoints-threshold-percent`, `run-away-armor-hitpoints-threshold-percent` | Percentages below which the bot breaks off and warps back to the commander, read through the believed gauge behind a low-water mark. **Both default to -1, which is off.** |
 | `run-away-incoming-damage-threshold` | Hitpoints of incoming damage over a rolling 45-second window, past which the bot breaks off. Needs no HUD gauge. **Defaults to -1, which is off.** |
-| `orbit-fc` | Keep this ship on station beside the fleet commander by approaching their overview row (#365, #368). Defaults to `yes`. Also spelled `approach-fc`; the `orbit` spelling is kept so a settings string written for an earlier version still starts a session. |
+| `orbit-fc` | Keep this ship on station beside the fleet commander by approaching their overview row (#365, #368). Defaults to `yes`. Also spelled `approach-fc`; the `orbit` spelling is kept so a settings string written for an earlier version still starts a session. **It does not govern the close on landing** — since #397 that happens whatever this key says, and the key governs only the steady-state station-keeping after the client reports the manoeuvre. |
 | `orbit-fc-range` | **Accepted and ignored.** It named a rung of the client's `Orbit` submenu, which this bot no longer drives. Still parsed so a settings string carrying it does not end the session before it starts (#161), and named as ignored in the status line whenever it is set to anything but `500 m`. |
 | `orbit-in-combat` | Inherited, and **superseded by `orbit-fc` rather than sitting beside it** (#368): with `orbit-fc=yes`, `decideActionInAnomaly` does not issue its own orbit at all. |
 | `deactivate-module-on-warp` | Inherited, unchanged. |
@@ -1253,6 +1305,22 @@ restart.
     The banner cascade is now used only where a banner from that pilot is up;
     the recovery path presses the Selected Item panel's own Warp To instead.
     Nothing has yet watched either half fly for a ship that was hurt.
+- **Anything about the landing window running (#397).** No run has been flown,
+  and by construction this path has never fired: the arm it hoists was
+  unreachable on every grid with a fight on it, which is the defect. What a run
+  shows on the reading after a warp ends is
+  `Approach on the commander: CLOSING SINCE LANDING (…)` and then the approach
+  taking the reading rather than `Weapons:` or the broadcast arm — and the
+  clause **going away** within a reading or two, on the reading the client names
+  the manoeuvre. Two failures to watch for, in opposite directions. A run whose
+  clause never appears at all means the window is never opening, which would
+  mean `warpJustEnded` is not firing here — #205's own tell, and the direction
+  this fails silently in, since the bot then behaves exactly as it did before.
+  And a clause that stays up while the count in the same line climbs towards 40
+  is a landing on which the manoeuvre never took: the fight is being held off
+  for that whole budget, which is the stated cost, and the give-up is what ends
+  it. **How long a landing close normally takes is unmeasured**, so nothing here
+  says whether that budget is generous or tight for this ship.
 - **Whether a double click on a *pilot's* overview row commands an approach.**
   The gesture is proven — `eve-online-saxrat` double clicks a rat's row for
   exactly this, and the framework function is that bot's, ported unchanged —

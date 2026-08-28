@@ -21,8 +21,10 @@
      reading.
    + Acts on the fleet commander's broadcasts -- see below.
    + Launches drones and assists the fleet commander while rats are on grid.
-   + Orbits the fleet commander whenever the commander has an overview row and
-     this ship is not already orbiting -- see `orbit-fc`.
+   + Closes on the fleet commander the moment it lands on a grid, ahead of the
+     fight, until the client reports the manoeuvre -- and then keeps station on
+     the commander whenever they have an overview row and this ship is not
+     already approaching. Only the second half is governed by `orbit-fc`.
    + Routes to `home-station` through ESI and docks when the session is ending.
 
    ## Broadcasts
@@ -108,6 +110,11 @@
      the one place it is supposed to be. Also spelled `approach-fc`, which is
      the manoeuvre it actually commands: the orbit spelling is kept so a
      settings string written for an earlier version still starts a session.
+     **It does not govern the close on landing.** Since #397 this bot closes on
+     the commander when it lands on a grid whatever this key says, because a
+     wingman that lands at range and stays there is outside logistics and
+     outside support. The key governs the steady-state station-keeping it was
+     written for, on every reading after the client reports the manoeuvre.
    + `orbit-fc-range` : **Accepted and ignored.** It named a rung of the
      client's Orbit submenu, and this bot no longer drives that submenu --
      keeping station is an approach at the client's own approach distance, and
@@ -643,6 +650,19 @@ type alias BotMemory =
     -- is still on the grid, and resets the moment the ship reads as
     -- approaching or the commander leaves the overview.
     , approachFleetCommanderAskedReadings : Int
+
+    -- Whether this ship has landed on a grid and has not since been seen
+    -- closing on the fleet commander. #397. Opened on the reading a warp ends
+    -- (`warpJustEnded`) and closed by the client naming the manoeuvre
+    -- `Approach` -- by nothing else, so it is not a clock. While it is open,
+    -- closing on the commander outranks the fighting arms; see
+    -- `closeOnTheCommanderAfterLanding` for the whole argument, including what
+    -- bounds an open window that nothing ever closes.
+    --
+    -- `False` at the start of a session, so a bot that begins already on grid
+    -- has no landing to close from -- `arrivalWindowIsOpen`'s posture, and the
+    -- conservative direction.
+    , closingOnTheCommanderSinceLanding : Bool
 
     -- Readings in a row spent right-clicking a locked fleet pilot's target-bar
     -- entry to unlock it, bounded like the three counters above -- see
@@ -2960,6 +2980,7 @@ initBotMemory =
     , dronesInSpaceCountLastReading = 0
     , weaponsAskedReadings = 0
     , approachFleetCommanderAskedReadings = 0
+    , closingOnTheCommanderSinceLanding = False
     , unlockFleetPilotAskedReadings = 0
     }
 
@@ -3623,6 +3644,25 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         shipIsApproachingNow =
             shipIsApproachingFromReading context.readingFromGameClient
 
+        -- #397's window, settled here for the reason every verdict on this
+        -- channel is: the memory update is the only thing that runs on every
+        -- reading unconditionally, and `warpJustEnded` is a transition between
+        -- two readings that only this function can see.
+        --
+        -- Read by the counter below rather than `botMemoryBefore`'s value,
+        -- because the decision reads this reading's answer -- so a window that
+        -- opens on this reading with `orbit-fc=no` would otherwise have the
+        -- decision asking while the counter believed the ask was off, and
+        -- `approachFleetCommanderAskedReadingsBound` would be unreachable
+        -- during the very window it bounds. That is #34's shape.
+        closingOnTheCommanderSinceLandingNow : Bool
+        closingOnTheCommanderSinceLandingNow =
+            landingCloseAfterReading
+                { closeWasOwed = botMemoryBefore.closingOnTheCommanderSinceLanding
+                , justLanded = weJustFinishedWarping
+                , shipIsApproaching = shipIsApproachingNow
+                }
+
         -- The same shape as `askingTheGateToOpen` and `weaponsNow`,
         -- and taken from the shipped rule itself rather than restated beside
         -- it: a counter advanced by one condition and read by another is
@@ -3631,12 +3671,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- the same arrangement, and #364 is what made it possible here --
         -- `UpdateMemoryContext` carries the settings since that change, so
         -- this reads the real `orbit-fc` rather than the `True` it had to
-        -- assume when the settings were not visible from a memory update.
+        -- assume when the settings were not visible from a memory update --
+        -- and #397 is why the setting is asked through
+        -- `approachFleetCommanderIsAsked` rather than compared here.
         askingTheCommanderForAnApproach : Bool
         askingTheCommanderForAnApproach =
             List.member
                 (approachFleetCommanderStep
-                    { settingIsYes = context.botSettings.orbitFleetCommander == PromptParser.Yes
+                    { settingIsYes =
+                        approachFleetCommanderIsAsked
+                            { settingIsYes = context.botSettings.orbitFleetCommander == PromptParser.Yes
+                            , closingSinceLanding = closingOnTheCommanderSinceLandingNow
+                            }
                     , commanderOnGrid = commanderIsOnGrid
                     , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
                     , shipIsApproaching = shipIsApproachingNow
@@ -3832,6 +3878,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , closingOnTheCommanderSinceLanding = closingOnTheCommanderSinceLandingNow
     , unlockFleetPilotAskedReadings =
         case friendlyFireNow of
             UnlockAFleetPilot _ signal ->
@@ -5357,87 +5404,112 @@ wingmanDecisionRootInSpaceOrdinary context shipUI =
                             manageTheMiddleRow
 
                         Nothing ->
-                            case actOnFleetBroadcast context shipUI of
-                                Just actOnBroadcast ->
-                                    actOnBroadcast
+                            case closeOnTheCommanderAfterLanding context shipUI of
+                                Just closeOnTheCommander ->
+                                    -- #397, and it is a window rather than a
+                                    -- placement. From the reading the warp ends
+                                    -- until the client names the manoeuvre
+                                    -- `Approach`, closing on the commander
+                                    -- outranks the arms below -- each of which
+                                    -- answers `Just` for the whole of a fight,
+                                    -- which is what made
+                                    -- `approachTheFleetCommander` unreachable at
+                                    -- the foot of this list on every grid worth
+                                    -- landing on.
+                                    --
+                                    -- **Below the middle-row arm, not above it.**
+                                    -- #394 ties the propulsion module to the
+                                    -- client naming `Approach`; this arm answers
+                                    -- `Just` for as long as it is closing, so
+                                    -- above the module arm it would starve the
+                                    -- prop mod during exactly the window the
+                                    -- module exists for. The module arm is a
+                                    -- state check and a click and can block on
+                                    -- nothing, which is why it is safe ahead.
+                                    closeOnTheCommander
 
                                 Nothing ->
-                                    case dronesAssistTheCommander context of
-                                        Just assist ->
-                                            assist
+                                    case actOnFleetBroadcast context shipUI of
+                                        Just actOnBroadcast ->
+                                            actOnBroadcast
 
                                         Nothing ->
-                                            case fireOnActiveTarget context of
-                                                Just fire ->
-                                                    -- Strictly below the drone arm and
-                                                    -- strictly above the gate: a locked
-                                                    -- target means a fight, and a bot
-                                                    -- that would rather take a gate
-                                                    -- than shoot what the commander
-                                                    -- called has left the fleet a ship
-                                                    -- short in the pocket it just left.
-                                                    fire
+                                            case dronesAssistTheCommander context of
+                                                Just assist ->
+                                                    assist
 
                                                 Nothing ->
-                                                    case approachTheFleetCommander context shipUI of
-                                                        Just approachTheCommander ->
-                                                            -- #365. Below the drone arm
-                                                            -- and below the guns so it
-                                                            -- can starve neither
-                                                            -- (#326), and above the
-                                                            -- gate so the gate arm's
-                                                            -- own "rats are still on
-                                                            -- the grid" wait cannot
-                                                            -- starve it in the one
-                                                            -- state it is most for.
-                                                            -- Below #364's retreat by
-                                                            -- the whole tree: a damaged
-                                                            -- ship breaks off rather
-                                                            -- than holds station, so
-                                                            -- nothing that keeps this
-                                                            -- ship on the grid may ever
-                                                            -- answer before that arm
-                                                            -- does. The full argument
-                                                            -- is in
-                                                            -- `approachTheFleetCommander`.
-                                                            approachTheCommander
+                                                    case fireOnActiveTarget context of
+                                                        Just fire ->
+                                                            -- Strictly below the drone arm and
+                                                            -- strictly above the gate: a locked
+                                                            -- target means a fight, and a bot
+                                                            -- that would rather take a gate
+                                                            -- than shoot what the commander
+                                                            -- called has left the fleet a ship
+                                                            -- short in the pocket it just left.
+                                                            fire
 
                                                         Nothing ->
-                                                            case accelerationGateStep context of
-                                                                Just takeTheGate ->
-                                                                    -- #348. Sits after the
-                                                                    -- drone arm and after the
-                                                                    -- guns, never before
-                                                                    -- them, so a gate this
-                                                                    -- bot can see is never
-                                                                    -- taken while drones are
-                                                                    -- still owed a command on
-                                                                    -- a live grid -- the same
-                                                                    -- ordering argument #326
-                                                                    -- established for the
-                                                                    -- drone arm itself.
-                                                                    takeTheGate
+                                                            case approachTheFleetCommander context shipUI of
+                                                                Just approachTheCommander ->
+                                                                    -- #365. Below the drone arm
+                                                                    -- and below the guns so it
+                                                                    -- can starve neither
+                                                                    -- (#326), and above the
+                                                                    -- gate so the gate arm's
+                                                                    -- own "rats are still on
+                                                                    -- the grid" wait cannot
+                                                                    -- starve it in the one
+                                                                    -- state it is most for.
+                                                                    -- Below #364's retreat by
+                                                                    -- the whole tree: a damaged
+                                                                    -- ship breaks off rather
+                                                                    -- than holds station, so
+                                                                    -- nothing that keeps this
+                                                                    -- ship on the grid may ever
+                                                                    -- answer before that arm
+                                                                    -- does. The full argument
+                                                                    -- is in
+                                                                    -- `approachTheFleetCommander`.
+                                                                    approachTheCommander
 
                                                                 Nothing ->
-                                                                    {- The inherited
-                                                                       combat-anomaly-bot arm
-                                                                       is gone from here
-                                                                       (#349): it hunted
-                                                                       anomalies on an idle
-                                                                       grid, which is not
-                                                                       following a commander.
-                                                                       What remains is
-                                                                       self-defense only --
-                                                                       and it is now genuinely
-                                                                       the last resort it
-                                                                       reads as, because
-                                                                       `fireOnActiveTarget`
-                                                                       above it fires on
-                                                                       anything locked whether
-                                                                       or not a rat has
-                                                                       pointed this ship.
-                                                                    -}
-                                                                    fightPointedRatsOrReturnDrones context shipUI
+                                                                    case accelerationGateStep context of
+                                                                        Just takeTheGate ->
+                                                                            -- #348. Sits after the
+                                                                            -- drone arm and after the
+                                                                            -- guns, never before
+                                                                            -- them, so a gate this
+                                                                            -- bot can see is never
+                                                                            -- taken while drones are
+                                                                            -- still owed a command on
+                                                                            -- a live grid -- the same
+                                                                            -- ordering argument #326
+                                                                            -- established for the
+                                                                            -- drone arm itself.
+                                                                            takeTheGate
+
+                                                                        Nothing ->
+                                                                            {- The inherited
+                                                                               combat-anomaly-bot arm
+                                                                               is gone from here
+                                                                               (#349): it hunted
+                                                                               anomalies on an idle
+                                                                               grid, which is not
+                                                                               following a commander.
+                                                                               What remains is
+                                                                               self-defense only --
+                                                                               and it is now genuinely
+                                                                               the last resort it
+                                                                               reads as, because
+                                                                               `fireOnActiveTarget`
+                                                                               above it fires on
+                                                                               anything locked whether
+                                                                               or not a rat has
+                                                                               pointed this ship.
+                                                                            -}
+                                                                            fightPointedRatsOrReturnDrones context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
@@ -8162,7 +8234,11 @@ approachTheFleetCommander context shipUI =
     in
     case
         approachFleetCommanderStep
-            { settingIsYes = context.eventContext.botSettings.orbitFleetCommander == PromptParser.Yes
+            { settingIsYes =
+                approachFleetCommanderIsAsked
+                    { settingIsYes = context.eventContext.botSettings.orbitFleetCommander == PromptParser.Yes
+                    , closingSinceLanding = context.memory.closingOnTheCommanderSinceLanding
+                    }
             , commanderOnGrid = commanderEntry /= Nothing
             , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
             , shipIsApproaching = shipIsApproachingFromReading context.readingFromGameClient
@@ -8268,6 +8344,70 @@ approachTheFleetCommander context shipUI =
                             "Approach the fleet commander with the panel's own Approach button."
                             (clickUiElementForNavigation button)
                     )
+
+
+{-| Close on the commander while the landing window is open, ahead of the
+fight. #397.
+
+**The defect this answers is an ordering, not a rule.** `approachTheFleetCommander`
+was the last arm of `wingmanDecisionRootInSpaceOrdinary`, and the root's own
+comment above `retreatToTheCommander` already says why that is fatal for
+anything under the fighting arms: each of them answers `Just` for the whole of
+a fight and the first arm to answer ends the reading -- the broadcast banner
+does not clear while a target is called (#360), the drone arm answers on every
+reading a drone idles (#326), and the guns answer on every reading a weapon is
+not cycling. So on any grid worth landing on the approach was unreachable, and
+the ship landed at range, opened fire and never closed.
+
+**A permanent hoist is the wrong fix and is not what this is.** Putting the
+approach above the fight unconditionally means the ship never fights while the
+commander is on grid and unapproached, which inverts the problem. This is a
+window: from the reading the warp ends until the client names the manoeuvre,
+closing outranks the fight, and after that the arm keeps its old place and the
+existing order applies unchanged.
+
+**It calls the same arm rather than doing anything new**, which is #92's shape
+in the mission runner -- _the branch changes when that step is taken, never what
+it is_. Everything the ask already guarantees therefore still holds inside the
+window: the double click first and the panel fall-back behind it, the stray
+window closed before asking again, `approachFleetCommanderAskedReadingsBound`
+bounding the whole ask, and the manoeuvre confirmed by the client's own word
+rather than by a dispatched click.
+
+**What bounds the hoist is that arm's own budget, and it needs no new number.**
+The five answers that can hold a reading here are exactly
+`approachFleetCommanderAnswersThatSpendAReading`, which is exactly what the
+counter advances on -- so the fight can be outranked for at most
+`approachFleetCommanderAskedReadingsBound` readings, after which
+`GaveUpOnTheApproach` answers `Nothing` and every arm below runs again. The
+other four answers hand the reading back on the spot. That is the honest cost
+and it is stated rather than hidden: on a landing where the manoeuvre never
+takes, the bot spends up to that budget closing before it fights -- which is
+the same budget the arm has always been allowed to spend, moved to where it is
+reached.
+
+**Where it sits, and what is still above it.** Below `sessionIsEnding`,
+`retreatToTheCommander` and `recoverFromRetreat`, which is #364's measured
+ordering and not up for trade: a ship past its threshold breaks off, and it does
+not close on anyone first. Below `unlockFleetPilotInTargetBar`, a bounded safety
+arm (#367) whose veto on the guns is independent of its placement anyway, and
+below `activateAlwaysOnModules`, whose answers stop the moment the hardeners are
+on -- a tank worth having while landing at range. Above `actOnFleetBroadcast`,
+`dronesAssistTheCommander` and `fireOnActiveTarget`, which is the whole change.
+
+**So this does outrank the drone arm for the length of the window**, which is
+the trade #326 refused for a _permanent_ placement and which is only tolerable
+because this one ends: on the ordinary landing the client names the manoeuvre
+within a reading or two and the drones are commanded immediately after.
+
+-}
+closeOnTheCommanderAfterLanding : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
+closeOnTheCommanderAfterLanding context shipUI =
+    if context.memory.closingOnTheCommanderSinceLanding then
+        approachTheFleetCommander context shipUI
+
+    else
+        Nothing
 
 
 {-| The value `orbit-fc-range` holds when nobody has set it.
@@ -8499,6 +8639,79 @@ One comparison with two readers -- the step rule and the status clause --
 approachFleetCommanderHasBeenGivenUpOn : Int -> Bool
 approachFleetCommanderHasBeenGivenUpOn askedReadings =
     approachFleetCommanderAskedReadingsBound <= askedReadings
+
+
+{-| Whether this ship has landed and has not yet been seen closing on the
+commander. #397.
+
+**Opened by the warp ending and closed by the client's own word, and by nothing
+else.** `warpJustEnded` is the corrected trigger (#194 / #205 -- previous
+reading `Just True`, a ship UI present now, this reading not `Just True`), and
+`shipIsApproachingFromReading` is the same `ManeuverApproach` read that already
+stops the ask. So the window is sized by the manoeuvre landing rather than by a
+number picked for feel, which is the half #194's own arrival window got wrong
+first and the corpus later contradicted by a wide margin.
+
+**The confirmation is asked before the opening**, so a warp that ends with the
+client already naming `Approach` opens nothing. That inherits
+`shipIsApproachingFromReading`'s known limitation -- it says the ship is
+approaching _something_, not that it is approaching the commander -- which the
+ask itself has always had and which nothing here makes worse.
+
+**Nothing else closes it, and the two candidates were declined for the same
+reason.** Closing on the commander leaving the overview would make the window
+un-openable on the ordinary landing where the grid has not drawn his row yet;
+closing on the ask giving up would only tidy a flag, since a given-up ask
+answers `Nothing` at both call sites and holds no reading. What an open window
+costs while the commander is off grid is therefore exactly nothing: the arm
+answers `NoCommanderOnGrid` and hands the reading straight back.
+
+-}
+landingCloseAfterReading :
+    { closeWasOwed : Bool
+    , justLanded : Bool
+    , shipIsApproaching : Bool
+    }
+    -> Bool
+landingCloseAfterReading state =
+    if state.shipIsApproaching then
+        False
+
+    else
+        state.justLanded || state.closeWasOwed
+
+
+{-| Whether the approach on the commander is asked for on this reading at all.
+
+**The landing close does not depend on `orbit-fc`, and that is a deliberate
+behaviour change for every existing settings string** -- including one that
+switched the key off on purpose. A wingman that lands at range and does not
+close is a ship on its own outside logistics and outside support, and the
+operator's framing is that failing to close is what gets it killed. A survival
+behaviour is not opt-in. The key goes on governing the steady-state
+station-keeping it was written for, which is what it does on every reading the
+landing window is shut.
+
+So with `orbit-fc=no` the bot closes once per landing, stops the moment the
+client names the manoeuvre, and leaves station-keeping alone for the rest of
+that grid. `orbit-in-combat` is unaffected in either direction: it is consulted
+only where `orbit-fc` is `no`, which this does not change.
+
+One rule with three readers -- `approachTheFleetCommander`,
+`updateMemoryForNewReadingFromGame` and `describeApproachFleetCommanderAsk` --
+because a counter advanced under one notion of "the ask is on" and read under
+another is #102's defect, and here it would make
+`approachFleetCommanderAskedReadingsBound` unreachable during the very window
+that bounds the hoist.
+
+-}
+approachFleetCommanderIsAsked :
+    { settingIsYes : Bool
+    , closingSinceLanding : Bool
+    }
+    -> Bool
+approachFleetCommanderIsAsked ask =
+    ask.settingIsYes || ask.closingSinceLanding
 
 
 {-| How many readings the double click on the commander's row gets before this
@@ -9147,6 +9360,19 @@ describeApproachFleetCommanderAsk context =
                 |> Maybe.andThen .objectDistance
                 |> Maybe.withDefault "an unread distance"
 
+        -- #397. Printed on every reading the window is open, because from
+        -- outside the tree a reading in which the approach outranked the fight
+        -- and one in which it merely came last read identically -- and the
+        -- window is the whole change.
+        landingCloseClause : String
+        landingCloseClause =
+            if context.memory.closingOnTheCommanderSinceLanding then
+                "CLOSING SINCE LANDING (this outranks the fight until the client"
+                    ++ " names the manoeuvre 'Approach'), "
+
+            else
+                ""
+
         rangeSettingClause : String
         rangeSettingClause =
             if context.eventContext.botSettings.orbitFleetCommanderRange == defaultOrbitFleetCommanderRange then
@@ -9159,9 +9385,14 @@ describeApproachFleetCommanderAsk context =
                     ++ " and no longer drives the Orbit menu that key named a rung of.)"
     in
     "Approach on the commander: "
+        ++ landingCloseClause
         ++ (case
                 approachFleetCommanderStep
-                    { settingIsYes = context.eventContext.botSettings.orbitFleetCommander == PromptParser.Yes
+                    { settingIsYes =
+                        approachFleetCommanderIsAsked
+                            { settingIsYes = context.eventContext.botSettings.orbitFleetCommander == PromptParser.Yes
+                            , closingSinceLanding = context.memory.closingOnTheCommanderSinceLanding
+                            }
                     , commanderOnGrid = commanderEntry /= Nothing
                     , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
                     , shipIsApproaching = shipIsApproachingFromReading context.readingFromGameClient
@@ -9173,7 +9404,8 @@ describeApproachFleetCommanderAsk context =
                     }
             of
                 ApproachFleetCommanderIsOff ->
-                    "off ('orbit-fc=no')."
+                    "station-keeping off ('orbit-fc=no'). The close on landing"
+                        ++ " is NOT governed by that key (#397) and still runs."
 
                 NoCommanderOnGrid ->
                     case fleetCommanderNameFromFleetWindowHeader context.readingFromGameClient of
