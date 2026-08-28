@@ -258,12 +258,34 @@ class TheTwoMechanismsTest(unittest.TestCase):
         arm = self.body_of("warpToFleetMateFromTheBroadcastBanner context banner =")
         self.assertIn('useContextMenuCascade\n', arm)
         self.assertIn('( "fleet broadcast", banner )', arm)
-        self.assertEqual(arm.count("useMenuEntryWithTextEqual"), 2)
-        self.assertLess(arm.index('useMenuEntryWithTextEqual "Fleet Member"'),
-                        arm.index('useMenuEntryWithTextEqual "Warp to Member"'))
-        self.assertIn("menuCascadeCompleted", arm)
+        self.assertIn("warpToMemberFromTheBroadcastBanner", arm)
+
+        # The rungs moved into that declaration when the client turned out to
+        # offer `Warp to Member` in two different places -- directly on a
+        # `needs backup` banner, inside the `Fleet Member` submenu otherwise,
+        # both read live off the same element. What must not weaken is the
+        # *exactness*: `"Warp to Member"` is a prefix of
+        # `"Warp to Member Within"`, so a containing match at either rung takes
+        # the wrong entry and warps to a range nobody asked for.
+        cascade = self.body_of("warpToMemberFromTheBroadcastBanner =")
+        self.assertIn("menuEntryIsWarpToMember", cascade)
+        self.assertIn('menuEntryTextEquals "Fleet Member"', cascade)
+        self.assertIn('useMenuEntryWithTextEqual "Warp to Member"', cascade)
+        self.assertIn("menuCascadeCompleted", cascade)
+        self.assertNotIn("stringContainsIgnoringCase", cascade)
+        self.assertNotIn("String.startsWith", cascade)
+        self.assertNotIn("String.contains", cascade)
+
+        # The comparison is the one `useMenuEntryWithTextEqual` makes, so the
+        # direct rung and the submenu rung cannot come to disagree.
+        equals = self.body_of("menuEntryTextEquals expected entry =")
+        self.assertIn("String.trim", equals)
+        self.assertIn("String.toLower", equals)
+        self.assertIn("==", equals)
+
+        # Still one copy of the cascade, which is what #385 bought.
         self.assertEqual(
-            self.source.count('useMenuEntryWithTextEqual "Fleet Member"'), 1)
+            self.source.count("warpToMemberFromTheBroadcastBanner =\n"), 1)
         self.assertIn(
             "warpToFleetMateFromTheBroadcastBanner context banner",
             self.arm_of(

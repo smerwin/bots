@@ -772,16 +772,27 @@ class TheWiringTest(unittest.TestCase):
                           self.source, "        NeedBackup _ ->")))
 
     def test_the_cascade_is_written_once(self):
-        """One cascade, two callers. `useMenuEntryWithTextEqual` at both rungs
-        is what must not drift: `"Warp to Member"` is a prefix of
-        `"Warp to Member Within"`."""
+        """One cascade, two callers.
+
+        The client offers `Warp to Member` in two places and which one is
+        contextual -- directly on a `needs backup` banner, inside the
+        `Fleet Member` submenu otherwise, both read live off the same element.
+        So the cascade takes either, and what must not drift is the
+        **exactness**: `"Warp to Member"` is a prefix of
+        `"Warp to Member Within"`, and a containing match at either rung takes
+        the wrong entry.
+        """
         cascade = collapsed(declaration(
-            self.source, "warpToFleetMateFromTheBroadcastBanner"))
-        self.assertEqual(cascade.count("useMenuEntryWithTextEqual"), 2)
-        self.assertLess(cascade.index('useMenuEntryWithTextEqual "Fleet Member"'),
-                        cascade.index('useMenuEntryWithTextEqual "Warp to Member"'))
+            self.source, "warpToMemberFromTheBroadcastBanner"))
+        self.assertIn("menuEntryIsWarpToMember", cascade)
+        self.assertIn('menuEntryTextEquals "Fleet Member"', cascade)
+        self.assertIn('useMenuEntryWithTextEqual "Warp to Member"', cascade)
+        for loose in ("stringContainsIgnoringCase", "String.contains",
+                      "String.startsWith"):
+            with self.subTest(loose=loose):
+                self.assertNotIn(loose, cascade)
         self.assertEqual(
-            self.source.count('useMenuEntryWithTextEqual "Fleet Member"'), 1)
+            self.source.count("warpToMemberFromTheBroadcastBanner =\n"), 1)
         for caller in ("warpToFleetMateOnThisGrid context pilot calledIt overviewEntry =",
                        "answerTheBackupCall context shipUI ="):
             with self.subTest(caller=caller):

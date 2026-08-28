@@ -7960,10 +7960,59 @@ warpToFleetMateFromTheBroadcastBanner :
 warpToFleetMateFromTheBroadcastBanner context banner =
     useContextMenuCascade
         ( "fleet broadcast", banner )
-        (useMenuEntryWithTextEqual "Fleet Member"
-            (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
-        )
+        warpToMemberFromTheBroadcastBanner
         context
+
+
+{-| Take `Warp to Member` from the banner's menu, wherever the client put it.
+
+**The client puts it in two different places and which one is contextual.**
+Read live off a `needs backup` banner, the first menu offers `Warp to Member`
+directly; read live off the same banner showing other broadcasts, it is inside
+a `Fleet Member` submenu alongside `Warp to Member Within`, `Show Info` and
+`Add to Watch List`. Both observations are the operator's, minutes apart, on
+the same element -- so neither path alone is correct and a cascade that assumes
+either one fails silently on the other, which is the failure this bot's
+cascades produce most often.
+
+**Exact text at whichever rung it lands on.** `"Warp to Member"` is a prefix of
+`"Warp to Member Within"`, so a containing match takes the wrong entry and
+warps to a range nobody asked for. `menuEntryIsWarpToMember` makes the same
+comparison `useMenuEntryWithTextEqual` does -- trimmed and case-folded -- so
+the direct rung and the submenu rung cannot disagree about what counts.
+
+-}
+warpToMemberFromTheBroadcastBanner : UseContextMenuCascadeNode
+warpToMemberFromTheBroadcastBanner =
+    MenuEntryWithCustomChoice
+        { describeChoice = "'Warp to Member' where the first menu offers it, else the 'Fleet Member' submenu"
+        , chooseEntry =
+            \currentMenu ->
+                case currentMenu.entries |> List.filter menuEntryIsWarpToMember |> List.head of
+                    Just direct ->
+                        Just ( direct, menuCascadeCompleted )
+
+                    Nothing ->
+                        currentMenu.entries
+                            |> List.filter (menuEntryTextEquals "Fleet Member")
+                            |> List.head
+                            |> Maybe.map
+                                (\submenu ->
+                                    ( submenu
+                                    , useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted
+                                    )
+                                )
+        }
+
+
+menuEntryIsWarpToMember : { a | text : String } -> Bool
+menuEntryIsWarpToMember =
+    menuEntryTextEquals "Warp to Member"
+
+
+menuEntryTextEquals : String -> { a | text : String } -> Bool
+menuEntryTextEquals expected entry =
+    (entry.text |> String.trim |> String.toLower) == String.toLower expected
 
 
 {-| The broadcast banner as a clickable element, but only while the broadcast
