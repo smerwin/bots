@@ -6223,7 +6223,7 @@ selectedItemUnLockTargetButton =
 pilot to unlock.
 
 **Why this is worth having beside the cascade it does not replace.**
-`unlockFleetPilotInTargetBar` right-clicks the *target bar's* own entry and takes
+`unlockFleetPilotInTargetBar` right-clicks the _target bar's_ own entry and takes
 an `unlock` menu entry, which is a screen position computed from a reading plus a
 flyout that has to render -- and the bar reorders as targets are taken and lost,
 so it carries #413's exposure as the overview does. The panel button does not: it
@@ -6239,7 +6239,7 @@ only way to find something to right-click, and because #389's own reason for it
 is unchanged.
 
 **It adds no way to select and so cannot loop.** This answers `Nothing` unless
-the panel is *already* showing the pilot, and the caller then does exactly what
+the panel is _already_ showing the pilot, and the caller then does exactly what
 it always did. No reading is ever spent selecting for the unlock, no new bound is
 needed, and a client that never selects the pilot costs nothing at all.
 

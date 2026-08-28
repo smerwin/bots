@@ -7472,7 +7472,7 @@ does not: it is found by name in the same reading it is pressed in, and it acts
 on the selected object.
 
 **It adds no way to select and so cannot loop.** This answers `Nothing` unless
-the panel is *already* showing the target, and the caller then does what it
+the panel is _already_ showing the target, and the caller then does what it
 always did. So no reading is ever spent selecting for the unlock, no new bound is
 needed, and a client that never selects the object costs nothing at all -- the
 bot behaves exactly as it did before #414.
@@ -7514,7 +7514,7 @@ unlockFromSelectedItemPanel context targetToUnlock =
                 )
 
 
-{-| Whether one of a target-bar entry's texts says *which object* it is.
+{-| Whether one of a target-bar entry's texts says _which object_ it is.
 
 A bar entry carries more than a name -- the client draws its distance there too,
 and a distance is a string every object at that range shares. So a rule that
@@ -8056,7 +8056,7 @@ Read out of the effects rather than the decision, because
 `updateMemoryForNewReadingFromGame` is the only place that can write memory and
 it never sees the decision. `vkey_R` is used for nothing else in this bot --
 `vkey_C` is the loot window's Alt+C and `vkey_ESCAPE` the menu escapes -- so
-the chord is unambiguous, and it has become *more* so rather than less. `vkey_Q`
+the chord is unambiguous, and it has become _more_ so rather than less. `vkey_Q`
 carried the approach until PR #243, and #414 took the last two movement keys as
 well: `vkey_E` was the keep-at-range and `vkey_W` the orbit, and both are a
 select-then-press on the Selected Item panel now, pressing no key at all.
