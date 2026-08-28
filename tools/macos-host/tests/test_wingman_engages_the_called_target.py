@@ -64,8 +64,9 @@ Confirmed by mutation, ten of them, each failing named cases:
 2. `calledTargetIsLocked` reduced to the overview row alone --
    `test_the_bar_is_still_a_second_opinion`, which is what makes the second
    opinion a decision rather than leftovers;
-3. the `targetedByMe` read swapped for the neighbouring `.targeting` -- the
-   same three as (1) plus
+3. the `targetedByMe` read swapped for the neighbouring `.targeting`, now
+   inside `overviewRowSaysThisShipHasItLocked` where #390 lifted it -- the same
+   three as (1) plus
    `test_the_broadcast_arm_stands_down_once_the_target_is_locked`;
 4. `weaponsAnswersThatSpendAReading` widened to hold `AllWeaponsCycling` --
    `test_no_answer_that_asks_for_nothing_is_counted`,
@@ -90,6 +91,15 @@ Confirmed by mutation, ten of them, each failing named cases:
     the counter -- `test_every_constructor_is_classified_one_way_or_the_other`,
     which is the one case that cannot go quiet as the type grows.
 
+**What #390 changed here.** The friendly-fire guard shared the matcher this
+file moved off, so `test_a_wrapped_name_is_invisible_to_the_target_bar_matcher`
+was measuring a live hole in a safety rule as well as in this arm. It is
+re-expressed rather than deleted: the same `locked` reading is now also asked of
+`friendlyFireStepFromReading`, which holds fire on it. The fixture builders
+`overview_window` and `target_bar` moved to
+`test_wingman_holds_fire_on_fleetmates` beside the rest of the fixtures, since
+both files now build readings carrying that indicator.
+
 The cases run the real `Bot.elm` through `elm repl`, and the readings they ask
 about come from the real `EveOnline.ParseUserInterface`. Nothing here reads a
 live client, the recorded corpus, or a running bot.
@@ -108,7 +118,7 @@ sys.path.insert(0, HERE)
 
 from prerequisites import ElmRepl, open_repl  # noqa: E402
 from test_wingman_holds_fire_on_fleetmates import (  # noqa: E402
-    label, node, reading_binding)
+    overview_window, reading_binding, target_bar)
 
 WINGMAN_DIR = os.path.join(
     REPO_DIR, "implement", "applications", "eve-online", "eve-online-wingman")
@@ -123,68 +133,6 @@ CALLED = "Centus Black Ops Agent"
 # substituted: the bar wraps at the space and adds the distance. Nothing here
 # invents the shape.
 WRAPPED_IN_THE_BAR = ["Centus Black Ops", "Agent", "14 km"]
-
-ROW_HEIGHT = 16
-ROW_PITCH = 20
-ROW_TOP = 20
-
-
-def overview_window(rows):
-    """An overview window whose rows carry the client's own lock indicator.
-
-    Each row is `(name, distance, targeted)`. `targeted` puts a
-    `targetedByMeIndicator` under the row's `SpaceObjectIcon`, which is where
-    `parseOverviewWindowEntry` reads `commonIndications.targetedByMe` from --
-    so what the rule is handed is the icon the client draws rather than a
-    boolean this file decided.
-
-    The shape is `test_saxrat_learned_lock_range.overview_rows`'; it is rebuilt
-    here rather than imported because that helper belongs to the saxrat app's
-    fixtures and carries item ids and hidden rows this file has no use for.
-    """
-    headers = node("Headers", {}, [
-        label("Distance", (0, 0, 100, 16)),
-        label("Name", (100, 0, 200, 16)),
-        label("Type", (300, 0, 200, 16)),
-    ], region=(0, 0, 500, 16))
-
-    entries = []
-    for index, (name, distance, targeted) in enumerate(rows):
-        y = ROW_TOP + index * ROW_PITCH
-        icon_children = []
-        if targeted:
-            icon_children.append(
-                node("Sprite", {"_name": "targetedByMeIndicator"}))
-        entries.append(node("OverviewScrollEntry", {"_name": "overviewEntry"}, [
-            label(distance, (10, y, 50, ROW_HEIGHT)),
-            label(name, (110, y, 150, ROW_HEIGHT)),
-            label(name, (310, y, 150, ROW_HEIGHT)),
-            node("SpaceObjectIcon", {}, icon_children,
-                 region=(2, y, 12, ROW_HEIGHT)),
-        ], region=(0, y, 500, ROW_HEIGHT)))
-
-    return node("OverviewWindow", {}, [
-        node("Scroll", {}, [headers] + entries, region=(0, 0, 500, 300)),
-    ], region=(0, 0, 500, 300))
-
-
-def target_bar(targets):
-    """The locked-target bar, one `TargetInBar` per entry.
-
-    Each entry is the list of labels the client draws for it, top to bottom --
-    which is the field `textsTopToBottom` is built from, and the field whose
-    wrapping is what #389 turned on.
-    """
-    bars = []
-    for index, texts in enumerate(targets):
-        x = 600 + index * 90
-        bars.append(node("TargetInBar", {}, [
-            node("Container", {"_name": "barAndImageCont"}, [
-                label(text, (x, 40 + line * 12, 80, 12))
-                for line, text in enumerate(texts)
-            ], region=(x, 40, 80, 60)),
-        ], region=(x, 30, 80, 80)))
-    return node("TargetsContainer", {}, bars, region=(600, 30, 400, 80))
 
 
 class WingmanRepl(ElmRepl):
@@ -508,15 +456,29 @@ class TheCalledTargetIsRecognisedAsLockedTest(unittest.TestCase):
         This is a measurement of the instrument, not a pin on the behaviour: it
         is what a case has to show before "ask the overview instead" is a fix
         rather than a preference.
+
+        **Re-expressed for #390 rather than replaced.** The third assertion is
+        the same fixture asked of the friendly-fire guard, which shared that
+        matcher and fell through to `ClearToFire` on exactly this shape -- the
+        firing direction, and the one #367 exists to prevent. Handed the pilot
+        as a fleet member (`follow-fleet-broadcast-from`, which is what
+        `fleetPilotNamesFromReading` falls back to with no Fleet window), the
+        guard now names them off the overview row and holds. The executed cases
+        for the guard itself are in `test_wingman_holds_fire_on_fleetmates`;
+        this one is here so the reading that measured the failure is the reading
+        that shows it closed.
         """
         self.assertEqual(
             self.repl.evaluate(
                 ['(locked |> Maybe.andThen (lockedTargetNamed "%s"))'
                  " == Nothing" % CALLED,
                  '(barOnly |> Maybe.andThen (lockedTargetNamed "%s"))'
-                 " /= Nothing" % CALLED],
+                 " /= Nothing" % CALLED,
+                 '(locked |> Maybe.map (friendlyFireStepFromReading'
+                 ' [ "%s" ] 0)) == Just (UnlockAFleetPilot "%s"'
+                 " OverviewRowIndicator)" % (CALLED, CALLED)],
                 definitions=self.definitions),
-            [True, True])
+            [True, True, True])
 
     def test_a_locked_called_target_ends_the_ask(self):
         """The rule itself: the overview row answers, whatever the bar renders.
@@ -565,10 +527,22 @@ class TheCalledTargetIsRecognisedAsLockedTest(unittest.TestCase):
     def test_the_lock_and_the_recognition_read_one_row(self):
         """A bot that decides "not locked" off one row and clicks another can
         loop for ever without either half being wrong on its own -- #303's
-        lesson, which is what put both on `overviewEntryForPilot`."""
+        lesson, which is what put both on `overviewEntryForPilot`.
+
+        #390 lifted the indicator read into
+        `overviewRowSaysThisShipHasItLocked`, because the friendly-fire guard
+        asks it of every name in its no-shoot lists and a second copy of it is
+        the second instrument this whole argument is against. The property is
+        unchanged and is checked one step longer: the recognition goes through
+        that helper, and the helper resolves the row the click resolves.
+        """
         with open(WINGMAN_BOT_ELM, encoding="utf-8") as handle:
             source = handle.read()
-        for name in ("\ncalledTargetIsLocked calledTarget reading =",
+        recognition = source[source.index(
+            "\ncalledTargetIsLocked calledTarget reading ="):]
+        self.assertIn("overviewRowSaysThisShipHasItLocked",
+                      recognition[:recognition.index("\n\n\n")])
+        for name in ("\noverviewRowSaysThisShipHasItLocked pilotName reading =",
                      "\nlockCalledTarget context calledTarget ="):
             body = source[source.index(name):]
             body = body[:body.index("\n\n\n")]
@@ -621,7 +595,9 @@ class TheDecisionRootReachesTheGunsTest(unittest.TestCase):
         self.assertIn("calledTargetIsLocked calledTarget", body)
         self.assertIn("Nothing", body)
         recognition = self.body_of("calledTargetIsLocked calledTarget reading =")
-        self.assertIn("targetedByMe", recognition)
+        self.assertIn("overviewRowSaysThisShipHasItLocked", recognition)
+        self.assertIn("targetedByMe", self.body_of(
+            "overviewRowSaysThisShipHasItLocked pilotName reading ="))
 
     def test_the_fallback_leaves_the_drones_out_while_something_is_locked(self):
         self.assertIn(

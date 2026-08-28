@@ -44,7 +44,9 @@ nothing to do.
 4. **Unlock a fleet member sitting in the target bar**, through
    `unlockFleetPilotInTargetBar`. See "Never shooting the fleet" below for why
    it is this high.
-5. **Activate the always-on modules** named in `activate-module-always`.
+5. **Activate the always-on modules** named in `activate-module-always`, and
+   then **manage the middle row by position** — `manageMiddleRowModules`
+   (#394). See below.
 6. **Act on the fleet broadcast** — in practice only the `Target …` form,
    which is the one and only form that reaches a branch. Everything else the
    fleet broadcasts falls into a named wait. See "Live runs". It stands down
@@ -137,6 +139,88 @@ double click and twenty for the panel, both being this file's key-over-a-click
 allowance `weaponsAskedReadingsBound`) the arm hands the reading back and the
 status line says `GAVE UP`, so a mechanism that turns out not to work is
 visible and bounded rather than a bot that believes it is on station.
+
+### The middle row is switched on by position, not by tooltip (#394)
+
+**No wingman was activating any module at all**, and nothing in the bot was
+defective. The settings block the four pilots are actually launched with, read
+off Greta Gneiss's console on 2026-08-27, carries no `activate-module-always`
+line:
+
+    accept-fleet-invite-from=Gal Bistot
+    follow-fleet-broadcast-from=Gal Bistot
+    approach-fc=yes
+    run-away-shield-hitpoints-threshold-percent=-1
+    run-away-armor-hitpoints-threshold-percent=90
+    run-away-incoming-damage-threshold=600
+
+So `knownModulesToActivateAlways` was empty and `activateAlwaysOnModules`
+correctly did nothing. Note what that failure looks like from outside: a bot
+doing exactly what it was told, on a setting nobody passed, with nothing on the
+bot side able to report a key that never arrived.
+
+**And the setting was the wrong instrument anyway.** It matches tooltip text,
+so it needs `readShipUIModuleButtonTooltips` to have run first, and it cannot
+express either of the two things this ship wants — "everything except the
+propulsion module", and "this one only while moving".
+
+`eve-online-saxrat` already had the shape, and it is ported here whole:
+
+    shipUIModulesToActivateAlways = middleRowLeftToRight >> List.drop 1
+    propulsionModuleButton        = middleRowLeftToRight >> List.head
+
+**The x-sort inside `middleRowLeftToRight` is the load-bearing half and is
+ported rather than simplified.** `moduleButtonsRows.middle` arrives in UI-tree
+order, and while that traversal is a stable depth-first walk the list it
+produces is not a stable index space: the parser drops any node whose display
+region it cannot read, so a slot can leave and rejoin the list without anything
+moving on screen. saxrat recorded what taking "the first slot" by index cost
+live — with both tank modules already running it decided three times in a row
+to switch on the propulsion module, the propulsion module never came on, and a
+*tank* module went off instead. An odd number of toggles landing on a
+neighbour. `List.sortBy (.uiNode >> .totalDisplayRegion >> .x)` is what makes
+"first in the middle row" mean the slot the setup instructions point at.
+
+**The always-on half is not gated on a fight, and that was decided rather than
+inherited.** saxrat gates its own set on `anyAttackableInOverview`, because a
+rat-hunter spends most of a session crossing empty belts where a hardener buys
+nothing for its capacitor. Three things make a wingman the other case. It sits
+on the commander's grid rather than crossing to the next one, so the empty
+stretches that gate is worth having for are not what this bot's session is made
+of. It does not choose its fights — the fleet does, and the first this bot
+learns of one can be a broadcast or a volley landing. And what is shooting it
+may never appear on its own overview at all: the preset this bot depends on is
+the one that shows *fleet members*, and `shouldAttackOverviewEntry` answers
+about rats this ship would attack rather than about anything attacking it. A
+hardener switched on once damage is already landing is on for the readings
+after the ones that mattered, and those are exactly the readings the health
+retreat is measured over. So the row is held on and the capacitor is spent.
+
+**The propulsion module runs while approaching the commander and not
+otherwise.** That is narrower than saxrat's `propulsionModuleShouldBeRunning`,
+which reasons about crossing distance generally, and it is the operator's own
+rule: on the instant after the ship starts approaching, off when it is not.
+It reads `shipIsApproachingFromReading` — the client's own manoeuvre indication
+naming `Approach` — rather than whether `approachTheFleetCommander` decided to
+ask for one, so the module follows what the ship is doing rather than what the
+bot last intended. That matters because that arm treats no dispatched click as
+a manoeuvre either: a module tied to the ask would run through every reading of
+a double click that commanded nothing. It also means an orbit is not an
+approach, so a ship the client says is orbiting has the module shut down —
+where saxrat's `shipIsUnderway` would keep it running.
+
+**Client setup requirement.** The leftmost slot of the middle row **must be the
+propulsion module**, and the modules to keep running go in the rest of that
+row. Nothing reads a tooltip to check this, so whatever is in that slot is
+treated as the propulsion module: put a hardener there and it is switched on
+and off with the approaches instead of being held on. The status line prints
+the row it resolved on every reading — `Middle row: prop mod off and this ship
+is not approaching, keep-active [on, on].` — including the case where it found
+no slots at all, so the console can tell an unfound row from a row that needs
+nothing.
+
+`activate-module-always` still works and is unchanged, for anything genuinely
+tooltip-matched outside that row.
 
 ### Why the guns are their own arm, below the drones
 
@@ -681,24 +765,51 @@ reading and is the line to count that from. It has not been counted: no
 `wingman_run*.log` is in this Mac's `~/eve-bot-logs`, and run 9 lives on the
 Windows host that flew it.
 
-**The matcher this guard shares with the lock is weaker than it reads, and
-#389 is where that surfaced.** `firstNameCarriedByALockedTarget` asks
-`targetTextsCarryName` of each locked target's rendered labels — and the bar
-wraps a long name across labels, which is what made the called-target
+**The guard asks two instruments, because the one it had was defeated by the
+client's own line wrapping.** Until #390 it decided "is this pilot locked" from
+the target bar's rendered labels alone, through `targetTextsCarryName` — and
+the bar wraps a long name across labels, which is what made the called-target
 recognition fail on four pilots at once (see "Already locked" above). A
-fleetmate whose name the bar wraps is therefore **not recognised as locked**,
-and the guard's membership half falls through to `ClearToFire`. That fails in
-the firing direction, which is the one direction #367 exists to prevent.
+fleetmate whose name the bar wraps was therefore **not recognised as locked**,
+the membership branch answered `Nothing`, and with the Fleet window open that
+fell through to `ClearToFire`. It failed in the *firing* direction — the one
+direction #367 exists to prevent — on two-word character names, which is most
+of them and `Sonya Spodumain` among them.
 
-It is **not changed here.** #389 moved the called-target arm onto the
-overview's own `targetedByMe`, which is per-row and answers "has this ship
-locked *that object*"; the guard asks a different question — "is anything in
-the bar a fleet pilot" — and answering it from the overview means asking it of
-every name in `fleetPilotNames` and `getNamesOfOtherPilotsInOverview` instead,
-which is a change of what the rule reads and a widening of when it holds fire.
-The unlock arm needs the bar entry regardless, because it right-clicks a
-`Target`. A safety rule is not the place for a change folded into somebody
-else's fix, so it is **#390**, claimed on its own, rather than made quietly.
+So the rule now asks both and **holds fire if either answers**:
+
+| | the bar's labels | the pilot's overview row |
+|---|---|---|
+| what it reads | `textsTopToBottom`, as rendered | `commonIndications.targetedByMe`, the client's own icon |
+| goes quiet when | the name wraps across labels | the pilot has no row here at all |
+
+`lockSignalForPilot` is that union — the two questions and which of them
+answered — and `&&` in its place would be the defect rather than a variation:
+it would hold fire only where the two agreed, which is every case except the
+ones this rule exists for. The second column goes quiet on an overview preset
+that hides fleet members (already a recorded hazard for
+`approachTheFleetCommander`) and on a pilot who left the grid still holding a
+lock, so it is *added* to the first and never put in its place. **An added
+signal can only add refusals.** `NothingIsLocked` needs both to be empty for the
+same reason: a row carrying the indicator with nothing parsed in the bar is a
+lock, and calling it "nothing is locked" would release the guns.
+
+`unlockFleetPilotInTargetBar` still needs the bar entry, because it right-clicks
+a `Target`. A pilot seen only by the row indicator gives it nothing to click, so
+it hands the reading on and the veto holds the guns without an unlock — and
+`targetBarSawThePilot` keeps `unlockFleetPilotAskedReadingsBound` from being
+charged for the ask that could not be made, which is #389's second defect
+arriving in this counter.
+
+**The rule is still a function of plain values.** The overview signal reaches it
+as a list of names, built by `friendlyFireStepFromReading` from
+`overviewRowSaysThisShipHasItLocked`, so a case still executes the guard against
+six plain facts without constructing a reading — the property every case in
+`test_wingman_holds_fire_on_fleetmates.py` rests on.
+
+**What #390 does not close**, stated because both instruments can go quiet on
+one reading: a name the bar wraps *and* a row with no indicator drawn (or no row
+at all) reads exactly as it did before. That is `test_what_this_change_still_does_not_close`.
 
 **The bound stops the asking and not the refusal.** Every other give-up in this
 file hands the reading back to the arms below it.
@@ -723,9 +834,17 @@ Fleet membership: THE FLEET WINDOW IS NOT OPEN, so the member list is
 unverifiable -- an empty one would otherwise read as 'nobody here is a
 fleetmate'. ...
 Friendly fire guard: HOLDING FIRE on 'Sonya Spodumain' -- a pilot on the
-overview, and with the Fleet window shut this bot cannot tell whether they
-are a fleetmate. Open it to fire on players again.
+overview, seen by the overview row's lock indicator, and with the Fleet
+window shut this bot cannot tell whether they are a fleetmate. Open it to
+fire on players again.
 ```
+
+**And every refusal names the instrument that saw the pilot**, which is #390's
+half of the same argument one level down: two signals that fail in opposite
+directions means a line saying only "held" leaves the next incident reasoning
+from silence about which one was working. `the target bar's labels`, `the
+overview row's lock indicator`, or both — and the two together are what a run
+would have to print before either could be trusted alone.
 
 ### Local chat's standing icons add names and cannot certify a list
 
@@ -1005,6 +1124,14 @@ throughout. Porting the mechanism without porting a fix inherits that: **the
 thing that decides to unlock must read the same source as the thing that
 notices the problem.**
 
+#390 is the deliberate exception and the difference is worth being precise
+about. The guard now reads *both* sources and refuses on either, while
+`unlockFleetPilotInTargetBar` still reads the bar alone, because it right-clicks
+a bar entry and nothing else can be right-clicked. The two do not disagree about
+what is locked: when only the row saw the pilot, the guard holds the guns and
+the unlock arm simply has nothing to click, which is the safe half of #303's
+divergence rather than a repeat of it.
+
 **Logi is the exception and needs a setting.** A logistics pilot locks fleet
 members deliberately — that is the job. So this cannot be an unconditional rule;
 it wants a setting defaulting to unlock, which a logi fit turns off, in the
@@ -1039,7 +1166,7 @@ Only after this bot has flown. See the top of this file.
 |---|---|
 | `accept-fleet-invite-from` | Pilot whose invitations to accept, exactly as the client writes it. Repeatable. **This is where the trust is**: accepting means the fleet can warp this ship and call its targets. |
 | `follow-fleet-broadcast-from` | Pilot whose travel broadcasts to follow. Repeatable, matched exactly. Does **not** gate target broadcasts, which carry no sender. Also the fallback behind `fleetCommanderName` when the fleet window's header names nobody — which since #367 is the only time it is consulted for that. |
-| `activate-module-always` | Tooltip text of modules to keep active. |
+| `activate-module-always` | Tooltip text of modules to keep active. **Optional and usually unnecessary since #394**: the middle row right of the propulsion module is already held on by position. Use it only for a module outside that row, and note it acts only once the bot has read that module's tooltip. |
 | `home-station` | Station to return to when the session ends. Defaults to `Amarr VIII (Oris) - Emperor Family Academy`. |
 | `assist-fleet-commander` | `no` keeps drones on this ship's own target. Defaults to `yes`. |
 | `run-away-shield-hitpoints-threshold-percent`, `run-away-armor-hitpoints-threshold-percent` | Percentages below which the bot breaks off and warps back to the commander, read through the believed gauge behind a low-water mark. **Both default to -1, which is off.** |
@@ -1061,12 +1188,15 @@ restart.
 - **Whether this client draws `targetedByMeIndicator` at all.** #389's fix
   decides "the called target is already locked" from
   `OverviewWindowEntry.commonIndications.targetedByMe`, which the vendored
-  parser sets from a sprite of that name under the row's space-object icon. The
-  field and the icon name are the parser's, unchanged and shared by all six
-  apps, but **nothing in `~/eve-bot-logs` records the flag coming back true**,
-  and no `wingman_run*.log` is on this Mac to look in. The target-bar matcher is
-  kept beside it precisely so a client that names the icon something else
-  degrades to the old behaviour rather than to a bot that never stands down.
+  parser sets from a sprite of that name under the row's space-object icon, and
+  **#390 put the friendly-fire guard on the same icon** — so two arms now
+  depend on a flag nothing here has watched come back. The field and the icon
+  name are the parser's, unchanged and shared by all six apps, but **nothing in
+  `~/eve-bot-logs` records the flag coming back true**, and no
+  `wingman_run*.log` is on this Mac to look in. The target-bar matcher is kept
+  beside it in both places precisely so a client that names the icon something
+  else degrades to the old behaviour rather than to a bot that never stands
+  down — and, for the guard, so the added signal can only add refusals.
   What a run shows: `Lock the called target 'X'.` appearing **once** and then
   the reading reaching `dronesAssistTheCommander` and `Weapons:` — against the
   #389 signature, which is that line every reading with targets locked in the
@@ -1145,6 +1275,27 @@ restart.
   `the panel offers no 'selectedItemApproach' yet` for the twenty readings the
   fall-back gets and then gives up — which is the bounded, visible failure, not
   a silent one.
+- **What the four pilots actually have in the middle row (#394).** The rule
+  reads the row by position and cannot check what is fitted, so the whole thing
+  rests on the leftmost middle slot being the propulsion module on every ship.
+  Nobody has looked at the four fits, and a ship with a hardener in that slot
+  gets it cycled with the approaches rather than held on. What a run shows: the
+  status line's `Middle row:` clause names the row it resolved, so one console
+  reading per pilot settles it — `keep-active []` with modules visibly fitted
+  means one slot was found and the rest were not, and `no module slots read`
+  means the middle row was not resolved at all.
+- **That the propulsion module comes on at all, and comes off again (#394).**
+  `ManeuverApproach` still appears nowhere in `~/eve-bot-logs`, which is the
+  same gap `approachTheFleetCommander` has: if the client never names the
+  manoeuvre, this module never runs, and the failure is silent apart from
+  `this ship is not approaching` sitting in the status line while the ship
+  visibly moves. The shutdown direction is the one to watch on arrival — the
+  module has to come off when the approach ends, and nothing has watched a
+  reading where it does.
+- **Whether the middle row's capacitor cost is bearable ungated.** The choice
+  not to gate the always-on set on a fight is argued rather than measured, and
+  the counter-evidence would be a wingman running its capacitor dry sitting on
+  station. Nothing has watched the capacitor gauge over a session.
 - **Whether the commander's overview row is there to be clicked.** The
   approach acts on an overview row, so the active overview preset has to show
   fleet members. Nobody has confirmed which preset the four pilots are flying,

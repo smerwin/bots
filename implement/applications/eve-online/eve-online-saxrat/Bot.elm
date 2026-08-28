@@ -49,6 +49,7 @@
       + `accept-fleet-invite-from`: Name of a pilot whose fleet invitations this bot should accept, exactly as the client writes it. You can use this setting multiple times to name several pilots. With no such setting the bot accepts no invitation at all and declines every dialog as it always has -- and note the client renders a fleet invitation as an ordinary message box, so before this setting existed the bot actively clicked 'No' on them. Accepting means the fleet commander can warp this ship, so name only pilots you would hand the ship to.
       + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping range or aligning.
       + `keep-at-range`: Set this to 'yes' to keep range from the target instead of orbiting or aligning.
+      + `approach-in-combat`: Set this to 'yes' to approach the target and close right up to it, instead of keeping range or aligning. For a brawler fit -- webs, scramblers, short-range guns -- that has to be on top of the rat, which neither of the two settings above does: orbit holds transversal at a distance and keep-at-range holds a distance on purpose. The three are mutually exclusive and are read in the order they are listed here, so `orbit-in-combat=yes` wins over `keep-at-range=yes`, which wins over this; with none of them set the bot aligns as it always has. The approach is a double click on the overview row and presses no key, so unlike `orbit-in-combat` this needs no keyboard binding set up in the client. It has no distance and takes none: the ship closes all the way and stays there, which is the point of it and is also its cost -- a ship sitting on top of a rat has zero transversal against anything that tracks, so do not set this on a fit that wants to be moving across its target.
       + `targeting-range`: Maximum distance in meters to lock a target from the overview, e.g. `targeting-range=50000`. Beyond this, the bot approaches instead of locking. Defaults to 66000. This is a starting value, not the last word: the bot narrows it during the session from the client's own answers -- the greatest distance at which a lock was accepted and the smallest at which one was provably refused -- and the setting is clamped between the two. Set it to pin the starting point; it still gives way to what the client has actually granted. See `lockRangeThresholdInMeters`.
       + `max-targets`: How many rats to hold locked at once, e.g. `max-targets=6`. Defaults to 4. This is a starting value, not the last word: the client states its own maximum on the game log -- `You are already managing 6 targets, as many as you have skill to.` -- and the target bar proves a floor by holding that many, so the bot raises or lowers this from what the client has actually granted. With no evidence it is exactly the setting. Until the client has stated its maximum the bot asks for one more than it believes in, once per reading it has a row to spare, because that sentence is only written when a lock is attempted beyond the cap. See `maxTargetsCeiling` and `maxTargetsRowsToTake`.
       + `hunt-system`: Name of a solar system to hunt anomalies in, e.g. `hunt-system=Irnin`. Use it several times to give the bot a circuit, or write the circuit as one comma-separated line -- either way the circuit is walked in the order written. When a system has nothing left worth hunting and no route is set, the bot asks the host to set the autopilot destination to the next system on this list and flies there on its own. Without this setting the bot behaves as it always did: it parks and waits for a human to set a route.
@@ -184,6 +185,10 @@ defaultBotSettings =
     , anomalyWaitTimeSeconds = 600
     , orbitInCombat = AppSettings.No
     , keepAtRange = AppSettings.No
+
+    -- Off, like its two siblings, so an existing settings string is unchanged
+    -- and a bot nobody configures still aligns exactly as it did.
+    , approachInCombat = AppSettings.No
     , warpAt = 100
     , targetingRangeMeters = 66000
 
@@ -317,6 +322,12 @@ parseBotSettings =
            , AppSettings.valueTypeYesOrNo
                 (\keepAtRange settings ->
                     { settings | keepAtRange = keepAtRange }
+                )
+           )
+         , ( "approach-in-combat"
+           , AppSettings.valueTypeYesOrNo
+                (\approachInCombat settings ->
+                    { settings | approachInCombat = approachInCombat }
                 )
            )
          , ( "bot-step-delay"
@@ -519,6 +530,7 @@ type alias BotSettings =
     , botStepDelayMilliseconds : Int
     , orbitInCombat : AppSettings.YesOrNo
     , keepAtRange : AppSettings.YesOrNo
+    , approachInCombat : AppSettings.YesOrNo
     , warpAt : Int
     , targetingRangeMeters : Int
     , runAwayIncomingDamageThreshold : Int
@@ -6548,6 +6560,12 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                 |> List.head
                 |> Maybe.andThen (\overviewEntryToAttack -> ensureShipIsKeepingRange seeUndockingComplete.shipUI overviewEntryToAttack)
 
+        ensureShipIsApproachingDecision =
+            overviewEntriesToAttack
+                |> List.filter overviewEntryIsActiveTarget
+                |> List.head
+                |> Maybe.andThen (\overviewEntryToAttack -> ensureShipIsApproaching seeUndockingComplete.shipUI overviewEntryToAttack)
+
         ensureShipIsAlignedDecision =
             overviewEntriesToAttack
                 |> List.filter overviewEntryIsActiveTarget
@@ -6963,14 +6981,18 @@ decideActionInAnomaly { arrivalInAnomalyAgeSeconds } context seeUndockingComplet
                                                     )
                                 )
     in
-    if context.eventContext.botSettings.orbitInCombat == AppSettings.Yes then
-        ensureShipIsOrbitingDecision |> Maybe.withDefault decisionToFight
+    case combatManoeuvreFromSettings context.eventContext.botSettings of
+        ManoeuvreOrbit ->
+            ensureShipIsOrbitingDecision |> Maybe.withDefault decisionToFight
 
-    else if context.eventContext.botSettings.keepAtRange == AppSettings.Yes then
-        ensureShipIsKeepingRangeDecision |> Maybe.withDefault decisionToFight
+        ManoeuvreKeepAtRange ->
+            ensureShipIsKeepingRangeDecision |> Maybe.withDefault decisionToFight
 
-    else
-        ensureShipIsAlignedDecision |> Maybe.withDefault decisionToFight
+        ManoeuvreApproach ->
+            ensureShipIsApproachingDecision |> Maybe.withDefault decisionToFight
+
+        ManoeuvreAlign ->
+            ensureShipIsAlignedDecision |> Maybe.withDefault decisionToFight
 
 
 enterAnomaly : { ifNoAcceptableAnomalyAvailable : DecisionPathNode } -> BotDecisionContext -> DecisionPathNode
@@ -7023,6 +7045,104 @@ enterAnomaly { ifNoAcceptableAnomalyAvailable } context =
                                 context
                             )
                         )
+
+
+{-| Which of the four things the ship does with its position while it fights.
+
+The three settings are mutually exclusive, and this is where that is decided
+rather than in three separate `if`s at the call site. It is a rule over the
+settings record so a case can execute it -- all eight combinations of the three
+answers, in `elm repl` -- where a chain buried inside `decideActionInAnomaly`
+is reachable only through a whole `BotDecisionContext` and would have to be read
+instead. #106 records what reading rather than running a rule costs.
+
+The order is the order the chain already had, with approach appended: a settings
+string that already sets `orbit-in-combat` or `keep-at-range` picks exactly what
+it picked before, whatever else is now set beside it. `ManoeuvreAlign` is what
+no setting at all means, which is also what saxrat has always done.
+
+-}
+type CombatManoeuvre
+    = ManoeuvreOrbit
+    | ManoeuvreKeepAtRange
+    | ManoeuvreApproach
+    | ManoeuvreAlign
+
+
+combatManoeuvreFromSettings : BotSettings -> CombatManoeuvre
+combatManoeuvreFromSettings botSettings =
+    if botSettings.orbitInCombat == AppSettings.Yes then
+        ManoeuvreOrbit
+
+    else if botSettings.keepAtRange == AppSettings.Yes then
+        ManoeuvreKeepAtRange
+
+    else if botSettings.approachInCombat == AppSettings.Yes then
+        ManoeuvreApproach
+
+    else
+        ManoeuvreAlign
+
+
+{-| Close on the target and stay on it, for a fit that has to be on top of a rat.
+
+Webs, scramblers and short-range guns all want the ship next to the thing it is
+shooting, and neither of the two manoeuvres beside this does that: orbit holds
+transversal at a distance and keep-at-range holds a distance on purpose.
+
+**A double click on the overview row, and no keystroke.** That is the gesture
+this bot already uses to approach, and `doubleClickUiElement`'s own doc comment
+carries the argument: EVE answers a double click on an object with that object's
+default action, which for a hostile ship with no cargo to open is an approach,
+and `cg_input` posts a key event without stamping flags on it, so a posted `Q`
+carries whatever modifier state the session happens to hold -- with the Fn bit
+set that is macOS Quick Note, and one recorded run took the old approach branch
+1,571 times while Notes came to the front 241 times with nobody at the machine.
+PR #241 stopped the mis-stamping; PR #243 stopped the keystroke existing, and
+nothing here brings one back. The two siblings still wrap a click in `vkey_E`
+and `vkey_W`, which is recorded rather than fixed and is not this change.
+
+**The dispatched click is not the confirmation.** `ManeuverApproach` is, exactly
+as `ManeuverOrbit` confirms the orbit arm next door: this answers `Just` -- keeps
+commanding -- on every reading the client has not reported the manoeuvre on, and
+`Nothing` on the readings it has. A click that went out and did nothing therefore
+costs one reading and is re-issued, where reading the dispatch back would be this
+repo's signature failure: a branch that prints an action and believes it worked.
+
+**It approaches for the whole engagement rather than stopping at a range, and
+the cost of that is stated rather than hidden.** A ship sitting on top of a rat
+has zero transversal against anything that tracks, which is a question about the
+fit rather than about this code -- a brawler wants exactly that and a kiter must
+not set this setting. The alternative -- stop once inside some distance -- was
+declined because it needs a distance, and PILOT.md records what that costs: `no
+bot setting carries an engagement distance`, so `orbit-in-combat` and
+`keep-at-range` fall back on a client default nobody can read back, which shipped
+at 7,500 m and was suicidal on a hull whose guns reach tens of kilometres.
+Approach closes to zero and so has no distance to get wrong. A range setting is
+deliberately not built here.
+
+`ManeuverApproach` stays set while the ship approaches _something_, which need
+not be this target -- the bot issues approaches elsewhere, at a wreck or a gate.
+The two siblings have the identical exposure on `ManeuverOrbit` and
+`ManeuverRange`, and this mirrors them rather than inventing a bound of its own;
+`approachIndicationTrustedForTicks` is what a bounded belief looks like where one
+is wanted, and `unlessAlreadyClosingIn` is where it is used.
+
+-}
+ensureShipIsApproaching : ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode
+ensureShipIsApproaching shipUI overviewEntryToApproach =
+    if (shipUI.indication |> Maybe.andThen .maneuverType) == Just EveOnline.ParseUserInterface.ManeuverApproach then
+        Nothing
+
+    else
+        Just
+            (describeBranch
+                ("Approach the target '"
+                    ++ (overviewEntryToApproach.objectName |> Maybe.withDefault "")
+                    ++ "' -- double click on the overview entry."
+                )
+                (doubleClickUiElement overviewEntryToApproach.uiNode)
+            )
 
 
 ensureShipIsKeepingRange : ShipUI -> OverviewWindowEntry -> Maybe DecisionPathNode

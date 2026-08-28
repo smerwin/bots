@@ -1198,9 +1198,9 @@ class ThePlacementTest(unittest.TestCase):
         anomaly = collapsed(without_comments(
             body_of(self.source, "decideActionInAnomaly")))
         self.assertEqual(
-            anomaly.count("Maybe.withDefault decisionToFight"), 3,
-            "orbit, keep-at-range and align each fall through to the fight, so "
-            "an arm still naming decisionToKillRats would never swap")
+            anomaly.count("Maybe.withDefault decisionToFight"), 4,
+            "orbit, keep-at-range, approach and align each fall through to the "
+            "fight, so an arm still naming decisionToKillRats would never swap")
         self.assertNotIn("Maybe.withDefault decisionToKillRats", anomaly)
 
     def test_the_memory_update_runs_on_every_reading(self):
