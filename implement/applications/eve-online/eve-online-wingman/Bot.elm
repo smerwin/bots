@@ -42,11 +42,15 @@
    is itself gated by `accept-fleet-invite-from`, which is where the trust in
    this bot is placed.
 
-   The other six broadcasts the client offers -- `Need Backup`, `Need Shield`,
-   `Need Armor`, `Need Capacitor`, `At Location`, `In Position at`,
-   `Spotted an Enemy`, `Request That the Fleet Hold Position` -- are enumerated
-   from the fleet window's own buttons but **their rendered wording has not been
-   observed**, so nothing here matches them yet. See `broadcastVerbsNotYetRead`.
+   A **backup** call uses a third shape again, with no colon and the verb in the
+   third person: `Gal Bistot needs backup`. It is answered by closing on the
+   caller -- see `answerTheBackupCall` and `answer-backup-calls`.
+
+   The remaining broadcasts the client offers -- `Need Shield`, `Need Armor`,
+   `Need Capacitor`, `Spotted an Enemy`,
+   `Request That the Fleet Hold Position` -- are enumerated from the fleet
+   window's own buttons but **their rendered wording has not been observed**,
+   so nothing here matches them yet. See `broadcastVerbsNotYetRead`.
 
    ## Setting up the Game Client
 
@@ -93,7 +97,15 @@
      hand the ship to.**
    + `follow-fleet-broadcast-from` : Name of a pilot whose travel broadcasts
      this bot should follow. Repeatable. Matched exactly, never as a substring.
-     Does not gate target broadcasts, which carry no sender.
+     Does not gate target broadcasts, which carry no sender, and does not gate
+     backup calls either -- see `answer-backup-calls`.
+   + `answer-backup-calls` : Set to 'no' to ignore `<pilot> needs backup`.
+     Defaults to 'yes'. **Its trust boundary is the fleet, not
+     `follow-fleet-broadcast-from`**: a fleet-mate who needs help is not
+     necessarily one whose _travel_ broadcasts you follow, so the caller has to
+     be someone `fleetPilotNames` recognises -- the fleet window's own member
+     rows, its header's commander, or a pilot local chat's standing icon marks
+     as a fleetmate. With 'yes' this ship breaks off for any of them.
    + `activate-module-always` : Text found in tooltips of ship modules that
      should always be active. For example: "shield hardener". **Optional and
      usually unnecessary**: the middle row right of the propulsion module is
@@ -224,6 +236,7 @@ defaultBotSettings : BotSettings
 defaultBotSettings =
     { acceptFleetInviteFrom = []
     , followFleetBroadcastFrom = []
+    , answerBackupCalls = PromptParser.Yes
     , assistFleetCommander = PromptParser.Yes
     , homeStation = Nothing
     , hideWhenNeutralInLocal = PromptParser.No
@@ -312,6 +325,16 @@ parseBotSettings =
                             | followFleetBroadcastFrom =
                                 settings.followFleetBroadcastFrom ++ splitSettingIntoNames pilotNames
                         }
+                    )
+             }
+           )
+         , ( "answer-backup-calls"
+           , { alternativeNames = [ "answer-backup-call", "answer-need-backup" ]
+             , description = "Whether to break off and close on a fleet-mate who broadcasts 'needs backup'. Defaults to 'yes'. The caller has to be someone this reading recognises as a fleet pilot -- the fleet window's member rows, its header's commander, or a local-chat standing icon -- rather than someone named in 'follow-fleet-broadcast-from'."
+             , valueParser =
+                PromptParser.valueTypeYesOrNo
+                    (\answerBackupCalls settings ->
+                        { settings | answerBackupCalls = answerBackupCalls }
                     )
              }
            )
@@ -489,6 +512,7 @@ goodStandingPatterns =
 type alias BotSettings =
     { acceptFleetInviteFrom : List String
     , followFleetBroadcastFrom : List String
+    , answerBackupCalls : PromptParser.YesOrNo
     , assistFleetCommander : PromptParser.YesOrNo
     , homeStation : Maybe String
     , hideWhenNeutralInLocal : PromptParser.YesOrNo
@@ -674,6 +698,14 @@ type alias BotMemory =
     -- has no landing to close from -- `arrivalWindowIsOpen`'s posture, and the
     -- conservative direction.
     , closingOnTheCommanderSinceLanding : Bool
+
+    -- Readings in a row spent trying to reach a fleet-mate who broadcast
+    -- `needs backup`, bounded like the counters above -- see
+    -- `backupCallAskedReadingsBound`. Advances only on the answers that
+    -- actually spend a reading (`backupCallAnswersThatSpendAReading`), holds
+    -- once the budget is spent while the call is still up, and resets the
+    -- moment the banner stops naming a backup call this ship may answer.
+    , backupCallAskedReadings : Int
 
     -- Readings in a row spent right-clicking a locked fleet pilot's target-bar
     -- entry to unlock it, bounded like the three counters above -- see
@@ -3011,6 +3043,7 @@ initBotMemory =
     , weaponsAskedReadings = 0
     , approachFleetCommanderAskedReadings = 0
     , closingOnTheCommanderSinceLanding = False
+    , backupCallAskedReadings = 0
     , unlockFleetPilotAskedReadings = 0
     }
 
@@ -3130,6 +3163,7 @@ statusTextFromState context =
                     , [ describeWeaponsAsk context ]
                     , [ describeApproachFleetCommanderAsk context ]
                     , [ describeFleetMateWarp context ]
+                    , [ describeBackupCall context ]
                     ]
                         |> List.map (String.join " ")
     in
@@ -3740,6 +3774,21 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 }
                 context.readingFromGameClient
 
+        -- The same arrangement again, and the same reason: the arm and this
+        -- counter ask one rule rather than two conditions that could disagree
+        -- about whether a reading was spent. `backupCallAnswersThatSpendAReading`
+        -- is the list, so an answer that dispatches nothing -- a call this ship
+        -- will not answer, one it has given up on, a ship already closing --
+        -- spends none of the budget.
+        answeringABackupCall : Maybe { pilot : String, step : BackupCallStep }
+        answeringABackupCall =
+            backupCallStepFromReading
+                { followFleetBroadcastFrom = context.botSettings.followFleetBroadcastFrom
+                , answerBackupCalls = context.botSettings.answerBackupCalls == PromptParser.Yes
+                }
+                botMemoryBefore.backupCallAskedReadings
+                context.readingFromGameClient
+
         -- Taken from the shipped rule rather than restated beside it, the same
         -- arrangement as `askingTheCommanderForAnOrbit` above and for #102's
         -- reason: a counter advanced by one condition and read by another is
@@ -3916,6 +3965,31 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         else
             0
     , closingOnTheCommanderSinceLanding = closingOnTheCommanderSinceLandingNow
+    , backupCallAskedReadings =
+        case answeringABackupCall of
+            Nothing ->
+                -- No backup call on this reading at all: the next one starts
+                -- from a full budget.
+                0
+
+            Just { step } ->
+                if List.member step backupCallAnswersThatSpendAReading then
+                    botMemoryBefore.backupCallAskedReadings + 1
+
+                else if step == GaveUpOnTheBackupCall then
+                    -- Held rather than advanced, `unlockFleetPilotAskedReadings`'s
+                    -- own arrangement: the call is still up and this bot has
+                    -- stopped trying, and a counter that ran away would make the
+                    -- status line's "after N readings" meaningless.
+                    botMemoryBefore.backupCallAskedReadings
+
+                else
+                    -- A call this ship is not answering, or one it is already on
+                    -- its way to. Neither spent a reading, so neither may spend
+                    -- the budget -- and a ship that has arrived and is
+                    -- approaching gets the whole allowance again if the caller
+                    -- moves off the grid.
+                    0
     , unlockFleetPilotAskedReadings =
         case friendlyFireNow of
             UnlockAFleetPilot _ signal ->
@@ -4615,17 +4689,34 @@ targetBroadcastPilotName broadcastText =
 Enumerated from the window's own `BroadcastButton` tooltips, so the list is the
 client's rather than a guess. **What is missing is how each one renders** once
 broadcast: the button says `Broadcast: Spotted an Enemy` and the history says
-something else, and only `Target …` and `…: Travel to …` have been observed. A
-capture pass -- one click per button, then read the history panel -- is what
-turns these into matchable strings.
+something else. A capture pass -- one click per button, then read the history
+panel -- is what turns these into matchable strings.
+
+**Three names left this list in #385, and the first of them is why that issue
+exists.** `parseBroadcastVerb` claimed to read `Need Backup` while it was still
+listed here, so one of the two was wrong on every reading -- and it was the
+matcher, which carried the button's first-person `need backup` against a banner
+that renders `needs backup`. `At Location` and `In Position at` were the same
+disagreement with the halves the other way round: `parseFleetBroadcast` has read
+`<Sender> is at location <system>` and
+`<Sender> is in position at Stargate <name>` since those wordings were captured
+live, and `actOnBroadcastVerb` acts on both, while this list went on calling
+them unread. A list that names a verb the parser reads is a list nobody can
+check the parser against, which is what let one wrong matcher sit here
+unnoticed.
+
+**The five that remain are named on a button and have never been seen
+rendered.** `Need Armor`, `Need Capacitor`, `Need Shield`,
+`Request That the Fleet Hold Position` and `Spotted an Enemy` -- and wiring any
+of them from the button's wording is exactly the mistake this list exists to
+record. Note also that the live vocabulary is _wider_ than the buttons:
+`Jump Stargate` and `Align Stargate` were observed in real runs, are matched,
+and are on no button at all.
 
 -}
 broadcastVerbsNotYetRead : List String
 broadcastVerbsNotYetRead =
-    [ "At Location"
-    , "In Position at"
-    , "Need Armor"
-    , "Need Backup"
+    [ "Need Armor"
     , "Need Capacitor"
     , "Need Shield"
     , "Request That the Fleet Hold Position"
@@ -5441,123 +5532,166 @@ wingmanDecisionRootInSpaceOrdinary context shipUI =
                             manageTheMiddleRow
 
                         Nothing ->
-                            case closeOnTheCommanderAfterLanding context shipUI of
-                                Just closeOnTheCommander ->
-                                    -- #397, and it is a window rather than a
-                                    -- placement. From the reading the warp ends
-                                    -- until the client names the manoeuvre
-                                    -- `Approach`, closing on the commander
-                                    -- outranks the arms below -- each of which
-                                    -- answers `Just` for the whole of a fight,
-                                    -- which is what made
-                                    -- `approachTheFleetCommander` unreachable at
-                                    -- the foot of this list on every grid worth
-                                    -- landing on.
+                            case answerTheBackupCall context shipUI of
+                                Just goToTheirAid ->
+                                    -- #385. Above the travel forms in
+                                    -- `actOnFleetBroadcast`, because being slow to a
+                                    -- backup call costs a ship where being slow to an
+                                    -- `is at location` costs a few seconds of
+                                    -- alignment -- the argument #237 makes for saxrat.
+                                    -- Below the retreat and below `sessionIsEnding` by
+                                    -- the whole tree, as everything here is: a ship
+                                    -- past its own threshold leaves rather than
+                                    -- joining somebody else's fight, which is the
+                                    -- ordering saxrat's own retreat records having
+                                    -- needed. And below the module step --
+                                    -- `unlockFleetPilotInTargetBar`,
+                                    -- `activateAlwaysOnModules` and #394's
+                                    -- `manageMiddleRowModules` -- which are a
+                                    -- safety condition and two clicks. #394's own
+                                    -- argument for keeping that step together is
+                                    -- what settles the order between it and this:
+                                    -- a hardener or a prop mod is worth a reading
+                                    -- while the ship is staying, and this arm is
+                                    -- the first one that decides to go somewhere.
                                     --
-                                    -- **Below the middle-row arm, not above it.**
-                                    -- #394 ties the propulsion module to the
-                                    -- client naming `Approach`; this arm answers
-                                    -- `Just` for as long as it is closing, so
-                                    -- above the module arm it would starve the
-                                    -- prop mod during exactly the window the
-                                    -- module exists for. The module arm is a
-                                    -- state check and a click and can block on
-                                    -- nothing, which is why it is safe ahead.
-                                    closeOnTheCommander
+                                    -- It answers `Nothing` for every case that is not
+                                    -- an action, so it starves nothing below it while
+                                    -- a banner that does not clear stays up -- see
+                                    -- `answerTheBackupCall`.
+                                    goToTheirAid
 
                                 Nothing ->
-                                    case actOnFleetBroadcast context shipUI of
-                                        Just actOnBroadcast ->
-                                            actOnBroadcast
+                                    case closeOnTheCommanderAfterLanding context shipUI of
+                                        Just closeOnTheCommander ->
+                                            -- Below the backup call, and that was neither
+                                            -- author's decision: #385 and #397 were written
+                                            -- against this same slot without knowing of each
+                                            -- other, and the order was chosen when they met.
+                                            -- A backup call costs a ship and this window costs
+                                            -- seconds, and `answerTheBackupCall` answers
+                                            -- `Nothing` for everything that is not an action,
+                                            -- so it starves nothing by sitting above. The
+                                            -- reverse would swallow a backup call for this
+                                            -- whole window, which opens on landing -- when a
+                                            -- fight is most likely starting.
+                                            -- #397, and it is a window rather than a
+                                            -- placement. From the reading the warp ends
+                                            -- until the client names the manoeuvre
+                                            -- `Approach`, closing on the commander
+                                            -- outranks the arms below -- each of which
+                                            -- answers `Just` for the whole of a fight,
+                                            -- which is what made
+                                            -- `approachTheFleetCommander` unreachable at
+                                            -- the foot of this list on every grid worth
+                                            -- landing on.
+                                            --
+                                            -- **Below the middle-row arm, not above it.**
+                                            -- #394 ties the propulsion module to the
+                                            -- client naming `Approach`; this arm answers
+                                            -- `Just` for as long as it is closing, so
+                                            -- above the module arm it would starve the
+                                            -- prop mod during exactly the window the
+                                            -- module exists for. The module arm is a
+                                            -- state check and a click and can block on
+                                            -- nothing, which is why it is safe ahead.
+                                            closeOnTheCommander
 
                                         Nothing ->
-                                            case dronesAssistTheCommander context of
-                                                Just assist ->
-                                                    assist
+                                            case actOnFleetBroadcast context shipUI of
+                                                Just actOnBroadcast ->
+                                                    actOnBroadcast
 
                                                 Nothing ->
-                                                    case fireOnActiveTarget context of
-                                                        Just fire ->
-                                                            -- Strictly below the drone arm and
-                                                            -- strictly above the gate: a locked
-                                                            -- target means a fight, and a bot
-                                                            -- that would rather take a gate
-                                                            -- than shoot what the commander
-                                                            -- called has left the fleet a ship
-                                                            -- short in the pocket it just left.
-                                                            fire
+                                                    case dronesAssistTheCommander context of
+                                                        Just assist ->
+                                                            assist
 
                                                         Nothing ->
-                                                            case approachTheFleetCommander context shipUI of
-                                                                Just approachTheCommander ->
-                                                                    -- #365. Below the drone arm
-                                                                    -- and below the guns so it
-                                                                    -- can starve neither
-                                                                    -- (#326), and above the
-                                                                    -- gate so the gate arm's
-                                                                    -- own "rats are still on
-                                                                    -- the grid" wait cannot
-                                                                    -- starve it in the one
-                                                                    -- state it is most for.
-                                                                    -- Below #364's retreat by
-                                                                    -- the whole tree: a damaged
-                                                                    -- ship breaks off rather
-                                                                    -- than holds station, so
-                                                                    -- nothing that keeps this
-                                                                    -- ship on the grid may ever
-                                                                    -- answer before that arm
-                                                                    -- does. The full argument
-                                                                    -- is in
-                                                                    -- `approachTheFleetCommander`.
-                                                                    approachTheCommander
+                                                            case fireOnActiveTarget context of
+                                                                Just fire ->
+                                                                    -- Strictly below the drone arm and
+                                                                    -- strictly above the gate: a locked
+                                                                    -- target means a fight, and a bot
+                                                                    -- that would rather take a gate
+                                                                    -- than shoot what the commander
+                                                                    -- called has left the fleet a ship
+                                                                    -- short in the pocket it just left.
+                                                                    fire
 
                                                                 Nothing ->
-                                                                    case accelerationGateStep context of
-                                                                        Just takeTheGate ->
-                                                                            -- #348. Sits after the
-                                                                            -- drone arm and after the
-                                                                            -- guns, never before
-                                                                            -- them, so a gate this
-                                                                            -- bot can see is never
-                                                                            -- taken while drones are
-                                                                            -- still owed a command on
-                                                                            -- a live grid -- the same
-                                                                            -- ordering argument #326
-                                                                            -- established for the
-                                                                            -- drone arm itself.
-                                                                            takeTheGate
+                                                                    case approachTheFleetCommander context shipUI of
+                                                                        Just approachTheCommander ->
+                                                                            -- #365. Below the drone arm
+                                                                            -- and below the guns so it
+                                                                            -- can starve neither
+                                                                            -- (#326), and above the
+                                                                            -- gate so the gate arm's
+                                                                            -- own "rats are still on
+                                                                            -- the grid" wait cannot
+                                                                            -- starve it in the one
+                                                                            -- state it is most for.
+                                                                            -- Below #364's retreat by
+                                                                            -- the whole tree: a damaged
+                                                                            -- ship breaks off rather
+                                                                            -- than holds station, so
+                                                                            -- nothing that keeps this
+                                                                            -- ship on the grid may ever
+                                                                            -- answer before that arm
+                                                                            -- does. The full argument
+                                                                            -- is in
+                                                                            -- `approachTheFleetCommander`.
+                                                                            approachTheCommander
 
                                                                         Nothing ->
-                                                                            {- The inherited
-                                                                               combat-anomaly-bot arm
-                                                                               is gone from here
-                                                                               (#349): it hunted
-                                                                               anomalies on an idle
-                                                                               grid, which is not
-                                                                               following a commander.
-                                                                               What remains is
-                                                                               self-defense only --
-                                                                               and it is now genuinely
-                                                                               the last resort it
-                                                                               reads as, because
-                                                                               `fireOnActiveTarget`
-                                                                               above it fires on
-                                                                               anything locked whether
-                                                                               or not a rat has
-                                                                               pointed this ship.
-                                                                            -}
-                                                                            fightPointedRatsOrReturnDrones context shipUI
+                                                                            case accelerationGateStep context of
+                                                                                Just takeTheGate ->
+                                                                                    -- #348. Sits after the
+                                                                                    -- drone arm and after the
+                                                                                    -- guns, never before
+                                                                                    -- them, so a gate this
+                                                                                    -- bot can see is never
+                                                                                    -- taken while drones are
+                                                                                    -- still owed a command on
+                                                                                    -- a live grid -- the same
+                                                                                    -- ordering argument #326
+                                                                                    -- established for the
+                                                                                    -- drone arm itself.
+                                                                                    takeTheGate
+
+                                                                                Nothing ->
+                                                                                    {- The inherited
+                                                                                       combat-anomaly-bot arm
+                                                                                       is gone from here
+                                                                                       (#349): it hunted
+                                                                                       anomalies on an idle
+                                                                                       grid, which is not
+                                                                                       following a commander.
+                                                                                       What remains is
+                                                                                       self-defense only --
+                                                                                       and it is now genuinely
+                                                                                       the last resort it
+                                                                                       reads as, because
+                                                                                       `fireOnActiveTarget`
+                                                                                       above it fires on
+                                                                                       anything locked whether
+                                                                                       or not a rat has
+                                                                                       pointed this ship.
+                                                                                    -}
+                                                                                    fightPointedRatsOrReturnDrones context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
 
-**Only the two observed forms are matched.** A travel broadcast names its
-sender, so it is filtered against `follow-fleet-broadcast-from`; a target
-broadcast does not, and is acted on for anyone in the fleet.
+**Only observed forms are matched.** A travel broadcast names its sender, so it
+is filtered against `follow-fleet-broadcast-from`; a target broadcast does not,
+and is acted on for anyone in the fleet. A backup call is neither: it reaches
+`answerTheBackupCall`, above this branch, whose boundary is fleet membership --
+see #385.
 
-The eight verbs in `broadcastVerbsNotYetRead` fall through to a named wait
-rather than to a guess, because the button's wording is not the broadcast's and
-nothing has observed the difference yet.
+The verbs in `broadcastVerbsNotYetRead` fall through to a named wait rather than
+to a guess, because the button's wording is not the broadcast's and nothing has
+observed the difference yet.
 
 -}
 actOnFleetBroadcast : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
@@ -6428,10 +6562,70 @@ parseFleetBroadcast bannerText =
                         Nothing ->
                             case afterColon of
                                 Nothing ->
-                                    Unrecognized trimmed
+                                    -- The colon shapes are exhausted, so the
+                                    -- one remaining observed shape is
+                                    -- `<Sender> needs backup` -- third person,
+                                    -- no colon, the same shape as the two
+                                    -- `withoutSender` forms above. It is asked
+                                    -- *after* `afterColon` rather than beside
+                                    -- them because a banner carrying `": "`
+                                    -- would otherwise yield a sender with the
+                                    -- colon still stuck to it, and this bot
+                                    -- matches a pilot name exactly.
+                                    case backupCallSender trimmed of
+                                        Just sender ->
+                                            NeedBackup { pilot = sender }
+
+                                        Nothing ->
+                                            Unrecognized trimmed
 
                                 Just { pilot, rest } ->
                                     parseBroadcastVerb pilot rest trimmed
+
+
+{-| The sender of a `<Sender> needs backup` broadcast, which carries no colon.
+
+**The marker is the broadcast's own wording and not the button's**, which is
+the whole of #385: `parseBroadcastVerb` tested `"need backup"` -- the fleet
+window's `Broadcast: Need Backup` button label, first person -- and the client
+renders `needs backup`. `"needs backup"` does not contain `"need backup"`,
+because after `need` comes `s` rather than a space, so the test was false on
+every reading and every backup call this bot has ever seen fell through to
+`Unrecognized`. WINGMAN.md already carried the rule in its own words -- _"a
+button's wording is not the broadcast's"_ -- and this is the one verb somebody
+wired from the button list without a capture to check it against.
+
+`needsBackupMarker` is the single constant both this and `parseBroadcastVerb`
+read, `gateKeyClosingMarker`'s arrangement: two copies of a client wording are
+two things that can drift apart silently, and a matcher that stops matching is
+this repo's signature failure rather than an error.
+
+**A sender is required.** A banner that is nothing but the verb names nobody to
+fly to, and `Unrecognized` is the better answer for it -- that opens the
+broadcast's own menu, which is how an unread wording gets captured.
+
+-}
+backupCallSender : String -> Maybe String
+backupCallSender trimmed =
+    case String.indexes needsBackupMarker (String.toLower trimmed) of
+        firstMarker :: _ ->
+            case String.left firstMarker trimmed |> String.trim of
+                "" ->
+                    Nothing
+
+                sender ->
+                    Just sender
+
+        [] ->
+            Nothing
+
+
+{-| How the client writes a backup call, in the third person the banner renders
+rather than the first person the button offers. See `backupCallSender`.
+-}
+needsBackupMarker : String
+needsBackupMarker =
+    "needs backup"
 
 
 {-| The verb half of a `<Sender>: <verb> <argument>` broadcast.
@@ -6456,7 +6650,7 @@ parseBroadcastVerb pilot rest whole =
             , gate = String.dropLeft (String.length "Align Stargate ") rest
             }
 
-    else if stringContainsIgnoringCase "need backup" rest then
+    else if stringContainsIgnoringCase needsBackupMarker rest then
         NeedBackup { pilot = pilot }
 
     else
@@ -6558,17 +6752,16 @@ actOnBroadcastVerb context shipUI bannerText =
             else
                 goToFleetMate context shipUI pilot gate "is in position at"
 
-        NeedBackup { pilot } ->
-            if not (permitted pilot) then
-                say
-                    ("'"
-                        ++ pilot
-                        ++ "' needs backup but is not named in"
-                        ++ " 'follow-fleet-broadcast-from'."
-                    )
-
-            else
-                goToFleetMate context shipUI pilot "" "needs backup"
+        NeedBackup _ ->
+            -- #385. This verb has its own arm, `answerTheBackupCall`, placed
+            -- above this whole branch in the decision root: being slow to a
+            -- backup call costs a ship where being slow to a travel broadcast
+            -- costs a few seconds of alignment. It is also the one verb whose
+            -- trust boundary is fleet membership rather than
+            -- `follow-fleet-broadcast-from`, so `permitted` is the wrong
+            -- question to ask about it -- which is why this says "handled
+            -- above" rather than refusing here.
+            say "Handled above -- a backup call reaches its own branch."
 
         JumpGate { pilot, gate } ->
             if not (permitted pilot) then
@@ -6779,13 +6972,7 @@ warpToFleetMateOnThisGrid context pilot calledIt overviewEntry =
                         (\banner ->
                             describeBranch
                                 (preamble ++ "warping to them from the broadcast banner's own menu.")
-                                (useContextMenuCascade
-                                    ( "fleet broadcast", banner )
-                                    (useMenuEntryWithTextEqual "Fleet Member"
-                                        (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
-                                    )
-                                    context
-                                )
+                                (warpToFleetMateFromTheBroadcastBanner context banner)
                         )
                     |> Maybe.withDefault
                         (describeBranch
@@ -6817,6 +7004,34 @@ warpToFleetMateOnThisGrid context pilot calledIt overviewEntry =
                 )
 
 
+{-| Right-click the fleet broadcast banner and take `Fleet Member` ->
+`Warp to Member`: `eve-online-saxrat`'s `respondToFleetBackupBroadcast` cascade,
+unchanged.
+
+**One cascade, two callers.** `warpToFleetMateOnThisGrid` drives it for the
+`is at location` and `is in position at` forms, and `answerTheBackupCall`
+(#385) for the one broadcast that names no place at all -- a backup call, whose
+caller may have no overview row on this grid to select. Writing the rungs out
+twice is how the two would come to disagree about what the client offers.
+
+`useMenuEntryWithTextEqual` at **both** rungs is the part that must not drift:
+`"Warp to Member"` is a prefix of `"Warp to Member Within"`, and a containing
+match takes the wrong entry.
+
+-}
+warpToFleetMateFromTheBroadcastBanner :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    -> DecisionPathNode
+warpToFleetMateFromTheBroadcastBanner context banner =
+    useContextMenuCascade
+        ( "fleet broadcast", banner )
+        (useMenuEntryWithTextEqual "Fleet Member"
+            (useMenuEntryWithTextEqual "Warp to Member" menuCascadeCompleted)
+        )
+        context
+
+
 {-| The broadcast banner as a clickable element, but only while the broadcast
 it is showing is this pilot's own call for company.
 
@@ -6843,10 +7058,19 @@ fleetMateBroadcastBannerElement followFleetBroadcastFrom pilot readingFromGameCl
 
 {-| The fleet-mate whose current broadcast asks this ship to come to them.
 
-The three verbs `actOnBroadcastVerb` hands to `goToFleetMate`, filtered by
+The two verbs `actOnBroadcastVerb` hands to `goToFleetMate`, filtered by
 `follow-fleet-broadcast-from` the same way that function filters them -- an
 exact match, never a substring, `fleetInviteSenderFromMessageBox`'s reason:
 this decides which pilot this ship flies to.
+
+**`NeedBackup` was a third and is deliberately gone from here** (#385). That
+verb no longer reaches `goToFleetMate` at all: it has its own arm, its own
+mechanism split (approach on grid, the banner's cascade off it), its own bound
+and its own trust boundary, which is fleet membership rather than this
+allowlist. Leaving it here would have advanced `goToFleetMateWarpAskedReadings`
+and made `describeFleetMateWarp` report a warp that no branch was attempting --
+a status line disagreeing with the decision, which is the failure that clause
+exists to prevent.
 
 -}
 fleetMateCallingForCompany : List String -> ReadingFromGameClient -> Maybe String
@@ -6859,9 +7083,6 @@ fleetMateCallingForCompany followFleetBroadcastFrom readingFromGameClient =
                         Just pilot
 
                     InPositionAt { pilot } ->
-                        Just pilot
-
-                    NeedBackup { pilot } ->
                         Just pilot
 
                     _ ->
@@ -7000,6 +7221,359 @@ would replace it with a measured value.
 fleetMateWarpAskedReadingsBound : Int
 fleetMateWarpAskedReadingsBound =
     30
+
+
+{-| The pilot the banner is currently calling backup for, with no permission
+filter of any kind.
+
+Kept separate from `fleetMateCallingForCompany` because the two answer to
+different trust boundaries -- that one to `follow-fleet-broadcast-from`, this
+one to fleet membership -- and because the memory update has to ask this
+question over a bare reading. Permission is `backupCallStep`'s first two
+clauses and is never folded in here, so a reader can see which of the two a call
+was refused by.
+
+-}
+backupCallOnTheBanner : ReadingFromGameClient -> Maybe String
+backupCallOnTheBanner readingFromGameClient =
+    fleetBroadcastBannerText readingFromGameClient
+        |> Maybe.andThen
+            (\bannerText ->
+                case parseFleetBroadcast bannerText of
+                    NeedBackup { pilot } ->
+                        Just pilot
+
+                    _ ->
+                        Nothing
+            )
+
+
+{-| What to do about a fleet-mate calling for backup, as six named answers over
+five facts and a counter -- `fleetMateWarpStep`'s shape, for its reason: a rule
+reachable only through a whole `BotDecisionContext` is a rule nothing can
+execute in a test.
+
+**The trust boundary is the fleet, not `follow-fleet-broadcast-from`.** Those
+are different policies: that allowlist says whose _travel_ this ship follows,
+and a fleet-mate who needs help is not necessarily one of them. So the caller
+has to be someone `fleetPilotNames` recognises -- the fleet window's own member
+rows, its header's commander, or a pilot local chat's standing icon marks as a
+fleetmate -- which is the same boundary the friendly-fire guard already uses,
+and matched exactly rather than as a substring for
+`fleetInviteSenderFromMessageBox`'s reason.
+
+**The failure direction is the quiet one, and #380 is why that matters.** Those
+member rows are known to be under-reported: four wingmen in one fleet read 0, 2,
+4 and 4 rows from the same Fleet window at the same moment. Under-reporting here
+declines a call and this ship goes on doing what it was doing -- it never sends
+a ship anywhere. Over-reporting would be the dangerous direction and nothing in
+that issue shows it: every source of a name here is the client stating fleet
+membership, and the commander fallback is the operator's own setting. Stated
+plainly rather than hidden: a wingman whose Fleet window lists nobody answers no
+backup calls at all, and says so on every reading.
+
+**Permission is asked before the give-up**, which is
+`approachFleetCommanderStep`'s ordering rather than `fleetMateWarpStep`'s, and
+for that rule's stated reason: a session that never permits a call must not read
+as one that gave up on one. Nothing is lost by it either -- the counter only
+advances on the answers that act, so an unpermitted call never spends a reading
+to give up on.
+
+**On grid it approaches; off grid it warps.** That is the issue's own split and
+it is what the two mechanisms are for. An approach needs the caller's overview
+row and closes the last of the distance without a warp the client may refuse at
+short range; the banner's `Fleet Member` -> `Warp to Member` needs no row at all,
+which is the only thing that can reach a mate who is in this system and not on
+this grid.
+
+**A warp already under way is left alone**, and so is an approach the client has
+confirmed -- `ManeuverApproach` is the only thing that stops the ask, since a
+dispatched click is not a manoeuvre (`ensureShipIsApproaching`). Both hand the
+reading back rather than holding it, so the drones, the guns and the gate get
+their readings while this ship is on its way.
+
+-}
+backupCallStep :
+    { settingIsYes : Bool
+    , callerIsInThisFleet : Bool
+    , callerIsOnThisGrid : Bool
+    , shipIsWarpingOrJumping : Bool
+    , shipIsApproaching : Bool
+    , askedReadings : Int
+    }
+    -> BackupCallStep
+backupCallStep backupCase =
+    if not backupCase.settingIsYes then
+        BackupCallsAreOff
+
+    else if not backupCase.callerIsInThisFleet then
+        TheCallerIsNotAFleetPilot
+
+    else if backupCallHasBeenGivenUpOn backupCase.askedReadings then
+        GaveUpOnTheBackupCall
+
+    else if backupCase.shipIsWarpingOrJumping then
+        AlreadyOnTheWayToTheCaller
+
+    else if backupCase.callerIsOnThisGrid then
+        if backupCase.shipIsApproaching then
+            AlreadyOnTheWayToTheCaller
+
+        else
+            ApproachTheCaller
+
+    else
+        WarpToTheCallerFromTheBroadcast
+
+
+type BackupCallStep
+    = BackupCallsAreOff
+    | TheCallerIsNotAFleetPilot
+    | GaveUpOnTheBackupCall
+    | AlreadyOnTheWayToTheCaller
+    | ApproachTheCaller
+    | WarpToTheCallerFromTheBroadcast
+
+
+{-| The answers on which this arm actually spends a reading, and therefore the
+answers the counter advances on.
+
+One list with two readers -- `updateMemoryForNewReadingFromGame` and the status
+clause -- rather than a condition restated beside the rule, which is #102's
+defect. Only the two that dispatch are here: a call this ship is not answering,
+one it has given up on, and a ship already closing all cost nothing, so charging
+them would spend a budget on readings this arm never asked for.
+
+-}
+backupCallAnswersThatSpendAReading : List BackupCallStep
+backupCallAnswersThatSpendAReading =
+    [ ApproachTheCaller
+    , WarpToTheCallerFromTheBroadcast
+    ]
+
+
+{-| Whether the budget for reaching one backup call has been spent. One
+comparison with two readers -- the step rule and the status clause --
+`fleetMateWarpHasBeenGivenUpOn`'s arrangement, for its reason.
+-}
+backupCallHasBeenGivenUpOn : Int -> Bool
+backupCallHasBeenGivenUpOn askedReadings =
+    backupCallAskedReadingsBound <= askedReadings
+
+
+{-| How many readings this bot spends reaching one backup call before it stops.
+
+**`fleetMateWarpAskedReadingsBound`, written as that constant rather than as a
+number**, because this arm drives the same banner cascade that bound was sized
+for and a second number would be two opinions about one mechanism. The approach
+half costs one reading an attempt where the cascade costs several, so thirty is
+generous for it and about right for the warp.
+
+**The give-up hands the reading back rather than waiting**, which is what makes
+this a bound at all: this arm sits above the whole fight, so a give-up that
+parks on `waitForProgressInGame` is #321's "a branch at the head of the tree
+with no bound owns the whole bot" with a politer status line.
+`describeBackupCall` is what keeps it visible afterwards.
+
+-}
+backupCallAskedReadingsBound : Int
+backupCallAskedReadingsBound =
+    fleetMateWarpAskedReadingsBound
+
+
+{-| The backup call this reading carries and what to do about it, resolved the
+one way both the decision and the memory update can resolve it.
+
+One question with two readers, `fleetMateToWarpToOnThisGrid`'s arrangement and
+for its reason: a counter advanced by one condition and read by another is
+#102's defect. `UpdateMemoryContext` carries no decision, so everything here is
+a function of the reading, the settings and the counter.
+
+-}
+backupCallStepFromReading :
+    { followFleetBroadcastFrom : List String, answerBackupCalls : Bool }
+    -> Int
+    -> ReadingFromGameClient
+    -> Maybe { pilot : String, step : BackupCallStep }
+backupCallStepFromReading settings askedReadings readingFromGameClient =
+    backupCallOnTheBanner readingFromGameClient
+        |> Maybe.map
+            (\pilot ->
+                { pilot = pilot
+                , step =
+                    backupCallStep
+                        { settingIsYes = settings.answerBackupCalls
+                        , callerIsInThisFleet =
+                            List.member pilot
+                                (fleetPilotNamesFromReading
+                                    settings.followFleetBroadcastFrom
+                                    readingFromGameClient
+                                )
+                        , callerIsOnThisGrid =
+                            overviewEntryForPilot pilot readingFromGameClient /= Nothing
+                        , shipIsWarpingOrJumping =
+                            shipIsWarpingOrJumpingFromReading readingFromGameClient
+                        , shipIsApproaching =
+                            shipIsApproachingFromReading readingFromGameClient
+                        , askedReadings = askedReadings
+                        }
+                }
+            )
+
+
+backupCallStepNow : BotDecisionContext -> Maybe { pilot : String, step : BackupCallStep }
+backupCallStepNow context =
+    backupCallStepFromReading
+        { followFleetBroadcastFrom = context.eventContext.botSettings.followFleetBroadcastFrom
+        , answerBackupCalls = context.eventContext.botSettings.answerBackupCalls == PromptParser.Yes
+        }
+        context.memory.backupCallAskedReadings
+        context.readingFromGameClient
+
+
+{-| Answer a fleet-mate's `needs backup`: close on them, by whichever of the two
+mechanisms this reading offers.
+
+**This is wiring rather than a new mechanism.** The approach is
+`ensureShipIsApproaching`, the same helper `approachTheFleetCommander` drives
+and with the same confirmation -- the client's own `ManeuverApproach`, never a
+dispatched click. The warp is `warpToFleetMateFromTheBroadcastBanner`, the
+cascade `warpToFleetMateOnThisGrid` drives for the other two company verbs.
+Neither is written twice.
+
+**It sits above the travel broadcasts in the decision root**, because being slow
+to a backup call costs a ship where being slow to an `is at location` costs a
+few seconds of alignment -- #237's argument for saxrat. Below the retreat and
+below the session-ending arm, as everything is: a ship past its own threshold
+leaves rather than joining somebody else's fight, which is exactly the ordering
+saxrat's own retreat records having needed.
+
+**Every answer that is not an action hands the reading back**, so nothing under
+this arm is starved by a banner that does not clear -- #360's lesson, and the
+one that #395 and #397 each paid for again. That includes the refusals: a call
+this ship will not answer is _nothing more to do about the call_, not a reason
+to spend the reading saying so. `describeBackupCall` is what says it instead,
+on every reading, since a `Nothing` cannot carry a decision line.
+
+**Out of system it cannot help, and it says so rather than waiting.** A backup
+call names no place -- the broadcast carries a pilot and nothing else -- and
+saxrat found the client refuses a waypoint to a fleet-mate's live position, so
+there is nothing to route to and `goToFleetMate`'s place-less branch is
+deliberately not reached from here. What this bot can do is in-system: the
+banner's own `Warp to Member`, which the client offers where it can and declines
+where it cannot. So an out-of-system caller looks exactly like an in-system one
+here, the cascade is tried, and the bound ends it -- with
+`describeBackupCall`'s give-up naming out-of-system as the likely reason and
+#381 as the issue that would have to answer first.
+
+-}
+answerTheBackupCall : BotDecisionContext -> ShipUI -> Maybe DecisionPathNode
+answerTheBackupCall context shipUI =
+    backupCallStepNow context
+        |> Maybe.andThen
+            (\{ pilot, step } ->
+                let
+                    preamble : String
+                    preamble =
+                        "'" ++ pilot ++ "' needs backup -- "
+                in
+                case step of
+                    BackupCallsAreOff ->
+                        Nothing
+
+                    TheCallerIsNotAFleetPilot ->
+                        Nothing
+
+                    GaveUpOnTheBackupCall ->
+                        Nothing
+
+                    AlreadyOnTheWayToTheCaller ->
+                        Nothing
+
+                    ApproachTheCaller ->
+                        overviewEntryForPilot pilot context.readingFromGameClient
+                            |> Maybe.andThen (ensureShipIsApproaching shipUI)
+                            |> Maybe.map
+                                (Result.Extra.unpack
+                                    (\error ->
+                                        describeBranch
+                                            (preamble ++ "could not approach them: " ++ error)
+                                            waitForProgressInGame
+                                    )
+                                    (describeBranch
+                                        (preamble ++ "they are on this grid -- approach them.")
+                                    )
+                                )
+
+                    WarpToTheCallerFromTheBroadcast ->
+                        fleetBroadcastBannerElement context.readingFromGameClient
+                            |> Maybe.map
+                                (\banner ->
+                                    describeBranch
+                                        (preamble ++ "they are not on this grid -- warp to them from the broadcast banner's own menu.")
+                                        (warpToFleetMateFromTheBroadcastBanner context banner)
+                                )
+            )
+
+
+{-| What this bot is doing about a backup call, in one line.
+
+Exists for `describeFleetMateWarp`'s reason: `answerTheBackupCall` answers
+`Nothing` for four of its six cases, and from outside the decision tree a
+refusal, a spent budget, a ship already on its way and a grid with no backup
+call on it are the same silence.
+
+-}
+describeBackupCall : BotDecisionContext -> String
+describeBackupCall context =
+    "Backup call: "
+        ++ (case backupCallStepNow context of
+                Nothing ->
+                    "none on this reading."
+
+                Just { pilot, step } ->
+                    let
+                        spentOf : String
+                        spentOf =
+                            " Readings spent: "
+                                ++ String.fromInt context.memory.backupCallAskedReadings
+                                ++ " of "
+                                ++ String.fromInt backupCallAskedReadingsBound
+                                ++ "."
+                    in
+                    case step of
+                        BackupCallsAreOff ->
+                            "'"
+                                ++ pilot
+                                ++ "' is calling, and 'answer-backup-calls' is set to 'no'."
+
+                        TheCallerIsNotAFleetPilot ->
+                            "'"
+                                ++ pilot
+                                ++ "' is calling, but nothing on this reading says they are in this fleet"
+                                ++ " -- not the fleet window's member rows, not its header, not local chat's"
+                                ++ " standing icons. Not going."
+
+                        GaveUpOnTheBackupCall ->
+                            "GAVE UP after "
+                                ++ String.fromInt context.memory.backupCallAskedReadings
+                                ++ " readings trying to reach '"
+                                ++ pilot
+                                ++ "'. They are most likely not in this system: a backup call names no place,"
+                                ++ " so nothing here can route to one -- see #381."
+
+                        AlreadyOnTheWayToTheCaller ->
+                            "on the way to '" ++ pilot ++ "'." ++ spentOf
+
+                        ApproachTheCaller ->
+                            "approaching '" ++ pilot ++ "', who is on this grid." ++ spentOf
+
+                        WarpToTheCallerFromTheBroadcast ->
+                            "warping to '"
+                                ++ pilot
+                                ++ "' from the banner's own 'Fleet Member' menu; they are not on this grid."
+                                ++ spentOf
+           )
 
 
 {-| Right-click a broadcast nobody has read, so the next reading records its menu.
