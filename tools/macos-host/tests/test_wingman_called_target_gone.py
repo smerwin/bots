@@ -718,13 +718,25 @@ class TheArmAndTheCounterReadOneRuleTest(unittest.TestCase):
             arm)
 
     def test_the_unbounded_wait_is_reachable_from_one_state_only(self):
-        """`lockCalledTarget`'s no-row branch is a wait it cannot bound. It is
-        reachable only where `calledObjectOnOverviewFromReading` answered
+        """`lockCalledTarget`'s wait is one it cannot bound, since it answers a
+        `DecisionPathNode` and a `DecisionPathNode` cannot decline a reading. It
+        is reachable only where `calledObjectOnOverviewFromReading` answered
         `CalledNameNamesNoOverviewRow`, which is the branch above that bounds
-        it: the other caller of `shootIt` has a row by construction."""
+        it: the other caller of `shootIt` has a row by construction.
+
+        **#366 moved the branch and left the property.** That wait used to be
+        the `Nothing` of a `case overviewEntryForPilot`; the lock now dispatches
+        on `lockCalledTargetStep` and the wait is its
+        `NoWayToLockTheCalledTarget` answer, which needs *neither* a banner to
+        click nor a row -- strictly narrower than before, and still only
+        reachable from the state #395 bounds.
+        """
         lock = collapsed(without_comments(declaration("lockCalledTarget")))
-        self.assertIn("case overviewEntryForPilot calledTarget "
-                      "context.readingFromGameClient of Nothing ->", lock)
+        self.assertIn("NoWayToLockTheCalledTarget -> nothingToLockItWith", lock)
+        self.assertIn("nothingToLockItWith = describeBranch", lock)
+        self.assertIn("waitForProgressInGame", lock)
+        self.assertIn("overviewEntryForPilot calledTarget "
+                      "context.readingFromGameClient", lock)
         arm = collapsed(
             without_comments(declaration("bringCalledTargetUnderFire")))
         self.assertIn("CalledObjectIsNotAGate -> shootIt", arm)
