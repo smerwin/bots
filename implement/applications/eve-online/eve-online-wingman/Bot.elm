@@ -775,6 +775,11 @@ type alias BotMemory =
     -- which is what lets a ship that starts approaching again get the whole
     -- allowance back.
     , middleRowAskedReadings : Int
+
+    -- Whether the client's own game log has said a middle-row click is being
+    -- refused for cloaking, since the last time this ship moved. See
+    -- `cloakingPreventsModuleActivation`.
+    , cloakingInterferesWithModules : Bool
     }
 
 
@@ -1966,6 +1971,26 @@ counter from, the rule the status line prints and the rule this arm executes
 are one call and cannot be asked with different numbers -- `fireOnActiveTarget`
 and `inactiveWeaponFromReading`'s arrangement, for #102's reason.
 
+**A click while cloaked is not one reading, it is up to twenty.** #394's own
+argument for placing this arm ahead of the gate and the travel forms is that
+"the module arm is a state check and a click and can block on nothing" -- true
+for an ordinary click, and false for a jump. EVE cloaks a ship for a stretch
+after every jump, and the client refuses a module click outright rather than
+queuing it:
+
+    [ 2026.08.29 20:15:02 ] (notify) Interference from the cloaking you are
+    doing is preventing your systems from functioning at this time.
+
+Confirmed live, `wingman_run22.log`: the always-on-module click was refused
+this way on 20 straight readings, `manageMiddleRowModules` answered `Just` on
+every one of them, and the next gate went unasked for the whole stretch --
+exactly the starvation #408 built the give-up to prevent, except here the give-up
+itself cannot help, since reaching it costs the same twenty readings it is
+supposed to bound. `cloakingPreventsModuleActivation` is what makes the click
+decline instead of spending them: see it for the latch and
+`clickModuleButtonButWaitIfClickedInPreviousStep`'s discussion for the general
+shape.
+
 -}
 manageMiddleRowModules : BotDecisionContext -> Maybe DecisionPathNode
 manageMiddleRowModules context =
@@ -1976,6 +2001,9 @@ manageMiddleRowModules context =
     in
     case middleRowStepFromContext context of
         MiddleRowNeedsNothing ->
+            Nothing
+
+        CloakingPreventsActivation ->
             Nothing
 
         LeaveThePropulsionModuleToTheWarp ->
@@ -2015,6 +2043,7 @@ type MiddleRowStep
     | PropulsionModuleIsAlreadyShuttingDown
     | PropulsionModuleSaysNothingAboutShuttingDown
     | LeaveThePropulsionModuleToTheWarp
+    | CloakingPreventsActivation
     | GaveUpOnTheMiddleRow
     | MiddleRowNeedsNothing
 
@@ -2090,6 +2119,18 @@ That also keeps `MiddleRowNeedsNothing` reachable after a give-up, which is what
 resets the counter -- see `middleRowAskedReadingsBound` for the one coupling
 this costs.
 
+**Cloaking interference is checked first and answers for the whole row, not
+only for the click it was seen on.** #426's own shape is the reason: a give-up
+here still costs `middleRowAskedReadingsBound` readings to reach, and a jump's
+cloak is exactly the state that manufactures them one at a time, so the guard
+has to sit ahead of the counter rather than inside it. Blanket rather than
+scoped to the activation branches specifically -- a legitimate propulsion-module
+shutdown deferred a reading or two while cloaked costs nothing next to the
+twenty readings this refuses to spend at all, and one fact checked once is
+safer than restating "would this branch have clicked" at each of the three
+sites that can. See `cloakingPreventsModuleActivation` for how the fact is
+latched and cleared.
+
 -}
 middleRowStep :
     { inactiveAlwaysOnModulePresent : Bool
@@ -2098,6 +2139,7 @@ middleRowStep :
     , propulsionModuleIsDeactivating : Maybe Bool
     , shipIsApproaching : Bool
     , shipIsWarpingOrJumping : Bool
+    , cloakingPreventsActivation : Bool
     , askedReadings : Int
     }
     -> MiddleRowStep
@@ -2111,7 +2153,10 @@ middleRowStep step =
             else
                 answer
     in
-    if step.inactiveAlwaysOnModulePresent then
+    if step.cloakingPreventsActivation then
+        CloakingPreventsActivation
+
+    else if step.inactiveAlwaysOnModulePresent then
         clickOrGiveUp ActivateAnAlwaysOnModule
 
     else if not step.propulsionModulePresent then
@@ -2180,8 +2225,9 @@ charges the budget for readings nobody spent, and then reports a give-up on an
 arm that was never asked. Everything not listed here either declines to click
 (`PropulsionModuleIsAlreadyShuttingDown`,
 `PropulsionModuleSaysNothingAboutShuttingDown`,
-`LeaveThePropulsionModuleToTheWarp`), has already given up, or has nothing to
-do, and none of those may spend a reading of the budget.
+`LeaveThePropulsionModuleToTheWarp`, `CloakingPreventsActivation`), has already
+given up, or has nothing to do, and none of those may spend a reading of the
+budget.
 
 -}
 middleRowAnswersThatSpendAReading : List MiddleRowStep
@@ -2201,8 +2247,8 @@ in space has a module row to manage, and that is also the answer which resets
 the counter, so a docked stretch hands the next undock a full allowance.
 
 -}
-middleRowStepFromReading : Int -> ReadingFromGameClient -> MiddleRowStep
-middleRowStepFromReading askedReadings readingFromGameClient =
+middleRowStepFromReading : Int -> Bool -> ReadingFromGameClient -> MiddleRowStep
+middleRowStepFromReading askedReadings cloakingPreventsActivation readingFromGameClient =
     let
         propulsionModule : Maybe ShipUIModuleButton
         propulsionModule =
@@ -2221,13 +2267,87 @@ middleRowStepFromReading askedReadings readingFromGameClient =
                 |> Maybe.andThen (.stateFromDictEntries >> .isDeactivating)
         , shipIsApproaching = shipIsApproachingFromReading readingFromGameClient
         , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading readingFromGameClient
+        , cloakingPreventsActivation = cloakingPreventsActivation
         , askedReadings = askedReadings
         }
 
 
 middleRowStepFromContext : BotDecisionContext -> MiddleRowStep
 middleRowStepFromContext context =
-    middleRowStepFromReading context.memory.middleRowAskedReadings context.readingFromGameClient
+    middleRowStepFromReading
+        context.memory.middleRowAskedReadings
+        context.memory.cloakingInterferesWithModules
+        context.readingFromGameClient
+
+
+{-| The client's own refusal of a middle-row click, read off the notify
+channel rather than inferred from a click that never seemed to land.
+
+    [ 2026.08.29 20:15:02 ] (notify) Interference from the cloaking you are
+    doing is preventing your systems from functioning at this time.
+
+Captured live in `wingman_run22.log`, on every one of the twenty readings
+`manageMiddleRowModules`'s own doc comment records. Two markers rather than
+the whole sentence, `loadRefusalFromGameLog`'s reason: this line carries no
+name to vary the way a weapon's own refusal does, but matching two substrings
+rather than the exact punctuation is what survives a client that wraps the
+line or re-cases a word this repo has not seen it do yet.
+
+-}
+cloakingInterferenceFromGameLog : ReadingFromGameClient -> Bool
+cloakingInterferenceFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.any
+            (\entry ->
+                stringContainsIgnoringCase "cloaking" entry.text
+                    && stringContainsIgnoringCase "preventing your systems from functioning" entry.text
+            )
+
+
+gameLogEntryIsFromNotifyChannel : EveOnline.ParseUserInterface.GameLogEntry -> Bool
+gameLogEntryIsFromNotifyChannel entry =
+    case entry.channel of
+        Nothing ->
+            True
+
+        Just channel ->
+            (channel |> String.trim |> String.toLower) == "notify"
+
+
+{-| Whether the middle row should stand down because the client's own game log
+has recently refused a click for cloaking, since the last time this ship
+moved.
+
+**Cleared by movement, not by a guessed duration.** EVE's own post-jump cloak
+ends the moment the ship takes a manoeuvring action -- approaching or warping
+decloaks it, where a module click is merely refused and changes nothing -- so
+the reading this ship starts moving again is the reading the client's own
+mechanics say the cloak is gone. That is a fact read off the reading rather
+than a number picked to cover "about how long a gate cloak lasts", which this
+file has no measurement for and no way to get one short of a live client.
+
+**Set the moment the refusal is seen, not before.** There is no proactive
+"about to be cloaked" signal here -- see `cloakingInterferenceFromGameLog` --
+so the first click after a jump still costs one wasted reading before this
+latches. What it prevents is the other nineteen: `manageMiddleRowModules`'s own
+doc comment is the incident this closes.
+
+-}
+cloakingInterferesWithModulesAfterReading :
+    Bool
+    -> { cloakingSeenThisReading : Bool, shipMovedThisReading : Bool }
+    -> Bool
+cloakingInterferesWithModulesAfterReading before facts =
+    if facts.shipMovedThisReading then
+        False
+
+    else if facts.cloakingSeenThisReading then
+        True
+
+    else
+        before
 
 
 {-| The propulsion module of the ship in this reading, if there is one.
@@ -3587,6 +3707,7 @@ initBotMemory =
     , backupCallAskedReadings = 0
     , unlockFleetPilotAskedReadings = 0
     , middleRowAskedReadings = 0
+    , cloakingInterferesWithModules = False
     }
 
 
@@ -3830,6 +3951,9 @@ describeMiddleRowAsk context =
 
         LeaveThePropulsionModuleToTheWarp ->
             "The ship is warping or jumping, so the propulsion module is left to the manoeuvre."
+
+        CloakingPreventsActivation ->
+            "The client's game log says cloaking is interfering with this ship's systems, so the middle row is left alone until it moves again."
 
         GaveUpOnTheMiddleRow ->
             "GAVE UP after "
@@ -4468,6 +4592,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 botMemoryBefore.weaponsAskedReadings
                 context.readingFromGameClient
 
+        -- #426. Cleared by movement rather than a guessed duration -- see
+        -- `cloakingInterferesWithModulesAfterReading`.
+        cloakingInterferesWithModulesNow : Bool
+        cloakingInterferesWithModulesNow =
+            cloakingInterferesWithModulesAfterReading
+                botMemoryBefore.cloakingInterferesWithModules
+                { cloakingSeenThisReading =
+                    cloakingInterferenceFromGameLog context.readingFromGameClient
+                , shipMovedThisReading =
+                    shipIsApproachingNow
+                        || shipIsWarpingOrJumpingFromReading context.readingFromGameClient
+                }
+
         -- The same arrangement once more, and #408 is why this counter exists
         -- at all: the arm it bounds answered `Just` on every reading a
         -- propulsion module read on and the ship was not approaching, and
@@ -4476,6 +4613,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         middleRowNow =
             middleRowStepFromReading
                 botMemoryBefore.middleRowAskedReadings
+                cloakingInterferesWithModulesNow
                 context.readingFromGameClient
     in
     { lastDockedStationNameFromInfoPanel =
@@ -4766,6 +4904,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             -- running, so the row needs nothing and the next stretch of
             -- not-approaching gets the whole allowance back.
             0
+    , cloakingInterferesWithModules = cloakingInterferesWithModulesNow
     }
 
 
