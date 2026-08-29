@@ -776,10 +776,11 @@ type alias BotMemory =
     -- allowance back.
     , middleRowAskedReadings : Int
 
-w    -- Whether the client's own game log has said a middle-row click is being
+    -- Whether the client's own game log has said a middle-row click is being
     -- refused for cloaking, since the last time this ship moved. See
     -- `cloakingPreventsModuleActivation`.
     , cloakingInterferesWithModules : Bool
+
     -- The message box `closeMessageBox` is trying to answer and how many
     -- readings it has been at it, ported from `eve-online-saxrat` (#138, which
     -- is the mission runner's #101). `generalSetupInUserInterface` is evaluated
