@@ -56,6 +56,17 @@ inheritance.** saxrat gates its own on `anyAttackableInOverview`.
 `test_the_row_is_held_on_with_nothing_to_fight` asks the arm over an overview
 carrying rows and nothing attackable in them, so adding that gate fails it.
 
+**#426: a click while cloaked is not one reading, it is up to twenty.**
+Live on `wingman_run22.log`, an always-on module refused for cloaking on twenty
+straight readings after a jump, with the next gate unasked for the whole
+stretch. `TheCloakingMatcherTest` is the client's own refusal, read off the
+notify channel; `TheCloakingHaltTest` is the arm declining both activation
+branches once it is latched; `TheDecisionTreeFallsThroughTest` is the actual
+claim -- that the *tree*, not only the arm, reaches past the middle row while
+cloaked; and `TheLatchAfterReadingTest` is what clears the latch -- the ship
+moving, which is what EVE's own mechanics say ends a post-jump cloak, rather
+than a guessed duration this file has no measurement for.
+
 The cases run the real `Bot.elm` through `elm repl`, and the readings come from
 the real `EveOnline.ParseUserInterface`. Nothing here reads a live client, the
 recorded corpus, or a running bot.
@@ -254,6 +265,56 @@ READINGS = [
 
 STOOD_DOWN = "ARM STOOD DOWN"
 
+# #426. Quoted verbatim from `wingman_run22.log`, where it appeared on twenty
+# straight readings beside an always-on-module click that never landed.
+CLOAK_INTERFERENCE = (
+    "Interference from the cloaking you are doing is preventing your systems "
+    "from functioning at this time.")
+
+
+def game_log(entries):
+    """The host's synthetic game-log node, `test_saxrat_ported_guards.py`'s
+    own builder ported here -- see there for why the text sits under `text`
+    and never `_setText`, and why the node carries no display region."""
+    return node("MacOsHostSyntheticGameLog", {}, [
+        node("MacOsHostSyntheticGameLogEntry",
+             {"timestamp": "2026.08.29 20:15:02",
+              "channel": channel, "text": text})
+        for channel, text in entries])
+
+
+CLOAK_READINGS = [
+    # An inactive always-on module, with the client's own cloaking refusal on
+    # the game log -- `wingman_run22.log`'s own shape.
+    reading_binding("cloakedTankModuleOff", [
+        ship_ui([(120, OFF), (180, ON)]),
+        game_log([("notify", CLOAK_INTERFERENCE)]),
+    ]),
+
+    # The other branch cloak has to cover: approaching with the propulsion
+    # module cold, which would otherwise fire `RunThePropulsionModule`.
+    reading_binding("cloakedApproachingPropulsionCold", [
+        ship_ui([(120, OFF), (180, ON)], maneuver="Approach"),
+        game_log([("notify", CLOAK_INTERFERENCE)]),
+    ]),
+
+    # No refusal on this reading's own game log, ship sitting still -- what a
+    # latch set on an earlier reading has to be told apart from movement by,
+    # not by a fresh sighting that is not there.
+    reading_binding("quietTankModuleOff", [ship_ui([(120, OFF), (180, ON)])]),
+
+    # No refusal, ship approaching -- the movement #426 reads as "the cloak is
+    # gone", whatever a latch carried into this reading said.
+    reading_binding("quietApproaching", [
+        ship_ui([(120, OFF), (180, ON)], maneuver="Approach"),
+    ]),
+
+    # No refusal, ship warping -- the other half of "moved".
+    reading_binding("quietWarping", [
+        ship_ui([(120, OFF), (180, ON)], maneuver="Warp"),
+    ]),
+]
+
 
 class WingmanRepl(ElmRepl):
     """The wingman's own `Bot.elm`, plus what running the middle-row arm costs.
@@ -339,7 +400,42 @@ class WingmanRepl(ElmRepl):
         " , botSettings = defaultBotSettings }"
         " { initBotMemory | middleRowAskedReadings = spent })"
         ".middleRowAskedReadings) |> Maybe.withDefault (-1)",
-    ) + tuple(READINGS)
+        # #426. The context forced into believing cloaking is already
+        # latched, `contextAsked`'s own arrangement for a chosen memory field
+        # -- so the arm and the whole tree can be asked what they do while it
+        # holds, independent of how the flag came to be set.
+        "contextCloaked = \\parsed -> (\\base -> { base | memory ="
+        " { initBotMemory | cloakingInterferesWithModules = True } })"
+        " (context parsed)",
+        "armCloaked = \\parsed -> parsed |> Maybe.andThen (contextCloaked >> manageMiddleRowModules)",
+        "describeCloaked = \\parsed -> armCloaked parsed"
+        ' |> Maybe.map (unpack >> Tuple.first >> String.join " | ")'
+        ' |> Maybe.withDefault "%s"' % STOOD_DOWN,
+        "rootCloaked = \\parsed -> parsed |> Maybe.andThen (\\p ->"
+        " p.shipUI |> Maybe.map (\\s ->"
+        " wingmanDecisionRootInSpaceOrdinary (contextCloaked p) s"
+        ' |> unpack |> Tuple.first |> String.join " | "))'
+        ' |> Maybe.withDefault "NO SHIP UI"',
+        # The real memory update again, this time over both of the fields
+        # #426 touches at once -- so a case can ask whether a reading spends
+        # the click budget while cloaked (it must not) in the same call that
+        # asks whether the latch itself moved.
+        "memoryAfterCloak = \\askedBefore -> \\cloakedBefore -> \\parsed ->"
+        " parsed |> Maybe.map (\\p ->"
+        " updateMemoryForNewReadingFromGame"
+        " { timeInMilliseconds = 0, readingFromGameClient = p"
+        " , screenshot ="
+        " { pixels_1x1 = always Nothing, pixels_2x2 = always Nothing }"
+        " , botSettings = defaultBotSettings }"
+        " { initBotMemory | middleRowAskedReadings = askedBefore"
+        " , cloakingInterferesWithModules = cloakedBefore })",
+        "askedReadingsAfterCloak = \\askedBefore -> \\cloakedBefore -> \\parsed ->"
+        " memoryAfterCloak askedBefore cloakedBefore parsed"
+        " |> Maybe.map .middleRowAskedReadings |> Maybe.withDefault (-1)",
+        "cloakedAfter = \\askedBefore -> \\cloakedBefore -> \\parsed ->"
+        " memoryAfterCloak askedBefore cloakedBefore parsed"
+        " |> Maybe.map .cloakingInterferesWithModules |> Maybe.withDefault False",
+    ) + tuple(READINGS) + tuple(CLOAK_READINGS)
 
     def __init__(self, **kwargs):
         kwargs.setdefault("prefix", "wingman-middle-row-repl-")
@@ -350,20 +446,26 @@ class WingmanRepl(ElmRepl):
 
 def step(inactive_always_on="False", propulsion_present="True",
          propulsion_running="False", deactivating="Just False",
-         approaching="False", warping="False", asked="0"):
-    """The shipped middle-row rule, over six plain facts and a counter.
+         approaching="False", warping="False", cloaking="False", asked="0"):
+    """The shipped middle-row rule, over seven plain facts and a counter.
 
     `deactivating` is written as the Elm value rather than as a flag, because
     the three values it can take are the point: `Just True`, `Just False` and
     `Nothing` are three different facts and a case that could only pass a
     `Bool` could not tell the last two apart.
+
+    `cloaking` defaults to `False` so every existing case keeps asking the
+    question it was written to ask -- #426's fact is orthogonal to the six
+    already here, and `TheCloakingHaltTest` below is what asks about it on its
+    own.
     """
     return ("middleRowStep { inactiveAlwaysOnModulePresent = %s"
             ", propulsionModulePresent = %s, propulsionModuleIsRunning = %s"
             ", propulsionModuleIsDeactivating = %s, shipIsApproaching = %s"
-            ", shipIsWarpingOrJumping = %s, askedReadings = %s }"
+            ", shipIsWarpingOrJumping = %s, cloakingPreventsActivation = %s"
+            ", askedReadings = %s }"
             % (inactive_always_on, propulsion_present, propulsion_running,
-               deactivating, approaching, warping, asked))
+               deactivating, approaching, warping, cloaking, asked))
 
 
 class TheMiddleRowRuleTest(unittest.TestCase):
@@ -1002,6 +1104,154 @@ class TheCounterAdvancesFromTheShippedRuleTest(unittest.TestCase):
             self.repl.evaluate(
                 ["askedAfter 9999 propulsionModuleRunningOnTheApproach == 0"]),
             [True])
+
+
+class TheCloakingMatcherTest(unittest.TestCase):
+    """`cloakingInterferenceFromGameLog`, against real parsed game-log
+    entries -- #426."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+
+    def test_the_live_sentence_matches(self):
+        self.assertEqual(
+            self.repl.evaluate(
+                ["cloakedTankModuleOff |> Maybe.map"
+                 " cloakingInterferenceFromGameLog"]),
+            [True])
+
+    def test_a_quiet_game_log_does_not_match(self):
+        self.assertEqual(
+            self.repl.evaluate(
+                ["quietTankModuleOff |> Maybe.map"
+                 " cloakingInterferenceFromGameLog"]),
+            [False])
+
+    def test_the_channel_is_read_not_assumed(self):
+        """The identical sentence on a channel other than `notify` is not
+        this refusal -- `loadRefusalFromGameLog`'s own filter, ported."""
+        answers = self.repl.evaluate(
+            ["otherChannel |> Maybe.map cloakingInterferenceFromGameLog"],
+            definitions=[reading_binding("otherChannel", [
+                ship_ui([(120, OFF), (180, ON)]),
+                game_log([("combat", CLOAK_INTERFERENCE)]),
+            ])])
+        self.assertEqual(answers, [False])
+
+    def test_an_unrelated_notify_line_does_not_match(self):
+        answers = self.repl.evaluate(
+            ["unrelated |> Maybe.map cloakingInterferenceFromGameLog"],
+            definitions=[reading_binding("unrelated", [
+                ship_ui([(120, OFF), (180, ON)]),
+                game_log([("notify", "Setting course to docking perimeter")]),
+            ])])
+        self.assertEqual(answers, [False])
+
+
+class TheCloakingHaltTest(unittest.TestCase):
+    """`middleRowStep`/`manageMiddleRowModules`, with cloaking already latched
+    -- independent of how the game log got it there, `contextCloaked`'s own
+    point."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+
+    def test_cloaking_declines_the_always_on_module_click(self):
+        """`coldTankModule` would otherwise switch a tank module on --
+        `TheMiddleRowRuleTest`'s own control for this reading."""
+        self.assertEqual(
+            self.repl.strings(["describeCloaked coldTankModule"]),
+            [STOOD_DOWN])
+
+    def test_cloaking_declines_the_propulsion_module_too(self):
+        """`approachingWithTheModuleCold` would otherwise switch the
+        propulsion module on -- the other activation branch, not only the
+        always-on one."""
+        self.assertEqual(
+            self.repl.strings(
+                ["describeCloaked approachingWithTheModuleCold"]),
+            [STOOD_DOWN])
+
+    def test_the_rule_answers_its_own_named_case_not_merely_nothing(self):
+        """`manageMiddleRowModules` answering `Nothing` is also what a
+        genuinely empty row answers -- `middleRowStep` itself has to name the
+        cloaked case distinctly, or a status line reading it could not tell
+        the two apart."""
+        self.assertEqual(
+            self.repl.evaluate(
+                [step(cloaking="True") + " == CloakingPreventsActivation"]),
+            [True])
+
+
+class TheDecisionTreeFallsThroughTest(unittest.TestCase):
+    """`wingmanDecisionRootInSpaceOrdinary`, the whole tree rather than the
+    arm alone -- #426's actual claim is that a jump gets asked for on the
+    reading cloaking blocks the module, not merely that the arm goes quiet."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+
+    def test_the_uncloaked_control_does_click_the_module(self):
+        """The sanity check the next case is measured against: with cloaking
+        not latched, this reading's own path does click a module button."""
+        answers = self.repl.strings(["rootFor coldTankModule"])
+        self.assertIn("Click on this module button.", answers[0])
+
+    def test_cloaked_the_same_reading_never_reaches_the_module_click(self):
+        answers = self.repl.strings(["rootCloaked coldTankModule"])
+        self.assertNotIn("Click on this module button.", answers[0])
+        self.assertNotIn("module button", answers[0])
+
+
+class TheLatchAfterReadingTest(unittest.TestCase):
+    """`cloakingInterferesWithModulesAfterReading`, exercised through the real
+    `updateMemoryForNewReadingFromGame` rather than restated -- #102's own
+    reason, applied to a fresh latch."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+
+    def test_a_fresh_refusal_latches_it(self):
+        answers = self.repl.evaluate(
+            ["cloakedAfter 0 False cloakedTankModuleOff == True"])
+        self.assertTrue(answers[0])
+
+    def test_a_quiet_still_reading_holds_an_existing_latch(self):
+        """No refusal on *this* reading and the ship has not moved: the latch
+        set on an earlier reading has to survive, or every quiet reading in
+        between the refusal and the next jump would re-arm the click."""
+        answers = self.repl.evaluate(
+            ["cloakedAfter 0 True quietTankModuleOff == True"])
+        self.assertTrue(answers[0])
+
+    def test_approaching_clears_a_latched_flag_with_no_fresh_refusal(self):
+        """Cleared by the ship moving, not by a guessed duration --
+        `cloakingInterferesWithModulesAfterReading`'s own point."""
+        answers = self.repl.evaluate(
+            ["cloakedAfter 0 True quietApproaching == False"])
+        self.assertTrue(answers[0])
+
+    def test_warping_clears_it_too(self):
+        answers = self.repl.evaluate(
+            ["cloakedAfter 0 True quietWarping == False"])
+        self.assertTrue(answers[0])
+
+    def test_a_quiet_reading_never_latches_it_from_false(self):
+        answers = self.repl.evaluate(
+            ["cloakedAfter 0 False quietTankModuleOff == False"])
+        self.assertTrue(answers[0])
+
+    def test_the_click_budget_is_not_spent_while_cloaked(self):
+        """`middleRowAskedReadings` resets to 0 on `CloakingPreventsActivation`
+        the same way it does on every other decline -- `askedReadingsAfterCloak`
+        is `askedAfter`'s own arrangement, over both fields #426 touches."""
+        answers = self.repl.evaluate(
+            ["askedReadingsAfterCloak 5 True cloakedTankModuleOff == 0"])
+        self.assertTrue(answers[0])
 
 
 if __name__ == "__main__":
