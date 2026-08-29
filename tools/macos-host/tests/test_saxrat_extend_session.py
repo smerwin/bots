@@ -343,6 +343,25 @@ class TheDirectiveTest(unittest.TestCase):
         self.assertEqual(
             answers[0], "@host extend-session %d" % ESCALATION_ALLOWANCE)
 
+    def test_a_session_hours_past_its_planned_end_still_asks_while_fighting(self):
+        """`secondsToSessionEnd` (`EveOnline/BotFramework.elm`) is `Just
+        ((limit - elapsed) // 1000)` with no floor -- it goes on answering
+        `Just` however negative that gets, it never becomes `Nothing` once a
+        limit is configured. So a session left running well past its planned
+        end is still `secondsBeforeSessionEndToWindDown < secondsRemaining`
+        answering `False` (a very negative number is not greater than 200),
+        and the ask keeps firing for as long as there is still a fight to
+        finish -- this is `saxrat_run63`'s own shape, a 6-hour session found
+        11.2 hours in, still in combat, reported live on PR #423."""
+        run63_overrun_seconds = 18791
+        answers = self.repl.strings(
+            ["directiveFor %s (%s) fourRats"
+             % (DEFAULT_MEMORY,
+                self.milliseconds_remaining(-run63_overrun_seconds))],
+            definitions=[rats_reading("fourRats", 4)])
+        self.assertEqual(
+            answers[0], "@host extend-session %d" % (4 * SECONDS_PER_RAT))
+
 
 class TheWiringTest(unittest.TestCase):
     """What `statusTextFromState` does with the directive, which is not an

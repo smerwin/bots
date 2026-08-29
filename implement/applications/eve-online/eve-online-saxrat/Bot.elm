@@ -2689,8 +2689,8 @@ this bot never has, because nothing here ever built the sentence.
 runner's identically-named constant. That one gates a whole cascade -- recall
 drones, set a route home, dock -- so its 200s had to cover real travel time.
 saxrat has no such cascade (this is a from-scratch addition of the window, not
-a change to an existing one), so this constant gates nothing but *when the ask
-starts appearing in the status text*. The size the ask itself carries is
+a change to an existing one), so this constant gates nothing but _when the ask
+starts appearing in the status text_. The size the ask itself carries is
 `sessionOverrunSecondsNeeded`'s job, not this one's, and `botlab_host.py`
 re-reads that ask on every tick and compares it against the overrun actually
 elapsed -- so asking early only buys lead time, it never has to be large enough
@@ -2739,7 +2739,7 @@ left on the overview.
 Without this, a pocket that happens to spawn a large batch at once multiplies
 `anomalyFightSecondsPerRatRemaining` unbounded -- the host's own
 `MAX_BOT_REQUESTED_OVERRUN_SECONDS` (600s) would still clamp what is actually
-granted, but the number this bot *prints* would read as a claim nobody should
+granted, but the number this bot _prints_ would read as a claim nobody should
 trust. Capping it here keeps the ask honest about what it expects to need
 rather than leaning on the host's ceiling to hide an unbounded multiplication.
 
@@ -2752,7 +2752,7 @@ anomalyFightOverrunCapSeconds =
 {-| How many seconds this bot still needs to finish the fight it is in, judged
 by rats left on the overview right now -- 0 if none are left.
 
-**Live, not remembered.** `getNamesOfRatsInOverview` is asked of the *current*
+**Live, not remembered.** `getNamesOfRatsInOverview` is asked of the _current_
 reading rather than `BotMemory.combatStalemate.ratsInOverview`, which is last
 reading's count kept for the stalemate detector's own reason (comparing this
 reading against the one before it). Reusing that field here would carry a
