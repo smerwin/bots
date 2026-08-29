@@ -2680,6 +2680,239 @@ hostDirectiveSetDestination systemName =
     hostDirectivePrefix ++ "set-destination " ++ systemName
 
 
+{-| How long before the planned session end this bot starts asking for more of
+it. Issue #230: the host has read `@host extend-session <seconds>` out of the
+status text since PR #68, and the mission runner has written one ever since --
+this bot never has, because nothing here ever built the sentence.
+
+**Not tied to any wind-down behaviour of this bot's own**, unlike the mission
+runner's identically-named constant. That one gates a whole cascade -- recall
+drones, set a route home, dock -- so its 200s had to cover real travel time.
+saxrat has no such cascade (this is a from-scratch addition of the window, not
+a change to an existing one), so this constant gates nothing but _when the ask
+starts appearing in the status text_. The size the ask itself carries is
+`sessionOverrunSecondsNeeded`'s job, not this one's, and `botlab_host.py`
+re-reads that ask on every tick and compares it against the overrun actually
+elapsed -- so asking early only buys lead time, it never has to be large enough
+to cover the trip by itself.
+
+200 is mirrored from the mission runner anyway, because the reasoning that
+picks it there also applies here once "gates a cascade" is dropped: at this
+bot's cadence of a few seconds a reading, 200s is several dozen ticks of margin
+before the host's own deadline check can fire, which is ample room for the ask
+to be seen (and re-seen, if one reading's parse happens to miss) well before
+the session actually runs out.
+
+-}
+secondsBeforeSessionEndToWindDown : Int
+secondsBeforeSessionEndToWindDown =
+    200
+
+
+{-| A flat, unmeasured guess at how many seconds one rat still on the overview
+takes to clear.
+
+**Not corpus-derived, and said so rather than dressed up as measured.** The
+mission runner's own flat constants in this family --
+`homeStationTripSecondsPastSessionEnd` (420s),
+`secondsPastSessionEndBeforeGivingUpOnDocking` (120s) -- came out of real run
+logs (docking times, intra-system warps). There is no equivalent corpus for
+saxrat: nothing in `~/eve-bot-logs` has ever been read for "how long does an
+anomaly take to clear from N rats", and this codebase's own habit is to say so
+plainly rather than let a placeholder read like a measurement. A future PR
+should derive this the way those two were derived -- read recorded saxrat runs,
+line up `rats N` in the status line against the reading `rats 0` is reached,
+and replace this guess with a real number (or a real distribution).
+
+45 seconds a rat is a round guess at "about one more volley of shots", nothing
+more considered than that.
+
+-}
+anomalyFightSecondsPerRatRemaining : Int
+anomalyFightSecondsPerRatRemaining =
+    45
+
+
+{-| The most the anomaly-fight half of the ask may claim, however many rats are
+left on the overview.
+
+Without this, a pocket that happens to spawn a large batch at once multiplies
+`anomalyFightSecondsPerRatRemaining` unbounded -- the host's own
+`MAX_BOT_REQUESTED_OVERRUN_SECONDS` (600s) would still clamp what is actually
+granted, but the number this bot _prints_ would read as a claim nobody should
+trust. Capping it here keeps the ask honest about what it expects to need
+rather than leaning on the host's ceiling to hide an unbounded multiplication.
+
+-}
+anomalyFightOverrunCapSeconds : Int
+anomalyFightOverrunCapSeconds =
+    300
+
+
+{-| How many seconds this bot still needs to finish the fight it is in, judged
+by rats left on the overview right now -- 0 if none are left.
+
+**Live, not remembered.** `getNamesOfRatsInOverview` is asked of the _current_
+reading rather than `BotMemory.combatStalemate.ratsInOverview`, which is last
+reading's count kept for the stalemate detector's own reason (comparing this
+reading against the one before it). Reusing that field here would carry a
+one-reading lag into a request whose whole point is silence the moment nothing
+is left to finish -- the rats-just-hit-zero reading has to stop asking on
+itself, not on the reading after.
+
+A per-rat allowance rather than a flat one while any rat remains, because the
+two ways a flat number can be wrong cost differently: sized for one rat, it
+under-asks the instant a second is still up; sized for a full room, it
+over-asks once only a straggler is left. Both are equally unmeasured, so this
+is deliberately the simpler of the two shapes the issue allows, capped at
+`anomalyFightOverrunCapSeconds` rather than left to grow with the room.
+
+-}
+anomalyFightOverrunSecondsNeeded : ReadingFromGameClient -> Int
+anomalyFightOverrunSecondsNeeded readingFromGameClient =
+    let
+        ratsRemaining =
+            getNamesOfRatsInOverview readingFromGameClient |> List.length
+    in
+    if ratsRemaining < 1 then
+        0
+
+    else
+        min anomalyFightOverrunCapSeconds (ratsRemaining * anomalyFightSecondsPerRatRemaining)
+
+
+{-| A flat, estimated allowance for finishing an escalation trip that is
+already under way.
+
+**Flat for the same reason the mission runner's `homeStationTripSecondsPastSessionEnd`
+(420s) is flat rather than a geometric calculation from distance**: this bot
+has no jump-distance or route-length signal for an escalation in progress any
+more than that one has one for the trip home (`grep -n "numJumps" Bot.elm` in
+this file returns nothing -- saxrat carries no such field at all). So there is
+nothing to compute a real allowance from, and a flat number is not a simplified
+version of a better answer, it is the only answer either bot has evidence for.
+
+**Why this is worth covering at all**, per the design decision behind #230: an
+escalation can leave the ship several jumps from home if abandoned mid-trip --
+the risk `escalationIsBeingWorked`'s own doc comment already treats as real
+and previously recorded here, distinct from an ordinary anomaly the ship simply
+warps away from. 420s is a round guess at "long enough to jump back through a
+handful of systems", borrowed at the mission runner's own order of magnitude
+for the analogous flat constant rather than independently derived -- **an
+estimate, not a measurement**. A future PR should size it the way that one was
+sized: read `~/eve-bot-logs` for how long a tracked escalation actually takes
+to finish once asked to wind down.
+
+-}
+escalationTripOverrunAllowanceSeconds : Int
+escalationTripOverrunAllowanceSeconds =
+    420
+
+
+{-| How many seconds this bot still needs to finish an escalation already in
+progress -- `escalationTripOverrunAllowanceSeconds` while the tracker is
+working one, 0 otherwise.
+
+Reads `escalationIsBeingWorked` rather than a memory field, for the same
+reason `anomalyFightOverrunSecondsNeeded` reads the overview live: the request
+is a lease re-derived every reading, not a setting, so the moment the tracker
+stops working an escalation this stops claiming one.
+
+-}
+escalationOverrunSecondsNeeded : ReadingFromGameClient -> Int
+escalationOverrunSecondsNeeded readingFromGameClient =
+    if escalationIsBeingWorked readingFromGameClient then
+        escalationTripOverrunAllowanceSeconds
+
+    else
+        0
+
+
+{-| How many seconds past the planned session end this bot still needs, asked
+of the state it is actually in -- the max of the anomaly-fight half and the
+escalation half, per the design decision behind #230.
+
+**`max`, not a sum**, because the two halves are two different answers to "what
+would leaving right now cost", not two separate costs to add together: leaving
+mid-fight costs the fight, leaving mid-escalation costs the escalation, and
+whichever is larger is the one that decides how long this session needs.
+
+**The two conditions are close to mutually exclusive on this bot, and that is
+worth saying rather than silently relying on it.**
+`escalationOverrunSecondsNeeded` is scoped to a **shut** probe scanner
+(`escalationIsBeingWorked`'s own doc comment: "with the window open ... the
+bot is not working the escalation at all"), and killing rats in an ordinary
+anomaly is scoped the other way -- `getNamesOfRatsInOverview` is read on
+readings this bot reaches with the scanner open on 160,171 of 162,033 recorded
+in-space readings, per that same comment's own count (1.15% shut). So in
+practice at most one of the two halves is ever positive on a given reading, and
+`max` behaves like a plain alternative between them; it is still written as
+`max` rather than a case split on which one applies, because nothing here
+should depend on that near-exclusivity holding forever -- a rat surviving on
+the grid of a shut-scanner escalation room is not something this function
+needs to rule out to stay correct.
+
+-}
+sessionOverrunSecondsNeeded : BotDecisionContext -> Int
+sessionOverrunSecondsNeeded context =
+    max
+        (anomalyFightOverrunSecondsNeeded context.readingFromGameClient)
+        (escalationOverrunSecondsNeeded context.readingFromGameClient)
+
+
+{-| The one thing this bot asks of its host, carried in the status text --
+issue #230, the same channel PR #68 opened for the mission runner and
+`hostDirectiveSetDestination` above already rides for a system name.
+
+**Why the status text.** `InterfaceToHost.ContinueSession` offers exactly three
+fields -- `statusText`, `startTasks` and `notifyWhenArrivedAtTime` -- and the
+first is the only one that can carry a fact the protocol has no type for.
+Adding a type would mean changing the vendored codecs on both sides, the same
+closed-decoder problem #30's game log and #69's `set-destination` both avoided
+by riding a field that already crosses the boundary instead. This rides it in
+the other direction: the host reads for `hostDirectivePrefix ++
+"extend-session "` the same way it already reads for `set-destination`.
+
+**It is a lease, not a setting.** The line is re-derived every reading from
+live state -- rats on the overview right now, whether the tracker is working
+an escalation right now -- so a bot that stops needing the extension stops
+asking for it and the host stops granting it on the next tick. Nothing
+latches: a bot that crashes or hangs asks for nothing at all, which is what
+makes handing a deadline to the thing being bounded safe. `botlab_host.py`
+enforces the cap (`MAX_BOT_REQUESTED_OVERRUN_SECONDS`, 600s) on its side --
+this bot does not try to enforce its own version of that cap, it only asks for
+what `sessionOverrunSecondsNeeded` says it needs and lets the host clamp it.
+`--session-duration-minutes` stays the authority throughout.
+
+**Only while winding down.** Outside the window the answer is the session's
+own planned length and the question does not arise, so the directive is
+absent from the status text of an ordinary reading rather than present and
+zero -- the same distinction `describeQuickMessage` and every other
+`Nothing`-versus-empty field in this file draws.
+
+-}
+hostDirectiveExtendSession : BotDecisionContext -> String
+hostDirectiveExtendSession context =
+    case EveOnline.BotFramework.secondsToSessionEnd context.eventContext of
+        Nothing ->
+            ""
+
+        Just secondsRemaining ->
+            if secondsBeforeSessionEndToWindDown < secondsRemaining then
+                ""
+
+            else
+                let
+                    needed =
+                        sessionOverrunSecondsNeeded context
+                in
+                if needed <= 0 then
+                    ""
+
+                else
+                    hostDirectivePrefix ++ "extend-session " ++ String.fromInt needed
+
+
 {-| The client's own wording for a fleet travel broadcast, read off a live one.
 
 Captured from this account's client on 2026-08-11, three separate broadcasts,
@@ -13800,8 +14033,19 @@ statusTextFromState context =
     -- sitting.
     , [ describeQuickMessage context.memory.quickMessage ]
     , describeCurrentReading
+
+    -- Last, and on its own line. #284's one-line header
+    -- (`describeStatusHeader`) is what an operator and `stall_watch.py`'s
+    -- dedupe both read first as "what is this reading about" -- the mission
+    -- or anomaly, the kill count, the ship's own condition -- and that has to
+    -- stay the *first* line of the reading. Filtered rather than printed
+    -- empty, the same as every other absent-versus-present field here:
+    -- outside the wind-down window this line does not exist, it is not a
+    -- blank one.
+    , [ hostDirectiveExtendSession context ]
     ]
         |> List.concat
+        |> List.filter (String.isEmpty >> not)
         |> String.join "\n"
 
 
