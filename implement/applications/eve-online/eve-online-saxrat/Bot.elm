@@ -47,6 +47,7 @@
       + `anomaly-wait-time`: Minimum time to wait after arriving in an anomaly before considering it finished. Use this if you see anomalies in which rats arrive later than you arrive on grid.
       + `warp-at`: Distance in km to warp to when warping to an anomaly, e.g. `warp-at=30`. Must match one of the game client's own preset "Warp to Within" distances offered in that menu (typically 0, 5, 10, 15, 20, 30, 50, 70, 100) -- an arbitrary value will not match any menu entry and will leave the bot stuck. Defaults to 100.
       + `accept-fleet-invite-from`: Name of a pilot whose fleet invitations this bot should accept, exactly as the client writes it. You can use this setting multiple times to name several pilots. With no such setting the bot accepts no invitation at all and declines every dialog as it always has -- and note the client renders a fleet invitation as an ordinary message box, so before this setting existed the bot actively clicked 'No' on them. Accepting means the fleet commander can warp this ship, so name only pilots you would hand the ship to.
+      + `fleet-commander`: Set this to 'yes' to make the bot **send** fleet broadcasts as well as read them. Off by default, and with it off nothing about this bot changes at all. With it on the bot broadcasts four things, each fired from a fact the client has reported rather than from what the bot means to do next: `Broadcast: Jump to` on the route's next stargate, once the Selected Item panel is showing that gate and offering its own Jump button; `Broadcast: At Location` once the client shows a locked target with rats on the overview, so the fleet is told the ship is engaged rather than on its way; `Broadcast: Target` on the rat the client marks as this ship's active target, which is never a fleet-mate because a row whose name is in Local is a pilot and is excluded before anything is clicked; and `Broadcast: Need Backup` once the retreat is actually under way -- the combat log past `run-away-incoming-damage-threshold` and the client reporting the ship in warp -- so it costs the retreat nothing. Every call is sent at most once: the client's own broadcast banner is read back to confirm it, and the bot latches on what it reads there, because that banner never clears and real people are on the other end of it. A call the banner does not read back within 20 readings is given up on, said in the status line, and the reading handed back to flying the ship. The bot does **not** use `Warp Fleet (Point)`, which moves other players' ships rather than telling them where to go.
       + `orbit-in-combat`: Set this to 'yes' to orbit the target instead of keeping range or aligning.
       + `keep-at-range`: Set this to 'yes' to keep range from the target instead of orbiting or aligning.
       + `approach-in-combat`: Set this to 'yes' to approach the target and close right up to it, instead of keeping range or aligning. For a brawler fit -- webs, scramblers, short-range guns -- that has to be on top of the rat, which neither of the two settings above does: orbit holds transversal at a distance and keep-at-range holds a distance on purpose. The three are mutually exclusive and are read in the order they are listed here, so `orbit-in-combat=yes` wins over `keep-at-range=yes`, which wins over this; with none of them set the bot aligns as it always has. The approach is a double click on the overview row and presses no key, so unlike `orbit-in-combat` this needs no keyboard binding set up in the client. It has no distance and takes none: the ship closes all the way and stays there, which is the point of it and is also its cost -- a ship sitting on top of a rat has zero transversal against anything that tracks, so do not set this on a fit that wants to be moving across its target.
@@ -223,6 +224,12 @@ defaultBotSettings =
     -- Empty for the same reason, and the cost of a wrong entry is larger: a
     -- pilot on this list can send this ship anywhere in New Eden.
     , followFleetBroadcastFrom = []
+
+    -- Off, so a bot nobody configures broadcasts nothing and behaves exactly as
+    -- it did before this setting existed. Every broadcasting arm is gated on
+    -- this one answer through `fleetBroadcastStep`, rather than each arm asking
+    -- for itself -- one gate is one thing to get wrong.
+    , fleetCommander = AppSettings.No
     }
 
 
@@ -278,6 +285,15 @@ parseBotSettings =
                             settings.followFleetBroadcastFrom ++ splitSettingIntoNames pilotNames
                     }
                 )
+           )
+         , ( "fleet-commander"
+           , -- Yes-or-no rather than a list of pilots, because a broadcast is
+             -- addressed to the fleet this ship is already in rather than to a
+             -- pilot named here: there is nothing for a name to select. The
+             -- two settings above are the ones that decide whose word this ship
+             -- takes; this one decides whether it says anything of its own.
+             AppSettings.valueTypeYesOrNo
+                (\commanding settings -> { settings | fleetCommander = commanding })
            )
          , ( "run-away-incoming-damage-threshold"
            , AppSettings.valueTypeInteger (\threshold settings -> { settings | runAwayIncomingDamageThreshold = threshold })
@@ -542,6 +558,7 @@ type alias BotSettings =
     , ammoSwapRangeMeters : Maybe Int
     , acceptFleetInviteFrom : List String
     , followFleetBroadcastFrom : List String
+    , fleetCommander : AppSettings.YesOrNo
     }
 
 
@@ -731,6 +748,12 @@ type alias BotMemory =
     -- `fleetAtLocationDestinationAsked` above, same shape as
     -- `fleetBroadcastSeen`.
     , fleetAtLocationBroadcastSeen : Maybe String
+
+    -- The other direction of the same window: what this ship has broadcast to
+    -- the fleet, rather than what the fleet broadcast to it. Written on every
+    -- reading whatever the bot is doing, and read by the arms that send. See
+    -- `FleetBroadcastMemory`.
+    , fleetBroadcast : FleetBroadcastMemory
     , destinationAskReadings : Int
     , routeSettingGivenUp : Bool
 
@@ -1658,6 +1681,7 @@ anomalyBotDecisionRoot context =
      , context.memory.maxTargetsLastChange
      , context.memory.droneLaunchLastChange
      , context.memory.lockBatchLastChange
+     , context.memory.fleetBroadcast.lastChange
      ]
         |> List.filterMap identity
         |> List.foldr describeBranch (anomalyBotDecisionRootBeforeApplyingSettings context)
@@ -1700,67 +1724,86 @@ anomalyBotDecisionRootBeforeApplyingSettings context =
                             -- wrong.
                             ((context.readingFromGameClient.shipUI
                                 |> Maybe.andThen (runAwayIfLowHealth context)
+                                -- The backup call, and only that one, on a
+                                -- reading the retreat would have spent
+                                -- re-warping a ship already in warp. See
+                                -- `runAwayAndTellTheFleet` for why it cannot
+                                -- sit below this arm instead.
+                                |> Maybe.map (runAwayAndTellTheFleet context)
                              )
                                 |> Maybe.withDefault
-                                    (respondToFleetAtLocationBroadcast context
+                                    -- Below the retreat, so a ship worth saving
+                                    -- is saved before anything is said about
+                                    -- it, and above everything that flies the
+                                    -- ship, so a call goes out beside the
+                                    -- action it is about rather than after it.
+                                    -- Answers `Nothing` on every reading with
+                                    -- nothing to say and on every reading
+                                    -- `fleet-commander` is unset, which is
+                                    -- every reading of a bot that does not set
+                                    -- it.
+                                    (sendFleetBroadcastAsFleetCommander fleetBroadcastVerbsSent context
                                         |> Maybe.withDefault
-                                            (respondToFleetBackupBroadcast context
+                                            (respondToFleetAtLocationBroadcast context
                                                 |> Maybe.withDefault
-                                                    (followFleetBroadcast context
+                                                    (respondToFleetBackupBroadcast context
                                                         |> Maybe.withDefault
-                                                            (branchDependingOnDockedOrInSpace
-                                                                { ifDocked =
-                                                                    continueIfShouldHide
-                                                                        { ifShouldHide =
-                                                                            describeBranch "Stay docked." waitForProgressInGame
+                                                            (followFleetBroadcast context
+                                                                |> Maybe.withDefault
+                                                                    (branchDependingOnDockedOrInSpace
+                                                                        { ifDocked =
+                                                                            continueIfShouldHide
+                                                                                { ifShouldHide =
+                                                                                    describeBranch "Stay docked." waitForProgressInGame
+                                                                                }
+                                                                                context
+                                                                                |> Maybe.withDefault
+                                                                                    (if
+                                                                                        context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
+                                                                                            && (context.readingFromGameClient
+                                                                                                    |> infoPanelRouteFirstMarkerFromReadingFromGameClient
+                                                                                                    |> (==) Nothing
+                                                                                               )
+                                                                                            -- A "Warp to Site" opportunity takes
+                                                                                            -- precedence over staying docked: the
+                                                                                            -- Opportunities panel this comes from is
+                                                                                            -- part of the persistent left sidebar
+                                                                                            -- (like the route panel), so it's
+                                                                                            -- checkable even while docked. Undocking
+                                                                                            -- here rather than trying to click it
+                                                                                            -- directly from dock -- untested whether
+                                                                                            -- that even works -- lets the very next
+                                                                                            -- tick's normal in-space priority chain
+                                                                                            -- (which already puts this ahead of
+                                                                                            -- tether/dock) pick it up once genuinely
+                                                                                            -- in space.
+                                                                                            && (context.readingFromGameClient
+                                                                                                    |> escalationEntriesPermitted context.eventContext.botSettings
+                                                                                                    |> warpToOpportunitySiteIfAvailable
+                                                                                                    |> (==) Nothing
+                                                                                               )
+                                                                                     then
+                                                                                        describeBranch
+                                                                                            "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
+                                                                                            waitForProgressInGame
+
+                                                                                     else
+                                                                                        undockUsingStationWindow context
+                                                                                    )
+                                                                        , ifSeeShipUI =
+                                                                            \shipUI ->
+                                                                                runAwayIfLowHealth context shipUI
+                                                                                    |> Maybe.withDefault
+                                                                                        (continueIfShouldHide
+                                                                                            { ifShouldHide = hideFromNeutralInLocal context
+                                                                                            }
+                                                                                            context
+                                                                                            |> Maybe.withDefault
+                                                                                                (decideNextActionWhenInSpace context { shipUI = shipUI })
+                                                                                        )
                                                                         }
                                                                         context
-                                                                        |> Maybe.withDefault
-                                                                            (if
-                                                                                context.memory.noProbeScanResultsAndNoRouteLastTimeInSpace
-                                                                                    && (context.readingFromGameClient
-                                                                                            |> infoPanelRouteFirstMarkerFromReadingFromGameClient
-                                                                                            |> (==) Nothing
-                                                                                       )
-                                                                                    -- A "Warp to Site" opportunity takes
-                                                                                    -- precedence over staying docked: the
-                                                                                    -- Opportunities panel this comes from is
-                                                                                    -- part of the persistent left sidebar
-                                                                                    -- (like the route panel), so it's
-                                                                                    -- checkable even while docked. Undocking
-                                                                                    -- here rather than trying to click it
-                                                                                    -- directly from dock -- untested whether
-                                                                                    -- that even works -- lets the very next
-                                                                                    -- tick's normal in-space priority chain
-                                                                                    -- (which already puts this ahead of
-                                                                                    -- tether/dock) pick it up once genuinely
-                                                                                    -- in space.
-                                                                                    && (context.readingFromGameClient
-                                                                                            |> escalationEntriesPermitted context.eventContext.botSettings
-                                                                                            |> warpToOpportunitySiteIfAvailable
-                                                                                            |> (==) Nothing
-                                                                                       )
-                                                                             then
-                                                                                describeBranch
-                                                                                    "No anomalies to hunt and no route set last time we were in space, and still no route now -- stay docked instead of undocking right back into the same dead end."
-                                                                                    waitForProgressInGame
-
-                                                                             else
-                                                                                undockUsingStationWindow context
-                                                                            )
-                                                                , ifSeeShipUI =
-                                                                    \shipUI ->
-                                                                        runAwayIfLowHealth context shipUI
-                                                                            |> Maybe.withDefault
-                                                                                (continueIfShouldHide
-                                                                                    { ifShouldHide = hideFromNeutralInLocal context
-                                                                                    }
-                                                                                    context
-                                                                                    |> Maybe.withDefault
-                                                                                        (decideNextActionWhenInSpace context { shipUI = shipUI })
-                                                                                )
-                                                                }
-                                                                context
+                                                                    )
                                                             )
                                                     )
                                             )
@@ -3277,6 +3320,975 @@ respondToFleetAtLocationBroadcast context =
             )
 
 
+{-| The client's own broadcast verbs, all of them, read off a live client
+rather than written from the English.
+
+Eight sit on the fleet window as buttons and the rest on an object's context
+menu, and the two need different mechanisms -- see
+`fleetBroadcastVerbMechanism`. Only four are ever sent
+(`fleetBroadcastVerbsSent`). The rest are defined and unsent on purpose: what
+the client calls a verb is the half that cannot be re-derived from this source,
+and sending one more should be an entry added to a list rather than another
+capture session against somebody's live client.
+
+**Six of the eight buttons carry `_elementId = fleetwindow.<lambda>`**, which
+is not an identifier -- so matching a button on `_elementId` silently maps six
+of them to one name, and the match has to be on `_hint`. Their positions are
+36px apart and shift when the set changes, so no indexing either. See
+`fleetWindowBroadcastButton`.
+
+**`Broadcast: Jump to` has a lowercase `to`.** A matcher written from the
+English would have got that wrong and failed in this repo's usual direction:
+nothing matches, the branch never fires, and nothing complains.
+
+Two entries a stargate's menu also offers are deliberately **not** here.
+`Warp Fleet (Point)` and `Warp Fleet (Point) to Within` are not broadcasts at
+all -- they move other players' ships rather than telling them where to go,
+which is a materially different thing to hand a bot, and it is not what this
+setting is for.
+
+Captured 2026-08-19 for issue #417: the eight buttons off the fleet window,
+three verbs off a stargate's context menu, and two off a `Centii Minion`'s.
+
+-}
+type FleetBroadcastVerb
+    = BroadcastNeedBackup
+    | BroadcastJumpTo
+    | BroadcastAtLocation
+    | BroadcastTarget
+    | BroadcastInPositionAt
+    | BroadcastSpottedAnEnemy
+    | BroadcastNeedArmor
+    | BroadcastNeedShield
+    | BroadcastNeedCapacitor
+    | BroadcastHoldPosition
+    | BroadcastWarpTo
+    | BroadcastAlignTo
+    | BroadcastRepairTarget
+
+
+{-| What the client writes for each verb: the button's `_hint` on the fleet
+window, the entry's own text on an object's menu.
+-}
+fleetBroadcastVerbText : FleetBroadcastVerb -> String
+fleetBroadcastVerbText verb =
+    case verb of
+        BroadcastNeedBackup ->
+            "Broadcast: Need Backup"
+
+        BroadcastJumpTo ->
+            "Broadcast: Jump to"
+
+        BroadcastAtLocation ->
+            "Broadcast: At Location"
+
+        BroadcastTarget ->
+            "Broadcast: Target"
+
+        BroadcastInPositionAt ->
+            "Broadcast: In Position at"
+
+        BroadcastSpottedAnEnemy ->
+            "Broadcast: Spotted an Enemy"
+
+        BroadcastNeedArmor ->
+            "Broadcast: Need Armor"
+
+        BroadcastNeedShield ->
+            "Broadcast: Need Shield"
+
+        BroadcastNeedCapacitor ->
+            "Broadcast: Need Capacitor"
+
+        BroadcastHoldPosition ->
+            "Broadcast: Request That the Fleet Hold Position"
+
+        BroadcastWarpTo ->
+            "Broadcast: Warp to"
+
+        BroadcastAlignTo ->
+            "Broadcast: Align to"
+
+        BroadcastRepairTarget ->
+            "Broadcast: Repair Target"
+
+
+{-| Which of the two things this verb is: a button on the fleet window, or an
+entry on the menu of the object the call is about.
+
+The split is not cosmetic. A fleet-window button is a single click and says
+something about this ship; an object menu entry is a multi-reading cascade and
+says something about a particular object, which first has to be the one the
+Selected Item panel is showing.
+
+-}
+type FleetBroadcastMechanism
+    = FleetWindowButton
+    | SelectedItemMenu
+
+
+fleetBroadcastVerbMechanism : FleetBroadcastVerb -> FleetBroadcastMechanism
+fleetBroadcastVerbMechanism verb =
+    case verb of
+        BroadcastJumpTo ->
+            SelectedItemMenu
+
+        BroadcastTarget ->
+            SelectedItemMenu
+
+        BroadcastWarpTo ->
+            SelectedItemMenu
+
+        BroadcastAlignTo ->
+            SelectedItemMenu
+
+        BroadcastRepairTarget ->
+            SelectedItemMenu
+
+        _ ->
+            FleetWindowButton
+
+
+{-| The four this bot sends, and the list nothing else may grow past.
+
+Everything outside it is defined and never sent. `fleetBroadcastCall` is what
+actually decides -- this list is the same claim written where it can be read and
+executed, so "which verbs does this bot send" has one answer rather than four
+scattered warrant functions to be counted by hand.
+
+-}
+fleetBroadcastVerbsSent : List FleetBroadcastVerb
+fleetBroadcastVerbsSent =
+    [ BroadcastNeedBackup
+    , BroadcastJumpTo
+    , BroadcastAtLocation
+    , BroadcastTarget
+    ]
+
+
+{-| One call: the verb to send, what identifies it, and what the client's own
+banner has to say for it to count as sent.
+
+`identity` is the de-duplication key and the status text, so a call that is
+genuinely a new thing to say -- a different gate, a different primary, a
+different site -- reads as a different identity, and one that is the same thing
+said twice reads as the same.
+
+`bannerMustContain` is the confirmation. The banner carries the exact text of
+the last broadcast the client rendered, so success is read back rather than
+assumed from having dispatched a click.
+
+-}
+type alias FleetBroadcastCall =
+    { verb : FleetBroadcastVerb
+    , identity : String
+    , bannerMustContain : List String
+    }
+
+
+{-| The one call this reading warrants, if any -- and nothing about whether the
+bot is allowed to send it.
+
+**Every warrant is a fact the client has reported, never an intention.** A jump
+is warranted by the client's own panel offering to jump that gate, a target call
+by the client marking a row as this ship's active target, an at-location call by
+the client showing a lock with rats on the overview, and a backup call by the
+combat log plus the client reporting the ship already in warp. Nothing here asks
+what the decision tree is about to do, which is the whole of the issue's
+"a fleet told 'in position' by a ship still aligning is being misled".
+
+Ordered rather than filtered, because only one call can be in flight: the ship's
+own emergency first, then the gate the fleet has to follow through, then arrival,
+then the primary. A reading warrants at most one thing to say.
+
+Free of the `fleet-commander` gate on purpose -- `fleetBroadcastStep` is where
+that lives, so there is one gate rather than four.
+
+-}
+fleetBroadcastCall :
+    { incomingDamagePastTheThreshold : Bool }
+    -> ReadingFromGameClient
+    -> Maybe FleetBroadcastCall
+fleetBroadcastCall situation readingFromGameClient =
+    [ fleetNeedBackupCall situation readingFromGameClient
+    , fleetJumpToCall readingFromGameClient
+    , fleetAtLocationCall readingFromGameClient
+    , fleetTargetCall readingFromGameClient
+    ]
+        |> List.filterMap identity
+        |> List.head
+
+
+{-| Backup, from the retreat's own armed signal and from the ship being in warp.
+
+Both halves are the client speaking. The first is the combat log summed over
+`incomingDamageWindowSeconds` past `run-away-incoming-damage-threshold`, which is
+the one retreat guard saxrat ships armed; the second is the ship UI reporting a
+warp or a jump.
+
+**The warp half is what makes this cost the retreat nothing**, and it is why this
+is the only call sent from inside the retreat's own branch (see
+`runAwayAndTellTheFleet`). On a reading where the ship is already in warp,
+`runAway`'s own action is a warp command re-issued at a ship that is already
+warping; spending that reading on one click of a fleet-window button takes
+nothing away from getting out. Firing on the damage alone would have put a click
+in front of the warp that saves the ship, which is not a trade a broadcast gets
+to make.
+
+-}
+fleetNeedBackupCall :
+    { incomingDamagePastTheThreshold : Bool }
+    -> ReadingFromGameClient
+    -> Maybe FleetBroadcastCall
+fleetNeedBackupCall situation readingFromGameClient =
+    if not situation.incomingDamagePastTheThreshold then
+        Nothing
+
+    else if not (shipIsWarpingOrJumping readingFromGameClient) then
+        Nothing
+
+    else
+        Just
+            { verb = BroadcastNeedBackup
+            , identity =
+                "Need Backup leaving "
+                    ++ (currentSolarSystemNameFromReading readingFromGameClient
+                            |> Maybe.withDefault "an unnamed system"
+                       )
+            , bannerMustContain = [ fleetBackupBroadcastMarker ]
+            }
+
+
+{-| The gate call, from the same verdict that presses the Jump button.
+
+`routeStargateJumpFromReading` answering `PressTheJumpButton` means the client's
+Selected Item panel is showing the stargate the route names for the next system
+_and_ offering its own Jump for it -- so the ship is at that gate and can take
+it now. That is a fact about where the ship is, not a plan, and it is the same
+declaration `jumpThroughRouteStargate` decides on, so the broadcast and the jump
+cannot come to disagree about which gate is being taken.
+
+Two further conditions narrow it to the readings the jump path actually runs on.
+A ship in warp is not at a gate whatever the panel is showing, and a fight
+underway means the panel is showing something left over rather than the next leg
+of a trip. Without them this arm sits above the fight in the decision tree and
+could take a reading from it on the strength of a stale panel.
+
+**The gate's own name is the confirmation.** The wording the client wraps a
+`Broadcast: Jump to` in was not captured -- only the menu entry was -- so this
+claims the least it can claim and no more: the banner has to name the gate this
+call is about, and to have changed since the call started. Where a measured
+wording exists (`fleetBackupBroadcastMarker`, `fleetAtLocationBroadcastMarker`)
+that wording is what the call asks for instead.
+
+-}
+fleetJumpToCall : ReadingFromGameClient -> Maybe FleetBroadcastCall
+fleetJumpToCall readingFromGameClient =
+    if shipIsWarpingOrJumping readingFromGameClient then
+        Nothing
+
+    else if combatFightIsUnderway readingFromGameClient then
+        Nothing
+
+    else
+        case routeStargateJumpFromReading readingFromGameClient of
+            PressTheJumpButton gateName ->
+                Just
+                    { verb = BroadcastJumpTo
+                    , identity = "Jump to '" ++ gateName ++ "'"
+                    , bannerMustContain = [ gateName ]
+                    }
+
+            _ ->
+                Nothing
+
+
+{-| Arrival, from the client reporting the ship engaged rather than on its way.
+
+`combatFightIsUnderway` is the client holding a lock _and_ drawing rats on the
+overview -- a lock the client reports, which is the issue's own example of the
+right signal. A ship still aligning, still warping, or still deciding has
+neither.
+
+The site is part of the identity, so the next anomaly gets its own call and the
+one the ship is standing in does not get a second. Where the probe scanner names
+no site -- a deadspace pocket behind an acceleration gate -- the system alone is
+the identity, which means one call for the whole system rather than one per
+pocket. That is the quiet direction, and it is the one to fail in.
+
+-}
+fleetAtLocationCall : ReadingFromGameClient -> Maybe FleetBroadcastCall
+fleetAtLocationCall readingFromGameClient =
+    if not (combatFightIsUnderway readingFromGameClient) then
+        Nothing
+
+    else
+        Just
+            { verb = BroadcastAtLocation
+            , identity =
+                "At Location in "
+                    ++ (currentSolarSystemNameFromReading readingFromGameClient
+                            |> Maybe.withDefault "an unnamed system"
+                       )
+                    ++ (getCurrentAnomalyIDAsSeenInProbeScanner readingFromGameClient
+                            |> Maybe.map (\anomalyID -> ", site " ++ anomalyID)
+                            |> Maybe.withDefault ", no site on the scanner"
+                       )
+            , bannerMustContain = [ fleetAtLocationBroadcastMarker ]
+            }
+
+
+{-| The target call, about the row the client itself marks as active.
+
+**Nothing here picks a rat by name**, which is #413's problem and the reason the
+row is taken from `myActiveTargetIndicator` instead: a rat's overview row carries
+its name three times over, so two rats of one type are indistinguishable by name
+and a name match against rows is not selective. The client knows which object
+this ship's guns are pointed at, and that is the one the fleet is being told
+about.
+
+-}
+fleetTargetCall : ReadingFromGameClient -> Maybe FleetBroadcastCall
+fleetTargetCall readingFromGameClient =
+    ratToCallAsTarget readingFromGameClient
+        |> Maybe.andThen .objectName
+        |> Maybe.map
+            (\name ->
+                { verb = BroadcastTarget
+                , identity = "Target '" ++ name ++ "'"
+
+                -- `Target Centii Minion (Centii Minion)` is what the banner
+                -- read back live, so both halves are asserted: the verb the
+                -- client renders and the object it named.
+                , bannerMustContain = [ "Target", name ]
+                }
+            )
+
+
+{-| The one row a target call may be made about, or nothing.
+
+Four filters and every one of them is about not calling the wrong thing.
+
+**A row that is not `_display`ed is not clicked**, this file's standing rule: a
+virtualised row keeps the region of whatever was recycled into its place.
+
+**The active target is the client's answer to "which object", not this bot's.**
+
+**A fleet-mate is excluded before anything is clicked, and so is every other
+pilot.** The fleet's own ships are on this overview -- `Imperial Navy Slicer`
+rows sat beside the rats in the capture this was written from -- and a target
+call on one of them is a fleet told to shoot a friendly. The exclusion is the
+membership reading saxrat already has, used the other way round: Local lists
+every pilot in the system by name and a rat never appears there, so a row whose
+name is in Local is a player. `chatUserIsKnownFleetmate` is what proves the
+fleet's own ships are in that list; this filter does not need the hint, because
+it excludes every pilot rather than only the fleet's.
+
+**A row with no name is excluded**, since absent evidence must not read as
+"harmless rat" -- the direction this has to fail in.
+
+-}
+ratToCallAsTarget : ReadingFromGameClient -> Maybe OverviewWindowEntry
+ratToCallAsTarget readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter overviewEntryIsActiveTarget
+        |> List.filter iconSpriteHasColorOfRat
+        |> List.filter (overviewEntryIsAPilot readingFromGameClient >> not)
+        |> List.head
+
+
+{-| Every pilot Local is showing, fleet-mates included.
+
+`getNamesOfOtherPilotsInOverview` drops fleet-mates on purpose -- it is looking
+for strangers in an anomaly. This one wants the whole list, because what it
+feeds is a guard against clicking a _player's_ row, and a fleet-mate's row is
+the most dangerous one of all.
+
+-}
+pilotNamesInLocalChat : ReadingFromGameClient -> List String
+pilotNamesInLocalChat readingFromGameClient =
+    readingFromGameClient
+        |> localChatWindowFromUserInterface
+        |> Maybe.andThen .userlist
+        |> Maybe.map .visibleUsers
+        |> Maybe.withDefault []
+        |> List.filterMap .name
+
+
+{-| Whether this overview row is a player rather than a rat.
+
+A row with no name answers `True`: absent evidence is a pilot here, since the
+cost of being wrong is a target call broadcast on a fleet-mate.
+
+-}
+overviewEntryIsAPilot : ReadingFromGameClient -> OverviewWindowEntry -> Bool
+overviewEntryIsAPilot readingFromGameClient entry =
+    case entry.objectName of
+        Nothing ->
+            True
+
+        Just name ->
+            pilotNamesInLocalChat readingFromGameClient
+                |> List.any
+                    (\pilot ->
+                        String.toLower (String.trim pilot) == String.toLower (String.trim name)
+                    )
+
+
+{-| How many readings one call gets before the bot stops trying to send it.
+
+Sized on the mechanism rather than on taste. A fleet-window button is one click
+and reads back on the next reading or two; an object menu is a real cascade, and
+`readingsToWaitForAFirstContextMenu` alone is 10, because a freshly opened menu
+reads back as no menu at all while it renders. So a cascade that is behaving
+normally can legitimately spend a dozen readings, and a bound under that would
+give up on menus that were about to work.
+
+Past it the arm hands the reading back -- see `describeFleetBroadcastGaveUp`,
+which is a status clause rather than a decision line for exactly the reason
+`describeGateGaveUp` is.
+
+-}
+fleetBroadcastGiveUpReadings : Int
+fleetBroadcastGiveUpReadings =
+    20
+
+
+{-| How many calls one session may confirm, as a backstop under the
+de-duplication rather than instead of it.
+
+Nothing plausible reaches this: a call is sent once per gate, per site and per
+primary, and a long session takes tens of gates. What it bounds is the shape
+this file has shipped three times -- a rule that turns out to fire on every
+reading -- with real people on the other end of it.
+
+-}
+fleetBroadcastsPerSession : Int
+fleetBroadcastsPerSession =
+    100
+
+
+{-| How many confirmed calls are remembered, which is what de-duplication costs.
+
+A call that has fallen out of this list can be sent again. Sixteen is more than
+one grid's worth of primaries, so what falls out is a gate or a site the ship
+left long ago -- and re-announcing a site the fleet has come back to is a
+sentence the fleet wants rather than spam. An unbounded list would be a session's
+worth of strings held for the sake of never repeating anything, which is the
+wrong side of the trade.
+
+-}
+fleetBroadcastsRemembered : Int
+fleetBroadcastsRemembered =
+    16
+
+
+{-| What this ship has told the fleet, and what it is in the middle of telling.
+
+`broadcast` is the de-duplication: an identity in it has been read back off the
+client's own banner and is never sent again while it is remembered.
+`asking`/`askedReadings` are the bound, and `bannerWhenAsked` is what stops a
+fleet-mate's older broadcast being mistaken for this ship's own -- the banner
+never clears, so "it contains our marker" is not by itself evidence that our
+call is what put it there.
+
+-}
+type alias FleetBroadcastMemory =
+    { asking : Maybe String
+    , askedReadings : Int
+    , bannerWhenAsked : Maybe String
+    , broadcast : List String
+    , sent : Int
+    , givenUp : Int
+    , lastChange : Maybe String
+    }
+
+
+initFleetBroadcastMemory : FleetBroadcastMemory
+initFleetBroadcastMemory =
+    { asking = Nothing
+    , askedReadings = 0
+    , bannerWhenAsked = Nothing
+    , broadcast = []
+    , sent = 0
+    , givenUp = 0
+    , lastChange = Nothing
+    }
+
+
+{-| What to do about broadcasting on this reading.
+
+A pure function over a small record, with three readers -- the memory update
+that advances the counters, the arm that sends, and the status clause that says
+what is happening -- so a broadcast decided in one place and reported in another
+cannot be two places that disagree.
+
+**This is where `fleet-commander` is gated, and it is the only place.** Every
+arm reaches the client through this one answer, so the setting cannot be
+half-honoured by an arm that forgot to ask.
+
+The order of the clauses is load-bearing. A call already broadcast is dropped
+before anything else looks at it, so the banner persisting cannot re-send it. A
+confirmation is taken before the give-up, so a call the banner reads back on the
+very last reading still latches instead of being recorded as abandoned. And the
+session cap sits below the confirmation for the same reason: reaching it stops
+new calls, it does not throw away one already in flight.
+
+-}
+type alias FleetBroadcastCase =
+    { commanderMode : Bool
+    , call : Maybe FleetBroadcastCall
+    , alreadyBroadcast : Bool
+    , bannerConfirmsTheCall : Bool
+    , asking : Maybe String
+    , askedReadings : Int
+    , broadcastsSent : Int
+    }
+
+
+type FleetBroadcastStep
+    = NoBroadcastToMake
+    | RecordTheBroadcastAsSent String
+    | SendTheBroadcast FleetBroadcastCall
+    | GiveUpOnTheBroadcast String
+
+
+fleetBroadcastStep : FleetBroadcastCase -> FleetBroadcastStep
+fleetBroadcastStep broadcastCase =
+    case broadcastCase.call of
+        Nothing ->
+            NoBroadcastToMake
+
+        Just call ->
+            if not broadcastCase.commanderMode then
+                NoBroadcastToMake
+
+            else if broadcastCase.alreadyBroadcast then
+                NoBroadcastToMake
+
+            else if
+                (broadcastCase.asking == Just call.identity)
+                    && broadcastCase.bannerConfirmsTheCall
+            then
+                RecordTheBroadcastAsSent call.identity
+
+            else if fleetBroadcastsPerSession <= broadcastCase.broadcastsSent then
+                NoBroadcastToMake
+
+            else if fleetBroadcastGiveUpReadings < broadcastCase.askedReadings then
+                GiveUpOnTheBroadcast call.identity
+
+            else
+                SendTheBroadcast call
+
+
+{-| Whether this call has already gone out and been read back.
+-}
+fleetBroadcastAlreadyMade : Maybe FleetBroadcastCall -> FleetBroadcastMemory -> Bool
+fleetBroadcastAlreadyMade call memory =
+    case call of
+        Nothing ->
+            False
+
+        Just theCall ->
+            memory.broadcast |> List.member theCall.identity
+
+
+{-| Whether the client's banner is reading this ship's own call back.
+
+Two conditions, and the second is the one that is easy to leave out. The banner
+carries whatever the _fleet_ last broadcast and it never clears, so a fleet-mate
+who broadcast "is at location" an hour ago would otherwise confirm this ship's
+at-location call before it was ever sent -- a latch with no broadcast behind it,
+which is this repo's signature bug with the fleet as its subject. So the text has
+to have changed since the ask began as well as carrying what the call is about.
+
+A fleet-mate broadcasting the same kind of thing during the few readings one ask
+is in flight would still confirm it wrongly. That is bounded rather than
+eliminated: the cost is one call that does not go out, and silence is the
+direction this fails in.
+
+-}
+fleetBroadcastBannerConfirms :
+    { call : Maybe FleetBroadcastCall
+    , bannerNow : Maybe String
+    , bannerWhenAsked : Maybe String
+    }
+    -> Bool
+fleetBroadcastBannerConfirms input =
+    case ( input.call, input.bannerNow ) of
+        ( Just call, Just banner ) ->
+            (Just banner /= input.bannerWhenAsked)
+                && (call.bannerMustContain
+                        |> List.all (\marker -> stringContainsIgnoringCase marker banner)
+                   )
+
+        _ ->
+            False
+
+
+{-| The broadcast memory after one more reading.
+
+Advanced in `updateMemoryForNewReadingFromGame` and nowhere else, which is this
+file's placement rule for anything a bound is counted in: that is the one thing
+running on every reading, so an arm that stops being reached cannot freeze the
+count that is supposed to bound it.
+
+**The counter advances only on `SendTheBroadcast`** -- the one answer that spends
+a reading -- and resets whenever the call changes or there is nothing to say. It
+can over-count, because a reading the arm never got (a message box, the retreat
+holding the tree) still shows the same warrant and still counts. Over-counting
+gives up sooner and broadcasts less, which is the direction to be wrong in.
+
+-}
+fleetBroadcastMemoryAfterReading :
+    { commanderMode : Bool
+    , call : Maybe FleetBroadcastCall
+    , bannerNow : Maybe String
+    , before : FleetBroadcastMemory
+    }
+    -> FleetBroadcastMemory
+fleetBroadcastMemoryAfterReading input =
+    let
+        before : FleetBroadcastMemory
+        before =
+            input.before
+    in
+    case
+        fleetBroadcastStep
+            { commanderMode = input.commanderMode
+            , call = input.call
+            , alreadyBroadcast = fleetBroadcastAlreadyMade input.call before
+            , bannerConfirmsTheCall =
+                fleetBroadcastBannerConfirms
+                    { call = input.call
+                    , bannerNow = input.bannerNow
+                    , bannerWhenAsked = before.bannerWhenAsked
+                    }
+            , asking = before.asking
+            , askedReadings = before.askedReadings
+            , broadcastsSent = before.sent
+            }
+    of
+        NoBroadcastToMake ->
+            { before
+                | asking = Nothing
+                , askedReadings = 0
+                , bannerWhenAsked = Nothing
+                , lastChange = Nothing
+            }
+
+        RecordTheBroadcastAsSent identity ->
+            { before
+                | asking = Nothing
+                , askedReadings = 0
+                , bannerWhenAsked = Nothing
+                , broadcast = identity :: before.broadcast |> List.take fleetBroadcastsRemembered
+                , sent = before.sent + 1
+                , lastChange =
+                    Just
+                        ("Told the fleet: "
+                            ++ identity
+                            ++ ". The client's own broadcast banner read it back, which is what makes it sent rather than clicked."
+                        )
+            }
+
+        GiveUpOnTheBroadcast identity ->
+            let
+                -- The reading the bound is crossed on, counted once. The call
+                -- goes on being warranted afterwards, so this answer repeats
+                -- until the state changes -- and a `givenUp` advanced on every
+                -- one of those readings would be a count of readings dressed as
+                -- a count of calls.
+                justCrossed : Bool
+                justCrossed =
+                    before.askedReadings == fleetBroadcastGiveUpReadings + 1
+            in
+            { before
+                | askedReadings = before.askedReadings + 1
+                , givenUp =
+                    if justCrossed then
+                        before.givenUp + 1
+
+                    else
+                        before.givenUp
+                , lastChange =
+                    if justCrossed then
+                        Just (describeFleetBroadcastGaveUp identity before.askedReadings)
+
+                    else
+                        Nothing
+            }
+
+        SendTheBroadcast call ->
+            let
+                sameCallAsBefore : Bool
+                sameCallAsBefore =
+                    before.asking == Just call.identity
+            in
+            { before
+                | asking = Just call.identity
+                , askedReadings =
+                    if sameCallAsBefore then
+                        before.askedReadings + 1
+
+                    else
+                        0
+                , bannerWhenAsked =
+                    if sameCallAsBefore then
+                        before.bannerWhenAsked
+
+                    else
+                        input.bannerNow
+                , lastChange = Nothing
+            }
+
+
+{-| The step, asked of a decision's context.
+
+The memory it reads has already been advanced for this reading, so the arm and
+the update are answering the same question about the same reading rather than
+one about the last one.
+
+-}
+fleetBroadcastStepFrom : BotDecisionContext -> FleetBroadcastStep
+fleetBroadcastStepFrom context =
+    let
+        call : Maybe FleetBroadcastCall
+        call =
+            fleetBroadcastCall
+                { incomingDamagePastTheThreshold = context.memory.incomingDamage.retreating }
+                context.readingFromGameClient
+    in
+    fleetBroadcastStep
+        { commanderMode = context.eventContext.botSettings.fleetCommander == AppSettings.Yes
+        , call = call
+        , alreadyBroadcast = fleetBroadcastAlreadyMade call context.memory.fleetBroadcast
+        , bannerConfirmsTheCall =
+            fleetBroadcastBannerConfirms
+                { call = call
+                , bannerNow = fleetBroadcastBannerText context.readingFromGameClient
+                , bannerWhenAsked = context.memory.fleetBroadcast.bannerWhenAsked
+                }
+        , asking = context.memory.fleetBroadcast.asking
+        , askedReadings = context.memory.fleetBroadcast.askedReadings
+        , broadcastsSent = context.memory.fleetBroadcast.sent
+        }
+
+
+{-| One of the eight fleet-window buttons, found by the text the client puts in
+its tooltip.
+
+`_hint` rather than `_elementId` for the reason `FleetBroadcastVerb` gives: six
+of the eight have no usable id. Matched whole and ignoring case, the rule
+`useMenuEntryWithTextEqual` already uses for menu entries -- a `contains` match
+would let `Broadcast: Need Armor` be found by asking for `Broadcast: Need`.
+
+Scoped to the fleet window through `fleetWindowDescendants`, which is what stops
+a `_hint` elsewhere in the tree answering for one of these.
+
+-}
+fleetWindowBroadcastButton : String -> ReadingFromGameClient -> Maybe UIElement
+fleetWindowBroadcastButton hint readingFromGameClient =
+    readingFromGameClient
+        |> fleetWindowDescendants
+        |> List.filter
+            (.uiNode
+                >> EveOnline.ParseUserInterface.getHintTextFromDictEntries
+                >> Maybe.map (\nodeHint -> String.toLower (String.trim nodeHint) == String.toLower hint)
+                >> Maybe.withDefault False
+            )
+        |> List.head
+
+
+{-| The row that has to be selected before the Selected Item panel's own menu is
+about the right object, if it is not selected already.
+
+**Right-clicking the panel rather than the overview row is the whole reason this
+exists.** Three consecutive right-clicks on moving overview rows failed during
+the capture this was written from -- the overview re-sorts between the read and
+the click, which this file already records as having shot an asteroid for 290
+readings -- and the panel does not re-sort, so it worked first time.
+
+`Nothing` means the panel is already showing what the call is about. For
+`BroadcastJumpTo` that is the call's own warrant, since
+`routeStargateJumpFromReading` only answers `PressTheJumpButton` where the panel
+is showing that gate.
+
+-}
+fleetBroadcastRowToSelect : FleetBroadcastCall -> ReadingFromGameClient -> Maybe OverviewWindowEntry
+fleetBroadcastRowToSelect call readingFromGameClient =
+    case call.verb of
+        BroadcastTarget ->
+            ratToCallAsTarget readingFromGameClient
+                |> Maybe.andThen
+                    (\row ->
+                        if selectedItemIsOverviewEntry readingFromGameClient row then
+                            Nothing
+
+                        else
+                            Just row
+                    )
+
+        _ ->
+            Nothing
+
+
+{-| Say the one thing this reading warrants saying, or decline the reading.
+
+`Nothing` on every reading there is nothing to say, on every reading the setting
+is off, and on every reading a call has already gone out -- so a bot without
+`fleet-commander` never reaches a client through here at all.
+
+`verbsThisSiteMaySend` is what keeps the retreat's own site from sending
+anything but a backup call: see `runAwayAndTellTheFleet`.
+
+-}
+sendFleetBroadcastAsFleetCommander : List FleetBroadcastVerb -> BotDecisionContext -> Maybe DecisionPathNode
+sendFleetBroadcastAsFleetCommander verbsThisSiteMaySend context =
+    case fleetBroadcastStepFrom context of
+        SendTheBroadcast call ->
+            if not (verbsThisSiteMaySend |> List.member call.verb) then
+                Nothing
+
+            else
+                let
+                    describeIt : String
+                    describeIt =
+                        "Fleet commander: "
+                            ++ fleetBroadcastVerbText call.verb
+                            ++ " -- "
+                            ++ call.identity
+                            ++ ", "
+                            ++ describeFleetBroadcastAsk context.memory.fleetBroadcast
+                in
+                case fleetBroadcastVerbMechanism call.verb of
+                    FleetWindowButton ->
+                        fleetWindowBroadcastButton (fleetBroadcastVerbText call.verb)
+                            context.readingFromGameClient
+                            |> Maybe.map (clickUiElement >> describeBranch describeIt)
+
+                    SelectedItemMenu ->
+                        case fleetBroadcastRowToSelect call context.readingFromGameClient of
+                            Just rowToSelect ->
+                                Just
+                                    (describeBranch
+                                        (describeIt ++ " Select it first, so the panel's own menu is about it.")
+                                        (clickUiElement rowToSelect.uiNode)
+                                    )
+
+                            Nothing ->
+                                context.readingFromGameClient.selectedItemWindow
+                                    |> Maybe.map
+                                        (\panel ->
+                                            describeBranch describeIt
+                                                (useContextMenuCascade
+                                                    ( "the Selected Item panel", panel.uiNode )
+                                                    (useMenuEntryWithTextEqual
+                                                        (fleetBroadcastVerbText call.verb)
+                                                        menuCascadeCompleted
+                                                    )
+                                                    context
+                                                )
+                                        )
+
+        _ ->
+            Nothing
+
+
+{-| The retreat, with one thing said to the fleet on the way out.
+
+The retreat's branch is the only place a backup call can be sent from, because
+`runAwayIfLowHealth` answers `Just` for as long as `incomingDamage.retreating` is
+latched and everything below it is starved for the duration -- so a backup arm
+placed under the retreat would be counted, bounded, and given up on without ever
+having been reached. That is a broadcast that reports success and does nothing,
+which is this project's signature bug.
+
+Only `BroadcastNeedBackup` may be sent here, and it is warranted only while the
+client reports the ship already warping, so what this spends is a reading in
+which `runAway` would have re-issued a warp command at a ship that is already
+warping. Nothing else may preempt getting out.
+
+-}
+runAwayAndTellTheFleet : BotDecisionContext -> DecisionPathNode -> DecisionPathNode
+runAwayAndTellTheFleet context retreat =
+    sendFleetBroadcastAsFleetCommander [ BroadcastNeedBackup ] context
+        |> Maybe.withDefault retreat
+
+
+{-| The give-up, which says what was tried and stops there.
+
+A status clause rather than a decision line, for `describeGateGaveUp`'s reason:
+the arm answers `Nothing` past the bound so the rest of the tree gets the
+reading, and a `Nothing` cannot carry a decision line. Without this the only
+visible trace of a broadcast that never landed would be its absence.
+
+-}
+describeFleetBroadcastGaveUp : String -> Int -> String
+describeFleetBroadcastGaveUp identity askedReadings =
+    "I have been trying to send the fleet broadcast '"
+        ++ identity
+        ++ "' for "
+        ++ String.fromInt askedReadings
+        ++ " readings and the client's own broadcast banner has not read it back, which is past "
+        ++ String.fromInt fleetBroadcastGiveUpReadings
+        ++ ". Stopping rather than sending it again, and getting on with flying the ship."
+
+
+{-| Where one ask has got to, for the decision line that dispatches it.
+-}
+describeFleetBroadcastAsk : FleetBroadcastMemory -> String
+describeFleetBroadcastAsk memory =
+    "reading "
+        ++ String.fromInt memory.askedReadings
+        ++ " of "
+        ++ String.fromInt fleetBroadcastGiveUpReadings
+        ++ ", confirmed off the client's own banner before it counts as sent."
+
+
+{-| The fleet-commander clause in the status line.
+
+Off is said in two words rather than left blank, because "this bot broadcasts
+nothing" is the answer an operator most often wants confirmed. Past the bound it
+carries the give-up itself, which is the only place that sentence appears.
+
+-}
+describeFleetCommander : BotDecisionContext -> String
+describeFleetCommander context =
+    if context.eventContext.botSettings.fleetCommander /= AppSettings.Yes then
+        "FC off"
+
+    else
+        let
+            memory : FleetBroadcastMemory
+            memory =
+                context.memory.fleetBroadcast
+        in
+        "FC "
+            ++ String.fromInt memory.sent
+            ++ " sent, "
+            ++ String.fromInt memory.givenUp
+            ++ " given up, "
+            ++ String.fromInt (List.length memory.broadcast)
+            ++ " remembered"
+            ++ (case fleetBroadcastStepFrom context of
+                    SendTheBroadcast call ->
+                        " (saying '" ++ call.identity ++ "', " ++ describeFleetBroadcastAsk memory ++ ")"
+
+                    GiveUpOnTheBroadcast identity ->
+                        " -- " ++ describeFleetBroadcastGaveUp identity memory.askedReadings
+
+                    RecordTheBroadcastAsSent identity ->
+                        " (the banner read '" ++ identity ++ "' back)"
+
+                    NoBroadcastToMake ->
+                        ""
+               )
+
+
 {-| How long to keep asking before concluding nobody is listening.
 
 The ask costs one line of status text and the host acts on it only when the
@@ -4343,6 +5355,35 @@ overviewEntryIsAStargate entry =
         |> List.any (containsWords "stargate")
 
 
+{-| The verdict, taken from a reading alone.
+
+Split out of `jumpThroughRouteStargate` so `fleetJumpToCall` can ask the same
+question: the gate the fleet is told to jump has to be the gate this ship is
+about to jump, and two constructions of that verdict are two answers that can
+come to disagree about which gate that is.
+
+-}
+routeStargateJumpFromReading : ReadingFromGameClient -> RouteStargateJump
+routeStargateJumpFromReading readingFromGameClient =
+    routeStargateJump
+        { nextSystemOnRoute = nextSystemOnRouteFromReading readingFromGameClient
+        , stargatesOnOverview =
+            readingFromGameClient.overviewWindows
+                |> List.concatMap .entries
+                |> List.filter overviewEntryIsDisplayed
+                |> List.filter overviewEntryIsAStargate
+                |> List.map
+                    (\gate ->
+                        { name = gate.objectName |> Maybe.withDefault ""
+                        , panelIsShowingIt =
+                            selectedItemIsOverviewEntry readingFromGameClient gate
+                        }
+                    )
+        , panelOffersJump =
+            selectedItemButtonNamed readingFromGameClient "selectedItemJump" /= Nothing
+        }
+
+
 {-| Take the route's next stargate by pressing the Selected Item panel's own
 Jump button, where the panel is already showing that gate.
 
@@ -4383,22 +5424,7 @@ jumpThroughRouteStargate context ifThePanelCannotDoIt =
 
         verdict : RouteStargateJump
         verdict =
-            routeStargateJump
-                { nextSystemOnRoute = nextSystemOnRouteFromReading context.readingFromGameClient
-                , stargatesOnOverview =
-                    context.readingFromGameClient.overviewWindows
-                        |> List.concatMap .entries
-                        |> List.filter overviewEntryIsDisplayed
-                        |> List.filter overviewEntryIsAStargate
-                        |> List.map
-                            (\gate ->
-                                { name = gate.objectName |> Maybe.withDefault ""
-                                , panelIsShowingIt =
-                                    selectedItemIsOverviewEntry context.readingFromGameClient gate
-                                }
-                            )
-                , panelOffersJump = jumpButton /= Nothing
-                }
+            routeStargateJumpFromReading context.readingFromGameClient
     in
     case ( verdict, jumpButton ) of
         ( PressTheJumpButton _, Just buttonToPress ) ->
@@ -10020,6 +11046,7 @@ initBotMemory =
     , fleetAtLocationInSystemStanding = Nothing
     , fleetAtLocationDestinationAsked = Nothing
     , fleetAtLocationBroadcastSeen = Nothing
+    , fleetBroadcast = initFleetBroadcastMemory
     , destinationAskReadings = 0
     , routeSettingGivenUp = False
     , escalationStandDownReadings = 0
@@ -12571,6 +13598,8 @@ statusTextFromState context =
                         |> Maybe.map (.objectDistanceInMeters >> distantGateVerdict >> describeDistantGate)
                         |> Maybe.withDefault ""
                    )
+                ++ " | "
+                ++ describeFleetCommander context
                 ++ " | wrecks "
                 ++ (context.memory.lootedWreckIds |> List.length |> String.fromInt)
                 ++ " | "
@@ -16416,6 +17445,24 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         fleetAtLocationBroadcast context.botSettings.followFleetBroadcastFrom
             context.readingFromGameClient
             |> Maybe.map .identity
+    , fleetBroadcast =
+        -- The counters that bound a broadcast, advanced here for the reason
+        -- every other bound in this file is advanced here: this runs on every
+        -- reading whatever the bot is doing, so an arm that stops being reached
+        -- cannot freeze the count that is supposed to stop it asking.
+        --
+        -- `incomingDamageNow.retreating` rather than the previous reading's, so
+        -- a backup call is warranted by the same latched fact
+        -- `runAwayIfLowHealth` is reading on the reading it fires on.
+        fleetBroadcastMemoryAfterReading
+            { commanderMode = context.botSettings.fleetCommander == AppSettings.Yes
+            , call =
+                fleetBroadcastCall
+                    { incomingDamagePastTheThreshold = incomingDamageNow.retreating }
+                    context.readingFromGameClient
+            , bannerNow = fleetBroadcastBannerText context.readingFromGameClient
+            , before = botMemoryBefore.fleetBroadcast
+            }
     , fleetAtLocationDestinationAsked =
         -- Same second-sighting lag `fleetBroadcastFollowed` uses for the
         -- idempotent host directive: safe here because asking again before
