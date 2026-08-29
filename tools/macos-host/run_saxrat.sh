@@ -50,6 +50,17 @@ USAGE='./run_saxrat.sh                                # start a run
 #
 # targeting-range is the max distance (meters) to lock a target from the
 # overview; beyond it the bot approaches instead of locking.
+#
+# fleet-commander is off here on purpose, and it is listed rather than omitted.
+# --settings replaces this whole block wholesale, so a launch of
+# `--settings "fleet-commander=yes"` would start a saxrat with no anomaly-name,
+# no warp-at and no thresholds -- a bot that broadcasts and cannot hunt. Having
+# the line here means turning the feature on is editing a `no` to a `yes`
+# rather than retyping fourteen settings correctly from memory.
+#
+# With it on the bot sends fleet broadcasts as well as reading them; see the
+# `fleet-commander` entry in eve-online-saxrat's own Bot.elm header for which
+# four, and what each one fires from.
 SETTINGS="anomaly-name=sansha hideaway
 anomaly-name=sansha refuge
 anomaly-name=sansha burrow
@@ -62,7 +73,8 @@ keep-at-range=no
 warp-at=10
 targeting-range=37000
 run-away-shield-hitpoints-threshold-percent=-1
-run-away-armor-hitpoints-threshold-percent=80"
+run-away-armor-hitpoints-threshold-percent=80
+fleet-commander=no"
 
 # Answered before the guard below: asking what the flags are must not kill a
 # session that is already running.
