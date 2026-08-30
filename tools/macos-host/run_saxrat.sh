@@ -5,8 +5,9 @@
 #
 # This bot's own EveOnline/* and Common/* framework files predated the
 # ones eve-online-mining-bot has been updated to (it was still on the
-# BotLab.BotInterface_To_Host_2023_02_06 interface). Migrated it to the
-# current framework files and adapted Bot.elm's few call sites that used
+# older BotLab host interface, retired with wingus -- see
+# notes/retire-wingus.md). Migrated it to the current framework files and
+# adapted Bot.elm's few call sites that used
 # now-changed framework APIs (context-menu-cascade custom choices,
 # mouseClickOnUIElement's Result return type, the merged
 # ifSeeShipUI/ifUndockingComplete branch). Confirmed working end-to-end in

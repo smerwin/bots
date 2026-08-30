@@ -21975,9 +21975,12 @@ getNamesOfRatsInOverview readingFromGameClient =
 
 {-| A real pilot on grid also shows up by name in the Local chat
 userlist; a rat/NPC never does. Cross-referencing overview entries
-against Local is how the sibling `eve-online-wingus` bot already does
-this (ported verbatim from there -- same `ChatWindow`/`ChatUserEntry`
-shape in this bot's own `ParseUserInterface.elm`).
+against Local is a technique this bot took verbatim from the sibling
+`eve-online-wingus` bot, which has since been retired along with the
+older BotLab host interface it was the last bot on -- see
+`notes/retire-wingus.md`. Nothing here depends on that app: the
+`ChatWindow`/`ChatUserEntry` shape this reads is vendored in this bot's
+own `ParseUserInterface.elm`.
 -}
 getNamesOfOtherPilotsInOverview : ReadingFromGameClient -> List String
 getNamesOfOtherPilotsInOverview readingFromGameClient =

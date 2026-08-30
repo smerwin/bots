@@ -18,9 +18,9 @@ downstream of it pass, which is how a total defect survived in reachable code.
 
 **The fix is #201's, taken whole rather than re-derived.** `shipWarpingFromReading`
 and `warpJustEnded` are ported byte-identical from `eve-online-saxrat`, which
-already keeps them in step with `eve-online-combat-anomaly-bot` (#201) and
-`eve-online-wingus` (#233) -- all four are compared here, in
-`TheTwoDeclarationsMatchTheThreeAppsThatHadThem`. `warpJustEnded` reads three
+already keeps them in step with `eve-online-combat-anomaly-bot` (#201) --
+every app that carries the rule is compared here, in
+`TheThreeAppsCarryTheSameWorkingTrigger`. `warpJustEnded` reads three
 things rather than two: the previous reading was `Just True`, **the ship UI is
 present now**, and the current reading is not `Just True`. The middle clause is
 load-bearing, and it is load-bearing *here* in a way it is not in the anomaly
@@ -103,10 +103,12 @@ Confirmed by mutation, each failing a named case:
     `test_nothing_acts_on_the_verdict_it_writes`.
   - either consumer given its own second copy of the trigger ->
     `TheOldConditionIsGone.test_both_consumers_read_one_definition`.
-  - the dead condition back in any of the four apps ->
-    `test_wingus_warp_end_trigger.TheFourAppsCarryTheSameWorkingTrigger
-    .test_no_app_still_carries_the_dead_condition`, which is what replaces
-    #233's `TheMissionRunnerIsUntouched`.
+  - the dead condition back in any app that carries the rule ->
+    `TheThreeAppsCarryTheSameWorkingTrigger
+    .test_no_app_still_carries_the_dead_condition`, which is what replaced
+    #233's `TheMissionRunnerIsUntouched` and, in turn, absorbed
+    `test_wingus_warp_end_trigger.TheFourAppsCarryTheSameWorkingTrigger` when
+    that app was retired.
 
 **Unverified: any of it running.** No run has been flown since, and neither
 newly-live consumer has ever fired on the warp half in a recorded run -- by
@@ -121,6 +123,8 @@ work, which is the one direction this must not fail in.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
+import os
+import re
 import unittest
 
 from prerequisites import open_repl
@@ -130,19 +134,44 @@ from test_arrival_pilot_window import (
     COMBAT_ANOMALY_BOT_ELM, WARP_READINGS, body_of_declaration,
     declaration_containing, indented_binding, record_returned_by,
     without_block_comments)
-from test_wingus_warp_end_trigger import (
-    MISSION_RUNNER_BOT_ELM, WINGUS_BOT_ELM, declaration)
 
-# The two declarations #201 built, #233 gave wingus, and #205 asks for here.
+MISSION_RUNNER_BOT_ELM = os.path.join(MISSION_RUNNER_DIR, "Bot.elm")
+
+# The two declarations #201 built and #205 asks for here.
 SHARED_DECLARATIONS = ("shipWarpingFromReading", "warpJustEnded")
 
-# Every app that carries them, in the order they took them.
+# The dead condition, quoted from the issue and from the source every app
+# carried it in. Matched without its parentheses, because two apps quote the
+# shape in a doc comment and the code is what this is about -- the callers
+# below strip block comments first.
+OLD_CONDITION = "shipIsWarping == Just False"
+
+# Every app that carries the working trigger, in the order they took it.
+#
+# There were four until `eve-online-wingus` was retired (see
+# `notes/retire-wingus.md`); it took the rule in #233 and left with the last
+# bot on the 2023 host interface. Nothing about the rule was wingus-specific,
+# so its removal narrows the population and changes no assertion.
 APPS_WITH_THE_RULE = (
     ("saxrat", SAXRAT_BOT_ELM),
     ("combat anomaly bot", COMBAT_ANOMALY_BOT_ELM),
-    ("wingus", WINGUS_BOT_ELM),
     ("mission runner", MISSION_RUNNER_BOT_ELM),
 )
+
+
+def declaration(path, name):
+    """One top-level declaration, doc comment and all, by exact text match.
+
+    Mirrors `TheTwoAppsCarryTheSameRules.declaration` in
+    `test_arrival_pilot_window.py` -- kept local rather than imported because
+    that one is a bound method on a `unittest.TestCase` there.
+    """
+    match = re.search(
+        r"(\{-\|(?:(?!-\})[\s\S])*?-\}\n)?%s :[\s\S]*?(?=\n\n\n)"
+        % re.escape(name), source_of(path))
+    assert match, "no declaration named %r in %s" % (name, path)
+    return match.group(0)
+
 
 # The two declarations that read `weJustFinishedWarping`, and the field each
 # reads it into. Named here so a third reader arriving has to be added by
@@ -234,13 +263,25 @@ CONSUMER_BINDINGS = WARP_READINGS + (
 )
 
 
-class TheTwoDeclarationsMatchTheThreeAppsThatHadThem(unittest.TestCase):
-    """#201 built these once; #233 and now #205 take them whole.
+class TheThreeAppsCarryTheSameWorkingTrigger(unittest.TestCase):
+    """One rule, in every app that carries it, and the dead shape in none.
 
-    Nothing in either declaration is app-specific -- a `Maybe` read off a ship
-    UI, and a three-clause boolean over it -- so a copy that drifts from the
-    others is a bug in whichever one drifted, and the drift is silent: all four
-    still compile and all four still answer.
+    This is `test_wingus_warp_end_trigger.TheFourAppsCarryTheSameWorkingTrigger`
+    relocated when `eve-online-wingus` was retired, merged with this file's own
+    byte-identical check, which asserted exactly the first of its two halves.
+    Its argument survives its subject and is why the case is moved rather than
+    deleted: **what was worth noticing was never "wingus is behind"**, it is
+    that several apps carry one rule that is app-specific in no part of it, and
+    that a copy which drifts still compiles and still answers. So every app is
+    compared byte for byte, and none of them may carry the shape #194 found
+    dead. A further app growing its own copy, or one of the three drifting from
+    the rest, goes red -- which makes a future divergence a decision somebody
+    argues for rather than one the suite lets happen.
+
+    That case itself replaced PR #233's `TheMissionRunnerIsUntouched`, which
+    asserted this bot **still had** the dead condition and so collided with the
+    change that fixed it. Two relocations, one property: the population moves,
+    the rule does not.
     """
 
     def test_shipWarpingFromReading_and_warpJustEnded_are_byte_identical(self):
@@ -250,10 +291,29 @@ class TheTwoDeclarationsMatchTheThreeAppsThatHadThem(unittest.TestCase):
             distinct = set(texts.values())
             self.assertEqual(
                 len(distinct), 1,
-                "%s is not the same declaration in all four apps -- they all "
+                "%s is not the same declaration in all %d apps -- they all "
                 "compile and they all answer, so a drift here is silent. "
                 "Lengths by app: %r"
-                % (name, {app: len(text) for app, text in texts.items()}))
+                % (name, len(APPS_WITH_THE_RULE),
+                   {app: len(text) for app, text in texts.items()}))
+
+    def test_no_app_still_carries_the_dead_condition(self):
+        """Block comments stripped, because two of the three quote the shape.
+
+        saxrat and the combat anomaly bot explain #194 in a doc comment by
+        writing the condition out, so a search over the raw source finds the
+        prose rather than the code -- and would go on passing with the code
+        reverted in an app that carries no such comment.
+        """
+        for app, path in APPS_WITH_THE_RULE:
+            # `assertNotIn` would print the whole `Bot.elm` as the container,
+            # which is tens of thousands of lines of failure output for a
+            # one-line finding.
+            self.assertFalse(
+                OLD_CONDITION in without_block_comments(source_of(path)),
+                "%s carries #194's unreachable condition in code again -- it "
+                "cannot answer True at the end of a warp, and every case "
+                "downstream of it passes while it is there" % app)
 
 
 class TheOldConditionIsGone(unittest.TestCase):
@@ -409,8 +469,8 @@ class TheTransitionIsSeenOnTheClientsOwnShape(
         """The defect, executed on the reading it had to answer `True` on.
 
         Kept as its own case so a revert fails with the reason rather than an
-        arithmetic mismatch six rules away, the same convention #201's and
-        #233's suites use.
+        arithmetic mismatch six rules away, the same convention #201's own
+        suite uses.
         """
         answers = self.repl.evaluate(
             ["oldWarpEndSeen warping landed == Just False"], WARP_READINGS)

@@ -1,7 +1,8 @@
 """Tests for the wingman's fleet-window reading.
 
-`eve-online-wingman` replaces `eve-online-wingus`, which flew the same job on
-the retired `BotInterface_To_Host_2023_02_06` interface.
+`eve-online-wingman` replaced `eve-online-wingus`, which flew the same job on
+the older BotLab host interface. That app and the interface it was the last bot
+on have since been retired -- see `notes/retire-wingus.md` and `WINGMAN.md`.
 
 **Everything asserted here was captured from a live client**, not invented. Gal
 Bistot's fleet window, read through `eve_read.py` while a run was in flight:

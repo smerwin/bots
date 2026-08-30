@@ -612,7 +612,7 @@ procedure and its traps; this file carries the facts.
 | `window_probe/` | window enumeration via `CGWindowList` (bounds in points, backing scale); `--all` sees windows on any macOS Space, not just the active one |
 | `cg_input/` | persistent `CGEventPost` input executor, one text command per stdin line (`move`/`down`/`up`/`drag`/`doubleclick`/`keydown`/`keyup`/`scroll`) |
 | `botlab_host/botlab_host.py` | the BotLab.exe replacement — fetches bot source (GitHub URL or local path), patches `elm-version`, compiles with `Main.elm`, drives the compiled bot via `driver.js`, dispatches every `Task` type |
-| `botlab_host/Main.elm`, `Main_2023_02_06.elm`, `driver.js` | port wrappers (one per host interface, picked from the bot's own import) + Node bridge (newline-delimited JSON) between the Python host and the compiled bot |
+| `botlab_host/Main.elm`, `driver.js` | the port wrapper (one per host interface, picked from the bot's own import -- there is one interface left, see `notes/retire-wingus.md`) + Node bridge (newline-delimited JSON) between the Python host and the compiled bot |
 | `run_saxrat.sh`, `run_mission.sh` | launchers for `eve-online-saxrat` / `eve-online-mission-runner`; one-bot-at-a-time guard kills any prior launcher/`botlab_host.py`/`driver.js`/`tree_walker` first |
 | `bot_help.py` | backs `--help` on the launchers |
 | `stall_watch.py` | watches a running bot's log and screenshots the client when it stalls |
@@ -2480,9 +2480,14 @@ accepts `avoid-rat` must read `avoidRats` somewhere outside the default, the
 handler and the record type. That is what goes red if saxrat's read is ever
 deleted — the mistake #125 as written would have caused — and what goes red if
 another app grows the parser half without the decision half. The converse shape,
-**documented but never parsed**, is `eve-online-wingus`' today and is #161's: it
-ends a session at startup rather than doing nothing, and fixing it is not this
-change, so it is deliberately not asserted here.
+**documented but never parsed**, is #161's: it ends a session at startup rather
+than doing nothing, and fixing it is not this change, so it is deliberately not
+asserted here. Its worked example was `eve-online-wingus`, retired with the
+older host interface (see `notes/retire-wingus.md`) -- so **no app in the tree
+carries the shape today**, and `test_documented_settings_are_parsed.py` is the
+rule with no instance left to point at. That is the ordinary state for a rule
+this repo keeps: it was always stated over every app rather than over the one it
+was found in, which is exactly why it survived its subject.
 
 Confirmed by mutation, seven of them, each failing a named case: putting the
 setting back whole — field, default and parser entry, with no read — which is the
@@ -6145,12 +6150,20 @@ consult `dronesLeftBehind`.
 **`TheMissionRunnerIsUntouched` was PR #233's deferral marker and is replaced
 rather than deleted.** It asserted this bot **still had** the dead condition, so
 it collides with the change that fixes it — which this repo has now been bitten
-by twice. What replaces it,
-`test_wingus_warp_end_trigger.TheFourAppsCarryTheSameWorkingTrigger`, keeps what
-was worth keeping: four apps carry one rule that is app-specific in no part of
-it, so it compares all four byte for byte and refuses the dead shape in any of
-them. A future divergence is then a decision somebody argues for rather than one
-the suite lets happen.
+by twice. What replaced it kept what was worth keeping: several apps carry one
+rule that is app-specific in no part of it, so it compares them byte for byte
+and refuses the dead shape in any of them. A future divergence is then a
+decision somebody argues for rather than one the suite lets happen.
+
+**That case has since moved once more, for the same reason it was written.** It
+lived in `test_wingus_warp_end_trigger.py` as `TheFourAppsCarryTheSameWorking
+Trigger`, and `eve-online-wingus` was retired with the older host interface
+(`notes/retire-wingus.md`) — so a file named for that app, and a class naming a
+count of four, would have gone the way of the marker it replaced. It is
+`test_mission_runner_warp_end_trigger.TheThreeAppsCarryTheSameWorkingTrigger`
+now, asserting the same two halves over the apps that remain. **The population
+is what moves; the rule does not**, and neither does the property that a copy
+which drifts still compiles and still answers.
 
 **Unverified: any of it running.** No run has been flown, and by construction
 neither consumer has ever fired on the warp half in a recorded run. What to
@@ -8999,8 +9012,9 @@ gone, and `anomaly-name=*` says it through #188's prefix rule.
 **Unverified:** whether any recorded run ever set `anomaly-name`, so whether this
 has cost anything in practice is not established -- only that the launcher's own
 string names six sites and would have hunted eight. `eve-online-combat-anomaly-bot`
-and `eve-online-wingus` both carry an anomaly-name setting and neither was
-examined.
+carries an anomaly-name setting and was not examined; `eve-online-wingus` carried
+one too and has since been retired, so that half of the gap closed by the app
+going rather than by anybody reading it.
 
 ### The comma the settings parser eats: one of the two columns is read, one cannot be
 
@@ -9466,13 +9480,18 @@ apps derived `shipIsWarping` inline in two different shapes, a pipeline and a
 them rather than merely checking both are present.
 
 **`eve-online-mission-runner` and `eve-online-wingus` carried the dead trigger
-too, and that was #205 rather than this change.** Both have it now — wingus in
-#233 and the mission runner in #205 — so all four apps carry
+too, and that was #205 rather than this change.** Both took it — wingus in #233
+and the mission runner in #205 — so every app that carries the rule carries
 `shipWarpingFromReading` and `warpJustEnded` byte for byte, which
-`test_wingus_warp_end_trigger.TheFourAppsCarryTheSameWorkingTrigger` compares
-rather than leaving to be assumed. Wingus had #194 verbatim: the same
-single-reading snapshot on the same unreachable condition. The mission runner
-has no arrival snapshot, but the same condition gated its drone abandonment
+`test_mission_runner_warp_end_trigger.TheThreeAppsCarryTheSameWorkingTrigger`
+compares rather than leaving to be assumed. (It was four apps and a case named
+for the count until wingus was retired with the older host interface — see
+`notes/retire-wingus.md`.) Wingus had #194 verbatim: the same
+single-reading snapshot on the same unreachable condition, which is worth
+recording because it is the clearest statement of how far this defect
+travelled — four vendored copies of a rule nobody had executed. The mission
+runner has no arrival snapshot, but the same condition gated its drone
+abandonment
 (`shipLeftThisReading`, whose other half — docking — does work) and #154's
 per-warp ammo-swap retry, which is why it was a behaviour change to two live
 consumers rather than a third copy of this one — see "The mission runner's warp
@@ -9541,31 +9560,36 @@ exists.
 - **Full bot loop:** proven end to end for `eve-online-mission-runner` and
   `eve-online-saxrat`, and for `eve-online-warp-to-0-autopilot`, from both a
   local path and a GitHub URL.
-- **`eve-online-mining-bot` and `eve-online-wingus` compile now, but their input
-  path is untested live.** Both are written against
-  `BotLab.BotInterface_To_Host_2023_02_06` while `botlab_host/Main.elm` imports
-  `..._2024_10_19`, so `elm make` used to fail on a missing module.
-  `botlab_host/Main_2023_02_06.elm` is the wrapper for the older interface, and
-  both `botlab_host.py` and `compile_bot.sh` now choose the wrapper from the
-  interface the bot's own `Bot.elm` imports (read from the import, not from
-  which interface modules the app vendors -- the mining bot ships two). All six
-  apps build.
+- **Every EVE app in the tree is on `BotLab.BotInterface_To_Host_2024_10_19`,
+  and there is one wrapper.** `eve-online-mining-bot` and `eve-online-wingman`
+  compile but their input path is untested against *this* host; the mission
+  runner, saxrat and `warp-to-0` are the proven ones above.
 
-  The older interface has no `WindowsInputRequest` task: input travels inside
-  the volatile-process request as `EffectSequenceOnWindow`, so `run_task`
-  intercepts that and translates it into the same item list `_windows_input`
-  already executes, keeping one input path with all its client-specific
-  behaviour. Mouse buttons arrive as `KeyDown`/`KeyUp` carrying a mouse
-  virtual-key code rather than as `ButtonDown`/`ButtonUp`; there is no scroll,
-  relative move or raw character input in that vocabulary. The translation is
-  unit-checked, **but no 2023-interface bot has yet been run against the live
-  client** -- treat the first run as unproven, and watch that input actually
-  lands rather than trusting the log.
+  **This bullet used to describe a second host interface and its wrapper, and
+  both are gone** -- `eve-online-wingus` was the last bot on `2023_02_06`, and
+  retiring it took `Main_2023_02_06.elm`, `legacy_search_ui_root`'s blocking
+  UI-root search and the `EffectSequenceOnWindow` input translation with it.
+  The write-up is `notes/retire-wingus.md`. Two things from that arrangement are
+  worth keeping, because both are about how a host should fail rather than about
+  the interface that is gone:
 
-  `VolatileProcess.handle_request`'s fallback used to answer *every*
-  unrecognised request with `CompletedEffectSequenceOnWindow`, which is how a
-  2023-interface bot would previously have reported every input as successful
-  while executing nothing. It now logs what it could not handle.
+  - **The wrapper is chosen from the bot's own `import`, not from which
+    interface modules the app vendors**, and `MAIN_ELM_TEMPLATE_BY_INTERFACE` is
+    still a map with one entry rather than a constant. A vendored tree can carry
+    a module its `botMain` is not typed against -- the mining bot once shipped
+    both `2023_01_17` and `2023_02_06` while importing neither -- so the import
+    is the only statement of which one a bot is written for, and a bot importing
+    an interface with no wrapper is refused **by name** in `prepare_build_dir`
+    rather than compiled against the wrong one. `compile_bot.sh` and the CI job
+    keep their own single-arm `case` for the same reason.
+  - **`VolatileProcess.handle_request`'s fallback used to answer *every*
+    unrecognised request with `CompletedEffectSequenceOnWindow`**, which is how
+    a bot would previously have reported every input as successful while
+    executing nothing. It logs what it could not handle now. The reply itself is
+    left as it is, deliberately: every vendored `VolatileProcessInterface` still
+    decodes that constructor, so it is a response a live bot understands, and
+    changing it is a behaviour change on the path every current bot runs with no
+    evidence asking for it.
 - **`eve-online-mission-runner`** takes a security mission from an agent, flies
   out, clears each pocket through its acceleration gates, returns and hands in.
   Across 55 logged runs it completed 48 missions, median 58 ticks (~5.4 min).

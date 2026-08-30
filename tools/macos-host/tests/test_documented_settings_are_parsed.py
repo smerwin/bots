@@ -9,6 +9,17 @@ answers an unrecognised key with `Unknown setting name 'avoid-rat'`, and
 an operator who pasted the bot's own example got a session that ended before it
 started.
 
+**That app has since been retired** with the last bot on the 2023 host
+interface (see `notes/retire-wingus.md`), and the cases that asked it about
+itself went with it. **What survives is the whole of what this file is for**:
+the defect was never wingus-shaped, and the rule below has always been stated
+over every EVE app rather than over the app it was found in. The one thing lost
+is a worked example -- so the shape is written out here, because a rule with no
+instance left in the tree is one whose point is easy to mistake for pedantry.
+The instance was: a header bullet offering a key, an example line assigning it,
+and a parser that had never heard of it; loud, immediate, and blamed on the
+operator who followed the documentation.
+
 **This is #125 read the other way round, and the two fail in opposite
 directions.** There an app parsed a setting nothing read: harmless, silent, and
 discovered only because somebody counted references by hand. Here an app
@@ -16,29 +27,15 @@ documents a setting nothing parses: loud, immediate, and blamed on the operator
 who followed the documentation. `AvoidRatIsParsedAndNeverRead` pinned the first
 shape for one key in one app; `test_avoid_rat_removed` generalised it to
 "an app that parses `avoid-rat` must read `avoidRats`". This file is the
-converse rule, and it is not about `avoid-rat` at all: **every key any app's
-header offers must appear in that app's `parseBotSettings`, in every app.**
+converse rule, and it is not about `avoid-rat` -- or about any one app -- at
+all: **every key any app's header offers must appear in that app's
+`parseBotSettings`, in every app.**
 
-**The documentation was deleted rather than the setting implemented**, and the
-reasoning is checked rather than assumed. wingus has no launcher script, no
-recorded run in `~/eve-bot-logs`, and exactly one commit in this repo's history
-touching its `Bot.elm` (a vendored-parser sweep); the other two that touch the
-app at all touch only its copy of `ParseUserInterface.elm`. It *is*
-anomaly-shaped, so a port from `eve-online-saxrat` or
-`eve-online-combat-anomaly-bot` -- both of which implement `avoid-rat` at
-anomaly granularity, per #125's own correction -- would be a real port rather
-than the wrong shape it would have been in the mission runner. Nobody has asked
-for it, so the honest change is the one that stops the header promising it.
-
-**The client's own suggestion is what settles that wingus meant something
-else.** Asked for `avoid-rat`, its parser answers `Unknown setting name
-'avoid-rat'. Did you mean 'hated-rat'?` -- `hated-rat` being the key wingus
-actually accepts, filling `priorityRats`. So the avoid machinery was replaced
-by a priority list when this bot was adapted, and the header was not updated.
-That is a fact about the key rather than a promise about the feature, which is
-why nothing here documents `hated-rat`: it is reported under `--help`'s "Also
-accepted, but not described in the bot's own header", and a case below pins that
-the new note did not accidentally take it out of that list.
+**The documentation was deleted rather than the setting implemented**, which is
+the choice worth keeping even though its subject is gone: implementing a
+setting is a behaviour change and must not arrive under cover of a
+documentation fix. Whoever makes it has to restore the documentation too --
+which is then what the cross-app rule below checks.
 
 ## Two readers, because the header promises in two places
 
@@ -80,29 +77,24 @@ direction it would drift in is the one that makes both files pass for free.
 
 ## What it found
 
-**Nothing else.** Run over all six EVE apps, in both directions of documentation,
-wingus' `avoid-rat` is the only documented key no parser accepts -- before the
+**Nothing else.** Run over every EVE app, in both directions of documentation,
+wingus' `avoid-rat` was the only documented key no parser accepted -- before the
 fix it was the only one, and after it there are none. The reverse mismatch
 (parsed but not in the header) is common and is *not* a defect: `bot_help.py`
 reports those under "Also accepted", which is the whole reason that section
-exists, and four wingus keys, six saxrat keys and three mission-runner keys sit
-there legitimately.
+exists, and several saxrat and mission-runner keys sit there legitimately.
 
-**Verified by execution where it can be.** The cross-app rule is a source read,
-because there is nothing to run: a key an app never registered cannot be asked
-of anything. wingus' own half is *executed* through the real `Bot.elm` in
-`elm repl` -- its parser is asked what it does with the header's complete
-example settings string (accepts it, where before this change it did not), with
-the key the header used to offer (rejects it, naming the key), and with each key
-the header still offers.
+**Verified by reading, because there is nothing to run.** The cross-app rule is
+a source read: a key an app never registered cannot be asked of anything. The
+half that *was* executed -- wingus' own parser answering for the header's
+complete example -- went with the app, and nothing replaced it, because no other
+app has ever carried the defect for a repl to demonstrate. That is the honest
+state and it is stated rather than papered over: this file is now a source read
+in full, and its strength is the population it runs over rather than an
+execution.
 
-Confirmed by mutation, twelve of them, each failing a named case:
+Confirmed by mutation, each failing a named case:
 
-- **the `avoid-rat` bullet restored to the wingus header**, which is #161 put
-  back and is what the cross-app rule exists to catch;
-- **the `avoid-rat` line restored to the wingus example**, which the bullet rule
-  does *not* see, since `--help` never prints the example -- the two halves were
-  checked separately for exactly this, and each mutation fails only its own;
 - the bullet reader narrowed to one key per bullet, so five real keys across two
   apps stop being checked;
 - the bullet reader taking keys from a bullet's body as well as its head;
@@ -113,28 +105,30 @@ Confirmed by mutation, twelve of them, each failing a named case:
 - the example reader made to accept lines that are not assignments;
 - the parsed-key reader narrowed to `AppSettings.valueType`, which is the
   pass-by-seeing-nothing shape CLAUDE.md names;
-- the rule scoped to one app rather than iterated over `eve_apps()`;
-- the note gutted so `--help` no longer tells an operator to delete the line;
-- the note written so that it suppresses `hated-rat` from "Also accepted";
-- and **the wingus parser given an `avoid-rat` entry** -- the other way #161
-  could have been closed. That one fails three cases, and failing is the wanted
-  answer rather than a hole: implementing a setting is a behaviour change that
-  must not arrive under cover of a documentation fix, and whoever makes it has
-  to restore the documentation too -- which is then what the cross-app rule
-  above checks.
+- the rule scoped to one app rather than iterated over `eve_apps()`.
 
-**Two of the twelve survived the first pass and both were real holes.** The
+Three further mutations were graded against `eve-online-wingus` while it
+existed and can no longer be run: restoring the `avoid-rat` bullet to its
+header (which is #161 put back, and what the cross-app rule exists to catch),
+restoring the `avoid-rat` line to its example (which the bullet rule does
+*not* see, since `--help` never prints the example -- the two halves are read
+separately for exactly this), and giving its parser an `avoid-rat` entry. The
+first two are what the cross-app rule catches in **any** app, so they are
+covered by construction rather than lost; the third was graded on the two
+classes that lived with the app and went with them.
+
+**Two of them survived the first pass and both were real holes.** The
 cross-app rule is "no app violates this", which is satisfied by *any* subset of
 the apps once the corpus is clean -- so scoping its loop to one app changed
 nothing it asserted, and the apps inspected are now asserted beside the rule
 rather than left to the loop. And both example-reader loosenings were harmless
-against today's six apps, since no app has a fenced block outside its header and
+against today's apps, since no app has a fenced block outside its header and
 every line inside one is an assignment; the rule caught them only by luck, so
 `TheReadersReadOffersAndNotProse` asks the readers directly instead.
 
-Nothing here reads a live game client, a bot, or the recorded runs. The
-`elm repl` cases need `elm` on PATH; without it they **fail** rather than
-skipping, for the reason `prerequisites.py` gives.
+Nothing here reads a live game client, a bot, or the recorded runs, and since
+the retirement above nothing here needs `elm` either -- every remaining case is
+a read of `--help`'s own output and of the sources it is generated from.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
@@ -143,23 +137,15 @@ import re
 import subprocess
 import unittest
 
-from prerequisites import ElmRepl, open_repl
 # One definition of "which keys does this parser accept", for the reason in the
 # doc comment above: a second copy would drift towards passing by seeing
 # nothing, which is the one failure this whole file is about.
 from test_avoid_rat_removed import (APPLICATIONS_DIR, bot_elm, eve_apps,
-                                    setting_keys, top_level_blocks)
+                                    setting_keys)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
 BOT_HELP = os.path.join(MACOS_HOST_DIR, "bot_help.py")
-
-WINGUS = "eve-online-wingus"
-SETTING = "avoid-rat"
-# What wingus accepts instead, and what the client's own parse error suggests.
-# Named so that a change which starts *documenting* it has to come past this
-# file, since documenting a setting no decision reads is #125's shape.
-WINGUS_OWN_RAT_SETTING = "hated-rat"
 
 # Bullets whose head names more than one key, and the app each is in. Named
 # rather than discovered: they are what makes the difference between a reader
@@ -281,30 +267,6 @@ def example_settings_keys(source):
     return list(dict.fromkeys(keys))
 
 
-def elm_string(value):
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') \
-        .replace("\n", "\\n") + '"'
-
-
-PREAMBLE = ("import Bot exposing (..)", "import Result.Extra")
-
-
-class WingusRepl(ElmRepl):
-    """The shared harness, asking wingus' own parser the two questions here."""
-
-    def parses(self, settings_strings):
-        return self.booleans([
-            "parseBotSettings %s |> Result.map (always True) "
-            "|> Result.withDefault False" % elm_string(settings)
-            for settings in settings_strings])
-
-    def rejection_reasons(self, settings_strings):
-        return self.strings([
-            'parseBotSettings %s |> Result.map (always "<accepted>") '
-            "|> Result.Extra.merge" % elm_string(settings)
-            for settings in settings_strings])
-
-
 class TheReadersCannotPassBySeeingNothing(unittest.TestCase):
     """The rule below is a subset test, so a reader that reads nothing passes.
 
@@ -353,7 +315,7 @@ class TheReadersCannotPassBySeeingNothing(unittest.TestCase):
         with_examples = [app for app in eve_apps()
                          if example_settings_keys(bot_elm(app))]
         self.assertGreaterEqual(len(with_examples), 4)
-        self.assertIn(WINGUS, with_examples)
+        self.assertIn("eve-online-saxrat", with_examples)
 
     def test_the_example_reader_stops_at_the_end_of_the_header(self):
         # `eve-online-warp-to-0-autopilot` has no example and no terminator that
@@ -367,7 +329,7 @@ class TheReadersCannotPassBySeeingNothing(unittest.TestCase):
         # the settings section and not the module the section describes.
         # (Asserted against the module declaration rather than against a
         # function name, since the prose is free to *name* one.)
-        header = header_of(bot_elm(WINGUS))
+        header = header_of(bot_elm("eve-online-saxrat"))
         self.assertIn("## Configuration Settings", header)
         self.assertNotIn("module Bot exposing", header)
 
@@ -471,145 +433,5 @@ class TheHeaderMayNotOfferWhatTheParserRefuses(unittest.TestCase):
         self.assertGreaterEqual(len(inspected), 6)
 
 
-class WingusIsTheAppTheRuleWasWrittenFor(unittest.TestCase):
-    """#161 itself, read out of the source.
-
-    Both halves of the promise are asserted gone, and the parser is asserted
-    *unchanged* -- implementing the setting is the other way this issue could
-    have been closed, and these cases must go red for a header that still
-    offers it rather than for a parser that grew an entry.
-    """
-
-    def setUp(self):
-        self.source = bot_elm(WINGUS)
-        self.help = help_text(WINGUS)
-
-    def test_the_header_no_longer_offers_it(self):
-        self.assertNotIn(
-            SETTING, documented_keys(offered_settings_text(self.help)))
-
-    def test_the_example_settings_string_no_longer_assigns_it(self):
-        self.assertNotIn(SETTING, example_settings_keys(self.source))
-
-    def test_the_settings_beside_it_are_still_offered(self):
-        offered = documented_keys(offered_settings_text(self.help))
-        for key in ("anomaly-name", "hide-when-neutral-in-local",
-                    "activate-module-always", "anomaly-wait-time"):
-            with self.subTest(key):
-                self.assertIn(key, offered)
-
-    def test_the_help_still_tells_an_operator_what_happened_to_it(self):
-        # An unknown key ends the session at startup, so somebody whose settings
-        # file still carries the line has to be able to read why. Prose rather
-        # than a bullet, which is why the two cases above still hold.
-        self.assertIn(SETTING, self.help)
-        self.assertIn("Unknown setting name", self.help)
-        self.assertIn("Delete the line", self.help)
-
-    def test_the_setting_this_bot_used_to_accept_instead_is_gone_too(self):
-        """`hated-rat` was what wingus parsed instead of `avoid-rat`.
-
-        #195 removed it: it parsed, it filled a field, and the field had a real
-        reader that nothing ever called. So this bot now accepts **neither**
-        rat setting, and the contrast this case used to draw -- "the one it
-        does accept" -- no longer has two sides.
-
-        Asserted as absent rather than deleted, because an operator whose
-        settings file still carries the line needs the header to say what
-        happened, exactly as `avoid-rat`'s own removal does.
-        """
-        self.assertNotIn(WINGUS_OWN_RAT_SETTING, setting_keys(self.source))
-        self.assertIn(WINGUS_OWN_RAT_SETTING, self.help)
-
-    def test_the_field_the_setting_would_have_filled_is_still_absent(self):
-        # The half no repl case can see: wingus never had `avoidRats` at all,
-        # so "documented but not parsed" was the whole defect and re-adding the
-        # field without the parser entry would be a different one.
-        mentions = [name for name, text in top_level_blocks(self.source).items()
-                    if "avoidRats" in text]
-        self.assertEqual(mentions, [])
-
-
-class WingusParserAnswersForItself(unittest.TestCase):
-    """The header's own example, run through the real parser.
-
-    Every case here would have failed before this change: the example carried an
-    `avoid-rat` line, so wingus rejected the settings string its own
-    documentation told an operator to paste.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.repl = open_repl(WingusRepl, prefix="test-wingus-settings-",
-                             preamble=PREAMBLE,
-                             app_dir=os.path.join(APPLICATIONS_DIR, WINGUS))
-        cls.source = bot_elm(WINGUS)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.repl.close()
-
-    def example_settings_string(self):
-        """The header's example, reassembled as an operator would paste it."""
-        lines = []
-        inside = False
-        for line in header_of(self.source).split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("```"):
-                inside = not inside
-                continue
-            if inside and ASSIGNMENT_LINE.match(stripped):
-                lines.append(stripped)
-        return "\n".join(lines)
-
-    def test_the_headers_own_example_is_accepted(self):
-        settings = self.example_settings_string()
-        self.assertTrue(settings, "the header has no example to paste")
-        self.assertEqual(self.repl.parses([settings]), [True])
-
-    def test_the_key_the_header_used_to_offer_is_still_refused(self):
-        # Unchanged by this issue, and the reason the documentation had to go
-        # rather than stay: the parser answers `Err`, which ends the session.
-        self.assertEqual(
-            self.repl.parses(["%s=Infested Carrier" % SETTING]), [False])
-
-    def test_the_refusal_names_the_key_so_an_operator_can_delete_the_line(self):
-        reason = self.repl.rejection_reasons(
-            ["%s=Infested Carrier" % SETTING])[0]
-        self.assertIn(SETTING, reason)
-        self.assertIn("Unknown setting name", reason)
-
-    def test_one_such_line_would_reject_the_whole_example(self):
-        # What #161 cost, restated as the parser's own answer: a single unknown
-        # key rejects everything beside it, so the example was unusable whole.
-        self.assertEqual(
-            self.repl.parses([
-                self.example_settings_string()
-                + "\n%s=Infested Carrier" % SETTING]),
-            [False])
-
-    def test_every_key_the_header_still_offers_is_accepted_on_its_own(self):
-        # The rule above is a source read; this is the same claim executed, for
-        # the one app the issue is about.
-        offered = documented_keys(offered_settings_text(help_text(WINGUS)))
-        values = {"anomaly-name": "Drone Patrol",
-                  "hide-when-neutral-in-local": "yes",
-                  "activate-module-always": "shield hardener",
-                  "anomaly-wait-time": "30"}
-        self.assertEqual(sorted(offered), sorted(values))
-        self.assertEqual(
-            self.repl.parses(["%s = %s" % (key, values[key])
-                              for key in sorted(offered)]),
-            [True] * len(offered))
-
-    def test_the_setting_this_bot_used_to_accept_no_longer_parses(self):
-        """#195 removed `hated-rat`, so the parser must now refuse it.
-
-        This case read `parses([...]) == [True]` until then. It is the pin that
-        would have gone red on the removal whether or not the removal was
-        right, which is why it now asserts the removal instead of the setting.
-        """
-        self.assertEqual(
-            self.repl.parses(["%s = Infested Carrier"
-                              % WINGUS_OWN_RAT_SETTING]),
-            [False])
+if __name__ == "__main__":
+    unittest.main()

@@ -21,15 +21,16 @@ set -e -u -o pipefail
 SCRIPT_DIR="${0:A:h}"
 APPS_DIR="${SCRIPT_DIR}/../../implement/applications/eve-online"
 MAIN_ELM="${SCRIPT_DIR}/botlab_host/Main.elm"
-MAIN_ELM_2023_02_06="${SCRIPT_DIR}/botlab_host/Main_2023_02_06.elm"
 
 # Which wrapper a bot needs is fixed by the interface its own Bot.elm imports.
-# Mirrors host_interface_of_bot in botlab_host.py -- keep the two in step, or
-# this verifies a build the host would never produce.
+# Mirrors MAIN_ELM_TEMPLATE_BY_INTERFACE in botlab_host.py -- keep the two in
+# step, or this verifies a build the host would never produce. There is one
+# wrapper now, and the `case` is kept rather than flattened for the same reason
+# the host keeps a map: an app on an interface with no wrapper is *skipped and
+# named* rather than built against the wrong one.
 main_elm_for() {
     case "$(grep -m1 -o 'BotLab\.BotInterface_To_Host_[0-9_]*' "$1/Bot.elm")" in
         BotLab.BotInterface_To_Host_2024_10_19) print -r -- "$MAIN_ELM" ;;
-        BotLab.BotInterface_To_Host_2023_02_06) print -r -- "$MAIN_ELM_2023_02_06" ;;
         *) return 1 ;;
     esac
 }

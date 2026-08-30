@@ -58,10 +58,23 @@ bot stops paying for it: at most one reading in `moduleButtonClickSettlingSteps
   - moving the settling window by one in either direction fails three, split
     across the two boundary cases and the fold;
   - reverting all copies of this mechanism to the code this issue was filed on
-    fails eighteen, which is every behavioural case in this file plus the pins
+    fails every behavioural case in this file plus the pins
     in `test_info_panel_icon_click_settling.py`. (`eve-online-mining-bot`'s
     tree has since been replaced with Viir's current upstream and carries none
     of this mechanism at all; it is excluded from every case here.)
+
+**One shape this file used to fold over has no app any more.** A
+`StepDecisionContext` carrying `previousStepEffects : List
+EffectOnWindowStructure` -- one step of history rather than several -- bought a
+narrower bound, every other reading rather than five in six, and it was the
+same property: the repair cannot hold the tree on consecutive readings, so
+`runAwayIfLowHealth` stays reachable however long the panel stays broken. Its
+only app was `eve-online-wingus`, retired with the 2023 host interface (see
+`notes/retire-wingus.md`), so the fold over it went with the app. The finding
+is kept here rather than in a deleted class, because it is what says the bound
+is a property of the rule and not of how deep a context's history happens to
+be -- a future app on a one-step context needs no second design, only a
+narrower expectation.
 
 **Executed rather than restated.** Every reading here is a UI tree run through
 the real `EveOnline.ParseUserInterface`, and the rule is the one in the app's
@@ -83,8 +96,7 @@ import unittest
 
 from prerequisites import ElmRepl, open_repl
 from test_info_panel_icon_click_settling import (
-    EXTRA_PREAMBLE, SIX_VENDORED_FRAMEWORKS, WINGUS_DIR,
-    info_panel_container)
+    EXTRA_PREAMBLE, SIX_VENDORED_FRAMEWORKS, info_panel_container)
 from test_saxrat_ported_guards import (
     SaxratRepl, body_of, collapsed, label, node, source_of)
 
@@ -398,65 +410,6 @@ class TheAlternationTerminatesTest(BothAppsRepl, unittest.TestCase):
         for app, (log,) in self.each(
                 ["alternation %d" % self.READINGS]):
             self.assertNotIn("CC", log, "%s: %s" % (app, log))
-
-
-class GroupCRepairRepl(RepairRepl):
-    """The 2023-interface shape: one step of history rather than several.
-
-    `StepDecisionContext` there carries `previousStepEffects : List
-    EffectOnWindowStructure`, so the settling window is one reading wide and the
-    fold threads one step rather than ten. Same rule, the history this shape has
-    to give it -- the same way #227's guard was written once per shape.
-    """
-
-    HELPERS = [
-        helper.replace("effects :: history |> List.take 10", "effects")
-        for helper in RepairRepl.HELPERS
-    ]
-
-
-class GroupCBothAppsRepl:
-    @classmethod
-    def setUpClass(cls):
-        cls.repls = {
-            "wingus": open_repl(GroupCRepairRepl, app_dir=WINGUS_DIR),
-        }
-
-    @classmethod
-    def tearDownClass(cls):
-        for repl in cls.repls.values():
-            repl.close()
-
-    def each(self, expressions, definitions=()):
-        for app, repl in self.repls.items():
-            yield app, repl.strings(
-                expressions, definitions=repl.with_helpers(definitions))
-
-
-class TheAlternationTerminatesOnTheOlderInterfaceTooTest(
-        GroupCBothAppsRepl, unittest.TestCase):
-    """`eve-online-wingus`, folded the same way.
-
-    One step of history buys a narrower bound -- every other reading rather than
-    five in six -- and it is the same property: the repair cannot hold the tree
-    on consecutive readings, so the run-away-when-shields-are-low branch below
-    the setup list is reachable however long the panel stays broken.
-    `eve-online-mining-bot` used to share this shape; its tree was replaced with
-    Viir's current upstream and it no longer carries this mechanism at all --
-    see `test_info_panel_icon_click_settling.py`'s exclusion note.
-    """
-
-    READINGS = 40
-
-    def test_the_repair_never_holds_two_readings_running(self):
-        for app, (log,) in self.each(["alternation %d" % self.READINGS]):
-            self.assertEqual(self.READINGS, len(log), "%s: %s" % (app, log))
-            self.assertNotIn("CC", log, "%s: %s" % (app, log))
-            self.assertNotIn("W", log, "%s: %s" % (app, log))
-            self.assertGreaterEqual(
-                log.count("-"), self.READINGS // 2 - 1,
-                "%s: the repair gave back %d of %d readings (%s)"
-                % (app, log.count("-"), self.READINGS, log))
 
 
 class BothBranchesReadOneGuardTest(unittest.TestCase):

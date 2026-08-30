@@ -48,7 +48,9 @@ and the record type. That is what would have gone red if #125 had been acted on
 as written and saxrat's read deleted, and it is what will go red if some other
 app gains the parser half without the decision half. The **converse** shape --
 documented but never parsed, which ends a session at startup rather than doing
-nothing -- was `eve-online-wingus`' and is issue #161's. It is still deliberately
+nothing -- is issue #161's. Its worked example was `eve-online-wingus`, an app
+since retired with the 2023 host interface (see `notes/retire-wingus.md`); the
+rule outlived it, because it was never about that app. It is still deliberately
 not asserted here: `test_documented_settings_are_parsed.py` is that rule, over
 every app and over both halves of a header's promise, and it imports this file's
 `setting_keys` rather than copying it, so the two rules cannot come to disagree
