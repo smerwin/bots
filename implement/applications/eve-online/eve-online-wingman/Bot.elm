@@ -5215,7 +5215,11 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- else is holding this bot back from pressing it -- rats on the
         -- overview count as holding back, since #348 is what this counter
         -- exists for, unless the commander called this gate, which is #393's
-        -- override and is asked through `gateMayBeTaken` rather than restated.
+        -- override, or the retreat recovery is gating back to him, which is
+        -- #429's -- both asked through `gateMayBeTaken` rather than restated.
+        -- The rejoin's own half comes from `recoveringStepNow` above, the same
+        -- answer that decides whether this reading spends the recovery's
+        -- budget, so the two cannot disagree about which reading it is.
         -- A reading spent recalling drones is not a reading spent asking the
         -- gate, so it holds the count rather than advancing it.
         askingTheGateToOpen : Bool
@@ -5228,6 +5232,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     gateMayBeTaken
                         { ratsOnTheGrid = not (List.isEmpty namesOfRatsInOverview)
                         , calledByTheCommander = gate.calledByTheCommander
+                        , rejoiningAfterARetreat = rejoinIsTakingThisGate recoveringStepNow
                         }
                         && not askingForTheCalledGateRecall
                         && selectedItemIsOverviewEntry context.readingFromGameClient gate.gate
@@ -6401,6 +6406,80 @@ fleetMemberNames readingFromGameClient =
         |> List.filter (textAfterBroadcastTimestamp >> (==) Nothing)
         |> List.map String.trim
         |> List.filter (String.isEmpty >> not)
+
+
+{-| One pilot's own line in the fleet window, as an element to right-click.
+
+**The roster half of `fleetMemberNames`, kept as nodes rather than as strings**,
+which is the whole of what #429 needed from this window: the names were already
+read here every reading and nothing could click them, so a commander with no
+broadcast and no overview row had no element in the client this bot could act
+on at all.
+
+**The header is searched as well as the member rows, and it is where the
+commander is.** `fleetMemberNames`' own comment records the boss being drawn in
+the header rather than in a `FleetMember` row, and the commander is exactly the
+pilot this is asked about -- so a lookup over the rows alone would answer
+`Nothing` for the one pilot it exists for. The rows are searched first anyway,
+because a fleet whose window draws the commander as an ordinary member is a
+fleet where the member row is the more specific answer.
+
+**Matched on the trimmed display text, exactly** -- `fleetMemberNames`' own
+comparison, and `fleetInviteSenderFromMessageBox`' reason: this decides which
+pilot this ship warps to. **The exactness is also what keeps the broadcast
+history out**, which is why there is no timestamp test here where
+`fleetMemberNames` has one: the history shares `entryLabel` with the member
+rows, but `02:59:30 - Gal Bistot is at location Amarr` is not equal to
+`Gal Bistot` and only a containing match could take it for his row. A second
+filter that no case can kill is #42's shape, so the one comparison carries it.
+
+**What the client offers on the header's label is not captured.** The
+`Fleet Member` menu is recorded live off the broadcast banner and off nothing
+else, so whether right-clicking the header's own name label opens the same menu
+is the premise this rests on. It fails safe: a menu without that entry resolves
+nothing, `retreatRecoveryAskedReadingsBound` ends the attempt, and the arm hands
+the reading back to the arms below.
+
+-}
+fleetWindowRowForPilot :
+    String
+    -> ReadingFromGameClient
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+fleetWindowRowForPilot pilot readingFromGameClient =
+    let
+        namesThisPilot : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Bool
+        namesThisPilot node =
+            (node.uiNode
+                |> EveOnline.ParseUserInterface.getDisplayText
+                |> Maybe.map String.trim
+            )
+                == Just (String.trim pilot)
+
+        memberRows : List EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        memberRows =
+            readingFromGameClient
+                |> fleetWindowDescendants
+                |> List.filter
+                    (.uiNode
+                        >> EveOnline.ParseUserInterface.getNameFromDictEntries
+                        >> (==) (Just "entryLabel")
+                    )
+
+        headerLabels : List EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        headerLabels =
+            readingFromGameClient
+                |> fleetWindowDescendants
+                |> List.filter
+                    (.uiNode
+                        >> .pythonObjectTypeName
+                        >> String.contains "FleetHeader"
+                    )
+                |> List.concatMap
+                    EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+    in
+    (memberRows ++ headerLabels)
+        |> List.filter namesThisPilot
+        |> List.head
 
 
 {-| The pilots local chat's own standing icons mark as fleetmates.
@@ -9668,6 +9747,34 @@ warpToFleetMateFromTheBroadcastBanner context banner =
         context
 
 
+{-| The same `Warp to Member`, taken off a pilot's own fleet-window row.
+
+**#429's rejoin, and it exists because the banner is the wrong element for a
+commander who does not broadcast.** `fleetMateBroadcastBannerElement` refuses a
+stale banner -- correctly, and that refusal is exactly what leaves a wingman
+under a hand-flown commander with nothing to right-click. The fleet window is
+open for the roster on every reading regardless of what anybody broadcasts, so
+the row is the element that is always there.
+
+**The menu node is `warpToMemberFromTheBroadcastBanner`, shared rather than
+copied.** That name records where the two rungs were captured live, not the only
+element they may be driven from: the question it answers -- `Warp to Member`
+directly, else inside a `Fleet Member` submenu -- is about what the client
+offers rather than about which node was right-clicked, and a second copy is how
+the two would come to disagree about it.
+
+-}
+warpToFleetMateFromTheirFleetWindowRow :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    -> DecisionPathNode
+warpToFleetMateFromTheirFleetWindowRow context row =
+    useContextMenuCascade
+        ( "fleet window row", row )
+        warpToMemberFromTheBroadcastBanner
+        context
+
+
 {-| Take `Warp to Member` from the banner's menu, wherever the client put it.
 
 **The client puts it in two different places and which one is contextual.**
@@ -10692,8 +10799,8 @@ long as `recoveringFromRetreat` is latched and sits above the broadcast and
 combat arms: three of four live wingmen sat here healthy, at 86-100% shield,
 for tens of readings each, not fighting.
 
-**Two levers, and they answer different questions**, which is why both are
-here and why neither replaces the other:
+**Four levers, and they answer different questions**, which is why each is here
+and why none replaces another:
 
   - `Fleet Member` -> `Warp to Member` **from the broadcast banner**, where the
     banner is the commander's own call for company. That is a _live_ signal --
@@ -10707,12 +10814,31 @@ here and why neither replaces the other:
     `fleetPlaceBroadcast` and handed to `goToFleetMate` as a real place. That is
     a _historical_ signal and it is the cross-system one.
 
+  - **An acceleration gate on this grid**, taken through `accelerationGateStep`.
+    That is a signal about _here_ rather than about the commander at all: a gate
+    on the overview says this ship is at the mouth of a pocket the commander is
+    somewhere inside, and an escalation is one or two of them deep.
+
+  - **The commander's own row in the fleet window**, driving `Warp to Member`
+    (#429). The only one of the four that needs nothing the commander has to
+    _do_ -- no broadcast, and no overview row, which the operator's preset does
+    not draw for fleet members. It is the cross-grid lever for a human
+    commander, where the banner is the cross-grid lever for a bot one.
+
 **The banner is asked first**, because after `warpAwayFromDanger` this ship is
 usually in the same system as its commander and on a different grid -- where the
 banner's warp is exactly right and a route to a system the ship is already in is
 an empty route `navigateTowardFleetCommander` has nothing to click. It is also
-the cheaper of the two: one cascade against a host round trip and a multi-jump
+the cheapest of the four: one cascade against a host round trip and a multi-jump
 flight.
+
+**The two broadcast-fed levers keep their places ahead of the other two**,
+because where a broadcast has named somewhere they are what works and they are
+what every recorded rejoin has used. The cost of that ordering is stated rather
+than hidden: a place broadcast before the retreat outranks a gate standing right
+here, so a ship that has already gated part of the way back on an earlier leg
+routes to the remembered system instead of gating on. That is the behaviour
+#415 shipped, and #429 changes only the readings on which it had nothing at all.
 
 **A place another pilot named is refused**, not used. `fleetPlaceBroadcast`
 carries the sender for exactly this, and routing to wherever anybody last
@@ -10772,11 +10898,46 @@ recoverFromRetreat context shipUI =
                 |> Maybe.andThen (\place -> goToFleetMate context shipUI commander place calledIt)
                 |> Maybe.andThen named
 
+        ( GateThroughToTheCommander, Just commander ) ->
+            -- #429. `accelerationGateStep` rather than a second gate
+            -- mechanism, so the select-then-press and its own bound are the
+            -- ones the hunting arm already uses. The only thing this reading
+            -- changes is `gateMayBeTaken`'s answer, through
+            -- `rejoinIsTakingThisGate`, and why no drone recall rides on it is
+            -- in that rule's own doc comment.
+            accelerationGateStep context
+                |> Maybe.map
+                    (describeBranch
+                        ("'"
+                            ++ commander
+                            ++ "' "
+                            ++ calledIt
+                            ++ " -- an acceleration gate is here and they are not, so take it."
+                        )
+                    )
+                |> Maybe.andThen named
+
+        ( WarpToTheCommanderFromTheFleetWindow, Just commander ) ->
+            fleetWindowRowForPilot commander context.readingFromGameClient
+                |> Maybe.map
+                    (\row ->
+                        describeBranch
+                            ("'"
+                                ++ commander
+                                ++ "' "
+                                ++ calledIt
+                                ++ " -- nothing has broadcast, so warping to them from their own fleet-window row."
+                            )
+                            (warpToFleetMateFromTheirFleetWindowRow context row)
+                    )
+                |> Maybe.andThen named
+
         _ ->
             -- Every other answer -- not recovering, nothing naming the
             -- commander, a budget spent, a ship already on its way, and a grid
-            -- with nowhere to rejoin -- hands the reading back so the drones,
-            -- the guns, the gate and the broadcasts below become reachable.
+            -- with neither a gate, a place, a banner nor a fleet window naming
+            -- the commander -- hands the reading back so the drones, the guns,
+            -- the gate and the broadcasts below become reachable.
             Nothing
 
 
@@ -10822,9 +10983,9 @@ rememberedCommanderPlaceFromReading followFleetBroadcastFrom fleetPlaceBroadcast
             )
 
 
-{-| What to do about getting back to the commander after a retreat, as eight
-named answers over five facts and a counter -- `backupCallStep`'s shape, for its
-reason: a rule reachable only through a whole `BotDecisionContext` is a rule
+{-| What to do about getting back to the commander after a retreat, as ten
+named answers over seven facts and a counter -- `backupCallStep`'s shape, for
+its reason: a rule reachable only through a whole `BotDecisionContext` is a rule
 nothing can execute in a test.
 
 **A commander nothing names is asked before the give-up**, `backupCallStep`'s
@@ -10841,6 +11002,28 @@ manoeuvre is the recovery executing, and charging it would bill this arm for the
 very flight it asked for -- `retreatAskedReadings`' own rule, and what keeps a
 legitimate multi-jump route from reaching a bound sized for a cascade.
 
+**The two broadcast-fed answers keep their places, unchanged** (#429). A banner
+and a remembered place are both the commander saying where he is, and where
+either is available this arm routes on it exactly as it did -- the cheaper path
+and the proven one.
+
+**Below them are the two answers a commander who never broadcasts leaves
+reachable.** #429 watched four wingmen retreat under a hand-flown commander and
+none of them get back: nothing had broadcast, so the place was `Nothing` and the
+banner named nobody, and the last answer handed the reading back for the rest of
+the session. `Warp to Member` on the commander's own fleet-window row needs
+neither a broadcast nor an overview row -- the window is already open and
+already parsed for the roster and the header -- and it drives the same
+`Fleet Member` menu `warpToFleetMateFromTheBroadcastBanner` drives.
+
+**The gate is asked before that warp, and the ordering is what terminates.** An
+escalation is one or two acceleration gates deep and `Warp to Member` lands this
+ship at the pocket's mouth rather than beside its commander, so a rule offering
+the warp first would warp, land, find the commander still off grid and warp
+again until the budget was gone. Asking the gate first means a ship that has
+arrived somewhere carrying a gate gates inward, and a ship with no gate in sight
+warps.
+
 -}
 retreatRecoveryStep :
     { recovering : Bool
@@ -10848,6 +11031,8 @@ retreatRecoveryStep :
     , commanderIsOnThisGrid : Bool
     , bannerNamesTheCommander : Bool
     , remembersWhereTheCommanderWas : Bool
+    , anAccelerationGateIsOnThisGrid : Bool
+    , fleetWindowNamesTheCommander : Bool
     , shipIsWarpingOrJumping : Bool
     , askedReadings : Int
     }
@@ -10874,6 +11059,12 @@ retreatRecoveryStep recoveryCase =
     else if recoveryCase.remembersWhereTheCommanderWas then
         RouteToWhereTheCommanderLastSaidHeWas
 
+    else if recoveryCase.anAccelerationGateIsOnThisGrid then
+        GateThroughToTheCommander
+
+    else if recoveryCase.fleetWindowNamesTheCommander then
+        WarpToTheCommanderFromTheFleetWindow
+
     else
         NowhereToRejoinTheCommander
 
@@ -10886,6 +11077,8 @@ type RetreatRecoveryStep
     | RejoinTheCommanderOnThisGrid
     | WarpToTheCommanderFromTheBroadcast
     | RouteToWhereTheCommanderLastSaidHeWas
+    | GateThroughToTheCommander
+    | WarpToTheCommanderFromTheFleetWindow
     | NowhereToRejoinTheCommander
 
 
@@ -10904,12 +11097,23 @@ charging it would be exactly #389's defect, and it needs no budget: it already
 hands the reading back, so the arms below it run whether or not anything is ever
 remembered.
 
+**#429's two answers are here, because they dispatch.** The gate drives
+`accelerationGateStep` and the fleet-window warp drives a context-menu cascade,
+so each spends the reading exactly as the three above them do, and the same
+counter that bounds a banner cascade bounds them. The bound is not a bound on
+the flight either way: a ship taking a gate is warping across the pocket on the
+readings that follow, and `AlreadyOnTheWayBackToTheCommander` resets the count
+on every one of them, so what accumulates is clicking with the ship standing
+still and each leg of a rejoin gets the whole allowance.
+
 -}
 retreatRecoveryAnswersThatSpendAReading : List RetreatRecoveryStep
 retreatRecoveryAnswersThatSpendAReading =
     [ RejoinTheCommanderOnThisGrid
     , WarpToTheCommanderFromTheBroadcast
     , RouteToWhereTheCommanderLastSaidHeWas
+    , GateThroughToTheCommander
+    , WarpToTheCommanderFromTheFleetWindow
     ]
 
 
@@ -11010,6 +11214,14 @@ retreatRecoveryStepFromReading followFleetBroadcastFrom recoveryMemory readingFr
                 recoveryMemory.fleetPlaceBroadcast
                 readingFromGameClient
                 /= Nothing
+        , anAccelerationGateIsOnThisGrid =
+            nearestAccelerationGateOnOverview readingFromGameClient /= Nothing
+        , fleetWindowNamesTheCommander =
+            (commander
+                |> Maybe.andThen
+                    (\pilot -> fleetWindowRowForPilot pilot readingFromGameClient)
+            )
+                /= Nothing
         , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading readingFromGameClient
         , askedReadings = recoveryMemory.askedReadings
         }
@@ -11018,12 +11230,13 @@ retreatRecoveryStepFromReading followFleetBroadcastFrom recoveryMemory readingFr
 {-| What this bot is doing about getting back to its commander, in one line.
 
 Exists for `describeBackupCall`'s reason, and #381 is the incident that makes it
-load-bearing here: `recoverFromRetreat` now answers `Nothing` for five of its
-eight cases, and from outside the decision tree a ship that is not recovering,
-one with no commander named, one whose budget is spent, one already in warp and
-one with nowhere at all to fly are the same silence. Naming the case on every
+load-bearing here: `recoverFromRetreat` answers `Nothing` for five of its ten
+cases, and from outside the decision tree a ship that is not recovering, one
+with no commander named, one whose budget is spent, one already in warp and one
+with nowhere at all to fly are the same silence. Naming the case on every
 reading is what would have made #381 one line rather than a live read of four
-clients.
+clients, and #429 is the same lesson: four wingmen printed the nowhere case
+together, and that line is what named the cause.
 
 -}
 describeRetreatRecovery : BotDecisionContext -> String
@@ -11082,8 +11295,14 @@ describeRetreatRecovery context =
                 RouteToWhereTheCommanderLastSaidHeWas ->
                     "routing to where the commander last said he was." ++ remembered ++ spentOf
 
+                GateThroughToTheCommander ->
+                    "nothing has broadcast, but an acceleration gate is on this grid -- taking it to get further in." ++ spentOf
+
+                WarpToTheCommanderFromTheFleetWindow ->
+                    "nothing has broadcast, so warping to the commander from their own fleet-window row." ++ spentOf
+
                 NowhereToRejoinTheCommander ->
-                    "the commander is off this grid and nothing names a place to fly to, so the reading is handed back."
+                    "the commander is off this grid, nothing names a place to fly to, no acceleration gate is here and the fleet window shows no row for them, so the reading is handed back."
                         ++ remembered
            )
 
@@ -12738,12 +12957,16 @@ the shape #343's own review caught elsewhere in this file -- this answers
 `Nothing` for the first, silently, exactly as every other arm in this decision
 root does when it has nothing to do, and describes the second explicitly.
 
-**#393 is the one thing that overrides the rats guard, and it is scoped to the
-gate the commander called.** Absent a `Target` broadcast on a gate,
-`gateMayBeTaken` is handed `calledByTheCommander = False` and #348's guard is
-exactly what it was. This arm never sees the override: it selects the nearest
-gate rather than the called one, and a called gate is taken by
-`bringCalledTargetUnderFire`, which sits above this in the decision root.
+**Two things override the rats guard and this arm asks for neither of them.**
+#393 is the gate the commander called, and this arm hands `gateMayBeTaken`
+`calledByTheCommander = False` -- a called gate is taken by
+`bringCalledTargetUnderFire`, which sits above this in the decision root. #429
+is the retreat recovery gating back to its commander, and that permission comes
+from `retreatRecoveryStepNow` inside `takeTheAccelerationGate` rather than from
+this arm's caller, because the recovery reaches the same gate mechanism through
+here. On a reading the recovery is not the one acting, both are `False` and
+#348's guard is exactly what it was -- which is the ordinary hunting case this
+whole arm is for.
 
 -}
 accelerationGateStep : BotDecisionContext -> Maybe DecisionPathNode
@@ -12760,13 +12983,16 @@ accelerationGateStep context =
 {-| Take the acceleration gate the commander broadcast a `Target` on, drones
 first.
 
-**The rats guard is overridden here and only here.** #348 refuses a gate while
-rats are on the grid, because a wingman taking one mid-fight "abandons whatever
-the fleet is still fighting and leaves the commander a ship short in the pocket
-this bot just left". That guard exists to stop a wingman wandering off on its
-own judgement; the FC calling the gate is the explicit instruction to send the
-crew through, and there are occasions when a fleet must take a gate with rats
-still up. So the call overrules it, and nothing else does.
+**The rats guard is overridden here on the commander's authority.** #348
+refuses a gate while rats are on the grid, because a wingman taking one mid-fight
+"abandons whatever the fleet is still fighting and leaves the commander a ship
+short in the pocket this bot just left". That guard exists to stop a wingman
+wandering off on its own judgement; the FC calling the gate is the explicit
+instruction to send the crew through, and there are occasions when a fleet must
+take a gate with rats still up. The only other thing that overrules it is #429's
+rejoin, which is the case where the commander is off this grid and there is no
+fleet fight here to abandon; that one is asked in `takeTheAccelerationGate` and
+never reaches this arm.
 
 **The drones come home first, and that is not optional.** `accelerationGateStep`
 recalls nothing, which was survivable only while the guard required a clear
@@ -12827,17 +13053,70 @@ type alias AccelerationGateToAct =
 
 
 {-| Whether this bot may take a gate on this reading -- #348's guard, and the
-one exception to it.
+two exceptions to it.
 
-A pure rule over two `Bool`s so a case can execute it, and one declaration so
+A pure rule over three `Bool`s so a case can execute it, and one declaration so
 the arm, the memory update and the status clause cannot hold three opinions
-about when the guard applies. With `calledByTheCommander = False` it _is_ #348's
-guard, unchanged.
+about when the guard applies. With both exceptions `False` it _is_ #348's guard,
+unchanged.
+
+**The second exception is #429's rejoin, and it is the retreat recovery's own
+reading rather than a state.** A ship gating back to its commander lands in
+rooms with rats in them -- that is what an escalation is -- so #348's guard, on
+the way back, refuses the whole rejoin rather than protecting a fight. The
+commander is off this grid by construction on those readings, so there is no
+fight of the fleet's to abandon and no pocket to leave him a ship short in,
+which is the harm #348's own wording names.
+
+**Scoped to the reading the rejoin is acting on, not to the retreat.**
+`rejoinIsTakingThisGate` asks the shipped `RetreatRecoveryStep`, so the
+permission exists only where `recoverFromRetreat` is itself dispatching this
+gate: a recovery that has given up, one the retreat is still holding, and one
+warping somewhere all answer something else, and ordinary hunting is not
+recovering at all. That is narrower than "this ship is recovering" on purpose --
+#348's guard has to be exactly what it was on every reading the hunting arm is
+the one asking.
+
+**No drone recall rides on this one, and that is a reading of the retreat rather
+than an omission.** #393's override recalls first because rats on the grid means
+the drones are out essentially by construction --
+`dronesAssistTheCommander` is what puts them there. The rejoin's rats are the
+same rats and its drones are not: `warpAwayFromDanger` recalls before it warps,
+so the retreat is what brings them home, and `recoverFromRetreat` sits above
+`dronesAssistTheCommander` in the decision root, so nothing relaunches them
+while a recovery is running. What is left is the retreat's own bounded recall
+having given up -- and those drones were abandoned by the retreat, a system
+away, before this arm was ever reached. `calledGateDroneRecall` therefore stays
+scoped to the called gate, where the drones can still be recalled and the choice
+is real.
 
 -}
-gateMayBeTaken : { ratsOnTheGrid : Bool, calledByTheCommander : Bool } -> Bool
+gateMayBeTaken :
+    { ratsOnTheGrid : Bool
+    , calledByTheCommander : Bool
+    , rejoiningAfterARetreat : Bool
+    }
+    -> Bool
 gateMayBeTaken gateCase =
-    gateCase.calledByTheCommander || not gateCase.ratsOnTheGrid
+    gateCase.calledByTheCommander
+        || gateCase.rejoiningAfterARetreat
+        || not gateCase.ratsOnTheGrid
+
+
+{-| Whether the gate on this reading is the one the retreat recovery is taking
+to get back to its commander.
+
+One declaration with four readers -- the arm, the press's own wording, the
+memory update's counter and the status clause -- rather than a constructor
+comparison restated beside each, which is #102's defect. The memory update asks
+it of `recoveringStepNow`, the rule it already computes for
+`retreatRecoveryAskedReadings`, so the reading that spends the recovery's budget
+and the reading that carries the gate permission are one answer.
+
+-}
+rejoinIsTakingThisGate : RetreatRecoveryStep -> Bool
+rejoinIsTakingThisGate recoveryStep =
+    recoveryStep == GateThroughToTheCommander
 
 
 {-| The select-then-press sequence, shared by the called gate and the nearest
@@ -12851,6 +13130,8 @@ takeTheAccelerationGate context gateToTake =
                 { ratsOnTheGrid =
                     not (List.isEmpty (getNamesOfRatsInOverview context.readingFromGameClient))
                 , calledByTheCommander = gateToTake.calledByTheCommander
+                , rejoiningAfterARetreat =
+                    rejoinIsTakingThisGate (retreatRecoveryStepNow context)
                 }
             )
     then
@@ -12961,6 +13242,15 @@ pressTheAccelerationGate context gateToTake =
                             describeBranch
                                 (if gateToTake.calledByTheCommander then
                                     "The commander called this acceleration gate -- activate it and take the fleet through, rats on the grid or not."
+
+                                 else if rejoinIsTakingThisGate (retreatRecoveryStepNow context) then
+                                    -- Named separately because the line below
+                                    -- would be a lie on exactly the readings
+                                    -- #429 is about: a rejoin takes this gate
+                                    -- with rats up, and a press reporting a
+                                    -- clear overview is a status line
+                                    -- disagreeing with the decision it is on.
+                                    "Gating back toward the commander after a retreat -- activate it, rats on the grid or not."
 
                                  else
                                     "The overview is clear of rats -- activate the acceleration gate to move to the next pocket."
@@ -13686,17 +13976,25 @@ describeAccelerationGateAsk context =
                 askedReadings =
                     context.memory.gateAskedReadings
 
+                rejoining : Bool
+                rejoining =
+                    rejoinIsTakingThisGate (retreatRecoveryStepNow context)
+
                 mayBeTaken : Bool
                 mayBeTaken =
                     gateMayBeTaken
                         { ratsOnTheGrid =
                             not (List.isEmpty (getNamesOfRatsInOverview context.readingFromGameClient))
                         , calledByTheCommander = gateToTake.calledByTheCommander
+                        , rejoiningAfterARetreat = rejoining
                         }
             in
             "Acceleration gate: on the overview"
                 ++ (if gateToTake.calledByTheCommander then
                         " and CALLED by the commander, "
+
+                    else if rejoining then
+                        " and this ship is gating back to its commander after a retreat, "
 
                     else
                         ", "

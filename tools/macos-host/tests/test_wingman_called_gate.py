@@ -592,12 +592,21 @@ class TheCallOverridesTheRatsGuardTest(unittest.TestCase):
         cls.repl.close()
 
     def test_the_rule_answers_the_four_combinations(self):
+        """#429 gave the rule a second exception and this asks it with that one
+        switched off, which is what keeps the case about #393's override.
+
+        The whole grid of three inputs is next door, in
+        `test_wingman_rejoins_without_a_broadcast`; what belongs here is that
+        the call is the only thing that may take a gate with rats up **when
+        nothing is rejoining**, and that it always may.
+        """
         self.assertEqual(
             self.repl.evaluate([
-                "gateMayBeTaken { ratsOnTheGrid = False, calledByTheCommander = False }",
-                "gateMayBeTaken { ratsOnTheGrid = True, calledByTheCommander = False }",
-                "gateMayBeTaken { ratsOnTheGrid = False, calledByTheCommander = True }",
-                "gateMayBeTaken { ratsOnTheGrid = True, calledByTheCommander = True }",
+                "gateMayBeTaken { ratsOnTheGrid = %s"
+                ", calledByTheCommander = %s"
+                ", rejoiningAfterARetreat = False }" % (rats, called)
+                for rats, called in [("False", "False"), ("True", "False"),
+                                     ("False", "True"), ("True", "True")]
             ]),
             [True, False, True, True],
             "only the call may take a gate with rats up, and it always may")
@@ -1034,10 +1043,17 @@ class TheRecallIsTheOneEveryOtherDepartingArmUsesTest(unittest.TestCase):
 
     def test_the_override_has_one_declaration_and_three_readers(self):
         """Three opinions about when #348's guard applies is how the arm, the
-        counter and the status line come apart."""
-        self.assertIn(
-            "gateMayBeTaken : { ratsOnTheGrid : Bool, calledByTheCommander : Bool } -> Bool",
-            collapsed(self.source))
+        counter and the status line come apart.
+
+        The record grew a third field in #429 and the property did not: what is
+        asserted is the two inputs this issue owns and the one declaration, so a
+        later exception has to be added to the same rule rather than beside it.
+        """
+        # Anchored on the annotation line rather than on the bare name, which
+        # occurs first in a doc comment several declarations earlier.
+        signature = collapsed(declaration(self.source, "\ngateMayBeTaken :"))
+        self.assertIn("ratsOnTheGrid : Bool", signature)
+        self.assertIn("calledByTheCommander : Bool", signature)
         self.assertEqual(
             len(re.findall(r"^gateMayBeTaken\b", self.source, re.M)), 2,
             "one annotation and one definition")
