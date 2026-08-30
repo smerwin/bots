@@ -248,6 +248,11 @@ class WingmanRepl(ElmRepl):
         " { timeInMilliseconds = 0"
         " , readingFromGameClient = reading"
         " , screenshot = { pixels_1x1 = always Nothing, pixels_2x2 = always Nothing }"
+        # #411 widened `UpdateMemoryContext` with what the bot itself
+        # dispatched, so that a gate this bot took clears the commander
+        # sighting the way a warp does. Nothing folded here dispatches
+        # anything, so an empty history is what the framework would hand it.
+        " , previousStepsEffects = []"
         " , botSettings = settings }",
         # A session, written as `(repeats, reading)` pairs. The `filterMap` is
         # what a fixture that never parsed falls out of, which is why every

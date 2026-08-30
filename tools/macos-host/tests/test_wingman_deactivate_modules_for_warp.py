@@ -323,7 +323,13 @@ class WarpDeactivationRepl(ElmRepl):
         "updateOver = \\names -> \\parsed -> \\memory ->"
         " updateMemoryForNewReadingFromGame"
         " { timeInMilliseconds = 0, readingFromGameClient = parsed"
-        " , screenshot = aScreenshot, botSettings = settingsWith names }"
+        " , screenshot = aScreenshot, botSettings = settingsWith names"
+        # #411 widened `UpdateMemoryContext` with what the bot dispatched.
+        # Nothing folded here dispatches anything, so an empty history is
+        # what the framework would hand it. Note this is the *memory*
+        # context -- `contextFor` above builds a `BotDecisionContext`, which
+        # has carried its own `previousStepsEffects` all along.
+        " , previousStepsEffects = [] }"
         " memory",
         "foldReadings = \\shipModules -> \\names -> \\asked -> \\readings ->"
         " List.foldl (updateOver names)"
