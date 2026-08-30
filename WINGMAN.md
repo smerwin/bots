@@ -329,14 +329,11 @@ module whose cycle is longer than that window will still read unchanged when
 the window expires, and the retry is a toggle. Four other arms in this file
 click module buttons through that helper, and none of them was touched:
 
-- **`deactivateModulesForWarp`** is #408's shape exactly, in the other
-  direction. It clicks a module the operator named in `deactivate-module-on-warp`
-  while `.isActive == Just True`, which is the same "still cycling" reading
-  that trapped the propulsion module — so a ten-second module would be switched
-  off, still read active, and be switched back on mid-warp. It is unreached in
-  the shipped settings (`deactivateModuleOnWarp` defaults to `[]`), but it is
-  live code: `warpAwayFromDanger` calls it on the retreat, not only the
-  inherited root. Reading `isDeactivating` there is the same one-line change.
+- **`deactivateModulesForWarp`** was #408's shape exactly, in the other
+  direction, and is **fixed in #410** — see the section below. It clicked a
+  module the operator named in `deactivate-module-on-warp` while
+  `.isActive == Just True`, which is the same "still cycling" reading that
+  trapped the propulsion module.
 - **`activateAlwaysOnModules`** and the always-on half of the middle row click
   in the *activation* direction, gated on `moduleIsActiveOrReloading`. The
   transient is the other one — a module told to switch on does not carry
@@ -351,6 +348,88 @@ click module buttons through that helper, and none of them was touched:
   are bounded by `weaponsAskedReadingsBound`, so this costs twenty readings and
   a `GAVE UP` rather than a session, and repointing them at `isInActiveState`
   is a behaviour change on the arm that shoots — deliberately not made here.
+
+### The same defect on the retreat path (#410)
+
+`deactivateModulesForWarp` is the first bullet above, fixed. The read is #408's
+exactly — `ShipUIModuleButton.stateFromDictEntries.isDeactivating`, with
+`Just True` **and** `Nothing` both buying no click, because the parser's own doc
+block is explicit that absent and `False` are different facts and only one of
+them is safe to act on. Collapsing them licences precisely the click that
+re-arms a module the previous click may already have stopped.
+
+**Why it wanted a bound as well as a read, where #408's argument alone would not
+have got one.** This arm is not only the inherited root's: `warpAwayFromDanger`
+takes its answer **before** commanding the warp, so an arm that answers `Just`
+forever is a damaged ship that never leaves. #408's loop merely stopped four
+ships following their commander; this one would fire while a ship is escaping.
+And `isDeactivating` alone does not bound it — a click the client never
+acknowledges leaves the module reading active and settled on every reading, and
+the arm clicks again indefinitely. So `deactivateForWarpAskedReadingsBound`
+(= `weaponsAskedReadingsBound`) bounds the *click*, and past it the arm answers
+`Nothing` and the caller's own step runs. That is the shape this repo uses for a
+give-up that bounds effort — it declines an action and hands the caller's step
+back — against the root-placed shape it uses for one that ends the session. A
+ship that warps with an afterburner lit is worth incomparably more than one that
+never warps.
+
+**The counter's reset is deliberately tighter than #408's, and that is the one
+place this diverges from the change it ports.** `middleRowAskedReadings` resets
+on every answer that declined to click; `deactivateForWarpAskedReadings` resets
+only on `NoModuleToDeactivateForWarp` — no named module reading active at all,
+which is the end of an episode rather than a pause inside one. What #408's rule
+cannot bound is an **alternation**: a module whose deactivation is cancelled
+mid-cycle reads `Just True` on one reading and `Just False` on the next with
+`isActive` never falling, so the arm clicks, declines, clicks, and a counter
+that resets on the decline never reaches its bound. A bound a click/decline
+alternation walks past is not a bound, and on the retreat path that is the ship
+that never warps. It costs nothing in the healthy case: a click that lands
+leaves the module deactivating for a reading or two and then *off*, at which
+point it is no longer a named module that reads active and the counter is back
+to zero for the next warp.
+
+**One tooltip memory, asked once.** The framework updates memory and only then
+decides, so `context.memory.shipModules` at the arm is the *integrated* value
+while a counter reading `botMemoryBefore.shipModules` beside it would be the
+previous reading's — and on the reading a module's tooltip first arrives those
+two disagree about which modules the setting names at all.
+`updateMemoryForNewReadingFromGame` hoists `shipModulesNow` and hands it to
+both, so the rule the memory update advances the counter from and the rule the
+arm executes cannot be asked with different tooltips.
+
+`describeDeactivateForWarp` carries all five answers in the status line, which
+matters more here than for the middle row: this arm answers `Nothing` when it
+gives up, `Nothing` when it declines to click and `Nothing` when there is
+nothing to do, and from a console an operator watching a ship that would not
+leave has no other way to tell those apart.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_wingman_deactivate_modules_for_warp.py`. The rule,
+the arm, the status clause and the counter are executed through the real
+`Bot.elm` in `elm repl`, and the readings come from the real
+`EveOnline.ParseUserInterface` — the three `isDeactivating` fixtures differ only
+in that one dictionary entry and read `ramp_active` on in all three, which is
+what makes "a rule on `isActive` cannot tell them apart" a measurement rather
+than a claim. The counter is *folded* over sessions rather than asked once.
+Confirmed by mutation, eleven of them, each failing a named case and listed in
+that file's own docstring — including `Nothing` treated as licence to click, the
+read pointed back at `.isActive`, the comparison inverted, the bound moved by
+one and removed, the reset widened to #408's, and two of the four out-of-scope
+callers repointed at this rule.
+
+**Unverified: any of it running, and nothing has ever run it.**
+`deactivate-module-on-warp` ships as `[]` and no pilot profile sets it, so no
+recorded wingman run exercises this arm at all — the fix is latent in exactly
+the way the defect was, and nothing here is a measurement. What to watch on the
+first run that sets the setting: `Switching a module off for the warp, N of 20
+readings spent clicking.` in the status line, appearing at N=0 and *going away*
+within a reading or two with `already deactivating` in between. A console
+reading `says nothing about whether the module named for the warp is
+deactivating` for a whole session is a build that does not carry the entry, and
+on such a build no named module is ever switched off — which loses the module
+and keeps the ship, and is the direction #410 asks for. A `GAVE UP` is the click
+landing on something the client does not answer for, which is #408's own
+remaining unknown rather than this one's.
 
 ### On landing, closing outranks the fight — for as long as the client is silent
 
@@ -2272,7 +2351,7 @@ Only after this bot has flown. See the top of this file.
 | `orbit-fc` | Keep this ship on station beside the fleet commander by approaching their overview row (#365, #368). Defaults to `yes`. Also spelled `approach-fc`; the `orbit` spelling is kept so a settings string written for an earlier version still starts a session. **It does not govern the close on landing** — since #397 that happens whatever this key says, and the key governs only the steady-state station-keeping after the client reports the manoeuvre. |
 | `orbit-fc-range` | **Accepted and ignored.** It named a rung of the client's `Orbit` submenu, which this bot no longer drives. Still parsed so a settings string carrying it does not end the session before it starts (#161), and named as ignored in the status line whenever it is set to anything but `500 m`. |
 | `orbit-in-combat` | Inherited, and **superseded by `orbit-fc` rather than sitting beside it** (#368): with `orbit-fc=yes`, `decideActionInAnomaly` does not issue its own orbit at all. |
-| `deactivate-module-on-warp` | Inherited, unchanged. |
+| `deactivate-module-on-warp` | Inherited. The setting itself is unchanged; what it drives is not — since #410 the arm reads the client's own `isDeactivating` before it clicks anything off, and is bounded by `deactivateForWarpAskedReadingsBound`. Defaults to nothing named, so it is inert until an operator sets it, and no run ever has. |
 
 **These live in the launcher's profile, not in the console.** A settings change
 applied through the web console lasts exactly as long as the session: it is
@@ -2501,6 +2580,13 @@ restart.
   the debounce that is about ten clicks — five net toggles of a module the
   operator would rather have off. With `isDeactivating` read it should never
   get near that; nothing has watched a run to confirm it does not.
+- **That `deactivateModulesForWarp` has ever run at all (#410).**
+  `deactivate-module-on-warp` ships as `[]` and no pilot profile sets it, so
+  neither the defect nor the fix has been exercised by any recorded run — the
+  arm is inert until an operator names a module. Everything asserted about it is
+  executed in `elm repl` against fixtures, and the first operator to set that
+  setting is the first person to watch it. See "The same defect on the retreat
+  path" for what to watch.
 - **Whether the middle row's capacitor cost is bearable ungated.** The choice
   not to gate the always-on set on a fight is argued rather than measured, and
   the counter-evidence would be a wingman running its capacitor dry sitting on
