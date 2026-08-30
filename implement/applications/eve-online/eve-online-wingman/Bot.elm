@@ -752,6 +752,15 @@ type alias BotMemory =
     -- conservative direction.
     , closingOnTheCommanderSinceLanding : Bool
 
+    -- Whether the fleet commander has been seen on this grid, and for how many
+    -- readings he has not been seen since. #411. Three states rather than a
+    -- counter, so "never saw him here" and "saw him and lost him" cannot be
+    -- read as one another -- which is the whole of what makes an absence-based
+    -- inference safe to draw at all. Reset to `CommanderNotSeenOnThisGrid` on
+    -- the reading a warp ends, so a sighting from the previous pocket licenses
+    -- nothing in this one. See `commanderPresenceAfterReading`.
+    , commanderGridPresence : CommanderGridPresence
+
     -- Readings in a row spent trying to reach a fleet-mate who broadcast
     -- `needs backup`, bounded like the counters above -- see
     -- `backupCallAskedReadingsBound`. Advances only on the answers that
@@ -867,6 +876,29 @@ type alias BannerCtrlClickAsk =
     { calledTarget : String
     , readings : Int
     }
+
+
+{-| What this grid has said about the fleet commander so far. #411.
+
+**Three constructors rather than a `Bool` and a counter**, because the two
+absences are different facts and collapsing them is the failure this whole
+design refuses. `CommanderNotSeenOnThisGrid` is _nothing here has ever named
+him_ -- which is what a ship that has just landed reads, and what a pilot whose
+overview preset is too short to draw his row reads for the whole of a grid
+(#366 was fixed on exactly that correction). `CommanderGoneFromTheGrid` is _this
+grid named him and now does not_, carrying how many consecutive readings that
+has been true for. Only the second is evidence of anything.
+
+`CommanderGoneFromTheGrid` is reachable only from `CommanderOnTheGrid`, so the
+prior sighting is a property of the type rather than a condition somebody has to
+remember to write. See `commanderPresenceAfterReading` for what moves between
+them, and `followTheCommanderThroughTheGate` for the one rule that reads it.
+
+-}
+type CommanderGridPresence
+    = CommanderNotSeenOnThisGrid
+    | CommanderOnTheGrid
+    | CommanderGoneFromTheGrid Int
 
 
 {-| The message box the bot has been trying to answer, and how many readings it
@@ -4243,6 +4275,7 @@ initBotMemory =
     , approachFleetCommanderAskedReadings = 0
     , panelSelectUnansweredReadings = 0
     , closingOnTheCommanderSinceLanding = False
+    , commanderGridPresence = CommanderNotSeenOnThisGrid
     , backupCallAskedReadings = 0
     , unlockFleetPilotAskedReadings = 0
     , middleRowAskedReadings = 0
@@ -4362,7 +4395,9 @@ statusTextFromState context =
                     , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
                     , [ describeRetreat context, describeRetreatRecovery context ]
                     , [ describeFleetMembership context, describeFriendlyFireGuard context ]
-                    , [ describeAccelerationGateAsk context ]
+                    , [ describeAccelerationGateAsk context
+                      , describeCommanderFollowThroughGate context
+                      ]
                     , [ describeCalledObject context ]
                     , [ describeWeaponsAsk context ]
                     , [ describeApproachFleetCommanderAsk context ]
@@ -4784,6 +4819,21 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         arrivalWindowIsOpenNow =
             arrivalWindowIsOpen { readingsSinceWarpEnded = readingsSinceWarpEnded }
 
+        -- #411's presence, settled here for the reason every verdict on this
+        -- channel is: the memory update is the only thing that runs on every
+        -- reading unconditionally, and the grid changing is a transition
+        -- between two readings that only this function can see. The grid
+        -- boundary is `weJustFinishedWarping` -- the same shared
+        -- `warpJustEnded` that #397's landing window and the drone bookkeeping
+        -- already read -- rather than a second notion of "we changed grid".
+        commanderGridPresenceNow : CommanderGridPresence
+        commanderGridPresenceNow =
+            commanderPresenceAfterReading
+                { before = botMemoryBefore.commanderGridPresence
+                , gridChanged = weJustFinishedWarping
+                , commanderOnGrid = commanderOnGridFromReading context.readingFromGameClient
+                }
+
         visitedAnomalies : Dict.Dict String MemoryOfAnomaly
         visitedAnomalies =
             if shipIsWarping == Just True then
@@ -4917,6 +4967,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     gateMayBeTaken
                         { ratsOnTheGrid = not (List.isEmpty namesOfRatsInOverview)
                         , calledByTheCommander = gate.calledByTheCommander
+                        , commanderLeftTheGrid =
+                            -- This reading's presence rather than
+                            -- `botMemoryBefore`'s, because the decision reads
+                            -- the memory this update writes -- a counter
+                            -- advanced under a presence one reading behind the
+                            -- arm's would leave
+                            -- `accelerationGateRefusesThisShipTicks`
+                            -- unreachable on the reading the follow begins.
+                            -- #397's arrangement, and #34's shape without it.
+                            followingTheCommanderThroughAGate
+                                commanderGridPresenceNow
+                                context.readingFromGameClient
                         }
                         && not askingForTheCalledGateRecall
                         && selectedItemIsOverviewEntry context.readingFromGameClient gate.gate
@@ -5413,6 +5475,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         else
             0
     , closingOnTheCommanderSinceLanding = closingOnTheCommanderSinceLandingNow
+    , commanderGridPresence = commanderGridPresenceNow
     , backupCallAskedReadings =
         case answeringABackupCall of
             Nothing ->
@@ -6961,18 +7024,36 @@ overviewEntryIsAnAccelerationGate entry =
         |> List.any (containsWords "acceleration gate")
 
 
-{-| The nearest displayed acceleration gate on the overview, if there is one.
-A hidden row's region belongs to whatever was recycled into its place, so a
-row that is not `_display`ed is excluded rather than clicked. `Result.withDefault`
-pushes an unreadable (AU) distance to the back rather than dropping it, since a
-gate whose distance cannot be read is still a gate worth reporting on.
+{-| Every displayed acceleration gate on the overview.
+
+A hidden row's region belongs to whatever was recycled into its place, so a row
+that is not `_display`ed is excluded rather than clicked.
+
+**One derivation with two readers**, which is what makes #411's
+"exactly one gate" guard mean the same thing as the gate this bot would act on.
+A count taken over a different filter than the choice is two questions about one
+grid: counting undisplayed rows too would refuse the follow because of a row
+nothing would ever have clicked, and counting fewer than the choice sees would
+license it while the choice was ambiguous. `overviewEntryLockHandle`'s lesson,
+and `overviewRowsForPilot`'s arrangement one screen up.
+
 -}
-nearestAccelerationGateOnOverview : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
-nearestAccelerationGateOnOverview readingFromGameClient =
+accelerationGatesOnOverview : ReadingFromGameClient -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+accelerationGatesOnOverview readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.filter overviewEntryIsDisplayed
         |> List.filter overviewEntryIsAnAccelerationGate
+
+
+{-| The nearest displayed acceleration gate on the overview, if there is one.
+`Result.withDefault` pushes an unreadable (AU) distance to the back rather than
+dropping it, since a gate whose distance cannot be read is still a gate worth
+reporting on.
+-}
+nearestAccelerationGateOnOverview : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+nearestAccelerationGateOnOverview readingFromGameClient =
+    accelerationGatesOnOverview readingFromGameClient
         |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
         |> List.head
 
@@ -12393,17 +12474,288 @@ type alias AccelerationGateToAct =
 
 
 {-| Whether this bot may take a gate on this reading -- #348's guard, and the
-one exception to it.
+two exceptions to it.
 
-A pure rule over two `Bool`s so a case can execute it, and one declaration so
+A pure rule over three `Bool`s so a case can execute it, and one declaration so
 the arm, the memory update and the status clause cannot hold three opinions
-about when the guard applies. With `calledByTheCommander = False` it _is_ #348's
-guard, unchanged.
+about when the guard applies. With both exceptions `False` it _is_ #348's guard,
+unchanged.
+
+**Both exceptions are the same thing said two ways**: the fleet is going through
+this gate and a wingman that stays behind is a ship short in the pocket the
+fleet just left. `calledByTheCommander` is #393's, and is the commander saying
+so explicitly. `commanderLeftTheGrid` is #411's, and is the commander having
+gone without saying so -- a weaker signal by a long way, which is why it is
+`followTheCommanderThroughTheGate` rather than a bare "he is not on the
+overview" and why that rule carries four guards.
 
 -}
-gateMayBeTaken : { ratsOnTheGrid : Bool, calledByTheCommander : Bool } -> Bool
+gateMayBeTaken :
+    { ratsOnTheGrid : Bool
+    , calledByTheCommander : Bool
+    , commanderLeftTheGrid : Bool
+    }
+    -> Bool
 gateMayBeTaken gateCase =
-    gateCase.calledByTheCommander || not gateCase.ratsOnTheGrid
+    gateCase.calledByTheCommander
+        || gateCase.commanderLeftTheGrid
+        || not gateCase.ratsOnTheGrid
+
+
+{-| Whether this reading licenses following the commander through an
+acceleration gate nobody named. #411.
+
+**The question this answers is not "where did he go".** It cannot be: a pilot
+leaving the overview has at least five causes and only one of them is _took the
+gate_ -- he died, he warped off, he cloaked, he drifted out of the overview's
+own range filter, or this pilot's overview preset never drew his row at all. No
+guard below changes that, and none is claimed to. What they change is _when_ the
+inference is drawn, so that it is drawn on a grid that has already answered
+about him rather than on one that never has. **The accepted cost is a wingman
+that follows a dead commander through a gate and ends up alone in a pocket**,
+and the reason it is acceptable is that the commander being gone is already a
+broken state this bot has no better answer to -- the alternative is sitting on
+the grid following nobody, which is what #415 had to write a give-up for.
+
+**It rests on two positive readings and not on an absence alone**, which is
+#411's own first constraint and #395's lesson: a called target absent from the
+overview was read as dead and latched the bot for a whole session.
+
+  - **A prior sighting is required**, and it is a property of
+    `CommanderGridPresence` rather than a condition: `CommanderGoneFromTheGrid`
+    is reachable only from `CommanderOnTheGrid`. This is the guard that matters
+    most. Without it the rule fires from the first reading on any pilot whose
+    overview window is too short to render the commander's row -- his entry is
+    in the tree and fails `_display`, which reads as an absence exactly like
+    leaving does, and #366 was fixed on that correction.
+  - **The sighting is scoped to this grid**, cleared on the reading a warp ends
+    by the same shared `warpJustEnded` the drone bookkeeping and #397's landing
+    window already read. A sighting from the previous pocket must license
+    nothing in this one.
+  - **The absence has to persist**, for `commanderGoneReadingsBeforeFollowing`
+    readings, because a row can fail `_display` for one reading without the
+    pilot having gone anywhere.
+  - **Exactly one acceleration gate on the grid**, which is the whole
+    difference from #393: nobody named this gate, so with two there is no basis
+    to choose and picking the nearest would be a guess whose failure is a wrong
+    pocket. Refusing on ambiguity is `dockAtDestinationStation`'s discipline
+    (exactly one `AutopilotDestinationIcon`), and what refusing costs here is
+    only the follow -- the gate is still taken on a clear grid exactly as it
+    was.
+
+**It holds no reading.** This is a `Bool` handed to `gateMayBeTaken`; every
+answer below it is the shipped gate path, already bounded by
+`accelerationGateRefusesThisShipTicks`. On the readings it changes anything at
+all the arm was answering `Just (… rats still on the grid …)` and waiting, so
+what this can do to a reading is take a gate on it, never hold it.
+
+-}
+followTheCommanderThroughTheGate :
+    { presence : CommanderGridPresence
+    , accelerationGatesOnTheGrid : Int
+    }
+    -> Bool
+followTheCommanderThroughTheGate state =
+    commanderHasLeftTheGrid state.presence
+        && (state.accelerationGatesOnTheGrid == 1)
+
+
+{-| The rule above over a reading, so the arm, the press's own wording, the
+memory update and the two status clauses all reach it the same way.
+
+The presence is an argument rather than read from a context, because the memory
+update has to ask about the presence _this_ reading produces while the decision
+asks about the one already written -- #397's own arrangement, and #34's shape if
+the two disagree.
+
+-}
+followingTheCommanderThroughAGate : CommanderGridPresence -> ReadingFromGameClient -> Bool
+followingTheCommanderThroughAGate presence readingFromGameClient =
+    followTheCommanderThroughTheGate
+        { presence = presence
+        , accelerationGatesOnTheGrid =
+            List.length (accelerationGatesOnOverview readingFromGameClient)
+        }
+
+
+{-| Whether the commander has been gone from this grid for long enough to draw
+anything from it. One comparison with several readers --
+`followTheCommanderThroughTheGate` and the status clause --
+`accelerationGateHasBeenGivenUpOn`'s arrangement, for its reason.
+
+`CommanderNotSeenOnThisGrid` answers `False` rather than counting, which is the
+prior-sighting guard: a grid that has never named him says nothing about him
+having left it.
+
+-}
+commanderHasLeftTheGrid : CommanderGridPresence -> Bool
+commanderHasLeftTheGrid presence =
+    case presence of
+        CommanderNotSeenOnThisGrid ->
+            False
+
+        CommanderOnTheGrid ->
+            False
+
+        CommanderGoneFromTheGrid readings ->
+            commanderGoneReadingsBeforeFollowing <= readings
+
+
+{-| How many consecutive readings the commander's row has to be missing from a
+grid that had it before this bot concludes he has left.
+
+**Three, and it is the number this repo already gives a row that may simply not
+have been drawn.** `calledTargetGoneReadings` is the same question about a
+called target's row and its own comment carries the argument: the parser drops
+what it cannot read, so "one reading finding none may be a parse that missed",
+and CLAUDE.md's ship-loss signal wants three consecutive empty module rows for
+the same reason.
+
+**Deliberately not written as `calledTargetGoneReadings`.** The two questions
+are the same and the two give-ups are not -- that one costs a lock on a target
+whose row is back next reading, this one costs a pocket -- so tying them would
+let a retune of #395's bound silently move this one. The shared thing is the
+argument, which is why the argument is written here.
+
+**No corpus sizes it**, and this bot has none of its own at all (WINGMAN.md).
+Being late costs three readings of following the fleet late; being early costs a
+pocket, and the count resets the moment the row comes back, so a commander whose
+row flickers re-arms the guard rather than spending it.
+
+-}
+commanderGoneReadingsBeforeFollowing : Int
+commanderGoneReadingsBeforeFollowing =
+    3
+
+
+{-| Whether this reading can say at all whether the commander is on this grid.
+
+**`Nothing` is _cannot say_ and is never read as _he is not here_**, which is
+the distinction this whole memory is built on. Three readings cannot answer:
+one whose fleet window does not name a commander (the header comes and goes,
+which `fleetPlaceBroadcast`'s own comment records), one with no ship UI, and one
+with no overview window at all. Each of those reads as an absence to a rule that
+only asks `fleetCommanderOverviewEntry`, and an absence is exactly what this
+memory is counting.
+
+`Just False` is the grid answering: it named a commander, it is in space, it has
+an overview, and no row on it carries his name.
+
+-}
+commanderOnGridFromReading : ReadingFromGameClient -> Maybe Bool
+commanderOnGridFromReading readingFromGameClient =
+    case fleetCommanderNameFromFleetWindowHeader readingFromGameClient of
+        Nothing ->
+            Nothing
+
+        Just commander ->
+            if
+                (readingFromGameClient.shipUI == Nothing)
+                    || List.isEmpty readingFromGameClient.overviewWindows
+            then
+                Nothing
+
+            else
+                Just (pilotIsOnOverview commander readingFromGameClient)
+
+
+{-| What this grid says about the commander, folded from what it said before.
+
+Settled in `updateMemoryForNewReadingFromGame` for the reason every verdict on
+this channel is: that is the only thing that runs on every reading
+unconditionally (#102, #126), and `gridChanged` is a transition between two
+readings that only it can see.
+
+The order of the clauses is the design.
+
+1.  **A sighting wins over everything**, including a grid change on the same
+    reading: he is here, and that is a positive reading rather than an
+    inference.
+2.  **A grid change clears the sighting**, so a commander seen in the previous
+    pocket licenses nothing in this one -- including when this reading cannot
+    say, since a sighting that has definitely gone stale must not be carried on
+    the strength of a reading that answered nothing.
+3.  **A reading that cannot say holds** whatever was believed. Advancing here
+    would count a shut fleet window or a docked reading as the commander
+    leaving, which is `Maybe.withDefault False` in the expensive direction.
+4.  Otherwise the grid answered `Just False`, and that is the one thing that
+    advances the count.
+
+-}
+commanderPresenceAfterReading :
+    { before : CommanderGridPresence
+    , gridChanged : Bool
+    , commanderOnGrid : Maybe Bool
+    }
+    -> CommanderGridPresence
+commanderPresenceAfterReading state =
+    if state.commanderOnGrid == Just True then
+        CommanderOnTheGrid
+
+    else if state.gridChanged then
+        CommanderNotSeenOnThisGrid
+
+    else if state.commanderOnGrid == Nothing then
+        state.before
+
+    else
+        case state.before of
+            CommanderNotSeenOnThisGrid ->
+                CommanderNotSeenOnThisGrid
+
+            CommanderOnTheGrid ->
+                CommanderGoneFromTheGrid 1
+
+            CommanderGoneFromTheGrid readings ->
+                CommanderGoneFromTheGrid (readings + 1)
+
+
+{-| On whose authority a gate is being taken, as three named answers over two
+facts -- the shape `accelerationGateActivationStep` uses, so a case can execute
+it and so the press's own wording is derived from it rather than restated.
+
+Which one it is matters more than it looks: `The overview is clear of rats` is
+**false** on a gate taken under either exception, and a log claiming a clear
+grid on readings that had rats on them is worse than no line at all. That is
+#393's own argument, and #411 adds the second way to reach it.
+
+-}
+gateTakingAuthority :
+    { calledByTheCommander : Bool, followingTheCommander : Bool }
+    -> GateTakingAuthority
+gateTakingAuthority authorityCase =
+    if authorityCase.calledByTheCommander then
+        TheCommanderCalledThisGate
+
+    else if authorityCase.followingTheCommander then
+        TheCommanderLeftThisGrid
+
+    else
+        TheGridIsClearOfRats
+
+
+type GateTakingAuthority
+    = TheCommanderCalledThisGate
+    | TheCommanderLeftThisGrid
+    | TheGridIsClearOfRats
+
+
+{-| The press's own line, rendered from the rule's answer so a case executes
+what an operator reads rather than asserting a substring over the branch --
+`describeCalledObjectOnOverview`'s arrangement, and the one #109 records a
+status clause passing a case while printing nothing at all.
+-}
+describeGateTakingAuthority : GateTakingAuthority -> String
+describeGateTakingAuthority authority =
+    case authority of
+        TheCommanderCalledThisGate ->
+            "The commander called this acceleration gate -- activate it and take the fleet through, rats on the grid or not."
+
+        TheCommanderLeftThisGrid ->
+            "The commander is no longer on this grid and this is the only acceleration gate on it -- activate it and follow him through, rats on the grid or not. This cannot tell that from him having died, warped off or cloaked, and does not claim to."
+
+        TheGridIsClearOfRats ->
+            "The overview is clear of rats -- activate the acceleration gate to move to the next pocket."
 
 
 {-| The select-then-press sequence, shared by the called gate and the nearest
@@ -12417,6 +12769,10 @@ takeTheAccelerationGate context gateToTake =
                 { ratsOnTheGrid =
                     not (List.isEmpty (getNamesOfRatsInOverview context.readingFromGameClient))
                 , calledByTheCommander = gateToTake.calledByTheCommander
+                , commanderLeftTheGrid =
+                    followingTheCommanderThroughAGate
+                        context.memory.commanderGridPresence
+                        context.readingFromGameClient
                 }
             )
     then
@@ -12525,11 +12881,15 @@ pressTheAccelerationGate context gateToTake =
                     |> Maybe.map
                         (\button ->
                             describeBranch
-                                (if gateToTake.calledByTheCommander then
-                                    "The commander called this acceleration gate -- activate it and take the fleet through, rats on the grid or not."
-
-                                 else
-                                    "The overview is clear of rats -- activate the acceleration gate to move to the next pocket."
+                                (describeGateTakingAuthority
+                                    (gateTakingAuthority
+                                        { calledByTheCommander = gateToTake.calledByTheCommander
+                                        , followingTheCommander =
+                                            followingTheCommanderThroughAGate
+                                                context.memory.commanderGridPresence
+                                                context.readingFromGameClient
+                                        }
+                                    )
                                 )
                                 (clickUiElementForNavigation button)
                         )
@@ -13258,6 +13618,10 @@ describeAccelerationGateAsk context =
                         { ratsOnTheGrid =
                             not (List.isEmpty (getNamesOfRatsInOverview context.readingFromGameClient))
                         , calledByTheCommander = gateToTake.calledByTheCommander
+                        , commanderLeftTheGrid =
+                            followingTheCommanderThroughAGate
+                                context.memory.commanderGridPresence
+                                context.readingFromGameClient
                         }
             in
             "Acceleration gate: on the overview"
@@ -13306,6 +13670,78 @@ describeAccelerationGateAsk context =
                                         ++ "."
                                )
                    )
+
+
+{-| What this grid has said about the commander, for the status line. #411.
+
+**Printed on every in-space reading, and the two absences are printed as
+different sentences.** That is the one thing an operator needs first from this
+change: `NEVER SEEN on this grid` and `SEEN AND GONE` are the difference between
+a pilot whose overview preset never draws the commander -- in which case nothing
+here will ever conclude anything, correctly -- and a commander this bot really
+did watch leave. A clause that printed one number for both would leave those two
+runs reading identically, which is the failure the three-state memory exists to
+refuse.
+
+The gate count rides along because it is the fourth guard, and a follow that
+does not happen on a grid with two gates and one with none are two different
+answers an operator would otherwise have to guess between.
+
+-}
+describeCommanderGridPresence : CommanderGridPresence -> Int -> String
+describeCommanderGridPresence presence gatesOnTheGrid =
+    let
+        describeGates : String
+        describeGates =
+            " Acceleration gates on this grid: "
+                ++ String.fromInt gatesOnTheGrid
+                ++ (if gatesOnTheGrid == 1 then
+                        "."
+
+                    else
+                        " -- nobody named one, so with any number but one there is no basis to choose and this follows nothing."
+                   )
+    in
+    "Commander on this grid: "
+        ++ (case presence of
+                CommanderNotSeenOnThisGrid ->
+                    "NEVER SEEN since this grid began, so nothing here concludes he left it."
+                        ++ describeGates
+
+                CommanderOnTheGrid ->
+                    "on the overview now." ++ describeGates
+
+                CommanderGoneFromTheGrid readings ->
+                    (if commanderHasLeftTheGrid presence then
+                        "SEEN AND GONE for "
+                            ++ String.fromInt readings
+                            ++ " readings -- taken as him having left."
+
+                     else
+                        "SEEN AND GONE for "
+                            ++ String.fromInt readings
+                            ++ " of "
+                            ++ String.fromInt commanderGoneReadingsBeforeFollowing
+                            ++ " readings."
+                    )
+                        ++ describeGates
+                        ++ (if followTheCommanderThroughTheGate { presence = presence, accelerationGatesOnTheGrid = gatesOnTheGrid } then
+                                " FOLLOWING HIM THROUGH IT, rats on the grid or not. He may instead have died, warped off or cloaked; nothing here can tell those apart."
+
+                            else
+                                ""
+                           )
+           )
+
+
+{-| The clause above over a context, so the status line reaches the gate count
+through the same derivation the rule does.
+-}
+describeCommanderFollowThroughGate : BotDecisionContext -> String
+describeCommanderFollowThroughGate context =
+    describeCommanderGridPresence
+        context.memory.commanderGridPresence
+        (List.length (accelerationGatesOnOverview context.readingFromGameClient))
 
 
 {-| What the commander's `Target` broadcast named, for the status line.
