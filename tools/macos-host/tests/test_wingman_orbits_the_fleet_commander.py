@@ -1020,24 +1020,38 @@ class ThePlacementAndTheSupersessionTest(unittest.TestCase):
     def test_the_counter_is_advanced_by_the_shipped_rule_itself(self):
         """#102's defect is a counter advanced by one condition and read by
         another. The memory update calls `approachFleetCommanderStep` rather
-        than restating it, so the two cannot drift apart."""
+        than restating it, so the two cannot drift apart.
+
+        **What it advances is `approachAskedReadingsCarriedIn` since #428** --
+        `botMemoryBefore.approachFleetCommanderAskedReadings` refilled by a warp
+        that has just landed, because the landing re-arms the closing window and
+        a window re-armed onto a spent budget is a give-up nothing can take
+        back. The step is predicted against the same value the counter carries,
+        which is what keeps this case's own property true across a landing;
+        `test_wingman_landing_refills_the_budget` is where that is executed.
+        """
         update = self.source[self.source.index(
             "updateMemoryForNewReadingFromGame context botMemoryBefore ="):]
         update = update[:update.index(
             "\n\n\ngetCurrentAnomalyIDAsSeenInProbeScanner")]
         self.assertIn("approachFleetCommanderStep", update)
         self.assertIn("approachFleetCommanderAnswersThatSpendAReading", update)
-        self.assertIn("approachFleetCommanderAskedReadings + 1", update)
+        self.assertIn("askedReadings = approachAskedReadingsCarriedIn", update)
+        self.assertIn("approachAskedReadingsCarriedIn + 1", update)
 
     def test_the_counter_is_advanced_by_the_shipped_rule_and_the_memory_field(
             self):
         """The other half of #102: the memory update writes the field the
-        decision reads, and by name."""
+        decision reads, and by name -- and what it advances is that same field
+        carried in, so the refill #428 added cannot become a second counter."""
         update = self.source[self.source.index(
             "updateMemoryForNewReadingFromGame context botMemoryBefore ="):]
         update = update[:update.index(
             "\n\n\ngetCurrentAnomalyIDAsSeenInProbeScanner")]
-        self.assertIn("approachFleetCommanderAskedReadings + 1", update)
+        self.assertIn("\n    , approachFleetCommanderAskedReadings =", update)
+        self.assertIn("approachAskedReadingsCarriedIn + 1", update)
+        self.assertIn("spentBefore = botMemoryBefore"
+                      ".approachFleetCommanderAskedReadings", update)
 
     def test_the_commander_is_read_the_one_way_both_sides_can_read_him(self):
         """The arm and the counter resolve the commander through the same

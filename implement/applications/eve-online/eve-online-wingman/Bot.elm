@@ -5052,6 +5052,21 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 , shipIsApproaching = shipIsApproachingNow
                 }
 
+        -- #428. The budget the ask carries into this reading, refilled by the
+        -- same warp ending that re-arms the window above -- the two are one
+        -- event, and a window re-armed onto a spent budget is a give-up that
+        -- can never be taken back. Read here as well as by the counter below,
+        -- because the decision reads this reading's count: predicting the step
+        -- against the un-refilled value would leave the counter and the arm
+        -- disagreeing about whether the landing had bought anything, which is
+        -- #102's defect.
+        approachAskedReadingsCarriedIn : Int
+        approachAskedReadingsCarriedIn =
+            askedReadingsRefilledByLanding
+                { justLanded = weJustFinishedWarping
+                , spentBefore = botMemoryBefore.approachFleetCommanderAskedReadings
+                }
+
         -- The same shape as `askingTheGateToOpen` and `weaponsNow`,
         -- and taken from the shipped rule itself rather than restated beside
         -- it: a counter advanced by one condition and read by another is
@@ -5079,7 +5094,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     , panelShowsTheCommander = panelIsShowingTheFleetCommander context.readingFromGameClient
                     , panelOffersApproach =
                         selectedItemButtonNamed context.readingFromGameClient selectedItemApproachButtonName /= Nothing
-                    , askedReadings = botMemoryBefore.approachFleetCommanderAskedReadings
+                    , askedReadings = approachAskedReadingsCarriedIn
                     }
                 )
                 approachFleetCommanderAnswersThatSpendAReading
@@ -5098,6 +5113,20 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 , recoveringFromRetreat = botMemoryBefore.recoveringFromRetreat
                 }
                 context.readingFromGameClient
+
+        -- #428, and the same rule the approach reads: a mate who stays on this
+        -- grid held the give-up for the rest of the session, because
+        -- `fleetMateOnThisGrid == Nothing` was the only thing that cleared the
+        -- count. Three of the four pilots #428 was filed on read
+        -- `GAVE UP after 30 readings asking to warp to '...', who is on this
+        -- grid` beside the approach's own give-up, so neither way of reaching
+        -- the commander was left.
+        fleetMateWarpAskedReadingsCarriedIn : Int
+        fleetMateWarpAskedReadingsCarriedIn =
+            askedReadingsRefilledByLanding
+                { justLanded = weJustFinishedWarping
+                , spentBefore = botMemoryBefore.goToFleetMateWarpAskedReadings
+                }
 
         -- The same arrangement again, and the same reason: the arm and this
         -- counter ask one rule rather than two conditions that could disagree
@@ -5272,15 +5301,17 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         if fleetMateOnThisGrid == Nothing then
             0
 
-        else if fleetMateWarpHasBeenGivenUpOn botMemoryBefore.goToFleetMateWarpAskedReadings then
+        else if fleetMateWarpHasBeenGivenUpOn fleetMateWarpAskedReadingsCarriedIn then
             -- Held rather than advanced, `unlockFleetPilotAskedReadings`'s own
             -- arrangement: the mate is still there and this bot has stopped
             -- asking, and a counter that ran away would make the status line's
-            -- "after N readings" meaningless.
-            botMemoryBefore.goToFleetMateWarpAskedReadings
+            -- "after N readings" meaningless. The give-up is asked of the
+            -- refilled budget, so a warp that has since landed un-holds it on
+            -- the reading it lands rather than a reading later.
+            fleetMateWarpAskedReadingsCarriedIn
 
         else
-            botMemoryBefore.goToFleetMateWarpAskedReadings + 1
+            fleetMateWarpAskedReadingsCarriedIn + 1
     , routeFirstMarkerRegion = currentRouteFirstMarkerRegion
     , routeFirstMarkerUnchangedTicks =
         if currentRouteFirstMarkerRegion == Nothing then
@@ -5405,10 +5436,14 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             }
     , approachFleetCommanderAskedReadings =
         if askingTheCommanderForAnApproach then
-            botMemoryBefore.approachFleetCommanderAskedReadings + 1
+            approachAskedReadingsCarriedIn + 1
 
         else if commanderIsOnGrid && not shipIsApproachingNow then
-            botMemoryBefore.approachFleetCommanderAskedReadings
+            -- Held rather than cleared: the commander is still on grid and this
+            -- arm did not ask this reading, and a reset here would un-give-up
+            -- on the very next one. What refills it instead is the landing --
+            -- see `approachAskedReadingsCarriedIn`, which is what this holds.
+            approachAskedReadingsCarriedIn
 
         else
             0
@@ -12131,6 +12166,41 @@ landingCloseAfterReading state =
 
     else
         state.justLanded || state.closeWasOwed
+
+
+{-| What a give-up budget for reaching something on this grid carries into this
+reading, once a completed warp is allowed to refill it. #428.
+
+**The asymmetry this closes was between two rules written for one event.**
+`landingCloseAfterReading` above re-arms `closingOnTheCommanderSinceLanding` on
+_every_ warp that ends, because landing at range is precisely when a wingman has
+to close; the counter that bounds the ask had no matching reset, reaching zero
+only where the commander was off grid or the ship was already approaching. So
+the ordinary landing -- the commander on grid, the ship not yet moving -- held
+the count, the re-armed window opened onto a budget already spent, and
+`approachFleetCommanderStep` answered `GaveUpOnTheApproach` for as long as the
+commander stayed on grid. Four pilots parked at 37-46 km read exactly that.
+
+**One rule with two readers**, the approach and the warp to a fleet-mate, rather
+than the same reset written twice: both bound getting to something on this grid,
+both are refilled by the same event, and two spellings of one idea are what
+drift. It is the budget _carried in_ rather than the value written out, so the
+readings this one spends are still charged -- a counter refilled after the
+ask is a counter that never charges the first reading of a landing, which is
+#102's defect in the direction that under-counts.
+
+**Only a completed warp refills it**, so nothing here can be reached without the
+ship having gone somewhere: an ask that never warps spends its budget once and
+stays given up, exactly as it does today.
+
+-}
+askedReadingsRefilledByLanding : { justLanded : Bool, spentBefore : Int } -> Int
+askedReadingsRefilledByLanding budget =
+    if budget.justLanded then
+        0
+
+    else
+        budget.spentBefore
 
 
 {-| Whether the approach on the commander is asked for on this reading at all.

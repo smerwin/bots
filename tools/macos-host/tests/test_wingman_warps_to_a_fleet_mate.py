@@ -457,18 +457,38 @@ class TheCounterTest(unittest.TestCase):
         rewritten to assert after it turned out to pass with the counter pinned
         at a constant. Reset when no mate is on this grid, hold once the budget
         is spent so the status line's "after N readings" stays meaningful, and
-        advance otherwise."""
+        advance otherwise.
+
+        **The budget the three arms carry is `fleetMateWarpAskedReadingsCarriedIn`
+        since #428**, which is `botMemoryBefore.goToFleetMateWarpAskedReadings`
+        refilled by a warp that has just landed. The arms are the same three;
+        what changed is what they carry, and
+        `test_wingman_landing_refills_the_budget` is where that is executed.
+        """
         start = self.update.index(", goToFleetMateWarpAskedReadings =")
         clause = self.update[start:self.update.index(
             "\n    , routeFirstMarkerRegion", start)]
         self.assertIn("if fleetMateOnThisGrid == Nothing then\n            0",
                       clause)
-        self.assertIn("fleetMateWarpHasBeenGivenUpOn botMemoryBefore"
-                      ".goToFleetMateWarpAskedReadings", clause)
-        self.assertIn("botMemoryBefore.goToFleetMateWarpAskedReadings + 1",
-                      clause)
+        self.assertIn("fleetMateWarpHasBeenGivenUpOn "
+                      "fleetMateWarpAskedReadingsCarriedIn", clause)
+        self.assertIn("fleetMateWarpAskedReadingsCarriedIn + 1", clause)
         self.assertEqual(
-            clause.count("botMemoryBefore.goToFleetMateWarpAskedReadings"), 3)
+            clause.count("fleetMateWarpAskedReadingsCarriedIn"), 3)
+        self.assertNotIn("botMemoryBefore.goToFleetMateWarpAskedReadings",
+                         clause)
+
+    def test_the_budget_the_three_arms_carry_is_the_shipped_refill(self):
+        """#428, and the half only this file can see: the counter's own arms
+        read a budget the shared refill rule produced from
+        `botMemoryBefore.goToFleetMateWarpAskedReadings`, so a rename that left
+        the arms reading something else would pass the case above."""
+        start = self.update.index("fleetMateWarpAskedReadingsCarriedIn =\n")
+        binding = self.update[start:self.update.index("\n\n", start)]
+        self.assertIn("askedReadingsRefilledByLanding", binding)
+        self.assertIn("justLanded = weJustFinishedWarping", binding)
+        self.assertIn("spentBefore = botMemoryBefore"
+                      ".goToFleetMateWarpAskedReadings", binding)
 
     def test_the_bound_is_read_through_one_comparison(self):
         """The step rule and the status clause ask
