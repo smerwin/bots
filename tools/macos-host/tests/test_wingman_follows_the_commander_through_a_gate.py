@@ -29,9 +29,13 @@ cost -- the alternative is sitting on the grid following nobody, which is what
    This is the guard that matters most and it is not hypothetical: a short
    overview window fails `_display` while the entry is still in the tree, and
    #366 was fixed on exactly that correction.
-2. **The sighting is scoped to the grid**, cleared on the reading a warp ends
-   through the shared `warpJustEnded` that #397's landing window and the drone
-   bookkeeping already read -- not a second notion of "we changed grid".
+2. **The sighting is scoped to the grid**, cleared whenever the grid changes.
+   `gridChangedThisReading` is one notion of that over two positive facts: the
+   shared `warpJustEnded` that #397's landing window and the drone bookkeeping
+   already read, and this bot having pressed an acceleration gate, read out of
+   the previous step's own effects. The second is what stops one wrong follow
+   chaining through pocket after pocket -- see
+   `TheGatePressAlsoChangesTheGridTest`.
 3. **The absence persists** for `commanderGoneReadingsBeforeFollowing` readings,
    because a row can fail `_display` for one reading without the pilot going
    anywhere.
@@ -50,14 +54,14 @@ commander leaving a grid with a gate on it.** So every number and every premise
 below is reasoned from this repo's own precedents rather than measured, and
 `commanderGoneReadingsBeforeFollowing` is sized by argument alone.
 
-**Whether taking an acceleration gate reads as a warp is not established here.**
-If it does, guard 2 clears the sighting on arrival in the next pocket and the
-follow re-arms from nothing, which is what should happen. If it does not, the
-`CommanderGoneFromTheGrid` count is carried into the next pocket and a commander
-who is there but never rendered would be followed again through its gate -- what
-bounds that chase is a pocket with no gate, or with two, which guard 4 refuses.
-One live reading of the ship UI's indication container during a gate activation
-settles it, and it is the first thing to check on a run that follows anything.
+**Whether taking an acceleration gate reads as a warp is still not established,
+and nothing here depends on the answer.** It used to: guard 2 reset only on
+`warpJustEnded`, so a gate that is not a warp let a follow carry its count into
+the next pocket and take that pocket's gate blind. `gridChangedThisReading` now
+also resets on this bot's own gate press, which is a fact the bot owns rather
+than an inference about the client. What a live reading would still settle is
+whether the warp half was ever doing that work on its own; with a gate that *is*
+a warp both sources fire on the same reading and the reset is identical.
 
 **What to watch on a first run** is the status clause on every in-space reading:
 `Commander on this grid: NEVER SEEN ...` on a pilot whose overview never draws
@@ -69,17 +73,19 @@ the direction this fails silently in.
 
 ## Confirmed by mutation
 
-Thirteen, each failing at least one named case. **The cases listed are the ones
+Fifteen, each failing at least one named case. **The cases listed are the ones
 each mutation actually broke, read off the run rather than predicted** -- the
 counts are the whole file's, and where a mutation kills only one case that is
 recorded as it is rather than padded.
 
 | the mutation | cases it fails |
 |---|---|
-| **the prior-sighting guard dropped** -- `commanderPresenceAfterReading` answering `CommanderGoneFromTheGrid 1` from `CommanderNotSeenOnThisGrid`, so a commander this grid never drew is followed from the third reading. The failure this whole design refuses | `test_a_grid_that_never_named_him_says_nothing`, `test_a_commander_never_rendered_is_never_followed` |
-| **the sighting surviving a warp** -- the `gridChanged` clause dropped | `test_a_warp_clears_the_sighting`, `test_a_sighting_in_the_last_pocket_licenses_nothing_in_this_one` |
+| **the prior-sighting guard dropped** -- `commanderPresenceAfterReading` answering `CommanderGoneFromTheGrid 1` from `CommanderNotSeenOnThisGrid`, so a commander this grid never drew is followed from the third reading. The failure this whole design refuses | 3, including `test_a_grid_that_never_named_him_says_nothing` and `test_a_commander_never_rendered_is_never_followed` |
+| **the sighting surviving a warp** -- the `gridChanged` clause dropped | 3, including `test_a_warp_clears_the_sighting` and `test_a_sighting_in_the_last_pocket_licenses_nothing_in_this_one` |
+| **the gate-press reset removed** -- `gridChangedThisReading` narrowed back to `state.warpJustEnded`, so a follow through a gate carries its count into the next pocket and takes that pocket's gate blind. The defect the review closed | `test_a_click_inside_the_remembered_button_is_a_grid_change`, `test_a_gate_this_bot_took_starts_the_next_pocket_from_nothing` |
+| **the button's region read live rather than remembered** -- the memory update asking about the panel as it is *now* instead of as it was when the press was decided, which fails silently on any client that drops the button once the gate is taken | `test_the_memory_update_reads_the_press_it_remembered` |
 | the persistence bound removed (`0 <= readings`) | 5, including `test_the_absence_has_to_persist` and `test_a_row_that_flickers_re_arms_the_guard` |
-| the persistence bound moved by one (`<` for `<=`) | 10, including both boundary cases and the status line's own count |
+| the persistence bound moved by one (`<` for `<=`) | 12, including both boundary cases and the status line's own count |
 | **the exactly-one-gate guard relaxed to "at least one"**, which is the "pick the nearest" guess | `test_exactly_one_gate_or_nothing`, `test_two_gates_on_the_grid_refuse_the_follow`, `test_the_status_line_says_why_a_follow_did_not_happen` |
 | **the follow made to wait** -- a branch added to `takeTheAccelerationGate` answering `waitForProgressInGame` on a licensed follow with rats up | 6, including `test_the_follow_acts_rather_than_holding_the_reading` |
 | **the rule split into a second copy** -- `describeAccelerationGateAsk` passing `commanderLeftTheGrid = False` of its own | `test_one_rule_with_five_readers`, `test_the_status_line_and_the_arm_agree_about_the_follow` |
@@ -177,6 +183,7 @@ class WingmanRepl(ElmRepl):
     IMPORTS = (
         "import Bot exposing (..)",
         "import Common.DecisionPath",
+        "import Common.EffectOnWindow as EffectOnWindow",
         "import EveOnline.MemoryReading",
         "import EveOnline.ParseUserInterface",
     )
@@ -256,6 +263,30 @@ class WingmanRepl(ElmRepl):
         ", commanderLeftTheGrid = left }",
         "authority = \\called -> \\following -> gateTakingAuthority"
         " { calledByTheCommander = called, followingTheCommander = following }",
+        # The grid-change half, from the effects the bot would really have
+        # dispatched rather than from a pre-computed `gridChanged` -- so the
+        # chaining scenario below is executed end to end instead of described.
+        "gateRegion = { x = 100, y = 200, width = 40, height = 20 }",
+        "clickAt = \\x -> \\y ->"
+        " [ EffectOnWindow.MouseMoveTo { x = x, y = y }"
+        " , EffectOnWindow.ButtonDown EffectOnWindow.MouseButtonLeft"
+        " , EffectOnWindow.ButtonUp EffectOnWindow.MouseButtonLeft ]",
+        "gridChanged = \\warpEnded -> \\region -> \\effects ->"
+        " gridChangedThisReading"
+        " { warpJustEnded = warpEnded"
+        " , activateGateButtonInTheLastReading = region"
+        " , previousStepEffects = effects }",
+        # A session of readings, folded through *both* rules the memory update
+        # composes -- so a case can put a gate press in the middle of a run and
+        # ask what the far side believes. A record rather than a tuple because
+        # Elm takes no four-tuple, and because a named field cannot be misread
+        # for its neighbour in a fixture this long.
+        "foldSession = \\start -> \\readings -> List.foldl"
+        " (\\r before -> commanderPresenceAfterReading"
+        " { before = before"
+        " , gridChanged = gridChanged r.warpEnded r.region r.effects"
+        " , commanderOnGrid = r.onGrid })"
+        " start readings",
     )
 
     def __init__(self, **kwargs):
@@ -496,6 +527,225 @@ class ThePresenceMemoryTest(unittest.TestCase):
                 "0 < commanderGoneReadingsBeforeFollowing",
             ]),
             [True] * 4)
+
+
+class TheGatePressAlsoChangesTheGridTest(unittest.TestCase):
+    """The second half of guard 2: a gate this bot took clears the sighting.
+
+    **This is the chaining scenario, executed rather than described.** #411 as
+    first written reset only on `warpJustEnded`, and an acceleration gate is
+    very likely not a warp -- so after following the commander through a gate on
+    grid A carrying `CommanderGoneFromTheGrid 3`, the bot arrived in pocket B
+    with that count intact and would take B's single gate on the arrival
+    reading, without ever having looked for him there. It chains until it
+    reaches a pocket with no gate or with two.
+
+    **And it bites only where the follow was already wrong.** A follow that was
+    right puts the commander on grid B, where a sighting clears the state on its
+    own. So the unbounded case is exactly the one where compounding it is worst,
+    which is why this is closed rather than documented.
+
+    The rule reads the *press* and not the client, so none of this depends on
+    whether taking a gate reads as a warp -- which is still unestablished, and
+    is now a question about nothing load-bearing.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repl = open_repl(WingmanRepl)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.repl.close()
+
+    def test_a_click_inside_the_remembered_button_is_a_grid_change(self):
+        """The press, matched against the button's region as it was on the
+        reading the press was decided from. A click elsewhere on the screen is
+        not this gesture, and a reading whose panel drew no such button cannot
+        match one however the mouse moved."""
+        self.assertEqual(
+            self.repl.evaluate([
+                # The centre of the remembered button.
+                "gridChanged False (Just gateRegion) (clickAt 120 210) == True",
+                # Its very corner, which the one-pixel grow admits.
+                "gridChanged False (Just gateRegion) (clickAt 100 200) == True",
+                # A click somewhere else entirely -- an overview row, a module.
+                "gridChanged False (Just gateRegion) (clickAt 900 700) == False",
+                # No button on the last reading: nothing to have pressed.
+                "gridChanged False Nothing (clickAt 120 210) == False",
+                # A step that dispatched nothing at all.
+                "gridChanged False (Just gateRegion) [] == False",
+            ]),
+            [True] * 5)
+
+    def test_a_keystroke_over_the_button_is_not_a_press(self):
+        """Only a left click counts. The bot presses hotkeys constantly and a
+        rule keyed on "the previous step did something" would clear the sighting
+        on every one of them."""
+        self.assertEqual(
+            self.repl.evaluate([
+                "gridChanged False (Just gateRegion)"
+                " [ EffectOnWindow.MouseMoveTo { x = 120, y = 210 } ]"
+                " == False",
+                "gridChanged False (Just gateRegion)"
+                " [ EffectOnWindow.KeyDown EffectOnWindow.vkey_F"
+                " , EffectOnWindow.KeyUp EffectOnWindow.vkey_F ]"
+                " == False",
+            ]),
+            [True, True])
+
+    def test_the_warp_half_still_answers_on_its_own(self):
+        """An additional reset, not a replacement. A warp ending is a grid
+        change whatever the previous step dispatched, so nothing #411 already
+        did stops working."""
+        self.assertEqual(
+            self.repl.evaluate([
+                "gridChanged True Nothing [] == True",
+                "gridChanged True (Just gateRegion) (clickAt 900 700) == True",
+            ]),
+            [True, True])
+
+    def test_a_gate_this_bot_took_starts_the_next_pocket_from_nothing(self):
+        """The chaining scenario, folded as a session.
+
+        Grid A: he is seen, he goes, three readings pass and the follow is
+        licensed. The bot presses Activate Gate. Grid B: the commander is not
+        drawn there either -- which is the bad case, since a follow that was
+        right would have shown him.
+
+        On the far side the presence has to read `CommanderNotSeenOnThisGrid`,
+        so B's own gate is not taken on the strength of A's absence. The control
+        beside it is the same session with the press missing, which is what the
+        bot did before this and which reaches the far side still licensed.
+        """
+        onGrid = "(Just True)"
+        offGrid = "(Just False)"
+        press = "(clickAt 120 210)"
+        nothing = "[]"
+        region = "(Just gateRegion)"
+
+        def reading(warp, effects, seen):
+            return ("{ warpEnded = %s, region = %s, effects = %s, onGrid = %s }"
+                    % (warp, region, effects, seen))
+
+        grid_a = [
+            reading("False", nothing, onGrid),
+            reading("False", nothing, offGrid),
+            reading("False", nothing, offGrid),
+            reading("False", nothing, offGrid),
+        ]
+        # The reading after the press -- the arrival in pocket B, with the
+        # commander not drawn there.
+        pocket_b = [
+            reading("False", press, offGrid),
+            reading("False", nothing, offGrid),
+        ]
+        # The same arrival with no press dispatched, which is #411 as it
+        # shipped: the count carries over and B's gate is taken blind.
+        pocket_b_without_the_press = [
+            reading("False", nothing, offGrid),
+            reading("False", nothing, offGrid),
+        ]
+
+        def session(readings):
+            return "[ %s ]" % ", ".join(readings)
+
+        self.assertEqual(
+            self.repl.evaluate([
+                # Grid A licenses the follow, which is the premise.
+                "commanderHasLeftTheGrid"
+                " (foldSession CommanderNotSeenOnThisGrid %s) == True"
+                % session(grid_a),
+                # The press clears it, and guard 1 then holds the far side at
+                # "this grid has never named him" -- so the readings after the
+                # gate do not merely restart the count, they cannot start one
+                # until pocket B has drawn him at least once.
+                "foldSession CommanderNotSeenOnThisGrid %s"
+                " == CommanderNotSeenOnThisGrid"
+                % session(grid_a + pocket_b),
+                "commanderHasLeftTheGrid"
+                " (foldSession CommanderNotSeenOnThisGrid %s) == False"
+                % session(grid_a + pocket_b),
+                # The control: with no press the count carries into pocket B and
+                # the follow is licensed there having never looked for him.
+                "commanderHasLeftTheGrid"
+                " (foldSession CommanderNotSeenOnThisGrid %s) == True"
+                % session(grid_a + pocket_b_without_the_press),
+            ]),
+            [True] * 4)
+
+    def test_the_far_side_re_arms_from_a_sighting_rather_than_staying_blind(self):
+        """Clearing is not latching. Once through the gate the ordinary rule
+        applies again: he is seen in pocket B, he goes, and three readings later
+        the follow is licensed on B's own evidence."""
+        def reading(effects, seen):
+            return ("{ warpEnded = False, region = Just gateRegion"
+                    ", effects = %s, onGrid = %s }" % (effects, seen))
+
+        rows = [
+            reading("(clickAt 120 210)", "(Just False)"),
+            reading("[]", "(Just True)"),
+            reading("[]", "(Just False)"),
+            reading("[]", "(Just False)"),
+            reading("[]", "(Just False)"),
+        ]
+        self.assertEqual(
+            self.repl.evaluate([
+                "commanderHasLeftTheGrid"
+                " (foldSession (CommanderGoneFromTheGrid 9) [ %s ]) == True"
+                % ", ".join(rows),
+            ]),
+            [True])
+
+    def test_the_memory_update_reads_the_press_it_remembered(self):
+        """The wiring, read out of the source: the memory update hands the rule
+        the button region *from the memory it is updating* and the head of
+        `previousStepsEffects`, and writes this reading's region back for the
+        next one.
+
+        Two ways this could be wired and be wrong, both of which compile.
+        Reading the region live off this reading would ask about a panel that
+        may no longer offer the button, which fails silently in exactly the case
+        the rule exists for. And folding the whole effect history rather than
+        its head would re-clear the sighting for as many readings as the press
+        stays in the list.
+        """
+        with open(WINGMAN_BOT_ELM, encoding="utf-8") as handle:
+            source = handle.read()
+        binding = collapsed(indented_let_binding(source, "commanderGridPresenceNow"))
+        self.assertIn("gridChanged = gridChangedThisReading", binding)
+        self.assertIn("warpJustEnded = weJustFinishedWarping", binding)
+        self.assertIn(
+            "activateGateButtonInTheLastReading ="
+            " botMemoryBefore.activateGateButtonRegion",
+            binding)
+        self.assertIn(
+            "previousStepEffects = context.previousStepsEffects"
+            " |> List.head |> Maybe.withDefault []",
+            binding)
+        # And the region really is written back, from this reading.
+        self.assertIn(
+            "activateGateButtonRegion ="
+            " activateGateButtonRegionFromReading context.readingFromGameClient",
+            collapsed(source))
+
+    def test_the_framework_carries_the_effects_to_the_memory_update(self):
+        """`UpdateMemoryContext` did not carry `previousStepsEffects` in this
+        app's vendored copy, though `eve-online-saxrat` and
+        `eve-online-mission-runner` have both carried it since #11. Without it
+        the memory update cannot know what the bot itself did, which is the one
+        thing that makes this reset a positive fact rather than an inference.
+        """
+        framework = os.path.join(
+            WINGMAN_DIR, "EveOnline", "BotFrameworkSeparatingMemory.elm")
+        with open(framework, encoding="utf-8") as handle:
+            source = handle.read()
+        update_context = source.split("type alias UpdateMemoryContext")[1]
+        update_context = update_context.split("type alias StepDecisionContext")[0]
+        self.assertIn("previousStepsEffects", update_context)
+        self.assertIn(
+            "previousStepsEffects = stateBefore.lastStepsEffects",
+            collapsed(source))
 
 
 class TheFourGuardsTest(unittest.TestCase):
@@ -1053,10 +1303,20 @@ class TheWiringTest(unittest.TestCase):
         #194 / #205 -- previous reading `Just True`, a ship UI present now, this
         reading not `Just True`. A second notion of "we changed grid" written
         here would be two definitions drifting apart, and the condition #205
-        replaced could not answer `True` at the end of a warp at all."""
+        replaced could not answer `True` at the end of a warp at all.
+
+        The warp is now one of *two* sources feeding one notion of a grid change
+        -- see `TheGatePressAlsoChangesTheGridTest` -- so what this asserts is
+        that the shared trigger is still what the warp half is, and that the
+        second source did not become a second opinion sitting beside it.
+        """
         binding = indented_let_binding(
             self.source, "commanderGridPresenceNow")
-        self.assertIn("gridChanged = weJustFinishedWarping",
+        self.assertIn("gridChanged = gridChangedThisReading",
+                      collapsed(binding))
+        rule = declaration(self.source, "gridChangedThisReading state =")
+        self.assertIn("state.warpJustEnded", collapsed(rule))
+        self.assertIn("warpJustEnded = weJustFinishedWarping",
                       collapsed(binding))
         rule = declaration(
             self.source, "warpJustEnded { warpingLastReading, readingNow } =")

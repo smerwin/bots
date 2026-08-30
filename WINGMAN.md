@@ -704,11 +704,16 @@ way, which is why it carries four guards where the broadcast carries none.
    this the rule fires from the first reading on any client whose preset never
    draws the commander — following nobody through a gate, on a grid that had
    never named him.
-2. **The sighting is scoped to the grid**, cleared on the reading a warp ends
-   through the shared `warpJustEnded` that #397's landing window and the drone
-   bookkeeping already read. Not a second notion of "we changed grid": #205
-   records what the condition this one replaced cost, which is that it could not
-   answer `True` at the end of a warp at all.
+2. **The sighting is scoped to the grid**, cleared whenever the grid changes.
+   `gridChangedThisReading` is **one** notion of that over two positive facts:
+   the shared `warpJustEnded` that #397's landing window and the drone
+   bookkeeping already read, and **this bot having pressed an acceleration
+   gate**, read out of the previous step's own effects. Not two conditions
+   sitting beside each other and not a second definition of a grid change: #205
+   records what the condition `warpJustEnded` replaced cost, which is that it
+   could not answer `True` at the end of a warp at all. The gate half is what
+   stops one wrong follow chaining through pocket after pocket, and it needs no
+   answer to *is a gate a warp* — see the Unverified note below.
 3. **The absence has to persist**, for `commanderGoneReadingsBeforeFollowing`
    readings, because a row can fail `_display` for one reading without the pilot
    going anywhere. **Three**, and it is the number this repo already gives a row
@@ -831,9 +836,16 @@ presence is **folded over whole sessions** rather than asked once — a rule rig
 for one reading and wrong across a run is the defect that shape prevents. The
 persistence bound is asked at both sides *and* at fixed values either side,
 since a boundary pair alone passes for any constant. **Neither parser needed a
-change.** Confirmed by mutation, eleven of them, each failing a named case and
+change.** The gate half of guard 2 is executed from the *effects* the bot would
+really have dispatched rather than from a pre-computed grid change, so the
+chaining scenario is run end to end: a session that licenses a follow on grid A,
+presses Activate Gate, and arrives in pocket B where the commander is not drawn
+either. Confirmed by mutation, fifteen of them, each failing a named case and
 listed in that file's own docstring — including the prior-sighting guard
-dropped, the sighting surviving a warp, the exactly-one-gate guard relaxed to
+dropped, the sighting surviving a warp, **the gate-press reset removed** (which
+is the defect this closes, and which fails the chaining case), **the button's
+region read live rather than remembered** (the half-revert that fails silently
+in exactly the case the reset exists for), the exactly-one-gate guard relaxed to
 "at least one", the follow made to wait, and the status clause collapsing the
 two absences.
 
@@ -842,15 +854,47 @@ two absences.
 **Any of it running**, and there is no wingman corpus of any kind, so every
 number rests on argument rather than measurement.
 
-**Whether taking an acceleration gate reads as a warp is not established.** If
-it does, guard 2 clears the sighting on arrival in the next pocket and the
-follow re-arms from nothing, which is what should happen. If it does not, the
-`CommanderGoneFromTheGrid` count is carried into the next pocket, and a
-commander who is there but never rendered would be followed again through its
-gate — a chase bounded only by reaching a pocket with no gate, or with two,
-which guard 4 refuses. **One live reading of the ship UI's indication container
-during a gate activation settles it**, and it is the first thing to check on a
-run that follows anything.
+**Whether taking an acceleration gate reads as a warp is still not established,
+and it is no longer load-bearing.** It was: guard 2 reset only on
+`warpJustEnded`, so if a gate is not a warp, a follow through one on grid A
+carried its `CommanderGoneFromTheGrid` count into pocket B and took B's single
+gate on the arrival reading — without ever having looked for the commander
+there — chaining until it reached a pocket with no gate or with two.
+
+**And that bites only where the follow was already wrong.** A follow that was
+right puts the commander on grid B, where a sighting clears the state on its
+own. So the unbounded case was exactly the one where compounding it costs most,
+which is why it is closed rather than documented.
+
+The fix does not answer the question, it stops depending on it. **The bot knows
+when it took a gate, because it dispatched the press itself**, so
+`gridChangedThisReading` is one notion of a grid change over two positive facts:
+`warpJustEnded`, and this bot's own click landing inside the Selected Item
+panel's Activate Gate button. `lockClickLocationFromStepEffects` and the mission
+runner's `swapJustCommandedAGunOff` are the precedents for reading a dispatched
+gesture out of `previousStepsEffects`; this is the second reader of that field in
+this app, after `ensureInfoPanelLocationInfoIsExpanded`. A press this bot made is
+a fact it owns, where *did the client call that a warp* is an inference about the
+client.
+
+Two details are load-bearing rather than incidental. The button's region is
+matched **as it was on the previous reading** (`BotMemory.activateGateButtonRegion`),
+because nothing says the panel still offers the button once the gate has been
+taken — a rule reading it live would fail silently in exactly the case it exists
+for. And only the **head** of `previousStepsEffects` is read, since that list is
+a history and folding it would hold `CommanderNotSeenOnThisGrid` for as many
+readings as the press stays in it.
+
+`UpdateMemoryContext` had to gain `previousStepsEffects` to make any of this
+reachable — `eve-online-saxrat` and `eve-online-mission-runner` have carried it
+since #11 and this app's vendored copy had not, so the widening brings it into
+line rather than diverging.
+
+**What is still open** is only the client's own answer: a live reading of the
+ship UI's indication container during a gate activation would say whether a gate
+reads as a warp. What it decides now is nothing about correctness — with a gate
+that *is* a warp both sources fire on the same reading and the reset is the same
+— only whether the warp half was ever doing this work on its own.
 
 What to watch: the clause above on every in-space reading. `NEVER SEEN` standing
 on a run where the commander is plainly on the grid means the overview preset is
@@ -2689,17 +2733,16 @@ restart.
   over while the bot goes on locking the target normally; the fix would be a
   larger bound rather than a different rule. See "A called target that dies
   leaves the banner naming it".
-- **Whether taking an acceleration gate reads as a warp** (#411). It decides
-  whether the follow re-arms from nothing in the next pocket -- which is what
-  should happen, and what `warpJustEnded` already delivers if a gate activation
-  names the manoeuvre -- or whether the `CommanderGoneFromTheGrid` count is
-  carried through the gate, in which case a commander who is in the next pocket
-  but never rendered is followed again through its gate. What bounds that chase
-  is reaching a pocket with no gate or with two, which the exactly-one-gate
-  guard refuses. **One live reading of the ship UI's indication container
-  during a gate activation settles it**, and it is the first thing to check on
-  a run that follows anything. See "The commander gone from a grid with one
-  gate on it is taken as the way he went".
+- **Whether taking an acceleration gate reads as a warp** (#411). **Nothing
+  about the follow's correctness rests on this any more**, and that is the
+  change: guard 2 used to reset only on `warpJustEnded`, so a gate that is not a
+  warp let one wrong follow chain through pocket after pocket, and it now resets
+  on this bot's own gate press as well -- a fact the bot owns rather than an
+  inference about the client. What a live reading of the ship UI's indication
+  container during a gate activation would still settle is whether the warp half
+  was ever doing that work on its own; with a gate that *is* a warp both sources
+  fire on the same reading and the reset is identical. See "The commander gone
+  from a grid with one gate on it is taken as the way he went".
 - **Whether the commander's row is drawn on this fleet's overview presets at
   all** (#411). Everything the follow does rests on a sighting, so a preset
   that never renders him means it never fires -- correct, and silent unless the

@@ -79,6 +79,18 @@ type alias UpdateMemoryContext botSettings =
     -- rejected exactly that. The copies in `eve-online-saxrat` and
     -- `eve-online-mission-runner` already carry this field.
     , botSettings : botSettings
+
+    -- What the bot itself dispatched, most recent step first. The memory
+    -- update is the only place that can write a verdict and the one place that
+    -- never sees the decision, so a verdict about something _this bot did_ has
+    -- no other way to know it happened -- the mission runner's #11 widened this
+    -- record for exactly that (`droneRecallUnansweredTicks` counts readings
+    -- since the bot asked, not readings since the drones went out), and
+    -- `eve-online-saxrat` and `eve-online-mission-runner` have carried the
+    -- field ever since. This copy was the one that had not; #411 needed it,
+    -- because "did we press the gate ourselves" is a fact this bot owns where
+    -- "did the client call that a warp" is an inference about the client.
+    , previousStepsEffects : List (List Common.EffectOnWindow.EffectOnWindowStruct)
     }
 
 
@@ -197,6 +209,7 @@ processEventInBaseFramework config eventContext event stateBefore =
                     , readingFromGameClient = readingFromGameClient
                     , screenshot = screenshot
                     , botSettings = eventContext.botSettings
+                    , previousStepsEffects = stateBefore.lastStepsEffects
                     }
 
                 botMemory : botMemory

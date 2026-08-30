@@ -756,10 +756,24 @@ type alias BotMemory =
     -- readings he has not been seen since. #411. Three states rather than a
     -- counter, so "never saw him here" and "saw him and lost him" cannot be
     -- read as one another -- which is the whole of what makes an absence-based
-    -- inference safe to draw at all. Reset to `CommanderNotSeenOnThisGrid` on
-    -- the reading a warp ends, so a sighting from the previous pocket licenses
-    -- nothing in this one. See `commanderPresenceAfterReading`.
+    -- inference safe to draw at all. Reset to `CommanderNotSeenOnThisGrid`
+    -- whenever the grid changes, which is a warp ending _or_ this bot pressing
+    -- an acceleration gate, so a sighting from the previous pocket licenses
+    -- nothing in this one. See `commanderPresenceAfterReading` and
+    -- `gridChangedThisReading`.
     , commanderGridPresence : CommanderGridPresence
+
+    -- Where the Selected Item panel's own Activate Gate button was drawn on the
+    -- previous reading, so `gridChangedThisReading` can tell whether the click
+    -- the previous step dispatched was this bot taking a gate. #411.
+    --
+    -- Remembered rather than re-read, because the reading _after_ the press is
+    -- the one that has to answer, and nothing says the panel still offers the
+    -- button once the gate has been taken -- a rule reading it live would fail
+    -- silently in exactly the case it exists for. `Nothing` is "no button was
+    -- drawn on the last reading", which no click can match, so absent evidence
+    -- resets nothing.
+    , activateGateButtonRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
 
     -- Readings in a row spent trying to reach a fleet-mate who broadcast
     -- `needs backup`, bounded like the counters above -- see
@@ -4276,6 +4290,7 @@ initBotMemory =
     , panelSelectUnansweredReadings = 0
     , closingOnTheCommanderSinceLanding = False
     , commanderGridPresence = CommanderNotSeenOnThisGrid
+    , activateGateButtonRegion = Nothing
     , backupCallAskedReadings = 0
     , unlockFleetPilotAskedReadings = 0
     , middleRowAskedReadings = 0
@@ -4822,15 +4837,28 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- #411's presence, settled here for the reason every verdict on this
         -- channel is: the memory update is the only thing that runs on every
         -- reading unconditionally, and the grid changing is a transition
-        -- between two readings that only this function can see. The grid
-        -- boundary is `weJustFinishedWarping` -- the same shared
-        -- `warpJustEnded` that #397's landing window and the drone bookkeeping
-        -- already read -- rather than a second notion of "we changed grid".
+        -- between two readings that only this function can see.
+        --
+        -- The grid boundary is `gridChangedThisReading`, which is one notion of
+        -- a grid change over two positive facts: the shared `warpJustEnded`
+        -- that #397's landing window and the drone bookkeeping already read,
+        -- and this bot having pressed an acceleration gate. Neither is an
+        -- inference about the client -- see `gridChangedThisReading` for why
+        -- the second is what stops one wrong follow chaining into several.
         commanderGridPresenceNow : CommanderGridPresence
         commanderGridPresenceNow =
             commanderPresenceAfterReading
                 { before = botMemoryBefore.commanderGridPresence
-                , gridChanged = weJustFinishedWarping
+                , gridChanged =
+                    gridChangedThisReading
+                        { warpJustEnded = weJustFinishedWarping
+                        , activateGateButtonInTheLastReading =
+                            botMemoryBefore.activateGateButtonRegion
+                        , previousStepEffects =
+                            context.previousStepsEffects
+                                |> List.head
+                                |> Maybe.withDefault []
+                        }
                 , commanderOnGrid = commanderOnGridFromReading context.readingFromGameClient
                 }
 
@@ -5476,6 +5504,8 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             0
     , closingOnTheCommanderSinceLanding = closingOnTheCommanderSinceLandingNow
     , commanderGridPresence = commanderGridPresenceNow
+    , activateGateButtonRegion =
+        activateGateButtonRegionFromReading context.readingFromGameClient
     , backupCallAskedReadings =
         case answeringABackupCall of
             Nothing ->
@@ -12708,6 +12738,100 @@ commanderPresenceAfterReading state =
 
             CommanderGoneFromTheGrid readings ->
                 CommanderGoneFromTheGrid (readings + 1)
+
+
+{-| Whether this reading is on a different grid from the one before it.
+
+**Two positive sources, one notion of a grid change**, rather than two fields on
+`commanderPresenceAfterReading` that would be two opinions about the same
+question. Both are things this bot can state rather than infer:
+
+1.  **A warp ended**, which is `warpJustEnded` -- the shared trigger #194 fixed
+    and #205 and #233 carried into the other three apps. It covers arriving on a
+    grid by warp, which is how a wingman reaches most of them.
+2.  **This bot pressed an acceleration gate**, read out of the previous step's
+    own effects. A gate is very likely _not_ a warp, and #411 shipped without
+    this: after following the commander through a gate on grid A carrying
+    `CommanderGoneFromTheGrid 3`, the bot arrived in pocket B with that count
+    intact and would take B's single gate on the arrival reading, without ever
+    having looked for the commander there -- chaining until it reached a pocket
+    with no gate or two. **And it bites only where the follow was already
+    wrong**: a follow that was right puts the commander on grid B, where clause
+    1 of `commanderPresenceAfterReading` fires and clears the state. So the
+    unbounded case was exactly the one where compounding it costs most.
+
+**Reading the press rather than the client is the whole point.** Whether taking
+a gate reads as a warp is not established here and this deliberately does not
+depend on the answer -- the press is a fact this bot owns, where the client's
+own account of it is an inference this repo has no reading for.
+
+The click is matched against the button's region **as it was on the previous
+reading** (`activateGateButtonRegion`), because the panel may not still offer the
+button once the gate has been taken. `lockClickLocationFromStepEffects` and the
+mission runner's `swapJustCommandedAGunOff` are the precedents for reading a
+dispatched gesture this way; the remembered region is what makes it independent
+of what the client does with the panel afterwards.
+
+**Only the immediately previous step is read.** `previousStepsEffects` is most
+recent first and holds a history, so folding the whole list would re-clear the
+sighting for as many readings as the press stays in it -- which would hold
+`CommanderNotSeenOnThisGrid` past the readings that ought to be re-establishing
+the commander on the new grid.
+
+-}
+gridChangedThisReading :
+    { warpJustEnded : Bool
+    , activateGateButtonInTheLastReading : Maybe EveOnline.ParseUserInterface.DisplayRegion
+    , previousStepEffects : List EffectOnWindow.EffectOnWindowStruct
+    }
+    -> Bool
+gridChangedThisReading state =
+    state.warpJustEnded
+        || thisBotPressedAnAccelerationGate
+            { activateGateButtonInTheLastReading = state.activateGateButtonInTheLastReading
+            , previousStepEffects = state.previousStepEffects
+            }
+
+
+{-| Whether the previous step's own effects were this bot pressing Activate Gate.
+
+`Nothing` for the region is "the panel drew no such button on the last reading",
+which no click can match -- so a reading that cannot say answers `False` and
+clears nothing, which is the direction absent evidence fails in everywhere else
+on this channel.
+
+The region is grown by a pixel the way `doEffectsClickUIElement` grows its own,
+since the click is aimed at the button's centre and the comparison is against a
+region read one reading earlier.
+
+-}
+thisBotPressedAnAccelerationGate :
+    { activateGateButtonInTheLastReading : Maybe EveOnline.ParseUserInterface.DisplayRegion
+    , previousStepEffects : List EffectOnWindow.EffectOnWindowStruct
+    }
+    -> Bool
+thisBotPressedAnAccelerationGate press =
+    case press.activateGateButtonInTheLastReading of
+        Nothing ->
+            False
+
+        Just region ->
+            press.previousStepEffects
+                |> EveOnline.BotFramework.findMouseButtonClickLocationsInListOfEffects
+                    EffectOnWindow.MouseButtonLeft
+                |> List.any
+                    (EveOnline.BotFramework.isPointInRectangle
+                        (EveOnline.BotFramework.growRegionOnAllSides 1 region)
+                    )
+
+
+{-| Where the Selected Item panel's Activate Gate button is on this reading, for
+the next reading to match a click against. See `gridChangedThisReading`.
+-}
+activateGateButtonRegionFromReading : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.DisplayRegion
+activateGateButtonRegionFromReading readingFromGameClient =
+    selectedItemButtonNamed readingFromGameClient "selectedItemActivateGate"
+        |> Maybe.map .totalDisplayRegion
 
 
 {-| On whose authority a gate is being taken, as three named answers over two

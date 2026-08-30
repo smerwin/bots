@@ -350,7 +350,7 @@ class WingmanRepl(ElmRepl):
         " updateMemoryForNewReadingFromGame"
         " { timeInMilliseconds = 0, readingFromGameClient = r"
         " , screenshot = { pixels_1x1 = always Nothing, pixels_2x2 = always Nothing }"
-        " , botSettings = defaultBotSettings } m) initBotMemory)"
+        " , botSettings = defaultBotSettings, previousStepsEffects = [] } m) initBotMemory)"
         " |> .calledGateRecallAskedReadings",
     )
 
