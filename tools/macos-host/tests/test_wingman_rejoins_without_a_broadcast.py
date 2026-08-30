@@ -222,9 +222,18 @@ def step(recovering="True", named="True", on_grid="False", banner="False",
 
 
 def may_be_taken(rats, called, rejoining):
-    """`gateMayBeTaken`, as one expression over its three `Bool`s."""
+    """`gateMayBeTaken`, over the two `Bool`s this issue owns.
+
+    The record grew a fourth field when #411 landed -- `commanderLeftTheGrid`,
+    the commander having gone through a gate without saying so. It is held off
+    in every row here, for the reason this file already holds `calledByTheCommander`
+    off where it is asking about the rejoin: an exception that is switched on
+    would answer for the one under test. #411's own combinations are
+    `test_wingman_follows_the_commander_through_a_gate`'s.
+    """
     return ("gateMayBeTaken { ratsOnTheGrid = %s, calledByTheCommander = %s"
-            ", rejoiningAfterARetreat = %s }" % (rats, called, rejoining))
+            ", rejoiningAfterARetreat = %s, commanderLeftTheGrid = False }"
+            % (rats, called, rejoining))
 
 
 class WingmanRepl(ElmRepl):

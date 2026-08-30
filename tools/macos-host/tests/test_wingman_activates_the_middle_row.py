@@ -397,7 +397,7 @@ class WingmanRepl(ElmRepl):
         " { timeInMilliseconds = 0, readingFromGameClient = p"
         " , screenshot ="
         " { pixels_1x1 = always Nothing, pixels_2x2 = always Nothing }"
-        " , botSettings = defaultBotSettings }"
+        " , botSettings = defaultBotSettings, previousStepsEffects = [] }"
         " { initBotMemory | middleRowAskedReadings = spent })"
         ".middleRowAskedReadings) |> Maybe.withDefault (-1)",
         # #426. The context forced into believing cloaking is already
@@ -426,7 +426,7 @@ class WingmanRepl(ElmRepl):
         " { timeInMilliseconds = 0, readingFromGameClient = p"
         " , screenshot ="
         " { pixels_1x1 = always Nothing, pixels_2x2 = always Nothing }"
-        " , botSettings = defaultBotSettings }"
+        " , botSettings = defaultBotSettings, previousStepsEffects = [] }"
         " { initBotMemory | middleRowAskedReadings = askedBefore"
         " , cloakingInterferesWithModules = cloakedBefore })",
         "askedReadingsAfterCloak = \\askedBefore -> \\cloakedBefore -> \\parsed ->"

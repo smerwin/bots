@@ -733,6 +733,19 @@ type alias BotMemory =
     -- approaching or the commander leaves the overview.
     , approachFleetCommanderAskedReadings : Int
 
+    -- How much of that budget went to closing a window sitting over the client
+    -- rather than to asking for the manoeuvre. Advanced on exactly the answer
+    -- `CloseAWindowLeftOverTheClient`, held and reset wherever the counter
+    -- above is, so the two can never describe different stretches of one ask.
+    --
+    -- Read by `describeApproachFleetCommanderAsk` and by no decision. #433:
+    -- the give-up said `the double click and the panel's Approach button both`
+    -- on runs where the budget had gone to a window instead, and from outside
+    -- the tree a spent budget looks the same whichever it bought -- which is
+    -- what made three wingmen sitting 32 km off their commander take an issue
+    -- to diagnose.
+    , approachFleetCommanderCloseWindowReadings : Int
+
     -- Readings in a row the Selected Item panel has not come to show the object
     -- `ensureShipIsOrbiting` wants to orbit, which is what bounds that arm's
     -- selection click. See `panelSelectReadingsAfterReading` and
@@ -751,6 +764,29 @@ type alias BotMemory =
     -- has no landing to close from -- `arrivalWindowIsOpen`'s posture, and the
     -- conservative direction.
     , closingOnTheCommanderSinceLanding : Bool
+
+    -- Whether the fleet commander has been seen on this grid, and for how many
+    -- readings he has not been seen since. #411. Three states rather than a
+    -- counter, so "never saw him here" and "saw him and lost him" cannot be
+    -- read as one another -- which is the whole of what makes an absence-based
+    -- inference safe to draw at all. Reset to `CommanderNotSeenOnThisGrid`
+    -- whenever the grid changes, which is a warp ending _or_ this bot pressing
+    -- an acceleration gate, so a sighting from the previous pocket licenses
+    -- nothing in this one. See `commanderPresenceAfterReading` and
+    -- `gridChangedThisReading`.
+    , commanderGridPresence : CommanderGridPresence
+
+    -- Where the Selected Item panel's own Activate Gate button was drawn on the
+    -- previous reading, so `gridChangedThisReading` can tell whether the click
+    -- the previous step dispatched was this bot taking a gate. #411.
+    --
+    -- Remembered rather than re-read, because the reading _after_ the press is
+    -- the one that has to answer, and nothing says the panel still offers the
+    -- button once the gate has been taken -- a rule reading it live would fail
+    -- silently in exactly the case it exists for. `Nothing` is "no button was
+    -- drawn on the last reading", which no click can match, so absent evidence
+    -- resets nothing.
+    , activateGateButtonRegion : Maybe EveOnline.ParseUserInterface.DisplayRegion
 
     -- Readings in a row spent trying to reach a fleet-mate who broadcast
     -- `needs backup`, bounded like the counters above -- see
@@ -878,6 +914,29 @@ type alias BannerCtrlClickAsk =
     { calledTarget : String
     , readings : Int
     }
+
+
+{-| What this grid has said about the fleet commander so far. #411.
+
+**Three constructors rather than a `Bool` and a counter**, because the two
+absences are different facts and collapsing them is the failure this whole
+design refuses. `CommanderNotSeenOnThisGrid` is _nothing here has ever named
+him_ -- which is what a ship that has just landed reads, and what a pilot whose
+overview preset is too short to draw his row reads for the whole of a grid
+(#366 was fixed on exactly that correction). `CommanderGoneFromTheGrid` is _this
+grid named him and now does not_, carrying how many consecutive readings that
+has been true for. Only the second is evidence of anything.
+
+`CommanderGoneFromTheGrid` is reachable only from `CommanderOnTheGrid`, so the
+prior sighting is a property of the type rather than a condition somebody has to
+remember to write. See `commanderPresenceAfterReading` for what moves between
+them, and `followTheCommanderThroughTheGate` for the one rule that reads it.
+
+-}
+type CommanderGridPresence
+    = CommanderNotSeenOnThisGrid
+    | CommanderOnTheGrid
+    | CommanderGoneFromTheGrid Int
 
 
 {-| The message box the bot has been trying to answer, and how many readings it
@@ -4501,8 +4560,11 @@ initBotMemory =
     , dronesInSpaceCountLastReading = 0
     , weaponsAskedReadings = 0
     , approachFleetCommanderAskedReadings = 0
+    , approachFleetCommanderCloseWindowReadings = 0
     , panelSelectUnansweredReadings = 0
     , closingOnTheCommanderSinceLanding = False
+    , commanderGridPresence = CommanderNotSeenOnThisGrid
+    , activateGateButtonRegion = Nothing
     , backupCallAskedReadings = 0
     , unlockFleetPilotAskedReadings = 0
     , middleRowAskedReadings = 0
@@ -4626,7 +4688,9 @@ statusTextFromState context =
                     , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
                     , [ describeRetreat context, describeRetreatRecovery context ]
                     , [ describeFleetMembership context, describeFriendlyFireGuard context ]
-                    , [ describeAccelerationGateAsk context ]
+                    , [ describeAccelerationGateAsk context
+                      , describeCommanderFollowThroughGate context
+                      ]
                     , [ describeCalledObject context ]
                     , [ describeWeaponsAsk context ]
                     , [ describeApproachFleetCommanderAsk context ]
@@ -5095,6 +5159,34 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         arrivalWindowIsOpenNow =
             arrivalWindowIsOpen { readingsSinceWarpEnded = readingsSinceWarpEnded }
 
+        -- #411's presence, settled here for the reason every verdict on this
+        -- channel is: the memory update is the only thing that runs on every
+        -- reading unconditionally, and the grid changing is a transition
+        -- between two readings that only this function can see.
+        --
+        -- The grid boundary is `gridChangedThisReading`, which is one notion of
+        -- a grid change over two positive facts: the shared `warpJustEnded`
+        -- that #397's landing window and the drone bookkeeping already read,
+        -- and this bot having pressed an acceleration gate. Neither is an
+        -- inference about the client -- see `gridChangedThisReading` for why
+        -- the second is what stops one wrong follow chaining into several.
+        commanderGridPresenceNow : CommanderGridPresence
+        commanderGridPresenceNow =
+            commanderPresenceAfterReading
+                { before = botMemoryBefore.commanderGridPresence
+                , gridChanged =
+                    gridChangedThisReading
+                        { warpJustEnded = weJustFinishedWarping
+                        , activateGateButtonInTheLastReading =
+                            botMemoryBefore.activateGateButtonRegion
+                        , previousStepEffects =
+                            context.previousStepsEffects
+                                |> List.head
+                                |> Maybe.withDefault []
+                        }
+                , commanderOnGrid = commanderOnGridFromReading context.readingFromGameClient
+                }
+
         visitedAnomalies : Dict.Dict String MemoryOfAnomaly
         visitedAnomalies =
             if shipIsWarping == Just True then
@@ -5233,6 +5325,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                         { ratsOnTheGrid = not (List.isEmpty namesOfRatsInOverview)
                         , calledByTheCommander = gate.calledByTheCommander
                         , rejoiningAfterARetreat = rejoinIsTakingThisGate recoveringStepNow
+                        , commanderLeftTheGrid =
+                            -- This reading's presence rather than
+                            -- `botMemoryBefore`'s, because the decision reads
+                            -- the memory this update writes -- a counter
+                            -- advanced under a presence one reading behind the
+                            -- arm's would leave
+                            -- `accelerationGateRefusesThisShipTicks`
+                            -- unreachable on the reading the follow begins.
+                            -- #397's arrangement, and #34's shape without it.
+                            followingTheCommanderThroughAGate
+                                commanderGridPresenceNow
+                                context.readingFromGameClient
                         }
                         && not askingForTheCalledGateRecall
                         && selectedItemIsOverviewEntry context.readingFromGameClient gate.gate
@@ -5383,6 +5487,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 , spentBefore = botMemoryBefore.approachFleetCommanderAskedReadings
                 }
 
+        -- #433's record of where that budget went, refilled by the same landing
+        -- and by the same rule -- a window that ate one grid's readings must not
+        -- still be reported against the next grid's ask.
+        approachCloseWindowReadingsCarriedIn : Int
+        approachCloseWindowReadingsCarriedIn =
+            askedReadingsRefilledByLanding
+                { justLanded = weJustFinishedWarping
+                , spentBefore = botMemoryBefore.approachFleetCommanderCloseWindowReadings
+                }
+
         -- The same shape as `askingTheGateToOpen` and `weaponsNow`,
         -- and taken from the shipped rule itself rather than restated beside
         -- it: a counter advanced by one condition and read by another is
@@ -5394,26 +5508,33 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- assume when the settings were not visible from a memory update --
         -- and #397 is why the setting is asked through
         -- `approachFleetCommanderIsAsked` rather than compared here.
+        strayWindowNow : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        strayWindowNow =
+            windowOpenedOverTheClient context.readingFromGameClient
+
+        approachStepNow : ApproachFleetCommanderStep
+        approachStepNow =
+            approachFleetCommanderStep
+                { settingIsYes =
+                    approachFleetCommanderIsAsked
+                        { settingIsYes = context.botSettings.orbitFleetCommander == PromptParser.Yes
+                        , closingSinceLanding = closingOnTheCommanderSinceLandingNow
+                        }
+                , commanderOnGrid = commanderIsOnGrid
+                , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
+                , shipIsApproaching = shipIsApproachingNow
+                , strayWindowIsOpen = strayWindowNow /= Nothing
+                , strayWindowCanBeClosed =
+                    (strayWindowNow |> Maybe.andThen closeButtonThisBotCanPress) /= Nothing
+                , panelShowsTheCommander = panelIsShowingTheFleetCommander context.readingFromGameClient
+                , panelOffersApproach =
+                    selectedItemButtonNamed context.readingFromGameClient selectedItemApproachButtonName /= Nothing
+                , askedReadings = approachAskedReadingsCarriedIn
+                }
+
         askingTheCommanderForAnApproach : Bool
         askingTheCommanderForAnApproach =
-            List.member
-                (approachFleetCommanderStep
-                    { settingIsYes =
-                        approachFleetCommanderIsAsked
-                            { settingIsYes = context.botSettings.orbitFleetCommander == PromptParser.Yes
-                            , closingSinceLanding = closingOnTheCommanderSinceLandingNow
-                            }
-                    , commanderOnGrid = commanderIsOnGrid
-                    , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
-                    , shipIsApproaching = shipIsApproachingNow
-                    , strayWindowIsOpen = windowOpenedOverTheClient context.readingFromGameClient /= Nothing
-                    , panelShowsTheCommander = panelIsShowingTheFleetCommander context.readingFromGameClient
-                    , panelOffersApproach =
-                        selectedItemButtonNamed context.readingFromGameClient selectedItemApproachButtonName /= Nothing
-                    , askedReadings = approachAskedReadingsCarriedIn
-                    }
-                )
-                approachFleetCommanderAnswersThatSpendAReading
+            List.member approachStepNow approachFleetCommanderAnswersThatSpendAReading
 
         -- The same shape as `askingTheGateToOpen`, and asked through the rule
         -- the decision itself asks rather than restated beside it: a fleet-mate
@@ -5783,7 +5904,23 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , approachFleetCommanderCloseWindowReadings =
+        -- Advanced on the one answer that spends a reading closing a window,
+        -- and held and cleared on exactly the conditions the counter above
+        -- uses, so the pair always describes one stretch of one ask rather
+        -- than two overlapping ones.
+        if approachStepNow == CloseAWindowLeftOverTheClient then
+            approachCloseWindowReadingsCarriedIn + 1
+
+        else if askingTheCommanderForAnApproach || (commanderIsOnGrid && not shipIsApproachingNow) then
+            approachCloseWindowReadingsCarriedIn
+
+        else
+            0
     , closingOnTheCommanderSinceLanding = closingOnTheCommanderSinceLandingNow
+    , commanderGridPresence = commanderGridPresenceNow
+    , activateGateButtonRegion =
+        activateGateButtonRegionFromReading context.readingFromGameClient
     , backupCallAskedReadings =
         case answeringABackupCall of
             Nothing ->
@@ -7439,18 +7576,36 @@ overviewEntryIsAnAccelerationGate entry =
         |> List.any (containsWords "acceleration gate")
 
 
-{-| The nearest displayed acceleration gate on the overview, if there is one.
-A hidden row's region belongs to whatever was recycled into its place, so a
-row that is not `_display`ed is excluded rather than clicked. `Result.withDefault`
-pushes an unreadable (AU) distance to the back rather than dropping it, since a
-gate whose distance cannot be read is still a gate worth reporting on.
+{-| Every displayed acceleration gate on the overview.
+
+A hidden row's region belongs to whatever was recycled into its place, so a row
+that is not `_display`ed is excluded rather than clicked.
+
+**One derivation with two readers**, which is what makes #411's
+"exactly one gate" guard mean the same thing as the gate this bot would act on.
+A count taken over a different filter than the choice is two questions about one
+grid: counting undisplayed rows too would refuse the follow because of a row
+nothing would ever have clicked, and counting fewer than the choice sees would
+license it while the choice was ambiguous. `overviewEntryLockHandle`'s lesson,
+and `overviewRowsForPilot`'s arrangement one screen up.
+
 -}
-nearestAccelerationGateOnOverview : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
-nearestAccelerationGateOnOverview readingFromGameClient =
+accelerationGatesOnOverview : ReadingFromGameClient -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+accelerationGatesOnOverview readingFromGameClient =
     readingFromGameClient.overviewWindows
         |> List.concatMap .entries
         |> List.filter overviewEntryIsDisplayed
         |> List.filter overviewEntryIsAnAccelerationGate
+
+
+{-| The nearest displayed acceleration gate on the overview, if there is one.
+`Result.withDefault` pushes an unreadable (AU) distance to the back rather than
+dropping it, since a gate whose distance cannot be read is still a gate worth
+reporting on.
+-}
+nearestAccelerationGateOnOverview : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+nearestAccelerationGateOnOverview readingFromGameClient =
+    accelerationGatesOnOverview readingFromGameClient
         |> List.sortBy (.objectDistanceInMeters >> Result.withDefault 999999)
         |> List.head
 
@@ -12301,6 +12456,14 @@ approachTheFleetCommander context shipUI =
         approachButton : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
         approachButton =
             selectedItemButtonNamed context.readingFromGameClient selectedItemApproachButtonName
+
+        -- Bound once and read three times below -- the fact the rule is given,
+        -- the fact about its button, and the window the close names. Each of
+        -- those walks the whole tree, and this arm is re-derived on every
+        -- framework event rather than once a reading.
+        strayWindow : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+        strayWindow =
+            windowOpenedOverTheClient context.readingFromGameClient
     in
     case
         approachFleetCommanderStep
@@ -12312,7 +12475,9 @@ approachTheFleetCommander context shipUI =
             , commanderOnGrid = commanderEntry /= Nothing
             , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
             , shipIsApproaching = shipIsApproachingFromReading context.readingFromGameClient
-            , strayWindowIsOpen = windowOpenedOverTheClient context.readingFromGameClient /= Nothing
+            , strayWindowIsOpen = strayWindow /= Nothing
+            , strayWindowCanBeClosed =
+                (strayWindow |> Maybe.andThen closeButtonThisBotCanPress) /= Nothing
             , panelShowsTheCommander = panelIsShowingTheFleetCommander context.readingFromGameClient
             , panelOffersApproach = approachButton /= Nothing
             , askedReadings = context.memory.approachFleetCommanderAskedReadings
@@ -12343,32 +12508,39 @@ approachTheFleetCommander context shipUI =
             -- `describeApproachFleetCommanderAsk` is what keeps this visible.
             Nothing
 
+        AWindowThisBotCannotCloseIsOpen ->
+            -- Hand the reading back rather than poking at it, and spend none of
+            -- the budget doing so -- #433, and #427's answer to #426: a window
+            -- this bot cannot close will not become closable by being looked at
+            -- forty times, and the readings it would have taken are the ones
+            -- the approach needs once the window is gone. Nothing is clicked at
+            -- a guessed point either. Clicking at one is what #321's stray-menu
+            -- rescue did 16,791 times in one run, and it is how a rescue
+            -- becomes the damage. `describeApproachFleetCommanderAsk` is what
+            -- names the window while this arm stands aside.
+            Nothing
+
         CloseAWindowLeftOverTheClient ->
-            case windowOpenedOverTheClient context.readingFromGameClient of
-                Nothing ->
-                    Nothing
-
-                Just strayWindow ->
-                    case EveOnline.ParseUserInterface.parseWindowControlsFromWindow strayWindow |> Maybe.andThen .closeButton of
-                        Nothing ->
-                            -- Nothing is clicked at a window this bot cannot
-                            -- close by its own close button. Clicking at a
-                            -- guessed point is what #321's stray-menu rescue
-                            -- did 16,791 times in one run, and it is how a
-                            -- rescue becomes the damage.
-                            Nothing
-
-                        Just closeButton ->
-                            Just
-                                (describeBranch
-                                    ("A '"
-                                        ++ strayWindow.uiNode.pythonObjectTypeName
-                                        ++ "' is sitting over the client while this ship is being asked to"
-                                        ++ " approach -- the mis-click PILOT.md records. Close it before"
-                                        ++ " asking again."
-                                    )
-                                    (clickUiElementForNavigation closeButton)
+            -- The `Nothing` either lookup can answer is unreachable from this
+            -- answer, which is asked exactly when both are `Just`. It is still
+            -- an answer rather than a default, so a reading that somehow lands
+            -- here dispatches nothing instead of clicking somewhere guessed.
+            strayWindow
+                |> Maybe.andThen
+                    (\window ->
+                        closeButtonThisBotCanPress window
+                            |> Maybe.map
+                                (\closeButton ->
+                                    describeBranch
+                                        ("A '"
+                                            ++ window.uiNode.pythonObjectTypeName
+                                            ++ "' is sitting over the client while this ship is being asked to"
+                                            ++ " approach -- the mis-click PILOT.md records. Close it before"
+                                            ++ " asking again."
+                                        )
+                                        (clickUiElementForNavigation closeButton)
                                 )
+                    )
 
         ApproachByDoubleClick ->
             commanderEntry
@@ -12588,7 +12760,61 @@ windowOpenedOverTheClient readingFromGameClient =
         |> List.head
 
 
-{-| The approach decision on its own, as seven named answers over five facts
+{-| The close button of a window sitting over the client, when this bot can
+actually press it.
+
+**Parsing a close button is not the same as being able to click one**, and #433
+is what that gap cost: three of four wingmen in one fleet spent the whole
+approach budget with an `InfoWindow` still over the client and the commander 32
+to 37 km away, having made no approach attempt at all.
+`mouseClickOnUIElement` answers `Err ()` for an element whose visible part is
+too small to click -- which is what one window sitting over another produces --
+and `clickUiElementForNavigation` folds that into `Result.withDefault []`, so
+the arm printed a close on every reading and dispatched an empty effect list.
+`clickUiElementOrSayItCannotBeClicked` already names that shape as this repo's
+signature failure and refuses it for the manoeuvre arm; what #433 adds is that
+the reading was _charged_ for it too, which is the half that took the ships out
+of the fleet.
+
+**Asked through `mouseClickOnUIElement` rather than through
+`uiNodeVisibleRegionLargeEnoughForClicking`**, though the second is what the
+first tests. The click is the thing that has to land, so the rule asks the
+question the dispatch asks -- restating the framework's own clickability test
+beside it would be a second opinion that can drift, which is #102's defect in
+another place.
+
+`windowOpenedOverTheClient` is untouched and still identifies a stray window by
+its carrying a close button at all: that is the window's _identity_, and a node
+whose type name merely ends in `Window` with nothing to close it by is not
+something this arm should be forming an opinion about -- PILOT.md's recorded
+mis-click opened a window with a close button on it. What this adds is the
+second question, asked of the button that identity found.
+
+**One rule with three readers**, and each of them hands it a window it has
+already bound rather than looking one up again: the arm, the memory update and
+the status clause all need `windowOpenedOverTheClient`'s answer for the fact
+beside this one, and that lookup walks the whole tree while the arm is
+re-derived on every framework event rather than once a reading.
+
+-}
+closeButtonThisBotCanPress :
+    EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+closeButtonThisBotCanPress strayWindow =
+    EveOnline.ParseUserInterface.parseWindowControlsFromWindow strayWindow
+        |> Maybe.andThen .closeButton
+        |> Maybe.andThen
+            (\closeButton ->
+                case mouseClickOnUIElement MouseButtonLeft closeButton of
+                    Ok _ ->
+                        Just closeButton
+
+                    Err () ->
+                        Nothing
+            )
+
+
+{-| The approach decision on its own, as eleven named answers over eight facts
 and a counter -- the shape `weaponsStep` and `accelerationGateActivationStep`
 already use here, and for the stated reason: a rule reachable only through a
 full `BotDecisionContext` is a rule nothing can execute in a test.
@@ -12609,6 +12835,18 @@ over the client is a problem whatever the ship is doing, and it is only
 consulted at all once `0 < askedReadings` -- a window an operator opened on a
 healthy session is not this bot's to close.
 
+**A window this bot cannot press the close button of is a separate answer, and
+that is #433.** `AWindowThisBotCannotCloseIsOpen` is checked before
+`CloseAWindowLeftOverTheClient` and is absent from
+`approachFleetCommanderAnswersThatSpendAReading`, so a reading on which nothing
+is dispatched costs nothing. Writing it as a condition inside the closing
+answer was the other option and is the worse one: an answer that sometimes
+spends and sometimes does not makes that list stop being the single rule the
+arm, the counter and the status clause all ask, which is the arrangement #102
+is about. Halting rather than draining is #427's resolution of #426 -- a window
+this bot cannot close does not become closable by being looked at forty times,
+and the budget kept is the budget the approach has when the window goes away.
+
 **Two mechanisms and two bounds, and the fall-back is the proven half.**
 `approachFleetCommanderDoubleClickAskedReadingsBound` ends the double click and
 `approachFleetCommanderAskedReadingsBound` ends the whole ask, so the readings
@@ -12627,6 +12865,7 @@ approachFleetCommanderStep :
     , shipIsWarpingOrJumping : Bool
     , shipIsApproaching : Bool
     , strayWindowIsOpen : Bool
+    , strayWindowCanBeClosed : Bool
     , panelShowsTheCommander : Bool
     , panelOffersApproach : Bool
     , askedReadings : Int
@@ -12644,6 +12883,9 @@ approachFleetCommanderStep approachCase =
 
     else if approachFleetCommanderHasBeenGivenUpOn approachCase.askedReadings then
         GaveUpOnTheApproach
+
+    else if approachCase.strayWindowIsOpen && not approachCase.strayWindowCanBeClosed && 0 < approachCase.askedReadings then
+        AWindowThisBotCannotCloseIsOpen
 
     else if approachCase.strayWindowIsOpen && 0 < approachCase.askedReadings then
         CloseAWindowLeftOverTheClient
@@ -12669,7 +12911,7 @@ answers the counter advances on.
 
 One list with two readers -- `updateMemoryForNewReadingFromGame` and the cases
 that check it -- rather than a condition restated beside the rule, which is
-#102's defect. Five of the seven answers are here: the double click, both
+#102's defect. Five of the eleven answers are here: the double click, both
 ticks of the panel fall-back, the reading the panel spends not yet offering its
 button, and the click that closes a window sitting over the client. The close
 counts against the same budget on purpose, so a rescue that does not land
@@ -12677,6 +12919,12 @@ cannot outlive the ask it is rescuing, and `WaitForTheApproachButton` counts
 for the reason `askingTheGateToOpen` counts its own wait: a panel that showed
 the row and never produced the button would otherwise buy unlimited readings by
 doing nothing.
+
+**`AWindowThisBotCannotCloseIsOpen` is deliberately not here**, which is the
+whole of #433: the arm dispatches nothing on that answer, so there is nothing
+for the budget to be bounding. Every answer in this list puts an effect on the
+client or holds the reading in this arm; membership is that property and not a
+list of the answers that happen to look busy.
 
 -}
 approachFleetCommanderAnswersThatSpendAReading : List ApproachFleetCommanderStep
@@ -12695,6 +12943,7 @@ type ApproachFleetCommanderStep
     | ShipIsWarpingOrJumping
     | AlreadyApproaching
     | CloseAWindowLeftOverTheClient
+    | AWindowThisBotCannotCloseIsOpen
     | GaveUpOnTheApproach
     | ApproachByDoubleClick
     | SelectTheCommandersRow
@@ -13060,6 +13309,14 @@ the arm, the memory update and the status clause cannot hold three opinions
 about when the guard applies. With both exceptions `False` it _is_ #348's guard,
 unchanged.
 
+**Both exceptions are the same thing said two ways**: the fleet is going through
+this gate and a wingman that stays behind is a ship short in the pocket the
+fleet just left. `calledByTheCommander` is #393's, and is the commander saying
+so explicitly. `commanderLeftTheGrid` is #411's, and is the commander having
+gone without saying so -- a weaker signal by a long way, which is why it is
+`followTheCommanderThroughTheGate` rather than a bare "he is not on the
+overview" and why that rule carries four guards.
+
 **The second exception is #429's rejoin, and it is the retreat recovery's own
 reading rather than a state.** A ship gating back to its commander lands in
 rooms with rats in them -- that is what an escalation is -- so #348's guard, on
@@ -13094,13 +13351,375 @@ is real.
 gateMayBeTaken :
     { ratsOnTheGrid : Bool
     , calledByTheCommander : Bool
+    , commanderLeftTheGrid : Bool
     , rejoiningAfterARetreat : Bool
     }
     -> Bool
 gateMayBeTaken gateCase =
     gateCase.calledByTheCommander
+        || gateCase.commanderLeftTheGrid
         || gateCase.rejoiningAfterARetreat
         || not gateCase.ratsOnTheGrid
+
+
+{-| Whether this reading licenses following the commander through an
+acceleration gate nobody named. #411.
+
+**The question this answers is not "where did he go".** It cannot be: a pilot
+leaving the overview has at least five causes and only one of them is _took the
+gate_ -- he died, he warped off, he cloaked, he drifted out of the overview's
+own range filter, or this pilot's overview preset never drew his row at all. No
+guard below changes that, and none is claimed to. What they change is _when_ the
+inference is drawn, so that it is drawn on a grid that has already answered
+about him rather than on one that never has. **The accepted cost is a wingman
+that follows a dead commander through a gate and ends up alone in a pocket**,
+and the reason it is acceptable is that the commander being gone is already a
+broken state this bot has no better answer to -- the alternative is sitting on
+the grid following nobody, which is what #415 had to write a give-up for.
+
+**It rests on two positive readings and not on an absence alone**, which is
+#411's own first constraint and #395's lesson: a called target absent from the
+overview was read as dead and latched the bot for a whole session.
+
+  - **A prior sighting is required**, and it is a property of
+    `CommanderGridPresence` rather than a condition: `CommanderGoneFromTheGrid`
+    is reachable only from `CommanderOnTheGrid`. This is the guard that matters
+    most. Without it the rule fires from the first reading on any pilot whose
+    overview window is too short to render the commander's row -- his entry is
+    in the tree and fails `_display`, which reads as an absence exactly like
+    leaving does, and #366 was fixed on that correction.
+  - **The sighting is scoped to this grid**, cleared on the reading a warp ends
+    by the same shared `warpJustEnded` the drone bookkeeping and #397's landing
+    window already read. A sighting from the previous pocket must license
+    nothing in this one.
+  - **The absence has to persist**, for `commanderGoneReadingsBeforeFollowing`
+    readings, because a row can fail `_display` for one reading without the
+    pilot having gone anywhere.
+  - **Exactly one acceleration gate on the grid**, which is the whole
+    difference from #393: nobody named this gate, so with two there is no basis
+    to choose and picking the nearest would be a guess whose failure is a wrong
+    pocket. Refusing on ambiguity is `dockAtDestinationStation`'s discipline
+    (exactly one `AutopilotDestinationIcon`), and what refusing costs here is
+    only the follow -- the gate is still taken on a clear grid exactly as it
+    was.
+
+**It holds no reading.** This is a `Bool` handed to `gateMayBeTaken`; every
+answer below it is the shipped gate path, already bounded by
+`accelerationGateRefusesThisShipTicks`. On the readings it changes anything at
+all the arm was answering `Just (… rats still on the grid …)` and waiting, so
+what this can do to a reading is take a gate on it, never hold it.
+
+-}
+followTheCommanderThroughTheGate :
+    { presence : CommanderGridPresence
+    , accelerationGatesOnTheGrid : Int
+    }
+    -> Bool
+followTheCommanderThroughTheGate state =
+    commanderHasLeftTheGrid state.presence
+        && (state.accelerationGatesOnTheGrid == 1)
+
+
+{-| The rule above over a reading, so the arm, the press's own wording, the
+memory update and the two status clauses all reach it the same way.
+
+The presence is an argument rather than read from a context, because the memory
+update has to ask about the presence _this_ reading produces while the decision
+asks about the one already written -- #397's own arrangement, and #34's shape if
+the two disagree.
+
+-}
+followingTheCommanderThroughAGate : CommanderGridPresence -> ReadingFromGameClient -> Bool
+followingTheCommanderThroughAGate presence readingFromGameClient =
+    followTheCommanderThroughTheGate
+        { presence = presence
+        , accelerationGatesOnTheGrid =
+            List.length (accelerationGatesOnOverview readingFromGameClient)
+        }
+
+
+{-| Whether the commander has been gone from this grid for long enough to draw
+anything from it. One comparison with several readers --
+`followTheCommanderThroughTheGate` and the status clause --
+`accelerationGateHasBeenGivenUpOn`'s arrangement, for its reason.
+
+`CommanderNotSeenOnThisGrid` answers `False` rather than counting, which is the
+prior-sighting guard: a grid that has never named him says nothing about him
+having left it.
+
+-}
+commanderHasLeftTheGrid : CommanderGridPresence -> Bool
+commanderHasLeftTheGrid presence =
+    case presence of
+        CommanderNotSeenOnThisGrid ->
+            False
+
+        CommanderOnTheGrid ->
+            False
+
+        CommanderGoneFromTheGrid readings ->
+            commanderGoneReadingsBeforeFollowing <= readings
+
+
+{-| How many consecutive readings the commander's row has to be missing from a
+grid that had it before this bot concludes he has left.
+
+**Three, and it is the number this repo already gives a row that may simply not
+have been drawn.** `calledTargetGoneReadings` is the same question about a
+called target's row and its own comment carries the argument: the parser drops
+what it cannot read, so "one reading finding none may be a parse that missed",
+and CLAUDE.md's ship-loss signal wants three consecutive empty module rows for
+the same reason.
+
+**Deliberately not written as `calledTargetGoneReadings`.** The two questions
+are the same and the two give-ups are not -- that one costs a lock on a target
+whose row is back next reading, this one costs a pocket -- so tying them would
+let a retune of #395's bound silently move this one. The shared thing is the
+argument, which is why the argument is written here.
+
+**No corpus sizes it**, and this bot has none of its own at all (WINGMAN.md).
+Being late costs three readings of following the fleet late; being early costs a
+pocket, and the count resets the moment the row comes back, so a commander whose
+row flickers re-arms the guard rather than spending it.
+
+-}
+commanderGoneReadingsBeforeFollowing : Int
+commanderGoneReadingsBeforeFollowing =
+    3
+
+
+{-| Whether this reading can say at all whether the commander is on this grid.
+
+**`Nothing` is _cannot say_ and is never read as _he is not here_**, which is
+the distinction this whole memory is built on. Three readings cannot answer:
+one whose fleet window does not name a commander (the header comes and goes,
+which `fleetPlaceBroadcast`'s own comment records), one with no ship UI, and one
+with no overview window at all. Each of those reads as an absence to a rule that
+only asks `fleetCommanderOverviewEntry`, and an absence is exactly what this
+memory is counting.
+
+`Just False` is the grid answering: it named a commander, it is in space, it has
+an overview, and no row on it carries his name.
+
+-}
+commanderOnGridFromReading : ReadingFromGameClient -> Maybe Bool
+commanderOnGridFromReading readingFromGameClient =
+    case fleetCommanderNameFromFleetWindowHeader readingFromGameClient of
+        Nothing ->
+            Nothing
+
+        Just commander ->
+            if
+                (readingFromGameClient.shipUI == Nothing)
+                    || List.isEmpty readingFromGameClient.overviewWindows
+            then
+                Nothing
+
+            else
+                Just (pilotIsOnOverview commander readingFromGameClient)
+
+
+{-| What this grid says about the commander, folded from what it said before.
+
+Settled in `updateMemoryForNewReadingFromGame` for the reason every verdict on
+this channel is: that is the only thing that runs on every reading
+unconditionally (#102, #126), and `gridChanged` is a transition between two
+readings that only it can see.
+
+The order of the clauses is the design.
+
+1.  **A sighting wins over everything**, including a grid change on the same
+    reading: he is here, and that is a positive reading rather than an
+    inference.
+2.  **A grid change clears the sighting**, so a commander seen in the previous
+    pocket licenses nothing in this one -- including when this reading cannot
+    say, since a sighting that has definitely gone stale must not be carried on
+    the strength of a reading that answered nothing.
+3.  **A reading that cannot say holds** whatever was believed. Advancing here
+    would count a shut fleet window or a docked reading as the commander
+    leaving, which is `Maybe.withDefault False` in the expensive direction.
+4.  Otherwise the grid answered `Just False`, and that is the one thing that
+    advances the count.
+
+-}
+commanderPresenceAfterReading :
+    { before : CommanderGridPresence
+    , gridChanged : Bool
+    , commanderOnGrid : Maybe Bool
+    }
+    -> CommanderGridPresence
+commanderPresenceAfterReading state =
+    if state.commanderOnGrid == Just True then
+        CommanderOnTheGrid
+
+    else if state.gridChanged then
+        CommanderNotSeenOnThisGrid
+
+    else if state.commanderOnGrid == Nothing then
+        state.before
+
+    else
+        case state.before of
+            CommanderNotSeenOnThisGrid ->
+                CommanderNotSeenOnThisGrid
+
+            CommanderOnTheGrid ->
+                CommanderGoneFromTheGrid 1
+
+            CommanderGoneFromTheGrid readings ->
+                CommanderGoneFromTheGrid (readings + 1)
+
+
+{-| Whether this reading is on a different grid from the one before it.
+
+**Two positive sources, one notion of a grid change**, rather than two fields on
+`commanderPresenceAfterReading` that would be two opinions about the same
+question. Both are things this bot can state rather than infer:
+
+1.  **A warp ended**, which is `warpJustEnded` -- the shared trigger #194 fixed
+    and #205 and #233 carried into the other three apps. It covers arriving on a
+    grid by warp, which is how a wingman reaches most of them.
+2.  **This bot pressed an acceleration gate**, read out of the previous step's
+    own effects. A gate is very likely _not_ a warp, and #411 shipped without
+    this: after following the commander through a gate on grid A carrying
+    `CommanderGoneFromTheGrid 3`, the bot arrived in pocket B with that count
+    intact and would take B's single gate on the arrival reading, without ever
+    having looked for the commander there -- chaining until it reached a pocket
+    with no gate or two. **And it bites only where the follow was already
+    wrong**: a follow that was right puts the commander on grid B, where clause
+    1 of `commanderPresenceAfterReading` fires and clears the state. So the
+    unbounded case was exactly the one where compounding it costs most.
+
+**Reading the press rather than the client is the whole point.** Whether taking
+a gate reads as a warp is not established here and this deliberately does not
+depend on the answer -- the press is a fact this bot owns, where the client's
+own account of it is an inference this repo has no reading for.
+
+The click is matched against the button's region **as it was on the previous
+reading** (`activateGateButtonRegion`), because the panel may not still offer the
+button once the gate has been taken. `lockClickLocationFromStepEffects` and the
+mission runner's `swapJustCommandedAGunOff` are the precedents for reading a
+dispatched gesture this way; the remembered region is what makes it independent
+of what the client does with the panel afterwards.
+
+**Only the immediately previous step is read.** `previousStepsEffects` is most
+recent first and holds a history, so folding the whole list would re-clear the
+sighting for as many readings as the press stays in it -- which would hold
+`CommanderNotSeenOnThisGrid` past the readings that ought to be re-establishing
+the commander on the new grid.
+
+-}
+gridChangedThisReading :
+    { warpJustEnded : Bool
+    , activateGateButtonInTheLastReading : Maybe EveOnline.ParseUserInterface.DisplayRegion
+    , previousStepEffects : List EffectOnWindow.EffectOnWindowStruct
+    }
+    -> Bool
+gridChangedThisReading state =
+    state.warpJustEnded
+        || thisBotPressedAnAccelerationGate
+            { activateGateButtonInTheLastReading = state.activateGateButtonInTheLastReading
+            , previousStepEffects = state.previousStepEffects
+            }
+
+
+{-| Whether the previous step's own effects were this bot pressing Activate Gate.
+
+`Nothing` for the region is "the panel drew no such button on the last reading",
+which no click can match -- so a reading that cannot say answers `False` and
+clears nothing, which is the direction absent evidence fails in everywhere else
+on this channel.
+
+The region is grown by a pixel the way `doEffectsClickUIElement` grows its own,
+since the click is aimed at the button's centre and the comparison is against a
+region read one reading earlier.
+
+-}
+thisBotPressedAnAccelerationGate :
+    { activateGateButtonInTheLastReading : Maybe EveOnline.ParseUserInterface.DisplayRegion
+    , previousStepEffects : List EffectOnWindow.EffectOnWindowStruct
+    }
+    -> Bool
+thisBotPressedAnAccelerationGate press =
+    case press.activateGateButtonInTheLastReading of
+        Nothing ->
+            False
+
+        Just region ->
+            press.previousStepEffects
+                |> EveOnline.BotFramework.findMouseButtonClickLocationsInListOfEffects
+                    EffectOnWindow.MouseButtonLeft
+                |> List.any
+                    (EveOnline.BotFramework.isPointInRectangle
+                        (EveOnline.BotFramework.growRegionOnAllSides 1 region)
+                    )
+
+
+{-| Where the Selected Item panel's Activate Gate button is on this reading, for
+the next reading to match a click against. See `gridChangedThisReading`.
+-}
+activateGateButtonRegionFromReading : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.DisplayRegion
+activateGateButtonRegionFromReading readingFromGameClient =
+    selectedItemButtonNamed readingFromGameClient "selectedItemActivateGate"
+        |> Maybe.map .totalDisplayRegion
+
+
+{-| On whose authority a gate is being taken, as three named answers over two
+facts -- the shape `accelerationGateActivationStep` uses, so a case can execute
+it and so the press's own wording is derived from it rather than restated.
+
+Which one it is matters more than it looks: `The overview is clear of rats` is
+**false** on a gate taken under either exception, and a log claiming a clear
+grid on readings that had rats on them is worse than no line at all. That is
+#393's own argument, and #411 adds the second way to reach it.
+
+-}
+gateTakingAuthority :
+    { calledByTheCommander : Bool
+    , rejoiningAfterARetreat : Bool
+    , followingTheCommander : Bool
+    }
+    -> GateTakingAuthority
+gateTakingAuthority authorityCase =
+    if authorityCase.calledByTheCommander then
+        TheCommanderCalledThisGate
+
+    else if authorityCase.rejoiningAfterARetreat then
+        TheShipIsRejoiningAfterARetreat
+
+    else if authorityCase.followingTheCommander then
+        TheCommanderLeftThisGrid
+
+    else
+        TheGridIsClearOfRats
+
+
+type GateTakingAuthority
+    = TheCommanderCalledThisGate
+    | TheShipIsRejoiningAfterARetreat
+    | TheCommanderLeftThisGrid
+    | TheGridIsClearOfRats
+
+
+{-| The press's own line, rendered from the rule's answer so a case executes
+what an operator reads rather than asserting a substring over the branch --
+`describeCalledObjectOnOverview`'s arrangement, and the one #109 records a
+status clause passing a case while printing nothing at all.
+-}
+describeGateTakingAuthority : GateTakingAuthority -> String
+describeGateTakingAuthority authority =
+    case authority of
+        TheCommanderCalledThisGate ->
+            "The commander called this acceleration gate -- activate it and take the fleet through, rats on the grid or not."
+
+        TheShipIsRejoiningAfterARetreat ->
+            "Gating back toward the commander after a retreat -- activate it, rats on the grid or not."
+
+        TheCommanderLeftThisGrid ->
+            "The commander is no longer on this grid and this is the only acceleration gate on it -- activate it and follow him through, rats on the grid or not. This cannot tell that from him having died, warped off or cloaked, and does not claim to."
+
+        TheGridIsClearOfRats ->
+            "The overview is clear of rats -- activate the acceleration gate to move to the next pocket."
 
 
 {-| Whether the gate on this reading is the one the retreat recovery is taking
@@ -13132,6 +13751,10 @@ takeTheAccelerationGate context gateToTake =
                 , calledByTheCommander = gateToTake.calledByTheCommander
                 , rejoiningAfterARetreat =
                     rejoinIsTakingThisGate (retreatRecoveryStepNow context)
+                , commanderLeftTheGrid =
+                    followingTheCommanderThroughAGate
+                        context.memory.commanderGridPresence
+                        context.readingFromGameClient
                 }
             )
     then
@@ -13240,20 +13863,17 @@ pressTheAccelerationGate context gateToTake =
                     |> Maybe.map
                         (\button ->
                             describeBranch
-                                (if gateToTake.calledByTheCommander then
-                                    "The commander called this acceleration gate -- activate it and take the fleet through, rats on the grid or not."
-
-                                 else if rejoinIsTakingThisGate (retreatRecoveryStepNow context) then
-                                    -- Named separately because the line below
-                                    -- would be a lie on exactly the readings
-                                    -- #429 is about: a rejoin takes this gate
-                                    -- with rats up, and a press reporting a
-                                    -- clear overview is a status line
-                                    -- disagreeing with the decision it is on.
-                                    "Gating back toward the commander after a retreat -- activate it, rats on the grid or not."
-
-                                 else
-                                    "The overview is clear of rats -- activate the acceleration gate to move to the next pocket."
+                                (describeGateTakingAuthority
+                                    (gateTakingAuthority
+                                        { calledByTheCommander = gateToTake.calledByTheCommander
+                                        , rejoiningAfterARetreat =
+                                            rejoinIsTakingThisGate (retreatRecoveryStepNow context)
+                                        , followingTheCommander =
+                                            followingTheCommanderThroughAGate
+                                                context.memory.commanderGridPresence
+                                                context.readingFromGameClient
+                                        }
+                                    )
                                 )
                                 (clickUiElementForNavigation button)
                         )
@@ -13494,6 +14114,15 @@ swap the two, and `GAVE UP after N readings` is what it looks like when neither
 works -- a spent budget and a named cause, rather than a bot that quietly
 believes it is keeping station.
 
+**The give-up says what the budget bought rather than assuming it**, which is
+#433. It read `the double click and the panel's Approach button both` on every
+give-up, including the runs where the readings had gone to closing a window and
+neither mechanism had had a turn -- and from outside the tree a spent budget
+looks the same whichever it bought, so the ships that never left their landing
+spot took an issue to explain. `approachFleetCommanderCloseWindowReadings` is
+the measurement the claim now rests on, and it exists for this clause and for
+nothing else.
+
 **It also names `orbit-fc-range` when an operator has set it**, because that
 key no longer decides anything: `approachTheFleetCommander` does not drive the
 Orbit flyout it used to name a rung of. A setting that silently does nothing is
@@ -13517,9 +14146,19 @@ describeApproachFleetCommanderAsk context =
         strayWindow =
             windowOpenedOverTheClient context.readingFromGameClient
 
+        strayWindowName : String
+        strayWindowName =
+            strayWindow
+                |> Maybe.map (.uiNode >> .pythonObjectTypeName)
+                |> Maybe.withDefault "?"
+
         askedReadings : Int
         askedReadings =
             context.memory.approachFleetCommanderAskedReadings
+
+        closeWindowReadings : Int
+        closeWindowReadings =
+            context.memory.approachFleetCommanderCloseWindowReadings
 
         spentOf : String
         spentOf =
@@ -13573,6 +14212,8 @@ describeApproachFleetCommanderAsk context =
                     , shipIsWarpingOrJumping = shipIsWarpingOrJumpingFromReading context.readingFromGameClient
                     , shipIsApproaching = shipIsApproachingFromReading context.readingFromGameClient
                     , strayWindowIsOpen = strayWindow /= Nothing
+                    , strayWindowCanBeClosed =
+                        (strayWindow |> Maybe.andThen closeButtonThisBotCanPress) /= Nothing
                     , panelShowsTheCommander = panelIsShowingTheFleetCommander context.readingFromGameClient
                     , panelOffersApproach =
                         selectedItemButtonNamed context.readingFromGameClient selectedItemApproachButtonName /= Nothing
@@ -13604,11 +14245,17 @@ describeApproachFleetCommanderAsk context =
 
                 CloseAWindowLeftOverTheClient ->
                     "a '"
-                        ++ (strayWindow
-                                |> Maybe.map (.uiNode >> .pythonObjectTypeName)
-                                |> Maybe.withDefault "?"
-                           )
+                        ++ strayWindowName
                         ++ "' is over the client while asking -- closing it. Readings spent: "
+                        ++ spentOf
+
+                AWindowThisBotCannotCloseIsOpen ->
+                    "STOOD ASIDE: a '"
+                        ++ strayWindowName
+                        ++ "' is over the client and this bot cannot press its close button -- what"
+                        ++ " the client draws of it is too small or too covered to click. Nothing is"
+                        ++ " dispatched at it and nothing is spent, so the ask still has its whole"
+                        ++ " budget for when the window goes. Readings spent so far: "
                         ++ spentOf
 
                 ApproachByDoubleClick ->
@@ -13640,10 +14287,11 @@ describeApproachFleetCommanderAsk context =
                         ++ spentOf
 
                 GaveUpOnTheApproach ->
-                    "GAVE UP after "
-                        ++ String.fromInt askedReadings
-                        ++ " readings, the double click and the panel's Approach button both, with the client"
-                        ++ " never naming the manoeuvre 'Approach'. Commander at "
+                    describeApproachGiveUp
+                        { askedReadings = askedReadings
+                        , closeWindowReadings = closeWindowReadings
+                        }
+                        ++ " Commander at "
                         ++ commanderDistance
                         ++ "."
                         ++ (case strayWindow of
@@ -13656,6 +14304,44 @@ describeApproachFleetCommanderAsk context =
                                         ++ "' is still open over the client."
                            )
            )
+
+
+{-| The give-up sentence on its own, over the two counters it rests on.
+
+**A rule over a record rather than a branch inside the clause**, because
+`describeApproachFleetCommanderAsk` takes a whole `BotDecisionContext` and a
+sentence reachable only through one is a sentence nothing can execute in a test
+-- #106 records what that costs, and a claim about what the bot tried is
+exactly the kind that has to be run rather than read.
+
+**What it may claim is what the counters measured.** #433: this read
+`the double click and the panel's Approach button both` on every give-up,
+including the runs where the budget had gone to closing a window over the
+client and neither mechanism had had a turn -- and from outside the tree a
+spent budget looks identical whichever it bought, which is why three wingmen
+sitting 32 km off their commander took an issue to explain.
+
+**It says less only where less is true.** A give-up whose budget really did go
+to the ask still names both mechanisms, because dropping the claim outright
+would leave the next operator with the same diagnostic gap in the other
+direction -- and `describeApproachFleetCommanderAsk`'s own note says this line
+is where a first live run reports which of the two mechanisms works.
+
+-}
+describeApproachGiveUp : { askedReadings : Int, closeWindowReadings : Int } -> String
+describeApproachGiveUp giveUp =
+    "GAVE UP after "
+        ++ String.fromInt giveUp.askedReadings
+        ++ " readings"
+        ++ (if giveUp.closeWindowReadings <= 0 then
+                ", the double click and the panel's Approach button both,"
+
+            else
+                ", of which "
+                    ++ String.fromInt giveUp.closeWindowReadings
+                    ++ " went to closing a window over the client rather than to the ask,"
+           )
+        ++ " with the client never naming the manoeuvre 'Approach'."
 
 
 {-| What the warp to a fleet-mate on this grid is doing, in one line.
@@ -13987,6 +14673,10 @@ describeAccelerationGateAsk context =
                             not (List.isEmpty (getNamesOfRatsInOverview context.readingFromGameClient))
                         , calledByTheCommander = gateToTake.calledByTheCommander
                         , rejoiningAfterARetreat = rejoining
+                        , commanderLeftTheGrid =
+                            followingTheCommanderThroughAGate
+                                context.memory.commanderGridPresence
+                                context.readingFromGameClient
                         }
             in
             "Acceleration gate: on the overview"
@@ -14038,6 +14728,78 @@ describeAccelerationGateAsk context =
                                         ++ "."
                                )
                    )
+
+
+{-| What this grid has said about the commander, for the status line. #411.
+
+**Printed on every in-space reading, and the two absences are printed as
+different sentences.** That is the one thing an operator needs first from this
+change: `NEVER SEEN on this grid` and `SEEN AND GONE` are the difference between
+a pilot whose overview preset never draws the commander -- in which case nothing
+here will ever conclude anything, correctly -- and a commander this bot really
+did watch leave. A clause that printed one number for both would leave those two
+runs reading identically, which is the failure the three-state memory exists to
+refuse.
+
+The gate count rides along because it is the fourth guard, and a follow that
+does not happen on a grid with two gates and one with none are two different
+answers an operator would otherwise have to guess between.
+
+-}
+describeCommanderGridPresence : CommanderGridPresence -> Int -> String
+describeCommanderGridPresence presence gatesOnTheGrid =
+    let
+        describeGates : String
+        describeGates =
+            " Acceleration gates on this grid: "
+                ++ String.fromInt gatesOnTheGrid
+                ++ (if gatesOnTheGrid == 1 then
+                        "."
+
+                    else
+                        " -- nobody named one, so with any number but one there is no basis to choose and this follows nothing."
+                   )
+    in
+    "Commander on this grid: "
+        ++ (case presence of
+                CommanderNotSeenOnThisGrid ->
+                    "NEVER SEEN since this grid began, so nothing here concludes he left it."
+                        ++ describeGates
+
+                CommanderOnTheGrid ->
+                    "on the overview now." ++ describeGates
+
+                CommanderGoneFromTheGrid readings ->
+                    (if commanderHasLeftTheGrid presence then
+                        "SEEN AND GONE for "
+                            ++ String.fromInt readings
+                            ++ " readings -- taken as him having left."
+
+                     else
+                        "SEEN AND GONE for "
+                            ++ String.fromInt readings
+                            ++ " of "
+                            ++ String.fromInt commanderGoneReadingsBeforeFollowing
+                            ++ " readings."
+                    )
+                        ++ describeGates
+                        ++ (if followTheCommanderThroughTheGate { presence = presence, accelerationGatesOnTheGrid = gatesOnTheGrid } then
+                                " FOLLOWING HIM THROUGH IT, rats on the grid or not. He may instead have died, warped off or cloaked; nothing here can tell those apart."
+
+                            else
+                                ""
+                           )
+           )
+
+
+{-| The clause above over a context, so the status line reaches the gate count
+through the same derivation the rule does.
+-}
+describeCommanderFollowThroughGate : BotDecisionContext -> String
+describeCommanderFollowThroughGate context =
+    describeCommanderGridPresence
+        context.memory.commanderGridPresence
+        (List.length (accelerationGatesOnOverview context.readingFromGameClient))
 
 
 {-| What the commander's `Target` broadcast named, for the status line.

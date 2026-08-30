@@ -266,13 +266,19 @@ class WingmanRepl(ElmRepl):
 
 def step(setting_is_yes=True, closing=False, commander_on_grid=True,
          warping=False, approaching=False, stray_window=False,
-         panel_shows=False, panel_offers=False, asked=0):
+         stray_window_closable=True, panel_shows=False, panel_offers=False,
+         asked=0):
     """The shipped step rule, asked through the shipped "is it asked" rule.
 
     The two are spelled together here because that is how all three readers
     reach them -- the arm, the memory update and the status clause -- so a case
     that asked `approachFleetCommanderStep` with a bare boolean would be asking
     something no shipped caller asks.
+
+    `stray_window_closable` defaults to `True` so that every case in this file
+    goes on asking what it asked before #433: the hoist is about which arm gets
+    the reading, and a window this bot cannot press is that arm declining --
+    which `test_wingman_unclosable_window` is where it is asked about.
     """
     return ("approachFleetCommanderStep { settingIsYes ="
             " approachFleetCommanderIsAsked { settingIsYes = %s"
@@ -281,11 +287,13 @@ def step(setting_is_yes=True, closing=False, commander_on_grid=True,
             ", shipIsWarpingOrJumping = %s"
             ", shipIsApproaching = %s"
             ", strayWindowIsOpen = %s"
+            ", strayWindowCanBeClosed = %s"
             ", panelShowsTheCommander = %s"
             ", panelOffersApproach = %s"
             ", askedReadings = %s }"
             % (setting_is_yes, closing, commander_on_grid, warping,
-               approaching, stray_window, panel_shows, panel_offers, asked))
+               approaching, stray_window, stray_window_closable, panel_shows,
+               panel_offers, asked))
 
 
 def elm_bool(value):
@@ -612,6 +620,12 @@ class TheHoistIsBoundedTest(unittest.TestCase):
     more. A case that only asserted the window's closing condition would say
     nothing about the case the window never closes in, which is the one that
     matters.
+
+    **#433 narrows what the hoist can cost rather than widening it.** A window
+    this bot cannot press the close button of answers
+    `AWindowThisBotCannotCloseIsOpen`, which hands the reading back, so it
+    joins the list below rather than the one above -- the fight gets those
+    readings where before it got a decision line over an empty effect list.
     """
 
     ADVANCES = ("ApproachByDoubleClick", "SelectTheCommandersRow",
@@ -619,6 +633,7 @@ class TheHoistIsBoundedTest(unittest.TestCase):
                 "CloseAWindowLeftOverTheClient")
     HANDS_BACK = ("ApproachFleetCommanderIsOff", "NoCommanderOnGrid",
                   "ShipIsWarpingOrJumping", "AlreadyApproaching",
+                  "AWindowThisBotCannotCloseIsOpen",
                   "GaveUpOnTheApproach")
 
     @classmethod
@@ -815,21 +830,28 @@ class TheCounterIsAdvancedFromTheSameRuleTest(unittest.TestCase):
             "updateMemoryForNewReadingFromGame context botMemoryBefore =")
 
     def test_the_counter_is_advanced_through_the_same_asked_rule(self):
-        binding = indented_let_binding(
+        """Read across the two bindings #433 split this into: the step is
+        predicted once as `approachStepNow`, because that change gave the
+        memory update a second thing to derive from it, and the counter's own
+        binding asks the shipped list of that one answer. Both halves are named
+        so a step predicted for one counter and a membership test taken against
+        something else cannot pass."""
+        step = indented_let_binding(self.source, "approachStepNow")
+        self.assertIn("approachFleetCommanderStep", step)
+        self.assertIn("approachFleetCommanderIsAsked", step)
+        self.assertIn("closingSinceLanding", step)
+        asking = indented_let_binding(
             self.source, "askingTheCommanderForAnApproach")
-        self.assertIn("approachFleetCommanderStep", binding)
-        self.assertIn("approachFleetCommanderIsAsked", binding)
-        self.assertIn("closingSinceLanding", binding)
         self.assertIn(
-            "approachFleetCommanderAnswersThatSpendAReading", binding)
+            "approachFleetCommanderAnswersThatSpendAReading", asking)
+        self.assertIn("approachStepNow", asking)
 
     def test_the_counter_reads_this_readings_window(self):
         """The decision reads the memory this update writes, so a counter
         reading `botMemoryBefore`'s window is a reading behind it -- and on the
         reading a window opens that is the difference between the ask being
         counted and not."""
-        binding = indented_let_binding(
-            self.source, "askingTheCommanderForAnApproach")
+        binding = indented_let_binding(self.source, "approachStepNow")
         self.assertIn(
             "closingSinceLanding = closingOnTheCommanderSinceLandingNow",
             collapsed(binding))

@@ -250,8 +250,12 @@ misjudged line.
   in 33%, looting in 21%.
 - **`eve-online-saxrat`** (combat anomalies) and
   **`eve-online-warp-to-0-autopilot`** are also proven end to end, from both a
-  local path and a GitHub URL. `eve-online-mining-bot` still compiles but has
-  not been run against this host. `eve-online-wingus` is unexplored.
+  local path and a GitHub URL. `eve-online-mining-bot` and
+  `eve-online-wingman` still compile but have not been run against this host --
+  the wingman has flown on the Windows hosts, which is not the same thing.
+  `eve-online-wingus` was retired with the older BotLab host interface it was
+  the last bot on (see `notes/retire-wingus.md`); every app in the tree is on
+  `BotInterface_To_Host_2024_10_19` and builds with the one wrapper.
 - **Cycle time is set by the bot, not the host.** `warp-to-0` runs ~2.5-2.8s per
   cycle because its own `Bot.elm` sets
   `setMillisecondsToNextReadingFromGameBase 2000`. The mission runner and saxrat

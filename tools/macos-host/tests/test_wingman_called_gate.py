@@ -350,7 +350,7 @@ class WingmanRepl(ElmRepl):
         " updateMemoryForNewReadingFromGame"
         " { timeInMilliseconds = 0, readingFromGameClient = r"
         " , screenshot = { pixels_1x1 = always Nothing, pixels_2x2 = always Nothing }"
-        " , botSettings = defaultBotSettings } m) initBotMemory)"
+        " , botSettings = defaultBotSettings, previousStepsEffects = [] } m) initBotMemory)"
         " |> .calledGateRecallAskedReadings",
     )
 
@@ -592,21 +592,24 @@ class TheCallOverridesTheRatsGuardTest(unittest.TestCase):
         cls.repl.close()
 
     def test_the_rule_answers_the_four_combinations(self):
-        """#429 gave the rule a second exception and this asks it with that one
-        switched off, which is what keeps the case about #393's override.
-
-        The whole grid of three inputs is next door, in
-        `test_wingman_rejoins_without_a_broadcast`; what belongs here is that
-        the call is the only thing that may take a gate with rats up **when
-        nothing is rejoining**, and that it always may.
+        """#411 added a third field, `commanderLeftTheGrid`, and it is held off
+        in all four rows here deliberately: this case is about *the call* being
+        the only thing that overrides #348's guard, so the second exception has
+        to be absent for the answers to be about the first one. Its own
+        combinations are `test_wingman_follows_the_commander_through_a_gate`'s, and #429's
+        `rejoiningAfterARetreat` is held off here for the same reason -- its own
+        combinations are `test_wingman_rejoins_without_a_broadcast`'s.
         """
         self.assertEqual(
             self.repl.evaluate([
-                "gateMayBeTaken { ratsOnTheGrid = %s"
-                ", calledByTheCommander = %s"
-                ", rejoiningAfterARetreat = False }" % (rats, called)
-                for rats, called in [("False", "False"), ("True", "False"),
-                                     ("False", "True"), ("True", "True")]
+                "gateMayBeTaken { ratsOnTheGrid = False"
+                ", calledByTheCommander = False, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
+                "gateMayBeTaken { ratsOnTheGrid = True"
+                ", calledByTheCommander = False, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
+                "gateMayBeTaken { ratsOnTheGrid = False"
+                ", calledByTheCommander = True, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
+                "gateMayBeTaken { ratsOnTheGrid = True"
+                ", calledByTheCommander = True, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
             ]),
             [True, False, True, True],
             "only the call may take a gate with rats up, and it always may")
@@ -1045,15 +1048,18 @@ class TheRecallIsTheOneEveryOtherDepartingArmUsesTest(unittest.TestCase):
         """Three opinions about when #348's guard applies is how the arm, the
         counter and the status line come apart.
 
-        The record grew a third field in #429 and the property did not: what is
-        asserted is the two inputs this issue owns and the one declaration, so a
-        later exception has to be added to the same rule rather than beside it.
+        The record carries a third field since #411 -- `commanderLeftTheGrid`,
+        the commander having gone through the gate without saying so, which
+        overrides the same guard #393's call does. The signature is pinned
+        rather than merely present so that a fifth exception arriving is
+        somebody's decision here rather than something a diff slips past.
         """
-        # Anchored on the annotation line rather than on the bare name, which
-        # occurs first in a doc comment several declarations earlier.
-        signature = collapsed(declaration(self.source, "\ngateMayBeTaken :"))
-        self.assertIn("ratsOnTheGrid : Bool", signature)
-        self.assertIn("calledByTheCommander : Bool", signature)
+        self.assertIn(
+            "gateMayBeTaken : { ratsOnTheGrid : Bool"
+            " , calledByTheCommander : Bool"
+            " , commanderLeftTheGrid : Bool"
+            " , rejoiningAfterARetreat : Bool } -> Bool",
+            collapsed(self.source))
         self.assertEqual(
             len(re.findall(r"^gateMayBeTaken\b", self.source, re.M)), 2,
             "one annotation and one definition")

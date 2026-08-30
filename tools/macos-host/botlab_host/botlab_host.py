@@ -137,10 +137,21 @@ def bot_requested_destination(status_text):
 
 MAIN_ELM_TEMPLATE = os.path.join(HERE, "Main.elm")
 # A bot's own source fixes which host interface it imports, and the wrappers are
-# not interchangeable -- see Main_2023_02_06.elm's header.
+# not interchangeable: a wrapper for one interface does not compile against a
+# bot typed against the other, and the interfaces differ in more than the type
+# names -- 2023_02_06 had no `WindowsInputRequest` task at all, so input
+# travelled inside the volatile-process request as an `EffectSequenceOnWindow`
+# the host had to translate, and `SearchUIRootAddress` wanted a flat
+# synchronous answer rather than the staged one below.
+#
+# There is one wrapper now, and the map is kept as a map rather than collapsed
+# into a constant precisely so that stays true by construction: a bot importing
+# an interface with no wrapper is refused by name in `prepare_build_dir` instead
+# of being compiled against the wrong one. `eve-online-wingus` was the last bot
+# on 2023_02_06 and was retired with its wrapper -- see
+# `notes/retire-wingus.md`.
 MAIN_ELM_TEMPLATE_BY_INTERFACE = {
     "BotLab.BotInterface_To_Host_2024_10_19": MAIN_ELM_TEMPLATE,
-    "BotLab.BotInterface_To_Host_2023_02_06": os.path.join(HERE, "Main_2023_02_06.elm"),
 }
 DRIVER_JS = os.path.join(HERE, "driver.js")
 MEMORY_SAMPLE_BIN = os.path.join(MACOS_HOST_DIR, "memory_sample", "memory_sample")
@@ -437,61 +448,6 @@ def vk_to_mouse_button(vk):
     return 0
 
 
-MOUSE_BUTTON_VK_CODES = (0x01, 0x02, 0x04)
-
-
-def _effect_sequence_of_request(request_str):
-    """The EffectSequenceOnWindow body of a volatile-process request, or None.
-
-    Only bots on the 2023_02_06 host interface send these; on 2024_10_19 the
-    same input arrives as a WindowsInputRequest task instead.
-    """
-    try:
-        req = json.loads(request_str)
-    except (ValueError, TypeError):
-        return None
-    if isinstance(req, dict):
-        return req.get("EffectSequenceOnWindow")
-    return None
-
-
-def _effect_sequence_as_input_items(sequence):
-    """EffectSequenceOnWindow -> the item list _windows_input executes.
-
-    Translating rather than executing directly is what keeps the two host
-    interfaces on one input path: everything _windows_input has learned about
-    this client -- eased movement, the double-click collapse, not pausing
-    mid-drag, standing down for a human at the keyboard -- applies unchanged.
-
-    The 2023 vocabulary is narrower: mouse buttons are KeyDown/KeyUp carrying a
-    mouse virtual-key code rather than their own ButtonDown/ButtonUp, and there
-    is no scroll, no relative move and no raw character input.
-    """
-    items = []
-    window_id = sequence.get("windowId")
-    if sequence.get("bringWindowToForeground") and window_id is not None:
-        items.append({"BringWindowToForeground": str(window_id)})
-
-    for element in sequence.get("task") or []:
-        if "delayMilliseconds" in element:
-            items.append({"WaitMilliseconds": element["delayMilliseconds"]})
-            continue
-        effect = element.get("effect")
-        if not effect:
-            continue
-        (tag, payload), = effect.items()
-        if tag == "MouseMoveTo":
-            location = payload["location"]
-            items.append({"MouseMoveAbsolute": [location["x"], location["y"]]})
-        elif tag in ("KeyDown", "KeyUp"):
-            code = payload["virtualKeyCode"]
-            if code in MOUSE_BUTTON_VK_CODES:
-                items.append({"ButtonDown" if tag == "KeyDown" else "ButtonUp": code})
-            else:
-                items.append({tag: [code, False]})
-    return items
-
-
 # ---------------------------------------------------------------------------
 # Bot source acquisition
 # ---------------------------------------------------------------------------
@@ -661,8 +617,13 @@ def host_interface_of_bot(bot_dir):
     """Which BotLab.BotInterface_To_Host_* module the bot's own Bot.elm imports.
 
     Read from Bot.elm rather than from which interface modules the app happens
-    to vendor: the mining bot ships both 2023_01_17 and 2023_02_06, and only the
-    import says which one its botMain is actually typed against.
+    to vendor. An app's vendored tree can carry an interface module its
+    `botMain` is not typed against -- `eve-online-mining-bot` shipped both
+    2023_01_17 and 2023_02_06 while importing neither -- and only the import
+    says which one the bot is actually written for. Every EVE app is on
+    2024_10_19 today, so nothing in the tree currently disagrees with its own
+    import; the rule stays because it costs one regex and its failure mode is
+    compiling a bot against the wrong wrapper.
     """
     bot_elm = os.path.join(bot_dir, "Bot.elm")
     # Encoding stated rather than defaulted. Python's default is the locale's,
@@ -1378,20 +1339,7 @@ def synthetic_kills_node(kills):
 
 
 class VolatileHost:
-    def __init__(self, game_log=None, legacy_search_ui_root=False):
-        # The 2023_02_06 host interface's VolatileProcessInterface.elm has no
-        # notion of an in-progress search at all -- it decodes only a flat
-        # `SearchUIRootAddressResult { processId, uiRootAddress }`, matching
-        # BotLab.exe's original synchronous C# volatile process. Answering it
-        # with the 2024 interface's staged `SearchUIRootAddressResponse` (used
-        # below) is a response its own decoder's closed `oneOf` never matches,
-        # so the request silently fails to decode and the bot's setup state
-        # never learns the search happened -- it re-asks forever. Confirmed
-        # live: the mining bot's `Bot.elm` looped on "Search the address of
-        # the UI root" for the whole session, even after the host had found
-        # and cached the root within the first second, because the answer
-        # never reached the Elm decoder in a shape it recognised.
-        self.legacy_search_ui_root = legacy_search_ui_root
+    def __init__(self, game_log=None):
         self.roots = {}          # processId -> ui root address (int)
         self.root_search = {}    # processId -> {"begin": ms, "thread": Thread, "result": addr|None|"pending"}
         self.metatype = {}       # processId -> metatype addr
@@ -1439,12 +1387,6 @@ class VolatileHost:
 
         if "SearchUIRootAddress" in req:
             process_id = req["SearchUIRootAddress"]["processId"]
-            if self.legacy_search_ui_root:
-                addr = self._search_ui_root_blocking(process_id)
-                return json.dumps({"SearchUIRootAddressResult": {
-                    "processId": process_id,
-                    "uiRootAddress": hex(addr) if addr is not None else None,
-                }})
             return json.dumps({"SearchUIRootAddressResponse": self._search_ui_root(process_id)})
 
         if "ReadFromWindow" in req:
@@ -1456,12 +1398,19 @@ class VolatileHost:
             return json.dumps({"SetAutopilotDestinationResult":
                                self._set_autopilot_destination(body)})
 
-        # Nothing else is implemented. This used to answer everything with
-        # CompletedEffectSequenceOnWindow, which reported success for requests
-        # that never ran -- including, before the 2023_02_06 interface was
-        # wired up, every input effect a bot on it sent. Input is now
-        # intercepted before it reaches this method (see run_task), so anything
-        # arriving here is genuinely unhandled and says so.
+        # Nothing else is implemented, and the print is the whole point: this
+        # answered *everything* with a bare CompletedEffectSequenceOnWindow
+        # once, which reported success for requests that never ran -- silently,
+        # which is this repo's signature failure. It says so now.
+        #
+        # The reply itself is vestigial and is deliberately left as it is. It
+        # was the shape a 2023_02_06 bot's input request expected, back when
+        # input arrived here rather than as its own task; that interface and
+        # its last bot are gone, but `EveOnline.VolatileProcessInterface` still
+        # decodes this constructor in every vendored copy, so it remains a
+        # response a live bot understands. Changing it is a behaviour change on
+        # the path every current bot runs, with no evidence asking for it --
+        # see `notes/retire-wingus.md`.
         print(f"# unhandled volatile-process request: {sorted(req)}", file=sys.stderr)
         return json.dumps({"CompletedEffectSequenceOnWindow": True})
 
@@ -1541,10 +1490,10 @@ class VolatileHost:
         the root object's address), find it, then all later ReadFromWindow
         calls use the fast LiveSample path -- no more dumps needed.
 
-        Blocks the calling thread until it has an answer (or gives up); the
-        caller decides whether that thread is a background worker (the 2024
-        interface's polling protocol) or the request-handling thread itself
-        (the 2023 interface's synchronous one -- see `_search_ui_root_blocking`)."""
+        Blocks the calling thread until it has an answer (or gives up), which
+        is why the only caller is `_search_ui_root_worker` on a background
+        thread: the request-handling thread answers `SearchUIRootAddress` with
+        the search's current stage and returns immediately."""
         cached = self._cached_ui_root(process_id)
         if cached is not None:
             self.metatype[process_id] = cached["metatype"]
@@ -1586,18 +1535,6 @@ class VolatileHost:
 
     def _search_ui_root_worker(self, process_id, state):
         state["result"] = self._find_ui_root(process_id)
-
-    def _search_ui_root_blocking(self, process_id):
-        """The 2023 interface's synchronous answer: block until the root is
-        known (or the search has failed) rather than polling. Reuses
-        `self.roots` so a second request for an already-found process is free,
-        matching the async path's own cache."""
-        if process_id in self.roots:
-            return self.roots[process_id]
-        addr = self._find_ui_root(process_id)
-        if addr is not None:
-            self.roots[process_id] = addr
-        return addr
 
     @staticmethod
     def _any_seed_addr(sample):
@@ -2208,9 +2145,8 @@ class ConnectionLostWatch:
 
 
 class TaskDispatcher:
-    def __init__(self, execute_input=False, capture_screenshots=False, game_log=None,
-                 legacy_search_ui_root=False):
-        self.volatile = VolatileHost(game_log=game_log, legacy_search_ui_root=legacy_search_ui_root)
+    def __init__(self, execute_input=False, capture_screenshots=False, game_log=None):
+        self.volatile = VolatileHost(game_log=game_log)
         self._process_ids = {}
         self.execute_input = execute_input
         self.capture_screenshots = capture_screenshots
@@ -2269,17 +2205,7 @@ class TaskDispatcher:
             request_struct = self._unwrap_request_considering_focus(payload)
             request_str = request_struct["request"]
             try:
-                # Bots on the 2023_02_06 host interface have no
-                # WindowsInputRequest task -- their input arrives here instead,
-                # inside the volatile-process request. Intercept it rather than
-                # letting it reach VolatileProcess.handle_request, which has no
-                # way to reach the input executor.
-                effect_sequence = _effect_sequence_of_request(request_str)
-                if effect_sequence is not None:
-                    self._windows_input(_effect_sequence_as_input_items(effect_sequence))
-                    response_json = json.dumps({"CompletedEffectSequenceOnWindow": True})
-                else:
-                    response_json = self.volatile.handle_request(request_str)
+                response_json = self.volatile.handle_request(request_str)
                 return {
                     "RequestToVolatileProcessResponse": {
                         "Ok": {
@@ -3036,8 +2962,7 @@ def tick_bound_note(tick, elapsed_seconds, decisions, abandoned_tasks):
 
 
 def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_screenshots=False,
-            session_duration_minutes=None, game_log_dir=None, console=None,
-            legacy_search_ui_root=False):
+            session_duration_minutes=None, game_log_dir=None, console=None):
     proc = subprocess.Popen(
         ["node", DRIVER_JS, bot_js_path],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
@@ -3052,7 +2977,7 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
     )
     game_log = GameLogTail(game_log_dir) if game_log_dir else None
     dispatcher = TaskDispatcher(execute_input=execute_input, capture_screenshots=capture_screenshots,
-                                game_log=game_log, legacy_search_ui_root=legacy_search_ui_root)
+                                game_log=game_log)
 
     def send_event(event_at_time):
         event = {"timeInMilliseconds": int(time.time() * 1000), "eventAtTime": event_at_time}
@@ -4069,7 +3994,6 @@ def main():
         # afterwards, long after any console has been closed.
         print(f"# bot version: {bot_version}", file=sys.stderr)
         build_dir = prepare_build_dir(bot_dir, workdir)
-        legacy_search_ui_root = host_interface_of_bot(build_dir) == "BotLab.BotInterface_To_Host_2023_02_06"
         bot_js = compile_bot(build_dir)
         print(f"# compiled: {bot_js}", file=sys.stderr)
         console = None
@@ -4103,7 +4027,7 @@ def main():
                 capture_screenshots=args.capture_screenshots,
                 session_duration_minutes=args.session_duration_minutes,
             game_log_dir=None if args.no_game_log else args.game_log_dir,
-            console=console, legacy_search_ui_root=legacy_search_ui_root)
+            console=console)
     finally:
         if args.keep_build_dir:
             print(f"# left build dir at {workdir}", file=sys.stderr)

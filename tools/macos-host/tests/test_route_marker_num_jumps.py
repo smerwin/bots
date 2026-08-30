@@ -13,8 +13,9 @@ had exactly one jump left.
 
 `numJumps` was already on the marker in the client's own tree;
 `ParseUserInterface` just never read it. `InfoPanelRouteRouteElementMarker`
-now carries `numJumps : Maybe Int`, identically across all six vendored copies
--- `TheSixCopiesTest` pins that -- and `destinationIsInThisSystemFromRouteMarkers`
+now carries `numJumps : Maybe Int`, identically across every vendored copy
+that carries #171 -- `TheVendoredCopiesTest` pins that -- and
+`destinationIsInThisSystemFromRouteMarkers`
 asks the marker's own count rather than how many icons are drawn: exactly one
 marker, and that marker's `numJumps` reading `Just 0`.
 
@@ -54,9 +55,6 @@ APP_DIRS = {
     "eve-online-warp-to-0-autopilot": os.path.join(
         REPO_DIR, "implement", "applications", "eve-online",
         "eve-online-warp-to-0-autopilot"),
-    "eve-online-wingus": os.path.join(
-        REPO_DIR, "implement", "applications", "eve-online",
-        "eve-online-wingus"),
     "eve-online-combat-anomaly-bot": os.path.join(
         REPO_DIR, "implement", "applications", "eve-online",
         "eve-online-combat-anomaly-bot"),
@@ -398,8 +396,8 @@ class TheOtherConsumersAreUnaffectedTest(unittest.TestCase):
 #: (see CLAUDE.md), which predates #171 entirely: its
 #: `InfoPanelRouteRouteElementMarker` carries only `uiNode` and its
 #: `parseInfoPanelRouteFromInfoPanelContainer` reads no `numJumps` at all, so
-#: it cannot be compared byte for byte against the five copies that do carry
-#: this field. It is excluded from `TheSixCopiesTest` rather than assigned a
+#: it cannot be compared byte for byte against the copies that do carry
+#: this field. It is excluded from `TheVendoredCopiesTest` rather than assigned a
 #: shape; porting #171 into the newer base is tracked as follow-up work, not
 #: done here.
 WITHOUT_NUM_JUMPS = {"eve-online-mining-bot"}
@@ -409,16 +407,21 @@ APP_DIRS_WITH_NUM_JUMPS = {
 }
 
 
-class TheSixCopiesTest(unittest.TestCase):
+class TheVendoredCopiesTest(unittest.TestCase):
     """The parser policy: vendored identically across the apps that carry it.
 
     `InfoPanelRouteRouteElementMarker` and the parse function that builds it
-    are compared byte for byte across the five copies that carry #171 (see
+    are compared byte for byte across every copy that carries #171 (see
     `WITHOUT_NUM_JUMPS` for the one that does not), the way
     `test_game_log_channel.py` compares its own vendored block.
+
+    Named for the property rather than for a count: the population lost
+    `eve-online-wingus` when the 2023 host interface was retired (see
+    `notes/retire-wingus.md`), and a class called `TheSixCopiesTest` would have
+    gone on asserting the right thing under a name that had stopped being true.
     """
 
-    def test_the_type_alias_is_identical_across_all_six_copies(self):
+    def test_the_type_alias_is_identical_across_every_copy(self):
         blocks = {app: marker_type_alias_block(source_of(parser_file(app)))
                   for app in APP_DIRS_WITH_NUM_JUMPS}
         first_app, first_block = next(iter(blocks.items()))
@@ -429,7 +432,7 @@ class TheSixCopiesTest(unittest.TestCase):
                 % (app, first_app))
         self.assertIn("numJumps : Maybe Int", first_block)
 
-    def test_the_parse_function_is_identical_across_all_six_copies(self):
+    def test_the_parse_function_is_identical_across_every_copy(self):
         blocks = {app: parse_function_block(source_of(parser_file(app)))
                   for app in APP_DIRS_WITH_NUM_JUMPS}
         first_app, first_block = next(iter(blocks.items()))
