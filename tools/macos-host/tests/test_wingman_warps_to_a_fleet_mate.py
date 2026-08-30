@@ -482,11 +482,16 @@ class TheCounterTest(unittest.TestCase):
         """#428, and the half only this file can see: the counter's own arms
         read a budget the shared refill rule produced from
         `botMemoryBefore.goToFleetMateWarpAskedReadings`, so a rename that left
-        the arms reading something else would pass the case above."""
+        the arms reading something else would pass the case above.
+
+        **`weJustFinishedTraveling`, not `weJustFinishedWarping`, since a gate
+        jump refills this budget too** -- `wingman_run22.log`'s own shape,
+        three of #428's four pilots read this give-up beside the approach's.
+        See `test_wingman_jump_refills_the_budget.py`."""
         start = self.update.index("fleetMateWarpAskedReadingsCarriedIn =\n")
         binding = self.update[start:self.update.index("\n\n", start)]
         self.assertIn("askedReadingsRefilledByLanding", binding)
-        self.assertIn("justLanded = weJustFinishedWarping", binding)
+        self.assertIn("justLanded = weJustFinishedTraveling", binding)
         self.assertIn("spentBefore = botMemoryBefore"
                       ".goToFleetMateWarpAskedReadings", binding)
 

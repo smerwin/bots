@@ -565,16 +565,25 @@ class TheCountersReadTheSharedRuleTest(unittest.TestCase):
         condition it replaced -- `shipIsWarping == Just False` -- could not
         answer `True` at the end of a warp at all. A refill keyed on that would
         be a fix that never fires while every rule case here went on passing.
+
+        **Superseded by #429's `weJustFinishedTraveling`.** A gate jump re-arms
+        `closingOnTheCommanderSinceLanding` exactly as a warp does (see
+        `test_wingman_jump_refills_the_budget.py`), so the two budgets this
+        window bounds have to be refilled by the same wider trigger or a jump
+        landing reopens the window onto a still-exhausted count -- the shape
+        this very test caught #428's own warp-only version failing. The
+        underlying claim is unchanged: neither binding may read the dead
+        `Just False` condition #194 replaced.
         """
         for binding in ("approachAskedReadingsCarriedIn",
                         "fleetMateWarpAskedReadingsCarriedIn"):
             with self.subTest(binding=binding):
                 body = collapsed(indented_let_binding(self.source, binding))
                 self.assertIn("askedReadingsRefilledByLanding", body)
-                self.assertIn("justLanded = weJustFinishedWarping", body)
+                self.assertIn("justLanded = weJustFinishedTraveling", body)
         trigger = collapsed(
-            indented_let_binding(self.source, "weJustFinishedWarping"))
-        self.assertIn("warpJustEnded", trigger)
+            indented_let_binding(self.source, "weJustFinishedTraveling"))
+        self.assertIn("travelJustEnded", trigger)
         self.assertNotIn("Just False", trigger)
 
     def test_the_approach_counter_reads_the_refilled_budget(self):

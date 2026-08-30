@@ -839,11 +839,18 @@ class TheCounterIsAdvancedFromTheSameRuleTest(unittest.TestCase):
     def test_the_window_is_settled_in_the_memory_update(self):
         """`warpJustEnded` is a transition between two readings, and the memory
         update is the only thing that runs on every reading unconditionally --
-        #102's and #126's placement rule."""
+        #102's and #126's placement rule.
+
+        **Superseded by the wider `weJustFinishedTraveling`.** A gate jump
+        re-arms this window exactly as a warp does --
+        `wingman_run22.log` recorded `shipIsApproaching` stuck on a stale
+        reading for 600+ lines after a chained gate jump, because
+        `weJustFinishedWarping` never fires at the end of one. See
+        `test_wingman_jump_refills_the_budget.py`."""
         binding = indented_let_binding(
             self.source, "closingOnTheCommanderSinceLandingNow")
         self.assertIn("landingCloseAfterReading", binding)
-        self.assertIn("justLanded = weJustFinishedWarping", collapsed(binding))
+        self.assertIn("justLanded = weJustFinishedTraveling", collapsed(binding))
         self.assertIn(
             "closeWasOwed = botMemoryBefore.closingOnTheCommanderSinceLanding",
             collapsed(binding))
