@@ -776,6 +776,17 @@ type alias BotMemory =
     -- allowance back.
     , middleRowAskedReadings : Int
 
+    -- Readings in a row spent clicking a module `deactivate-module-on-warp`
+    -- names that the client never shows the change on -- see
+    -- `deactivateForWarpAskedReadingsBound`, and #410 for why an arm on the
+    -- retreat path needs a bound more than any other arm here. Advances only
+    -- on the answer that clicks (`deactivateForWarpAnswersThatSpendAReading`),
+    -- holds once the budget is spent, and resets only on the reading no named
+    -- module is running any more -- which is *not*
+    -- `middleRowAskedReadings`' rule, deliberately; see
+    -- `deactivateForWarpAskedReadingsBound`.
+    , deactivateForWarpAskedReadings : Int
+
     -- Whether the client's own game log has said a middle-row click is being
     -- refused for cloaking, since the last time this ship moved. See
     -- `cloakingPreventsModuleActivation`.
@@ -3247,58 +3258,307 @@ enterAnomaly { ifNoAcceptableAnomalyAvailable } context shipUI =
                         )
 
 
+{-| Switch off whatever `deactivate-module-on-warp` names, so a warp is not
+slowed by a module the operator wants down for it.
+
+**`isActive` is the duty cycle, and reading it here was #410.** This arm used to
+click every module whose `isActive` read `Just True`, and #408 established one
+level up what that entry actually is: the propulsion module goes on reading
+`ramp_active` for the whole ten seconds it takes to run its cycle out after
+being told to stop, while `clickModuleButtonButWaitIfClickedInPreviousStep`
+waits two steps -- roughly four seconds. So the click landed, the debounce
+expired inside the cycle, the module still read on, and **the next click
+switched it back on**. The button is a toggle, so an arm that cannot tell "still
+cycling" from "still on" re-arms exactly what it just switched off, for as long
+as the reading holds.
+
+**`isDeactivating` is the entry that answers "did my click take"**, and
+`deactivateForWarpStep` reads it with three answers rather than two -- `Nothing`
+buys no click either, for `ParseUserInterface`'s own reason. See that rule.
+
+**It is on the retreat path, which is what made #410 worth a bound as well as a
+read.** `warpAwayFromDanger` takes this arm's answer _before_ the warp, so an
+arm that answers `Just` forever is a damaged ship that never leaves -- worse
+than #408's loop, which merely stopped four ships following their commander.
+Past `deactivateForWarpAskedReadingsBound` this answers `Nothing`, the caller's
+own step runs, and the ship warps with the module still lit;
+`describeDeactivateForWarp` keeps the give-up visible in the status line.
+
+**Takes no `ShipUI`, and every fact comes off one lookup.**
+`moduleToDeactivateForWarp` is what the rule's `moduleToDeactivatePresent` asks
+and what this arm clicks, so the arm cannot decide to click a module and then
+find none to click -- `propulsionModuleFromReading`'s arrangement, for its
+reason.
+
+-}
 deactivateModulesForWarp : BotDecisionContext -> Maybe DecisionPathNode
 deactivateModulesForWarp context =
-    let
-        modulesToDeactivate : List ( String, EveOnline.ParseUserInterface.ShipUIModuleButton )
-        modulesToDeactivate =
-            case context.readingFromGameClient.shipUI of
-                Nothing ->
-                    []
-
-                Just shipUI ->
-                    shipUI.moduleButtons
-                        |> List.filterMap
-                            (\moduleButton ->
-                                case moduleButton.isActive of
-                                    Nothing ->
-                                        Nothing
-
-                                    Just False ->
-                                        Nothing
-
-                                    Just True ->
-                                        moduleButton
-                                            |> EveOnline.BotFramework.getModuleButtonTooltipFromModuleButton
-                                                context.memory.shipModules
-                                            |> Maybe.andThen
-                                                (\tooltipMemory ->
-                                                    let
-                                                        tooltipText =
-                                                            tooltipMemory.allContainedDisplayTextsWithRegion
-                                                                |> List.map Tuple.first
-                                                                |> String.join " "
-                                                    in
-                                                    if
-                                                        context.eventContext.botSettings.deactivateModuleOnWarp
-                                                            |> List.any (\moduleName -> tooltipText |> stringContainsIgnoringCase moduleName)
-                                                    then
-                                                        Just ( tooltipText, moduleButton )
-
-                                                    else
-                                                        Nothing
-                                                )
-                            )
-    in
-    case modulesToDeactivate of
-        [] ->
+    case deactivateForWarpStepFromContext context of
+        NoModuleToDeactivateForWarp ->
             Nothing
 
-        ( moduleName, moduleToDeactivate ) :: _ ->
-            Just
-                (describeBranch ("Click module to deactivate '" ++ moduleName ++ "' to speed up warp.")
-                    (clickModuleButtonButWaitIfClickedInPreviousStep context moduleToDeactivate)
-                )
+        NamedModuleIsAlreadyDeactivating ->
+            Nothing
+
+        NamedModuleSaysNothingAboutDeactivating ->
+            Nothing
+
+        GaveUpOnDeactivatingForWarp ->
+            Nothing
+
+        DeactivateAModuleForWarp ->
+            moduleToDeactivateForWarp
+                context.memory.shipModules
+                context.eventContext.botSettings.deactivateModuleOnWarp
+                context.readingFromGameClient
+                |> Maybe.map
+                    (\( moduleName, moduleToDeactivate ) ->
+                        describeBranch ("Click module to deactivate '" ++ moduleName ++ "' to speed up warp.")
+                            (clickModuleButtonButWaitIfClickedInPreviousStep context moduleToDeactivate)
+                    )
+
+
+{-| What `deactivate-module-on-warp` asks for on one reading. See
+`deactivateForWarpStep`.
+-}
+type DeactivateForWarpStep
+    = DeactivateAModuleForWarp
+    | NamedModuleIsAlreadyDeactivating
+    | NamedModuleSaysNothingAboutDeactivating
+    | GaveUpOnDeactivatingForWarp
+    | NoModuleToDeactivateForWarp
+
+
+{-| The warp-deactivation rule, as one expression over three plain facts and a
+counter.
+
+The facts are all about the modules the `deactivate-module-on-warp` setting
+names **that are still reading active** -- a module already off is nothing this
+arm has to do. Of those, the question asked of each is what the client says
+about whether it is in the act of shutting down.
+
+**`Nothing` is not `False`, and that asymmetry is the whole of #410.**
+`ParseUserInterface`'s own doc block is explicit that an entry which did not
+decode is absent rather than false, that absent and `False` are different facts,
+and that only one of them is safe to act on -- the neighbouring `ramp_active` is
+a duty cycle rather than an on/off state, and #34 is what reading it as a state
+cost. Collapsing `Nothing` to "not deactivating" would licence exactly the click
+this rule exists to withhold, so it gets its own answer: the client said
+nothing, so nothing is clicked. The cost is stated rather than hidden -- on a
+build that does not carry the entry no named module is ever switched off for a
+warp, which loses the module and keeps the ship, and is the direction #410 asks
+for.
+
+**The three answers are ordered clickable-first**, so one module that is already
+deactivating never holds up a second one the setting also names and that is
+still settled. Where nothing is clickable the arm reports _why_ rather than
+falling back on "nothing to do", because a console showing
+`says nothing about deactivating` for a whole session is a build that does not
+carry the entry, and that is worth being able to see.
+
+**The bound is applied to the click and to nothing else.** Only
+`DeactivateAModuleForWarp` can become `GaveUpOnDeactivatingForWarp`; the answers
+that decline to click are reported as themselves, so a give-up in the status
+line always means "this bot clicked a module button
+`deactivateForWarpAskedReadingsBound` times and the client never showed the
+change".
+
+-}
+deactivateForWarpStep :
+    { moduleToDeactivatePresent : Bool
+    , namedModuleIsAlreadyDeactivating : Bool
+    , namedModuleSaysNothingAboutDeactivating : Bool
+    , askedReadings : Int
+    }
+    -> DeactivateForWarpStep
+deactivateForWarpStep step =
+    if step.moduleToDeactivatePresent then
+        if deactivateForWarpAskedReadingsBound <= step.askedReadings then
+            GaveUpOnDeactivatingForWarp
+
+        else
+            DeactivateAModuleForWarp
+
+    else if step.namedModuleIsAlreadyDeactivating then
+        NamedModuleIsAlreadyDeactivating
+
+    else if step.namedModuleSaysNothingAboutDeactivating then
+        NamedModuleSaysNothingAboutDeactivating
+
+    else
+        NoModuleToDeactivateForWarp
+
+
+{-| How many readings in a row this bot will go on clicking a module named by
+`deactivate-module-on-warp` that the client never shows the change on, before it
+stops asking and hands the reading back.
+
+**Twenty, written as `weaponsAskedReadingsBound` rather than as a number**, the
+same allowance every other per-reading ask in this file gets and for the same
+reason: a click that is going to land does so in a handful of readings, and
+twenty is several attempts' worth while being nowhere near a session.
+
+**What the bound costs is measured against the retreat, because that is where
+this arm runs.** `warpAwayFromDanger` takes this arm's answer before commanding
+the warp, so every reading spent here is a reading a damaged ship is not
+leaving on. The `isDeactivating` read above is what keeps the ordinary case to
+one click and a decline -- the client answers `Just True` on the reading after
+a click that landed, and this arm hands the reading back at once -- so the
+budget is only ever spent where the click is _not_ landing, which is the state
+it exists to end. It is deliberately not tuned lower than the file's other
+asks: nothing has measured this arm at all (`deactivate-module-on-warp` ships as
+`[]` and no pilot profile sets it), and a number invented for the retreat would
+be a threshold with no evidence behind it.
+
+Past the bound the arm answers `Nothing` rather than parking on
+`askForHelpToGetUnstuck`, for the reason `accelerationGateStep` and
+`middleRowAskedReadingsBound` both give at their own give-ups: handing the
+reading back is what lets the caller's own step -- here, the warp -- still run.
+A ship that warps with an afterburner lit is worth incomparably more than one
+that never warps at all.
+
+-}
+deactivateForWarpAskedReadingsBound : Int
+deactivateForWarpAskedReadingsBound =
+    weaponsAskedReadingsBound
+
+
+{-| The answer on which this arm actually clicks something, and therefore the
+answer `deactivateForWarpAskedReadings` advances on.
+
+`middleRowAnswersThatSpendAReading`'s arrangement, for #389's reason: a counter
+advanced by conditions written beside the arm rather than by the arm's own rule
+charges the budget for readings nobody spent, and then reports a give-up on an
+arm that was never asked. Everything not listed here either declines to click
+(`NamedModuleIsAlreadyDeactivating`,
+`NamedModuleSaysNothingAboutDeactivating`), has already given up, or has nothing
+to do.
+
+-}
+deactivateForWarpAnswersThatSpendAReading : List DeactivateForWarpStep
+deactivateForWarpAnswersThatSpendAReading =
+    [ DeactivateAModuleForWarp ]
+
+
+{-| The rule above, asked of a reading, so that the memory update, the arm and
+the status line are all reading one decision -- `middleRowStepFromReading`'s
+arrangement, for #102's reason.
+
+A reading with no ship UI, or a setting naming nothing, answers
+`NoModuleToDeactivateForWarp`, which is also the answer that resets the counter.
+
+-}
+deactivateForWarpStepFromReading :
+    EveOnline.BotFramework.ShipModulesMemory
+    -> List String
+    -> Int
+    -> ReadingFromGameClient
+    -> DeactivateForWarpStep
+deactivateForWarpStepFromReading shipModules namedModules askedReadings readingFromGameClient =
+    let
+        deactivatingOf : ( String, EveOnline.ParseUserInterface.ShipUIModuleButton ) -> Maybe Bool
+        deactivatingOf ( _, moduleButton ) =
+            moduleButton.stateFromDictEntries.isDeactivating
+
+        running : List ( String, EveOnline.ParseUserInterface.ShipUIModuleButton )
+        running =
+            runningModulesNamedForWarp shipModules namedModules readingFromGameClient
+    in
+    deactivateForWarpStep
+        { moduleToDeactivatePresent =
+            moduleToDeactivateForWarp shipModules namedModules readingFromGameClient /= Nothing
+        , namedModuleIsAlreadyDeactivating =
+            running |> List.any (deactivatingOf >> (==) (Just True))
+        , namedModuleSaysNothingAboutDeactivating =
+            running |> List.any (deactivatingOf >> (==) Nothing)
+        , askedReadings = askedReadings
+        }
+
+
+deactivateForWarpStepFromContext : BotDecisionContext -> DeactivateForWarpStep
+deactivateForWarpStepFromContext context =
+    deactivateForWarpStepFromReading
+        context.memory.shipModules
+        context.eventContext.botSettings.deactivateModuleOnWarp
+        context.memory.deactivateForWarpAskedReadings
+        context.readingFromGameClient
+
+
+{-| Every module the `deactivate-module-on-warp` setting names that is still
+reading active, with the tooltip text it was matched on.
+
+`isActive` is the right question **here** and the wrong one for "did my click
+take": this filter is only asking which modules are candidates at all, and a
+module the client reports as running is one worth considering whether that
+reading is the duty cycle or the toggle. What the click itself is gated on is
+`isDeactivating`, one level up.
+
+-}
+runningModulesNamedForWarp :
+    EveOnline.BotFramework.ShipModulesMemory
+    -> List String
+    -> ReadingFromGameClient
+    -> List ( String, EveOnline.ParseUserInterface.ShipUIModuleButton )
+runningModulesNamedForWarp shipModules namedModules readingFromGameClient =
+    case readingFromGameClient.shipUI of
+        Nothing ->
+            []
+
+        Just shipUI ->
+            shipUI.moduleButtons
+                |> List.filterMap
+                    (\moduleButton ->
+                        case moduleButton.isActive of
+                            Nothing ->
+                                Nothing
+
+                            Just False ->
+                                Nothing
+
+                            Just True ->
+                                moduleButton
+                                    |> EveOnline.BotFramework.getModuleButtonTooltipFromModuleButton shipModules
+                                    |> Maybe.andThen
+                                        (\tooltipMemory ->
+                                            let
+                                                tooltipText =
+                                                    tooltipMemory.allContainedDisplayTextsWithRegion
+                                                        |> List.map Tuple.first
+                                                        |> String.join " "
+                                            in
+                                            if
+                                                namedModules
+                                                    |> List.any (\moduleName -> tooltipText |> stringContainsIgnoringCase moduleName)
+                                            then
+                                                Just ( tooltipText, moduleButton )
+
+                                            else
+                                                Nothing
+                                        )
+                    )
+
+
+{-| The first named, running module the client says is **not** in the act of
+shutting down -- the one module a click may be aimed at, or `Nothing`.
+
+One lookup with two readers, the rule's `moduleToDeactivatePresent` and the
+arm's own click, so the two cannot disagree about whether there is anything to
+click. `Just False` and nothing else: see `deactivateForWarpStep` for why
+`Nothing` is refused here rather than defaulted.
+
+-}
+moduleToDeactivateForWarp :
+    EveOnline.BotFramework.ShipModulesMemory
+    -> List String
+    -> ReadingFromGameClient
+    -> Maybe ( String, EveOnline.ParseUserInterface.ShipUIModuleButton )
+moduleToDeactivateForWarp shipModules namedModules readingFromGameClient =
+    runningModulesNamedForWarp shipModules namedModules readingFromGameClient
+        |> List.filter
+            (\( _, moduleButton ) ->
+                moduleButton.stateFromDictEntries.isDeactivating == Just False
+            )
+        |> List.head
 
 
 fightRatsIfShipIsPointed :
@@ -4246,6 +4506,7 @@ initBotMemory =
     , backupCallAskedReadings = 0
     , unlockFleetPilotAskedReadings = 0
     , middleRowAskedReadings = 0
+    , deactivateForWarpAskedReadings = 0
     , cloakingInterferesWithModules = False
     , messageBoxStandoff = Nothing
     , messageBoxLastChange = Nothing
@@ -4358,7 +4619,10 @@ statusTextFromState context =
                     in
                     [ [ describeShip ]
                     , [ describeDrones ]
-                    , [ describeMiddleRowModules context, describeMiddleRowAsk context ]
+                    , [ describeMiddleRowModules context
+                      , describeMiddleRowAsk context
+                      , describeDeactivateForWarp context
+                      ]
                     , [ describeAnomaly, describeArrivalWindowClause, describeOverview ]
                     , [ describeRetreat context, describeRetreatRecovery context ]
                     , [ describeFleetMembership context, describeFriendlyFireGuard context ]
@@ -4505,6 +4769,53 @@ describeMiddleRowAsk context =
             "GAVE UP after "
                 ++ String.fromInt context.memory.middleRowAskedReadings
                 ++ " readings clicking a middle-row module the client never showed the change on."
+
+
+{-| What the warp-deactivation arm is doing about `deactivate-module-on-warp`,
+in one clause beside the rest.
+
+Exists for `describeMiddleRowAsk`'s reason, and #410 needs it more than that arm
+does: `deactivateModulesForWarp` answers `Nothing` when it gives up, `Nothing`
+when it declines to click and `Nothing` when there is nothing to do, and this arm
+runs on the _retreat_ -- so without a clause an operator watching a ship that
+would not leave has no way to tell those three apart. It reports
+`deactivateForWarpStep`'s own answer rather than restating the conditions beside
+it.
+
+The two `isDeactivating` lines are named apart for the reason the parser's doc
+block insists on: "the client says it is deactivating" and "the client says
+nothing about it" are different facts, and only the first is evidence a click
+landed. A console showing the second for a whole session is a build that does not
+carry the entry.
+
+-}
+describeDeactivateForWarp : BotDecisionContext -> String
+describeDeactivateForWarp context =
+    let
+        spent : String
+        spent =
+            String.fromInt context.memory.deactivateForWarpAskedReadings
+                ++ " of "
+                ++ String.fromInt deactivateForWarpAskedReadingsBound
+                ++ " readings spent clicking."
+    in
+    case deactivateForWarpStepFromContext context of
+        NoModuleToDeactivateForWarp ->
+            ""
+
+        DeactivateAModuleForWarp ->
+            "Switching a module off for the warp, " ++ spent
+
+        NamedModuleIsAlreadyDeactivating ->
+            "The client says the module named for the warp is already deactivating, so it runs its cycle out unclicked."
+
+        NamedModuleSaysNothingAboutDeactivating ->
+            "The client says nothing about whether the module named for the warp is deactivating, and absent is not 'not deactivating', so no click goes out."
+
+        GaveUpOnDeactivatingForWarp ->
+            "GAVE UP after "
+                ++ String.fromInt context.memory.deactivateForWarpAskedReadings
+                ++ " readings clicking a module named by 'deactivate-module-on-warp' that the client never showed the change on -- the warp goes ahead with it still up."
 
 
 overviewEntryIsTargetedOrTargeting : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
@@ -5191,6 +5502,28 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 cloakingInterferesWithModulesNow
                 context.readingFromGameClient
 
+        -- Hoisted out of the record below so that the counter beside it and the
+        -- arm are asked with the *same* tooltip memory. The framework updates
+        -- memory and only then decides, so `context.memory.shipModules` at the
+        -- arm is this value rather than `botMemoryBefore`'s -- and on the
+        -- reading a module's tooltip first arrives those two disagree about
+        -- which modules the setting names at all.
+        shipModulesNow : EveOnline.BotFramework.ShipModulesMemory
+        shipModulesNow =
+            botMemoryBefore.shipModules
+                |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
+
+        -- #410, and the same arrangement as `middleRowNow` above: the arm this
+        -- bounds sits on the retreat path, so a `Just` it cannot stop answering
+        -- is a damaged ship that never warps.
+        deactivateForWarpNow : DeactivateForWarpStep
+        deactivateForWarpNow =
+            deactivateForWarpStepFromReading
+                shipModulesNow
+                context.botSettings.deactivateModuleOnWarp
+                botMemoryBefore.deactivateForWarpAskedReadings
+                context.readingFromGameClient
+
         -- Written here rather than where the box is answered, because the
         -- branch that would keep the count is the branch that stops running the
         -- moment the count reaches its bound. It counts readings a box was in
@@ -5230,9 +5563,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
             |> List.filterMap identity
             |> List.head
-    , shipModules =
-        botMemoryBefore.shipModules
-            |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
+    , shipModules = shipModulesNow
     , overviewWindows =
         botMemoryBefore.overviewWindows
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoOverviewWindowsMemory context.readingFromGameClient
@@ -5520,6 +5851,39 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             -- running, so the row needs nothing and the next stretch of
             -- not-approaching gets the whole allowance back.
             0
+    , deactivateForWarpAskedReadings =
+        if deactivateForWarpNow == NoModuleToDeactivateForWarp then
+            -- The **only** answer that resets, and that is a deliberate
+            -- divergence from `middleRowAskedReadings` two fields up, which
+            -- resets on every answer that declined to click.
+            --
+            -- What that shape cannot bound is an alternation: a module whose
+            -- deactivation is cancelled mid-cycle reads `Just True` on one
+            -- reading and `Just False` on the next with `isActive` never
+            -- falling, so the arm clicks, declines, clicks -- and a counter
+            -- that resets on the decline never reaches its bound. A bound a
+            -- click/decline alternation walks past is not a bound, and on the
+            -- retreat path that is a ship that never warps, which is the whole
+            -- of what #410 is about.
+            --
+            -- It costs nothing in the healthy case: a click that lands leaves
+            -- the module deactivating for a reading or two and then *off*, at
+            -- which point it is no longer a named module that reads active,
+            -- this answer is reached, and the counter is back to zero for the
+            -- next warp. So the reset is at the end of an episode rather than
+            -- inside one, which is what the counter is for.
+            0
+
+        else if List.member deactivateForWarpNow deactivateForWarpAnswersThatSpendAReading then
+            botMemoryBefore.deactivateForWarpAskedReadings + 1
+
+        else
+            -- The give-up, and the two answers that decline to click. Held
+            -- rather than advanced or reset, `middleRowAskedReadings`' own
+            -- arrangement for its give-up: the module is still up and this bot
+            -- has stopped clicking at it, and a counter that ran away would
+            -- make the status line's "after N readings" meaningless.
+            botMemoryBefore.deactivateForWarpAskedReadings
     , cloakingInterferesWithModules = cloakingInterferesWithModulesNow
     , messageBoxStandoff = messageBoxStandoff
     , messageBoxLastChange = messageBoxLastChange
