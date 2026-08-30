@@ -257,12 +257,21 @@ class WingmanRepl(ElmRepl):
         " { before = before, gridChanged = changed, commanderOnGrid = onGrid }",
         "follow = \\presence -> \\gates -> followTheCommanderThroughTheGate"
         " { presence = presence, accelerationGatesOnTheGrid = gates }",
+        # #429 added a fourth exception, `rejoiningAfterARetreat`. It is held
+        # off in every row this module asks, for the same reason this file
+        # already holds `calledByTheCommander` off where it asks about the
+        # follow: an exception that is switched on would answer for the one
+        # under test. Its own combinations are
+        # `test_wingman_rejoins_without_a_broadcast`'s.
         "mayTake = \\rats -> \\called -> \\left -> gateMayBeTaken"
         " { ratsOnTheGrid = rats"
         ", calledByTheCommander = called"
-        ", commanderLeftTheGrid = left }",
+        ", commanderLeftTheGrid = left"
+        ", rejoiningAfterARetreat = False }",
         "authority = \\called -> \\following -> gateTakingAuthority"
-        " { calledByTheCommander = called, followingTheCommander = following }",
+        " { calledByTheCommander = called"
+        ", rejoiningAfterARetreat = False"
+        ", followingTheCommander = following }",
         # The grid-change half, from the effects the bot would really have
         # dispatched rather than from a pre-computed `gridChanged` -- so the
         # chaining scenario below is executed end to end instead of described.

@@ -596,18 +596,20 @@ class TheCallOverridesTheRatsGuardTest(unittest.TestCase):
         in all four rows here deliberately: this case is about *the call* being
         the only thing that overrides #348's guard, so the second exception has
         to be absent for the answers to be about the first one. Its own
-        combinations are `test_wingman_follows_the_commander_through_a_gate`'s.
+        combinations are `test_wingman_follows_the_commander_through_a_gate`'s, and #429's
+        `rejoiningAfterARetreat` is held off here for the same reason -- its own
+        combinations are `test_wingman_rejoins_without_a_broadcast`'s.
         """
         self.assertEqual(
             self.repl.evaluate([
                 "gateMayBeTaken { ratsOnTheGrid = False"
-                ", calledByTheCommander = False, commanderLeftTheGrid = False }",
+                ", calledByTheCommander = False, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
                 "gateMayBeTaken { ratsOnTheGrid = True"
-                ", calledByTheCommander = False, commanderLeftTheGrid = False }",
+                ", calledByTheCommander = False, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
                 "gateMayBeTaken { ratsOnTheGrid = False"
-                ", calledByTheCommander = True, commanderLeftTheGrid = False }",
+                ", calledByTheCommander = True, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
                 "gateMayBeTaken { ratsOnTheGrid = True"
-                ", calledByTheCommander = True, commanderLeftTheGrid = False }",
+                ", calledByTheCommander = True, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
             ]),
             [True, False, True, True],
             "only the call may take a gate with rats up, and it always may")
@@ -1049,13 +1051,14 @@ class TheRecallIsTheOneEveryOtherDepartingArmUsesTest(unittest.TestCase):
         The record carries a third field since #411 -- `commanderLeftTheGrid`,
         the commander having gone through the gate without saying so, which
         overrides the same guard #393's call does. The signature is pinned
-        rather than merely present so that a fourth exception arriving is
+        rather than merely present so that a fifth exception arriving is
         somebody's decision here rather than something a diff slips past.
         """
         self.assertIn(
             "gateMayBeTaken : { ratsOnTheGrid : Bool"
             " , calledByTheCommander : Bool"
-            " , commanderLeftTheGrid : Bool } -> Bool",
+            " , commanderLeftTheGrid : Bool"
+            " , rejoiningAfterARetreat : Bool } -> Bool",
             collapsed(self.source))
         self.assertEqual(
             len(re.findall(r"^gateMayBeTaken\b", self.source, re.M)), 2,

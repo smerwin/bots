@@ -281,13 +281,22 @@ def indented_block(source, header):
 
 
 def step(recovering="True", named="True", on_grid="False", banner="False",
-         remembers="False", warping="False", asked=0):
-    """The shipped rule, as one expression over five facts and a count."""
+         remembers="False", gate="False", fleet_row="False", warping="False",
+         asked=0):
+    """The shipped rule, as one expression over seven facts and a count.
+
+    `gate` and `fleet_row` are #429's two, and they default off so that every
+    case written against the five that came first still asks what it asked.
+    """
     return ("retreatRecoveryStep { recovering = %s, commanderIsNamed = %s"
             ", commanderIsOnThisGrid = %s, bannerNamesTheCommander = %s"
-            ", remembersWhereTheCommanderWas = %s, shipIsWarpingOrJumping = %s"
+            ", remembersWhereTheCommanderWas = %s"
+            ", anAccelerationGateIsOnThisGrid = %s"
+            ", fleetWindowNamesTheCommander = %s"
+            ", shipIsWarpingOrJumping = %s"
             ", askedReadings = %s }"
-            % (recovering, named, on_grid, banner, remembers, warping, asked))
+            % (recovering, named, on_grid, banner, remembers, gate, fleet_row,
+               warping, asked))
 
 
 def place_after(seen=None, on_grid="False", before=None):
@@ -428,6 +437,10 @@ class ReplCase(unittest.TestCase):
              '        "WarpToTheCommanderFromTheBroadcast"\n'
              "    RouteToWhereTheCommanderLastSaidHeWas ->\n"
              '        "RouteToWhereTheCommanderLastSaidHeWas"\n'
+             "    GateThroughToTheCommander ->\n"
+             '        "GateThroughToTheCommander"\n'
+             "    WarpToTheCommanderFromTheFleetWindow ->\n"
+             '        "WarpToTheCommanderFromTheFleetWindow"\n'
              "    NowhereToRejoinTheCommander ->\n"
              '        "NowhereToRejoinTheCommander")' % expression
              for expression in expressions],
@@ -435,11 +448,14 @@ class ReplCase(unittest.TestCase):
 
 
 class TheRuleAnswersOneThingPerReadingTest(ReplCase):
-    """`retreatRecoveryStep` itself, executed at each of its eight answers.
+    """`retreatRecoveryStep` itself, executed at each of its ten answers.
 
     Asked as one rendering per case rather than as a `Bool` per constructor, so
     a rule that answered two things at once -- or none -- fails rather than
     passing on whichever one a case happened to name.
+
+    #429's two answers and their ordering against these are next door, in
+    `test_wingman_rejoins_without_a_broadcast`.
     """
 
     def test_a_ship_that_is_not_recovering_is_left_alone(self):
@@ -479,7 +495,8 @@ class TheRuleAnswersOneThingPerReadingTest(ReplCase):
         point of a bound on an arm this high in the tree."""
         self.assertEqual(
             self.answers([step(on_grid="True", banner="True",
-                               remembers="True", warping="True", asked=99)]),
+                               remembers="True", gate="True", fleet_row="True",
+                               warping="True", asked=99)]),
             ["GaveUpOnRejoiningTheCommander"])
 
     def test_a_ship_in_warp_is_told_to_do_nothing(self):
