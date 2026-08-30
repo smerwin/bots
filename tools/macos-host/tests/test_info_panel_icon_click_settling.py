@@ -41,11 +41,11 @@ and the step-count wording ("I clicked this icon 3 step(s) ago") is gone from
 the log with the branch that printed it. `test_info_panel_repair_deadlock.py`
 carries that change's own reasoning and its fold over the alternation.
 
-**The change lands in `EveOnline/BotFrameworkSeparatingMemory.elm` in five of
-the six vendored copies** (`eve-online-mining-bot` is the exception -- see
-below), and those five are not one file with five names -- they have already
-diverged into three shapes, and the fix is written once per shape rather than
-pasted five times:
+**The change lands in `EveOnline/BotFrameworkSeparatingMemory.elm` in every
+vendored copy but one** (`eve-online-mining-bot` is the exception -- see
+below), and those copies are not one file under several names -- they have
+already diverged in shape, and the fix is written once per shape rather than
+pasted into each:
 
   - `eve-online-mission-runner` and `eve-online-saxrat` (byte-identical before
     this change) carry `previousStepsEffects : List (List EffectOnWindowStruct)`
@@ -55,15 +55,19 @@ pasted five times:
   - `eve-online-combat-anomaly-bot` and `eve-online-warp-to-0-autopilot` carry
     the same `previousStepsEffects` shape and the same settling machinery, on an
     older revision of this function's "icon missing" branch (left untouched).
-  - `eve-online-wingus` is on the 2023 host interface, carries only
-    `previousStepEffects : List EffectOnWindowStructure` (one step, not
-    several) and has never had the module-button settling pattern ported into
-    this file at all. The fix there is `doEffectsClickUIElement` asked
-    directly as a `Bool` against that one step, which is the same rule with
-    one step of history instead of five -- all this shape's
-    `StepDecisionContext` carries.
+  - a third shape carried only `previousStepEffects : List
+    EffectOnWindowStructure` (one step, not several) and had never had the
+    module-button settling pattern ported into this file at all. The fix there
+    was `doEffectsClickUIElement` asked directly as a `Bool` against that one
+    step -- the same rule with one step of history instead of five, which is
+    all that shape's `StepDecisionContext` carried. Its only app was
+    `eve-online-wingus`, retired with the 2023 host interface (see
+    `notes/retire-wingus.md`), so **that shape now has no app** and the cases
+    over it went with it. The finding it recorded is kept here rather than in
+    a deleted class: the guard is the same rule whatever depth of history the
+    context carries, so a future app on a one-step context needs no new design.
 
-`eve-online-mining-bot` was on this same 2023-interface shape until its whole
+`eve-online-mining-bot` was on this same older shape until its whole
 tree was replaced with Viir's current upstream (2024_10_19 interface, a
 materially newer generation) -- that tree carries none of #227/#297 at all,
 not even the older single-step form: `ensureInfoPanelLocationInfoIsExpanded`
@@ -89,7 +93,7 @@ icon-click branch is the one reached. The wiring -- that `previousStepsEffects`
 actually reaches the function from `generalSetupInUserInterface` -- is read out
 of the source instead, since it is not an expression.
 
-**Since fixed.** Two of the six vendored copies --
+**Since fixed.** Two of the vendored copies --
 `eve-online-combat-anomaly-bot` and `eve-online-warp-to-0-autopilot` -- carried
 a *separate, pre-existing* defect in their own vendored
 `EveOnline/BotFramework.elm`: `findMouseButtonClickLocationsInListOfEffects`
@@ -125,9 +129,12 @@ COMBAT_ANOMALY_DIR = os.path.join(
 WARP_TO_0_DIR = os.path.join(
     REPO_DIR, "implement", "applications", "eve-online",
     "eve-online-warp-to-0-autopilot")
-WINGUS_DIR = os.path.join(
-    REPO_DIR, "implement", "applications", "eve-online", "eve-online-wingus")
-
+# The copies this file's cases run over. The name is historical: the count has
+# moved twice -- `eve-online-mining-bot` was excluded when its tree was replaced
+# with Viir's upstream, and `eve-online-wingus` left with the 2023 host
+# interface (see `notes/retire-wingus.md`). What the constant means is "every
+# vendored copy that carries this mechanism", and nothing here is derived from
+# a number, so the cases stay honest while the name reads as a fossil.
 SIX_VENDORED_FRAMEWORKS = {
     "mission runner": os.path.join(
         MISSION_RUNNER_DIR, "EveOnline", "BotFrameworkSeparatingMemory.elm"),
@@ -137,8 +144,6 @@ SIX_VENDORED_FRAMEWORKS = {
         COMBAT_ANOMALY_DIR, "EveOnline", "BotFrameworkSeparatingMemory.elm"),
     "warp-to-0 autopilot": os.path.join(
         WARP_TO_0_DIR, "EveOnline", "BotFrameworkSeparatingMemory.elm"),
-    "wingus": os.path.join(
-        WINGUS_DIR, "EveOnline", "BotFrameworkSeparatingMemory.elm"),
 }
 
 def info_panel_container(icon_region):
@@ -309,79 +314,6 @@ class TheSettlingWindowIsFiveSteps(BothAppsRepl, unittest.TestCase):
             self.assertNotIn("step(s) ago", answer, app)
 
 
-class GroupCRepl(ElmRepl):
-    """The 2023-interface shape: one step of history, asked as a `Bool`."""
-
-    def __init__(self, **kwargs):
-        kwargs.setdefault("preamble", EXTRA_PREAMBLE)
-        super().__init__(**kwargs)
-
-    HELPERS = [
-        SaxratRepl.reading_binding(
-            "reading", [info_panel_container((10, 5, 20, 16))]),
-        "icon = reading |> Maybe.andThen"
-        " (.infoPanelContainer >> Maybe.andThen .icons >> Maybe.andThen .locationInfo)",
-        "clickPoint icn = EveOnline.ParseUserInterface.centerFromDisplayRegion"
-        " icn.totalDisplayRegionVisible",
-        "clickEffects = icon |> Maybe.map"
-        " (clickPoint >> EffectOnWindow.effectsMouseClickAtLocation"
-        " EffectOnWindow.MouseButtonLeft) |> Maybe.withDefault []",
-        # `ensureInfoPanelLocationInfoIsExpanded` here takes the one
-        # previous step's effects directly, not a list of steps.
-        "resultText step = reading"
-        " |> Maybe.andThen (EveOnline.BotFrameworkSeparatingMemory"
-        ".ensureInfoPanelLocationInfoIsExpanded step)"
-        " |> Maybe.map (Common.DecisionPath"
-        ".unpackToDecisionStagesDescriptionsAndLeaf >> Tuple.first"
-        " >> String.join \" | \")"
-        " |> Maybe.withDefault \"NOTHING\"",
-    ]
-
-    def with_helpers(self, definitions):
-        return list(definitions) + self.HELPERS
-
-
-class GroupCBothAppsRepl:
-    @classmethod
-    def setUpClass(cls):
-        cls.repls = {
-            "wingus": open_repl(GroupCRepl, app_dir=WINGUS_DIR),
-        }
-
-    @classmethod
-    def tearDownClass(cls):
-        for repl in cls.repls.values():
-            repl.close()
-
-    def each(self, expressions, definitions=()):
-        for app, repl in self.repls.items():
-            yield app, repl.strings(
-                expressions, definitions=repl.with_helpers(definitions))
-
-
-class TheGuardHoldsOnTheOlderHostInterfaceToo(
-        GroupCBothAppsRepl, unittest.TestCase):
-    """`eve-online-wingus`.
-
-    It has never had the module-button settling pattern in this file, and
-    `StepDecisionContext` here carries only the immediately previous step's
-    effects -- so the guard is the same rule with one step of history rather
-    than five, which is all this shape has to give it. `eve-online-mining-bot`
-    used to share this shape; its tree was replaced with Viir's current
-    upstream and it no longer carries this file's settling-guard mechanism at
-    all, in any shape -- see the exclusion note near `SIX_VENDORED_FRAMEWORKS`.
-    """
-
-    def test_no_previous_click_means_click_now(self):
-        for app, (answer,) in self.each(["resultText []"]):
-            self.assertIn(
-                "Click on the icon to enable the info panel.", answer, app)
-
-    def test_last_steps_click_is_not_repeated(self):
-        for app, (answer,) in self.each(["resultText clickEffects"]):
-            self.assertEqual("NOTHING", answer, app)
-
-
 class NoClickIsReachableWithoutTheSharedGuardTest(unittest.TestCase):
     """The bug itself, restated for where the guard now lives.
 
@@ -432,7 +364,6 @@ class EachCopyNamesItsOwnSettlingCheckTest(unittest.TestCase):
         "saxrat": "doEffectsClickUIElement",
         "combat anomaly bot": "doEffectsClickUIElement",
         "warp-to-0 autopilot": "doEffectsClickUIElement",
-        "wingus": "doEffectsClickUIElement",
     }
 
     def test_each_block_names_its_guard(self):
@@ -454,7 +385,6 @@ class BotElmThreadsThePreviousStepsEffectsThroughTest(unittest.TestCase):
         "mission runner": os.path.join(MISSION_RUNNER_DIR, "Bot.elm"),
         "saxrat": os.path.join(SAXRAT_DIR, "Bot.elm"),
         "combat anomaly bot": os.path.join(COMBAT_ANOMALY_DIR, "Bot.elm"),
-        "wingus": os.path.join(WINGUS_DIR, "Bot.elm"),
     }
 
     def test_generalSetupInUserInterface_calls_it_with_an_argument(self):

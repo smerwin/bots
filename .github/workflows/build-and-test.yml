@@ -72,12 +72,13 @@ jobs:
             name=$(basename "$app")
 
             # The wrapper is fixed by the interface the bot's own Bot.elm
-            # imports -- not by which interface modules the app vendors, since
-            # the mining bot ships two.
+            # imports -- not by which interface modules the app vendors, which
+            # can carry one the bot is not typed against. There is one wrapper
+            # since wingus was retired; an app on any other interface is an
+            # error here rather than a build against the wrong wrapper.
             iface=$(grep -m1 -o 'BotLab\.BotInterface_To_Host_[0-9_]*' "${app}Bot.elm" || true)
             case "$iface" in
               BotLab.BotInterface_To_Host_2024_10_19) wrapper=Main.elm ;;
-              BotLab.BotInterface_To_Host_2023_02_06) wrapper=Main_2023_02_06.elm ;;
               *)
                 echo "::error::${name} imports an unknown host interface: ${iface:-none found}"
                 failed=1

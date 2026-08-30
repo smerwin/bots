@@ -16,7 +16,7 @@ clicking undock 20,486 times in between. Matching "abort" alone cut that to 3
 readings in three minutes and still did not free the ship -- 256 clicks met 132
 waits -- because the third label was still invisible.
 
-These cases pin both matches, the consistency of the six vendored copies, the
+These cases pin both matches, the consistency of every vendored copy, the
 suppression that stops the loop, and the property that makes it safe: nothing
 changes when no in-progress label is on screen.
 """
@@ -34,7 +34,6 @@ ALL_APPS = (
     "eve-online-mission-runner",
     "eve-online-saxrat",
     "eve-online-warp-to-0-autopilot",
-    "eve-online-wingus",
 )
 
 # `eve-online-mining-bot`'s tree was replaced with Viir's current upstream
@@ -96,10 +95,15 @@ class AbortUndockIsRecognised(unittest.TestCase):
                 self.assertIn('String.contains "undocking"', block,
                               "the in-progress label is matched on a substring too")
 
-    def test_the_six_copies_agree(self):
+    def test_the_copies_agree(self):
+        # Counted from PARSER_COPIES rather than written down: the population
+        # shrank by one when `eve-online-wingus` was retired with the 2023 host
+        # interface (see `notes/retire-wingus.md`), and a number in this message
+        # would have gone stale silently while every assertion still passed.
         blocks = {station_window_block(p) for p in PARSER_COPIES}
         self.assertEqual(len(blocks), 1,
-                         "all six vendored copies must carry the identical parse")
+                         "all %d vendored copies must carry the identical parse"
+                         % len(PARSER_COPIES))
 
     def test_an_abort_button_suppresses_the_undock_button(self):
         """The field the caller clicks must be empty while an undock is under way.

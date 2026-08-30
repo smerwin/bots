@@ -26,22 +26,26 @@ mission runner and saxrat have had the `ButtonDown` arm since the same defect
 was found and repaired there; saxrat's own doc comment records the diagnosis in
 the past tense.
 
-**The issue names four apps and the corpus said two.** `eve-online-wingus` is
-still on the 2023 interface: its `EffectOnWindowStructure` declares no
-`ButtonDown`, so its click really is `KeyDown`-encoded, the arm it has is the
-right one, and an arm naming `ButtonDown` would not compile.
-`eve-online-mining-bot` was the other 2023-interface app until its whole tree
-was replaced with Viir's current upstream, on the 2024_10_19 interface -- it
-now belongs in `PHOTON_APPS` and carries `ButtonDown` like the rest of that
-group. `test_the_arm_matches_the_encoding_the_app_actually_emits` is that
-correction as a rule rather than a note, so a later port cannot copy the fix
-into an app whose clients spell a click the other way.
+**The issue names four apps and the corpus said two**, and the two it was
+wrong about were the two on the older interface. `eve-online-wingus` declared no
+`ButtonDown` at all, so its click really was `KeyDown`-encoded, the arm it had
+was the right one, and an arm naming `ButtonDown` would not have compiled;
+`eve-online-mining-bot` was in the same position until its whole tree was
+replaced with Viir's current upstream, on the 2024_10_19 interface, and it now
+carries `ButtonDown` like the rest of `PHOTON_APPS`. Wingus has since been
+retired with that interface (`notes/retire-wingus.md`), so **no app in the repo
+spells a click the second way today** -- which is exactly why the correction is
+kept as a rule rather than as a list.
+`test_the_arm_matches_the_encoding_the_app_actually_emits` derives what arm an
+app needs from that app's own `effectsMouseClickAtLocation`, so a later port
+cannot copy the fix into an app whose clients spell a click the other way, and
+it says so about an app that arrives after this file was written.
 
 The strongest case here is the one that needs no knowledge of either encoding:
 **every app's matcher is asked about that app's own `effectsMouseClickAtLocation`
 output**, through the real compiler. That is the case the two fixed apps failed
 before this change and the case that goes red if either arm is removed from any
-of the six.
+of them.
 
     python3 -m unittest discover -s tools/macos-host/tests
 """
@@ -55,14 +59,23 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 APPS_DIR = os.path.join(REPO, "implement", "applications", "eve-online")
 
-# The two dialects, named by what their effect type is called. Every app in each
-# group vendors the same `Common/EffectOnWindow.elm` vocabulary.
+# The dialects, named by what their effect type is called. Every app in a group
+# vendors the same `Common/EffectOnWindow.elm` vocabulary.
 #
-# eve-online-mining-bot moved from INTERFACE_2023_APPS to PHOTON_APPS when its
+# eve-online-mining-bot moved from the older group to PHOTON_APPS when its
 # whole tree was replaced with Viir's current upstream (a materially newer
 # generation on the 2024_10_19 host interface) -- its Common/EffectOnWindow.elm
 # now carries ButtonDown and effectsMouseClickAtLocation builds the
 # [ MouseMoveTo, ButtonDown, ButtonUp ] shape like every other Photon-era app.
+#
+# `eve-online-wingus` was the last app in the KeyDown-encoded group and left
+# with the 2023 host interface (see `notes/retire-wingus.md`), so that group is
+# empty and is not written out. `DIALECTS` is kept as a list of groups rather
+# than collapsed to one, because a second encoding arriving is what this file
+# exists to keep straight -- and the rule that decides which arm an app needs,
+# `test_the_arm_matches_the_encoding_the_app_actually_emits`, derives the answer
+# from each app's own source rather than from this list, so it goes on working
+# for an app nobody has grouped yet.
 PHOTON_APPS = (
     "eve-online-mission-runner",
     "eve-online-saxrat",
@@ -70,10 +83,8 @@ PHOTON_APPS = (
     "eve-online-warp-to-0-autopilot",
     "eve-online-mining-bot",
 )
-INTERFACE_2023_APPS = (
-    "eve-online-wingus",
-)
-ALL_APPS = PHOTON_APPS + INTERFACE_2023_APPS
+DIALECTS = (PHOTON_APPS,)
+ALL_APPS = tuple(app for group in DIALECTS for app in group)
 
 MATCHER = "findMouseButtonClickLocationsInListOfEffects"
 
@@ -252,21 +263,6 @@ class TheArmMatchesTheEncoding(unittest.TestCase):
                     "ButtonDown button ->" in self.matcher(app),
                     "the fold has an arm for the constructor the click uses")
 
-    def test_the_2023_interface_apps_have_no_button_down_to_match(self):
-        """The half of #239 that is not a defect, stated so a port cannot undo it.
-
-        Adding a `ButtonDown` arm to these two would not compile, and their
-        `KeyDown` arm is not a legacy: it is what their clicks are made of.
-        """
-        for app in INTERFACE_2023_APPS:
-            with self.subTest(app=app):
-                self.assertFalse(carries_button_down(app))
-                self.assertIn(
-                    "KeyDown (virtualKeyCodeFromMouseButton mouseButton)",
-                    declaration(
-                        app_source(app, "Common", "EffectOnWindow.elm"),
-                        "effectsMouseClickAtLocation"))
-
     def test_every_photon_era_app_carries_the_constructor_and_the_arm(self):
         for app in PHOTON_APPS:
             with self.subTest(app=app):
@@ -281,7 +277,7 @@ class TheArmMatchesTheEncoding(unittest.TestCase):
         the two apps where it hurt and the other four kept the defect for as
         long as nobody compared them.
         """
-        for group in (PHOTON_APPS, INTERFACE_2023_APPS):
+        for group in DIALECTS:
             bodies = {app: self.matcher(app) for app in group}
             reference = bodies[group[0]]
             for app, body in bodies.items():

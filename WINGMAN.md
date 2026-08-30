@@ -11,18 +11,19 @@ Nothing here repeats those.
 
 ## Why it exists rather than a patch to wingus
 
-Wingus is the last app on `2023_02_06`. Every other bot moved to `2024_10_19`,
-and #332 had to teach the host to answer `SearchUIRootAddress` in the older
-interface's flat synchronous shape — because the newer staged shape decodes to
-an `Err` that `BotFramework.elm` writes and never reads, so the bot re-asked for
-the UI root forever while the host had already found it. That host path exists
-for exactly one app.
+Wingus **was** the last app on `2023_02_06`. Every other bot had moved to
+`2024_10_19`, and #332 had to teach the host to answer `SearchUIRootAddress` in
+the older interface's flat synchronous shape — because the newer staged shape
+decodes to an `Err` that `BotFramework.elm` writes and never reads, so the bot
+re-asked for the UI root forever while the host had already found it. That host
+path existed for exactly one app.
 
 So this is a rewrite on the current interface rather than a port, and retiring
-wingus is what finally lets `legacy_search_ui_root` go with it. **That removal
-is not part of this work and should not be**: it belongs after the wingman has
-actually flown, or the last 2023-interface bot disappears before its replacement
-is proven.
+wingus is what let `legacy_search_ui_root` go with it. **Both are now gone** —
+see section 6 below and `notes/retire-wingus.md`. The condition this paragraph
+used to set was that the removal wait until the wingman had actually flown, so
+that the last 2023-interface bot did not disappear before its replacement was
+proven; it has, and it did not.
 
 ## What it does now
 
@@ -2170,9 +2171,32 @@ reached home. See `notes/350-trip-home.md` for the write-up.
 This only fires when `secondsToSessionEnd` is set, so **the launcher must pass
 `--session-duration-minutes`** or the trip home never happens at all.
 
-### 6. Retire wingus, and `legacy_search_ui_root` with it
+### 6. Retire wingus, and `legacy_search_ui_root` with it -- done
 
-Only after this bot has flown. See the top of this file.
+**The criterion was "only after this bot has flown", and it was met.** That line
+was written into this file's skeleton commit (`be47b3fc`, 2026-08-24) before any
+wingman run existed. Nine sessions have been flown since, and two of them are
+written up in this file's own live-run section: the 45-minute watched smoke test
+on `DMC-MPC-001` (2026-08-24, ~1,467 readings, no exceptions) and the 25- and
+60-minute runs on `DMC-MPC-002`, which drove a real client end to end with no
+crash, no stall and no `askForHelpToGetUnstuck`. What those runs found was
+**unwired features rather than a bot that could not fly** -- the travel-broadcast
+dispatch, the trip home -- so the replacement was proven in the sense the
+condition asked about: the current interface carries this job.
+
+**What went.** `eve-online-wingus`; `botlab_host/Main_2023_02_06.elm`, the port
+wrapper for the older interface; `legacy_search_ui_root` and the blocking
+UI-root search behind it; and the `EffectSequenceOnWindow` translation, which
+existed because that interface had no `WindowsInputRequest` task and carried
+input inside the volatile-process request instead. The write-up, including what
+was deliberately *not* changed on the path every current bot runs, is
+`notes/retire-wingus.md`.
+
+**What did not go.** `host_interface_of_bot` and the wrapper map it feeds, which
+now hold one entry. Keeping the map is what makes a bot importing an interface
+with no wrapper fail **by name** rather than compile against the wrong one --
+the same reason `compile_bot.sh` and the CI job keep their own `case` over a
+single arm.
 
 ## Settings
 
