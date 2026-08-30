@@ -639,11 +639,21 @@ class NoSiblingArmSharesTheDefectTest(unittest.TestCase):
             "retreatRecoveryAnswersThatSpendAReading",
             "weaponsAnswersThatSpendAReading",
         )]
+        # Asserted against the window-closing *constructors* rather than
+        # against the substrings "Window" and "Close". Those were too loose:
+        # #429's `WarpToTheCommanderFromTheFleetWindow` is a warp commanded
+        # from a window, closes nothing, and carries the substring anyway --
+        # so a bare `assertNotIn("Window", ...)` failed on an arm that had
+        # gained no window-closing step at all. The names below are what the
+        # claim is actually about, and `test_every_spending_list_the_file_has_
+        # is_covered` next door is what stops a sixth arm going unasked.
+        closing = ("CloseAWindowLeftOverTheClient",
+                   "AWindowThisBotCannotCloseIsOpen")
         for name in others:
             with self.subTest(list=name):
                 body = declaration(self.source, "%s =" % name)
-                self.assertNotIn("Window", body)
-                self.assertNotIn("Close", body)
+                for constructor in closing:
+                    self.assertNotIn(constructor, body)
 
     def test_every_spending_list_the_file_has_is_covered(self):
         """A list added since this case was written is one nobody asked the
