@@ -398,6 +398,90 @@ line says so rather than printing a bare `off`.
 manoeuvre 'Approach')`, because from outside the tree a reading in which the
 close outranked the fight and one in which it merely came last read identically.
 
+### The landing re-armed the window and left the budget spent (#428)
+
+The section above is one half of a pair, and shipping only that half is what
+#428 was filed on. Observed live on all four wingmen at once, every one of them
+printing both clauses on the same reading:
+
+```
+Approach on the commander: CLOSING SINCE LANDING (this outranks the fight until
+the client names the manoeuvre 'Approach'), GAVE UP after 40 readings, the
+double click and the panel's Approach button both, with the client never naming
+the manoeuvre 'Approach'. Commander at 46 km.
+```
+
+Committed to closing and out of readings to close with, at once and permanently,
+for as long as the commander stayed on grid — four ships parked 37 to 46 km off
+their fleet commander. Three of the four also read `Warp to a fleet-mate: GAVE
+UP after 30 readings asking to warp to 'Gal Bistot', who is on this grid`, so
+neither way of reaching him was left.
+
+**The asymmetry is between two rules written for one event.**
+`landingCloseAfterReading` answers `justLanded || closeWasOwed`, so every warp
+that ends re-arms `closingOnTheCommanderSinceLanding`. The counter that bounds
+the ask had no matching reset: `approachFleetCommanderAskedReadings` reached
+zero only where the commander was off grid or the ship was already approaching,
+so the ordinary landing — the commander on grid, the ship not yet moving — took
+the middle clause and held the count. The re-armed window therefore opened onto
+a budget already spent, and `approachFleetCommanderStep` answered
+`GaveUpOnTheApproach` for ever. `goToFleetMateWarpAskedReadings` had the same
+shape from the other side: it cleared only on `fleetMateOnThisGrid == Nothing`,
+so a mate who stayed on grid held the give-up for the rest of the session.
+
+**What ships is one rule with two readers.** `askedReadingsRefilledByLanding`
+answers the budget a counter carries **into** this reading, refilled by
+`weJustFinishedWarping` — the signal that already re-arms the flag, already
+computed in the same memory update, so the two cannot come to disagree about
+what a landing is. Two spellings of one idea are what drift; that is #102's own
+lesson applied to a reset rather than to an advance.
+
+**It is the budget carried in rather than the value written out**, which is what
+keeps the landing reading's own ask charged. A counter refilled *after* the
+increment never charges the first reading of a landing, and the same value is
+what `askingTheCommanderForAnApproach` predicts the step against — the decision
+reads the count this update writes, so predicting against the spent one would
+leave the counter and the arm disagreeing about whether the landing had bought
+anything.
+
+**Only a completed warp refills it**, so nothing here is unbounded: an ask that
+never warps spends its budget once and stays given up exactly as before. What
+changes is that a bot which has *gone somewhere* gets to try again on arrival,
+which is the one event that says the situation is not the one it gave up on.
+
+**Deliberately not fixed here**: `CloseAWindowLeftOverTheClient` is a member of
+`approachFleetCommanderAnswersThatSpendAReading` and the stray-window clause
+returns it on every reading a window is open over the client. Three of the four
+pilots also reported `A 'InfoWindow' is still open over the client`, so those 40
+readings may have gone entirely on closing a window rather than on any approach
+attempt — which is #426's shape, a block that eats a whole give-up budget, and
+very likely how the four reached the bound in the first place. It wants its own
+fix and its own evidence, and cases in
+`tools/macos-host/tests/test_wingman_landing_refills_the_budget.py` pin both the
+list and the ladder unchanged so a later fix has to be somebody's decision.
+
+**Verified without a live client**, in that file (18 cases). Both counters are
+folded through the real `updateMemoryForNewReadingFromGame` over readings the
+real `EveOnline.ParseUserInterface` produced, with the control — the same
+session, the same length, no warp — beside each; without that control a session
+that ends un-given-up says nothing, since any counter that only rises reaches
+any bound. The commander (respectively the mate) is on the overview on **every**
+reading of both sessions, so the reset that already existed cannot be what
+cleared them. Confirmed by mutation, ten of them, each failing a named case and
+listed in that file — including the two halves of the out-of-scope change made
+by accident.
+
+**Unverified: any of it running.** No run has been flown since, and this bot
+still has no corpus of its own. What to watch on the first run that lands beside
+its commander is `GAVE UP after 40 readings` **going away** on the next landing
+rather than standing for the session, with `Approach on the commander:` counting
+up from a low number again afterwards. A run whose count never resets across a
+warp means `weJustFinishedWarping` is not reaching the counter, which is the
+direction this fails silently in. The opposite failure to watch for is a bot
+that re-warps to a mate it has just arrived at: each arrival refills that
+budget, and while the ask is bounded per arrival nothing remembers that the
+previous 30 readings achieved nothing.
+
 ### Why the guns are their own arm, below the drones
 
 Reported from the field on 2026-08-25: travel and locking worked, engaging a
