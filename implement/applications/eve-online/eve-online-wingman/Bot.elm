@@ -548,6 +548,14 @@ type alias BotMemory =
     , overviewWindows : OverviewWindowsMemory
     , shipWarpingInLastReading : Maybe Bool
 
+    -- The same three-valued shape as `shipWarpingInLastReading`, but over
+    -- `Warp` or `Jump` together -- see `shipTravelingFromReading`. Kept as a
+    -- separate field rather than folded into the one above so that #194's
+    -- warp-only arrival window and #397's warp-or-jump landing-close window
+    -- cannot be made to agree by accident: each reads the transition it was
+    -- measured against.
+    , shipTravelingInLastReading : Maybe Bool
+
     -- How many readings ago the last warp finished, which is what opens the
     -- arrival window the other-pilot snapshot is taken inside. `Nothing` means
     -- no warp has finished this session and is a closed window, never an open
@@ -1178,6 +1186,63 @@ warpJustEnded { warpingLastReading, readingNow } =
     (warpingLastReading == Just True)
         && (readingNow.shipUI /= Nothing)
         && (shipWarpingFromReading readingNow /= Just True)
+
+
+{-| `shipWarpingFromReading`'s own three-valued shape, but over both manoeuvres
+this ship cannot orbit through -- `Warp` and `Jump`. Built for `travelJustEnded`
+below, which is what opens the #397 landing-close window: nothing about "just
+arrived somewhere new" is warp-specific, and treating a jump as a warp for this
+one purpose is exactly what `shipIsWarpingOrJumpingFromReading` already does
+for the same reason, in its own words -- "a ship in a jump tunnel is no more
+able to start an orbit than one in warp".
+
+Kept as its own function rather than widening `shipWarpingFromReading` in
+place, because that function's three-valued shape is what
+`otherPilotArrivalWindowReadings`'s corpus was measured against (#194), and
+widening it there would be a second, unmeasured behaviour change riding on
+this one -- the arrival-window feature is about landing in an anomaly after a
+warp, not about a gate jump, and stays untouched.
+
+-}
+shipTravelingFromReading : ReadingFromGameClient -> Maybe Bool
+shipTravelingFromReading readingFromGameClient =
+    readingFromGameClient.shipUI
+        |> Maybe.andThen .indication
+        |> Maybe.andThen .maneuverType
+        |> Maybe.map
+            (\maneuver ->
+                (maneuver == EveOnline.ParseUserInterface.ManeuverWarp)
+                    || (maneuver == EveOnline.ParseUserInterface.ManeuverJump)
+            )
+
+
+{-| `warpJustEnded`'s own transition, asked of a gate jump as well as a warp.
+
+**`wingman_run22.log` is why this exists.** Chained gate jumps behind the
+fleet commander left `shipIsApproaching` reading `True` for over 600
+consecutive lines while the commander's own distance grew monotonically from
+3,014 m to 18 km -- the ship still nominally "approaching" a target the jump
+had already left behind. `warpJustEnded` never fired on any of those jumps,
+because `shipWarpingFromReading` answers about `Warp` only, so
+`approachFleetCommanderStep` kept reading `AlreadyApproaching` and asking
+nothing, on the strength of a manoeuvre word the client had not actually
+revisited since the jump.
+
+`landingCloseAfterReading`'s own window already exists to force exactly this
+re-ask on landing, and #397 built it -- for warps. This is the same mechanism
+opened by the wider trigger, so a jump is no longer the one kind of arrival it
+cannot see.
+
+-}
+travelJustEnded :
+    { travelingLastReading : Maybe Bool
+    , readingNow : ReadingFromGameClient
+    }
+    -> Bool
+travelJustEnded { travelingLastReading, readingNow } =
+    (travelingLastReading == Just True)
+        && (readingNow.shipUI /= Nothing)
+        && (shipTravelingFromReading readingNow /= Just True)
 
 
 {-| How many readings after a warp ends a pilot on the overview still counts as
@@ -4525,6 +4590,7 @@ initBotMemory =
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , overviewWindows = EveOnline.BotFramework.initOverviewWindowsMemory
     , shipWarpingInLastReading = Nothing
+    , shipTravelingInLastReading = Nothing
     , readingsSinceWarpEnded = Nothing
     , visitedAnomalies = Dict.empty
     , notEnoughBandwidthToLaunchDrone = False
@@ -5127,6 +5193,10 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         shipIsWarping =
             shipWarpingFromReading context.readingFromGameClient
 
+        shipIsTraveling : Maybe Bool
+        shipIsTraveling =
+            shipTravelingFromReading context.readingFromGameClient
+
         namesOfRatsInOverview : List String
         namesOfRatsInOverview =
             getNamesOfRatsInOverview context.readingFromGameClient
@@ -5135,6 +5205,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         weJustFinishedWarping =
             warpJustEnded
                 { warpingLastReading = botMemoryBefore.shipWarpingInLastReading
+                , readingNow = context.readingFromGameClient
+                }
+
+        -- #397's window is about having just arrived somewhere new, which a
+        -- gate jump does exactly as a warp does -- see `travelJustEnded`.
+        -- Deliberately not `weJustFinishedWarping`: that one stays scoped to
+        -- #194's arrival-window feature, which is about landing in an anomaly
+        -- rather than about the commander.
+        weJustFinishedTraveling : Bool
+        weJustFinishedTraveling =
+            travelJustEnded
+                { travelingLastReading = botMemoryBefore.shipTravelingInLastReading
                 , readingNow = context.readingFromGameClient
                 }
 
@@ -5463,22 +5545,29 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         closingOnTheCommanderSinceLandingNow =
             landingCloseAfterReading
                 { closeWasOwed = botMemoryBefore.closingOnTheCommanderSinceLanding
-                , justLanded = weJustFinishedWarping
+                , justLanded = weJustFinishedTraveling
                 , shipIsApproaching = shipIsApproachingNow
                 }
 
         -- #428. The budget the ask carries into this reading, refilled by the
-        -- same warp ending that re-arms the window above -- the two are one
+        -- same landing that re-arms the window above -- the two are one
         -- event, and a window re-armed onto a spent budget is a give-up that
         -- can never be taken back. Read here as well as by the counter below,
         -- because the decision reads this reading's count: predicting the step
         -- against the un-refilled value would leave the counter and the arm
         -- disagreeing about whether the landing had bought anything, which is
         -- #102's defect.
+        --
+        -- `weJustFinishedTraveling` rather than `weJustFinishedWarping`, for
+        -- the same reason the window above reads it: a gate jump re-arms
+        -- `closingOnTheCommanderSinceLanding` exactly as a warp does, so a
+        -- refill that only recognised warps would leave a jump landing
+        -- opening the window onto the very budget #428 says must not survive
+        -- one.
         approachAskedReadingsCarriedIn : Int
         approachAskedReadingsCarriedIn =
             askedReadingsRefilledByLanding
-                { justLanded = weJustFinishedWarping
+                { justLanded = weJustFinishedTraveling
                 , spentBefore = botMemoryBefore.approachFleetCommanderAskedReadings
                 }
 
@@ -5553,10 +5642,14 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- `GAVE UP after 30 readings asking to warp to '...', who is on this
         -- grid` beside the approach's own give-up, so neither way of reaching
         -- the commander was left.
+        --
+        -- `weJustFinishedTraveling`, not `weJustFinishedWarping`, so a gate
+        -- jump refills this budget too -- see `approachAskedReadingsCarriedIn`
+        -- above for why.
         fleetMateWarpAskedReadingsCarriedIn : Int
         fleetMateWarpAskedReadingsCarriedIn =
             askedReadingsRefilledByLanding
-                { justLanded = weJustFinishedWarping
+                { justLanded = weJustFinishedTraveling
                 , spentBefore = botMemoryBefore.goToFleetMateWarpAskedReadings
                 }
 
@@ -5689,6 +5782,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         botMemoryBefore.overviewWindows
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoOverviewWindowsMemory context.readingFromGameClient
     , shipWarpingInLastReading = shipIsWarping
+    , shipTravelingInLastReading = shipIsTraveling
     , readingsSinceWarpEnded = readingsSinceWarpEnded
     , visitedAnomalies = visitedAnomalies
     , notEnoughBandwidthToLaunchDrone = notEnoughBandwidthToLaunchDrone
@@ -12744,9 +12838,13 @@ approachFleetCommanderHasBeenGivenUpOn askedReadings =
 {-| Whether this ship has landed and has not yet been seen closing on the
 commander. #397.
 
-**Opened by the warp ending and closed by the client's own word, and by nothing
-else.** `warpJustEnded` is the corrected trigger (#194 / #205 -- previous
-reading `Just True`, a ship UI present now, this reading not `Just True`), and
+**Opened by a warp or a gate jump ending, and closed by the client's own word,
+and by nothing else.** `travelJustEnded` is the trigger (built on #194 / #205's
+corrected `warpJustEnded` shape -- previous reading `Just True`, a ship UI
+present now, this reading not `Just True` -- widened to the two manoeuvres a
+ship cannot orbit through rather than to `Warp` alone, since `wingman_run22.log`
+showed a chained gate jump leaving `shipIsApproaching` stuck on a stale reading
+for 600+ lines while the commander's distance only grew), and
 `shipIsApproachingFromReading` is the same `ManeuverApproach` read that already
 stops the ask. So the window is sized by the manoeuvre landing rather than by a
 number picked for feel, which is the half #194's own arrival window got wrong
