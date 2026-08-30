@@ -93,12 +93,17 @@ rather than predicted:
     rather than both reading the shared rule -- fails
     `test_the_refill_is_one_rule_with_two_readers` and
     `test_the_refill_is_keyed_on_the_corrected_warp_end_trigger`;
- 9. `CloseAWindowLeftOverTheClient` dropped from the spend list, which is the
-    out-of-scope change made by accident -- fails
-    `test_the_stray_window_defect_is_left_alone`;
-10. the stray-window clause hoisted above the give-up, which is the other half
-    of the same out-of-scope change -- fails
-    `test_the_step_ladder_is_unchanged`.
+ 9. `CloseAWindowLeftOverTheClient` dropped from the spend list, so a rescue
+    that does not land can outlive the ask it is rescuing -- fails
+    `test_a_close_that_is_dispatched_still_spends_a_reading`;
+10. the stray-window clause hoisted above the give-up -- fails
+    `test_the_step_ladder_is_as_the_two_changes_left_it`.
+
+Item 9's case was `test_the_stray_window_defect_is_left_alone` until #433, and
+the class holding it was #428's marker for a defect it named and deliberately
+did not fix. #433 fixed it, so the marker is replaced rather than deleted --
+see `TheStrayWindowDefectWasFixedSeparatelyTest` for what is still asserted
+here and what moved to `test_wingman_unclosable_window`.
 
 The cases run the real `Bot.elm` through `elm repl` and read its source.
 Nothing here reads a live client, the recorded corpus, or a running bot.
@@ -616,8 +621,12 @@ class TheCountersReadTheSharedRuleTest(unittest.TestCase):
         the count this update writes, so a memory update that predicts the step
         against `botMemoryBefore`'s spent count would charge nothing on the
         landing reading while the arm asked on it."""
+        # Read off `approachStepNow` since #433, which is where the prediction
+        # moved when the memory update grew a second thing to derive from it.
+        # Which binding holds it does not matter; what does is that the number
+        # it is predicted against is the refilled one.
         binding = collapsed(
-            indented_let_binding(self.source, "askingTheCommanderForAnApproach"))
+            indented_let_binding(self.source, "approachStepNow"))
         self.assertIn("askedReadings = approachAskedReadingsCarriedIn", binding)
         self.assertNotIn(
             "botMemoryBefore.approachFleetCommanderAskedReadings", binding)
@@ -625,12 +634,18 @@ class TheCountersReadTheSharedRuleTest(unittest.TestCase):
     def test_the_refill_is_one_rule_with_two_readers(self):
         """Both counters reach the reset through the same declaration, so the
         approach and the fleet-mate warp cannot come to disagree about what a
-        landing is -- which is what a second copy of the condition would be."""
+        landing is -- which is what a second copy of the condition would be.
+
+        Three readers since #433: the record of how much of the approach budget
+        went to closing a window is refilled by the same landing and through
+        the same rule, since a window that ate one grid's readings must not
+        still be reported against the next grid's ask."""
         readers = re.findall(r"askedReadingsRefilledByLanding", self.source)
         # The declaration, its type annotation, and one call from each of the
-        # two carried-in bindings.
-        self.assertEqual(len(readers), 4)
+        # three carried-in bindings.
+        self.assertEqual(len(readers), 5)
         for binding in ("approachAskedReadingsCarriedIn",
+                        "approachCloseWindowReadingsCarriedIn",
                         "fleetMateWarpAskedReadingsCarriedIn"):
             with self.subTest(binding=binding):
                 self.assertIn(
@@ -638,14 +653,25 @@ class TheCountersReadTheSharedRuleTest(unittest.TestCase):
                     indented_let_binding(self.source, binding))
 
 
-class TheStrayWindowDefectIsOutOfScopeTest(unittest.TestCase):
-    """#428 names this and says to leave it alone, so it is pinned unchanged.
+class TheStrayWindowDefectWasFixedSeparatelyTest(unittest.TestCase):
+    """This was #428's deferral marker, and #433 is what spends it.
 
-    `CloseAWindowLeftOverTheClient` spends a reading of the approach budget,
-    and three of the four pilots also reported `A 'InfoWindow' is still open
-    over the client` -- so the 40 readings may have gone entirely on closing a
-    window rather than on any approach attempt. That is #426's shape, it wants
-    its own fix and its own evidence, and it must stay separately reviewable.
+    It used to assert the stray-window defect was **left alone**: #428 named it
+    -- three of the four pilots also reported `A 'InfoWindow' is still open
+    over the client`, so the 40 readings may have gone entirely on closing a
+    window rather than on any approach attempt -- and pinned it unchanged so
+    that a later fix had to be deliberate rather than accidental.
+
+    It was deliberate, and it is #433. Replacing the class rather than deleting
+    it keeps what was worth keeping: the halves of that ladder this file's own
+    subject depends on are still asserted here, so a refill that started
+    charging readings for a window would still be caught by the file that is
+    about the refill. What the marker cannot go on saying is that the defect is
+    still there, since asserting the absence of a fix that has landed is a case
+    that fails for being right (`TheMissionRunnerIsUntouched`, twice).
+
+    The fix's own cases are `test_wingman_unclosable_window`. This class asks
+    only what this file needs to be true of the ladder around it.
     """
 
     @classmethod
@@ -658,7 +684,10 @@ class TheStrayWindowDefectIsOutOfScopeTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.repl.close()
 
-    def test_the_stray_window_defect_is_left_alone(self):
+    def test_a_close_that_is_dispatched_still_spends_a_reading(self):
+        """Untouched by #433 and deliberately so: a rescue that does not land
+        must not outlive the ask it is rescuing, which is what makes the
+        refilled budget a bound on the window as well as on the ask."""
         self.assertEqual(
             self.repl.evaluate([
                 "List.member CloseAWindowLeftOverTheClient"
@@ -666,17 +695,35 @@ class TheStrayWindowDefectIsOutOfScopeTest(unittest.TestCase):
             ]),
             [True])
 
-    def test_the_step_ladder_is_unchanged(self):
-        """The clause that returns it, and the ordering around it: the give-up
-        before the close, the close before "already approaching"."""
+    def test_a_close_that_is_not_dispatched_spends_nothing(self):
+        """#433's half. A reading the arm puts no effect on the client for is
+        not a reading of the budget this file refills."""
+        self.assertEqual(
+            self.repl.evaluate([
+                "List.member AWindowThisBotCannotCloseIsOpen"
+                " approachFleetCommanderAnswersThatSpendAReading",
+            ]),
+            [False])
+
+    def test_the_step_ladder_is_as_the_two_changes_left_it(self):
+        """The give-up before either window answer, the halt before the close
+        so it is reachable at all, and both before "already approaching"."""
         body = collapsed(declaration(
             self.source, "approachFleetCommanderStep approachCase ="))
+        self.assertIn(
+            "else if approachCase.strayWindowIsOpen"
+            " && not approachCase.strayWindowCanBeClosed"
+            " && 0 < approachCase.askedReadings then"
+            " AWindowThisBotCannotCloseIsOpen", body)
         self.assertIn(
             "else if approachCase.strayWindowIsOpen"
             " && 0 < approachCase.askedReadings then"
             " CloseAWindowLeftOverTheClient", body)
         self.assertLess(
             body.index("GaveUpOnTheApproach"),
+            body.index("AWindowThisBotCannotCloseIsOpen"))
+        self.assertLess(
+            body.index("AWindowThisBotCannotCloseIsOpen"),
             body.index("CloseAWindowLeftOverTheClient"))
         self.assertLess(
             body.index("CloseAWindowLeftOverTheClient"),

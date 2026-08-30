@@ -264,19 +264,28 @@ class WingmanManeuverRepl(WingmanRepl):
 
 
 def step(setting_is_yes=True, commander_on_grid=True, warping=False,
-         approaching=False, stray_window=False, panel_shows=False,
-         panel_offers=False, asked=0):
-    """The shipped rule, asked about one reading."""
+         approaching=False, stray_window=False, stray_window_closable=True,
+         panel_shows=False, panel_offers=False, asked=0):
+    """The shipped rule, asked about one reading.
+
+    `stray_window_closable` defaults to `True` so that every case written
+    before #433 goes on asking what it asked: a window this bot can press the
+    close button of. The case for the other answer is
+    `test_wingman_unclosable_window`, which is where the fixtures that make a
+    close button unpressable through the real parser live.
+    """
     return ("approachFleetCommanderStep { settingIsYes = %s"
             ", commanderOnGrid = %s"
             ", shipIsWarpingOrJumping = %s"
             ", shipIsApproaching = %s"
             ", strayWindowIsOpen = %s"
+            ", strayWindowCanBeClosed = %s"
             ", panelShowsTheCommander = %s"
             ", panelOffersApproach = %s"
             ", askedReadings = %s }"
             % (setting_is_yes, commander_on_grid, warping, approaching,
-               stray_window, panel_shows, panel_offers, asked))
+               stray_window, stray_window_closable, panel_shows, panel_offers,
+               asked))
 
 
 def wingman_root_body(source):
@@ -456,13 +465,19 @@ class TheStationKeepingDecisionTest(unittest.TestCase):
         """PILOT.md's recorded mis-click opened a Database Information window,
         and the live run that removed the cascade opened an `InfoWindow` and a
         `LoggerWindow`. Leaving one on top of the client is not acceptable, so
-        this outranks both 'already approaching' and another attempt."""
+        this outranks both 'already approaching' and another attempt.
+
+        Written with `stray_window_closable` spelled out since #433, because
+        that is now the condition this answer turns on and a case relying on
+        the helper's default would read as though it did not."""
         self.assertEqual(
             self.repl.evaluate(
                 ["%s == CloseAWindowLeftOverTheClient"
-                 % step(stray_window=True, asked=1),
+                 % step(stray_window=True, stray_window_closable=True,
+                        asked=1),
                  "%s == CloseAWindowLeftOverTheClient"
-                 % step(stray_window=True, approaching=True, asked=1)]),
+                 % step(stray_window=True, stray_window_closable=True,
+                        approaching=True, asked=1)]),
             [True, True])
 
     def test_a_window_open_before_the_ask_started_is_not_this_bots_to_close(
@@ -1138,8 +1153,15 @@ class TheAnswersThatSpendAReadingTest(unittest.TestCase):
     ADVANCES = ("ApproachByDoubleClick", "SelectTheCommandersRow",
                 "PressTheApproachButton", "WaitForTheApproachButton",
                 "CloseAWindowLeftOverTheClient")
+    # `AWindowThisBotCannotCloseIsOpen` joined this list in #433 rather than
+    # the one above, which is the whole of that change: the arm dispatches
+    # nothing on that answer, so there is nothing for the budget to bound. Its
+    # own cases are in `test_wingman_unclosable_window`; what this file keeps
+    # is the exhaustive question, since a constructor added without being
+    # thought about is what this class exists to catch.
     SILENT = ("ApproachFleetCommanderIsOff", "NoCommanderOnGrid",
               "ShipIsWarpingOrJumping", "AlreadyApproaching",
+              "AWindowThisBotCannotCloseIsOpen",
               "GaveUpOnTheApproach")
 
     @classmethod
