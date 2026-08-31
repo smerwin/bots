@@ -603,13 +603,17 @@ class TheCallOverridesTheRatsGuardTest(unittest.TestCase):
         self.assertEqual(
             self.repl.evaluate([
                 "gateMayBeTaken { ratsOnTheGrid = False"
-                ", calledByTheCommander = False, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
+                ", calledByTheCommander = False, commanderLeftTheGrid = False"
+                ", rejoiningAfterARetreat = False, deadspaceRefusedTheWarp = False }",
                 "gateMayBeTaken { ratsOnTheGrid = True"
-                ", calledByTheCommander = False, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
+                ", calledByTheCommander = False, commanderLeftTheGrid = False"
+                ", rejoiningAfterARetreat = False, deadspaceRefusedTheWarp = False }",
                 "gateMayBeTaken { ratsOnTheGrid = False"
-                ", calledByTheCommander = True, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
+                ", calledByTheCommander = True, commanderLeftTheGrid = False"
+                ", rejoiningAfterARetreat = False, deadspaceRefusedTheWarp = False }",
                 "gateMayBeTaken { ratsOnTheGrid = True"
-                ", calledByTheCommander = True, commanderLeftTheGrid = False, rejoiningAfterARetreat = False }",
+                ", calledByTheCommander = True, commanderLeftTheGrid = False"
+                ", rejoiningAfterARetreat = False, deadspaceRefusedTheWarp = False }",
             ]),
             [True, False, True, True],
             "only the call may take a gate with rats up, and it always may")
@@ -1049,30 +1053,34 @@ class TheRecallIsTheOneEveryOtherDepartingArmUsesTest(unittest.TestCase):
         counter and the status line come apart.
 
         The record carries a third field since #411 -- `commanderLeftTheGrid`,
-        the commander having gone through the gate without saying so, which
-        overrides the same guard #393's call does. The signature is pinned
-        rather than merely present so that a fifth exception arriving is
-        somebody's decision here rather than something a diff slips past.
+        the commander having gone through the gate without saying so -- and a
+        fifth since #440, `deadspaceRefusedTheWarp`, which overrides the same
+        guard #393's call does. The signature is pinned rather than merely
+        present so that a further exception arriving is somebody's decision here
+        rather than something a diff slips past.
 
         **The memory update asks `gateLicenceFromCase` since #439**, which is
         the enumeration `gateMayBeTaken` is itself defined over rather than a
         second one: the gate's give-up budget is refilled by a reason nothing
         has been spent under, and that needs *which* reason licensed a reading
         and not only that one did. The two share one closed record type, so a
-        fifth exception is still a type error at every site rather than a
-        licence the refill silently never sees.
+        further exception is still a type error at every site rather than a
+        licence the refill silently never sees -- and #440 is the first one to
+        arrive since, so both signatures are pinned with it in them.
         """
         self.assertIn(
             "gateMayBeTaken : { ratsOnTheGrid : Bool"
             " , calledByTheCommander : Bool"
             " , commanderLeftTheGrid : Bool"
-            " , rejoiningAfterARetreat : Bool } -> Bool",
+            " , rejoiningAfterARetreat : Bool"
+            " , deadspaceRefusedTheWarp : Bool } -> Bool",
             collapsed(self.source))
         self.assertIn(
             "gateLicenceFromCase : { ratsOnTheGrid : Bool"
             " , calledByTheCommander : Bool"
             " , commanderLeftTheGrid : Bool"
-            " , rejoiningAfterARetreat : Bool } -> GateLicence",
+            " , rejoiningAfterARetreat : Bool"
+            " , deadspaceRefusedTheWarp : Bool } -> GateLicence",
             collapsed(self.source))
         self.assertEqual(
             len(re.findall(r"^gateMayBeTaken\b", self.source, re.M)), 2,

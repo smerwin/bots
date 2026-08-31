@@ -188,12 +188,18 @@ class WingmanRepl(ElmRepl):
         " { panelShowsTheGate = False"
         ", panelOffersActivateGate = False"
         ", askedReadings = asked }",
-        # The four inputs, in the order the arm hands them over.
+        # The four inputs this file varies, in the order the arm hands them
+        # over. #440's `deadspaceRefusedTheWarp` is a fifth reason and is held
+        # off in every row here, for the reason every other file that touches
+        # this record holds an exception off: one that is switched on would
+        # answer for the reasons under test. Its own refill is
+        # `test_wingman_reads_the_deadspace_warp_refusal`'s.
         "gateCase = \\called -> \\left -> \\rejoining -> \\rats ->"
         " { ratsOnTheGrid = rats"
         ", calledByTheCommander = called"
         ", commanderLeftTheGrid = left"
-        ", rejoiningAfterARetreat = rejoining }",
+        ", rejoiningAfterARetreat = rejoining"
+        ", deadspaceRefusedTheWarp = False }",
         "licence = \\called -> \\left -> \\rejoining -> \\rats ->"
         " gateLicenceFromCase (gateCase called left rejoining rats)",
         # The four licences the cases name. `clearOnly` is the one the live
@@ -364,9 +370,10 @@ class TheLicenceIsThePermissionsOwnReasonsTest(unittest.TestCase):
                 "not noGateLicence.calledByTheCommander",
                 "not noGateLicence.commanderLeftTheGrid",
                 "not noGateLicence.rejoiningAfterARetreat",
+                "not noGateLicence.deadspaceRefusedTheWarp",
                 "not noGateLicence.gridIsClearOfRats",
             ]),
-            [True] * 4)
+            [True] * 5)
 
 
 class TheRefillRuleTest(unittest.TestCase):
