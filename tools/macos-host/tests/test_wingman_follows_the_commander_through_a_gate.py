@@ -1339,11 +1339,21 @@ class TheWiringTest(unittest.TestCase):
         arm -- and on the reading a follow begins that is the difference between
         `accelerationGateRefusesThisShipTicks` being reachable and not. #397's
         arrangement and #34's shape without it."""
-        binding = indented_let_binding(self.source, "askingTheGateToOpen")
+        # Read off `gateLicenceNow` since #439, which is where the four inputs
+        # moved when the memory update grew a second thing to derive from them:
+        # the budget for asking a gate is refilled by a reason nothing has been
+        # spent under, so the licence has to be the same answer the ask is
+        # spent under. Which binding holds it does not matter; what does is
+        # that the presence it reads is this reading's.
+        binding = indented_let_binding(self.source, "gateLicenceNow")
         self.assertIn(
             "commanderLeftTheGrid = followingTheCommanderThroughAGate"
             " commanderGridPresenceNow", collapsed(binding))
         self.assertNotIn("botMemoryBefore.commanderGridPresence", binding)
+        self.assertIn(
+            "gateIsLicensed gateLicenceNow",
+            collapsed(indented_let_binding(self.source,
+                                           "askingTheGateToOpen")))
 
     def test_one_rule_with_five_readers(self):
         """`followingTheCommanderThroughAGate` is asked by the arm, the press's
@@ -1357,10 +1367,21 @@ class TheWiringTest(unittest.TestCase):
         # trap `declaration` strips comments for one screen up.
         without_comments = re.sub(r"--[^\n]*", "", self.source)
         sites = re.findall(r"commanderLeftTheGrid =\s*(\S+)", without_comments)
-        self.assertEqual(len(sites), 3, sites)
-        for site in sites:
-            with self.subTest(site=site):
-                self.assertEqual(site, "followingTheCommanderThroughAGate")
+        self.assertEqual(
+            sites.count("followingTheCommanderThroughAGate"), 3, sites)
+        # #439's `GateLicence` carries this reason as a field of its own, so
+        # three further sites are the record's plumbing rather than a second
+        # opinion about what a follow is: the empty licence, the one derived
+        # from the case, and the memory of reasons a budget has been spent
+        # under. Named exactly, so a fourth site that answered something else
+        # is still a failure here.
+        self.assertEqual(
+            sorted(site for site in sites
+                   if site != "followingTheCommanderThroughAGate"),
+            ["False",
+             "gateCase.commanderLeftTheGrid",
+             "licenceCase.before.commanderLeftTheGrid"],
+            sites)
         self.assertEqual(
             self.source.count("followTheCommanderThroughTheGate\n        {"), 1)
 

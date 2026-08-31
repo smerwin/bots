@@ -1053,6 +1053,14 @@ class TheRecallIsTheOneEveryOtherDepartingArmUsesTest(unittest.TestCase):
         overrides the same guard #393's call does. The signature is pinned
         rather than merely present so that a fifth exception arriving is
         somebody's decision here rather than something a diff slips past.
+
+        **The memory update asks `gateLicenceFromCase` since #439**, which is
+        the enumeration `gateMayBeTaken` is itself defined over rather than a
+        second one: the gate's give-up budget is refilled by a reason nothing
+        has been spent under, and that needs *which* reason licensed a reading
+        and not only that one did. The two share one closed record type, so a
+        fifth exception is still a type error at every site rather than a
+        licence the refill silently never sees.
         """
         self.assertIn(
             "gateMayBeTaken : { ratsOnTheGrid : Bool"
@@ -1060,16 +1068,30 @@ class TheRecallIsTheOneEveryOtherDepartingArmUsesTest(unittest.TestCase):
             " , commanderLeftTheGrid : Bool"
             " , rejoiningAfterARetreat : Bool } -> Bool",
             collapsed(self.source))
+        self.assertIn(
+            "gateLicenceFromCase : { ratsOnTheGrid : Bool"
+            " , calledByTheCommander : Bool"
+            " , commanderLeftTheGrid : Bool"
+            " , rejoiningAfterARetreat : Bool } -> GateLicence",
+            collapsed(self.source))
         self.assertEqual(
             len(re.findall(r"^gateMayBeTaken\b", self.source, re.M)), 2,
             "one annotation and one definition")
+        self.assertIn(
+            "gateIsLicensed (gateLicenceFromCase gateCase)",
+            collapsed(declaration(self.source, "gateMayBeTaken gateCase =")))
         for reader in ("takeTheAccelerationGate context gateToTake =",
-                       "\nupdateMemoryForNewReadingFromGame context botMemoryBefore =",
                        "describeAccelerationGateAsk context ="):
             self.assertIn("gateMayBeTaken",
                           declaration(self.source, reader),
                           "%s has to ask the rule rather than restate it"
                           % reader)
+        self.assertIn(
+            "gateLicenceFromCase",
+            declaration(
+                self.source,
+                "\nupdateMemoryForNewReadingFromGame context botMemoryBefore ="),
+            "the memory update has to ask the licence rather than restate it")
 
     def test_nothing_else_re_derives_whether_drones_are_in_space(self):
         """`dronesAreInSpace` and the count are one definition, so the recall,

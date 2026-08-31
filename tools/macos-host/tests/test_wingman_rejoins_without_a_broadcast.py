@@ -945,10 +945,27 @@ class TheWiringIsWhereItSaysItIsTest(unittest.TestCase):
     def test_the_guard_has_one_declaration(self):
         """One rule with four readers, so the arm, the press, the memory update
         and the status clause cannot hold four opinions about when #348's guard
-        applies."""
+        applies.
+
+        **Two of those readers ask the licence rather than the `Bool` since
+        #439**, and that is the same enumeration rather than a second one:
+        `gateMayBeTaken` is now defined as `gateIsLicensed` over
+        `gateLicenceFromCase`, and the memory update asks the licence because it
+        has to know *which* reason licensed a reading to refill the gate budget
+        when a new one arrives. What has to stay true is what this case asks:
+        one declaration of the guard, and no reader with a disjunction of its
+        own.
+        """
         self.assertEqual(self.source.count("\ngateMayBeTaken :"), 1)
         self.assertEqual(self.source.count("\ngateMayBeTaken gateCase =\n"), 1)
-        self.assertGreaterEqual(self.source.count("gateMayBeTaken\n"), 3)
+        self.assertEqual(self.source.count("\ngateLicenceFromCase :"), 1)
+        self.assertGreaterEqual(self.source.count("gateMayBeTaken\n"), 2)
+        self.assertIn(
+            "gateIsLicensed (gateLicenceFromCase gateCase)",
+            declaration(self.source, "gateMayBeTaken"))
+        self.assertIn(
+            "gateLicenceFromCase",
+            declaration(self.source, "updateMemoryForNewReadingFromGame"))
 
     def test_the_rejoin_permission_has_one_declaration_and_four_readers(self):
         """A constructor comparison restated beside each reader is #102's
@@ -964,11 +981,21 @@ class TheWiringIsWhereItSaysItIsTest(unittest.TestCase):
         spends the recovery's budget, so taking the gate permission from it is
         what stops the counter and the permission disagreeing about which
         reading it is."""
+        # Read off `gateLicenceNow` since #439, which is where the four inputs
+        # moved when the memory update grew a second thing to derive from them
+        # -- the licence a spent budget is refilled by has to be the same
+        # answer the ask is spent under. Which binding holds it does not
+        # matter; what does is that the rejoin's half comes from
+        # `recoveringStepNow`.
+        #
         # The **binding** line rather than the type annotation above it: the
         # two are indented identically, so a reader anchored on the annotation
         # stops on the very next line and asserts nothing.
-        binding = indented_block(self.source, "        askingTheGateToOpen =")
+        binding = indented_block(self.source, "        gateLicenceNow =")
         self.assertIn("rejoinIsTakingThisGate recoveringStepNow", binding)
+        self.assertIn(
+            "gateIsLicensed gateLicenceNow",
+            indented_block(self.source, "        askingTheGateToOpen ="))
 
     def test_the_rejoin_reuses_the_one_gate_mechanism(self):
         """`accelerationGateStep` rather than a second select-then-press, so the
