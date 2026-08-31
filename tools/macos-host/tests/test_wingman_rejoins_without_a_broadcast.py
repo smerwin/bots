@@ -225,14 +225,18 @@ def may_be_taken(rats, called, rejoining):
     """`gateMayBeTaken`, over the two `Bool`s this issue owns.
 
     The record grew a fourth field when #411 landed -- `commanderLeftTheGrid`,
-    the commander having gone through a gate without saying so. It is held off
-    in every row here, for the reason this file already holds `calledByTheCommander`
-    off where it is asking about the rejoin: an exception that is switched on
-    would answer for the one under test. #411's own combinations are
-    `test_wingman_follows_the_commander_through_a_gate`'s.
+    the commander having gone through a gate without saying so -- and a fifth
+    when #440 did: `deadspaceRefusedTheWarp`, the client refusing this ship a
+    warp out of the pocket at all. Both are held off in every row here, for the
+    reason this file already holds `calledByTheCommander` off where it is asking
+    about the rejoin: an exception that is switched on would answer for the one
+    under test. Their own combinations are
+    `test_wingman_follows_the_commander_through_a_gate`'s and
+    `test_wingman_reads_the_deadspace_warp_refusal`'s.
     """
     return ("gateMayBeTaken { ratsOnTheGrid = %s, calledByTheCommander = %s"
-            ", rejoiningAfterARetreat = %s, commanderLeftTheGrid = False }"
+            ", rejoiningAfterARetreat = %s, commanderLeftTheGrid = False"
+            ", deadspaceRefusedTheWarp = False }"
             % (rats, called, rejoining))
 
 

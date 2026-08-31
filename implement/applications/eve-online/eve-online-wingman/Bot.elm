@@ -856,6 +856,39 @@ type alias BotMemory =
     -- branch that would otherwise say so is precisely the branch that has just
     -- stopped running.
     , messageBoxLastChange : Maybe String
+
+    -- The last transient centre-screen popup the client showed, and how stale
+    -- it is. Ported from `eve-online-saxrat`, which has carried it since #123 --
+    -- see `QuickMessageSighting`. #440 is the first decision in this repository
+    -- that reads one: `deadspaceRefusedTheWarp`.
+    , quickMessage : Maybe QuickMessageSighting
+    }
+
+
+{-| The last transient centre-screen popup the client showed, and how stale it is.
+
+Ported from `eve-online-saxrat`'s declaration of the same name, fields and
+bodies unchanged, so the bot that has a corpus of this channel and the bot that
+is starting one read it the same way. Its own argument for the shape is in that
+file and is not restated here; what follows is only what this bot adds.
+
+**This bot reads the channel for a decision, which saxrat's copy deliberately
+did not when it was written.** #123 held that line until there was a corpus, and
+there is one now: the deadspace warp refusal, quoted byte for byte rather than
+guessed at. See `deadspaceWarpRefusalMarker`.
+
+**`readingsSince` is what keeps a refusal from licensing a gate forever**, and
+every consumer has to ask it -- `deadspaceRefusedTheWarp` does so inside the
+rule rather than trusting its callers, since `memory.quickMessage` and
+`quickMessageOnScreen` are the same type at a call site and only one of them is
+dated.
+
+-}
+type alias QuickMessageSighting =
+    { text : String
+    , messagesInLayer : Int
+    , displayTextsInMessage : Int
+    , readingsSince : Int
     }
 
 
@@ -4647,6 +4680,7 @@ initBotMemory =
     , cloakingInterferesWithModules = False
     , messageBoxStandoff = Nothing
     , messageBoxLastChange = Nothing
+    , quickMessage = Nothing
     }
 
 
@@ -4765,6 +4799,7 @@ statusTextFromState context =
                     , [ describeFleetMembership context, describeFriendlyFireGuard context ]
                     , [ describeAccelerationGateAsk context
                       , describeCommanderFollowThroughGate context
+                      , describeQuickMessage context.memory.quickMessage
                       ]
                     , [ describeCalledObject context ]
                     , [ describeWeaponsAsk context ]
@@ -5278,6 +5313,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 , commanderOnGrid = commanderOnGridFromReading context.readingFromGameClient
                 }
 
+        -- The popup this reading carries, aged if there is none. Computed once
+        -- here because both the memory this update writes and the gate counter
+        -- it advances have to ask the same sighting -- a counter reading
+        -- `botMemoryBefore`'s would be one reading behind the arm's, which is
+        -- `commanderGridPresenceNow`'s own reason.
+        quickMessageNow : Maybe QuickMessageSighting
+        quickMessageNow =
+            quickMessageAfterReading
+                { onScreenNow = quickMessageOnScreen context.readingFromGameClient
+                , before = botMemoryBefore.quickMessage
+                }
+
         visitedAnomalies : Dict.Dict String MemoryOfAnomaly
         visitedAnomalies =
             if shipIsWarping == Just True then
@@ -5397,7 +5444,8 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- overview, since #348 is what the counter below exists for, or the
         -- commander having called this gate, which is #393's override, or the
         -- retreat recovery gating back to him, which is #429's, or #411's
-        -- follow. Asked through `gateLicenceFromCase` rather than restated, so
+        -- follow, or the client having refused this ship a warp for deadspace,
+        -- which is #440's. Asked through `gateLicenceFromCase` rather than restated, so
         -- the arm's permission and the budget's refill read one enumeration of
         -- the reasons (#439). The rejoin's own half comes from
         -- `recoveringStepNow` above, the same answer that decides whether this
@@ -5426,6 +5474,15 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                             followingTheCommanderThroughAGate
                                 commanderGridPresenceNow
                                 context.readingFromGameClient
+                        , deadspaceRefusedTheWarp =
+                            -- This reading's sighting rather than
+                            -- `botMemoryBefore`'s, for the same reason the
+                            -- presence above is: the decision reads the memory
+                            -- this update writes, so a counter advanced under a
+                            -- sighting one reading behind the arm's would leave
+                            -- `accelerationGateRefusesThisShipTicks` unreachable
+                            -- on the reading the refusal arrives.
+                            deadspaceRefusedTheWarp quickMessageNow
                         }
 
         -- Same shape as `askingAnAccelerationGateToOpen` in saxrat: some reason
@@ -6054,6 +6111,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         else
             0
     , closingOnTheCommanderSinceLanding = closingOnTheCommanderSinceLandingNow
+    , quickMessage = quickMessageNow
     , commanderGridPresence = commanderGridPresenceNow
     , activateGateButtonRegion =
         activateGateButtonRegionFromReading context.readingFromGameClient
@@ -6482,6 +6540,195 @@ readingFromGameClientSaysNotEnoughBandwidthToLaunchDrone reading =
         |> Maybe.withDefault []
         |> List.map Tuple.first
         |> List.any abovemainMessageSaysNotEnoughBandwidthToLaunchDrone
+
+
+{-| The quick message this reading carries, with what the parser dropped to get it.
+
+`eve-online-saxrat`'s declaration of the same name, unchanged. Reads the same two
+`List.head`s `parseQuickMessage` does and reports how many candidates each of
+them chose from -- see `QuickMessageSighting`. `readingsSince` is `0` here
+because this is a message on the screen now; ageing it is
+`quickMessageAfterReading`'s job.
+
+The text is trimmed of surrounding whitespace and nothing else. Case,
+punctuation and interior spacing are exactly what the client wrote, because a
+matcher is written against this string and a normalisation applied here is one
+nobody downstream can undo -- `deadspaceWarpRefusalMarker` is that matcher.
+
+-}
+quickMessageOnScreen : ReadingFromGameClient -> Maybe QuickMessageSighting
+quickMessageOnScreen readingFromGameClient =
+    readingFromGameClient.layerAbovemain
+        |> Maybe.andThen
+            (\layerAbovemain ->
+                layerAbovemain.quickMessage
+                    |> Maybe.map
+                        (\quickMessage ->
+                            { text = String.trim quickMessage.text
+                            , messagesInLayer =
+                                layerAbovemain.uiNode
+                                    |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+                                    |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "QuickMessage")
+                                    |> List.length
+                            , displayTextsInMessage =
+                                quickMessage.uiNode.uiNode
+                                    |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+                                    |> List.length
+                            , readingsSince = 0
+                            }
+                        )
+            )
+
+
+{-| The sighting to carry into the next reading.
+
+`eve-online-saxrat`'s declaration of the same name, unchanged. A message on the
+screen replaces whatever was remembered and starts the age at zero; a reading
+with no message ages the last one by one. Nothing expires it within the session,
+because an expiry would be a number with no evidence behind it and the age
+already says how stale the sighting is.
+
+**Nothing here decides how long a sighting stays _believable_**, which is a
+different question and is each consumer's own -- see
+`deadspaceWarpRefusalLicensesAGateForReadings`. Ageing without expiring is what
+lets one memory field answer both "what did the client last say" for the status
+line and "did it say it recently enough to act on" for a rule.
+
+Written as a rule over a record rather than inline in
+`updateMemoryForNewReadingFromGame` so a case can fold it over a sequence of
+readings and see the age advance, which is the half that can be wrong.
+
+-}
+quickMessageAfterReading :
+    { onScreenNow : Maybe QuickMessageSighting
+    , before : Maybe QuickMessageSighting
+    }
+    -> Maybe QuickMessageSighting
+quickMessageAfterReading state =
+    case state.onScreenNow of
+        Just onScreenNow ->
+            Just { onScreenNow | readingsSince = 0 }
+
+        Nothing ->
+            state.before
+                |> Maybe.map (\before -> { before | readingsSince = before.readingsSince + 1 })
+
+
+{-| How much of a quick message the status line will carry.
+
+`eve-online-saxrat`'s constant, unchanged. Generous on purpose: the point of
+printing this at all is that the wording becomes evidence, and a message clipped
+to a few characters is a message nobody can write a matcher from. The cap exists
+so one pathological string cannot push the rest of the status line out of the
+host's own log truncation, not to keep the line tidy.
+
+-}
+quickMessageStatusCharacterBudget : Int
+quickMessageStatusCharacterBudget =
+    400
+
+
+{-| How long a quick message stays in the status line after it left the screen.
+
+`eve-online-saxrat`'s constant, unchanged. Past this the clause says "none
+recent" rather than reprinting a notice from minutes ago beside a reading it has
+nothing to do with.
+
+**This is the status line's bound and no rule reads it.** What licenses a gate is
+`deadspaceWarpRefusalLicensesAGateForReadings`, which is a much shorter window
+and is argued from the arm it licenses. Two numbers rather than one because they
+answer different questions -- how long a wording is worth showing an operator,
+and how long a refusal is worth acting on -- and collapsing them would tie the
+second to a number chosen for the first.
+
+-}
+quickMessageStaleAfterReadings : Int
+quickMessageStaleAfterReadings =
+    100
+
+
+{-| A quick message rendered as one line, losing nothing that cannot be undone.
+
+`eve-online-saxrat`'s declaration of the same name, unchanged. Two
+transformations and no others: the text is cut to
+`quickMessageStatusCharacterBudget` characters -- and `describeQuickMessage` says
+so, with the original length, whenever it cuts -- and a newline, carriage return
+or tab is escaped rather than emitted, because the status line is
+line-structured. Backslash is escaped first so the mapping stays reversible.
+
+-}
+quickMessageTextForStatusLine : String -> String
+quickMessageTextForStatusLine text =
+    text
+        |> String.left quickMessageStatusCharacterBudget
+        |> String.replace "\\" "\\\\"
+        |> String.replace "\n" "\\n"
+        |> String.replace "\u{000D}" "\\r"
+        |> String.replace "\t" "\\t"
+
+
+{-| The quick message clause, which says what the client wrote and how old it is.
+
+`eve-online-saxrat`'s declaration of the same name, unchanged. Printed on every
+reading, including the ones with nothing to report: a clause that appears only
+when there is something to say leaves "the client said nothing" and "nothing is
+reading the client" grepping identically.
+
+Whether the message is on the screen _now_ is the first thing in the clause and
+is never implied. That matters more on this bot than on saxrat, because here a
+live sighting is the difference between a gate taken and a gate refused -- a
+stale message printed as if it were current would date the licence to the wrong
+reading.
+
+-}
+describeQuickMessage : Maybe QuickMessageSighting -> String
+describeQuickMessage sighting =
+    case sighting of
+        Nothing ->
+            "Quick message: none on this reading, and none seen this session."
+
+        Just seen ->
+            if quickMessageStaleAfterReadings < seen.readingsSince then
+                "Quick message: none recent."
+
+            else
+                "Quick msg"
+                    ++ (if seen.readingsSince == 0 then
+                            " (now)"
+
+                        else
+                            " (" ++ String.fromInt seen.readingsSince ++ " ago)"
+                       )
+                    ++ ": \""
+                    ++ quickMessageTextForStatusLine seen.text
+                    ++ "\""
+                    ++ (if String.length seen.text <= quickMessageStatusCharacterBudget then
+                            ""
+
+                        else
+                            " (CAPPED "
+                                ++ String.fromInt quickMessageStatusCharacterBudget
+                                ++ "/"
+                                ++ String.fromInt (String.length seen.text)
+                                ++ ")"
+                       )
+                    ++ (if seen.messagesInLayer <= 1 then
+                            ""
+
+                        else
+                            " (1 of "
+                                ++ String.fromInt seen.messagesInLayer
+                                ++ " quick messages in the layer -- the parser keeps the first and drops the rest)"
+                       )
+                    ++ (if seen.displayTextsInMessage <= 1 then
+                            ""
+
+                        else
+                            " (1 of "
+                                ++ String.fromInt seen.displayTextsInMessage
+                                ++ " display texts in the message -- the parser keeps the first and drops the rest)"
+                       )
+                    ++ "."
 
 
 {-| Returns the subsequence of offensive buff buttons from the ship UI that indicated that our own ship is pointed.
@@ -13442,50 +13689,74 @@ type alias AccelerationGateToAct =
 
 
 {-| Whether this bot may take a gate on this reading -- #348's guard, and the
-two exceptions to it.
+four exceptions to it.
 
-A pure rule over three `Bool`s so a case can execute it, and one declaration so
+A pure rule over five `Bool`s so a case can execute it, and one declaration so
 the arm, the memory update and the status clause cannot hold three opinions
-about when the guard applies. With both exceptions `False` it _is_ #348's guard,
+about when the guard applies. With every exception `False` it _is_ #348's guard,
 unchanged.
 
-**Both exceptions are the same thing said two ways**: the fleet is going through
-this gate and a wingman that stays behind is a ship short in the pocket the
-fleet just left. `calledByTheCommander` is #393's, and is the commander saying
-so explicitly. `commanderLeftTheGrid` is #411's, and is the commander having
-gone without saying so -- a weaker signal by a long way, which is why it is
-`followTheCommanderThroughTheGate` rather than a bare "he is not on the
-overview" and why that rule carries four guards.
+#348 refuses a gate while rats are on the overview because taking one mid-fight
+"abandons whatever the fleet is still fighting and leaves the commander a ship
+short in the pocket this bot just left". Every exception below has to answer that
+sentence, and each answers a different clause of it.
 
-**The second exception is #429's rejoin, and it is the retreat recovery's own
-reading rather than a state.** A ship gating back to its commander lands in
-rooms with rats in them -- that is what an escalation is -- so #348's guard, on
-the way back, refuses the whole rejoin rather than protecting a fight. The
-commander is off this grid by construction on those readings, so there is no
-fight of the fleet's to abandon and no pocket to leave him a ship short in,
-which is the harm #348's own wording names.
+**#440 asked whether the fourth could replace one of the three rather than join
+them, and the answer is no.** That question is worth recording rather than the
+conclusion alone, because the three were merged by union and nobody had checked.
 
-**Scoped to the reading the rejoin is acting on, not to the retreat.**
-`rejoinIsTakingThisGate` asks the shipped `RetreatRecoveryStep`, so the
-permission exists only where `recoverFromRetreat` is itself dispatching this
-gate: a recovery that has given up, one the retreat is still holding, and one
-warping somewhere all answer something else, and ordinary hunting is not
-recovering at all. That is narrower than "this ship is recovering" on purpose --
-#348's guard has to be exactly what it was on every reading the hunting arm is
-the one asking.
+  - **`calledByTheCommander`** (#393) is the commander saying go, explicitly.
+    Nothing weaker replaces an instruction.
+  - **`commanderLeftTheGrid`** (#411) and **`rejoiningAfterARetreat`** (#429) are
+    the same clause said two ways: the commander is not on this grid, so there is
+    no fleet fight here to abandon and no pocket to leave him a ship short in.
+    They are kept apart because their _guards_ differ and neither set fits the
+    other. The follow needs a prior sighting on this grid, three readings of
+    absence and exactly one gate, because it is inferring from an absence; the
+    rejoin needs none of those, because `retreatRecoveryStepNow` has already
+    established the commander is elsewhere and this ship is going to him.
+    Forcing either set onto both would either strand the rejoin or let the
+    hunting arm follow a gate on one reading of a missing row.
+  - **`deadspaceRefusedTheWarp`** (#440) answers a clause the other three do not
+    touch. It is not evidence about the commander at all; it is the client
+    stating that **this ship cannot leave this grid by warping**, so the gate is
+    the only exit there is. #348's guard is a rule about _choosing_ to leave a
+    fight, and on a reading where this bot has already commanded a warp and the
+    client has refused it, the choice was made before the guard was asked.
 
-**No drone recall rides on this one, and that is a reading of the retreat rather
-than an omission.** #393's override recalls first because rats on the grid means
-the drones are out essentially by construction --
+**It cannot subsume the absence-based licence, and the reason is structural
+rather than a matter of strength.** The refusal exists only on a reading where
+this ship commanded a warp and the client answered; the readings
+`commanderLeftTheGrid` exists for are readings on which nothing warped at all --
+a commander vanishes, no broadcast names a place, and no arm in
+`wingmanDecisionRootInSpaceOrdinary` issues a warp. A licence that requires the
+bot to have already tried something cannot replace one that fires where the bot
+tried nothing. The mirror holds for the rejoin: `retreatRecoveryStep` asks the
+gate _above_ its fleet-window warp, so on the readings that permission matters no
+warp has gone out and there is no refusal to read.
+
+**What the refusal does buy the weaker licence is worth saying and is not claimed
+here.** #411's own status line admits the follow "cannot tell that from him
+having died, warped off or cloaked". In a pocket the client has just called
+un-warpable, _warped off_ is one cause fewer. Narrowing that inference is a
+change to `followTheCommanderThroughTheGate` with its own evidence to gather; it
+is deliberately not in #440.
+
+**No drone recall rides on either of the two later exceptions, and that is a
+reading of the retreat rather than an omission.** #393's override recalls first
+because rats on the grid means the drones are out essentially by construction --
 `dronesAssistTheCommander` is what puts them there. The rejoin's rats are the
 same rats and its drones are not: `warpAwayFromDanger` recalls before it warps,
 so the retreat is what brings them home, and `recoverFromRetreat` sits above
 `dronesAssistTheCommander` in the decision root, so nothing relaunches them
 while a recovery is running. What is left is the retreat's own bounded recall
 having given up -- and those drones were abandoned by the retreat, a system
-away, before this arm was ever reached. `calledGateDroneRecall` therefore stays
-scoped to the called gate, where the drones can still be recalled and the choice
-is real.
+away, before this arm was ever reached. A ship the client will not let warp is in
+the same position from the other side: the drones are still owed a command, and
+`dronesAssistTheCommander` is above the gate arm, so a reading with a drone to
+recall is not a reading this arm is reached on. `calledGateDroneRecall` therefore
+stays scoped to the called gate, where the drones can still be recalled and the
+choice is real.
 
 **The body is `gateIsLicensed` over `gateLicenceFromCase` rather than the
 disjunction spelled out here**, because #439 needs to know _which_ reason is
@@ -13498,14 +13769,15 @@ gateMayBeTaken :
     , calledByTheCommander : Bool
     , commanderLeftTheGrid : Bool
     , rejoiningAfterARetreat : Bool
+    , deadspaceRefusedTheWarp : Bool
     }
     -> Bool
 gateMayBeTaken gateCase =
     gateIsLicensed (gateLicenceFromCase gateCase)
 
 
-{-| Which of the four reasons above license this reading's gate, kept apart
-rather than collapsed into the `Bool` the arm asks for. #439.
+{-| Which of the reasons above license this reading's gate, kept apart rather
+than collapsed into the `Bool` the arm asks for. #439.
 
 **The answer above is a disjunction, and a disjunction cannot say what changed.**
 `accelerationGateRefusesThisShipTicks` bounds readings spent asking _one_ gate,
@@ -13518,14 +13790,21 @@ reading this exists for: `GIVEN UP after 41 readings of asking` printed beside
 
 `gridIsClearOfRats` is the one field that is not the case's own, because
 `ratsOnTheGrid` is the _absence_ of a reason and a licence has to be spelled
-positively -- a record where three fields mean "this licenses it" and the fourth
+positively -- a record where the other fields mean "this licenses it" and one
 means the opposite is one a later reader gets wrong.
+
+**`deadspaceRefusedTheWarp` is #440's, and it is the first reason added since
+this record was closed** -- which is what the record was closed for. It is a
+reason like any other here: it refills the budget once, it is accumulated once
+spent under, and a gate can now spend at most five budgets before it is given up
+on for good rather than four.
 
 -}
 type alias GateLicence =
     { calledByTheCommander : Bool
     , commanderLeftTheGrid : Bool
     , rejoiningAfterARetreat : Bool
+    , deadspaceRefusedTheWarp : Bool
     , gridIsClearOfRats : Bool
     }
 
@@ -13538,40 +13817,52 @@ noGateLicence =
     { calledByTheCommander = False
     , commanderLeftTheGrid = False
     , rejoiningAfterARetreat = False
+    , deadspaceRefusedTheWarp = False
     , gridIsClearOfRats = False
     }
 
 
-{-| The four inputs read as reasons, and the one declaration that enumerates
-them -- `gateMayBeTaken` is defined over this rather than beside it, so a fifth
-reason cannot be added to the permission and left out of the licence. The
-compiler is what enforces that: both read one closed record type, so an input
-this does not name is a type error at the arm rather than a budget the refill
-silently never sees.
+{-| The inputs read as reasons, and the one declaration that enumerates them --
+`gateMayBeTaken` is defined over this rather than beside it, so a further reason
+cannot be added to the permission and left out of the licence. The compiler is
+what enforces that: both read one closed record type, so an input this does not
+name is a type error at the arm rather than a budget the refill silently never
+sees.
+
+**#440 is the first change to arrive after that was written, and it is what the
+enforcement bought.** Adding `deadspaceRefusedTheWarp` to `gateMayBeTaken`'s
+record alone would not compile; the reason therefore reaches
+`askedReadingsRefilledByANewLicence` by construction, and a ship that gave up on
+a gate under an earlier reason gets its budget back when the client refuses it a
+warp.
+
 -}
 gateLicenceFromCase :
     { ratsOnTheGrid : Bool
     , calledByTheCommander : Bool
     , commanderLeftTheGrid : Bool
     , rejoiningAfterARetreat : Bool
+    , deadspaceRefusedTheWarp : Bool
     }
     -> GateLicence
 gateLicenceFromCase gateCase =
     { calledByTheCommander = gateCase.calledByTheCommander
     , commanderLeftTheGrid = gateCase.commanderLeftTheGrid
     , rejoiningAfterARetreat = gateCase.rejoiningAfterARetreat
+    , deadspaceRefusedTheWarp = gateCase.deadspaceRefusedTheWarp
     , gridIsClearOfRats = not gateCase.ratsOnTheGrid
     }
 
 
-{-| Whether any reason licenses the gate at all -- #348's guard and its three
-exceptions, said over the licence rather than over the four inputs.
+{-| Whether any reason licenses the gate at all -- #348's guard and its four
+exceptions, said over the licence rather than over the inputs.
 -}
 gateIsLicensed : GateLicence -> Bool
 gateIsLicensed licence =
     licence.calledByTheCommander
         || licence.commanderLeftTheGrid
         || licence.rejoiningAfterARetreat
+        || licence.deadspaceRefusedTheWarp
         || licence.gridIsClearOfRats
 
 
@@ -13589,8 +13880,17 @@ rat died. `accelerationGateRefusesThisShipTicks` would then bound nothing at
 all -- which is the failure this change must not introduce while fixing the one
 it is for. Against a licence that _accumulates_ the reasons already spent
 against (see `gateLicenceSpentUnderAfter`), a reason returning is not a new one,
-so this refills at most once per reason and a gate can spend at most four
-budgets before it is given up on for good.
+so this refills at most once per reason and a gate can spend at most one budget
+per reason before it is given up on for good.
+
+**#440's refusal refills like any other reason, and that is the whole of what
+the two changes had to agree about.** A gate given up on while the grid was
+clear buys nothing from the client then refusing this ship a warp -- unless the
+refusal is a reason in its own right here, which is what makes
+`deadspaceRefusedTheWarp` worth a field rather than a disjunct. The bound it
+hands back is `accelerationGateRefusesThisShipTicks`, which is also what
+`deadspaceWarpRefusalLicensesAGateForReadings` is, so a refusal that refills the
+budget licenses the gate for exactly as long as the refilled budget lasts.
 
 **It is the budget carried into the reading rather than the value written out**,
 so the reading that asks under the new licence is still charged. A counter
@@ -13613,6 +13913,7 @@ askedReadingsRefilledByANewLicence budget =
         (budget.licenceNow.calledByTheCommander && not budget.spentUnder.calledByTheCommander)
             || (budget.licenceNow.commanderLeftTheGrid && not budget.spentUnder.commanderLeftTheGrid)
             || (budget.licenceNow.rejoiningAfterARetreat && not budget.spentUnder.rejoiningAfterARetreat)
+            || (budget.licenceNow.deadspaceRefusedTheWarp && not budget.spentUnder.deadspaceRefusedTheWarp)
             || (budget.licenceNow.gridIsClearOfRats && not budget.spentUnder.gridIsClearOfRats)
     then
         0
@@ -13658,12 +13959,103 @@ gateLicenceSpentUnderAfter licenceCase =
             licenceCase.before.commanderLeftTheGrid || licenceCase.licenceNow.commanderLeftTheGrid
         , rejoiningAfterARetreat =
             licenceCase.before.rejoiningAfterARetreat || licenceCase.licenceNow.rejoiningAfterARetreat
+        , deadspaceRefusedTheWarp =
+            licenceCase.before.deadspaceRefusedTheWarp || licenceCase.licenceNow.deadspaceRefusedTheWarp
         , gridIsClearOfRats =
             licenceCase.before.gridIsClearOfRats || licenceCase.licenceNow.gridIsClearOfRats
         }
 
     else
         licenceCase.before
+
+
+{-| What the client writes when it refuses a warp because the ship is in
+deadspace, quoted out of the recorded runs rather than typed from memory.
+
+    <center>You cannot warp there because natural phenomena are disrupting the warp.
+
+Matched as a substring of the whole popup and without the `<center>` wrapper the
+client puts on a quick message and does not put on the game log's copy of the
+same sentence, so the marker reads either channel. Nothing is lower-cased on
+either side, and a case fed the corpus literal byte for byte is what says the
+wording is stable.
+
+**Counted as lines rather than readings**, which is this file's own standing
+warning applied to its own evidence: across the three recorded runs that carry
+it the sentence appears on 1,737 status lines live and 32 game-log lines, and
+the status line is reprinted under every decision, so the number of _readings_
+behind those is smaller. What the counts are used for here is the relation --
+the wording occurs, on both channels, in more than one session -- rather than
+the totals.
+
+**It says where _this ship_ is, not where anybody else is**, which is the whole
+of how #440's licence differs from #411's -- see `gateMayBeTaken`. All three
+recorded runs that carry it show this bot's own warp being refused: saxrat's run
+12 pressing `Activate Gate` on a gate 312 km off, mission run 32 on one 263 km
+off, and mission run 14's retreat warping to a celestial at 1% shield. Both
+mission runs had acceleration gates on the overview on the same reading, which is
+the operator's own framing on the issue -- the refusal is a prime trigger to take
+a gate instead.
+
+-}
+deadspaceWarpRefusalMarker : String
+deadspaceWarpRefusalMarker =
+    "You cannot warp there because natural phenomena are disrupting the warp."
+
+
+{-| Whether the client has recently refused this ship a warp for deadspace.
+
+**Dated inside the rule rather than at its callers.** `memory.quickMessage` and
+`quickMessageOnScreen` are the same type at a call site and only one of them
+carries an age, so a rule that trusted its caller would license a gate off a
+popup shown before the last pocket. `deadspaceWarpRefusalLicensesAGateForReadings`
+is the window.
+
+**The refusal is its own proof that this ship asked.** The client writes this
+sentence only in answer to a warp command and this bot is the only thing
+commanding this client, so no separate reading of the dispatched effects is
+needed to establish that the ship had already decided to leave -- which is the
+clause of #348 the licence turns on.
+
+-}
+deadspaceRefusedTheWarp : Maybe QuickMessageSighting -> Bool
+deadspaceRefusedTheWarp sighting =
+    case sighting of
+        Nothing ->
+            False
+
+        Just seen ->
+            (seen.readingsSince <= deadspaceWarpRefusalLicensesAGateForReadings)
+                && String.contains deadspaceWarpRefusalMarker seen.text
+
+
+{-| How long one deadspace refusal keeps licensing a gate.
+
+**`accelerationGateRefusesThisShipTicks`, written as that constant rather than as
+a number**, because the two bound the same stretch of readings from opposite
+ends. That is this bot's whole budget for asking one gate to open; past it
+`accelerationGateActivationStep` answers `GiveUpOnThisGate` and the arm hands the
+reading back, so a licence outliving it can license nothing. Making them one
+number means this licence can never be the thing that keeps a ship standing at a
+gate, and it means no second number is invented for a bot that has no corpus of
+its own to place one against (WINGMAN.md).
+
+**A live-only rule was the alternative and it would have been inert.** Taking a
+gate is select, wait for the panel's button, press -- several readings -- so a
+licence lasting exactly the reading the popup appeared on would switch the arm on
+and off underneath itself and the gate would never be taken. That the client
+happens to hold this popup on screen for several readings in the recorded runs is
+luck rather than a design to lean on.
+
+**What it refuses is the failure #440 names**: a refusal from a pocket this ship
+has since left cannot license a gate in this one. The age only ever grows until
+another popup replaces it, so the licence lapses on its own rather than on
+anything having to notice the pocket changed.
+
+-}
+deadspaceWarpRefusalLicensesAGateForReadings : Int
+deadspaceWarpRefusalLicensesAGateForReadings =
+    accelerationGateRefusesThisShipTicks
 
 
 {-| Whether this reading licenses following the commander through an
@@ -13968,20 +14360,29 @@ activateGateButtonRegionFromReading readingFromGameClient =
         |> Maybe.map .totalDisplayRegion
 
 
-{-| On whose authority a gate is being taken, as three named answers over two
+{-| On whose authority a gate is being taken, as five named answers over four
 facts -- the shape `accelerationGateActivationStep` uses, so a case can execute
 it and so the press's own wording is derived from it rather than restated.
 
 Which one it is matters more than it looks: `The overview is clear of rats` is
-**false** on a gate taken under either exception, and a log claiming a clear
+**false** on a gate taken under any of the exceptions, and a log claiming a clear
 grid on readings that had rats on them is worse than no line at all. That is
-#393's own argument, and #411 adds the second way to reach it.
+#393's own argument, #411 adds the second way to reach it and #440 the fourth.
+
+**#440's answer is last among the exceptions rather than first**, though it rests
+on the strongest evidence of the three that are not the commander's own
+instruction. The other three name _who_ licensed the gate, and where one of them
+holds it is the more useful sentence for an operator; this one names why leaving
+by warp was not available, which is the answer when nothing else licensed it.
+Nothing decides on the ordering -- `gateMayBeTaken` is a disjunction and this
+rule only picks the wording.
 
 -}
 gateTakingAuthority :
     { calledByTheCommander : Bool
     , rejoiningAfterARetreat : Bool
     , followingTheCommander : Bool
+    , deadspaceRefusedTheWarp : Bool
     }
     -> GateTakingAuthority
 gateTakingAuthority authorityCase =
@@ -13994,6 +14395,9 @@ gateTakingAuthority authorityCase =
     else if authorityCase.followingTheCommander then
         TheCommanderLeftThisGrid
 
+    else if authorityCase.deadspaceRefusedTheWarp then
+        TheClientRefusedTheWarpForDeadspace
+
     else
         TheGridIsClearOfRats
 
@@ -14002,6 +14406,7 @@ type GateTakingAuthority
     = TheCommanderCalledThisGate
     | TheShipIsRejoiningAfterARetreat
     | TheCommanderLeftThisGrid
+    | TheClientRefusedTheWarpForDeadspace
     | TheGridIsClearOfRats
 
 
@@ -14021,6 +14426,9 @@ describeGateTakingAuthority authority =
 
         TheCommanderLeftThisGrid ->
             "The commander is no longer on this grid and this is the only acceleration gate on it -- activate it and follow him through, rats on the grid or not. This cannot tell that from him having died, warped off or cloaked, and does not claim to."
+
+        TheClientRefusedTheWarpForDeadspace ->
+            "The client refused this ship a warp because natural phenomena are disrupting it -- this pocket cannot be left by warping, so the acceleration gate is the only way out. Activate it, rats on the grid or not."
 
         TheGridIsClearOfRats ->
             "The overview is clear of rats -- activate the acceleration gate to move to the next pocket."
@@ -14059,6 +14467,8 @@ takeTheAccelerationGate context gateToTake =
                     followingTheCommanderThroughAGate
                         context.memory.commanderGridPresence
                         context.readingFromGameClient
+                , deadspaceRefusedTheWarp =
+                    deadspaceRefusedTheWarp context.memory.quickMessage
                 }
             )
     then
@@ -14176,6 +14586,8 @@ pressTheAccelerationGate context gateToTake =
                                             followingTheCommanderThroughAGate
                                                 context.memory.commanderGridPresence
                                                 context.readingFromGameClient
+                                        , deadspaceRefusedTheWarp =
+                                            deadspaceRefusedTheWarp context.memory.quickMessage
                                         }
                                     )
                                 )
@@ -14970,6 +15382,10 @@ describeAccelerationGateAsk context =
                 rejoining =
                     rejoinIsTakingThisGate (retreatRecoveryStepNow context)
 
+                deadspaceRefused : Bool
+                deadspaceRefused =
+                    deadspaceRefusedTheWarp context.memory.quickMessage
+
                 mayBeTaken : Bool
                 mayBeTaken =
                     gateMayBeTaken
@@ -14981,6 +15397,7 @@ describeAccelerationGateAsk context =
                             followingTheCommanderThroughAGate
                                 context.memory.commanderGridPresence
                                 context.readingFromGameClient
+                        , deadspaceRefusedTheWarp = deadspaceRefused
                         }
             in
             "Acceleration gate: on the overview"
@@ -14989,6 +15406,15 @@ describeAccelerationGateAsk context =
 
                     else if rejoining then
                         " and this ship is gating back to its commander after a retreat, "
+
+                    else if deadspaceRefused then
+                        -- Named separately from the press's own line, which
+                        -- appears only on the reading of the press. #440's
+                        -- licence lapses on its own after
+                        -- `deadspaceWarpRefusalLicensesAGateForReadings`, so a
+                        -- run has to be able to see it while it is live rather
+                        -- than only when it was spent.
+                        " and the client has refused this ship a warp for deadspace, so the gate is the only way out, "
 
                     else
                         ", "

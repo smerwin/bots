@@ -74,7 +74,9 @@ nothing to do.
     taken from arm 6 with the drones recalled first (#393); or unless he has
     gone from a grid that had named him and this is the only gate on it, which
     is taken from here and is the way he is followed through one he did not
-    call (#411). See below.
+    call (#411); or unless the client has just refused this ship a warp because
+    natural phenomena are disrupting it, which is the client saying the pocket
+    cannot be left by warping at all (#440). See below.
 11. **Self-defense**, through `fightPointedRatsOrReturnDrones` — fight back
     only if a rat has actually pointed this ship, otherwise sit still, and
     never while the friendly fire guard is holding the trigger.
@@ -1066,6 +1068,141 @@ not drawing him and nothing here will ever fire — correct, and worth knowing. 
 follow that happens on a reading whose previous clauses read `NEVER SEEN` means
 the prior-sighting guard is not reaching the rule, which is the direction this
 fails silently in and the one to escalate on.
+
+### The client's own refusal to warp is licence to take the gate
+
+#440. The client refuses a warp out of a deadspace pocket in as many words, and
+the string is quoted out of `~/eve-bot-logs` rather than typed from memory:
+
+```
+<center>You cannot warp there because natural phenomena are disrupting the warp.
+```
+
+Three recorded runs of the other two bots carry it, and until now nothing in
+this repository had ever keyed a decision off the quick-message channel at all — saxrat has printed it since #123 and read it for exactly one
+rule (#146's drone cap), and this app did not touch it. So the reader is
+saxrat's, ported byte for byte rather than written a second time:
+`quickMessageOnScreen`, `quickMessageAfterReading`, `quickMessageTextForStatusLine`
+and `describeQuickMessage` are its declarations under its names, and a case
+compares them.
+
+**It is a fact about this ship, not about the commander**, and that is the whole
+of how it differs from the licence above it. Every recorded sighting is this
+bot's own warp being refused: saxrat's run 12 pressing `Activate Gate` on a gate
+312 km off, mission run 32 on one 263 km off, and mission run 14's retreat
+warping to a celestial at 1% shield. Both mission runs had acceleration gates on
+the overview on the same reading. So what the client is saying is *this pocket
+cannot be left by warping*, and the gate is the only way out — which is the
+operator's own framing on the issue.
+
+**It arrives on two channels, and the counts are lines rather than readings** —
+this file's own standing warning applied to its own evidence. Across those three
+runs the sentence appears on **1,737** status lines live and **32** game-log
+`(notify)` lines, and the status line is reprinted under every decision, so the
+number of readings behind the first figure is smaller.
+`deadspaceWarpRefusalMarker` carries neither the `<center>` wrapper the popup has
+nor a channel, so one literal reads both.
+
+#### Why it is a fourth exception rather than a replacement for one
+
+#440's own question, and it is the better half of the issue: `gateMayBeTaken`
+carried three bypasses of #348's rats guard, two of them merged by union rather
+than by anyone deciding whether they mean the same thing. So the first thing
+asked was whether the refusal replaces one.
+
+**It does not, and the reason is structural rather than a matter of strength.**
+The refusal exists only on a reading where this ship commanded a warp and the
+client answered. The readings `commanderLeftTheGrid` exists for are readings on
+which *nothing warped*: a commander vanishes, no broadcast names a place, and no
+arm in `wingmanDecisionRootInSpaceOrdinary` issues a warp — `approachTheFleetCommander`
+wants an overview row, the travel forms want a broadcast. A licence that requires
+the bot to have already tried something cannot replace one that fires where the
+bot tried nothing. The mirror holds for #429's rejoin: `retreatRecoveryStep` asks
+`anAccelerationGateIsOnThisGrid` **above** both of its warps, so on the readings
+that permission is for no warp has gone out and there is no refusal to read.
+`TheTwoOlderLicencesAreNotThisOneTest` executes both halves rather than leaving
+them as prose.
+
+**What the refusal would buy the weakest licence is real and is deliberately not
+taken.** #411's own status line admits the follow "cannot tell that from him
+having died, warped off or cloaked", and in a pocket the client has just called
+un-warpable, *warped off* is one cause fewer. Narrowing that inference is a
+change to `followTheCommanderThroughTheGate` with its own evidence to gather, and
+one cause out of four is not a subsumption.
+
+**Each of the four now says which clause of #348 it answers**, in
+`gateMayBeTaken`'s own doc comment, because four bypasses of one guard is where a
+reader is owed a reason per line. #393's is the commander's instruction; #411's
+and #429's are both *the commander is not on this grid, so there is no fleet
+fight here to abandon*, kept apart because their guards differ and neither set
+fits the other; #440's is *this ship had already decided to leave and the client
+has just said the gate is the only exit*.
+
+#### It is a reason on #439's `GateLicence`, and that is what makes it work
+
+`gateMayBeTaken` has been defined over `gateLicenceFromCase` since #439, so a
+bypass is a field on one closed record rather than a disjunct. Adding one to the
+permission alone does not compile — which is what that record was closed for, and
+#440 is the first change to arrive since, so it is the first time the enforcement
+has bought anything.
+
+**What it buys is a gate the ship has already given up on.**
+`accelerationGateRefusesThisShipTicks` bounds readings spent asking *one* gate,
+and the hunting arm has usually been asking about a gate for a while before any
+warp is commanded — so a refusal arriving on a spent budget would license a gate
+the arm had stopped asking, which is #439's own live reading: `GIVEN UP after 41
+readings of asking` printed beside a licence that had just arrived, with the ship
+sitting still. As a reason the refusal refills that budget once, is accumulated
+once spent under, and cannot refill again by arriving a second time. The budget
+it hands back is `accelerationGateRefusesThisShipTicks`, which is also this
+licence's own staleness bound, so a refusal that refills the budget licenses the
+gate for exactly as long as the refilled budget lasts.
+
+#### The bound, and why a live-only rule would have been inert
+
+`deadspaceWarpRefusalLicensesAGateForReadings` is
+`accelerationGateRefusesThisShipTicks`, written as that constant rather than as a
+number. The two bound the same stretch of readings from opposite ends: that is
+this bot's whole budget for asking one gate to open, so past it the arm has
+already given up and a licence outliving it can license nothing. Making them one
+number means this licence can never be the thing that keeps a ship standing at a
+gate, and no second number is invented for a bot with no corpus of its own.
+
+The obvious alternative was `readingsSince == 0`, and it would have been
+**inert**: taking a gate is select, wait for the panel's button, press, so a
+licence lasting exactly the reading the popup appeared on switches the arm on and
+off underneath itself. That the client happens to hold this popup on screen for
+several consecutive readings in the recorded runs is luck rather than a design to
+lean on.
+
+The rule dates the sighting **itself** rather than trusting its callers, because
+`memory.quickMessage` and `quickMessageOnScreen` are the same type at a call site
+and only one of them carries an age. The status line's own
+`quickMessageStaleAfterReadings` is a separate and much longer number and no rule
+reads it: how long a wording is worth showing an operator and how long a refusal
+is worth acting on are different questions.
+
+#### Unverified
+
+**Any of it running, and rather more than usual.** The wording, its two channels
+and its frequency are measured; what a wingman does on meeting one is not.
+Nothing in any corpus shows this bot being refused a warp beside a gate, because
+this bot has never been recorded at all.
+
+**Whether this bot's own warps produce the sentence is inherited rather than
+shown.** The three recorded instances are a mission runner and saxrat. This app
+warps by the Selected Item panel's `selectedItemWarpTo`, by the broadcast
+banner's `Warp to Member` and by the fleet window's row; the client writes this
+sentence in answer to a warp command and all three are warp commands, but that is
+reasoning rather than a reading.
+
+What to watch on the first run that meets one: `Quick msg (now): "<center>You
+cannot warp there ..."` in the status line, then `Acceleration gate: on the
+overview and the client has refused this ship a warp for deadspace`, then the
+press's own line. A run that meets the refusal and never prints the
+quick-message clause means the channel is not reaching the memory, which is the
+direction this fails silently in; a run that prints the clause and never the gate
+one means the marker does not match what this client writes.
 
 ### A called target that dies leaves the banner naming it
 
