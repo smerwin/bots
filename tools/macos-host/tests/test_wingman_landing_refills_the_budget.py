@@ -653,8 +653,17 @@ class TheCountersReadTheSharedRuleTest(unittest.TestCase):
         Three readers since #433: the record of how much of the approach budget
         went to closing a window is refilled by the same landing and through
         the same rule, since a window that ate one grid's readings must not
-        still be reported against the next grid's ask."""
-        readers = re.findall(r"askedReadingsRefilledByLanding", self.source)
+        still be reported against the next grid's ask.
+
+        **Counted outside the comments since #439**, whose own refill rule
+        names this one in its doc comment as the arrangement it follows. A
+        count over the whole file fails for prose being written rather than for
+        a second copy of a rule appearing, which is a case that goes red for the
+        wrong reason."""
+        readers = re.findall(
+            r"askedReadingsRefilledByLanding",
+            re.sub(r"--[^\n]*", "",
+                   re.sub(r"\{-.*?-\}", "", self.source, flags=re.S)))
         # The declaration, its type annotation, and one call from each of the
         # three carried-in bindings.
         self.assertEqual(len(readers), 5)

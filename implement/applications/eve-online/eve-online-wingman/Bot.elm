@@ -631,6 +631,14 @@ type alias BotMemory =
     -- no gate is on the overview at all.
     , gateAskedReadings : Int
 
+    -- Which reasons that budget has already been spent under, so a reason
+    -- arriving that nothing has been spent against refills it -- #439, where a
+    -- gate given up on under the ordinary `not ratsOnTheGrid` permission bought
+    -- #411's follow nothing at all. Accumulates over the readings that ask,
+    -- and resets on the same reading `gateAskedReadings` does. See
+    -- `askedReadingsRefilledByANewLicence` and `gateLicenceSpentUnderAfter`.
+    , gateLicenceAskedUnder : GateLicence
+
     -- Readings in a row spent ctrl-clicking the fleet broadcast banner to lock
     -- the called target, carried with the name being clicked at. #366. Advances
     -- only on readings the click is actually asked on, holds while the same
@@ -4620,6 +4628,7 @@ initBotMemory =
     , fleetPlaceBroadcast = Nothing
     , retreatRecoveryAskedReadings = 0
     , gateAskedReadings = 0
+    , gateLicenceAskedUnder = noGateLicence
     , calledTargetGone = Nothing
     , bannerCtrlClick = Nothing
     , calledGateRecallAskedReadings = 0
@@ -5384,26 +5393,24 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                         }
                         == RecallTheDronesFirst
 
-        -- Same shape as `askingAnAccelerationGateToOpen` in saxrat: the gate
-        -- is on the overview, the panel is already showing it, and nothing
-        -- else is holding this bot back from pressing it -- rats on the
-        -- overview count as holding back, since #348 is what this counter
-        -- exists for, unless the commander called this gate, which is #393's
-        -- override, or the retreat recovery is gating back to him, which is
-        -- #429's -- both asked through `gateMayBeTaken` rather than restated.
-        -- The rejoin's own half comes from `recoveringStepNow` above, the same
-        -- answer that decides whether this reading spends the recovery's
-        -- budget, so the two cannot disagree about which reading it is.
-        -- A reading spent recalling drones is not a reading spent asking the
-        -- gate, so it holds the count rather than advancing it.
-        askingTheGateToOpen : Bool
-        askingTheGateToOpen =
+        -- On whose authority this reading's gate may be taken -- rats off the
+        -- overview, since #348 is what the counter below exists for, or the
+        -- commander having called this gate, which is #393's override, or the
+        -- retreat recovery gating back to him, which is #429's, or #411's
+        -- follow. Asked through `gateLicenceFromCase` rather than restated, so
+        -- the arm's permission and the budget's refill read one enumeration of
+        -- the reasons (#439). The rejoin's own half comes from
+        -- `recoveringStepNow` above, the same answer that decides whether this
+        -- reading spends the recovery's budget, so the two cannot disagree
+        -- about which reading it is.
+        gateLicenceNow : GateLicence
+        gateLicenceNow =
             case gateToAct of
                 Nothing ->
-                    False
+                    noGateLicence
 
                 Just gate ->
-                    gateMayBeTaken
+                    gateLicenceFromCase
                         { ratsOnTheGrid = not (List.isEmpty namesOfRatsInOverview)
                         , calledByTheCommander = gate.calledByTheCommander
                         , rejoiningAfterARetreat = rejoinIsTakingThisGate recoveringStepNow
@@ -5420,8 +5427,36 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                                 commanderGridPresenceNow
                                 context.readingFromGameClient
                         }
-                        && not askingForTheCalledGateRecall
-                        && selectedItemIsOverviewEntry context.readingFromGameClient gate.gate
+
+        -- Same shape as `askingAnAccelerationGateToOpen` in saxrat: some reason
+        -- licenses the gate, the panel is already showing it, and nothing else
+        -- is holding this bot back from pressing it. A reading spent recalling
+        -- drones is not a reading spent asking the gate, so it holds the count
+        -- rather than advancing it.
+        askingTheGateToOpen : Bool
+        askingTheGateToOpen =
+            gateIsLicensed gateLicenceNow
+                && not askingForTheCalledGateRecall
+                && (gateOnOverview
+                        |> Maybe.map (selectedItemIsOverviewEntry context.readingFromGameClient)
+                        |> Maybe.withDefault False
+                   )
+
+        -- #439. The budget the ask carries into this reading, refilled by a
+        -- reason nothing has yet been spent against -- a gate given up on under
+        -- one licence bought #411's follow nothing at all, and the live reading
+        -- this is for printed `GIVEN UP after 41 readings of asking` and
+        -- `FOLLOWING HIM THROUGH IT` on one line while the ship sat still.
+        -- Read by both branches of the counter below, and the decision reads
+        -- the count they write, so the arm and this update cannot disagree
+        -- about whether the new licence bought anything -- #102's defect.
+        gateAskedReadingsCarriedIn : Int
+        gateAskedReadingsCarriedIn =
+            askedReadingsRefilledByANewLicence
+                { licenceNow = gateLicenceNow
+                , spentUnder = botMemoryBefore.gateLicenceAskedUnder
+                , spentBefore = botMemoryBefore.gateAskedReadings
+                }
 
         gaugeReading : (EveOnline.ParseUserInterface.Hitpoints -> Int) -> Maybe Int
         gaugeReading whichGauge =
@@ -5875,13 +5910,20 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             0
     , gateAskedReadings =
         if askingTheGateToOpen then
-            botMemoryBefore.gateAskedReadings + 1
+            gateAskedReadingsCarriedIn + 1
 
         else if gateOnOverview /= Nothing then
-            botMemoryBefore.gateAskedReadings
+            gateAskedReadingsCarriedIn
 
         else
             0
+    , gateLicenceAskedUnder =
+        gateLicenceSpentUnderAfter
+            { gateOnTheOverview = gateOnOverview /= Nothing
+            , askedThisReading = askingTheGateToOpen
+            , licenceNow = gateLicenceNow
+            , before = botMemoryBefore.gateLicenceAskedUnder
+            }
     , calledGateRecallAskedReadings =
         calledGateRecallAskedReadingsAfter
             { askedThisReading = askingForTheCalledGateRecall
@@ -13445,6 +13487,11 @@ away, before this arm was ever reached. `calledGateDroneRecall` therefore stays
 scoped to the called gate, where the drones can still be recalled and the choice
 is real.
 
+**The body is `gateIsLicensed` over `gateLicenceFromCase` rather than the
+disjunction spelled out here**, because #439 needs to know _which_ reason is
+licensing this reading and not only that one is -- see `GateLicence`. What this
+answers is unchanged in every case.
+
 -}
 gateMayBeTaken :
     { ratsOnTheGrid : Bool
@@ -13454,10 +13501,169 @@ gateMayBeTaken :
     }
     -> Bool
 gateMayBeTaken gateCase =
-    gateCase.calledByTheCommander
-        || gateCase.commanderLeftTheGrid
-        || gateCase.rejoiningAfterARetreat
-        || not gateCase.ratsOnTheGrid
+    gateIsLicensed (gateLicenceFromCase gateCase)
+
+
+{-| Which of the four reasons above license this reading's gate, kept apart
+rather than collapsed into the `Bool` the arm asks for. #439.
+
+**The answer above is a disjunction, and a disjunction cannot say what changed.**
+`accelerationGateRefusesThisShipTicks` bounds readings spent asking _one_ gate,
+and the count advances only while some reason licenses it -- so a budget spent
+under the ordinary `not ratsOnTheGrid` permission is still spent when #411's
+`commanderLeftTheGrid` arrives on the same gate and the same overview row, and
+the ship decides to follow with nothing left to follow with. That is the live
+reading this exists for: `GIVEN UP after 41 readings of asking` printed beside
+`FOLLOWING HIM THROUGH IT` on one reading, and the ship did not move.
+
+`gridIsClearOfRats` is the one field that is not the case's own, because
+`ratsOnTheGrid` is the _absence_ of a reason and a licence has to be spelled
+positively -- a record where three fields mean "this licenses it" and the fourth
+means the opposite is one a later reader gets wrong.
+
+-}
+type alias GateLicence =
+    { calledByTheCommander : Bool
+    , commanderLeftTheGrid : Bool
+    , rejoiningAfterARetreat : Bool
+    , gridIsClearOfRats : Bool
+    }
+
+
+{-| No reason at all -- what a reading with no gate on the overview licenses,
+and what the memory of reasons already spent against starts and resets to.
+-}
+noGateLicence : GateLicence
+noGateLicence =
+    { calledByTheCommander = False
+    , commanderLeftTheGrid = False
+    , rejoiningAfterARetreat = False
+    , gridIsClearOfRats = False
+    }
+
+
+{-| The four inputs read as reasons, and the one declaration that enumerates
+them -- `gateMayBeTaken` is defined over this rather than beside it, so a fifth
+reason cannot be added to the permission and left out of the licence. The
+compiler is what enforces that: both read one closed record type, so an input
+this does not name is a type error at the arm rather than a budget the refill
+silently never sees.
+-}
+gateLicenceFromCase :
+    { ratsOnTheGrid : Bool
+    , calledByTheCommander : Bool
+    , commanderLeftTheGrid : Bool
+    , rejoiningAfterARetreat : Bool
+    }
+    -> GateLicence
+gateLicenceFromCase gateCase =
+    { calledByTheCommander = gateCase.calledByTheCommander
+    , commanderLeftTheGrid = gateCase.commanderLeftTheGrid
+    , rejoiningAfterARetreat = gateCase.rejoiningAfterARetreat
+    , gridIsClearOfRats = not gateCase.ratsOnTheGrid
+    }
+
+
+{-| Whether any reason licenses the gate at all -- #348's guard and its three
+exceptions, said over the licence rather than over the four inputs.
+-}
+gateIsLicensed : GateLicence -> Bool
+gateIsLicensed licence =
+    licence.calledByTheCommander
+        || licence.commanderLeftTheGrid
+        || licence.rejoiningAfterARetreat
+        || licence.gridIsClearOfRats
+
+
+{-| What the budget for asking one gate to open carries into this reading, once
+a reason nothing has yet been spent against is allowed to refill it. #439, and
+`askedReadingsRefilledByLanding`'s arrangement applied to a licence rather than
+to a landing.
+
+**"The licence changed" is a reason present now that the budget has not already
+been spent under**, and not the looser "the licence is not the one it was". The
+looser rule cannot be used here, and the reason is `gridIsClearOfRats`: rats
+arrive and die on a grid constantly, so that reason comes and goes on its own,
+and a refill on every difference would hand the budget back every time the last
+rat died. `accelerationGateRefusesThisShipTicks` would then bound nothing at
+all -- which is the failure this change must not introduce while fixing the one
+it is for. Against a licence that _accumulates_ the reasons already spent
+against (see `gateLicenceSpentUnderAfter`), a reason returning is not a new one,
+so this refills at most once per reason and a gate can spend at most four
+budgets before it is given up on for good.
+
+**It is the budget carried into the reading rather than the value written out**,
+so the reading that asks under the new licence is still charged. A counter
+refilled after the ask never charges the first reading of a new licence, which
+is #102's defect in the direction that under-counts. Both the increment and the
+hold read this one value, and the decision reads the count this update writes,
+so the arm and the memory update cannot come to disagree about whether the new
+licence bought anything.
+
+**Going from no licence to any licence is covered by the same sentence**, since
+every reason of a licence held against `noGateLicence` is one nothing has been
+spent under.
+
+-}
+askedReadingsRefilledByANewLicence :
+    { licenceNow : GateLicence, spentUnder : GateLicence, spentBefore : Int }
+    -> Int
+askedReadingsRefilledByANewLicence budget =
+    if
+        (budget.licenceNow.calledByTheCommander && not budget.spentUnder.calledByTheCommander)
+            || (budget.licenceNow.commanderLeftTheGrid && not budget.spentUnder.commanderLeftTheGrid)
+            || (budget.licenceNow.rejoiningAfterARetreat && not budget.spentUnder.rejoiningAfterARetreat)
+            || (budget.licenceNow.gridIsClearOfRats && not budget.spentUnder.gridIsClearOfRats)
+    then
+        0
+
+    else
+        budget.spentBefore
+
+
+{-| The reasons this gate's budget has already been spent under, after this
+reading. #439.
+
+Three cases, and each is a way the refill above would otherwise be wrong:
+
+  - **no gate on the overview** clears it, the same reading and the same
+    condition on which `gateAskedReadings` itself resets -- the count and the
+    licence it was spent under are one episode and must not outlive each other;
+  - **a reading that asked** adds this reading's reasons, so the reason that
+    just bought a budget cannot buy a second one by arriving again;
+  - **anything else** holds, because a reading the arm did not spend is not a
+    reading spent under anything.
+
+It accumulates rather than replacing, which is what bounds the refills. Storing
+only the last reason asked under would let two reasons that alternate -- the
+commander gone while rats come and go -- refill the budget on every swap, and
+that is the same runaway the looser definition of "changed" produces.
+
+-}
+gateLicenceSpentUnderAfter :
+    { gateOnTheOverview : Bool
+    , askedThisReading : Bool
+    , licenceNow : GateLicence
+    , before : GateLicence
+    }
+    -> GateLicence
+gateLicenceSpentUnderAfter licenceCase =
+    if not licenceCase.gateOnTheOverview then
+        noGateLicence
+
+    else if licenceCase.askedThisReading then
+        { calledByTheCommander =
+            licenceCase.before.calledByTheCommander || licenceCase.licenceNow.calledByTheCommander
+        , commanderLeftTheGrid =
+            licenceCase.before.commanderLeftTheGrid || licenceCase.licenceNow.commanderLeftTheGrid
+        , rejoiningAfterARetreat =
+            licenceCase.before.rejoiningAfterARetreat || licenceCase.licenceNow.rejoiningAfterARetreat
+        , gridIsClearOfRats =
+            licenceCase.before.gridIsClearOfRats || licenceCase.licenceNow.gridIsClearOfRats
+        }
+
+    else
+        licenceCase.before
 
 
 {-| Whether this reading licenses following the commander through an
