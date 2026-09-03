@@ -115,7 +115,7 @@ class ConsoleState:
     """Everything the console shows, and everything it asks for, behind a lock."""
 
     def __init__(self, settings_text="", session_end_at_ms=None,
-                 app_name="", bot_source="", version=""):
+                 app_name="", bot_source="", version="", links=None):
         self._lock = threading.Lock()
         self.started_at = time.time()
         self.session_end_at_ms = session_end_at_ms
@@ -128,6 +128,13 @@ class ConsoleState:
         self.app_name = app_name or ""
         self.bot_source = bot_source or ""
         self.version = version or ""
+
+        # GitHub links for `version`'s own commit, from `bot_source_links` --
+        # code/blame/diff URLs, or `{"reason": ...}` when there is nothing to
+        # link (LOCAL-ONLY, an unreachable remote, no git checkout at all).
+        # Fixed for the session like the three above, for the same reason: it
+        # is computed once, before the console exists, from the same read.
+        self.links = links or {}
 
         # Who the console is watching, which is the one identity above that the
         # host cannot resolve before the console exists: the name comes from the
@@ -225,6 +232,7 @@ class ConsoleState:
                 "appName": self.app_name,
                 "botSource": self.bot_source,
                 "version": self.version,
+                "links": self.links,
                 "character": self.character,
                 "uptimeSeconds": int(time.time() - self.started_at),
                 "sessionSecondsLeft": seconds_left,
