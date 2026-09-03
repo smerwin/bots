@@ -330,6 +330,22 @@ a pasted transcript.
   restrictions are still on. Re-check `csrutil status`.
 - **`no matching windows found`** — the client isn't running, or Screen
   Recording permission isn't granted to your terminal app.
+- **A window title reads just `EVE` instead of `EVE - <character>`** — Screen
+  Recording permission isn't granted to your terminal app, so the client's
+  window title comes back unreadable (`window_probe` writes `name=(null)`) and
+  the host falls back to the literal `"EVE"`. The process and its window are
+  otherwise found fine, so the bot keeps running; grant Screen Recording
+  (System Settings → Privacy & Security) if you want the real character name
+  in the console and in logs.
+- **The bot's own log says "I did not find an EVE Online client process" even
+  though the client is plainly running** — with Screen Recording granted or
+  not, this now means `lsappinfo` found the process but `window_probe` found
+  no window for it at all (not merely an unreadable title, which is the
+  bullet above). Look for
+  `# find_eve_processes: found the EVE process (pid ...) but no window for it`
+  on the host's own stderr, just above the misleading message — that line
+  names the pid that was found and is the one to act on, checking Screen
+  Recording first.
 - **Nothing happens with `--execute-input`** — check Accessibility permission is
   actually granted (not merely requested) to your terminal app, and that the
   game window isn't minimized.
