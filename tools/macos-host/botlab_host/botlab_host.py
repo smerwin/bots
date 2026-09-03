@@ -687,8 +687,17 @@ def compile_bot(build_dir):
 # macOS process/window discovery (ListGameClientProcessesRequest)
 # ---------------------------------------------------------------------------
 
+# `window_probe.c`'s `print_string_field` writes `name="..."` when the window's
+# title is readable and the bare, unquoted literal `name=(null)` when it is
+# not -- which is what a window owned by another process prints when this
+# terminal app lacks the Screen Recording grant (issue #363). The name group
+# has to accept both forms, or an unreadable title is not a window with an
+# empty title, it is a line this regex silently drops -- indistinguishable,
+# from `find_eve_processes`, from there being no window at all. Group 4 is
+# `None` on the `(null)` branch.
 WINDOW_LINE_RE = re.compile(
-    r'window=(\d+) owner_pid=(\d+) layer=(-?\d+) owner="[^"]*" name="([^"]*)" '
+    r'window=(\d+) owner_pid=(\d+) layer=(-?\d+) owner="[^"]*" '
+    r'name=(?:"([^"]*)"|\(null\)) '
     r'bounds=\{x=([\d.-]+) y=([\d.-]+) w=([\d.-]+) h=([\d.-]+)\}\(points\) '
     r'display=\d+ backing_scale=([\d.]+)'
 )
@@ -703,8 +712,12 @@ def _windows_for(pid):
     for line in r.stdout.splitlines():
         m = WINDOW_LINE_RE.match(line)
         if m:
+            # An unreadable title (`name=(null)`, group 4 is `None`) reads as
+            # an empty title -- the same "" a genuinely untitled window gets --
+            # rather than being dropped. `find_eve_processes` already falls
+            # back to the literal "EVE" for an empty title.
             rows.append({
-                "window": int(m.group(1)), "layer": int(m.group(3)), "name": m.group(4),
+                "window": int(m.group(1)), "layer": int(m.group(3)), "name": m.group(4) or "",
                 "x": float(m.group(5)), "y": float(m.group(6)), "w": float(m.group(7)), "h": float(m.group(8)),
                 "backing_scale": float(m.group(9)),
             })
@@ -741,6 +754,20 @@ def find_eve_processes():
     if not windows and launcher_pid:
         windows = [w for w in _windows_for(launcher_pid) if w["layer"] >= 0]
     if not windows:
+        # lsappinfo found the process, so this is not the same "no EVE Online
+        # client process" the caller's own message reads it as -- that wording
+        # belongs to game_pid being None above. A found pid with no matching
+        # window most often means a missing Screen Recording grant on whatever
+        # terminal app is running this host: without it every window's title
+        # comes back unreadable, which WINDOW_LINE_RE now still parses (see
+        # above) rather than silently dropping the line, so this path should be
+        # rare -- but if it fires, the log should say so rather than leaving an
+        # operator staring at "I did not find an EVE Online client process"
+        # for a process that plainly was found.
+        print(f"# find_eve_processes: found the EVE process (pid {game_pid}) but no "
+              "window for it -- if this persists, check Screen Recording permission "
+              "for this terminal app in System Settings > Privacy & Security",
+              file=sys.stderr)
         return []
     best = max(windows, key=lambda w: w["w"] * w["h"])
     return [{
