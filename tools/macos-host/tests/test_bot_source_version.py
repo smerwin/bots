@@ -105,6 +105,26 @@ class Checkout:
         """Make HEAD reachable from a remote-tracking ref, as a push would."""
         git(self.root, "update-ref", "refs/remotes/origin/main", "HEAD")
 
+    def add_remote(self, url, name="origin"):
+        """Register a remote, the way `remote get-url` needs one registered.
+
+        `publish()` only fakes the remote-tracking ref a push would leave
+        behind; it adds no actual remote, and `git remote get-url` has nothing
+        to answer without one. `git remote add` never contacts the URL, so
+        this is as local as everything else the fixture does.
+        """
+        git(self.root, "remote", "add", name, url)
+
+    def set_remote_head(self, branch, name="origin"):
+        """Point `<name>/HEAD` at `branch`, the way `git clone` does.
+
+        Needs `refs/remotes/<name>/<branch>` to already exist -- ordinarily
+        from `publish()` -- since `symbolic-ref` does not create the ref it
+        points at.
+        """
+        git(self.root, "symbolic-ref", f"refs/remotes/{name}/HEAD",
+           f"refs/remotes/{name}/{branch}")
+
     def short_head(self):
         return git(self.root, "rev-parse", "--short", "HEAD").strip()
 
@@ -290,6 +310,201 @@ class NoAnswerAvailable(unittest.TestCase):
             botlab_host._git = real
 
 
+class Links(unittest.TestCase):
+    """GitHub links for the commit the stamp names -- issue #317.
+
+    A link is a claim that something is there to look at, so it has to
+    respect exactly the same distinctions the stamp itself does: linkable
+    only on `"on a remote-tracking branch"`, never on LOCAL-ONLY or unknown
+    reachability, and never by guessing the remote -- the GitHub-URL source
+    mode can point at a different fork than `smerwin/bots`.
+    """
+
+    def setUp(self):
+        self.checkout = Checkout()
+        self.addCleanup(self.checkout.remove)
+
+    def links(self):
+        return botlab_host.bot_source_links(self.checkout.bot_dir)
+
+    # -- the table from the issue, row by row -------------------------------
+
+    def test_clean_on_a_remote_tracking_branch_links(self):
+        self.checkout.add_remote("https://github.com/smerwin/bots.git")
+        self.checkout.publish()
+        links = self.links()
+        self.assertNotIn("reason", links)
+        self.assertEqual(links["commit"], self.checkout.short_head())
+        self.assertFalse(links["dirty"])
+
+    def test_dirty_on_a_remote_tracking_branch_links_but_says_so(self):
+        self.checkout.add_remote("https://github.com/smerwin/bots.git")
+        self.checkout.publish()
+        self.checkout.write(os.path.join(self.checkout.bot_dir, "Bot.elm"),
+                            "module Bot exposing (..)\n-- edited mid-run\n")
+        links = self.links()
+        self.assertNotIn("reason", links)
+        self.assertTrue(links["dirty"])
+        self.assertIn("code", links)  # linked -- see the doc comment on why
+
+    def test_local_only_does_not_link(self):
+        # Run 29's 776a202: a local revert that was never pushed. A link would
+        # 404.
+        self.checkout.add_remote("https://github.com/smerwin/bots.git")
+        self.checkout.write(os.path.join(self.checkout.bot_dir, "Bot.elm"),
+                            "module Bot exposing (..)\n-- reverted locally\n")
+        self.checkout.commit("a revert that never left this machine")
+        links = self.links()
+        self.assertEqual(links, {"reason": "LOCAL-ONLY"})
+
+    def test_remote_reachability_unknown_does_not_link(self):
+        # A fetch that has not happened must not be treated as "reachable",
+        # same rule as the printed stamp.
+        self.checkout.add_remote("https://github.com/smerwin/bots.git")
+        self.checkout.publish()
+        real = botlab_host._git
+
+        def selective(cwd, *args):
+            if args and args[0] == "branch":
+                return None
+            return real(cwd, *args)
+
+        botlab_host._git = selective
+        try:
+            links = self.links()
+        finally:
+            botlab_host._git = real
+        self.assertEqual(links, {"reason": "remote reachability unknown"})
+
+    def test_not_a_git_checkout_has_nothing_to_link(self):
+        plain = tempfile.mkdtemp(prefix="not-a-checkout-")
+        self.addCleanup(shutil.rmtree, plain, True)
+        self.assertEqual(botlab_host.bot_source_links(plain),
+                         {"reason": "not a git checkout"})
+
+    def test_git_that_could_not_be_run_has_nothing_to_link(self):
+        real = botlab_host.subprocess.run
+
+        def refusing(*args, **kwargs):
+            raise FileNotFoundError("no git")
+
+        botlab_host.subprocess.run = refusing
+        try:
+            links = botlab_host.bot_source_links(HERE)
+        finally:
+            botlab_host.subprocess.run = real
+        self.assertEqual(links, {"reason": "git could not be run"})
+
+    def test_an_unexpected_failure_still_produces_an_answer(self):
+        real = botlab_host._version_facts
+
+        def exploding(*args, **kwargs):
+            raise RuntimeError("something nobody predicted")
+
+        botlab_host._version_facts = exploding
+        try:
+            links = botlab_host.bot_source_links("/nowhere")
+        finally:
+            botlab_host._version_facts = real
+        self.assertIn("something nobody predicted", links["reason"])
+
+    # -- remote URL parsing, both GitHub forms -------------------------------
+
+    def test_https_remote_forms_parse(self):
+        parse = botlab_host._parse_github_remote_url
+        self.assertEqual(parse("https://github.com/smerwin/bots.git"), ("smerwin", "bots"))
+        self.assertEqual(parse("https://github.com/smerwin/bots"), ("smerwin", "bots"))
+        self.assertEqual(parse("https://github.com/smerwin/bots/"), ("smerwin", "bots"))
+
+    def test_ssh_remote_forms_parse(self):
+        parse = botlab_host._parse_github_remote_url
+        self.assertEqual(parse("git@github.com:smerwin/bots.git"), ("smerwin", "bots"))
+        self.assertEqual(parse("git@github.com:smerwin/bots"), ("smerwin", "bots"))
+        self.assertEqual(parse("ssh://git@github.com/smerwin/bots.git"), ("smerwin", "bots"))
+
+    def test_a_non_github_remote_does_not_parse(self):
+        self.assertIsNone(botlab_host._parse_github_remote_url(
+            "https://gitlab.com/smerwin/bots.git"))
+        self.assertIsNone(botlab_host._parse_github_remote_url(""))
+        self.assertIsNone(botlab_host._parse_github_remote_url(None))
+
+    def test_a_non_github_remote_does_not_link(self):
+        self.checkout.add_remote("https://gitlab.com/smerwin/bots.git")
+        self.checkout.publish()
+        links = self.links()
+        self.assertEqual(links, {"reason": "remote 'origin' is not on github.com"})
+
+    # -- the subpath, scoped to the bot rather than the repo root -----------
+
+    def test_the_subpath_is_derived_and_scopes_the_code_link(self):
+        self.checkout.add_remote("https://github.com/smerwin/bots.git")
+        self.checkout.publish()
+        links = self.links()
+        self.assertEqual(
+            links["code"],
+            f"https://github.com/smerwin/bots/tree/{links['commit']}/"
+            "implement/applications/eve-online/eve-online-mission-runner")
+
+    def test_the_blame_link_names_bot_elm_under_the_subpath(self):
+        # There is no directory blame view on GitHub, so a file has to be
+        # chosen -- Bot.elm is the one an operator reading a decision ladder
+        # wants.
+        self.checkout.add_remote("https://github.com/smerwin/bots.git")
+        self.checkout.publish()
+        links = self.links()
+        self.assertEqual(
+            links["blame"],
+            f"https://github.com/smerwin/bots/blame/{links['commit']}/"
+            "implement/applications/eve-online/eve-online-mission-runner/Bot.elm")
+
+    def test_a_repo_rooted_bot_links_with_no_trailing_slash(self):
+        # If the bot directory ever were the repository root, `show-prefix`
+        # answers the empty string -- the code link must not end in `/tree/<sha>/`.
+        root_checkout = Checkout.__new__(Checkout)
+        root_checkout.root = tempfile.mkdtemp(prefix="bot-source-version-root-")
+        root_checkout.bot_dir = root_checkout.root
+        root_checkout.write(os.path.join(root_checkout.bot_dir, "Bot.elm"),
+                            "module Bot exposing (..)\n")
+        self.addCleanup(root_checkout.remove)
+        git(root_checkout.root, "init", "-q", "-b", "main")
+        root_checkout.commit("root-level bot")
+        root_checkout.add_remote("https://github.com/smerwin/bots.git")
+        root_checkout.publish()
+        links = botlab_host.bot_source_links(root_checkout.bot_dir)
+        self.assertEqual(links["code"], f"https://github.com/smerwin/bots/tree/{links['commit']}")
+        self.assertEqual(links["blame"],
+                         f"https://github.com/smerwin/bots/blame/{links['commit']}/Bot.elm")
+
+    # -- the two diff views --------------------------------------------------
+
+    def test_the_commit_diff_names_the_commit_itself(self):
+        self.checkout.add_remote("https://github.com/smerwin/bots.git")
+        self.checkout.publish()
+        links = self.links()
+        self.assertEqual(links["commitDiff"],
+                         f"https://github.com/smerwin/bots/commit/{links['commit']}")
+
+    def test_the_compare_diff_uses_the_remotes_default_branch_when_set(self):
+        # `git clone` sets `refs/remotes/<remote>/HEAD`; read locally, no fetch.
+        self.checkout.add_remote("https://github.com/smerwin/bots.git")
+        self.checkout.publish()
+        self.checkout.set_remote_head("main")
+        links = self.links()
+        self.assertEqual(links["compareBranch"], "main")
+        self.assertEqual(
+            links["compareDiff"],
+            f"https://github.com/smerwin/bots/compare/{links['commit']}...main")
+
+    def test_the_compare_diff_falls_back_to_main_when_the_default_is_unset(self):
+        # An older checkout, or a remote added by hand, has no
+        # `refs/remotes/<remote>/HEAD` at all -- the compare link must still
+        # have something to compare against.
+        self.checkout.add_remote("https://github.com/smerwin/bots.git")
+        self.checkout.publish()
+        links = self.links()
+        self.assertEqual(links["compareBranch"], "main")
+
+
 class Launch(unittest.TestCase):
     """The stamp reaches the log and the console, and names the right thing."""
 
@@ -323,6 +538,16 @@ class Launch(unittest.TestCase):
         self.assertIn("bot_source=bot_dir", constructor)
         self.assertIn("version=bot_version", constructor)
 
+    def test_the_links_are_computed_from_the_bot_source(self):
+        # Read once, beside the stamp itself, rather than a handler re-deriving
+        # them later from the printed version string.
+        self.assertIn("bot_links = bot_source_links(bot_dir)", self.source)
+
+    def test_the_console_is_told_the_links_too(self):
+        constructor = self.source[self.source.index("web_console.ConsoleState("):]
+        constructor = constructor[:constructor.index(")")]
+        self.assertIn("links=bot_links", constructor)
+
 
 class Console(unittest.TestCase):
     def test_the_snapshot_carries_the_identity(self):
@@ -355,6 +580,36 @@ class Console(unittest.TestCase):
         page = collapse(CONSOLE_PAGE)
         self.assertIn("version unknown", page)
         self.assertIn("source unknown", page)
+
+    def test_the_snapshot_carries_the_links(self):
+        links = {"commit": "abc1234", "dirty": False,
+                 "code": "https://github.com/smerwin/bots/tree/abc1234/implement/x",
+                 "blame": "https://github.com/smerwin/bots/blame/abc1234/implement/x/Bot.elm",
+                 "commitDiff": "https://github.com/smerwin/bots/commit/abc1234",
+                 "compareDiff": "https://github.com/smerwin/bots/compare/abc1234...main",
+                 "compareBranch": "main"}
+        state = web_console.ConsoleState(version="abc1234 (clean, on a remote-tracking branch)",
+                                         links=links)
+        self.assertEqual(state.snapshot()["links"], links)
+
+    def test_a_host_that_says_nothing_still_serves_a_console_with_no_links(self):
+        snapshot = web_console.ConsoleState().snapshot()
+        self.assertEqual(snapshot["links"], {})
+
+    def test_a_no_link_reason_is_carried_through_unchanged(self):
+        state = web_console.ConsoleState(
+            version="a1b2c3d (clean, LOCAL-ONLY)", links={"reason": "LOCAL-ONLY"})
+        self.assertEqual(state.snapshot()["links"], {"reason": "LOCAL-ONLY"})
+
+    def test_the_page_renders_the_commit_as_a_link(self):
+        page = collapse(CONSOLE_PAGE)
+        self.assertIn('id="links"', page)
+        self.assertIn("s.links", page)
+        self.assertIn("links.code", page)
+        self.assertIn("links.blame", page)
+        self.assertIn("links.commitDiff", page)
+        self.assertIn("links.compareDiff", page)
+        self.assertIn("a.href", page)
 
 
 if __name__ == "__main__":

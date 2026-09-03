@@ -58,6 +58,9 @@
   .note.pilot{color:var(--ink)}
   .note.pilot.unknown{color:var(--dim);font-style:italic}
   .ok{color:var(--accent)}
+  .links a{color:var(--accent);text-decoration:none;margin-right:10px}
+  .links a:hover{text-decoration:underline}
+  .links .dirty{color:var(--warn)}
 </style>
 </head>
 <body>
@@ -66,6 +69,7 @@
   <h1 id="app">Host Console</h1>
   <span class="note pilot" id="character">character unknown</span>
   <span class="note mono" id="version">—</span>
+  <span class="note links" id="links"></span>
   <span class="note path" id="source" title=""></span>
   <span class="note" id="conn">connecting…</span>
   <span class="spacer"></span>
@@ -174,6 +178,14 @@ $("applySettings").onclick = async () => {
 // because two consoles open at once are otherwise the same tab twice, and an
 // absent value says so rather than showing an empty space that reads like a
 // console that simply has nothing to report.
+//
+// The commit becomes links rather than staying opaque text, on exactly the
+// evidence the host judged reachable -- `s.links` carries either the four
+// GitHub URLs or a `reason` there are none (LOCAL-ONLY, an unresolvable
+// remote, no git checkout at all), computed server-side so this page never
+// has to parse the version string back apart to decide. A DIRTY tree still
+// links; the "code" label just says so, since the commit is real even though
+// the tree that compiled is not exactly it.
 let identified = false;
 function identify(s){
   if (identified) return;
@@ -184,6 +196,23 @@ function identify(s){
   $("version").textContent = s.version || "version unknown";
   $("source").textContent = s.botSource || "source unknown";
   $("source").title = s.botSource || "";
+
+  const links = s.links || {};
+  const box = $("links");
+  box.innerHTML = "";
+  if (links.code) {
+    const link = (href, label, cls) => {
+      const a = document.createElement("a");
+      a.href = href; a.target = "_blank"; a.rel = "noopener";
+      a.textContent = label;
+      if (cls) a.className = cls;
+      box.appendChild(a);
+    };
+    link(links.code, links.dirty ? "code (dirty tree)" : "code", links.dirty ? "dirty" : "");
+    link(links.blame, "blame");
+    link(links.commitDiff, "this commit");
+    link(links.compareDiff, `vs ${links.compareBranch || "main"}`);
+  }
 }
 
 // Who this console is watching. Deliberately not part of `identify()`: those

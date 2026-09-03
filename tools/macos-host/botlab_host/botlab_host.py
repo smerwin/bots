@@ -583,6 +583,69 @@ def _git(cwd, *args):
     return done.stdout
 
 
+def _version_facts(bot_dir):
+    """What this bot was built from, read once, as structured facts.
+
+    `bot_source_version` (the printed stamp) and `bot_source_links` (the
+    console's GitHub links) both build on this single read rather than one
+    parsing the other's rendered prose back apart -- which is the discipline
+    `bot_source_version` states about the SHA itself: it is meant to travel as
+    a separable field, not something to reconstruct from a formatted string.
+
+    Returns a dict. When this is not a resolvable git checkout, the only key
+    is `"commit": None` plus `"reason"` (`"not a git checkout"` or
+    `"git could not be run"`). Otherwise: `"commit"` (short SHA), `"tree"`
+    (`"clean"` | `"DIRTY"` | `"dirtiness unknown"`), `"reachable"`
+    (`True` | `False` | `None` for "remote reachability unknown"), and
+    `"remote_ref"` -- the first real remote-tracking branch name (e.g.
+    `"origin/main"`) found to contain the commit, or `None` when reachability
+    is `False` or unknown, or when the only match was the `origin/HEAD ->
+    origin/main` alias line rather than a branch to name a remote from.
+    """
+    head = _git(bot_dir, "rev-parse", "--short", "HEAD")
+    if head is GIT_UNAVAILABLE:
+        return {"commit": None, "reason": "git could not be run"}
+    if head is None or not head.strip():
+        return {"commit": None, "reason": "not a git checkout"}
+    commit = head.strip()
+
+    # `.` rather than the absolute path: git resolves its work tree through
+    # symlinks (`/var` is `/private/var` on macOS) and an absolute pathspec that
+    # does not match the resolved form is rejected as outside the repository,
+    # which would read as "dirtiness unknown" for every run.
+    status = _git(bot_dir, "status", "--porcelain", "--", ".")
+    if status is GIT_UNAVAILABLE or status is None:
+        tree = "dirtiness unknown"
+    elif status.strip():
+        tree = "DIRTY"
+    else:
+        tree = "clean"
+
+    on_remote = _git(bot_dir, "branch", "--remotes", "--contains", commit)
+    if on_remote is GIT_UNAVAILABLE or on_remote is None:
+        reachable, remote_ref = None, None
+    elif on_remote.strip():
+        reachable, remote_ref = True, _first_remote_tracking_ref(on_remote)
+    else:
+        reachable, remote_ref = False, None
+
+    return {"commit": commit, "tree": tree, "reachable": reachable, "remote_ref": remote_ref}
+
+
+def _first_remote_tracking_ref(remotes_output):
+    """The first real branch name in `git branch --remotes` output.
+
+    Skips the `origin/HEAD -> origin/main` alias line -- it names two refs on
+    one line rather than a branch a remote name can be read off of.
+    """
+    for line in remotes_output.splitlines():
+        line = line.strip()
+        if not line or "->" in line:
+            continue
+        return line
+    return None
+
+
 def bot_source_version(bot_dir):
     """What this bot was built from, as far as this machine can actually prove.
 
@@ -618,34 +681,130 @@ def bot_source_version(bot_dir):
 
 
 def _bot_source_version(bot_dir):
-    head = _git(bot_dir, "rev-parse", "--short", "HEAD")
-    if head is GIT_UNAVAILABLE:
-        return "unknown (git could not be run)"
-    if head is None or not head.strip():
-        return "unknown (not a git checkout)"
-    commit = head.strip()
-
-    # `.` rather than the absolute path: git resolves its work tree through
-    # symlinks (`/var` is `/private/var` on macOS) and an absolute pathspec that
-    # does not match the resolved form is rejected as outside the repository,
-    # which would read as "dirtiness unknown" for every run.
-    status = _git(bot_dir, "status", "--porcelain", "--", ".")
-    if status is GIT_UNAVAILABLE or status is None:
-        tree = "dirtiness unknown"
-    elif status.strip():
-        tree = "DIRTY"
-    else:
-        tree = "clean"
-
-    on_remote = _git(bot_dir, "branch", "--remotes", "--contains", commit)
-    if on_remote is GIT_UNAVAILABLE or on_remote is None:
-        where = "remote reachability unknown"
-    elif on_remote.strip():
+    facts = _version_facts(bot_dir)
+    if facts["commit"] is None:
+        return f"unknown ({facts['reason']})"
+    if facts["reachable"] is True:
         where = "on a remote-tracking branch"
-    else:
+    elif facts["reachable"] is False:
         where = "LOCAL-ONLY"
+    else:
+        where = "remote reachability unknown"
+    return f"{facts['commit']} ({facts['tree']}, {where})"
 
-    return f"{commit} ({tree}, {where})"
+
+# `github.com/<owner>/<repo>` out of either a GitHub HTTPS remote URL or an SSH
+# one (`git@github.com:owner/repo.git`, or the less common `ssh://` spelling of
+# the same thing). Neither form is guaranteed a trailing `.git`.
+_GITHUB_HTTPS_REMOTE_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+?)(\.git)?/?$")
+_GITHUB_SSH_REMOTE_RE = re.compile(r"^(?:ssh://)?git@github\.com[:/]([^/]+)/([^/]+?)(\.git)?/?$")
+
+
+def _parse_github_remote_url(url):
+    """(owner, repo), or None when `url` does not name a github.com remote.
+
+    A remote that is not GitHub -- another fork host, a self-hosted Gitea, a
+    filesystem path -- is a no-link case rather than a guess: hardcoding
+    `smerwin/bots` here would be wrong the moment the GitHub-URL source mode is
+    pointed at a different fork.
+    """
+    if not url:
+        return None
+    for pattern in (_GITHUB_HTTPS_REMOTE_RE, _GITHUB_SSH_REMOTE_RE):
+        m = pattern.match(url.strip())
+        if m:
+            return m.group(1), m.group(2)
+    return None
+
+
+def _remote_default_branch(bot_dir, remote_name):
+    """`remote_name`'s default branch, read locally -- no network call.
+
+    `git clone` sets `refs/remotes/<remote>/HEAD` to point at it, so this is
+    ordinarily answerable with nothing but a symbolic-ref lookup. Falls back to
+    `"main"` when that ref is unset (an older checkout, or a remote added by
+    hand) rather than leaving the compare link with nothing to compare against.
+    """
+    ref = _git(bot_dir, "symbolic-ref", "--short", f"refs/remotes/{remote_name}/HEAD")
+    if ref not in (GIT_UNAVAILABLE, None) and ref.strip():
+        return ref.strip().rsplit("/", 1)[-1]
+    return "main"
+
+
+def bot_source_links(bot_dir):
+    """GitHub links for this bot's code, blame and diff -- or none, and why.
+
+    A link is a claim that something is there to look at, so it is offered on
+    exactly the evidence `bot_source_version`'s own stamp is: linkable only
+    when the commit is known **and** reachable from a remote-tracking branch.
+    LOCAL-ONLY and "remote reachability unknown" both decline, the same as an
+    unresolvable stamp does -- a fetch that has not happened must not be
+    treated as "reachable", and a 404 is worse than no link. A DIRTY tree
+    still links: the commit itself is real and public, only the tree that
+    compiled is not exactly it, so the caller is handed `"dirty"` to label the
+    link with rather than having the link withheld.
+
+    Scoped to the bot's own subdirectory, not the repository root: `bot_dir`
+    is what `prepare_build_dir` copies, not the five other bots and the host
+    beside it.
+
+    Returns a dict. When there is nothing to link, its only key is `"reason"`
+    (why). Otherwise: `"commit"`, `"dirty"` (bool), `"code"` (the `/tree/` URL
+    scoped to this bot's subpath), `"blame"` (of `Bot.elm` under that subpath
+    -- there is no directory blame view on GitHub), `"commitDiff"`
+    (`/commit/<sha>`, what this commit itself changed) and `"compareDiff"`
+    plus `"compareBranch"` (`/compare/<sha>...<default branch>`, how far
+    behind the remote's default branch this running code is). Both diff views
+    are offered rather than one chosen on the caller's behalf: `/commit/`
+    answers "what did this change", `/compare/` answers "what has landed
+    since", and which one an operator wants depends on the incident.
+    """
+    try:
+        return _bot_source_links(bot_dir)
+    except Exception as exc:  # noqa: BLE001 -- a link must not fail a launch
+        return {"reason": f"could not be computed: {exc}"}
+
+
+def _bot_source_links(bot_dir):
+    facts = _version_facts(bot_dir)
+    commit = facts["commit"]
+    if commit is None:
+        return {"reason": facts["reason"]}
+    if facts["reachable"] is not True:
+        reason = "LOCAL-ONLY" if facts["reachable"] is False else "remote reachability unknown"
+        return {"reason": reason}
+
+    remote_ref = facts["remote_ref"]
+    if not remote_ref:
+        return {"reason": "could not determine which remote-tracking branch"}
+    remote_name = remote_ref.partition("/")[0]
+
+    remote_url = _git(bot_dir, "remote", "get-url", remote_name)
+    if remote_url is GIT_UNAVAILABLE or remote_url is None or not remote_url.strip():
+        return {"reason": f"could not read the URL of remote '{remote_name}'"}
+
+    owner_repo = _parse_github_remote_url(remote_url.strip())
+    if owner_repo is None:
+        return {"reason": f"remote '{remote_name}' is not on github.com"}
+    owner, repo = owner_repo
+
+    prefix = _git(bot_dir, "rev-parse", "--show-prefix")
+    subpath = prefix.strip() if prefix not in (GIT_UNAVAILABLE, None) else ""
+
+    default_branch = _remote_default_branch(bot_dir, remote_name)
+
+    base = f"https://github.com/{owner}/{repo}"
+    code_path = subpath.rstrip("/")
+    code = f"{base}/tree/{commit}/{code_path}" if code_path else f"{base}/tree/{commit}"
+    return {
+        "commit": commit,
+        "dirty": facts["tree"] != "clean",
+        "code": code,
+        "blame": f"{base}/blame/{commit}/{subpath}Bot.elm",
+        "commitDiff": f"{base}/commit/{commit}",
+        "compareDiff": f"{base}/compare/{commit}...{default_branch}",
+        "compareBranch": default_branch,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -4063,6 +4222,7 @@ def main():
         bot_dir = fetch_bot_source(args.bot_source, workdir)
         bot_app_name = os.path.basename(os.path.normpath(bot_dir))
         bot_version = bot_source_version(bot_dir)
+        bot_links = bot_source_links(bot_dir)
         print(f"# bot source: {bot_dir}", file=sys.stderr)
         # Beside the path rather than only in the console: the path never
         # changes and the log is where "which code did this run fly" gets asked
@@ -4081,7 +4241,8 @@ def main():
                                                session_end_at_ms=session_end_at_ms,
                                                app_name=bot_app_name,
                                                bot_source=bot_dir,
-                                               version=bot_version)
+                                               version=bot_version,
+                                               links=bot_links)
             try:
                 _httpd, url = web_console.start(console, port=args.web_console)
                 print(f"# web console: {url}", file=sys.stderr)
