@@ -740,18 +740,20 @@ class TheWiringTest(unittest.TestCase):
 
         `manageMiddleRowModules` joined this list when #398 landed while #385
         was in flight, and it is the one the rebase had to decide: both arms
-        wanted the slot directly under `activateAlwaysOnModules`. #394's own
-        argument settles it -- a hardener or a prop mod is worth a reading while
-        the ship is staying, and this arm is the first that decides to go
-        somewhere -- so the module step stays whole and this sits under it,
-        still above the travel broadcasts.
+        wanted the slot directly under `unlockFleetPilotInTargetBar`. #394's
+        own argument settles it -- a hardener or a prop mod is worth a reading
+        while the ship is staying, and this arm is the first that decides to
+        go somewhere -- so the module step stays whole and this sits under it,
+        still above the travel broadcasts. #400 later removed the module
+        step's tooltip-matched sibling, `activateAlwaysOnModules`, since it
+        could never fire; `manageMiddleRowModules` is the whole of the step
+        now.
         """
         root = self.root()
         for above in ("sessionIsEnding context shipUI",
                       "retreatToTheCommander context shipUI",
                       "recoverFromRetreat context shipUI",
                       "unlockFleetPilotInTargetBar context",
-                      "activateAlwaysOnModules context",
                       "manageMiddleRowModules context"):
             with self.subTest(above=above):
                 self.assertIn(above, root)

@@ -753,12 +753,12 @@ class ThePlacementTest(unittest.TestCase):
 
     def test_the_close_is_below_the_bounded_safety_arms(self):
         """`unlockFleetPilotInTargetBar` is #367's, and its veto on the guns is
-        independent of its placement anyway; `activateAlwaysOnModules` stops
+        independent of its placement anyway; `manageMiddleRowModules` stops
         answering the moment the hardeners are on, which is a tank worth having
         while landing at range."""
         unlock, modules, close = self.order_of(
             "case unlockFleetPilotInTargetBar context of",
-            "case activateAlwaysOnModules context of",
+            "case manageMiddleRowModules context of",
             "case closeOnTheCommanderAfterLanding context shipUI of")
         self.assertLess(unlock, modules)
         self.assertLess(modules, close)

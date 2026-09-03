@@ -69,10 +69,14 @@ whole file re-run:
    `test_a_session_that_never_lands_a_click_reaches_the_bound_and_holds`;
 6. the reset widened to #408's rule (every non-clicking answer resetting) --
    fails `test_a_click_decline_alternation_still_reaches_the_bound`;
-7. `activateAlwaysOnModules` repointed at `moduleToDeactivateForWarp`, which is
-   one of the four callers #410 puts out of scope -- fails
+7. `activateAlwaysOnModules` repointed at `moduleToDeactivateForWarp`, which was
+   one of the four callers #410 puts out of scope -- failed
    `test_the_new_rule_is_read_only_where_this_change_put_it` and
-   `test_the_activation_arms_still_choose_their_own_modules`;
+   `test_the_activation_arms_still_choose_their_own_modules`. #400 has since
+   removed that arm entirely -- the tooltip-matched `activate-module-always`
+   setting could never fire, since the tooltip read it needed ran only in
+   this app's inherited, unreachable decision root -- so this mutation no
+   longer applies and the caller count below is one fewer than it was;
 8. `fireOnActiveTarget` repointed the same way -- fails the first of those and
    `test_the_gun_arms_still_choose_their_own_modules`;
 9. the give-up made to answer `askForHelpToGetUnstuck` rather than `Nothing` --
@@ -921,9 +925,6 @@ class TheOtherCallersAreDeliberatelyUntouchedTest(unittest.TestCase):
 
     def test_the_activation_arms_still_choose_their_own_modules(self):
         self.assertIn(
-            "knownModulesToActivateAlways",
-            declaration(WINGMAN_BOT_ELM, "activateAlwaysOnModules"))
-        self.assertIn(
             "middleRowStepFromContext",
             declaration(WINGMAN_BOT_ELM, "manageMiddleRowModules"))
 
@@ -935,13 +936,18 @@ class TheOtherCallersAreDeliberatelyUntouchedTest(unittest.TestCase):
             "shipUIModulesToActivateOnTarget",
             declaration(WINGMAN_BOT_ELM, "fightUsingDronesAndModules"))
 
-    def test_the_debounce_still_has_five_callers(self):
-        """A sixth caller is a fifth arm that has to be asked which transient it
-        is reading, so it wants to be noticed rather than merged quietly."""
+    def test_the_debounce_still_has_four_callers(self):
+        """A fifth caller is a fifth arm that has to be asked which transient
+        it is reading, so it wants to be noticed rather than merged quietly.
+
+        Five until #400: `activateAlwaysOnModules`, the tooltip-matched
+        `activate-module-always` arm, was one of them and is now removed --
+        the tooltip read it needed ran only in this app's inherited,
+        unreachable decision root, so it could never fire."""
         self.assertEqual(
             sorted(declarations_naming(
                 self.source, "clickModuleButtonButWaitIfClickedInPreviousStep")),
-            ["activateAlwaysOnModules", "deactivateModulesForWarp",
+            ["deactivateModulesForWarp",
              "fightUsingDronesAndModules", "fireOnActiveTarget",
              "manageMiddleRowModules"])
 

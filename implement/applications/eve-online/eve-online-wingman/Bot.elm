@@ -11,8 +11,7 @@
    + Keeps the ship UI's **middle row** switched on, every slot except the
      leftmost -- by position, needing no setting and no tooltip. The leftmost
      slot is the propulsion module, which runs only while this ship is
-     approaching the commander. Also activates whatever
-     `activate-module-always` names by tooltip text, if anything.
+     approaching the commander.
    + Accepts a fleet invitation, if it is not in a fleet and the inviting pilot
      is named by `accept-fleet-invite-from`.
    + Breaks off and warps back to the fleet commander when its health or the
@@ -90,6 +89,18 @@
    All settings are optional; you only need them in case the defaults don't fit
    your use-case.
 
+   An `activate-module-always` setting used to be listed here. It named
+   modules by their tooltip text, and the step that reads a tooltip
+   (`readShipUIModuleButtonTooltips`) is only ever called from this app's
+   inherited, unreachable copy of the combat-anomaly-bot's decision root --
+   never from the reachable `wingmanDecisionRootInSpace` chain this bot
+   actually runs -- so it could never match anything, on any build this bot
+   has shipped. #398's `manageMiddleRowModules` is what an operator wanted it
+   for: the middle row is held on by position, needing no tooltip and no
+   setting. Removed rather than left as a setting that looks like it works. A
+   settings file still carrying the line is now **rejected** with
+   `Unknown setting name 'activate-module-always'`; delete the line.
+
    + `accept-fleet-invite-from` : Name of a pilot whose fleet invitations this
      bot should accept, exactly as the client writes it. Repeatable. With none
      given the bot accepts no invitation at all. **Accepting means the fleet
@@ -106,11 +117,6 @@
      be someone `fleetPilotNames` recognises -- the fleet window's own member
      rows, its header's commander, or a pilot local chat's standing icon marks
      as a fleetmate. With 'yes' this ship breaks off for any of them.
-   + `activate-module-always` : Text found in tooltips of ship modules that
-     should always be active. For example: "shield hardener". **Optional and
-     usually unnecessary**: the middle row right of the propulsion module is
-     already held on by position. Use this only for a module outside that row,
-     and note it takes effect only once the bot has read that module's tooltip.
    + `home-station` : Full name of the station to return to when the session is
      ending, exactly as the client renders it. Defaults to
      `Amarr VIII (Oris) - Emperor Family Academy`.
@@ -159,7 +165,6 @@
 
    accept-fleet-invite-from=Gal Bistot
    follow-fleet-broadcast-from=Gal Bistot
-   activate-module-always=shield hardener
    home-station=Amarr VIII (Oris) - Emperor Family Academy
 
 -}
@@ -183,8 +188,7 @@ import Common.PromptParser as PromptParser exposing (IntervalInt)
 import Dict
 import EveOnline.BotFramework
     exposing
-        ( ModuleButtonTooltipMemory
-        , OverviewWindowsMemory
+        ( OverviewWindowsMemory
         , ReadingFromGameClient
         , ShipModulesMemory
         , UseContextMenuCascadeNode(..)
@@ -243,7 +247,6 @@ defaultBotSettings =
     , anomalyNames = []
     , avoidRats = []
     , prioritizeRats = []
-    , activateModulesAlways = []
     , maxTargetCount = 3
     , botStepDelayMilliseconds = { minimum = 1300, maximum = 1500 }
     , anomalyWaitTimeSeconds = 15
@@ -384,16 +387,6 @@ parseBotSettings =
                     (\stationName settings -> { settings | homeStation = Just stationName })
              }
            )
-         , ( "activate-module-always"
-           , { alternativeNames = []
-             , description = "Text found in tooltips of ship modules that should always be active. For example: 'shield hardener'."
-             , valueParser =
-                PromptParser.valueTypeString
-                    (\moduleName settings ->
-                        { settings | activateModulesAlways = moduleName :: settings.activateModulesAlways }
-                    )
-             }
-           )
          , ( "anomaly-wait-time"
            , { alternativeNames = []
              , description = "Minimum time to wait after arriving in an anomaly before considering it finished. Use this if you see anomalies in which rats arrive later than you arrive on grid."
@@ -519,7 +512,6 @@ type alias BotSettings =
     , anomalyNames : List String
     , avoidRats : List String
     , prioritizeRats : List String
-    , activateModulesAlways : List String
     , maxTargetCount : Int
     , anomalyWaitTimeSeconds : Int
     , botStepDelayMilliseconds : IntervalInt
@@ -2590,41 +2582,7 @@ decideNextActionWhenInSpaceNotHiding context shipUI =
 
     else
         readShipUIModuleButtonTooltips context
-            |> Maybe.withDefault
-                (activateAlwaysOnModules context
-                    |> Maybe.withDefault (fightPointedRatsOrReturnDrones context shipUI)
-                )
-
-
-{-| The next inactive module that `activate-module-always` names, if any --
-`Just` a click if one is inactive, `Nothing` once every named module already
-reads active.
-
-Extracted out of what is now `decideNextActionWhenInSpaceNotHiding`'s own
-inline check (that function is this app's inherited, unreachable copy of the
-combat anomaly bot's root, kept for reference) so the wingman's own root can
-reach the same behaviour instead of never checking it at all -- #349 found
-that `wingmanDecisionRootInSpace` called straight into
-`modulesToActivateAlwaysActivated` (now `fightPointedRatsOrReturnDrones`) and
-never activated an always-on module in its own right.
-
--}
-activateAlwaysOnModules : BotDecisionContext -> Maybe DecisionPathNode
-activateAlwaysOnModules context =
-    case
-        context
-            |> knownModulesToActivateAlways
-            |> List.filter (Tuple.second >> moduleIsActiveOrReloading >> not)
-            |> List.head
-    of
-        Nothing ->
-            Nothing
-
-        Just ( inactiveModuleMatchingText, inactiveModule ) ->
-            Just
-                (describeBranch ("I see inactive module '" ++ inactiveModuleMatchingText ++ "' to activate always. Activate it.")
-                    (clickModuleButtonButWaitIfClickedInPreviousStep context inactiveModule)
-                )
+            |> Maybe.withDefault (fightPointedRatsOrReturnDrones context shipUI)
 
 
 {-| The middle row: everything right of the leftmost slot held on, and the
@@ -2633,14 +2591,14 @@ approaching the fleet commander.
 
 **By position, with no tooltip read**, which is `eve-online-saxrat`'s shape
 ported whole: `shipUIModulesToActivateAlways` and `propulsionModuleButton` over
-`middleRowLeftToRight`. #394 is why it exists. The settings block these bots
-are actually launched with carries no `activate-module-always` line at all, so
-`knownModulesToActivateAlways` is empty and `activateAlwaysOnModules` correctly
-does nothing -- and the setting was the wrong instrument anyway, since it
-matches tooltip text, needs `readShipUIModuleButtonTooltips` to have run first,
-and has no way to say "everything except the propulsion module" or "this one
-only while moving". The setting stays for anything genuinely tooltip-matched;
-this is the path that does not depend on one being set.
+`middleRowLeftToRight`. #394 is why it exists. The `activate-module-always`
+setting this superseded matched tooltip text, needed
+`readShipUIModuleButtonTooltips` to have run first -- a step only the app's
+inherited, unreachable decision root ever called -- and had no way to say
+"everything except the propulsion module" or "this one only while moving". It
+could never match anything on any build this bot has shipped, and #400 removed
+it rather than leave a setting that looked like it worked. This is the path
+that needs no setting at all.
 
 **The always-on half is not gated on a fight, and that is a decision rather
 than something inherited.** saxrat gates its own on `anyAttackableInOverview`,
@@ -4575,39 +4533,6 @@ lockTargetFromOverviewEntry context overviewEntry =
 readShipUIModuleButtonTooltips : BotDecisionContext -> Maybe DecisionPathNode
 readShipUIModuleButtonTooltips =
     EveOnline.BotFrameworkSeparatingMemory.readShipUIModuleButtonTooltipWhereNotYetInMemory
-
-
-knownModulesToActivateAlways : BotDecisionContext -> List ( String, EveOnline.ParseUserInterface.ShipUIModuleButton )
-knownModulesToActivateAlways context =
-    context.readingFromGameClient.shipUI
-        |> Maybe.map .moduleButtons
-        |> Maybe.withDefault []
-        |> List.filterMap
-            (\moduleButton ->
-                moduleButton
-                    |> EveOnline.BotFramework.getModuleButtonTooltipFromModuleButton context.memory.shipModules
-                    |> Maybe.andThen (tooltipLooksLikeModuleToActivateAlways context)
-                    |> Maybe.map (\moduleName -> ( moduleName, moduleButton ))
-            )
-
-
-tooltipLooksLikeModuleToActivateAlways : BotDecisionContext -> ModuleButtonTooltipMemory -> Maybe String
-tooltipLooksLikeModuleToActivateAlways context =
-    .allContainedDisplayTextsWithRegion
-        >> List.filterMap
-            (\( tooltipText, _ ) ->
-                context.eventContext.botSettings.activateModulesAlways
-                    |> List.filterMap
-                        (\moduleToActivateAlways ->
-                            if tooltipText |> stringContainsIgnoringCase moduleToActivateAlways then
-                                Just tooltipText
-
-                            else
-                                Nothing
-                        )
-                    |> List.head
-            )
-        >> List.head
 
 
 botMain : InterfaceToHost.BotConfig State
@@ -8328,7 +8253,7 @@ wingmanDecisionRootInSpace context shipUI =
                     -- is not cycling. A retreat placed under any of them is
                     -- reachable only on the readings the fleet is doing
                     -- nothing, which is every reading except the ones it
-                    -- exists for. `activateAlwaysOnModules` is above the
+                    -- exists for. `manageMiddleRowModules` is above the
                     -- fight in #349's order and still below this: a hardener
                     -- click is worth a reading when the ship is staying and
                     -- is not when it is leaving.
@@ -8385,172 +8310,166 @@ wingmanDecisionRootInSpaceOrdinary context shipUI =
             unlockFleetmate
 
         Nothing ->
-            case activateAlwaysOnModules context of
-                Just activate ->
-                    activate
+            -- #394 and #400. The second half of #349's module step: a
+            -- hardener or a prop mod click is worth a reading when the ship
+            -- is staying, and every arm under the broadcast answers `Just`
+            -- for the whole of a fight. #400 removed this step's other
+            -- half -- the tooltip-matched `activate-module-always` setting,
+            -- which could never fire because the tooltip read it needed
+            -- ran only in this app's inherited, unreachable decision root
+            -- -- so the row this finds by position is the whole of the
+            -- module step now, not a standing default underneath a setting.
+            case manageMiddleRowModules context of
+                Just manageTheMiddleRow ->
+                    manageTheMiddleRow
 
                 Nothing ->
-                    -- #394. The second half of #349's module step, and it
-                    -- sits with the first rather than below the broadcast
-                    -- for the reason #349 established: a hardener click is
-                    -- worth a reading when the ship is staying, and every
-                    -- arm under the broadcast answers `Just` for the whole
-                    -- of a fight. `activateAlwaysOnModules` stays ahead of
-                    -- it: a module an operator named by tooltip is one they
-                    -- asked for by hand, and the row this finds by position
-                    -- is the standing default underneath that.
-                    case manageMiddleRowModules context of
-                        Just manageTheMiddleRow ->
-                            manageTheMiddleRow
+                    case answerTheBackupCall context shipUI of
+                        Just goToTheirAid ->
+                            -- #385. Above the travel forms in
+                            -- `actOnFleetBroadcast`, because being slow to a
+                            -- backup call costs a ship where being slow to an
+                            -- `is at location` costs a few seconds of
+                            -- alignment -- the argument #237 makes for saxrat.
+                            -- Below the retreat and below `sessionIsEnding` by
+                            -- the whole tree, as everything here is: a ship
+                            -- past its own threshold leaves rather than
+                            -- joining somebody else's fight, which is the
+                            -- ordering saxrat's own retreat records having
+                            -- needed. And below the module step --
+                            -- `unlockFleetPilotInTargetBar` and #394's
+                            -- `manageMiddleRowModules` -- which are a
+                            -- safety condition and a click. #394's own
+                            -- argument for keeping that step together is
+                            -- what settles the order between it and this:
+                            -- a hardener or a prop mod is worth a reading
+                            -- while the ship is staying, and this arm is
+                            -- the first one that decides to go somewhere.
+                            --
+                            -- It answers `Nothing` for every case that is not
+                            -- an action, so it starves nothing below it while
+                            -- a banner that does not clear stays up -- see
+                            -- `answerTheBackupCall`.
+                            goToTheirAid
 
                         Nothing ->
-                            case answerTheBackupCall context shipUI of
-                                Just goToTheirAid ->
-                                    -- #385. Above the travel forms in
-                                    -- `actOnFleetBroadcast`, because being slow to a
-                                    -- backup call costs a ship where being slow to an
-                                    -- `is at location` costs a few seconds of
-                                    -- alignment -- the argument #237 makes for saxrat.
-                                    -- Below the retreat and below `sessionIsEnding` by
-                                    -- the whole tree, as everything here is: a ship
-                                    -- past its own threshold leaves rather than
-                                    -- joining somebody else's fight, which is the
-                                    -- ordering saxrat's own retreat records having
-                                    -- needed. And below the module step --
-                                    -- `unlockFleetPilotInTargetBar`,
-                                    -- `activateAlwaysOnModules` and #394's
-                                    -- `manageMiddleRowModules` -- which are a
-                                    -- safety condition and two clicks. #394's own
-                                    -- argument for keeping that step together is
-                                    -- what settles the order between it and this:
-                                    -- a hardener or a prop mod is worth a reading
-                                    -- while the ship is staying, and this arm is
-                                    -- the first one that decides to go somewhere.
+                            case closeOnTheCommanderAfterLanding context shipUI of
+                                Just closeOnTheCommander ->
+                                    -- Below the backup call, and that was neither
+                                    -- author's decision: #385 and #397 were written
+                                    -- against this same slot without knowing of each
+                                    -- other, and the order was chosen when they met.
+                                    -- A backup call costs a ship and this window costs
+                                    -- seconds, and `answerTheBackupCall` answers
+                                    -- `Nothing` for everything that is not an action,
+                                    -- so it starves nothing by sitting above. The
+                                    -- reverse would swallow a backup call for this
+                                    -- whole window, which opens on landing -- when a
+                                    -- fight is most likely starting.
+                                    -- #397, and it is a window rather than a
+                                    -- placement. From the reading the warp ends
+                                    -- until the client names the manoeuvre
+                                    -- `Approach`, closing on the commander
+                                    -- outranks the arms below -- each of which
+                                    -- answers `Just` for the whole of a fight,
+                                    -- which is what made
+                                    -- `approachTheFleetCommander` unreachable at
+                                    -- the foot of this list on every grid worth
+                                    -- landing on.
                                     --
-                                    -- It answers `Nothing` for every case that is not
-                                    -- an action, so it starves nothing below it while
-                                    -- a banner that does not clear stays up -- see
-                                    -- `answerTheBackupCall`.
-                                    goToTheirAid
+                                    -- **Below the middle-row arm, not above it.**
+                                    -- #394 ties the propulsion module to the
+                                    -- client naming `Approach`; this arm answers
+                                    -- `Just` for as long as it is closing, so
+                                    -- above the module arm it would starve the
+                                    -- prop mod during exactly the window the
+                                    -- module exists for. The module arm is a
+                                    -- state check and a click and can block on
+                                    -- nothing, which is why it is safe ahead.
+                                    closeOnTheCommander
 
                                 Nothing ->
-                                    case closeOnTheCommanderAfterLanding context shipUI of
-                                        Just closeOnTheCommander ->
-                                            -- Below the backup call, and that was neither
-                                            -- author's decision: #385 and #397 were written
-                                            -- against this same slot without knowing of each
-                                            -- other, and the order was chosen when they met.
-                                            -- A backup call costs a ship and this window costs
-                                            -- seconds, and `answerTheBackupCall` answers
-                                            -- `Nothing` for everything that is not an action,
-                                            -- so it starves nothing by sitting above. The
-                                            -- reverse would swallow a backup call for this
-                                            -- whole window, which opens on landing -- when a
-                                            -- fight is most likely starting.
-                                            -- #397, and it is a window rather than a
-                                            -- placement. From the reading the warp ends
-                                            -- until the client names the manoeuvre
-                                            -- `Approach`, closing on the commander
-                                            -- outranks the arms below -- each of which
-                                            -- answers `Just` for the whole of a fight,
-                                            -- which is what made
-                                            -- `approachTheFleetCommander` unreachable at
-                                            -- the foot of this list on every grid worth
-                                            -- landing on.
-                                            --
-                                            -- **Below the middle-row arm, not above it.**
-                                            -- #394 ties the propulsion module to the
-                                            -- client naming `Approach`; this arm answers
-                                            -- `Just` for as long as it is closing, so
-                                            -- above the module arm it would starve the
-                                            -- prop mod during exactly the window the
-                                            -- module exists for. The module arm is a
-                                            -- state check and a click and can block on
-                                            -- nothing, which is why it is safe ahead.
-                                            closeOnTheCommander
+                                    case actOnFleetBroadcast context shipUI of
+                                        Just actOnBroadcast ->
+                                            actOnBroadcast
 
                                         Nothing ->
-                                            case actOnFleetBroadcast context shipUI of
-                                                Just actOnBroadcast ->
-                                                    actOnBroadcast
+                                            case dronesAssistTheCommander context of
+                                                Just assist ->
+                                                    assist
 
                                                 Nothing ->
-                                                    case dronesAssistTheCommander context of
-                                                        Just assist ->
-                                                            assist
+                                                    case fireOnActiveTarget context of
+                                                        Just fire ->
+                                                            -- Strictly below the drone arm and
+                                                            -- strictly above the gate: a locked
+                                                            -- target means a fight, and a bot
+                                                            -- that would rather take a gate
+                                                            -- than shoot what the commander
+                                                            -- called has left the fleet a ship
+                                                            -- short in the pocket it just left.
+                                                            fire
 
                                                         Nothing ->
-                                                            case fireOnActiveTarget context of
-                                                                Just fire ->
-                                                                    -- Strictly below the drone arm and
-                                                                    -- strictly above the gate: a locked
-                                                                    -- target means a fight, and a bot
-                                                                    -- that would rather take a gate
-                                                                    -- than shoot what the commander
-                                                                    -- called has left the fleet a ship
-                                                                    -- short in the pocket it just left.
-                                                                    fire
+                                                            case approachTheFleetCommander context shipUI of
+                                                                Just approachTheCommander ->
+                                                                    -- #365. Below the drone arm
+                                                                    -- and below the guns so it
+                                                                    -- can starve neither
+                                                                    -- (#326), and above the
+                                                                    -- gate so the gate arm's
+                                                                    -- own "rats are still on
+                                                                    -- the grid" wait cannot
+                                                                    -- starve it in the one
+                                                                    -- state it is most for.
+                                                                    -- Below #364's retreat by
+                                                                    -- the whole tree: a damaged
+                                                                    -- ship breaks off rather
+                                                                    -- than holds station, so
+                                                                    -- nothing that keeps this
+                                                                    -- ship on the grid may ever
+                                                                    -- answer before that arm
+                                                                    -- does. The full argument
+                                                                    -- is in
+                                                                    -- `approachTheFleetCommander`.
+                                                                    approachTheCommander
 
                                                                 Nothing ->
-                                                                    case approachTheFleetCommander context shipUI of
-                                                                        Just approachTheCommander ->
-                                                                            -- #365. Below the drone arm
-                                                                            -- and below the guns so it
-                                                                            -- can starve neither
-                                                                            -- (#326), and above the
-                                                                            -- gate so the gate arm's
-                                                                            -- own "rats are still on
-                                                                            -- the grid" wait cannot
-                                                                            -- starve it in the one
-                                                                            -- state it is most for.
-                                                                            -- Below #364's retreat by
-                                                                            -- the whole tree: a damaged
-                                                                            -- ship breaks off rather
-                                                                            -- than holds station, so
-                                                                            -- nothing that keeps this
-                                                                            -- ship on the grid may ever
-                                                                            -- answer before that arm
-                                                                            -- does. The full argument
-                                                                            -- is in
-                                                                            -- `approachTheFleetCommander`.
-                                                                            approachTheCommander
+                                                                    case accelerationGateStep context of
+                                                                        Just takeTheGate ->
+                                                                            -- #348. Sits after the
+                                                                            -- drone arm and after the
+                                                                            -- guns, never before
+                                                                            -- them, so a gate this
+                                                                            -- bot can see is never
+                                                                            -- taken while drones are
+                                                                            -- still owed a command on
+                                                                            -- a live grid -- the same
+                                                                            -- ordering argument #326
+                                                                            -- established for the
+                                                                            -- drone arm itself.
+                                                                            takeTheGate
 
                                                                         Nothing ->
-                                                                            case accelerationGateStep context of
-                                                                                Just takeTheGate ->
-                                                                                    -- #348. Sits after the
-                                                                                    -- drone arm and after the
-                                                                                    -- guns, never before
-                                                                                    -- them, so a gate this
-                                                                                    -- bot can see is never
-                                                                                    -- taken while drones are
-                                                                                    -- still owed a command on
-                                                                                    -- a live grid -- the same
-                                                                                    -- ordering argument #326
-                                                                                    -- established for the
-                                                                                    -- drone arm itself.
-                                                                                    takeTheGate
-
-                                                                                Nothing ->
-                                                                                    {- The inherited
-                                                                                       combat-anomaly-bot arm
-                                                                                       is gone from here
-                                                                                       (#349): it hunted
-                                                                                       anomalies on an idle
-                                                                                       grid, which is not
-                                                                                       following a commander.
-                                                                                       What remains is
-                                                                                       self-defense only --
-                                                                                       and it is now genuinely
-                                                                                       the last resort it
-                                                                                       reads as, because
-                                                                                       `fireOnActiveTarget`
-                                                                                       above it fires on
-                                                                                       anything locked whether
-                                                                                       or not a rat has
-                                                                                       pointed this ship.
-                                                                                    -}
-                                                                                    fightPointedRatsOrReturnDrones context shipUI
+                                                                            {- The inherited
+                                                                               combat-anomaly-bot arm
+                                                                               is gone from here
+                                                                               (#349): it hunted
+                                                                               anomalies on an idle
+                                                                               grid, which is not
+                                                                               following a commander.
+                                                                               What remains is
+                                                                               self-defense only --
+                                                                               and it is now genuinely
+                                                                               the last resort it
+                                                                               reads as, because
+                                                                               `fireOnActiveTarget`
+                                                                               above it fires on
+                                                                               anything locked whether
+                                                                               or not a rat has
+                                                                               pointed this ship.
+                                                                            -}
+                                                                            fightPointedRatsOrReturnDrones context shipUI
 
 
 {-| What the current broadcast asks for, if this bot can act on it yet.
@@ -13016,7 +12935,7 @@ reached.
 ordering and not up for trade: a ship past its threshold breaks off, and it does
 not close on anyone first. Below `unlockFleetPilotInTargetBar`, a bounded safety
 arm (#367) whose veto on the guns is independent of its placement anyway, and
-below `activateAlwaysOnModules`, whose answers stop the moment the hardeners are
+below `manageMiddleRowModules`, whose answers stop the moment the hardeners are
 on -- a tank worth having while landing at range. Above `actOnFleetBroadcast`,
 `dronesAssistTheCommander` and `fireOnActiveTarget`, which is the whole change.
 

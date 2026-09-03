@@ -446,12 +446,18 @@ class TheAccelerationGateStepTest(unittest.TestCase):
 
 
 class TheModuleActivationSplitTest(unittest.TestCase):
-    """#349: `activate-module-always` reached the client only through the arm
+    """#349: module activation reached the client only through the arm
     inherited from the combat anomaly bot, which did module activation, rat
     combat and anomaly hunting together. That put module activation behind
     the broadcast and the drone arm, and it dragged an idle-grid anomaly hunt
     in with it -- not following a commander, and the reason a six-hour
     unattended run was a bad idea.
+
+    `activateAlwaysOnModules`, the tooltip-matched `activate-module-always`
+    arm #349 split out first, was itself removed by #400: the tooltip read
+    it needed ran only in this app's inherited, unreachable decision root, so
+    it could never fire. `manageMiddleRowModules` (#394) is the whole of the
+    module step now.
     """
 
     @classmethod
@@ -460,17 +466,27 @@ class TheModuleActivationSplitTest(unittest.TestCase):
             cls.source = handle.read()
 
     def test_module_activation_is_its_own_step_ahead_of_the_broadcast(self):
-        # The needles stop at the scrutinee on purpose: the retreat's own
-        # comment in the first half of the root names `activateAlwaysOnModules`
+        # The needle stops at the scrutinee on purpose: the retreat's own
+        # comment in the first half of the root names `manageMiddleRowModules`
         # in prose, and a bare-name search would read that mention instead of
         # the arm and pass whatever the real order was.
         root = wingman_root_body(self.source)
-        self.assertIn("case activateAlwaysOnModules context", root)
+        self.assertIn("case manageMiddleRowModules context", root)
         self.assertIn("case actOnFleetBroadcast context", root)
         self.assertLess(
-            root.index("case activateAlwaysOnModules context"),
+            root.index("case manageMiddleRowModules context"),
             root.index("case actOnFleetBroadcast context"),
             "module activation is not ahead of the broadcast")
+
+    def test_the_tooltip_matched_setting_is_gone(self):
+        """#400. Neither the dead function nor the setting it read may
+        survive, on any path -- reachable or the inherited copy kept for
+        reference."""
+        self.assertNotIn("activateAlwaysOnModules", self.source)
+        self.assertNotIn("knownModulesToActivateAlways", self.source)
+        self.assertNotIn("tooltipLooksLikeModuleToActivateAlways", self.source)
+        self.assertNotIn("activateModulesAlways", self.source)
+        self.assertNotIn('"activate-module-always"', self.source)
 
     def test_the_wingman_s_own_root_no_longer_reaches_anomaly_hunting(self):
         """`enterAnomaly` / `decideActionInAnomaly` still exist in this file,

@@ -1119,7 +1119,7 @@ class ThePlacementAndTheSupersessionTest(unittest.TestCase):
             self.order_of(
                 "case sessionIsEnding context shipUI of",
                 "case retreatToTheCommander context",
-                "case activateAlwaysOnModules context of",
+                "case manageMiddleRowModules context of",
                 "case actOnFleetBroadcast context shipUI of",
                 "case dronesAssistTheCommander context of",
                 "case fireOnActiveTarget context of",

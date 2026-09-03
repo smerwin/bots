@@ -15,6 +15,13 @@ So `manageMiddleRowModules` ports `eve-online-saxrat`'s position-based shape:
 and the propulsion module runs only while the client names this ship's
 manoeuvre `Approach`.
 
+`activate-module-always` itself is **removed** by #400: the empty candidate
+list on the shipped settings was never the whole story, since the tooltip
+read it needed ran only in this app's inherited, unreachable copy of the
+combat-anomaly-bot's decision root -- so it could never fire even on a
+settings block that did carry the line. `manageMiddleRowModules` is the
+whole of the module step now.
+
 ## What each case is holding down
 
 **The x-sort, which is the load-bearing half of the port.**
@@ -671,10 +678,11 @@ class TheDeactivationTransientTest(unittest.TestCase):
 
 class TheMiddleRowBoundTest(unittest.TestCase):
     """#408's urgent half: the arm sits directly under
-    `activateAlwaysOnModules` and above the broadcast arm, the drones, the
+    `unlockFleetPilotInTargetBar` and above the broadcast arm, the drones, the
     guns, the gate and the travel forms, so answering `Just` forever starves
     all of them. That is #321's shape and the third time it has hit this bot
-    (#360, #395)."""
+    (#360, #395). (Its sibling `activateAlwaysOnModules`, which sat ahead of it
+    in #394's own order, is removed by #400.)"""
 
     @classmethod
     def setUpClass(cls):
@@ -951,26 +959,27 @@ class TheArmIsOnTheLiveDecisionPathTest(unittest.TestCase):
             ["This ship is not approaching anything. Shut the propulsion"
              " module down. | Click on this module button."])
 
-    def test_the_tooltip_path_is_still_consulted_ahead_of_it(self):
-        """#394 adds a position-based path; it does not replace the setting.
+    def test_the_tooltip_path_is_gone_and_the_position_path_stands_alone(self):
+        """#394 added a position-based path alongside the tooltip-matched
+        setting; #400 removed the setting rather than leave it as one that
+        looks like it works, since the tooltip read it needed
+        (`readShipUIModuleButtonTooltips`) is only ever called from this
+        app's inherited, unreachable copy of the combat-anomaly-bot's
+        decision root, never from the reachable
+        `wingmanDecisionRootInSpaceOrdinary` chain this bot actually runs --
+        so it could never match anything.
 
-        Source-pinned, and the only case here that is, because
-        `activateAlwaysOnModules` cannot be told apart from outside without a
-        `ShipModulesMemory` carrying a read tooltip: with none it answers
-        `Nothing` for every reading, which is also what a deleted call answers.
-
-        The slice is bounded to the two root declarations by
-        `wingman_root_body`, and both needles stop at the scrutinee -- the
-        retreat's own comment in the first half of that slice names
-        `activateAlwaysOnModules` in prose, and a bare-name search would read
-        that mention instead of the arm. `TheModuleActivationSplitTest` records
-        the same hazard for the same reason.
+        Source-pinned, because the retreat's own comment in the first half of
+        the root names `manageMiddleRowModules` in prose, and a bare-name
+        search would read that mention instead of the arm.
+        `TheModuleActivationSplitTest` records the same hazard for the same
+        reason.
         """
         with open(os.path.join(WINGMAN_DIR, "Bot.elm"), encoding="utf-8") as f:
-            body = wingman_root_body(f.read())
-        tooltips = body.index("case activateAlwaysOnModules context of")
+            source = f.read()
+        self.assertNotIn("activateAlwaysOnModules", source)
+        body = wingman_root_body(source)
         middleRow = body.index("case manageMiddleRowModules context of")
-        self.assertLess(tooltips, middleRow)
         self.assertLess(middleRow,
                         body.index("case actOnFleetBroadcast context"))
 
