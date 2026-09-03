@@ -890,15 +890,16 @@ way, which is why it carries four guards where the broadcast carries none.
    are not — #395's costs a lock on a target whose row is back next reading,
    this one costs a pocket — so tying them would let a retune of one silently
    move the other. **No corpus sizes it**, here or anywhere.
-4. **Exactly one acceleration gate on the grid**, which is the whole difference
-   from #393. Nobody named this gate, so with two there is no basis to choose
-   and picking the nearest would be a guess whose failure is a wrong pocket.
-   Refusing on ambiguity is `dockAtDestinationStation`'s discipline (exactly one
-   `AutopilotDestinationIcon`), and what refusing costs here is only the
-   follow — the gate is still taken on a clear grid exactly as it was. The count
-   and the choice come off **one** filter, `accelerationGatesOnOverview`, so a
-   row nothing would have clicked cannot refuse the follow and a row the choice
-   can see cannot be missing from the count.
+4. **At least one acceleration gate on the grid**, which is the whole difference
+   from #393. This guard was "exactly one" until #442 — nobody names this gate,
+   so with two or more there is no basis to choose, and picking the nearest was
+   read as a guess whose failure is a wrong pocket, refused on
+   `dockAtDestinationStation`'s discipline (exactly one `AutopilotDestinationIcon`).
+   **#442 revisits that refusal**; see "#442 revisits guard 4" below for why and
+   for the tiebreak. What still refuses is a grid with **no** gate at all. The
+   count and the choice come off **one** filter, `accelerationGatesOnOverview`,
+   so a row nothing would have clicked cannot license the follow and a row the
+   choice can see cannot be missing from the count.
 
 Guards 1 to 3 are folded in `updateMemoryForNewReadingFromGame`, which is the
 only thing that runs on every reading unconditionally (#102, #126) and the only
@@ -940,8 +941,10 @@ derived from `gateTakingAuthority` rather than restated at the press — because
 exception, which is #393's own argument reached a second way:
 
 ```
-++ The commander is no longer on this grid and this is the only acceleration gate on it -- activate it and follow him through, rats on the grid or not. This cannot tell that from him having died, warped off or cloaked, and does not claim to.
+++ The commander is no longer on this grid -- activate the nearest acceleration gate and follow him through, rats on the grid or not. This cannot tell that from him having died, warped off or cloaked, and does not claim to. With more than one gate here nobody named which one he took either, so this may be the wrong pocket -- #442 accepts that risk rather than refuse and stall.
 ```
+
+(This is #442's wording; the sentence quoted when this section was first written said "and this is the only acceleration gate on it", which stopped being true the day the guard stopped requiring exactly one.)
 
 **It holds no reading.** The trigger is a `Bool` handed to `gateMayBeTaken`;
 everything below it is the shipped gate path, bounded by
@@ -1011,9 +1014,10 @@ listed in that file's own docstring — including the prior-sighting guard
 dropped, the sighting surviving a warp, **the gate-press reset removed** (which
 is the defect this closes, and which fails the chaining case), **the button's
 region read live rather than remembered** (the half-revert that fails silently
-in exactly the case the reset exists for), the exactly-one-gate guard relaxed to
-"at least one", the follow made to wait, and the status clause collapsing the
-two absences.
+in exactly the case the reset exists for), **the at-least-one-gate guard
+reverted to "exactly one"** (#442's own relaxation undone, so a grid carrying
+two or more gates refuses the follow again), the follow made to wait, and the
+status clause collapsing the two absences.
 
 #### Unverified
 
@@ -1068,6 +1072,57 @@ not drawing him and nothing here will ever fire — correct, and worth knowing. 
 follow that happens on a reading whose previous clauses read `NEVER SEEN` means
 the prior-sighting guard is not reaching the rule, which is the direction this
 fails silently in and the one to escalate on.
+
+### #442 revisits guard 4: refusing to guess was worse than guessing
+
+Guard 4 above shipped as "exactly one gate on the grid", on
+`dockAtDestinationStation`'s discipline: nobody names which gate the commander
+took, so with two or more there is no basis to choose and the bot refused
+rather than guess. #442 is the operator revisiting that call, from live
+sessions in which a wingman under this guard sat on the grid or drifted away
+from its commander at exactly the sites that carry more than one gate — a cost
+the original decision named as a risk it was declining to take rather than
+weighed against the refusal's own cost, which is what this section states
+rather than argues away. `nearestAccelerationGateOnOverview` was already
+answering "the nearest one" for every *other* caller of it (an in-range gate,
+a called gate, the ordinary hunting arm's own gate step); guard 4 was the one
+place in this bot that had a tiebreak sitting right there and declined to use
+it.
+
+So the guard is now `commanderHasLeftTheGrid && accelerationGatesOnTheGrid > 0`
+— "at least one" rather than "exactly one" — and the press takes whichever gate
+`nearestAccelerationGateOnOverview` already would have, unchanged. **The
+wrong-pocket risk this accepts is real and is not new**: it is exactly the risk
+guard 4 always carried on a single-gate grid (the commander may have died,
+warped off or cloaked rather than taken it), widened to cover "and if he did
+take a gate, this may not have been the one." A wingman that follows into the
+wrong pocket is alone there, which was already the accepted cost of guard 4
+existing at all — see "What it does not claim" above. What refuses unchanged
+is a grid with **no** gate: there is nothing there for a tiebreak to choose
+between, so that state still hands the reading back exactly as before.
+
+The status line's gate-count clause and the press's own wording both say so on
+the reading it fires, rather than reading `rats are still on the grid` on a
+grid the follow is actually taking:
+
+```
+Commander on this grid: SEEN AND GONE for 5 readings -- taken as him having left. Acceleration gates on this grid: 2 -- nobody named which one he took, so the nearest is followed and this may be the wrong pocket (#442). FOLLOWING HIM THROUGH IT, rats on the grid or not. He may instead have died, warped off or cloaked; nothing here can tell those apart.
+```
+
+**Verified without a live client**, in the same
+`test_wingman_follows_the_commander_through_a_gate.py` referenced above, whose
+own fifteen-mutation battery now includes the guard reverted to "exactly one"
+as one of the fifteen (see the mutation list above), plus in
+`test_wingman_offgrid_fc_pursuit.py`'s lighter `TheGateAmbiguityTest`, which
+checks the pure rule at gate counts of 0, 1, 2 and 3 directly and is where a
+reader confirming #442 in isolation from #429's off-grid warp (below) should
+look first.
+
+**Unverified: any of it running**, unchanged from the rest of this section —
+there is still no wingman corpus, so how often a grid actually carries two or
+more gates, and how often the nearest-gate guess would have been the wrong
+one, are both unmeasured. The reversal rests on the operator's own account of
+what the refusal cost in practice, not on a corpus this section can point to.
 
 ### The client's own refusal to warp is licence to take the gate
 
@@ -2074,6 +2129,62 @@ no longer out of system` on the next reading. A run that reaches the travel
 branch and never prints a jump-related line at all past the first "no route
 in the info panel yet" wait means the ESI destination never took, which is
 `hostDirectiveSetDestination`'s own territory rather than this one's.
+
+### #442: the off-grid warp tries the fleet-window row before asking for a route
+
+The section above is `TravelTo`'s off-grid path. `AtLocation` and
+`InPositionAt` — "she is at Amarr", "he is in position at the gate" — go
+through a different function, `goToFleetMate`, and until #442 its off-grid
+half had exactly one move: ask the host to set a route through
+`@host set-destination` and wait for the ESI round trip and the route panel to
+catch up. That is slow next to a mechanism that already existed and already
+worked for exactly this problem — `warpToFleetMateFromTheirFleetWindowRow`
+(#429), which right-clicks a fleet-mate's own row in the fleet window and
+drives the proven `Warp to Member` cascade off it, no broadcast banner needed.
+Its only caller was `recoverFromRetreat`'s own
+`WarpToTheCommanderFromTheFleetWindow` case, reachable only while the health
+retreat above has latched `recoveringFromRetreat` — and that retreat ships
+switched off by default ("The health retreat, and why it ships switched off"
+above is where that default is recorded). So on the ordinary run, with the
+retreat off, an FC who simply flies faster than the ESI round trip left every
+`AtLocation`/`InPositionAt` broadcast falling straight to the slow ask, on
+every reading she stayed off grid, never trying the mechanism sitting right
+there in the same fleet window this bot already reads every reading.
+
+`goToFleetMateOffGridPreferringTheFleetWindow` is `goToFleetMate` with that
+mechanism tried first: off this grid, with a row in the fleet window and none
+on the overview, it warps from the row; with no row there, or past its own
+budget (`fleetWindowWarpAskedReadingsBound`, the on-grid warp's own bound
+reused rather than a second number invented for the same shape of wait), it
+falls through to `goToFleetMate` exactly as before. `actOnBroadcastVerb`'s two
+ordinary call sites are rewired to it; `recoverFromRetreat`'s own two call
+sites — which already order this mechanism against `RouteToWhereTheCommander
+LastSaidHeWas` through `retreatRecoveryStep` — are deliberately untouched,
+because that function's decision-log line is written from
+`retreatRecoveryStepNow`'s own answer before `goToFleetMate` ever runs, and a
+`goToFleetMate` that silently preferred the fleet window there would let the
+warp fire on a reading whose own status line still claims to be routing to a
+remembered place instead — a status line disagreeing with the decision.
+
+**Verified without a live client**, in
+`tools/macos-host/tests/test_wingman_offgrid_fc_pursuit.py`: the decision
+tried directly against a fleet-window row, against no row at all (the
+control), and against the pilot being on the overview (confirming the wrapper
+leaves the on-grid branch alone); the counter folded over a session, resetting
+on landing and on the row disappearing, holding at the bound; the status line
+and the decision read the same shared rule
+(`fleetMateOffGridWithFleetWindowRow`) rather than two copies of the same
+condition; and the whole thing run end to end through
+`wingmanDecisionRootInSpaceOrdinary`, the real decision root, so the wiring
+gap is what the tests close rather than an arm answering correctly in
+isolation.
+
+**Unverified: any of it running.** What to watch on the first run that meets
+an off-grid FC with a fleet-window row: the decision log naming "warping to
+them from their own row's menu" rather than "asking the host for the route",
+and the status line's `Off-grid fleet-window warp:` clause showing readings
+climbing rather than sitting at the give-up sentence for the whole time she is
+off grid.
 
 ### `entryLabel` is not the broadcast history's private name
 
