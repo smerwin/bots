@@ -2209,8 +2209,13 @@ class ConnectionLostWatch:
 
 class TaskDispatcher:
     def __init__(self, execute_input=False, capture_screenshots=False, game_log=None,
-                 legacy_search_ui_root=False):
+                 legacy_search_ui_root=False, console=None):
         self.volatile = VolatileHost(game_log=game_log, legacy_search_ui_root=legacy_search_ui_root)
+        # #163: where a step's input cost is reported besides stderr -- see
+        # `_report_input_cost`. `None` for any caller that builds a dispatcher
+        # without a console (including every raw `TaskDispatcher.__new__` in
+        # the tests), so nothing here requires one to exist.
+        self._console = console
         self._process_ids = {}
         self.execute_input = execute_input
         self.capture_screenshots = capture_screenshots
@@ -2970,6 +2975,14 @@ class TaskDispatcher:
         worst = max(self._glide_costs_this_step) if self._glide_costs_this_step else None
         self._glide_costs_this_step = []
         print(f"#   {describe_input_cost(worst)}", file=sys.stderr)
+        # `getattr` rather than `self._console`: several tests build a
+        # `TaskDispatcher` via `__new__` and never run `__init__`, so this
+        # stays reachable without every such harness having to grow a line it
+        # does not otherwise need. A real dispatcher always sets the
+        # attribute, console or no console.
+        console = getattr(self, "_console", None)
+        if console is not None:
+            console.note_input_cost(worst, INPUT_COST_SATURATED_MS)
 
 
 # ---------------------------------------------------------------------------
@@ -3052,7 +3065,8 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
     )
     game_log = GameLogTail(game_log_dir) if game_log_dir else None
     dispatcher = TaskDispatcher(execute_input=execute_input, capture_screenshots=capture_screenshots,
-                                game_log=game_log, legacy_search_ui_root=legacy_search_ui_root)
+                                game_log=game_log, legacy_search_ui_root=legacy_search_ui_root,
+                                console=console)
 
     def send_event(event_at_time):
         event = {"timeInMilliseconds": int(time.time() * 1000), "eventAtTime": event_at_time}
