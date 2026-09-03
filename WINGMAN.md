@@ -45,15 +45,17 @@ nothing to do.
 4. **Unlock a fleet member sitting in the target bar**, through
    `unlockFleetPilotInTargetBar`. See "Never shooting the fleet" below for why
    it is this high.
-5. **Activate the always-on modules** named in `activate-module-always`, and
-   then **manage the middle row by position** — `manageMiddleRowModules`
+5. **Manage the middle row by position** — `manageMiddleRowModules`
    (#394), bounded by `middleRowAskedReadingsBound` and reading the client's
    own `isDeactivating` before it clicks anything off (#408). Past the bound it
-   hands the reading back and the status line says `GAVE UP`. Directly under
-   those, and above everything below them, sits one
+   hands the reading back and the status line says `GAVE UP`. The
+   tooltip-matched `activate-module-always` setting this arm superseded is
+   **removed** (#400): the tooltip read it needed never ran on this bot's
+   reachable decision root, so it could never match anything. Directly under
+   this arm, and above everything below it, sits one
    window rather than an arm: `closeOnTheCommanderAfterLanding` (#397),
    which outranks 6, 7 and 8 from the reading a warp ends until the client
-   reports the manoeuvre. It sits *below* the module arms on purpose —
+   reports the manoeuvre. It sits *below* the module arm on purpose —
    #394 ties the propulsion module to the client naming `Approach`, and a
    window that answers for as long as it is closing would starve the very
    module the closing is meant to run. See both sections below.
@@ -234,8 +236,15 @@ is not approaching, keep-active [on, on].` — including the case where it found
 no slots at all, so the console can tell an unfound row from a row that needs
 nothing.
 
-`activate-module-always` still works and is unchanged, for anything genuinely
-tooltip-matched outside that row.
+`activate-module-always` is **removed** since #400. It matched tooltip text,
+and the step that reads a tooltip (`readShipUIModuleButtonTooltips`) is only
+ever called from this app's inherited, unreachable copy of the combat-anomaly-
+bot's decision root -- never from the reachable `wingmanDecisionRootInSpace`
+chain this bot actually runs -- so the paragraph above (the settings block
+carrying no `activate-module-always` line, and `knownModulesToActivateAlways`
+answering empty because of it) was never the whole story: even a settings
+block that *did* carry one could not have reached anything.
+`manageMiddleRowModules` is the only module step now.
 
 ### The prop mod was being switched back on, not failing to switch off (#408)
 
@@ -250,9 +259,11 @@ word the same:
 
 None of them was following the commander, and the travel arm was not at fault:
 it was **unreachable**. `manageMiddleRowModules` sits directly under
-`activateAlwaysOnModules` and above the broadcast arm, the drones, the guns,
-the gate and the travel forms, and #394 shipped it with no bound and no
-give-up, so an arm that answered `Just` on every reading owned the whole bot.
+`unlockFleetPilotInTargetBar` and above the broadcast arm, the drones, the guns,
+the gate and the travel forms (the sibling `activate-module-always` arm ahead
+of it in #394's own order was removed by #400, since it could never fire), and
+#394 shipped it with no bound and no give-up, so an arm that answered `Just` on
+every reading owned the whole bot.
 That is the same shape as the acceleration gate's #321 and the third time it
 has hit this bot (#360, #395).
 
@@ -340,13 +351,14 @@ click module buttons through that helper, and none of them was touched:
   module the operator named in `deactivate-module-on-warp` while
   `.isActive == Just True`, which is the same "still cycling" reading that
   trapped the propulsion module.
-- **`activateAlwaysOnModules`** and the always-on half of the middle row click
-  in the *activation* direction, gated on `moduleIsActiveOrReloading`. The
-  transient is the other one — a module told to switch on does not carry
-  `ramp_active` until it starts cycling — and nothing has measured how long
-  that takes on these fits. Both are now bounded (the middle row by #408, the
-  tooltip path by its own emptiness in the shipped settings), so the failure
-  costs readings rather than a session.
+- **The always-on half of the middle row** clicks in the *activation*
+  direction, gated on `moduleIsActiveOrReloading`. The transient is the other
+  one — a module told to switch on does not carry `ramp_active` until it
+  starts cycling — and nothing has measured how long that takes on these
+  fits. It is bounded by #408, so the failure costs readings rather than a
+  session. (Its sibling `activateAlwaysOnModules`, the tooltip-matched
+  `activate-module-always` arm, is **removed** by #400 rather than measured —
+  see "The middle row is switched on by position, not by tooltip" above.)
 - **`fightUsingDronesAndModules`** and **`fireOnActiveTarget`** click top-row
   weapons whose `isActive` *is* the duty cycle: `ramp_active` reads `False` for
   part of every cycle on a gun that is firing, which is what saxrat's #76 and
@@ -469,7 +481,7 @@ then the give-up hands every reading back.
 **Below the two arms that take the ship off the grid**, which is #364's measured
 ordering: a ship past its threshold breaks off and does not close on anyone
 first. Below `unlockFleetPilotInTargetBar` too, whose veto on the guns is
-independent of its placement, and below `activateAlwaysOnModules`, whose answers
+independent of its placement, and below `manageMiddleRowModules`, whose answers
 stop the moment the hardeners are on.
 
 **It does not depend on `orbit-fc`, and that is a behaviour change for every
@@ -2646,8 +2658,8 @@ dispatch. Small, and it unblocks the most.
 
 ### 2. Split the inherited combat arm
 
-`activate-module-always` ahead of the broadcast, drones behind it, rat combat
-behind that — the order the bot is meant to have.
+The module step ahead of the broadcast, drones behind it, rat combat behind
+that — the order the bot is meant to have.
 
 ### 3. Drones assisting the commander
 
@@ -2743,11 +2755,20 @@ single arm.
 
 ## Settings
 
+An `activate-module-always` setting used to be listed here. It matched module
+tooltips, and #400 removed it: the tooltip read it needed
+(`readShipUIModuleButtonTooltips`) is only ever called from this app's
+inherited, unreachable copy of the combat-anomaly-bot's decision root, so it
+could never match anything on any build this bot has shipped.
+`manageMiddleRowModules` (#394) is what an operator wanted it for -- the
+middle row is held on by position, needing no tooltip and no setting. A
+settings file still carrying the line is now **rejected** with
+`Unknown setting name 'activate-module-always'`; delete the line.
+
 | setting | what it does |
 |---|---|
 | `accept-fleet-invite-from` | Pilot whose invitations to accept, exactly as the client writes it. Repeatable. **This is where the trust is**: accepting means the fleet can warp this ship and call its targets. |
 | `follow-fleet-broadcast-from` | Pilot whose travel broadcasts to follow. Repeatable, matched exactly. Does **not** gate target broadcasts, which carry no sender. Also the fallback behind `fleetCommanderName` when the fleet window's header names nobody — which since #367 is the only time it is consulted for that. |
-| `activate-module-always` | Tooltip text of modules to keep active. **Optional and usually unnecessary since #394**: the middle row right of the propulsion module is already held on by position. Use it only for a module outside that row, and note it acts only once the bot has read that module's tooltip. |
 | `home-station` | Station to return to when the session ends. Defaults to `Amarr VIII (Oris) - Emperor Family Academy`. |
 | `assist-fleet-commander` | `no` keeps drones on this ship's own target. Defaults to `yes`. |
 | `run-away-shield-hitpoints-threshold-percent`, `run-away-armor-hitpoints-threshold-percent` | Percentages below which the bot breaks off and warps back to the commander, read through the believed gauge behind a low-water mark. **Both default to -1, which is off.** |

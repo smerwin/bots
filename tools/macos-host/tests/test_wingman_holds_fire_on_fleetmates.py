@@ -911,7 +911,7 @@ class TheGuardsAreOnEveryFiringPathTest(unittest.TestCase):
             arms[:4],
             ["sessionIsEnding", "retreatToTheCommander", "recoverFromRetreat",
              "unlockFleetPilotInTargetBar"])
-        for below in ["activateAlwaysOnModules", "actOnFleetBroadcast",
+        for below in ["manageMiddleRowModules", "actOnFleetBroadcast",
                       "dronesAssistTheCommander", "fireOnActiveTarget",
                       "accelerationGateStep"]:
             self.assertGreater(arms.index(below), 3, below)

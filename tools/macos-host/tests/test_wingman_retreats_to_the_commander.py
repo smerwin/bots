@@ -342,7 +342,7 @@ class TheRetreatIsReachableTest(unittest.TestCase):
     def test_the_retreat_outranks_every_arm_that_fights(self):
         retreat, modules, broadcast, drones, guns, gate = self.order_of(
             "case retreatToTheCommander context",
-            "case activateAlwaysOnModules context of",
+            "case manageMiddleRowModules context of",
             "case actOnFleetBroadcast context shipUI of",
             "case dronesAssistTheCommander context of",
             "case fireOnActiveTarget context of",
