@@ -606,6 +606,15 @@ type alias BotMemory =
     -- `fleetMateWarpStep`.
     , goToFleetMateWarpAskedReadings : Int
 
+    -- #442's own counter, the off-grid complement of the one above: readings
+    -- in a row spent warping to a fleet-mate through their own fleet-window
+    -- row while they have no row on this overview at all. Bounded for the
+    -- same reason -- the cascade it drives is `warpToFleetMateFromTheirFleet
+    -- WindowRow`'s, which can spin exactly as unresolved as the on-grid one
+    -- can -- and reused rather than a second bound invented for the same
+    -- shape of wait. See `fleetWindowWarpStep`.
+    , goToFleetMateFleetWindowWarpAskedReadings : Int
+
     -- Ported from `eve-online-warp-to-0-autopilot`'s fields of the same name
     -- -- see `navigateTowardFleetCommander` for what they drive. Not renamed,
     -- so a reader who knows that bot recognises them immediately. That bot's
@@ -4568,6 +4577,7 @@ initBotMemory =
     , goToFleetMatePlaceSeen = Nothing
     , goToFleetMateDestinationAsked = Nothing
     , goToFleetMateWarpAskedReadings = 0
+    , goToFleetMateFleetWindowWarpAskedReadings = 0
     , routeFirstMarkerRegion = Nothing
     , routeFirstMarkerUnchangedTicks = 0
     , hitpoints =
@@ -4740,6 +4750,7 @@ statusTextFromState context =
                             }
                       ]
                     , [ describeFleetMateWarp context ]
+                    , [ describeFleetMateOffGridFleetWindowWarp context ]
                     , [ describeBackupCall context ]
                     ]
                         -- Empties are dropped inside a group as well as
@@ -5675,6 +5686,20 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 , spentBefore = botMemoryBefore.goToFleetMateWarpAskedReadings
                 }
 
+        -- #442's off-grid complement of `fleetMateOnThisGrid` above, asked of
+        -- the same two broadcast forms and nothing else -- `recoverFromRetreat`
+        -- reaches its own fleet-window warp through `retreatRecoveryStepNow`
+        -- and spends `retreatRecoveryAskedReadings` instead, so this counter
+        -- only has to agree with `goToFleetMateOffGridPreferringTheFleetWindow`,
+        -- the one caller that reads it. `fleetMateOffGridWithFleetWindowRow`
+        -- itself, not restated: this and `describeFleetMateOffGridFleetWindowWarp`
+        -- are the two readers that shape was built for.
+        fleetMateOffGridWithFleetWindowRowNow : Maybe String
+        fleetMateOffGridWithFleetWindowRowNow =
+            fleetMateOffGridWithFleetWindowRow
+                context.botSettings.followFleetBroadcastFrom
+                context.readingFromGameClient
+
         -- The same arrangement again, and the same reason: the arm and this
         -- counter ask one rule rather than two conditions that could disagree
         -- about whether a reading was spent. `backupCallAnswersThatSpendAReading`
@@ -5890,6 +5915,21 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             0
+    , goToFleetMateFleetWindowWarpAskedReadings =
+        -- The same shape as `goToFleetMateWarpAskedReadings` above, against
+        -- `fleetMateOffGridWithFleetWindowRow` instead: resets the moment
+        -- nobody this ship is flying to is off-grid with a fleet-window row
+        -- (including the reading the warp lands, since landing puts the
+        -- pilot back on the overview), holds once
+        -- `fleetWindowWarpHasBeenGivenUpOn`, else advances.
+        if fleetMateOffGridWithFleetWindowRowNow == Nothing then
+            0
+
+        else if fleetWindowWarpHasBeenGivenUpOn botMemoryBefore.goToFleetMateFleetWindowWarpAskedReadings then
+            botMemoryBefore.goToFleetMateFleetWindowWarpAskedReadings
+
+        else
+            botMemoryBefore.goToFleetMateFleetWindowWarpAskedReadings + 1
     , gateAskedReadings =
         if askingTheGateToOpen then
             gateAskedReadingsCarriedIn + 1
@@ -9911,7 +9951,7 @@ actOnBroadcastVerb context shipUI bannerText =
                     )
 
             else
-                goToFleetMate context shipUI pilot system "is at location"
+                goToFleetMateOffGridPreferringTheFleetWindow context shipUI pilot system "is at location"
 
         InPositionAt { pilot, gate } ->
             if not (permitted pilot) then
@@ -9924,7 +9964,7 @@ actOnBroadcastVerb context shipUI bannerText =
                     )
 
             else
-                goToFleetMate context shipUI pilot gate "is in position at"
+                goToFleetMateOffGridPreferringTheFleetWindow context shipUI pilot gate "is in position at"
 
         NeedBackup _ ->
             -- #385. This verb has its own arm, `answerTheBackupCall`, placed
@@ -10049,6 +10089,128 @@ goToFleetMate context shipUI pilot place calledIt =
                         )
                         waitForProgressInGame
                 )
+
+
+{-| `goToFleetMate`, with one thing tried first: a pilot who is off this grid
+but still has a row in the fleet window is warped to directly, through
+`warpToFleetMateFromTheirFleetWindowRow`, rather than falling straight to the
+place-based route/ESI ask `goToFleetMate` reaches for when nothing else places
+the pilot. #442.
+
+**`warpToFleetMateFromTheirFleetWindowRow` already existed and already
+worked** -- #429 proved it live -- but the only caller reaching it was
+`recoverFromRetreat`'s own `WarpToTheCommanderFromTheFleetWindow` case, which
+fires only while `recoveringFromRetreat` is set, and the health retreat that
+sets it ships switched off by default (see "The health retreat, and why it
+ships switched off" in WINGMAN.md). So the two ordinary broadcast forms --
+`AtLocation`, `InPositionAt` -- never tried the fleet-window warp at all on any
+run that has not armed the retreat, and fell straight to asking the host for a
+route the moment the pilot left this grid, even on a run whose FC is simply
+flying faster than the ESI round trip and the route panel can keep up with.
+
+**Not folded into `goToFleetMate` itself**, and that is deliberate rather than
+an oversight. `recoverFromRetreat`'s own `retreatRecoveryStep` also reaches
+`goToFleetMate`'s off-grid branch, through its `RouteToWhereTheCommanderLastSaid
+HeWas` case -- and that case's own priority, route to the remembered place
+_before_ the fleet-window warp (`WarpToTheCommanderFromTheFleetWindow` sits
+below it in `retreatRecoveryStep`'s chain), is `retreatRecoveryStep`'s to keep,
+not this function's to override. Its decision-log line is written from
+`retreatRecoveryStepNow`'s own answer before `goToFleetMate` ever runs, so a
+`goToFleetMate` that silently preferred the fleet window here would let the
+warp fire on a reading whose own log line still claims to be routing to a
+remembered place -- the status-line-disagreeing-with-the-decision failure
+`describeFleetMateWarp`'s neighbouring comment already refuses (#102). Wrapping
+only the two ordinary broadcast call sites leaves `recoverFromRetreat` -- and
+its own, already-armed, already-ordered fleet-window case -- untouched.
+
+**Bounded the same way as the on-grid warp, and for the same reason.** A
+cascade `useContextMenuCascade` cannot resolve spins forever without a bound,
+and an arm this high in the tree with no bound owns the whole bot (#321,
+#373's own incident). `fleetWindowWarpAskedReadingsBound` is
+`fleetMateWarpAskedReadingsBound` itself rather than a second number:
+`warpToFleetMateFromTheirFleetWindowRow` drives the identical
+`warpToMemberFromTheBroadcastBanner` cascade the on-grid warp does, off a
+different starting element, so a second bound would be a second opinion about
+one mechanism -- `retreatRecoveryAskedReadingsBound`'s own arrangement, for its
+reason.
+
+**On give-up, or when there is no fleet-window row at all, this falls through
+to `goToFleetMate` unmodified** -- the place-based route/ESI ask is still there
+underneath, exactly as it always was for a pilot the fleet window cannot place
+either.
+
+-}
+goToFleetMateOffGridPreferringTheFleetWindow : BotDecisionContext -> ShipUI -> String -> String -> String -> Maybe DecisionPathNode
+goToFleetMateOffGridPreferringTheFleetWindow context shipUI pilot place calledIt =
+    if pilotIsOnOverview pilot context.readingFromGameClient then
+        goToFleetMate context shipUI pilot place calledIt
+
+    else
+        case fleetWindowRowForPilot pilot context.readingFromGameClient of
+            Nothing ->
+                goToFleetMate context shipUI pilot place calledIt
+
+            Just row ->
+                case
+                    fleetWindowWarpStep
+                        { askedReadings = context.memory.goToFleetMateFleetWindowWarpAskedReadings }
+                of
+                    WarpFromTheFleetWindowRow ->
+                        Just
+                            (describeBranch
+                                ("'"
+                                    ++ pilot
+                                    ++ "' "
+                                    ++ calledIt
+                                    ++ " and is not on this grid, but is in the fleet window -- warping to them from their own row's menu."
+                                )
+                                (warpToFleetMateFromTheirFleetWindowRow context row)
+                            )
+
+                    FleetWindowWarpGivenUp ->
+                        goToFleetMate context shipUI pilot place calledIt
+
+
+{-| What to do about the fleet-window warp #442 adds, as two named answers over
+a counter -- `fleetMateWarpStep`'s shape, so a case can execute it.
+-}
+fleetWindowWarpStep : { askedReadings : Int } -> FleetWindowWarpStep
+fleetWindowWarpStep { askedReadings } =
+    if fleetWindowWarpHasBeenGivenUpOn askedReadings then
+        FleetWindowWarpGivenUp
+
+    else
+        WarpFromTheFleetWindowRow
+
+
+type FleetWindowWarpStep
+    = FleetWindowWarpGivenUp
+    | WarpFromTheFleetWindowRow
+
+
+{-| Whether the budget for the off-grid fleet-window warp has been spent. One
+comparison with two readers -- the step rule and the status clause --
+`fleetMateWarpHasBeenGivenUpOn`'s arrangement, for its reason.
+-}
+fleetWindowWarpHasBeenGivenUpOn : Int -> Bool
+fleetWindowWarpHasBeenGivenUpOn askedReadings =
+    fleetWindowWarpAskedReadingsBound <= askedReadings
+
+
+{-| How many readings this bot spends warping to one off-grid fleet-mate
+through their fleet-window row before it stops asking.
+
+**`fleetMateWarpAskedReadingsBound` itself, not a second number.** This arm
+drives the identical cascade that bound was sized for --
+`warpToMemberFromTheBroadcastBanner`, off a different element -- so a second
+number here would be two opinions about one mechanism rather than one, and
+this bot still has no corpus of its own to place a different one against
+(WINGMAN.md).
+
+-}
+fleetWindowWarpAskedReadingsBound : Int
+fleetWindowWarpAskedReadingsBound =
+    fleetMateWarpAskedReadingsBound
 
 
 {-| Warp to a fleet-mate whose overview row is right there, by whichever of the
@@ -10346,6 +10508,37 @@ fleetMateCallingForCompany followFleetBroadcastFrom readingFromGameClient =
 
                 else
                     Nothing
+            )
+
+
+{-| Which fleet-mate this ship is trying to reach through their fleet-window
+row while off this grid entirely -- #442's off-grid complement of
+`fleetMateToWarpToOnThisGrid` below, built the same way and asked the same way:
+one question with two readers (the memory update's counter and the status
+line, `describeFleetMateOffGridFleetWindowWarp`) rather than a condition
+restated beside each, which is #102's failure. The decision site,
+`goToFleetMateOffGridPreferringTheFleetWindow`, does not call this -- it
+already has the pilot handed to it by `actOnBroadcastVerb`'s own parse of the
+broadcast, so re-deriving one here would ask the same question a second way
+for no reason.
+
+Built on `fleetMateCallingForCompany`, so it answers exactly the two broadcast
+forms that function does and nothing else.
+
+-}
+fleetMateOffGridWithFleetWindowRow : List String -> ReadingFromGameClient -> Maybe String
+fleetMateOffGridWithFleetWindowRow followFleetBroadcastFrom readingFromGameClient =
+    fleetMateCallingForCompany followFleetBroadcastFrom readingFromGameClient
+        |> Maybe.andThen
+            (\pilot ->
+                if pilotIsOnOverview pilot readingFromGameClient then
+                    Nothing
+
+                else if fleetWindowRowForPilot pilot readingFromGameClient == Nothing then
+                    Nothing
+
+                else
+                    Just pilot
             )
 
 
@@ -14010,13 +14203,23 @@ overview was read as dead and latched the bot for a whole session.
   - **The absence has to persist**, for `commanderGoneReadingsBeforeFollowing`
     readings, because a row can fail `_display` for one reading without the
     pilot having gone anywhere.
-  - **Exactly one acceleration gate on the grid**, which is the whole
-    difference from #393: nobody named this gate, so with two there is no basis
-    to choose and picking the nearest would be a guess whose failure is a wrong
-    pocket. Refusing on ambiguity is `dockAtDestinationStation`'s discipline
-    (exactly one `AutopilotDestinationIcon`), and what refusing costs here is
-    only the follow -- the gate is still taken on a clear grid exactly as it
-    was.
+  - **At least one acceleration gate on the grid.** This was "exactly one"
+    until #442, refusing on ambiguity by `dockAtDestinationStation`'s own
+    discipline (exactly one `AutopilotDestinationIcon`): nobody names which
+    gate he took, so with two there is no basis to choose and picking the
+    nearest is a guess whose failure is a wrong pocket. #442 revisits that
+    refusal rather than overlooking it -- watched live, a fleet's own grids
+    routinely carry more than one gate, and a wingman that refuses to guess
+    there is a wingman that stalls or drifts away from the commander on every
+    one of them while a bot willing to guess has been seen closing the gap
+    successfully. So the guess is accepted: `accelerationGateStep`'s own
+    `nearestAccelerationGateOnOverview` already takes the nearest gate on this
+    grid without asking how many there are, for the ordinary clear-grid case
+    (#348) and for #393's called gate alike, and this guard now licenses that
+    same nearest gate rather than picking one of its own. What refusing still
+    costs here is only the follow -- a grid with **no** gate at all still
+    licenses nothing, and the gate is still taken on a clear grid exactly as
+    it was regardless of this guard.
 
 **It holds no reading.** This is a `Bool` handed to `gateMayBeTaken`; every
 answer below it is the shipped gate path, already bounded by
@@ -14032,7 +14235,7 @@ followTheCommanderThroughTheGate :
     -> Bool
 followTheCommanderThroughTheGate state =
     commanderHasLeftTheGrid state.presence
-        && (state.accelerationGatesOnTheGrid == 1)
+        && (state.accelerationGatesOnTheGrid > 0)
 
 
 {-| The rule above over a reading, so the arm, the press's own wording, the
@@ -14344,7 +14547,7 @@ describeGateTakingAuthority authority =
             "Gating back toward the commander after a retreat -- activate it, rats on the grid or not."
 
         TheCommanderLeftThisGrid ->
-            "The commander is no longer on this grid and this is the only acceleration gate on it -- activate it and follow him through, rats on the grid or not. This cannot tell that from him having died, warped off or cloaked, and does not claim to."
+            "The commander is no longer on this grid -- activate the nearest acceleration gate and follow him through, rats on the grid or not. This cannot tell that from him having died, warped off or cloaked, and does not claim to. With more than one gate here nobody named which one he took either, so this may be the wrong pocket -- #442 accepts that risk rather than refuse and stall."
 
         TheClientRefusedTheWarpForDeadspace ->
             "The client refused this ship a warp because natural phenomena are disrupting it -- this pocket cannot be left by warping, so the acceleration gate is the only way out. Activate it, rats on the grid or not."
@@ -15067,6 +15270,50 @@ describeFleetMateWarp context =
            )
 
 
+{-| What #442's off-grid fleet-window warp is doing, in one line -- the
+off-grid complement of `describeFleetMateWarp` just above, for the same reason:
+`goToFleetMateOffGridPreferringTheFleetWindow` answers `Nothing` from neither
+of its two mechanisms directly (both fall through to `goToFleetMate`), so from
+outside the decision tree a spent budget reads exactly like nobody having been
+off-grid at all unless this says otherwise.
+-}
+describeFleetMateOffGridFleetWindowWarp : BotDecisionContext -> String
+describeFleetMateOffGridFleetWindowWarp context =
+    "Off-grid fleet-window warp: "
+        ++ (case
+                fleetMateOffGridWithFleetWindowRow
+                    context.eventContext.botSettings.followFleetBroadcastFrom
+                    context.readingFromGameClient
+            of
+                Nothing ->
+                    "nobody this ship is flying to is off this grid with a fleet-window row."
+
+                Just pilot ->
+                    let
+                        askedReadings : Int
+                        askedReadings =
+                            context.memory.goToFleetMateFleetWindowWarpAskedReadings
+                    in
+                    case fleetWindowWarpStep { askedReadings = askedReadings } of
+                        FleetWindowWarpGivenUp ->
+                            "GAVE UP after "
+                                ++ String.fromInt askedReadings
+                                ++ " readings warping to '"
+                                ++ pilot
+                                ++ "' from their fleet-window row -- falling back to the route."
+
+                        WarpFromTheFleetWindowRow ->
+                            "'"
+                                ++ pilot
+                                ++ "' is off this grid but has a fleet-window row -- warping to them from it."
+                                ++ " Readings spent: "
+                                ++ String.fromInt askedReadings
+                                ++ " of "
+                                ++ String.fromInt fleetWindowWarpAskedReadingsBound
+                                ++ "."
+           )
+
+
 {-| Where "who is in this fleet" was answered from this reading, and what it
 answered -- printed on every reading, whether or not anything is locked.
 
@@ -15390,9 +15637,10 @@ did watch leave. A clause that printed one number for both would leave those two
 runs reading identically, which is the failure the three-state memory exists to
 refuse.
 
-The gate count rides along because it is the fourth guard, and a follow that
-does not happen on a grid with two gates and one with none are two different
-answers an operator would otherwise have to guess between.
+The gate count rides along because it is the fourth guard, and a grid with no
+gate at all and one carrying several are two different answers an operator
+would otherwise have to guess between -- the first never follows, and since
+#442 the second does, on a guess it names as one.
 
 -}
 describeCommanderGridPresence : CommanderGridPresence -> Int -> String
@@ -15402,11 +15650,11 @@ describeCommanderGridPresence presence gatesOnTheGrid =
         describeGates =
             " Acceleration gates on this grid: "
                 ++ String.fromInt gatesOnTheGrid
-                ++ (if gatesOnTheGrid == 1 then
+                ++ (if gatesOnTheGrid <= 1 then
                         "."
 
                     else
-                        " -- nobody named one, so with any number but one there is no basis to choose and this follows nothing."
+                        " -- nobody named which one he took, so the nearest is followed and this may be the wrong pocket (#442)."
                    )
     in
     "Commander on this grid: "

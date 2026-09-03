@@ -39,10 +39,15 @@ cost -- the alternative is sitting on the grid following nobody, which is what
 3. **The absence persists** for `commanderGoneReadingsBeforeFollowing` readings,
    because a row can fail `_display` for one reading without the pilot going
    anywhere.
-4. **Exactly one acceleration gate**, which is the whole difference from #401:
-   nobody named this gate, so with two there is no basis to choose and picking
-   the nearest is a guess whose failure is a wrong pocket. Refusing on ambiguity
-   is `dockAtDestinationStation`'s discipline.
+4. **At least one acceleration gate**, which is the whole difference from #401.
+   This guard was "exactly one" until #442: nobody names this gate, so with two
+   there was no basis to choose and picking the nearest was read as a guess
+   whose failure is a wrong pocket, refused by `dockAtDestinationStation`'s own
+   discipline. #442 revisits that refusal on live evidence that a wingman which
+   refuses to guess here stalls or drifts from its commander on every grid that
+   happens to carry more than one gate, and accepts the wrong-pocket risk
+   instead -- see `TheAmbiguousGateNowFollowsTest` below. What still refuses is
+   a grid with **no** gate at all.
 
 Guards 1 to 3 live in `commanderPresenceAfterReading`, folded in the memory
 update; guard 4 is the second clause of `followTheCommanderThroughTheGate`.
@@ -86,7 +91,7 @@ recorded as it is rather than padded.
 | **the button's region read live rather than remembered** -- the memory update asking about the panel as it is *now* instead of as it was when the press was decided, which fails silently on any client that drops the button once the gate is taken | `test_the_memory_update_reads_the_press_it_remembered` |
 | the persistence bound removed (`0 <= readings`) | 5, including `test_the_absence_has_to_persist` and `test_a_row_that_flickers_re_arms_the_guard` |
 | the persistence bound moved by one (`<` for `<=`) | 12, including both boundary cases and the status line's own count |
-| **the exactly-one-gate guard relaxed to "at least one"**, which is the "pick the nearest" guess | `test_exactly_one_gate_or_nothing`, `test_two_gates_on_the_grid_refuse_the_follow`, `test_the_status_line_says_why_a_follow_did_not_happen` |
+| **the at-least-one-gate guard reverted to "exactly one"** -- #442's own relaxation undone, so a grid carrying two or more gates refuses the follow again | `test_at_least_one_gate_or_nothing`, `test_two_gates_on_the_grid_now_follow_too`, `test_the_status_line_now_names_the_ambiguity_it_still_follows_through` |
 | **the follow made to wait** -- a branch added to `takeTheAccelerationGate` answering `waitForProgressInGame` on a licensed follow with rats up | 6, including `test_the_follow_acts_rather_than_holding_the_reading` |
 | **the rule split into a second copy** -- `describeAccelerationGateAsk` passing `commanderLeftTheGrid = False` of its own | `test_one_rule_with_five_readers`, `test_the_status_line_and_the_arm_agree_about_the_follow` |
 | **the status clause collapsing the two absences** -- `CommanderNotSeenOnThisGrid` rendered as `SEEN AND GONE for 0 readings` | `test_the_status_line_keeps_the_two_absences_apart` |
@@ -771,16 +776,16 @@ class TheFourGuardsTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.repl.close()
 
-    def test_exactly_one_gate_or_nothing(self):
-        """Guard 4. Nobody named this gate, so two is not a choice and zero is
-        not a gate -- and "the nearest of several" is the guess whose failure is
-        a wrong pocket."""
+    def test_at_least_one_gate_or_nothing(self):
+        """Guard 4, #442. Zero is not a gate and still refuses; nobody names
+        which gate he took either way, but #442 accepts that guess rather than
+        refuse and stall -- so one gate and several now answer alike."""
         self.assertEqual(
             self.repl.evaluate([
                 "follow (CommanderGoneFromTheGrid 5) 0 == False",
                 "follow (CommanderGoneFromTheGrid 5) 1 == True",
-                "follow (CommanderGoneFromTheGrid 5) 2 == False",
-                "follow (CommanderGoneFromTheGrid 5) 3 == False",
+                "follow (CommanderGoneFromTheGrid 5) 2 == True",
+                "follow (CommanderGoneFromTheGrid 5) 3 == True",
             ]),
             [True] * 4)
 
@@ -872,7 +877,7 @@ class TheGateGuardTest(unittest.TestCase):
         ])
         self.assertIn("called this acceleration gate", called)
         self.assertIn("no longer on this grid", left)
-        self.assertIn("only acceleration gate", left)
+        self.assertIn("activate the nearest acceleration gate", left)
         self.assertIn("died, warped off or cloaked", left)
         self.assertNotIn("clear of rats", left)
         self.assertNotIn("clear of rats", called)
@@ -1047,7 +1052,7 @@ class TheGateArmFollowsHimTest(unittest.TestCase):
             "gateArm (CommanderGoneFromTheGrid 3) oneGateHeIsGone",
             "gateArm (CommanderGoneFromTheGrid 3) oneGateNoPanel",
         ], definitions=self.definitions)
-        self.assertIn("activate it and follow him through", pressed)
+        self.assertIn("activate the nearest acceleration gate and follow him through", pressed)
         self.assertIn("select it", selected)
         for answer in (pressed, selected):
             with self.subTest(answer=answer):
@@ -1071,16 +1076,18 @@ class TheGateArmFollowsHimTest(unittest.TestCase):
         self.assertTrue(presence)
         self.assertIn("rats are still on the grid", answer)
 
-    def test_two_gates_on_the_grid_refuse_the_follow(self):
+    def test_two_gates_on_the_grid_now_follow_too(self):
         """Guard 4 through the arm, on the same commander memory that licenses
         the follow next door -- so what separates the two answers is the grid
-        and not the fixture."""
+        and not the fixture. #442: relaxed from 'exactly one' to 'at least
+        one', so both readings follow now, on the nearest gate either way."""
         one, two = self.repl.strings([
             "gateArm (CommanderGoneFromTheGrid 3) oneGateHeIsGone",
             "gateArm (CommanderGoneFromTheGrid 3) twoGatesHeIsGone",
         ], definitions=self.definitions)
         self.assertIn("follow him through", one)
-        self.assertIn("rats are still on the grid", two)
+        self.assertIn("follow him through", two)
+        self.assertNotIn("rats are still on the grid", two)
 
     def test_the_absence_still_has_to_persist_at_the_arm(self):
         """Guard 3 through the arm, at both sides of the bound."""
@@ -1146,16 +1153,18 @@ class TheStatusLineTest(unittest.TestCase):
         self.assertIn("3 readings", at)
         self.assertIn("FOLLOWING HIM THROUGH IT", at)
 
-    def test_the_status_line_says_why_a_follow_did_not_happen(self):
-        """Guard 4 is not visible from the decision log -- the arm just goes on
-        declining for the rats -- so the gate count rides in the clause. A grid
-        with two gates and one with none are otherwise the same silence."""
+    def test_the_status_line_now_names_the_ambiguity_it_still_follows_through(self):
+        """#442. Guard 4 relaxed from 'exactly one' to 'at least one' means the
+        gate count clause has to keep saying something true: it used to explain
+        why a follow did *not* happen on an ambiguous grid, and now has to say
+        the follow happened anyway, on a guess."""
         two = self.repl.strings(
             ["describePresence (CommanderGoneFromTheGrid 5) twoGatesHeIsGone"],
             definitions=self.definitions)[0]
         self.assertIn("Acceleration gates on this grid: 2", two)
-        self.assertIn("no basis to choose", two)
-        self.assertNotIn("FOLLOWING", two)
+        self.assertIn("nobody named which one he took", two)
+        self.assertIn("wrong pocket", two)
+        self.assertIn("FOLLOWING", two)
 
     def test_the_status_line_and_the_arm_agree_about_the_follow(self):
         """One rule, five readers. A status line that said the follow was on
