@@ -210,6 +210,14 @@ class ConsoleState:
         self.isk = 0.0
         self.decisions = 0
 
+        # #163: what the host's last posted input event cost, and how many
+        # steps have read as saturated this session -- diagnostic only, see
+        # `note_input_cost`. `last_input_cost_ms` starts `None` rather than 0,
+        # since a session that has not yet posted a glide has not measured
+        # anything, and that must not read as healthy.
+        self.slow_input_events = 0
+        self.last_input_cost_ms = None
+
         # Set by handlers, drained by the bot loop.
         self.pending_settings = None
         self.pending_commands = deque()
@@ -257,6 +265,30 @@ class ConsoleState:
         """
         with self._lock:
             self.tick_started_at = time.time()
+
+    def note_input_cost(self, cost_ms, threshold_ms):
+        """#163: report only, decide nothing -- the same posture as
+        `note_game_log`'s bounty counter and #123's quick message.
+
+        `cost_ms` is `None` whenever the step posted no glide to measure (see
+        `describe_input_cost`), and that must not move `last_input_cost_ms` at
+        all -- a quiet step is not evidence the posting path is healthy, so it
+        must not overwrite the last real measurement with silence. Crossing
+        `threshold_ms` counts once, in `slow_input_events`, and is announced
+        on the log the operator is already watching rather than left for
+        `/api/state`'s poller to notice on its own.
+        """
+        with self._lock:
+            if cost_ms is None:
+                return
+            self.last_input_cost_ms = cost_ms
+            if cost_ms >= threshold_ms:
+                self.slow_input_events += 1
+                self._append(
+                    "host",
+                    f"INPUT COST HIGH: {cost_ms:.1f}ms for the last posted "
+                    f"event, at or above the {threshold_ms:.0f}ms mark -- "
+                    f"the window server may be saturated (#163)")
 
     def note_character(self, character):
         """Who the client is flying, once the host can name one.
@@ -315,6 +347,8 @@ class ConsoleState:
                 "decisions": self.decisions,
                 "kills": self.kills,
                 "isk": self.isk,
+                "slowInputEvents": self.slow_input_events,
+                "lastInputCostMs": self.last_input_cost_ms,
                 "status": self.status_text,
                 "settings": self.settings_text,
                 "paused": self.paused,
