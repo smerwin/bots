@@ -3356,6 +3356,15 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
         # carried over, so a bot that has stopped asking clears the lease.
         tick_requested_destination = bot_requested_destination(cont.get("statusText"))
         tick_start = time.monotonic()
+        # #312: stamped once per tick, never per substep, so the console's own
+        # live poll (`web_console.ConsoleState.snapshot`) can answer "how long
+        # has this been running" even while this very loop is blocked inside
+        # a single slow task -- see `tick_notably_long_reported` below for the
+        # throttled log line, which is a separate, coarser report of the same
+        # clock.
+        if console is not None:
+            console.note_tick_started()
+        tick_notably_long_reported = False
 
         # Drain tasks as a queue, not a fixed batch: (1) a response can
         # offer several tasks at once (e.g. the real per-cycle read sends
@@ -3457,13 +3466,35 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
                     # whole point of not finishing the queue first.
                     break
 
-            note = tick_bound_note(tick, time.monotonic() - tick_start,
-                                   decision_seq + 1, len(pending))
+            elapsed_this_tick = time.monotonic() - tick_start
+
+            # #312: the cheap half. A tick that has been running a while but
+            # has not yet reached `MAX_TICK_SECONDS` (or is stuck inside one
+            # task that never returns to let this check run at all) is
+            # already visible on `/api/state` every second, from the wall
+            # clock `console.note_tick_started` stamped -- see
+            # `web_console.tick_progress_state`. This is the *log's* copy of
+            # the same threshold, and it is worth one line: reported once,
+            # not once a substep, which is what `tick_notably_long_reported`
+            # is for -- a tick with hundreds of substeps past the threshold
+            # would otherwise print on every one of them.
+            if (not tick_notably_long_reported
+                    and elapsed_this_tick > web_console.TICK_NOTABLY_LONG_SECONDS):
+                tick_notably_long_reported = True
+                print(f"# tick {tick} has been running {elapsed_this_tick:.0f}s, longer "
+                      f"than usual (over {web_console.TICK_NOTABLY_LONG_SECONDS:.0f}s) -- "
+                      f"still working, not necessarily wedged", file=sys.stderr)
+                if console is not None:
+                    console.note_host(
+                        f"tick {tick} has been running {elapsed_this_tick:.0f}s, "
+                        f"longer than usual")
+
+            note = tick_bound_note(tick, elapsed_this_tick, decision_seq + 1, len(pending))
             if note is not None:
                 print(note, file=sys.stderr)
                 if console is not None:
                     console.note_host(
-                        f"tick {tick} held the loop {time.monotonic() - tick_start:.0f}s "
+                        f"tick {tick} held the loop {elapsed_this_tick:.0f}s "
                         f"and was given back")
                 break
 

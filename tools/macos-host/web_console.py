@@ -58,6 +58,54 @@ TAILNET_RE = re.compile(r"\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d
 
 MAX_LOG_LINES = 4000
 
+# #312: the pause/stop buttons above act on a queue `run_bot`'s own loop
+# drains, and that loop can go a while between drains while a single tick
+# blocks on a slow task -- the outer drain is between ticks, and #321's inner
+# drain and its `MAX_TICK_SECONDS` give-back are both reached only once the
+# task in progress *returns*. So a console watching `paused: False` while a
+# POST to pause it sits unanswered cannot tell "busy" from "wedged" -- the
+# whole complaint #312 was filed on.
+#
+# Two thresholds rather than one. `TICK_NOTABLY_LONG_SECONDS` is set above the
+# busiest *normal* band `botlab_host.MAX_TICK_SECONDS`'s own comment already
+# measured from the recorded corpus -- 95% of ticks in the 11-20-substep band
+# finish under 18s -- so an ordinary slow tick does not cross it, and this is
+# "worth a look", not an alarm. `TICK_WEDGED_SECONDS` is kept equal to
+# `botlab_host.MAX_TICK_SECONDS`, the point past which the host's own loop
+# gives a tick back on its own: a value the console still sees climbing past
+# that point is the tell that one task, not the whole tick, is the thing that
+# is stuck, since the loop cannot even reach its own check until that task's
+# call returns. Not imported from `botlab_host` -- that module imports this
+# one, and a reverse import would cycle -- so the two are pinned equal by
+# `test_the_console_reports_a_wedged_tick.TheThresholdsSitInARealGapTest
+# .test_the_console_agrees_with_the_hosts_own_bound` instead, the same
+# "checked rather than assumed" shape as the saxrat/mission-runner threshold
+# pairs elsewhere in this file's sibling constants.
+TICK_NOTABLY_LONG_SECONDS = 30.0
+TICK_WEDGED_SECONDS = 300.0
+
+
+def tick_progress_state(elapsed_seconds):
+    """How a tick's elapsed time reads to an operator, as a plain dict.
+
+    A declaration of its own, for the same reason `botlab_host.tick_bound_note`
+    is one: a case can ask the rule directly rather than driving a whole
+    console and a wedged bot process to reach it. `elapsedSeconds` is the raw
+    number so a UI can show it even where the two booleans below have not
+    changed since the last poll.
+
+    Both booleans are computed from a wall-clock timestamp `ConsoleState`
+    stores and `snapshot()` reads live -- **not** from anything the main bot
+    loop pushes as it goes -- which is what makes this answer anything at all
+    while a single slow task has that loop blocked: the HTTP handler thread
+    calling this is never the thread that could be stuck inside one.
+    """
+    return {
+        "elapsedSeconds": round(elapsed_seconds, 1),
+        "notablyLong": elapsed_seconds > TICK_NOTABLY_LONG_SECONDS,
+        "wedged": elapsed_seconds > TICK_WEDGED_SECONDS,
+    }
+
 
 class NoTailnet(Exception):
     """No tailnet address, so there is nowhere safe to listen."""
@@ -143,6 +191,13 @@ class ConsoleState:
         # under the lock like any other update, and empty until then.
         self.character = ""
         self.tick = 0
+        # Wall clock, not `time.monotonic()`, on purpose -- what leaves this
+        # state is JSON on an HTTP response, and `snapshot()` computing
+        # elapsed against `time.time()` on the same basis is what lets a
+        # caller trust the number rather than having to know which clock the
+        # host used. Starts at construction so a poll before the first tick
+        # answers a small number rather than a `None` the page has to guard.
+        self.tick_started_at = time.time()
         self.status_text = ""
         self.settings_text = settings_text or ""
         self.finished = False
@@ -190,6 +245,19 @@ class ConsoleState:
         with self._lock:
             self._append("host", line)
 
+    def note_tick_started(self):
+        """Stamp the moment the current tick began -- #312.
+
+        Called once per tick from `run_bot`'s own loop, never once per
+        substep -- the same "say it once" shape `note_character` already
+        uses, and for the same reason: a tick can carry hundreds of substeps,
+        and restamping on each of them would make `snapshot()`'s elapsed time
+        read the age of the *last substep* rather than of the tick, which is
+        what a wedge is measured against.
+        """
+        with self._lock:
+            self.tick_started_at = time.time()
+
     def note_character(self, character):
         """Who the client is flying, once the host can name one.
 
@@ -228,6 +296,10 @@ class ConsoleState:
             seconds_left = None
             if self.session_end_at_ms is not None:
                 seconds_left = max(0, int(self.session_end_at_ms / 1000 - time.time()))
+            # Computed here, live, against the wall clock -- not carried from
+            # whatever the bot loop last had time to report. That is the
+            # whole point (#312): the loop is exactly what can be stuck.
+            tick_progress = tick_progress_state(time.time() - self.tick_started_at)
             return {
                 "appName": self.app_name,
                 "botSource": self.bot_source,
@@ -237,6 +309,9 @@ class ConsoleState:
                 "uptimeSeconds": int(time.time() - self.started_at),
                 "sessionSecondsLeft": seconds_left,
                 "tick": self.tick,
+                "tickElapsedSeconds": tick_progress["elapsedSeconds"],
+                "tickNotablyLong": tick_progress["notablyLong"],
+                "tickWedged": tick_progress["wedged"],
                 "decisions": self.decisions,
                 "kills": self.kills,
                 "isk": self.isk,
