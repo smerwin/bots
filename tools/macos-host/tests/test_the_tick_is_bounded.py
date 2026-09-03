@@ -166,7 +166,13 @@ class TheLoopConsultsTheRuleTest(unittest.TestCase):
         self.loop = self.loop[:self.loop.index('if "FinishSession" in response: continue')]
 
     def test_the_task_loop_asks_the_bound(self):
-        self.assertIn("note = tick_bound_note(tick, time.monotonic() - tick_start,",
+        # #312 gave this call site a neighbour -- the notably-long throttle
+        # below reads the same clock -- so the elapsed time is computed once,
+        # into `elapsed_this_tick`, rather than recomputed at each call site
+        # (which could otherwise straddle an instant and disagree with itself).
+        self.assertIn("elapsed_this_tick = time.monotonic() - tick_start",
+                      self.source)
+        self.assertIn("note = tick_bound_note(tick, elapsed_this_tick,",
                       self.source)
 
     def test_the_bound_is_measured_from_the_tick_start(self):

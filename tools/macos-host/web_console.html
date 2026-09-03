@@ -19,7 +19,11 @@
   .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);
        box-shadow:0 0 0 3px rgba(79,209,197,.15)}
   .dot.paused{background:var(--warn);box-shadow:0 0 0 3px rgba(240,180,41,.15)}
+  .dot.long{background:var(--warn);box-shadow:0 0 0 3px rgba(240,180,41,.15)}
+  .dot.wedged{background:var(--bad);box-shadow:0 0 0 3px rgba(242,112,95,.15)}
   .dot.done{background:var(--bad);box-shadow:0 0 0 3px rgba(242,112,95,.15)}
+  #conn.long{color:var(--warn)}
+  #conn.wedged{color:var(--bad)}
   .spacer{flex:1}
   button{background:#18222d;color:var(--ink);border:1px solid var(--line);
          border-radius:6px;padding:6px 12px;font:inherit;cursor:pointer}
@@ -240,9 +244,23 @@ async function poll(){
     identify(s);
     nameCharacter(s);
 
-    $("conn").textContent = s.finished ? ("finished — " + (s.finishReason || ""))
-                                       : (s.paused ? "paused" : "running");
-    $("dot").className = "dot" + (s.finished ? " done" : s.paused ? " paused" : "");
+    // #312: a tick still running past TICK_NOTABLY_LONG_SECONDS or
+    // TICK_WEDGED_SECONDS (see web_console.py) is worth telling apart from an
+    // ordinary "running" -- pause/stop are still queued either way (#321
+    // drains them inside the task loop too), this is only the read-out.
+    let connText = s.finished ? ("finished — " + (s.finishReason || ""))
+                  : s.paused ? "paused" : "running";
+    let dotState = s.finished ? "done" : s.paused ? "paused" : "";
+    if (!s.finished && !s.paused && s.tickWedged) {
+      connText += ` — tick ${s.tick} has run ${Math.round(s.tickElapsedSeconds)}s, WEDGED`;
+      dotState = "wedged";
+    } else if (!s.finished && !s.paused && s.tickNotablyLong) {
+      connText += ` — tick ${s.tick} has run ${Math.round(s.tickElapsedSeconds)}s`;
+      dotState = "long";
+    }
+    $("conn").textContent = connText;
+    $("conn").className = "note " + dotState;
+    $("dot").className = "dot " + dotState;
     $("pause").disabled = s.paused || s.finished;
     $("resume").disabled = !s.paused || s.finished;
     $("stop").disabled = s.finished;
