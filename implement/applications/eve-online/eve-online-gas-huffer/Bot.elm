@@ -1,17 +1,24 @@
 {- EVE Online gas huffer -- SCAFFOLD ONLY, it does not harvest anything yet
 
       This app is meant to harvest gas from a wormhole gas site, deposit it at a
-      structure, and leave the moment anything else shows up on the grid. **None
-      of that behaviour is here yet.** What is here is the app: its settings, the
-      client-setup contract below, the two general-purpose recoveries every bot
-      in this repo needs (the game's own Settings/pause menu, and a message box
-      that will not close), and the seams the behaviour plugs into.
+      structure, and leave the moment anything else shows up on the grid. **Only
+      the first step of that is here.** What is here is the app: its settings,
+      the client-setup contract below, the two general-purpose recoveries every
+      bot in this repo needs (the game's own Settings/pause menu, and a message
+      box that will not close), and -- since #460 -- the rule that decides
+      **which site this bot would hunt**, reported on every reading.
 
-      Started under issue #459; the behaviour is #460 (find the site), #461 (the
-      harvest loop), #462 (hostile detection), #463 (retreat, cloak and evade)
-      and #464 (deposit the hold). Run today, this bot reads the client, keeps
-      the two recoveries above armed, prints what it can see, and does nothing
-      else -- and it says so on every reading rather than looking busy.
+      **Nothing flies to that site yet**, which is the one thing to be clear
+      about before reading further. #460 asked for the filter and for a status
+      line saying why nothing is being hunted; taking the site is the harvest
+      loop's, and the mechanism it should reuse is named on `siteSearch`.
+
+      Started under issue #459; the behaviour is #460 (which site to hunt, here),
+      #461 (the harvest loop), #462 (hostile detection), #463 (retreat, cloak and
+      evade) and #464 (deposit the hold). Run today, this bot reads the client,
+      keeps the two recoveries above armed, says which site it would hunt and why
+      it would decline the rest, and does nothing else -- and it says so on every
+      reading rather than looking busy.
 
       ## Setting up the Game Client
 
@@ -30,7 +37,17 @@
         visible.** That window's rows are read by matching each cell's
         horizontal position against the window's own header labels, so a hidden
         Group column is not a column the bot reads as empty -- it is a column
-        that is not there, and every site then reads as ungrouped.
+        that is not there, and every site then reads as ungrouped. A site the
+        bot cannot identify is one it declines rather than warps to, so a
+        scanner set up without that column hunts nothing at all. It says which
+        of those two it is on every reading; see `describeSiteSearch`.
+      + **Leave the Locations window open if you want the bookmark fallback.**
+        With no scanned row reading the hunted Group, this bot will take a
+        bookmark whose name carries `Reservoir` -- the client's own naming for
+        the wormhole gas sites (Ordinary/Sizeable Perimeter Reservoir,
+        Vast/Bountiful Frontier Reservoir, Vital/Instrumental Core Reservoir).
+        With that window shut there is no fallback, which is a different thing
+        from having no such bookmark and reads differently in the status line.
       + **The overview must show gas clouds, with the Name and Type columns
         visible.** A harvestable cloud renders with its own designation in the
         Name column and the generic `Harvestable Cloud` in the Type column, and
@@ -71,7 +88,18 @@
       + `anomaly-group` : the probe scanner's own `Group` column, for the sites
         this bot hunts. Defaults to `Gas Site`, which is the client's stock
         wording rather than anything about one wormhole. Matched against the
-        Group cell, so it must be written the way that column shows it.
+        Group cell, ignoring case and surrounding space, and whole unless it
+        ends in `*` -- `anomaly-group=Gas*` takes anything whose Group starts
+        that way. **A row whose Group cell this bot cannot read is declined**,
+        never taken on the strength of its other columns: warping to a site
+        nobody has identified is the expensive direction in a wormhole.
+      + `anomaly-name` : the probe scanner's `Name` column, if you want to
+        narrow further. **Unset means any name**, which is the useful default --
+        the Group column is what says a site is a gas site, and the Name is the
+        site's own designation. Set it and **both** have to hold: a row whose
+        Group reads the hunted group but whose Name does not match is declined,
+        and so is a row with no Name column to read. Same matching as
+        `anomaly-group`, so a trailing `*` is a prefix.
       + `gas-cloud-name-prefix` : which clouds to harvest, matched against the
         overview's **Name** column. Unset means any harvestable cloud on the
         grid, which is the useful default -- a site's clouds differ by a
@@ -167,6 +195,13 @@ defaultBotSettings : BotSettings
 defaultBotSettings =
     { anomalyGroup = "Gas Site"
 
+    -- Unset means any name, and the asymmetry with `anomalyGroup` above is the
+    -- point rather than an oversight: the Group column is what says a site is a
+    -- gas site, so it carries a default, and the Name is the site's own
+    -- designation, which nothing here can guess. See `anomalyVerdict` for why
+    -- the two stay separate conditions rather than one.
+    , anomalyName = Nothing
+
     -- Unset means any harvestable cloud, which is the widest useful answer and
     -- is safe in a way the tag below is not: the worst an unfiltered cloud list
     -- costs is harvesting the wrong gas, where an unfiltered *ship* list costs
@@ -210,6 +245,10 @@ parseBotSettings =
         ([ ( "anomaly-group"
            , valueTypeNonEmptyString
                 (\group settings -> { settings | anomalyGroup = group })
+           )
+         , ( "anomaly-name"
+           , valueTypeNonEmptyString
+                (\name settings -> { settings | anomalyName = Just name })
            )
          , ( "gas-cloud-name-prefix"
            , valueTypeNonEmptyString
@@ -289,6 +328,7 @@ emptySettingValueRejected =
 
 type alias BotSettings =
     { anomalyGroup : String
+    , anomalyName : Maybe String
     , gasCloudNamePrefix : Maybe String
     , homeStructureName : Maybe String
     , retreatBookmarkPrefix : String
@@ -404,6 +444,449 @@ describeHostileTrust trust =
             "Friendly ships: those whose name carries '"
                 ++ tag
                 ++ "'; every other ship reads hostile."
+
+
+
+-- Which site this bot would hunt
+
+
+{-| The probe scanner's own column headers, named once each.
+
+`ProbeScanResult.cellsTexts` is keyed by the header text of the column a cell
+sits under, so these two strings are what every lookup and every sentence about
+a lookup has to agree on. Written down once for #102's reason rather than
+spelled at each site: a status line telling an operator to make the `Group`
+column visible while the rule read some other key would present as a client that
+is set up wrong, which is the one diagnosis that sends them nowhere near the bug.
+
+-}
+anomalyGroupColumn : String
+anomalyGroupColumn =
+    "Group"
+
+
+anomalyNameColumn : String
+anomalyNameColumn =
+    "Name"
+
+
+{-| The bookmark naming that stands in for a scan result.
+
+`Reservoir` is the client's own word for the wormhole gas sites -- Ordinary and
+Sizeable Perimeter Reservoir, Vast and Bountiful Frontier Reservoir, Vital and
+Instrumental Core Reservoir -- so it is stock EVE terminology in exactly the
+sense `Gas Site` is, and shipping it names nobody's wormhole, corporation or
+bookmark folder. That is what keeps it a constant rather than a setting: #456's
+rule is that anything identifying an _operator_ is a setting with no default in
+code, and this identifies the game's own site family.
+
+Matched as a substring ignoring case, because a bookmark's name is whatever the
+operator typed around it -- `Reservoir 3`, `gas - vast frontier reservoir` --
+where a probe scanner's Group cell is a field the client fills in.
+
+-}
+bookmarkedGasSiteMarker : String
+bookmarkedGasSiteMarker =
+    "Reservoir"
+
+
+{-| Which sites this bot hunts, as the two independent conditions they are.
+
+`anomaly-group` and `anomaly-name` name **different columns of the same row**,
+and neither is derived from the other. That is #460's own emphasis and it is
+worth saying why it is not merely tidy: folding them -- matching the name
+against the Group cell, or letting a name match excuse a Group that does not
+hold -- widens the filter in a direction nobody asked for, and the thing it
+widens onto is "warp this ship into a site it has not identified".
+
+`anomalyVerdict` keeps them as two entries in one list so that the independence
+is structural rather than a promise a later edit can quietly break.
+
+-}
+type alias AnomalyFilter =
+    { group : String
+    , name : Maybe String
+    }
+
+
+anomalyFilterFromSettings : BotSettings -> AnomalyFilter
+anomalyFilterFromSettings settings =
+    { group = settings.anomalyGroup
+    , name = settings.anomalyName
+    }
+
+
+describeAnomalyFilter : AnomalyFilter -> String
+describeAnomalyFilter filter =
+    anomalyGroupColumn
+        ++ " '"
+        ++ filter.group
+        ++ "'"
+        ++ (case filter.name of
+                Nothing ->
+                    " (any " ++ anomalyNameColumn ++ ")"
+
+                Just name ->
+                    " and " ++ anomalyNameColumn ++ " '" ++ name ++ "'"
+           )
+
+
+{-| What this bot makes of one probe-scanner row, and why it declined it.
+
+**Three answers rather than two, and the middle one is the whole of #460.**
+`Dict.get` answering `Nothing` for a column is the reading saying it _cannot
+tell_ what this row is -- which is not the same fact as a cell that is there and
+reads something else, and the two must not collapse. A site nobody has
+identified is a site this ship would warp into blind, and in a wormhole that is
+the expensive direction, so the unreadable column declines. It is
+`loadRefusalFromGameLog`'s register applied to a column: absent evidence is
+never dressed up as a finding.
+
+Declining silently would only move the problem, though, which is why the column
+rides on the answer. An operator watching a bot that hunts nothing has two very
+different things to go and fix -- a scanner column they never made visible, or a
+filter that names a group the sites here do not have -- and
+`describeSiteSearch` can only tell them apart because this type does.
+
+-}
+type AnomalyVerdict
+    = HuntThisAnomaly
+    | ColumnIsNotInTheReading String
+    | CellIsNotWhatIsHunted String String
+
+
+{-| Every condition the filter puts on one row, asked in one place.
+
+The list is what makes the two conditions independent rather than nested: one
+entry per column, neither reading the other's cell, and a row is hunted only
+where every entry declines to object. **An unset `anomaly-name` contributes no
+entry at all**, which is what "unset means any name" has to mean -- not an entry
+that always passes, since that is one edit away from an entry that passes
+because it is comparing against the empty string.
+
+`List.head` rather than every reason, because a status line wants one reason per
+row and the first is the one to fix first: a `Group` column that is not there is
+what stops the `Name` mattering.
+
+-}
+anomalyVerdict : AnomalyFilter -> Dict.Dict String String -> AnomalyVerdict
+anomalyVerdict filter cellsTexts =
+    let
+        columnMustRead columnName wanted =
+            case cellsTexts |> Dict.get columnName of
+                Nothing ->
+                    Just (ColumnIsNotInTheReading columnName)
+
+                Just cellText ->
+                    if siteCellMatches cellText wanted then
+                        Nothing
+
+                    else
+                        Just (CellIsNotWhatIsHunted columnName cellText)
+    in
+    [ columnMustRead anomalyGroupColumn filter.group
+    , filter.name |> Maybe.andThen (columnMustRead anomalyNameColumn)
+    ]
+        |> List.filterMap identity
+        |> List.head
+        |> Maybe.withDefault HuntThisAnomaly
+
+
+{-| Whether one settings entry matches the cell the scanner shows.
+
+`eve-online-saxrat`'s `anomalyNameMatches` (#188), ported: whole by default,
+ignoring case and surrounding space, with a **trailing** `*` and only a trailing
+one meaning a prefix. Exact stays the default for that file's reason -- widening
+a site filter silently is how a bot ends up somewhere that kills it, and
+`attack-object` records what an accidental substring cost once, which was a bot
+firing at the wreck of the thing it had just killed.
+
+One matcher for both columns rather than one each, because there is nothing
+about a Group cell that wants different matching from a Name cell and two would
+be two places to disagree. The shipped `Gas Site` carries no `*`, so the default
+configuration is an exact, case-insensitive comparison.
+
+-}
+siteCellMatches : String -> String -> Bool
+siteCellMatches cellText entry =
+    let
+        wanted =
+            entry |> String.trim |> String.toLower
+
+        found =
+            cellText |> String.trim |> String.toLower
+    in
+    if String.endsWith "*" wanted then
+        found |> String.startsWith (wanted |> String.dropRight 1 |> String.trimRight)
+
+    else
+        found == wanted
+
+
+{-| The site this bot would take, and where it came from.
+
+Two sources, in preference order, because they are not equally good evidence. A
+scanned row carries the client's own `Group` cell, so the bot knows what it is
+warping to; a bookmark carries only whatever the operator called it. The
+bookmark is the fallback for the case #456 leaves open -- a site nobody has
+scanned down this session -- and never outranks a row the scanner has classified.
+
+-}
+type SiteToHunt
+    = ScannedAnomaly EveOnline.ParseUserInterface.ProbeScanResult
+    | BookmarkedSite EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
+
+
+{-| The two windows the search reads, and nothing else.
+
+A record of parsed windows rather than a whole `BotDecisionContext`, so that
+`siteSearch` is a rule a case can hand a reading and execute. #106 is what the
+other shape costs: a rule reachable only through a decision context is one
+nothing can run, so it gets checked by being read instead, which is how a rule
+that answers nothing passes for one that works.
+
+-}
+type alias SiteSearchReading =
+    { probeScannerWindow : Maybe EveOnline.ParseUserInterface.ProbeScannerWindow
+    , locationsWindow : Maybe EveOnline.ParseUserInterface.LocationsWindow
+    }
+
+
+{-| Everything one reading has to say about where this bot would go.
+
+Both windows' _presence_ is carried separately from what they held, because
+"the window is not open" and "the window is open and holds nothing that
+matches" are different states wanting different fixes from the operator, and a
+list that is empty for either reason cannot tell them apart.
+
+-}
+type alias SiteSearch =
+    { filter : AnomalyFilter
+    , probeScannerIsOpen : Bool
+    , anomalyVerdicts : List AnomalyVerdict
+    , locationsWindowIsOpen : Bool
+    , bookmarkedSites : List String
+    , hunted : Maybe SiteToHunt
+    }
+
+
+{-| The one declaration that decides where this bot would go, with two readers.
+
+The decision branch and the status line both call it, through
+`siteSearchFromContext`, and that is deliberate rather than incidental: #102 is
+one fact settled in one place and read in another, and the way that fails here
+would be a status line reporting a site the decision was not acting on. Two
+callers of one pure function over one reading cannot disagree.
+
+**Nothing here flies anywhere.** #460 asked for the filter and for a status line
+saying why nothing is being hunted, and that is what this is; taking the site
+belongs to the harvest loop (#461). When it lands, the mechanism to reuse for
+the bookmark half is `eve-online-mining-bot`'s
+`useContextMenuOnLocationWithMatchingName`, which already drives a context menu
+off a `LocationsWindowPlaceEntry` -- a second mechanism for that job is the kind
+of thing this codebase keeps having to reconcile later.
+
+`anomalyVerdicts` keeps a verdict for **every** row rather than only the
+declined ones, so that the status line can report a missing `Group` column on
+the readings where some other row did match. A column absent from half the
+scanner is worth saying whether or not the bot found something to do.
+
+-}
+siteSearch : AnomalyFilter -> SiteSearchReading -> SiteSearch
+siteSearch filter reading =
+    let
+        isOpen window =
+            window |> Maybe.map (always True) |> Maybe.withDefault False
+
+        scanResults =
+            reading.probeScannerWindow
+                |> Maybe.map .scanResults
+                |> Maybe.withDefault []
+
+        verdicts =
+            scanResults |> List.map (.cellsTexts >> anomalyVerdict filter)
+
+        scannedAnomaly =
+            List.map2 Tuple.pair scanResults verdicts
+                |> List.filter (Tuple.second >> (==) HuntThisAnomaly)
+                |> List.head
+                |> Maybe.map (Tuple.first >> ScannedAnomaly)
+
+        bookmarks =
+            reading.locationsWindow
+                |> Maybe.map .placeEntries
+                |> Maybe.withDefault []
+                |> List.filter
+                    (.mainText >> stringContainsIgnoringCase bookmarkedGasSiteMarker)
+    in
+    { filter = filter
+    , probeScannerIsOpen = isOpen reading.probeScannerWindow
+    , anomalyVerdicts = verdicts
+    , locationsWindowIsOpen = isOpen reading.locationsWindow
+    , bookmarkedSites = bookmarks |> List.map .mainText
+    , hunted =
+        case scannedAnomaly of
+            Just anomaly ->
+                Just anomaly
+
+            Nothing ->
+                bookmarks |> List.head |> Maybe.map BookmarkedSite
+    }
+
+
+siteSearchFromContext : BotDecisionContext -> SiteSearch
+siteSearchFromContext context =
+    siteSearch (anomalyFilterFromSettings context.eventContext.botSettings)
+        { probeScannerWindow = context.readingFromGameClient.probeScannerWindow
+        , locationsWindow = context.readingFromGameClient.locationsWindow
+        }
+
+
+{-| What an operator reads about the hunt, on every reading.
+
+Three clauses, because a bot that is hunting nothing has three separate things
+that could be wrong with it and the operator fixes a different one for each.
+Kept as three declarations over the one record rather than one long expression
+so that a case can execute each of them on its own.
+
+-}
+describeSiteSearch : SiteSearch -> String
+describeSiteSearch search =
+    [ describeSiteHunted search
+    , describeProbeScannerForHunting search
+    , describeBookmarksForHunting search
+    ]
+        |> String.join " "
+
+
+describeSiteHunted : SiteSearch -> String
+describeSiteHunted search =
+    case search.hunted of
+        Just (ScannedAnomaly anomaly) ->
+            "Site: would hunt the scanned anomaly "
+                ++ describeAnomalyIdentity anomaly
+                ++ " (nothing warps to it yet -- that is #461)."
+
+        Just (BookmarkedSite bookmark) ->
+            "Site: nothing scanned reads "
+                ++ describeAnomalyFilter search.filter
+                ++ ", so falling back to the bookmark '"
+                ++ bookmark.mainText
+                ++ "' (nothing warps to it yet -- that is #461)."
+
+        Nothing ->
+            "Site: NOTHING TO HUNT."
+
+
+{-| A scanned row named the way the scanner names it.
+
+The ID first, because it is the one cell that tells two sites of the same kind
+apart, and the Name after it where the column is there to read. Neither is
+defaulted into a plausible-looking string: a row whose ID column is absent says
+so, since an operator chasing a site by a name this bot invented is chasing
+nothing.
+
+-}
+describeAnomalyIdentity : EveOnline.ParseUserInterface.ProbeScanResult -> String
+describeAnomalyIdentity anomaly =
+    let
+        cell columnName =
+            anomaly.cellsTexts |> Dict.get columnName
+    in
+    "'"
+        ++ (cell "ID" |> Maybe.withDefault "<no ID column>")
+        ++ "'"
+        ++ (case cell anomalyNameColumn of
+                Just name ->
+                    " (" ++ name ++ ")"
+
+                Nothing ->
+                    ""
+           )
+
+
+describeProbeScannerForHunting : SiteSearch -> String
+describeProbeScannerForHunting search =
+    if not search.probeScannerIsOpen then
+        "The probe scanner window is not open, so nothing can be scanned down at all -- see this bot's client-setup list."
+
+    else if List.isEmpty search.anomalyVerdicts then
+        "The probe scanner is open and shows no results."
+
+    else
+        "Probe scanner: "
+            ++ String.fromInt
+                (search.anomalyVerdicts
+                    |> List.filter ((==) HuntThisAnomaly)
+                    |> List.length
+                )
+            ++ " of "
+            ++ String.fromInt (List.length search.anomalyVerdicts)
+            ++ " result(s) read "
+            ++ describeAnomalyFilter search.filter
+            ++ "."
+            ++ describeColumnsTheScannerDoesNotShow search
+
+
+{-| The clause #460 exists for, said in the operator's own terms.
+
+A run that hunts nothing because the `Group` column is hidden and a run that
+hunts nothing because this wormhole holds no gas site read identically from
+outside, and only one of them is fixed by touching the client. So the absent
+column is named, counted, and told apart from a Group cell that simply says
+something else.
+
+Empty on a reading where every column was there, because a clause that appears
+on every reading is one an operator stops seeing.
+
+-}
+describeColumnsTheScannerDoesNotShow : SiteSearch -> String
+describeColumnsTheScannerDoesNotShow search =
+    [ anomalyGroupColumn, anomalyNameColumn ]
+        |> List.filterMap
+            (\columnName ->
+                case
+                    search.anomalyVerdicts
+                        |> List.filter ((==) (ColumnIsNotInTheReading columnName))
+                        |> List.length
+                of
+                    0 ->
+                        Nothing
+
+                    absent ->
+                        Just
+                            (" NO '"
+                                ++ columnName
+                                ++ "' COLUMN on "
+                                ++ String.fromInt absent
+                                ++ " of "
+                                ++ String.fromInt (List.length search.anomalyVerdicts)
+                                ++ " result(s): this bot cannot tell what those sites are, so it declines them rather than warping to something it has not identified. Make that column visible in the probe scanner window."
+                            )
+            )
+        |> String.join ""
+
+
+describeBookmarksForHunting : SiteSearch -> String
+describeBookmarksForHunting search =
+    if not search.locationsWindowIsOpen then
+        "The Locations window is not open, so there is no bookmark fallback -- which is a different thing from having no '"
+            ++ bookmarkedGasSiteMarker
+            ++ "' bookmark, and wants a different fix."
+
+    else
+        case List.length search.bookmarkedSites of
+            0 ->
+                "Locations: open, and no bookmark's name carries '"
+                    ++ bookmarkedGasSiteMarker
+                    ++ "'."
+
+            count ->
+                "Locations: "
+                    ++ String.fromInt count
+                    ++ " bookmark(s) whose name carries '"
+                    ++ bookmarkedGasSiteMarker
+                    ++ "'."
 
 
 
@@ -567,10 +1050,30 @@ gasHufferDecisionRootBeforeApplyingSettings context =
         |> Maybe.withDefault
             (branchDependingOnDockedOrInSpace
                 { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
-                , ifSeeShipUI = \_ -> describeBranch nothingToDoInSpaceYet waitForProgressInGame
+                , ifSeeShipUI = \_ -> huntForASite context
                 }
                 context
             )
+
+
+{-| Says which site it would take, and then takes none of them.
+
+The decision line is the same sentence the status line carries, from the same
+call, so the two cannot come to disagree about which site was chosen -- and it
+is on the decision path rather than only in the status text because that is
+where an operator reading a run looks for what the bot decided.
+
+The wait underneath is unchanged and still says so in words. A branch that
+reports nothing and does nothing is indistinguishable from a branch that is
+stuck, which is `/review-silent-success` exactly; the difference here is that
+the doing-nothing is deliberate and names the issue that fills it.
+
+-}
+huntForASite : BotDecisionContext -> DecisionPathNode
+huntForASite context =
+    describeBranch
+        (describeSiteSearch (siteSearchFromContext context))
+        (describeBranch nothingToDoInSpaceYet waitForProgressInGame)
 
 
 {-| What the bot says while it has no behaviour, docked.
@@ -589,7 +1092,7 @@ nothingToDoDockedYet =
 
 nothingToDoInSpaceYet : String
 nothingToDoInSpaceYet =
-    "In space. This bot has no flying behaviour yet -- finding a site is #460, harvesting is #461, noticing a hostile is #462, leaving is #463 -- so it is doing nothing on purpose."
+    "In space. Deciding which site to hunt is #460 and is done; nothing flies to it yet -- warping and harvesting are #461, noticing a hostile is #462, leaving is #463 -- so it is doing nothing on purpose."
 
 
 {-| The things that have to be dealt with before any decision about the game.
@@ -1125,7 +1628,8 @@ statusTextFromState context =
         settings =
             context.eventContext.botSettings
     in
-    [ "SCAFFOLD ONLY: this bot does not harvest, deposit, watch for hostiles or retreat yet (issues #460-#464)."
+    [ "SCAFFOLD ONLY: this bot decides which site to hunt and goes nowhere -- it does not warp, harvest, deposit, watch for hostiles or retreat yet (issues #461-#464)."
+    , describeSiteSearch (siteSearchFromContext context)
     , "Readings: "
         ++ String.fromInt context.memory.readingsCount
         ++ ". Site group: '"
