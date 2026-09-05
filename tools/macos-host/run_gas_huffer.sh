@@ -2,13 +2,14 @@
 # Launches the eve-online-gas-huffer bot (implement/applications/eve-online/
 # eve-online-gas-huffer) via botlab_host.py.
 #
-# SCAFFOLD ONLY. That app has no harvesting, deposit, hostile-detection or
-# retreat behaviour yet -- see its Bot.elm header and issues #460-#464. Started
-# now it reads the client, keeps the pause-menu and message-box recoveries
-# armed, prints what it can see, and does nothing else. It says so on every
-# reading rather than looking busy, which is the whole reason it is launchable
-# at all: the alternative is a launcher nobody can smoke-test until the
-# behaviour lands.
+# HARVESTS BUT CANNOT LEAVE. Since #461 that app warps to a gas site, picks the
+# cloud whose designation carries the highest trailing number, orbits it, keeps
+# the propulsion module running, locks it and runs both harvesters. It does
+# **not** watch for anything arriving (#462), retreat (#463), deposit the hold
+# when it fills (#464), or keep the propulsion module on across a warp (#465).
+# So a run left unattended in a wormhole is a ship that will still be sitting on
+# its cloud when somebody else warps in. It says so on every reading rather than
+# looking busy, which is the whole reason it is launchable at all.
 #
 # Before running, per this bot's own setup instructions (see its Bot.elm
 # header): set the UI language to English; open the overview, the probe scanner
@@ -34,7 +35,7 @@ set -e -u -o pipefail
 SCRIPT_DIR="${0:A:h}"
 BOT_SOURCE="${SCRIPT_DIR}/../../implement/applications/eve-online/eve-online-gas-huffer"
 
-USAGE='./run_gas_huffer.sh                                     # no settings, scaffold behaviour only
+USAGE='./run_gas_huffer.sh                                     # no settings, every default in the source
 ./run_gas_huffer.sh --settings "home-structure-name=Example Refinery"
 ./run_gas_huffer.sh --settings "friendly-ship-tag=[EXMPL]"     # unset means every ship reads hostile
 ./run_gas_huffer.sh --max-ticks 50                             # short run, then stop
@@ -47,7 +48,7 @@ for arg in "$@"; do
         -h | --help)
             python3 "${SCRIPT_DIR}/bot_help.py" "$BOT_SOURCE" \
                 --script "run_gas_huffer.sh" \
-                --summary "runs the eve-online-gas-huffer bot, which is meant to harvest gas from a wormhole site and leave the moment anything else turns up -- and which is a SCAFFOLD today, with none of that behaviour implemented (issues #460-#464)." \
+                --summary "runs the eve-online-gas-huffer bot, which is meant to harvest gas from a wormhole site and leave the moment anything else turns up. Since #461 it does the harvesting half and NONE of the leaving half: it does not watch the grid (#462), retreat (#463), deposit the hold (#464) or keep the propulsion module on across a warp (#465)." \
                 --note "This always passes --execute-input: it WILL drive your real mouse and
 keyboard. Starting a run also kills any bot session already running, since two
 of them fighting over the cursor produces chaos.

@@ -35,16 +35,20 @@ and Instrumental Core Reservoir). A Locations window this bot cannot see is
 **not** licence to warp anywhere, and the clause says so in different words from
 "there is no such bookmark".
 
-## What is deliberately not here
+## What this file stopped being about
 
-**Nothing warps.** #460's own scope is the setting, the match and the status
-line, and its verification list is entirely about matching; taking the site is
-#461's harvest loop. When that lands, the bookmark half should reuse
-`eve-online-mining-bot`'s `useContextMenuOnLocationWithMatchingName`, which
-already drives a context menu off a `LocationsWindowPlaceEntry` --
-`TheHuntIsAChoiceAndNotYetAWarpTest` pins the absence so that the warp arrives
-as a decision somebody argues for rather than as drift, and `siteSearch`'s doc
-comment names the mechanism so nobody writes a second one.
+**#460's scope was the setting, the match and the status line -- not the warp**,
+and while that held this file carried `TheHuntIsAChoiceAndNotYetAWarpTest`,
+which pinned the *absence* of a warp so that one would arrive as a decision
+somebody argued for rather than as drift. #461's harvest loop is that decision,
+so the marker is spent and is **replaced rather than deleted**:
+`TheHuntTookTheWarpWithTheMechanismItNamedTest` pins the thing the marker was
+protecting, which is that the bookmark half reuses `eve-online-mining-bot`'s
+`useContextMenuOnLocationWithMatchingName` instead of growing a second
+mechanism for driving a context menu off a `LocationsWindowPlaceEntry`.
+
+What #461 itself is checked by is `test_gas_huffer_harvests_a_cloud.py`, which
+this file deliberately does not duplicate.
 
 ## How these are checked
 
@@ -486,7 +490,7 @@ class AMissingGroupColumnIsNotAMatchTest(unittest.TestCase):
                     [row(), {k: v for k, v in row().items() if k != "Group"}])]),
                 search_binding("search", "reading"),
             ])[0]
-        self.assertIn("would hunt the scanned anomaly", clause)
+        self.assertIn("hunting the scanned anomaly", clause)
         self.assertIn("NO 'Group' COLUMN on 1 of 2 result(s)", clause)
 
 
@@ -634,7 +638,7 @@ class TheBookmarkFallbackTest(unittest.TestCase):
     def test_a_scanned_gas_site_outranks_the_bookmark(self):
         clause = self.hunted([row(result_id="AIC-176")],
                              bookmarks=[RESERVOIR_BOOKMARK])
-        self.assertIn("would hunt the scanned anomaly 'AIC-176'", clause)
+        self.assertIn("hunting the scanned anomaly 'AIC-176'", clause)
         self.assertIn("(Ordinary Perimeter Reservoir)", clause)
         self.assertNotIn("bookmark", clause)
 
@@ -797,7 +801,7 @@ class TheSearchIsOneDeclarationWithSeveralReadersTest(unittest.TestCase):
     """
 
     def test_the_decision_branch_and_the_status_line_both_go_through_it(self):
-        self.assertIn("siteSearchFromContext", collapsed(block("huntForASite")))
+        self.assertIn("siteSearchFromContext", collapsed(block("huntAndHarvest")))
         self.assertIn("siteSearchFromContext",
                       collapsed(block("statusTextFromState")))
 
@@ -809,7 +813,7 @@ class TheSearchIsOneDeclarationWithSeveralReadersTest(unittest.TestCase):
 
     def test_the_in_space_branch_is_the_hunt(self):
         root = collapsed(block("gasHufferDecisionRootBeforeApplyingSettings"))
-        self.assertIn("ifSeeShipUI = \\_ -> huntForASite context", root)
+        self.assertIn("ifSeeShipUI = huntAndHarvest context", root)
 
     def test_the_rule_takes_a_reading_rather_than_a_decision_context(self):
         """#106's lesson: a rule reachable only through a `BotDecisionContext`
@@ -820,14 +824,19 @@ class TheSearchIsOneDeclarationWithSeveralReadersTest(unittest.TestCase):
         self.assertNotIn("BotDecisionContext", signature)
 
 
-class TheHuntIsAChoiceAndNotYetAWarpTest(unittest.TestCase):
-    """Nothing here flies anywhere, pinned while that is still true.
+class TheHuntTookTheWarpWithTheMechanismItNamedTest(unittest.TestCase):
+    """The deferral marker this class replaces, and what it deferred to.
 
-    #460 asked for the filter and the status line; taking the site is #461. The
-    case is here so that the warp arrives as a decision somebody argues for
-    rather than as drift -- and so that whoever writes it reads `siteSearch`'s
-    doc comment, which names the mechanism to reuse rather than leaving a second
-    one to be reconciled later.
+    It was `TheHuntIsAChoiceAndNotYetAWarpTest`, and it pinned the *absence* of
+    a warp so that one would arrive as a decision somebody argued for rather
+    than as drift. #461 is that decision, so the marker is spent -- and it is
+    replaced rather than deleted, for the reason PR #178's own marker was:
+    a case asserting a gap collides with the change that closes it, and
+    deleting it throws away the thing it was protecting. What it was protecting
+    is that the warp reuses `eve-online-mining-bot`'s
+    `useContextMenuOnLocationWithMatchingName` rather than growing a second
+    mechanism for driving a context menu off a bookmark, so that is what is
+    pinned now.
     """
 
     @classmethod
@@ -838,26 +847,35 @@ class TheHuntIsAChoiceAndNotYetAWarpTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.repl.close()
 
-    def test_the_hunt_branch_dispatches_no_effects(self):
-        body = collapsed(block("huntForASite"))
-        self.assertIn("waitForProgressInGame", body)
-        for acting in ("useContextMenuCascade", "decideActionForCurrentStep",
-                       "mouseClickOnUIElement", "EffectOnWindow"):
-            with self.subTest(acting):
-                self.assertNotIn(acting, body)
+    def test_the_warp_is_one_cascade_for_both_sources(self):
+        """Two right-click targets, one menu, so the two cannot drift apart.
 
-    def test_the_in_space_leaf_still_says_it_is_doing_nothing_on_purpose(self):
-        text = self.repl.strings(["nothingToDoInSpaceYet"])[0]
-        self.assertIn("on purpose", text)
-        self.assertIn("#460", text)
-        self.assertIn("#461", text)
+        A scanned anomaly and a bookmark differ in which node is right-clicked
+        and in nothing else, so a second copy of the two menu entries would be
+        two places to disagree about where the ship lands.
+        """
+        body = collapsed(block("warpToTheHuntedSite"))
+        self.assertEqual(body.count("useContextMenuCascade"), 2, body)
+        self.assertEqual(body.count("warpMenu"), 3, body)
+        self.assertIn("ScannedAnomaly anomaly", body)
+        self.assertIn("BookmarkedSite bookmark", body)
 
-    def test_the_doc_comment_names_the_mechanism_the_warp_should_reuse(self):
-        doc = bot_source().split("siteSearch : AnomalyFilter", 1)[0] \
+    def test_the_bookmark_arm_is_the_mining_bots_own(self):
+        """The same two arguments that function's locations-window branch uses.
+
+        It right-clicks a `PlaceEntry`'s `uiNode`, named by its `mainText`. A
+        warp built on the overview row or on the solar-system menu instead
+        would be the second mechanism the doc comment refuses.
+        """
+        body = collapsed(block("warpToTheHuntedSite"))
+        self.assertIn("useContextMenuCascade ( bookmark.mainText,"
+                      " bookmark.uiNode ) warpMenu context", body)
+
+    def test_the_doc_comment_still_names_the_mechanism_it_reused(self):
+        doc = bot_source().split("warpToTheHuntedSite :", 1)[0] \
             .rsplit("{-|", 1)[1]
         self.assertIn("useContextMenuOnLocationWithMatchingName", doc)
         self.assertIn("eve-online-mining-bot", doc)
-        self.assertIn("#461", doc)
 
     def test_that_mechanism_is_still_where_the_doc_comment_says_it_is(self):
         """A pointer at a function that has been renamed is worse than none."""
@@ -868,6 +886,19 @@ class TheHuntIsAChoiceAndNotYetAWarpTest(unittest.TestCase):
             source = handle.read()
         self.assertIn("useContextMenuOnLocationWithMatchingName :", source)
         self.assertIn("locationsWindow", source)
+
+    def test_the_leaf_that_is_left_still_says_it_is_waiting_on_purpose(self):
+        """The in-space wait is now reached only where there is nowhere to go.
+
+        `nothingToDoInSpaceYet` was the whole in-space branch and is gone;
+        what replaced it is a leaf for a grid with no cloud and no site, and it
+        still has to name itself rather than reading as a bot that quietly
+        stopped.
+        """
+        text = self.repl.strings(["nothingToHuntInSpace"])[0]
+        self.assertIn("on purpose", text)
+        self.assertIn("#462", text)
+        self.assertIn("#463", text)
 
 
 class TheMutationsThisFileCatches(unittest.TestCase):
@@ -904,7 +935,8 @@ class TheMutationsThisFileCatches(unittest.TestCase):
         telling a shut window from one with no such bookmark.
     18. the status line building its own `siteSearch` rather than going through
         `siteSearchFromContext`.
-    19. the in-space branch reverted to `nothingToDoInSpaceYet` alone.
+    19. the warp built on its own context-menu cascade for the bookmark rather
+        than on the mining bot's, so a second mechanism for one job survives.
     20. the vendored parser reverted to its pre-#466 copy, so `locationsWindow`
         answers `Nothing` for this client and the whole fallback is unreachable.
     """
