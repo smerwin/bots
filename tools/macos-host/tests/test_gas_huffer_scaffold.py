@@ -939,46 +939,118 @@ class TheLauncherAnswersHelpBeforeItKillsAnythingTest(unittest.TestCase):
         self.assertIn("WILL click and type for real", self.source)
 
 
-class TheVendoredTreeIsSaxratsTest(unittest.TestCase):
-    """The support modules are copied rather than diverged.
+class EveryVendoredModuleIsSomebodyElsesTest(unittest.TestCase):
+    """Every vendored module is byte-identical to a maintained copy, named.
 
-    `ParseUserInterface.elm` is vendored once per app and the policy is that
-    nothing app-specific lives in it, so a new app starts from the maintained
-    copy byte for byte. The cross-app cases (`test_game_log_channel`,
-    `test_ewar_priority_targets`) count apps by discovery through
-    `vendored_parser_count`, so this app joins those rules automatically -- and
-    it satisfies them only because the copy is exact, which is what this
-    asserts rather than leaves to chance. **No count is written down here**, for
-    that helper's own reason: a hardcoded `6` in seven cases all went red the
-    day a new bot was added, which is exactly the situation this app creates.
+    None of these files is this app's to edit. Being byte-identical to
+    somebody's is what makes re-syncing mechanical rather than a note somebody
+    has to remember: a shared fix that lands in the named app and not here goes
+    red *here*, naming the file, rather than being discovered by whatever breaks
+    next.
 
-    **This is also the merge hazard, made mechanical rather than left to
-    somebody remembering.** Two parser changes are in flight against the
-    vendored copies -- #457 / PR #466 (`parseLocationsWindowFromUITreeRoot`
-    matching `StandaloneBookmarkWnd` as well as `LocationsWindow`) and #458 (a
-    `parseDirectionalScanResult`). This copy was taken from `main` as it stood
-    and carries neither. Whichever of the three merges last has to re-sync, and
-    this case is what says so: the moment saxrat's copy gains either change and
-    this one does not, it goes red naming the file.
+    **The parser is deliberately not saxrat's, and that is the one interesting
+    row.** Vendoring saxrat's whole tree was the first attempt and CI caught it:
+    `test_saxrat_opportunity_tracker_button.TheVendoredParserPolicyIsUnbroken`
+    asserts `parseOpportunityInfoPanelEntriesFromUITreeRoot` exists in saxrat's
+    copy and nowhere else -- PR #252's policy that an app-local *panel* parser
+    lands in one copy -- and vendoring byte for byte inherited it, so two copies
+    had it.
+
+    That case's own sibling shows when inheriting anyway is right: the mission
+    block travels with the *variant* rather than the app, and the haulerbot
+    carries it because it genuinely needs `stripHtmlTags` and `ShipItemCard` to
+    compile. **This app needs none of the tracker**, so inheriting it would be
+    gratuitous where the haulerbot's was forced, and relaxing a real property to
+    avoid a copy that already exists is the wrong trade.
+
+    So the rule this settles on, which a later app can reuse: **take the least
+    diverged copy that compiles this app's `Bot.elm`.** The parser has four
+    variants -- the plain baseline (`warp-to-0-autopilot`, byte-identical to
+    `combat-anomaly-bot`), that plus `getElementIdFromDictEntries` (wingman),
+    saxrat's, and the mission runner's (shared with the haulerbot). The plain
+    baseline will not do, and `test_the_least_diverged_copy_still_had_to_carry_
+    something` is why: `closeSystemSettingsMenu` navigates by `_elementId` to
+    reach the pause menu's close button, which is exactly the helper wingman's
+    copy adds and nothing else. Everything #460-#464 will read -- the probe
+    scanner's `cellsTexts`, the Directional Scanner, the capacity gauge, the
+    Locations window, the overview, the module buttons, the synthetic host
+    nodes -- is already in it. The one thing absent is
+    `parseTargetHitpointsPercent`, an instrument for a combat target's health
+    ring, and this bot locks a gas cloud rather than a ship.
+
+    Everything else stays saxrat's, because `Bot.elm` is written against
+    saxrat's framework and settings modules -- wingman is on `PromptParser` and
+    vendors no `Common/AppSettings.elm` at all, so its tree could not host a
+    `parseBotSettings` of the shape #459 asks for.
+
+    **No parser count is written down here**, for `vendored_parser_count`'s own
+    reason: a hardcoded `6` in seven cases all went red the day a new bot was
+    added, which is exactly the situation this app creates.
+
+    **The merge hazard is the same mechanism.** Two parser changes are in flight
+    -- #457 / PR #466 (`parseLocationsWindowFromUITreeRoot` matching
+    `StandaloneBookmarkWnd` as well as `LocationsWindow`) and #458 (a
+    `parseDirectionalScanResult`). This copy carries neither. Both are parses of
+    *the client's own widgets* rather than of one app's panel, so by the same
+    policy they belong in every copy; whichever change merges last re-syncs, and
+    the row below is what says so.
     """
 
-    VENDORED = (
-        os.path.join("EveOnline", "ParseUserInterface.elm"),
-        os.path.join("EveOnline", "BotFramework.elm"),
-        os.path.join("EveOnline", "BotFrameworkSeparatingMemory.elm"),
-        os.path.join("EveOnline", "MemoryReading.elm"),
-        os.path.join("Common", "AppSettings.elm"),
-        os.path.join("Common", "EffectOnWindow.elm"),
-        os.path.join("Common", "DecisionPath.elm"),
-        "elm.json",
-    )
+    # Each vendored file, and the app whose copy it must equal byte for byte.
+    VENDORED = {
+        os.path.join("EveOnline", "ParseUserInterface.elm"): "eve-online-wingman",
+        os.path.join("EveOnline", "BotFramework.elm"): "eve-online-saxrat",
+        os.path.join("EveOnline", "BotFrameworkSeparatingMemory.elm"): "eve-online-saxrat",
+        os.path.join("EveOnline", "MemoryReading.elm"): "eve-online-saxrat",
+        os.path.join("Common", "AppSettings.elm"): "eve-online-saxrat",
+        os.path.join("Common", "EffectOnWindow.elm"): "eve-online-saxrat",
+        os.path.join("Common", "DecisionPath.elm"): "eve-online-saxrat",
+        "elm.json": "eve-online-saxrat",
+    }
 
-    def test_every_vendored_module_matches_saxrats_byte_for_byte(self):
-        for relative in self.VENDORED:
+    def test_every_vendored_module_matches_its_named_copy_byte_for_byte(self):
+        for relative, app in self.VENDORED.items():
             with self.subTest(relative):
                 self.assertEqual(
                     source_of(os.path.join(GAS_HUFFER_DIR, relative)),
-                    source_of(os.path.join(SAXRAT_DIR, relative)))
+                    source_of(os.path.join(APPLICATIONS_DIR, app, relative)),
+                    "%s must be %s's copy byte for byte" % (relative, app))
+
+    def test_no_app_local_panel_parser_is_inherited(self):
+        """The other half of the row above, and the one CI caught.
+
+        Byte-identity to wingman's copy already implies this, but only while
+        wingman's copy stays clean. Naming the declarations is what makes a
+        lazy re-sync from the wrong app fail *here* as well as in the case that
+        owns each of them, so whoever does it is told which app they took.
+        """
+        parser = source_of(os.path.join(
+            GAS_HUFFER_DIR, "EveOnline", "ParseUserInterface.elm"))
+        for declaration in ("parseOpportunityInfoPanelEntriesFromUITreeRoot",
+                            "parseAgentMissionInfoPanelEntriesFromUITreeRoot",
+                            "parseShipItemCardsFromUITreeRoot"):
+            with self.subTest(declaration):
+                self.assertNotIn(declaration, parser)
+
+    def test_the_least_diverged_copy_still_had_to_carry_something(self):
+        """Why wingman's copy and not the plain baseline, executed as a fact.
+
+        `closeSystemSettingsMenu` reaches the pause menu's close button by
+        `_elementId`, and `getElementIdFromDictEntries` is the whole of what
+        wingman's copy adds to the baseline -- so this is not a preference
+        between two equally good copies. The baseline is asserted to lack it, so
+        a later change that "simplifies" this to the baseline fails here rather
+        than at a compile error somebody reads as unrelated.
+        """
+        parser = source_of(os.path.join(
+            GAS_HUFFER_DIR, "EveOnline", "ParseUserInterface.elm"))
+        baseline = source_of(os.path.join(
+            APPLICATIONS_DIR, "eve-online-warp-to-0-autopilot",
+            "EveOnline", "ParseUserInterface.elm"))
+        self.assertIn("getElementIdFromDictEntries :", parser)
+        self.assertNotIn("getElementIdFromDictEntries :", baseline)
+        self.assertIn("getElementIdFromDictEntries",
+                      collapsed(block("closeSystemSettingsMenu")))
 
     def test_the_bot_is_on_the_one_host_interface_that_has_a_wrapper(self):
         # `test_host_interface_wrappers` asserts this over every app; a bot on

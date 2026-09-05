@@ -40,7 +40,6 @@ type alias ParsedUserInterface =
     , inventoryWindows : List InventoryWindow
     , chatWindowStacks : List ChatWindowStack
     , agentConversationWindows : List AgentConversationWindow
-    , opportunityInfoPanelEntries : List OpportunityInfoPanelEntry
     , marketOrdersWindow : Maybe MarketOrdersWindow
     , surveyScanWindow : Maybe SurveyScanWindow
     , bookmarkLocationWindow : Maybe BookmarkLocationWindow
@@ -178,8 +177,6 @@ type ShipManeuverType
     | ManeuverJump
     | ManeuverOrbit
     | ManeuverApproach
-    | ManeuverRange
-    | ManeuverAlign
 
 
 type alias SquadronsUI =
@@ -261,7 +258,6 @@ type alias InfoPanelAgentMissionsEntry =
 type alias Target =
     { uiNode : UITreeNodeWithDisplayRegion
     , barAndImageCont : Maybe UITreeNodeWithDisplayRegion
-    , hitpointsPercent : Maybe Hitpoints
     , textsTopToBottom : List String
     , isActiveTarget : Bool
     , assignedContainerNode : Maybe UITreeNodeWithDisplayRegion
@@ -292,7 +288,6 @@ type alias OverviewWindowEntry =
     , rightAlignedIconsHints : List String
     , commonIndications : OverviewWindowEntryCommonIndications
     , opacityPercent : Maybe Int
-    , objectItemID : Maybe String
     }
 
 
@@ -523,66 +518,6 @@ type alias AgentConversationWindow =
     }
 
 
-{-| One escalation in the Opportunities tracker, and the travel button it draws.
-
-`DungeonInfoPanelEntry` is the client's own type name for an entry in that
-panel. Read live with five `Sansha's Command Relay Outpost` escalations in the
-tracker at once, only the **expanded** entry carried the objective chain beneath
-it, so only that one has a travel button at all; the rest render their name and
-a `View Details` row and nothing that can be acted on. That is what answers
-"which escalation" without picking by position -- the client has already chosen,
-and a button belonging to a collapsed entry is not in the tree to be clicked.
-
-**One button per entry, which is what the client has been observed drawing.**
-The expanded entry's objective chain holds two task rows -- travel to the
-location, and enter the site -- and every capture of it shows exactly one of
-them displayed at a time, the other hidden rather than removed. So this field is
-the task the client is showing. What it cannot express is both rows shown at
-once: see `parseOpportunityInfoPanelEntry` for what is taken then and for why
-carrying a list instead is not done on a shape nobody has read.
-
--}
-type alias OpportunityInfoPanelEntry =
-    { uiNode : UITreeNodeWithDisplayRegion
-    , siteName : Maybe String
-    , travelButton : Maybe OpportunityTravelButton
-    , destination : Maybe OpportunityDestination
-    }
-
-
-{-| Where the escalation's trip ends, as the chain's progress bar states it.
-
-Read off the **same** row the travel button was being confused with: the bar
-carries `8 jumps` and `0.6 Andabiar`, and until this was lifted the security
-status of an escalation's destination was in the tree on every reading and
-read by nothing. What that cost is on record -- a ship was flown fourteen jumps
-into `0.3 Arodan`, killed there by a pilot with nineteen thousand kills, and
-eleven million ISK of escalation loot went with it. The number that would have
-declined the trip was on screen the whole time.
-
-`Nothing` is the client not saying, and it is not `0.0`. A destination whose
-security cannot be read must not be treated as dangerous _or_ as safe by this
-field -- that is the caller's decision, and `Bot.elm` states which way it fails.
-
--}
-type alias OpportunityDestination =
-    { security : Maybe Float
-    , systemName : Maybe String
-    , jumps : Maybe Int
-    }
-
-
-{-| The one slot in an escalation's objective chain whose label says what the
-trip needs next -- `Set Destination`, `Jump`, `Warp to Site` and `Warping` have
-all been read off it. The label is the whole of what a decision has to go on,
-which is why it is carried rather than interpreted here.
--}
-type alias OpportunityTravelButton =
-    { uiNode : UITreeNodeWithDisplayRegion
-    , label : Maybe String
-    }
-
-
 type alias BookmarkLocationWindow =
     { uiNode : UITreeNodeWithDisplayRegion
     , submitButton : Maybe UITreeNodeWithDisplayRegion
@@ -698,7 +633,6 @@ parseUserInterfaceFromUITree uiTree =
     , heatStatusTooltip = parseHeatStatusTooltipFromUITreeRoot uiTree
     , chatWindowStacks = parseChatWindowStacksFromUITreeRoot uiTree
     , agentConversationWindows = parseAgentConversationWindowsFromUITreeRoot uiTree
-    , opportunityInfoPanelEntries = parseOpportunityInfoPanelEntriesFromUITreeRoot uiTree
     , marketOrdersWindow = parseMarketOrdersWindowFromUITreeRoot uiTree
     , surveyScanWindow = parseSurveyScanWindowFromUITreeRoot uiTree
     , bookmarkLocationWindow = parseBookmarkLocationWindowFromUITreeRoot uiTree
@@ -1802,8 +1736,6 @@ parseShipUIIndication indicationUINode =
             , ( "Jump", ManeuverJump )
             , ( "Orbit", ManeuverOrbit )
             , ( "Approach", ManeuverApproach )
-            , ( "Range", ManeuverRange )
-            , ( "Aligning", ManeuverAlign )
 
             -- Sample `session-2022-05-23T23-00-32-87ba97.zip` shared by Abaddon at https://forum.botlab.org/t/i-want-to-add-korean-support-on-eve-online-bot-what-should-i-do/4370/9
             , ( "워프 드라이브 가동", ManeuverWarp )
@@ -1893,15 +1825,7 @@ parseTarget targetNode =
         isActiveTarget =
             targetNode.uiNode
                 |> EveOnline.MemoryReading.listDescendantsInUITreeNode
-                |> List.any
-                    (\node ->
-                        -- 'ActiveTargetOnBracket' was the class name in an
-                        -- older game client; the current one renamed it to
-                        -- 'ActiveTargetIndicator'. Checking both since which
-                        -- name shows up isn't otherwise load-bearing.
-                        (node.pythonObjectTypeName == "ActiveTargetOnBracket")
-                            || (node.pythonObjectTypeName == "ActiveTargetIndicator")
-                    )
+                |> List.any (.pythonObjectTypeName >> (==) "ActiveTargetOnBracket")
 
         assignedContainerNode =
             targetNode
@@ -1918,65 +1842,11 @@ parseTarget targetNode =
     in
     { uiNode = targetNode
     , barAndImageCont = barAndImageCont
-    , hitpointsPercent = parseTargetHitpointsPercent targetNode
     , textsTopToBottom = textsTopToBottom
     , isActiveTarget = isActiveTarget
     , assignedContainerNode = assignedContainerNode
     , assignedIcons = assignedIcons
     }
-
-
-{-| What the target bar's three rings say about the thing being shot at.
-
-**The rings carry no width to take a ratio of**, which is what makes this
-unlike `DronesWindowEntryDroneStructure.hitpointsPercent` next door. Read live
-with targets locked, every node under a `TargetInBar`'s `TargetHealthBars` --
-the `shieldBar`, `armorBar` and `hullBar` containers, each one's `_Left` and
-`_Right` sprite, and `healthBarBackground` -- reports the identical 141x141
-region, the bounding box of the whole ring. The two sprites per bar are the two
-halves of a circle (`shieldLeft.png` and `shieldRight.png`, with `baseRotation`
-0 and -3pi/4), so the fraction is drawn by rotating an arc and never appears in
-a display region at all. A ratio of widths here answers 0% for a full shield.
-
-The client stores the fraction itself, as `lastState` on the named container,
-which makes this `ShipUI`'s `_lastValue` read rather than the drone's geometry.
-Watched changing under fire on one `Centii Plague`: `shieldBar` went 1 ->
-0.8089 -> 4.39e-06 as the shield collapsed and then climbed back through
-1.88e-05, 4.29e-05 and 1.24e-04 as it regenerated, with `armorBar` going 1 ->
-0.2484 in the same window and `hullBar` still at 1. So the three layers move
-independently and separately, which is the whole point of reading all three: a
-shot doing nothing is a shield that does not move while armour and hull sit at
-100%, and one combined figure hides exactly that.
-
-**All three or none.** `Nothing` is a target whose bars this reading could not
-read, and it must not be rendered as `0%` anywhere -- a fabricated zero is a
-hull about to explode as far as any later rule is concerned, which is
-`loadRefusalFromGameLog`'s rule about absent evidence applied to a gauge.
-
-The value is **not** clamped or filtered. `ShipUI.hitpointsPercent` is the same
-kind of read and CLAUDE.md records it producing -1021821% and 2132822% for
-single readings; a garbage value silently clamped to 0 or 100 reads exactly like
-a real one, and nothing acts on this field yet, so an operator seeing the raw
-number is the only way a run can show whether it reads sanely.
-
--}
-parseTargetHitpointsPercent : UITreeNodeWithDisplayRegion -> Maybe Hitpoints
-parseTargetHitpointsPercent targetNode =
-    let
-        barPercentFromContainerName containerName =
-            targetNode
-                |> listDescendantsWithDisplayRegion
-                |> List.filter (.uiNode >> getNameFromDictEntries >> (==) (Just containerName))
-                |> List.head
-                |> Maybe.andThen (.uiNode >> .dictEntriesOfInterest >> Dict.get "lastState")
-                |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.float >> Result.toMaybe)
-                |> Maybe.map ((*) 100 >> round)
-    in
-    Maybe.map3
-        (\shield armor structure -> { shield = shield, armor = armor, structure = structure })
-        (barPercentFromContainerName "shieldBar")
-        (barPercentFromContainerName "armorBar")
-        (barPercentFromContainerName "hullBar")
 
 
 parseOverviewWindowsFromUITreeRoot : UITreeNodeWithDisplayRegion -> List OverviewWindow
@@ -2001,29 +1871,11 @@ parseOverviewWindow overviewWindowNode =
                 |> List.head
 
         scrollControlsNode =
-            let
-                scrollDescendants =
-                    scrollNode
-                        |> Maybe.map listDescendantsWithDisplayRegion
-                        |> Maybe.withDefault []
-            in
-            {- This client build has no node type containing "ScrollControls":
-               the overview's scrollbar is a plain `Scrollbar` holding a
-               `ScrollHandle`, so the original lookup always returned Nothing
-               and the window looked unscrollable. Fall back to the Scrollbar,
-               whose descendants include the handle `parseScrollControls`
-               looks for, keeping the original match first for builds that do
-               use that type.
-            -}
-            (scrollDescendants
+            scrollNode
+                |> Maybe.map listDescendantsWithDisplayRegion
+                |> Maybe.withDefault []
                 |> List.filter (.uiNode >> .pythonObjectTypeName >> String.contains "ScrollControls")
                 |> List.head
-            )
-                |> Maybe.Extra.or
-                    (scrollDescendants
-                        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "Scrollbar")
-                        |> List.head
-                    )
 
         headersContainerNode =
             scrollNode
@@ -2137,23 +1989,6 @@ parseOverviewWindowEntry entriesHeaders overviewEntryNode =
     , rightAlignedIconsHints = rightAlignedIconsHints
     , commonIndications = commonIndications
     , opacityPercent = opacityPercent
-    , objectItemID =
-        -- EVE's own id for the object this row refers to, kept as text: it is
-        -- ~9e18, past what a JSON number survives intact (see tree_walker's
-        -- emit_integer_json). Used to remember which wrecks have already been
-        -- opened, since nothing about a row's text distinguishes an emptied
-        -- wreck from a full one.
-        overviewEntryNode.uiNode.dictEntriesOfInterest
-            |> Dict.get "itemID"
-            |> Maybe.andThen
-                (Json.Decode.decodeValue
-                    (Json.Decode.oneOf
-                        [ Json.Decode.string
-                        , Json.Decode.int |> Json.Decode.map String.fromInt
-                        ]
-                    )
-                    >> Result.toMaybe
-                )
     }
 
 
@@ -2562,15 +2397,7 @@ parseProbeScannerWindowFromUITreeRoot uiTreeRoot =
                         |> listDescendantsWithDisplayRegion
                         |> List.filter (.uiNode >> getNameFromDictEntries >> Maybe.map (String.contains "ResultsContainer") >> Maybe.withDefault False)
                         |> List.concatMap listDescendantsWithDisplayRegion
-                        |> List.filter
-                            (\node ->
-                                (node.uiNode.pythonObjectTypeName |> String.toLower |> String.contains "scroll")
-                                    || (node.uiNode
-                                            |> getNameFromDictEntries
-                                            |> Maybe.map (String.toLower >> String.contains "scroll")
-                                            |> Maybe.withDefault False
-                                       )
-                            )
+                        |> List.filter (.uiNode >> .pythonObjectTypeName >> String.toLower >> String.contains "scroll")
                         |> List.head
 
                 headersContainerNode =
@@ -3368,389 +3195,6 @@ parseAgentConversationWindow windowUINode =
     }
 
 
-parseOpportunityInfoPanelEntriesFromUITreeRoot : UITreeNodeWithDisplayRegion -> List OpportunityInfoPanelEntry
-parseOpportunityInfoPanelEntriesFromUITreeRoot uiTreeRoot =
-    uiTreeRoot
-        |> listDescendantsWithDisplayRegion
-        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "DungeonInfoPanelEntry")
-        |> List.map parseOpportunityInfoPanelEntry
-
-
-parseOpportunityInfoPanelEntry : UITreeNodeWithDisplayRegion -> OpportunityInfoPanelEntry
-parseOpportunityInfoPanelEntry entryNode =
-    let
-        descendants =
-            entryNode |> listDescendantsWithDisplayRegion
-
-        textsOf nodes =
-            nodes
-                |> List.filterMap (.uiNode >> getDisplayText)
-                |> List.filter (String.trim >> String.isEmpty >> not)
-
-        -- Matched on the widget's own **type** name, or on the client's own
-        -- `_name` for the objective task it belongs to. Either is what scopes
-        -- this to the tracker: the label the client puts on the button is a
-        -- word like `Jump` that the Selected Item panel also carries on a
-        -- button of its own, so a text search over the tree cannot tell the two
-        -- apart, while a node reached only from inside a
-        -- `DungeonInfoPanelEntry` cannot reach that panel at all.
-        --
-        -- **The chain has two task rows and the type name reaches only one of
-        -- them**, which is what `opportunityTravelTaskNames` is for. See that
-        -- declaration for the whole argument -- the short of it is that
-        -- `TravelToLocationButtonTask` is the row carrying `Set Destination`
-        -- and `Jump`, that the row which *enters* the site carries
-        -- `Warp to Site` on a `TravelStateButtonTaskWidget` the prefix cannot
-        -- reach, and that naming the two tasks admits the second without
-        -- admitting whatever the chain grows next.
-        --
-        -- **The display filter is the selection, not a safety net.** The chain
-        -- hides the tasks that are not currently available rather than removing
-        -- them, and picking a hidden one yields a button whose label a decision
-        -- then discards -- which is the same stall by a longer road. Run 14 on
-        -- the other bot sat docked for 750 readings on exactly that.
-        --
-        -- **`List.head` over the displayed candidates was the one thing here
-        -- that was not argued from an observation, and the observation has
-        -- arrived.** It was recorded as "every capture of this chain shows
-        -- exactly one task row displayed at a time, so nothing has ever had to
-        -- choose". Run 48 read this, on the enter-dungeon row in Nosodnis:
-        --
-        --     ProgressBarTaskWidget             _name=objective_task_travel_to_location  '8 jumps | 0.6 Andabiar'
-        --     TravelToLocationButtonTaskWidget  _name=objective_task_travel_to_location  'Set Destination'
-        --
-        -- **Two candidates are displayed at once, and they are not the two this
-        -- paragraph anticipated.** It is a button and the row's own progress
-        -- bar, which carries the same `_name` and so is admitted by the name
-        -- half of the selector; neither carries `_display`, so both read as
-        -- shown, and the bar sorts first. `travelButton.label` was therefore
-        -- `8 jumps | 0.6 Andabiar` -- readable text, so
-        -- `escalationIsBeingWorked` stood the bot down for the escalation,
-        -- while `travelLabelIsACommand` refused the label and
-        -- `opportunityTravelStep` answered `Nothing`. 234 stand-downs and zero
-        -- presses across three hours, with nothing in the log saying a button
-        -- had been missed.
-        --
-        -- **So a pressable candidate wins, and `List.head` is kept for the
-        -- no-button case.** `ButtonTask` is what separates them -- see
-        -- `uiNodeIsOpportunityTravelTaskButton`, which is a preference among
-        -- nodes `uiNodeIsOpportunityTravelTask` has already admitted rather
-        -- than a widening of what is admitted. It is strictly wider than the
-        -- `List.head` it replaces: every reading that yielded a button still
-        -- yields the same one, since a button is preferred only over things
-        -- that are not buttons and the client's order still decides among the
-        -- buttons themselves.
-        --
-        -- **Two buttons displayed at once is still the unread shape**, and this
-        -- leaves it exactly where it was: both are candidates, both are
-        -- buttons, and the client's order picks. `opportunityStepArrivingFirst`
-        -- in `Bot.elm` -- which prefers an arriving label over a travelling one
-        -- -- still never sees the second, because carrying both would be a
-        -- change to the field this type exposes and to the decision that reads
-        -- it. Deliberately not done on a shape nobody has read.
-        displayedTravelTaskNodes =
-            descendants
-                |> List.filter (.uiNode >> uiNodeIsOpportunityTravelTask)
-                |> List.filter (.uiNode >> nodeIsDisplayedFromDictEntries)
-
-        -- The bar the button preference below exists to step over. It is not
-        -- pressable and it is where the destination is written, so the same
-        -- node that had to stop being mistaken for a button is now read for
-        -- what it does carry.
-        --
-        -- Asked through `uiNodeIsOpportunityTravelTaskButton` rather than a
-        -- second type test of its own, so "which of these is the button" has
-        -- one answer here. A separate predicate would be a second place for
-        -- the chain's next widget to be classified, and they would drift.
-        destinationTexts =
-            displayedTravelTaskNodes
-                |> List.filter (.uiNode >> uiNodeIsOpportunityTravelTaskButton >> not)
-                |> List.concatMap listDescendantsWithDisplayRegion
-                |> textsOf
-
-        travelButtonNode =
-            case displayedTravelTaskNodes |> List.filter (.uiNode >> uiNodeIsOpportunityTravelTaskButton) of
-                firstButton :: _ ->
-                    Just firstButton
-
-                [] ->
-                    displayedTravelTaskNodes |> List.head
-    in
-    { uiNode = entryNode
-    , siteName =
-        -- The escalation's own name, e.g. `Sansha's Command Relay Outpost`, for
-        -- the decision line. Nothing decides anything on it.
-        descendants
-            |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "EveLabelLarge")
-            |> textsOf
-            |> List.head
-    , travelButton =
-        travelButtonNode
-            |> Maybe.map
-                (\buttonNode ->
-                    let
-                        buttonDescendants =
-                            buttonNode |> listDescendantsWithDisplayRegion
-
-                        -- The mission runner's copy of this reads only the
-                        -- descendant named `label`, which is what its own
-                        -- capture of the widget carries. The tracker capture
-                        -- records an `EveLabelMedium` under the button and does
-                        -- not record its `_name`, so requiring that name would
-                        -- risk answering `Nothing` for a button the client is
-                        -- plainly labelling. The named label still wins where
-                        -- there is one; the fallback is any text under the
-                        -- button, whose only other child is a `ButtonUnderlay`
-                        -- carrying none.
-                        namedLabelTexts =
-                            buttonDescendants
-                                |> List.filter (.uiNode >> getNameFromDictEntries >> (==) (Just "label"))
-                                |> textsOf
-                    in
-                    { uiNode = buttonNode
-                    , label =
-                        if List.isEmpty namedLabelTexts then
-                            buttonDescendants |> textsOf |> List.head
-
-                        else
-                            namedLabelTexts |> List.head
-                    }
-                )
-    , destination = parseOpportunityDestination destinationTexts
-    }
-
-
-{-| `['8 jumps', '0.6 Andabiar']` -> the trip's length and where it ends.
-
-Each cell is matched on its own shape rather than by position, because the bar
-has been read carrying them in one order and nothing says it always will. The
-security cell is `<number> <system name>`, which is how the client writes it
-everywhere it writes a system.
-
-**Every part is a `Maybe` and a cell that does not parse yields `Nothing`
-rather than a default.** A `0.0` invented here would read as null security --
-the most dangerous answer there is -- for a client that simply phrased
-something differently.
-
--}
-parseOpportunityDestination : List String -> Maybe OpportunityDestination
-parseOpportunityDestination texts =
-    let
-        jumpsFrom text =
-            if String.contains "jump" (String.toLower text) then
-                text |> String.split " " |> List.head |> Maybe.andThen String.toInt
-
-            else
-                Nothing
-
-        -- `8 jumps` is the same shape as `0.6 Andabiar` -- a number, a space,
-        -- a word -- and it is listed first, so without a test that separates
-        -- them the trip's *length* is read as its security and the destination
-        -- becomes a system called "jumps". That is not hypothetical: it is what
-        -- the first version of this did, and only running it said so.
-        --
-        -- Two independent exclusions, because either alone would be a matcher
-        -- resting on one observation. A security status is bounded by
-        -- [-1.0, 1.0] and no route is one jump long in that range's units; and
-        -- the jumps cell says `jump` in words, which no system name here does.
-        securityFrom text =
-            if String.contains "jump" (String.toLower text) then
-                Nothing
-
-            else
-                case text |> String.trim |> String.split " " of
-                    first :: rest ->
-                        case String.toFloat first of
-                            Just security ->
-                                if List.isEmpty rest || security > 1 || security < -1 then
-                                    Nothing
-
-                                else
-                                    Just ( security, String.join " " rest )
-
-                            Nothing ->
-                                Nothing
-
-                    [] ->
-                        Nothing
-
-        found =
-            texts |> List.filterMap securityFrom |> List.head
-    in
-    if List.isEmpty texts then
-        Nothing
-
-    else
-        Just
-            { security = found |> Maybe.map Tuple.first
-            , systemName = found |> Maybe.map Tuple.second
-            , jumps = texts |> List.filterMap jumpsFrom |> List.head
-            }
-
-
-{-| Whether a node inside an escalation's objective chain is one of the task
-rows that move the ship.
-
-**The client models the trip as two tasks and this used to see one of them.**
-Read off the live client during run `saxrat_20260816-173606`, in Ahrosseas, with
-the escalation on screen and the button plainly drawn:
-
-    DungeonInfoPanelEntry            name=escalation_sites:50839662
-      ContainerAutoSize              name=content_container
-        ObjectiveChainEntry          name=objective_chain_55
-          ObjectiveEntry             name=objective_enter_dungeon
-            EveLabelLarge            name=title    'Travel to Location'
-            ContainerAutoSize        name=task_container
-              ContainerAutoSize      name=task_container_travel_to_location
-              ContainerAutoSize      name=task_container_enter_dungeon
-              ContainerAutoSize      name=buttons_container
-                TravelStateButtonTaskWidget  name=objective_task_enter_dungeon
-                  EveLabelMedium             name=label   'Warp to Site'
-
-`task_container_travel_to_location` is the row that carries `Set Destination`
-and `Jump` on a `TravelToLocationButtonTask...` widget, and it is the one the
-type-name prefix reaches. `task_container_enter_dungeon` is the row that gets
-the ship _into_ the site, it carries `Warp to Site`, and its widget is a
-`TravelStateButtonTaskWidget` -- which does not start with
-`TravelToLocationButtonTask`, so the prefix alone answered `Nothing` for it on
-every reading. In that run the ship crossed six systems from Amarr to Ahrosseas
-entirely on the first row, 62 travel steps taken, and entered the site **zero**
-times with the button on screen.
-
-**The prefix stays, and it stays a prefix.** The widget has been read under two
-spellings on this client -- `TravelToLocation ButtonTaskWidget` while run 26 was
-flying, and `TravelToLocationButtonTask` on a later read -- so an equality would
-lose one of them, and every tracker step in every recorded run on this machine
-came through it.
-
-**The second row is admitted by name rather than by widening the type match**,
-and that is the deliberate part. `objective_task_enter_dungeon` and
-`objective_task_travel_to_location` are the client's own names for these two
-steps, so a rule keyed on them cannot drift onto whatever task widget the chain
-grows next. The mission runner's `endsWith "ButtonTaskWidget"` _would_ have
-matched the warp button and is still not what is written here: it admits every
-sibling in `buttons_container` sight-unseen, which is the failure the narrow
-prefix was written to avoid -- that panel has a conversation button to press at
-hand-in, and nothing says this chain will not grow one -- and this issue is
-evidence that guessing at that family is expensive in both directions. It is
-also **narrower** than the prefix in one place, which is easy to miss:
-`TravelToLocationButtonTask`, the later of the two spellings, does not end with
-`ButtonTaskWidget` at all, so swapping one rule for the other would have lost a
-row it can read today.
-
-So what this admits is: any widget whose type name begins with
-`TravelToLocationButtonTask`, whatever the client names it; and any widget the
-client names as one of these two objective tasks, whatever its type. What it
-excludes is every other sibling in `buttons_container`, every `ButtonTaskWidget`
-that is not one of these two tasks, and anything outside a
-`DungeonInfoPanelEntry` at all.
-
-**Nothing here decides whether a label is worth clicking**, and that separation
-is doing real work rather than being tidy. `travelLabelIsACommand` in `Bot.elm`
-is what sorts a label, and widening this selector does not widen that allow-list
-by one word. `Undock` is the worked example: it was carried as a state, and PR
-#282 read it off the live client as what this widget renders while the ship is
-**docked in the escalation's own system**, which is a command and the one that
-gets the ship out of a station it parked in. The vocabulary has now surprised
-this file twice, so the parser's job is to surface whatever the client wrote and
-let the rule that has the evidence decide.
-
-**This selector can only widen what the old one found**, which is what makes the
-docked case safe without a second capture. It is a union with the prefix rather
-than a replacement for it, so every node the prefix admitted is still admitted;
-the docked reading #282 measured is one where the label reached
-`travelLabelIsACommand` and was refused there, so the parser was already finding
-that button and still is.
-
-**Unverified, and it is #147's shape: what this widget does after the ship has
-arrived.** The capture above is from before arrival, and no recorded run on this
-machine has ever reached this row at all -- the tracker's own decision line names
-`Jump` and `Set Destination` and nothing else, in every run. PR #282 sharpens
-the question rather than answering it: if this button renders `Undock` while
-docked and `Warp to Site` while in space, the label really is a function of the
-ship's state, which makes both answers plausible. If the client keeps
-drawing an _enabled_ `Warp to Site` once the ship is inside the site, then since
-#261 an arriving label outranks the acceleration gate, and the branch would
-shadow gate work the way the whole-tree search shadowed it for 3,458 readings in
-run 5. Two things make that less likely than it sounds and neither settles it:
-the travelling row's own labels cycle into states (`Warping` was read on it
-during run 26), which `travelLabelIsACommand` refuses; and run 5's persistent
-`Warp to Site` came through `findUiElementWithText`, which filtered on no
-`_display` at all, so it is equally consistent with a _hidden_ node in a chain
-that hides what is unavailable. The tell on the first flown run is
-`offers 'Warp to Site'` continuing on readings where the ship is already inside
-the site, with acceleration-gate decisions disappearing on those readings.
-
--}
-uiNodeIsOpportunityTravelTask : EveOnline.MemoryReading.UITreeNode -> Bool
-uiNodeIsOpportunityTravelTask uiNode =
-    (uiNode.pythonObjectTypeName
-        |> String.startsWith opportunityTravelTaskTypePrefix
-    )
-        || (getNameFromDictEntries uiNode
-                |> Maybe.map (\name -> List.member name opportunityTravelTaskNames)
-                |> Maybe.withDefault False
-           )
-
-
-{-| The type-name prefix covering both spellings of the travel-to-location row.
--}
-opportunityTravelTaskTypePrefix : String
-opportunityTravelTaskTypePrefix =
-    "TravelToLocationButtonTask"
-
-
-{-| The client's own `_name` for each of the objective chain's two travel tasks.
--}
-opportunityTravelTaskNames : List String
-opportunityTravelTaskNames =
-    [ "objective_task_travel_to_location", "objective_task_enter_dungeon" ]
-
-
-{-| Whether a node the selector above admitted is one the bot can press.
-
-**The travel-to-location row's progress bar carries the same `_name` as its
-button**, so admitting the row by name admits both -- and the bar is listed
-first, which is what made the button unreachable. See
-`parseOpportunityInfoPanelEntry` for the reading and for what it cost. The two
-pressable widgets are `TravelToLocationButtonTask...` and the enter-dungeon
-row's state widget; the bar is a `ProgressBarTaskWidget`, so `ButtonTask` is a
-substring exactly one side of that carries.
-
-**A substring rather than a suffix**, for the reason the prefix above is a
-prefix: `TravelToLocationButtonTask` is one of the two spellings read on this
-client and does not end with `ButtonTaskWidget` at all, so a suffix test would
-lose a row the parser reads today.
-
-**This says nothing about what is admitted**, which is the distinction that
-keeps it clear of the `endsWith "ButtonTaskWidget"` its neighbour refuses by
-name: it is only ever asked about nodes `uiNodeIsOpportunityTravelTask` has
-already returned `True` for, so it cannot reach a sibling in
-`buttons_container` that selector declined, and it can only reorder candidates
-rather than add one.
-
--}
-uiNodeIsOpportunityTravelTaskButton : EveOnline.MemoryReading.UITreeNode -> Bool
-uiNodeIsOpportunityTravelTaskButton uiNode =
-    uiNode.pythonObjectTypeName
-        |> String.contains opportunityTravelTaskButtonTypeInfix
-
-
-{-| The part of a type name both pressable task widgets carry and the row's
-progress bar does not.
--}
-opportunityTravelTaskButtonTypeInfix : String
-opportunityTravelTaskButtonTypeInfix =
-    "ButtonTask"
-
-
-stripHtmlTags : String -> String
-stripHtmlTags =
-    Regex.replace
-        (Regex.fromString "<[^>]*>" |> Maybe.withDefault Regex.never)
-        (always "")
-
-
 parseMarketOrdersWindowFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe MarketOrdersWindow
 parseMarketOrdersWindowFromUITreeRoot uiTreeRoot =
     uiTreeRoot
@@ -4429,24 +3873,6 @@ getElementIdFromDictEntries =
 getHintTextFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Maybe String
 getHintTextFromDictEntries =
     getStringPropertyFromDictEntries "_hint"
-
-
-{-| Whether the client is rendering this node, from `_display`.
-
-Absent means shown -- the client writes the key to hide something, not to
-reveal it, and the overview's own rows carry no `_display` at all while plainly
-on screen. `Bot.elm` has the identical function for the same reason; this copy
-exists because `parseOpportunityInfoPanelEntry` has to pick between the tracker's
-task widgets where a hidden one is the wrong answer, and a parser cannot ask the
-bot.
-
--}
-nodeIsDisplayedFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Bool
-nodeIsDisplayedFromDictEntries uiNode =
-    uiNode.dictEntriesOfInterest
-        |> Dict.get "_display"
-        |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.bool >> Result.toMaybe)
-        |> Maybe.withDefault True
 
 
 getTexturePathFromDictEntries : EveOnline.MemoryReading.UITreeNode -> Maybe String
