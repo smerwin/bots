@@ -1130,6 +1130,59 @@ shield read 0% throughout while the armour read 99%, so this is a second hull
 confirming that the shield is a fuse rather than a buffer and that
 `run-away-shield-hitpoints-threshold-percent` belongs at `-1`.
 
+## Reading the Directional Scanner: there is no header row to match against
+
+`DirectionalScannerWindow.scanResults` was parsed on every reading in every
+vendored copy of the parser and **nothing in the repository ever took a cell of
+text out of it** -- `eve-online-wingman` asks whether the window's own `uiNode`
+is present, for stray-window handling, and reads no content. Issue #458 is that
+gap; #462 is what needs it.
+
+**`parseProbeScanResult`'s technique does not transfer, and this is the whole
+difficulty.** That one builds `cellsTexts` by matching each cell's horizontal
+position against the labels of *that window's own header row*. Walking the
+whole `DirectionalScanner` subtree of a live client turned up no
+`ScrollColumnHeader` anywhere in it, where the probe scanner's is right there
+and reads `Signal | Distance | ID | Name | Group`. So D-Scan has to be read
+positionally, and `parseDirectionalScanResult` is that read.
+
+**A row is four direct `Container` children at fixed local x-offsets**,
+measured live on 2026-09-04: 0 the icon and no text, 19 the Name, 179 the Type,
+309 the Distance. `_displayX` is local to the parent and `totalDisplayRegion`
+accumulates the inherited offset, so those numbers go into a fixture unchanged.
+
+Three properties, and each is a direction the read could have failed in:
+
+- **Every cell is a `Maybe` and an unreadable one answers `Nothing`, never
+  `""`.** #462 reads a row it cannot name as *hostile*, so a defaulted empty
+  string would match nothing in a list of friendly names and quietly make an
+  unknown ship read as safe. The same distinction `loadRefusalFromGameLog`
+  keeps, one window along.
+- **A row of any other shape answers `Nothing` for all three rather than being
+  read anyway.** Taking indices out of a list of a different length is how a
+  container nobody predicted comes to be read as the Name. The row is still
+  reported, still carrying its `uiNode`: declining to read the cells is not
+  declining to say something is on scan.
+- **The cells are taken left to right by display position**, off the row's own
+  direct children rather than its descendants -- "the second column is the
+  Name" is a question about layout and not about the order a tree walk yields.
+
+**Unverified, and it is the case the downstream feature exists for: every row
+measured was a structure.** Whether a row for a *piloted ship* has the same
+four-container shape is not known. The doc comment on
+`parseDirectionalScanResult` says so and a case asserts it keeps saying so. On
+the first live run with a ship on scan the tell is a scan carrying ships whose
+rows all read `Nothing` -- which is the fail-safe direction and visible, rather
+than a ship's corporation read into the name cell and matched against a
+friendly tag.
+
+Verified without a live client in
+`tools/macos-host/tests/test_directional_scan_result_cells.py`: the parse is
+executed through the real `EveOnline.ParseUserInterface` off UI trees, and the
+row count is asserted before any cell is, since a fixture the parser makes
+nothing of answers exactly like a parser that reads no cells. Confirmed by
+mutation, nine of them, each failing a named case, listed in that file.
+
 ## What the bot is willing to shoot
 
 For a long time this was two rules, and both required somebody to have predicted
