@@ -403,7 +403,24 @@ type alias ProbeScanResult =
 type alias DirectionalScannerWindow =
     { uiNode : UITreeNodeWithDisplayRegion
     , scrollNode : Maybe UITreeNodeWithDisplayRegion
-    , scanResults : List UITreeNodeWithDisplayRegion
+    , scanResults : List DirectionalScanResult
+    }
+
+
+{-| One row of the Directional Scanner's result list.
+
+Every field is a `Maybe`, and a cell this parser cannot read answers `Nothing`
+rather than the empty string. A consumer deciding whether a ship on scan is one
+of ours has to be able to tell "this parser could not read a name" from "the
+name is empty", and a defaulted `""` collapses those two in the direction that
+matches an unknown ship against a list of friendly names and finds it safe.
+
+-}
+type alias DirectionalScanResult =
+    { uiNode : UITreeNodeWithDisplayRegion
+    , name : Maybe String
+    , type_ : Maybe String
+    , distance : Maybe String
     }
 
 
@@ -2695,17 +2712,81 @@ parseDirectionalScannerWindowFromUITreeRoot uiTreeRoot =
                         |> List.sortBy (.totalDisplayRegion >> areaFromDisplayRegion >> Maybe.withDefault 0 >> negate)
                         |> List.head
 
-                scanResultsNodes =
+                scanResults =
                     scrollNode
                         |> Maybe.map listDescendantsWithDisplayRegion
                         |> Maybe.withDefault []
                         |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "DirectionalScanResultEntry")
+                        |> List.map parseDirectionalScanResult
             in
             Just
                 { uiNode = windowNode
                 , scrollNode = scrollNode
-                , scanResults = scanResultsNodes
+                , scanResults = scanResults
                 }
+
+
+{-| Reads a Directional Scanner row's three cells by position, because there is
+nothing else to read them by.
+
+`parseProbeScanResult` next door matches each cell's horizontal position
+against the labels of that window's own header row. **The Directional Scanner
+draws no header row**: walking the whole `DirectionalScanner` subtree of a live
+client turned up no `ScrollColumnHeader` anywhere in it, where the probe
+scanner's is right there and reads `Signal | Distance | ID | Name | Group`. So
+that technique has nothing to match against and does not transfer.
+
+What a row is instead, measured on a live client: exactly four direct
+`Container` children, laid out left to right as an icon carrying no text, then
+the Name, the Type and the Distance.
+
+**A row of any other shape answers `Nothing` for all three cells rather than
+being read anyway**, and that is the whole safety of this rather than a detail
+of it. Taking indices out of a list of a different length is how a container
+nobody predicted -- a corporation ticker beside a pilot's name, say -- comes to
+be read as the Name, and a consumer matching that against a list of friendly
+names would then read an unknown ship as safe. A row this parser declines to
+read is one such a consumer can treat as hostile; a row it mis-assigns is not.
+
+**Unverified: whether a row for a piloted ship has this shape at all.** Every
+row measured was a structure, and a ship is the case the whole
+hostile-detection question exists for. That is the first thing to confirm on a
+live run with a ship on scan, and the tell is a scan carrying ships whose rows
+all read `Nothing`.
+
+-}
+parseDirectionalScanResult : UITreeNodeWithDisplayRegion -> DirectionalScanResult
+parseDirectionalScanResult scanResultNode =
+    let
+        cellsLeftToRight =
+            scanResultNode
+                |> listChildrenWithDisplayRegion
+                |> List.sortBy (.totalDisplayRegion >> .x)
+
+        {- The icon, the Name, the Type and the Distance. -}
+        expectedCellCount =
+            4
+
+        cellTextAt cellIndex =
+            if List.length cellsLeftToRight /= expectedCellCount then
+                Nothing
+
+            else
+                cellsLeftToRight
+                    |> List.drop cellIndex
+                    |> List.head
+                    |> Maybe.andThen
+                        (.uiNode
+                            >> getAllContainedDisplayTexts
+                            >> List.filter (String.trim >> String.isEmpty >> not)
+                            >> List.head
+                        )
+    in
+    { uiNode = scanResultNode
+    , name = cellTextAt 1
+    , type_ = cellTextAt 2
+    , distance = cellTextAt 3
+    }
 
 
 parseStationWindowFromUITreeRoot : UITreeNodeWithDisplayRegion -> Maybe StationWindow
