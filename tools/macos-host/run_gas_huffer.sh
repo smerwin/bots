@@ -2,24 +2,30 @@
 # Launches the eve-online-gas-huffer bot (implement/applications/eve-online/
 # eve-online-gas-huffer) via botlab_host.py.
 #
-# NOTICES BUT CANNOT LEAVE. Since #461 that app warps to a gas site, picks the
-# cloud whose designation carries the highest trailing number, orbits it, keeps
-# the propulsion module running, locks it and runs both harvesters; since #462
-# it also refreshes the Directional Scanner and says on every reading whether
-# anything on the grid means leave. It does **not** retreat (#463), deposit the
-# hold when it fills (#464), or keep the propulsion module on across a warp
-# (#465). So a run left unattended in a wormhole is a ship that will still be
-# sitting on its cloud when somebody else warps in -- knowing they are there and
-# doing nothing about it. It says so on every reading rather than looking busy,
-# which is the whole reason it is launchable at all.
+# LEAVES WITHOUT ITS PROPULSION MODULE. Since #461 that app warps to a gas site,
+# picks the cloud whose designation carries the highest trailing number, orbits
+# it, keeps the propulsion module running, locks it and runs both harvesters;
+# since #462 it refreshes the Directional Scanner and says on every reading
+# whether anything on the grid means leave; and since #463 it acts on that --
+# warps to a prefixed bookmark, else the home structure, else any bookmark at
+# 100 km, cloaks if one is fitted, and bounces celestials at random ranges until
+# the grid reads clean, ending the session if it never does. It does **not**
+# deposit the hold when it fills (#464), or keep the propulsion module on across
+# a warp (#465), so it evades slower than it flew in. It says so on every
+# reading rather than looking busy, which is the whole reason it is launchable
+# at all.
 #
 # Before running, per this bot's own setup instructions (see its Bot.elm
 # header): set the UI language to English; open the overview, the probe scanner
-# with its Group column visible, the Directional Scanner and Local chat; leave
-# the scan bound to `V`, which is the client's own default; and -- the one that
-# cannot be checked from inside the bot -- orbit something by hand once at the
-# range you want, because the Selected Item panel's Orbit button orbits at
-# whatever range the client last used.
+# with its Group column visible, the Directional Scanner, the Locations window
+# and Local chat; leave the scan bound to `V`, which is the client's own
+# default; and -- the one that cannot be checked from inside the bot -- orbit
+# something by hand once at the range you want, because the Selected Item
+# panel's Orbit button orbits at whatever range the client last used.
+#
+# The Locations window matters more than it did: two of the three places this
+# bot runs to are bookmarks, so with it shut the only retreat destination left
+# is `home-structure-name`, and only while that structure is on the overview.
 #
 # Like run_autopilot.sh and unlike run_saxrat.sh / run_mission.sh, this passes
 # **no default settings at all**. Every setting this bot has either names
@@ -51,7 +57,7 @@ for arg in "$@"; do
         -h | --help)
             python3 "${SCRIPT_DIR}/bot_help.py" "$BOT_SOURCE" \
                 --script "run_gas_huffer.sh" \
-                --summary "runs the eve-online-gas-huffer bot, which is meant to harvest gas from a wormhole site and leave the moment anything else turns up. Since #462 it does the harvesting and the watching, and NONE of the leaving: it reports what is on the grid on every reading and does not retreat (#463), deposit the hold (#464) or keep the propulsion module on across a warp (#465)." \
+                --summary "runs the eve-online-gas-huffer bot, which is meant to harvest gas from a wormhole site and leave the moment anything else turns up. Since #463 it does the harvesting, the watching and the leaving; it still does not deposit the hold (#464) or keep the propulsion module on across a warp (#465), so it evades slower than it flew in and reports both on every reading." \
                 --note "This always passes --execute-input: it WILL drive your real mouse and
 keyboard. Starting a run also kills any bot session already running, since two
 of them fighting over the cursor produces chaos.
@@ -59,6 +65,10 @@ of them fighting over the cursor produces chaos.
 This launcher passes NO default settings. Anything naming a structure, a fleet
 tag or a bookmark convention is yours to write, and nothing identifying is
 committed to this repository.
+
+Leave the Locations window open. Two of the three places this bot runs to when
+it leaves are bookmarks, so with that window shut the only destination left is
+'home-structure-name', and only while that structure is on the overview.
 
 One setup item cannot be checked from inside the bot: orbit something by hand
 once, at the range you want, before starting. The Selected Item panel's Orbit

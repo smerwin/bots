@@ -1227,59 +1227,59 @@ class TheStatusLinePrintsWhatItJudgedTest(unittest.TestCase):
             "HOSTILE, Name cell unreadable." % FICTIONAL_TAG)
 
 
-class TheRetreatCoverSaysWhichHalfIsMissingTest(unittest.TestCase):
-    """Noticing and leaving are two halves, and only the first has arrived.
+class TheVerdictIsWhatDecidesToLeaveTest(unittest.TestCase):
+    """What `TheRetreatCoverSaysWhichHalfIsMissingTest` was protecting, kept.
 
-    A bot that notices a stranger, says so, and goes on harvesting is worse to
-    misread than one that never noticed, so the clause names the half that is
-    missing rather than falling silent the moment detection exists.
+    That class asserted `leavingIsImplemented = False` at its one call site, so
+    #463 collides with it -- which this repo has been bitten by before, and the
+    answer is to replace the class rather than delete it. What it was protecting
+    is that noticing and leaving are two halves and an operator is told which one
+    is missing. Both have arrived, so what is worth pinning now is that the
+    second reads the first rather than deciding for itself: one `gridVerdict`,
+    settled once and asked by the status line and by the evasion.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        cls.repl = repl()
+    def setUp(self):
+        self.declarations = top_level_declarations(bot_source())
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.repl.close()
+    def test_the_evasion_asks_the_verdict_rather_than_the_evidence(self):
+        """`gridReadsClean` answers `True` for `GridIsClean` and for nothing
+        else, so a grid this bot cannot see never ends an evasion. The evasion
+        reads that answer rather than re-deriving one from `GridEvidence`, which
+        is #102: a second reading of the same evidence is a second thing that can
+        come to disagree about whether the ship should still be here."""
+        body = collapsed(self.declarations["evasionSituationFromContext"])
+        self.assertIn("gridIsClean = gridReadsClean", body)
+        self.assertIn("gridEvidenceFromContext context", body)
 
-    def cover(self, detection=True, leaving=False, home='Just "Example Refinery"'):
-        return ("{ hostileDetectionIsArmed = %s, leavingIsImplemented = %s"
-                ", homeStructureName = %s, retreatBookmarkPrefix = \"*\" }" % (
-                    "True" if detection else "False",
-                    "True" if leaving else "False", home))
+    def test_the_counters_reset_on_the_same_answer_and_no_other(self):
+        """The memory update is the second reader, and it has to ask the same
+        question -- a counter that reset on `CannotTell` would end an evasion on
+        a reading the bot could not see."""
+        body = collapsed(self.declarations["updateMemoryForNewReadingFromGame"])
+        self.assertIn("gridIsClean = gridReadsClean", body)
+        self.assertIn("gridEvidenceFromReading", body)
 
-    def test_detection_alone_does_not_arm_the_retreat(self):
-        with_detection, with_both = self.repl.evaluate([
-            "retreatIsUnarmed %s" % self.cover(),
-            "retreatIsUnarmed %s" % self.cover(leaving=True),
-        ])
-        self.assertTrue(with_detection)
-        self.assertFalse(with_both)
-
-    def test_the_clause_names_leaving_as_the_missing_half(self):
-        printed = self.repl.strings([
-            "describeRetreatCover %s" % self.cover(),
-        ])[0]
-        self.assertIn("RETREAT NOT ARMED", printed)
-        self.assertIn("#463", printed)
-        self.assertNotIn("nothing in this bot notices a hostile yet", printed)
-
-    def test_a_missing_home_structure_is_still_reported(self):
-        printed = self.repl.strings([
-            "describeRetreatCover %s" % self.cover(leaving=True, home="Nothing"),
-        ])[0]
-        self.assertIn("RETREAT NOT ARMED", printed)
-        self.assertIn("home-structure-name", printed)
-
-    def test_the_call_site_reads_the_detection_half_rather_than_pinning_it(self):
-        """The constant that replaced it is the one naming #463, and it is the
-        one a later change flips. A file carrying both as `False` would be a file
-        whose clause could not tell an operator which half to go and look at."""
-        body = collapsed(top_level_declarations(bot_source())[
-            "retreatCoverFromContext"])
-        self.assertIn("hostileDetectionIsArmed = True", body)
-        self.assertIn("leavingIsImplemented = False", body)
+    def test_no_decision_reads_the_evidence_without_the_verdict(self):
+        """`GridEvidence` is a record of facts and `gridVerdict` is the rule over
+        it; a branch reaching past the rule into the record would be the rule
+        restated beside its consumer."""
+        readers = [name for name, text in self.declarations.items()
+                   if "gridEvidenceFrom" in collapsed(text)
+                   and not name.startswith("gridEvidenceFrom")]
+        self.assertEqual(
+            sorted(readers),
+            ["evasionSituationFromContext", "statusTextFromState",
+             "updateMemoryForNewReadingFromGame"],
+            readers)
+        # And each of the three hands it straight to a rule rather than reaching
+        # into a field of it.
+        for reader in readers:
+            with self.subTest(reader):
+                body = collapsed(self.declarations[reader])
+                self.assertNotIn(".ratsOnOverview", body)
+                self.assertNotIn(".pilotsNotInTheFleet", body)
+                self.assertNotIn(".localChatIsReadable", body)
 
 
 class TheWiringTest(unittest.TestCase):
@@ -1295,16 +1295,21 @@ class TheWiringTest(unittest.TestCase):
 
     def test_the_refresh_is_asked_before_the_harvest_loop(self):
         """Placement rather than a condition, which is how every other ordering
-        in this file is settled: the scan is asked for, and the whole of the
-        harvest loop sits in the branch reached when none is due."""
+        in this file is settled: the scan is asked for, and everything else --
+        since #463 the leaving as well as the harvest loop -- sits in the branch
+        reached when none is due."""
         body = collapsed(self.declarations["huntAndHarvest"])
         self.assertIn("refreshTheDirectionalScanner context", body)
-        for later in ("describeCloudSearch", "actOnTheHarvestStep",
-                      "warpToTheHuntedSite"):
+        for later in ("actOnTheEvasionStep", "harvestTheCloudsOnThisGrid"):
             with self.subTest(later):
                 self.assertLess(
                     body.index("refreshTheDirectionalScanner"),
                     body.index(later))
+        # And the leaving outranks the harvesting, which is the ordering #463
+        # rests on: a reading spent locking a cloud on a grid somebody else has
+        # arrived on is a reading the ship did not spend leaving.
+        self.assertLess(body.index("actOnTheEvasionStep"),
+                        body.index("harvestTheCloudsOnThisGrid"), body)
 
     def test_the_refresh_declines_rather_than_waiting_when_none_is_due(self):
         """A step on this hot path that answered `Just` unconditionally would
@@ -1420,12 +1425,17 @@ class TheMutationsThisFileCatches(unittest.TestCase):
     19. `describeDscanSightings` printing an unreadable cell as `""` --
         `TheStatusLinePrintsWhatItJudgedTest
         .test_an_unreadable_cell_does_not_print_as_an_empty_one`.
-    20. `retreatCoverFromContext` left with `hostileDetectionIsArmed = False` --
-        `TheRetreatCoverSaysWhichHalfIsMissingTest
-        .test_the_call_site_reads_the_detection_half_rather_than_pinning_it`.
-    21. `leavingIsImplemented` dropped from `retreatIsUnarmed`, so the clause
-        reports an armed retreat -- `TheRetreatCoverSaysWhichHalfIsMissingTest
-        .test_detection_alone_does_not_arm_the_retreat`.
+    20. the evasion re-deriving its answer from `GridEvidence` instead of asking
+        `gridReadsClean` -- `TheVerdictIsWhatDecidesToLeaveTest
+        .test_the_evasion_asks_the_verdict_rather_than_the_evidence`. (Graded
+        against `TheRetreatCoverSaysWhichHalfIsMissingTest`, which #463 replaced;
+        see that class's own doc comment for why it was replaced rather than
+        deleted.)
+    21. the evasion counters reset on `CannotTellWhetherTheGridIsClean` as well,
+        so an evasion ends on a reading the bot cannot see --
+        `TheVerdictIsWhatDecidesToLeaveTest
+        .test_the_counters_reset_on_the_same_answer_and_no_other`, and
+        `test_gas_huffer_retreats_and_evades` on the fold.
     22. `iconSpriteHasColorOfRat`'s `Nothing` branch answering `True`, so every
         unreadable icon is a rat -- `TheThreeTriggersFireIndependentlyTest
         .test_a_row_whose_icon_colour_cannot_be_read_is_not_a_rat`. **This one
