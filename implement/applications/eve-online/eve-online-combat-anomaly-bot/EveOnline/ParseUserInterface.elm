@@ -3504,10 +3504,24 @@ parseLocationsWindowFromUITreeRoot uiTreeRoot =
     {-
        2024-09-02 'Locations' window as shared by Paul with 'session-recording-2024-08-26T22-54-47.zip'
        For discussion of the 'Locations' window, see <https://forum.botlab.org/t/the-mining-robot-cant-find-its-way-home/4922/5>
+
+       2026-09-04: another client renders this window as 'StandaloneBookmarkWnd'
+       and carries no node named 'LocationsWindow' anywhere in the tree, so the
+       single-name filter answered Nothing on every reading while the window was
+       open and populated. Both names are matched rather than one replacing the
+       other, because the recording above is the evidence for 'LocationsWindow'
+       and this parser is vendored into every app. Same shape as the overview
+       window's own 'OverView' / 'OverviewWindow' / 'OverviewWindowOld'.
+       The rows underneath are untouched: 'PlaceEntry' is this client's real row
+       type already.
     -}
     uiTreeRoot
         |> listDescendantsWithDisplayRegion
-        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "LocationsWindow")
+        |> List.filter
+            (.uiNode
+                >> .pythonObjectTypeName
+                >> (List.member >> (|>) [ "LocationsWindow", "StandaloneBookmarkWnd" ])
+            )
         |> List.head
         |> Maybe.map parseLocationsWindow
 
