@@ -1247,10 +1247,21 @@ class TheVerdictIsWhatDecidesToLeaveTest(unittest.TestCase):
         else, so a grid this bot cannot see never ends an evasion. The evasion
         reads that answer rather than re-deriving one from `GridEvidence`, which
         is #102: a second reading of the same evidence is a second thing that can
-        come to disagree about whether the ship should still be here."""
+        come to disagree about whether the ship should still be here.
+
+        #464 put one clause in front of that, and it is not a second reading of
+        the evidence: a reading with no ship UI is a docked one, a docked client
+        answers no Directional Scan, and the grid an undock would enter is the
+        one the last in-space reading judged. So the in-space arm is still
+        `gridReadsClean` over `gridEvidenceFromContext` and nothing else, and the
+        docked arm reads a verdict that was reached that way.
+        """
         body = collapsed(self.declarations["evasionSituationFromContext"])
-        self.assertIn("gridIsClean = gridReadsClean", body)
-        self.assertIn("gridEvidenceFromContext context", body)
+        self.assertIn("else gridReadsClean (gridVerdict"
+                      " (gridEvidenceFromContext context))", body)
+        # The docked arm never re-derives one, and never defaults to clean.
+        self.assertIn("context.memory.lastGridVerdictInSpaceIsClean"
+                      " |> Maybe.withDefault False", body)
 
     def test_the_counters_reset_on_the_same_answer_and_no_other(self):
         """The memory update is the second reader, and it has to ask the same
@@ -1298,9 +1309,13 @@ class TheWiringTest(unittest.TestCase):
         in this file is settled: the scan is asked for, and everything else --
         since #463 the leaving as well as the harvest loop -- sits in the branch
         reached when none is due."""
-        body = collapsed(self.declarations["huntAndHarvest"])
+        # #464 moved this chain out of `huntAndHarvest` and above the
+        # docked-or-in-space split, so that the retreat outranks the deposit's
+        # undock as well as the harvest loop. The ordering it reads is the same
+        # ordering; what moved is which declaration holds it.
+        body = collapsed(self.declarations["watchLeaveDepositOrHarvest"])
         self.assertIn("refreshTheDirectionalScanner context", body)
-        for later in ("actOnTheEvasionStep", "harvestTheCloudsOnThisGrid"):
+        for later in ("actOnTheEvasionStep", "huntAndHarvest"):
             with self.subTest(later):
                 self.assertLess(
                     body.index("refreshTheDirectionalScanner"),
@@ -1309,7 +1324,7 @@ class TheWiringTest(unittest.TestCase):
         # rests on: a reading spent locking a cloud on a grid somebody else has
         # arrived on is a reading the ship did not spend leaving.
         self.assertLess(body.index("actOnTheEvasionStep"),
-                        body.index("harvestTheCloudsOnThisGrid"), body)
+                        body.index("huntAndHarvest"), body)
 
     def test_the_refresh_declines_rather_than_waiting_when_none_is_due(self):
         """A step on this hot path that answered `Just` unconditionally would
@@ -1318,6 +1333,10 @@ class TheWiringTest(unittest.TestCase):
         self.assertIn("dscanRefreshIsDue", body)
         self.assertIn("else Nothing", body)
         self.assertNotIn("waitForProgressInGame", body)
+        # And a docked reading is declined outright, which #464 added when this
+        # moved above the split: a docked client answers no scan, so the
+        # keypress would go nowhere and the reading would be spent for nothing.
+        self.assertIn("shipUI == Nothing", body)
 
     def test_the_memory_update_records_the_ask_and_the_window(self):
         body = collapsed(self.declarations["updateMemoryForNewReadingFromGame"])

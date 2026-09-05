@@ -558,9 +558,15 @@ class TheSetupListPutsThePauseMenuFirstTest(unittest.TestCase):
         self.assertIn("|> List.head", body)
 
     def test_the_setup_list_is_asked_before_anything_that_flies_the_ship(self):
+        # Since #464 everything that flies the ship hangs off
+        # `watchLeaveDepositOrHarvest`, which the root reaches only once the
+        # setup list has declined -- so the relation is between the two
+        # declarations rather than between two names in one.
         root = collapsed(block("gasHufferDecisionRootBeforeApplyingSettings"))
         self.assertLess(root.index("generalSetupInUserInterface"),
-                        root.index("branchDependingOnDockedOrInSpace"), root)
+                        root.index("watchLeaveDepositOrHarvest"), root)
+        self.assertIn("branchDependingOnDockedOrInSpace",
+                      collapsed(block("watchLeaveDepositOrHarvest")))
 
     def test_the_pause_menu_branch_fires_on_the_menu_the_client_draws(self):
         """Reachability, which a placement case cannot see.
@@ -813,16 +819,15 @@ class TheSessionEndingBoundIsAskedAtTheHeadTest(unittest.TestCase):
 
 # The marker the bot opens its header and its status line with. It was
 # `SCAFFOLD ONLY` while #459 was all there was; #461 gave the bot the whole
-# harvesting half, #462 gave it the watching half, and #463 gave it the leaving
-# -- so the honest opening has moved three times: "this does nothing", then
-# "this earns and cannot survive", then "this sees what is coming and cannot get
-# out of the way", and now "it gets out of the way slowly". Every wording answers
-# the same question -- what is an operator told before they read anything
-# reassuring -- which is why this is one constant updated rather than a case
-# deleted, and why the *worse* half is what it names each time. #464 (the
-# deposit) and #465 (the propulsion module across a warp) are what is left, and
-# #465 is the worse of the two because it is on the survival path: every retreat
-# and every celestial bounce is a warp.
+# harvesting half, #462 gave it the watching half, #463 gave it the leaving and
+# #464 the deposit -- so the honest opening has moved three times: "this does
+# nothing", then "this earns and cannot survive", then "this sees what is coming
+# and cannot get out of the way", and now "it gets out of the way slowly". Every
+# wording answers the same question -- what is an operator told before they read
+# anything reassuring -- which is why this is one constant updated rather than a
+# case deleted, and why the *worse* half is what it names each time. #465 (the
+# propulsion module across a warp) is what is left, and it is on the survival
+# path: every retreat, every celestial bounce and now every trip home is a warp.
 CANNOT_DO_MARKER = "LEAVES WITHOUT ITS PROPULSION MODULE"
 
 
@@ -853,13 +858,19 @@ class TheBotSaysWhatItCannotDoTest(unittest.TestCase):
             ["nothingToDoDockedYet", "nothingToHuntInSpace"])
         for text in (docked, in_space):
             self.assertIn("on purpose", text)
-            self.assertIn("#46", text)
-        self.assertIn("#464", docked)
-        # The in-space leaf is reached only where the grid reads clean and there
-        # is nothing to warp to, so what it has to name is the half that is still
-        # missing rather than the halves that arrived. #462 gave this bot eyes
-        # and #463 gave it the way out, so the leaf names neither as absent.
+        # The docked leaf named #464 as the thing that would fill it until #464
+        # filled it. What it has to say now is narrower and is still a fact an
+        # operator acts on: this bot undocks only to finish a deposit, so a
+        # session started docked stays docked until somebody undocks it.
+        self.assertIn("undocks only to finish a deposit", docked)
+        self.assertIn("#46", in_space)
+        # The in-space leaf is reached only where the grid reads clean *and* the
+        # hold does not need emptying, and since #464 that is two conditions
+        # rather than one -- so it names both, as the two reasons the wait is
+        # reached rather than as halves that are missing. #462 gave this bot
+        # eyes, so the leaf still names neither that nor its own eyes as absent.
         self.assertNotIn("#462", in_space)
+        self.assertIn("#463", in_space)
         self.assertIn("#464", in_space)
 
     def test_the_status_line_opens_by_saying_so(self):

@@ -25,14 +25,30 @@
       comes clean, the session ends with the ship wherever the last warp put it,
       which is a legitimate end to an evening in somebody else's wormhole.
 
+      Since #464 it **deposits**. A Mining Hold that reads full sends the ship to
+      the overview row matching `home-structure-name`, docks it with the Selected
+      Item panel's own Dock button, drags the hold's contents into the
+      structure's item hangar, and waits for the **client's own** `N item(s) was
+      moved to your hangar` line before calling it done -- never for the gauge to
+      read zero, which is the same reading whether the drag worked or moved
+      nothing. Then it undocks and goes back to work, and #461 picks the site
+      again. Nothing here cycles: a deposit that cannot be finished ends the
+      session saying the hold is still full, because an operator empties one by
+      hand in seconds and a bot looping on it wastes an evening.
+
+      **The retreat outranks all of that**, and it is placed above the
+      docked-or-in-space split rather than conditioned: a grid that stops reading
+      clean takes the ship out of a docking run-in, and while docked it keeps the
+      ship docked rather than undocking a full ship into somebody else's grid to
+      finish an errand.
+
       **What is still missing is the propulsion module across a warp (#465)**,
-      which is the one to be clear about before starting a run: the retreat and
-      every celestial bounce are warps, nothing here switches the module back on
-      afterwards except the harvest loop at the far end of a clean grid, so the
-      ship evades slower than it flew in. Nor does anything deposit the hold when
-      it fills (#464), so a full hold is a session that goes on harvesting
-      nothing. The status line says both on every reading rather than letting a
-      bot that looks busy read as a bot that is covered.
+      which is the one to be clear about before starting a run: the retreat, the
+      deposit trip and every celestial bounce are warps, nothing here switches
+      the module back on afterwards except the harvest loop at the far end of a
+      clean grid, so the ship evades slower than it flew in. The status line says
+      so on every reading rather than letting a bot that looks busy read as a bot
+      that is covered.
 
       Started under issue #459; the behaviour is #460 (which site to hunt), #461
       (the harvest loop), #462 (hostile detection), #463 (retreat, cloak and
@@ -96,6 +112,16 @@
         appearing there. With that window shut this bot cannot tell a pilot's row
         from a rock's, and it says `CANNOT TELL` rather than reading the grid as
         clean -- see `pilotsOnTheOverviewNotInTheFleet`.
+      + **Leave the inventory open with the ship's Mining Hold selected.** That
+        window's capacity gauge is the only thing in a reading that says how full
+        the hold is, and it belongs to whatever container the window has
+        _selected_ -- so an inventory showing anything else is a hold this bot
+        cannot read, and a hold it cannot read is one it never decides to deposit.
+        That is the direction this fails in on purpose: the alternative would
+        send the ship home on a session nobody had set up. It says which of the
+        two it is on every reading; see `describeDeposit`. The bot re-selects the
+        hold itself after a deposit, so this is a starting condition rather than
+        something to keep watching.
       + Set the overview to sort by distance with the nearest entry at the top.
       + In the ship UI, arrange the modules:
         + Put the gas harvesters in the **top** row, side by side.
@@ -479,6 +505,25 @@ type alias BotMemory =
     -- is still unknown. Bounds `identifyTheModulesFitted`, which is the only
     -- thing in this app that can tell a cloak from a hardener.
     , modulesUnidentifiedReadings : Int
+
+    -- The grid as it last read from a reading carrying a ship UI. A docked
+    -- client will not answer a Directional Scan, so a docked reading's own
+    -- verdict is a statement about the instrument rather than about the grid
+    -- outside -- and the undock is judged on this instead. `Nothing` is a
+    -- session that has never been in space, which reads as not clean.
+    , lastGridVerdictInSpaceIsClean : Maybe Bool
+
+    -- The dock the client has confirmed it is flying, and the evidence that it
+    -- is still closing. What stops the dock being re-commanded every reading,
+    -- which is what kept a mission runner 17 km off a station for eight
+    -- minutes. See `DockingRunIn`.
+    , dockingRunIn : Maybe DockingRunIn
+
+    -- The deposit run under way, its own clock, and the client's own sentence
+    -- saying the transfer landed. A reading's game-log entries are gone by the
+    -- next reading, so the confirmation has to be latched here or it is seen
+    -- once and the bot goes back to dragging. See `depositRunAfterReading`.
+    , deposit : Maybe DepositRun
     }
 
 
@@ -2351,43 +2396,6 @@ warpToTheHuntedSite context site =
                 (useContextMenuCascade ( bookmark.mainText, bookmark.uiNode ) warpMenu context)
 
 
-{-| How full the hold is, where a reading can say.
-
-Read off whichever inventory window this reading carries a capacity gauge for.
-**Nothing in this bot opens one and the client-setup list does not ask for one**,
-so the ordinary answer today is that there is none -- which is said in those
-words rather than reported as an empty hold. An operator watching a bot that
-never deposits has to be able to tell a hold that is not filling from a hold
-nobody is looking at, and #464 is what has to decide which of the two it wants:
-`InvContCapacityGauge` read `0/12,500.0 m3` on the hull #456 was measured on,
-and carries a transient `(12,500.0) 12,500.0/12,500.0 m3` form while a transfer
-is in flight, which is a state to wait through rather than to act on.
-
--}
-describeHoldFill : ReadingFromGameClient -> String
-describeHoldFill readingFromGameClient =
-    case
-        readingFromGameClient.inventoryWindows
-            |> List.filterMap .selectedContainerCapacityGauge
-            |> List.filterMap Result.toMaybe
-            |> List.head
-    of
-        Nothing ->
-            "Hold: no inventory window with a readable capacity gauge in this reading, so nothing here knows how full it is."
-
-        Just gauge ->
-            "Hold: "
-                ++ String.fromInt gauge.used
-                ++ (case gauge.maximum of
-                        Just maximum ->
-                            "/" ++ String.fromInt maximum
-
-                        Nothing ->
-                            " (the gauge states no maximum)"
-                   )
-                ++ " -- nothing empties it yet, which is #464."
-
-
 
 -- Whether anything on this grid means leave
 
@@ -3418,19 +3426,7 @@ retreatSearch settings reading =
                     (.mainText >> bookmarkLabelStartsWithPrefix settings.bookmarkPrefix)
 
         homeStructureRows =
-            case settings.homeStructureName of
-                Nothing ->
-                    []
-
-                Just name ->
-                    reading.overviewEntries
-                        |> List.filter overviewEntryIsDisplayed
-                        |> List.filter
-                            (\entry ->
-                                entry.objectName
-                                    |> Maybe.map (\objectName -> siteCellMatches objectName name)
-                                    |> Maybe.withDefault False
-                            )
+            homeStructureRowsOnTheOverview settings.homeStructureName reading.overviewEntries
     in
     { settings = settings
     , locationsWindowIsOpen = reading.locationsWindow /= Nothing
@@ -3446,6 +3442,49 @@ retreatSearch settings reading =
             |> List.filterMap identity
             |> List.head
     }
+
+
+{-| The overview rows that are the structure `home-structure-name` names.
+
+**One declaration with two readers**, which is #102's rule and the way it would
+fail here is the sharpest version of it this file has: the retreat's second rung
+and the deposit's only destination are the same structure, so two spellings of
+"which row is home" would be a bot that runs to one place when it is frightened
+and flies to another when it is full, with both status clauses reading correctly.
+
+Filtered on `_display` because both readers act on the row at a screen position
+-- the retreat right-clicks it and the deposit selects it -- and the overview
+virtualises, so a hidden row's region belongs to whatever was recycled into it.
+See `overviewEntryIsDisplayed`.
+
+`siteCellMatches` rather than a matcher written here, so this setting means what
+`anomaly-group` already promises an operator: whole, ignoring case and
+surrounding space, with a trailing `*` meaning a prefix.
+
+**An unset setting answers `[]`** rather than taking the first structure it sees.
+There is no default and there cannot be one -- it names a structure in one
+wormhole belonging to one operator -- and a bot that guessed would dock a full
+ship at somebody else's citadel.
+
+-}
+homeStructureRowsOnTheOverview :
+    Maybe String
+    -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+homeStructureRowsOnTheOverview homeStructureName overviewEntries =
+    case homeStructureName of
+        Nothing ->
+            []
+
+        Just name ->
+            overviewEntries
+                |> List.filter overviewEntryIsDisplayed
+                |> List.filter
+                    (\entry ->
+                        entry.objectName
+                            |> Maybe.map (\objectName -> siteCellMatches objectName name)
+                            |> Maybe.withDefault False
+                    )
 
 
 retreatSearchFromContext : BotDecisionContext -> RetreatSearch
@@ -4008,9 +4047,21 @@ earlier one.
 **cannot see** never resets any of these. That is the same line the whole design
 rests on, read here rather than restated.
 
+**`docked` resets them too, and that is not a widening of "clean".** Everything
+these counters bound is a ship trying to get off a grid: `readings` ends the
+session because a wormhole somebody lives in is one this bot has no work in, and
+`warpUnexecutedReadings` fetches a person because a commanded warp is not
+happening. A docked ship is doing neither -- it is in the safest place there is,
+which is the successful **end** of any evasion rather than a reading spent on
+one -- and counting docked readings against either bound would end a session, or
+raise an alarm, about a ship in no danger at all. What keeps a docked ship from
+waiting forever is not this: it is `depositGiveUpReadings`, which is running
+whenever there is anything for a docked ship to be doing.
+
 -}
 type alias EvasionAnswerFromClient =
     { gridIsClean : Bool
+    , docked : Bool
     , shipIsWarping : Bool
     , cloakAnsweredTheAsk : Bool
     }
@@ -4018,7 +4069,7 @@ type alias EvasionAnswerFromClient =
 
 evasionCountersAfterReading : EvasionAnswerFromClient -> EvasionCounters -> EvasionCounters
 evasionCountersAfterReading answer counters =
-    if answer.gridIsClean then
+    if answer.docked || answer.gridIsClean then
         { initEvasionCounters
             | longestWarpUnexecutedReadings = counters.longestWarpUnexecutedReadings
         }
@@ -4059,9 +4110,23 @@ see passes for one that works.
 inside a gas site, so a reading whose overview carries one is a reading taken on a
 site and nothing has to remember having warped.
 
+**`gridIsClean` is the grid as this bot last read it with a ship in space**,
+which for every in-space reading is this one and for a docked reading is the one
+before the ship went inside. That is not a convenience: a docked client will not
+answer a Directional Scan at all, so a docked reading's scan goes stale by the
+second, `gridVerdict` answers `CannotTellWhetherTheGridIsClean` -- correctly, and
+for a grid the ship is not on -- and a bot judging the undock on it would dock
+once and never come out. The reading that is genuinely about the grid outside is
+the last one taken from it, which is the reading the dock was commanded from.
+
+`Nothing` -- no reading with a ship UI this session -- reads as **not** clean,
+which is #463's own line applied to a session that started docked: this bot
+undocks into nothing it has never looked at.
+
 -}
 type alias EvasionSituation =
     { gridIsClean : Bool
+    , docked : Bool
     , stillOnTheHarvestSite : Bool
     , shipIsWarping : Bool
     , destination : Maybe RetreatDestination
@@ -4084,6 +4149,13 @@ in front of it that are not about leaving at all:
     `gridIsClean` is `gridReadsClean`'s answer, which is `True` for `GridIsClean`
     and for nothing else, so a grid the bot cannot see never ends an evasion.
     That is the line this whole issue rests on;
+  - **a docked ship stays docked**, which is #464's ordering requirement and the
+    reason this whole rule is asked above the docked-or-in-space split rather
+    than inside its in-space arm. A station or structure is the safest place this
+    hull can be, so there is nothing here to leave; what there is is an errand
+    -- the deposit's undock, and the trip back to the site behind it -- and
+    letting that outrank the retreat is what would send a full ship back out into
+    somebody else's grid to finish it. Inverting the two compiles.
   - **a ship already in warp is left alone**, because re-commanding a warp that is
     going is how a cascade re-opens on every reading of a manoeuvre already doing
     what it was told. `huntAndHarvest` declines the hunt warp for the same reason.
@@ -4107,7 +4179,8 @@ Then:
 -}
 type EvasionStep
     = TheGridReadsCleanSoResumeWork
-    | WaitForTheWarpToLand
+    | StayDockedRatherThanUndockIntoIt
+    | WaitForTheEvasionWarpToLand
     | WarpOutOfTheSite RetreatDestination
     | ActivateTheCloak Int
     | WarpToACelestial Int
@@ -4119,8 +4192,11 @@ evasionStep situation =
     if situation.gridIsClean then
         TheGridReadsCleanSoResumeWork
 
+    else if situation.docked then
+        StayDockedRatherThanUndockIntoIt
+
     else if situation.shipIsWarping then
-        WaitForTheWarpToLand
+        WaitForTheEvasionWarpToLand
 
     else
         case ( situation.stillOnTheHarvestSite, situation.destination ) of
@@ -4183,7 +4259,13 @@ celestialsToBounceOffOnTheOverview readingFromGameClient =
 
 evasionSituationFromContext : BotDecisionContext -> EvasionSituation
 evasionSituationFromContext context =
-    { gridIsClean = gridReadsClean (gridVerdict (gridEvidenceFromContext context))
+    { gridIsClean =
+        if context.readingFromGameClient.shipUI == Nothing then
+            context.memory.lastGridVerdictInSpaceIsClean |> Maybe.withDefault False
+
+        else
+            gridReadsClean (gridVerdict (gridEvidenceFromContext context))
+    , docked = context.readingFromGameClient.shipUI == Nothing
     , stillOnTheHarvestSite =
         0
             < (cloudSearchFromReading context.eventContext.botSettings
@@ -4220,7 +4302,14 @@ actOnTheEvasionStep context situation =
         TheGridReadsCleanSoResumeWork ->
             Nothing
 
-        WaitForTheWarpToLand ->
+        StayDockedRatherThanUndockIntoIt ->
+            Just
+                (describeBranch
+                    "The grid this ship would undock into did not read clean the last time anything looked at it from space, and a docked hull is the safest place there is -- stay put. Nothing here undocks a full ship to finish an errand (#464), and a docked client will not answer a Directional Scan, so this is the grid as it was read on the way in rather than a scan going stale inside a structure."
+                    waitForProgressInGame
+                )
+
+        WaitForTheEvasionWarpToLand ->
             Just
                 (describeBranch
                     "Leaving, and the ship is in warp -- wait for it to land rather than re-commanding a warp that is already going."
@@ -4430,6 +4519,1452 @@ describeEvasion counters =
 
 
 
+-- Depositing the hold at the home structure
+
+
+{-| The inventory sidebar row the hold this bot fills is drawn as.
+
+**A Mining Hold on the measured hull rather than a generic cargo hold**, which
+is #464's own first emphasis and the thing a plausible implementation gets
+wrong. `readingFromGameClient.inventoryWindows` is a list, and each window's
+`selectedContainerCapacityGauge` belongs to whichever container **that** window
+has selected -- so a rule taking the first gauge it finds reads whatever the
+client happened to draw first (a cargo hold, a wreck somebody opened, a
+structure's hangar) and then deposits, or declines to, on the strength of a
+number about some other container.
+
+Matched as a substring and ignoring case, because the client's own longer
+spellings of this row carry it (`General Mining Hold` is one) and because a
+sidebar row is a phrase rather than a word.
+
+-}
+miningHoldTreeEntryText : String
+miningHoldTreeEntryText =
+    "mining hold"
+
+
+{-| The node type the client draws the Mining Hold as while it is selected.
+
+The sidebar row above is what a click aims at; this is what says the capacity
+gauge in a window is **the hold's**. Both are needed and they answer different
+questions -- a window lists the hold in its sidebar while showing the
+structure's hangar on the right, which is exactly the state the drag happens in,
+and only the second of those two facts may be read as a fill level.
+
+Taken from the vendored parser rather than from a live client:
+`parseInventoryWindow` recognises `ShipCargo`, `ShipDroneBay`,
+`ShipGeneralMiningHold`, `StationItems`, `ShipFleetHangar` and
+`StructureItemHangar`, and this is the only one of the six that is a mining
+hold. **Nobody has read this hull's own type name**, so a build that spells it
+differently makes every reading answer `HoldFillCannotBeRead`, no deposit is
+ever decided, and the status line says so on every reading -- which is the
+direction this is built to fail in rather than an accident of it.
+
+-}
+miningHoldContainerTypeName : String
+miningHoldContainerTypeName =
+    "ShipGeneralMiningHold"
+
+
+{-| The structure's own hangar row, which is what the hold is dragged onto.
+
+Matched by the sidebar row's text rather than by the `StructureItemHangar` node
+type, because the drop target is a row to click and the type name only ever
+appears on a container the window has already **selected** -- and the whole
+point of the drag is that the hold is selected and the hangar is not.
+
+Absent from every reading taken in space, which is what makes it a `Maybe` at
+the call site rather than something to assert: an undocked ship has no
+structure's hangar in its inventory, and a docked one that does not either is a
+reading that says so in the decision log rather than a drag aimed at nothing.
+
+-}
+structureHangarTreeEntryText : String
+structureHangarTreeEntryText =
+    "item hangar"
+
+
+{-| What the hold's own capacity gauge says, in the three forms it was measured
+in plus the one every other reading gives.
+
+`InvContCapacityGauge`, read on the hull #456 was measured on:
+
+    0/12,500.0 m3                       empty
+    12,500.0/12,500.0 m3                full
+    (12,500.0) 12,500.0/12,500.0 m3     full, with a transfer in flight
+
+**The parenthesised form is a transient and is its own answer**, which is
+#464's second emphasis and the clause most easily lost.
+`parseInventoryCapacityGaugeText` puts the bracketed number in `selected` and
+the pair either side of the slash in `used` and `maximum`, so a rule looking
+only at those two reads the transient as _full_ -- which is true of the reading,
+is a fill level, and is precisely the wrong thing to act on, because a transfer
+already in flight would then be answered by dragging again. It is therefore
+asked **before** the used-against-maximum comparison, so that no ordering of the
+remaining clauses can let it through as a level.
+
+**`HoldFillCannotBeRead` is never read as full.** It is the ordinary answer on a
+reading whose inventory has something else selected, and the fail direction is
+chosen rather than inherited: an unreadable hold means this bot never decides to
+deposit, which is exactly the behaviour it had before #464 and which the status
+line shouts on every reading, where the other direction would fly the ship home
+on every session whose inventory nobody set up.
+
+`maximum <= used` is the honest limit rather than a full test, the same one
+`droneBayFillFromCapacityGauge` states next door: the gauge is cubic metres
+truncated to an integer and a gas cycle's own volume is not readable, so a hold
+with 1 m3 free reads as having room while the next cycle will not fit. What
+covers that is the harvester and the operator, not this.
+
+-}
+type HoldFill
+    = HoldIsFull
+    | HoldHasRoom
+    | HoldTransferIsInFlight
+    | HoldFillCannotBeRead
+
+
+holdFillFromCapacityGauge :
+    Maybe EveOnline.ParseUserInterface.InventoryWindowCapacityGauge
+    -> HoldFill
+holdFillFromCapacityGauge capacityGauge =
+    case capacityGauge of
+        Nothing ->
+            HoldFillCannotBeRead
+
+        Just gauge ->
+            if gauge.selected /= Nothing then
+                HoldTransferIsInFlight
+
+            else
+                case gauge.maximum of
+                    Nothing ->
+                        HoldFillCannotBeRead
+
+                    Just maximum ->
+                        if maximum <= gauge.used then
+                            HoldIsFull
+
+                        else
+                            HoldHasRoom
+
+
+selectedContainerTypeNameOfWindow : EveOnline.ParseUserInterface.InventoryWindow -> Maybe String
+selectedContainerTypeNameOfWindow inventoryWindow =
+    inventoryWindow.selectedContainerInventory
+        |> Maybe.map (.uiNode >> .uiNode >> .pythonObjectTypeName)
+
+
+holdIsTheSelectedContainer : EveOnline.ParseUserInterface.InventoryWindow -> Bool
+holdIsTheSelectedContainer inventoryWindow =
+    selectedContainerTypeNameOfWindow inventoryWindow
+        == Just miningHoldContainerTypeName
+
+
+{-| The hold's fill as this reading has it, or `HoldFillCannotBeRead`.
+
+The gauge is asked of the window that has the **hold** selected and of no other,
+which is `miningHoldContainerTypeName`'s whole reason. A reading where the
+deposit has selected the structure's hangar to drag into therefore says nothing
+about the hold, which is correct: the number on screen then belongs to the
+hangar.
+
+-}
+holdFillFromReading : ReadingFromGameClient -> HoldFill
+holdFillFromReading readingFromGameClient =
+    case
+        readingFromGameClient.inventoryWindows
+            |> List.filter holdIsTheSelectedContainer
+            |> List.head
+    of
+        Nothing ->
+            HoldFillCannotBeRead
+
+        Just inventoryWindow ->
+            holdFillFromCapacityGauge
+                (inventoryWindow.selectedContainerCapacityGauge
+                    |> Maybe.andThen Result.toMaybe
+                )
+
+
+{-| A row in an inventory window's sidebar, found anywhere in that tree.
+
+`eve-online-mission-runner`'s, ported with its reason: the ship's own holds hang
+off the ship's entry rather than sitting beside it, so a search over the roots
+alone finds neither the Mining Hold nor a docked structure's hangar.
+
+-}
+inventoryTreeEntryWithText :
+    String
+    -> EveOnline.ParseUserInterface.InventoryWindow
+    -> Maybe EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
+inventoryTreeEntryWithText text inventoryWindow =
+    inventoryWindow.leftTreeEntries
+        |> List.concatMap flattenInventoryTreeEntry
+        |> List.filter (.text >> stringContainsIgnoringCase text)
+        |> List.head
+
+
+flattenInventoryTreeEntry :
+    EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
+    -> List EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
+flattenInventoryTreeEntry entry =
+    entry
+        :: (entry.children
+                |> List.map EveOnline.ParseUserInterface.unwrapInventoryWindowLeftTreeEntryChild
+                |> List.concatMap flattenInventoryTreeEntry
+           )
+
+
+{-| The items an inventory window is currently rendering, in either view.
+
+Only the rendered ones: the list is virtualised, so a count from here is a
+signal that there is something to drag and never a total of what is in the hold.
+
+-}
+inventoryItemsInView :
+    EveOnline.ParseUserInterface.InventoryWindow
+    -> List EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+inventoryItemsInView inventoryWindow =
+    case inventoryWindow.selectedContainerInventory |> Maybe.andThen .itemsView of
+        Just (EveOnline.ParseUserInterface.InventoryItemsListView listView) ->
+            listView.items |> List.map .uiNode
+
+        Just (EveOnline.ParseUserInterface.InventoryItemsNotListView notListView) ->
+            notListView.items
+
+        Nothing ->
+            []
+
+
+{-| The one inventory window this whole sequence works in, with the two rows it
+clicks carried back beside it.
+
+Picked by the window's **sidebar listing the Mining Hold**, rather than by
+taking `List.head` of the windows, for `miningHoldTreeEntryText`'s reason. The
+hangar row is a `Maybe` because it exists only while docked, and finding both
+here is what makes the drag's source and target present by construction rather
+than re-derived at the point of the drag, where a "nothing to drop it into"
+branch would be unreachable and would read like a guard.
+
+-}
+type alias DepositInventory =
+    { window : EveOnline.ParseUserInterface.InventoryWindow
+    , holdTreeEntry : EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
+    , structureHangarTreeEntry : Maybe EveOnline.ParseUserInterface.InventoryWindowLeftTreeEntry
+    }
+
+
+depositInventoryFromReading : ReadingFromGameClient -> Maybe DepositInventory
+depositInventoryFromReading readingFromGameClient =
+    readingFromGameClient.inventoryWindows
+        |> List.filterMap
+            (\inventoryWindow ->
+                inventoryWindow
+                    |> inventoryTreeEntryWithText miningHoldTreeEntryText
+                    |> Maybe.map
+                        (\holdTreeEntry ->
+                            { window = inventoryWindow
+                            , holdTreeEntry = holdTreeEntry
+                            , structureHangarTreeEntry =
+                                inventoryWindow
+                                    |> inventoryTreeEntryWithText structureHangarTreeEntryText
+                            }
+                        )
+            )
+        |> List.head
+
+
+{-| The two substrings that make a `(notify)` line this bot's own deposit
+confirmation.
+
+    (notify) N item(s) was moved to your hangar in <system> - <structure>
+
+**The client's own line and not the gauge**, which is #464's third emphasis and
+the one that costs the most to get wrong. A gauge reading zero because the drag
+silently moved nothing and a gauge reading zero because the deposit worked are
+the same reading -- the distinction #19 cost the standalone restock tool, and
+the one `reload_drones.py` and the mission runner's `restockDroneBayWhileDocked`
+each had to learn afterwards. So the gauge says **when to start** and the client
+says **when it is done**, and neither is allowed to answer the other's question.
+
+Two substrings rather than the whole sentence, `loadRefusalFromGameLog`'s shape
+and for its reasons. The count, the system and the structure's name all sit
+inside the line, so a whole-line match would be per-structure and would stop
+matching the day an operator deposits somewhere else; and one substring is not
+enough, because `to your hangar` alone takes any sentence about a hangar this
+client ever writes.
+
+The verdict is carried into `BotMemory` by `depositRunAfterReading`, because a
+reading's game-log entries are gone by the next reading: a branch recognising
+this where it acts on it would see the confirmation once and go straight back to
+dragging.
+
+-}
+depositConfirmationMarkers : List String
+depositConfirmationMarkers =
+    [ "item(s) was moved", "to your hangar" ]
+
+
+depositConfirmedInGameLog : ReadingFromGameClient -> Maybe String
+depositConfirmedInGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.filter
+            (\entry ->
+                depositConfirmationMarkers
+                    |> List.all (\marker -> stringContainsIgnoringCase marker entry.text)
+            )
+        |> List.head
+        |> Maybe.map .text
+
+
+{-| The client saying it has begun flying the ship to a docking perimeter, in
+its own words.
+
+    [ ... ] (notify) Setting course to docking perimeter
+
+One constant rather than a literal at the match site, because the status line
+and the waiting branch both quote it: a matcher that drifts from what the client
+writes fails in the direction that looks like success -- nothing matches, the
+latch never arms, and the bot goes back to re-commanding a dock with nothing
+complaining.
+
+-}
+courseSetToDockingPerimeterMarker : String
+courseSetToDockingPerimeterMarker =
+    "Setting course to docking perimeter"
+
+
+courseSetToDockingPerimeterFromGameLog : ReadingFromGameClient -> Maybe String
+courseSetToDockingPerimeterFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.filter
+            (\entry ->
+                stringContainsIgnoringCase courseSetToDockingPerimeterMarker entry.text
+            )
+        |> List.head
+        |> Maybe.map .text
+
+
+{-| A docking run-in the client has confirmed it is flying, and the evidence
+that it is still making progress.
+
+**Ported from `eve-online-mission-runner`'s `DockingRunIn`, which #464 names by
+name.** Docking is not a command that completes when it is issued: the client
+answers a Dock by flying the ship to the structure's docking perimeter, and
+during that run-in the ship looks, to every other instrument in a reading,
+exactly like a ship that has been told nothing. That bot's run 27 is what it
+costs -- the dock was commanded on 120 of the 121 readings between two accepted
+course-settings, those two are **486 seconds** apart, which is the run-in's own
+length, and a ship that had precisely enough time to arrive sat 17 km off a
+station for eight minutes. **Commanding it again restarts it.**
+
+The sentence is the only evidence a reading carries that a dock is under way.
+`ShipManeuverType` has no docking member -- the parser knows Warp, Jump, Orbit,
+Approach, Range and Align, and none of them is this -- the ship keeps its
+ordinary UI, and the structure's overview row looks like any other. So the latch
+is written in `updateMemoryForNewReadingFromGame`, for the reason every
+game-log verdict here is: a reading's entries are gone by the next reading.
+
+**What ends the wait is not a clock.** Eight minutes is hundreds of readings, an
+order of magnitude past every settling window in this file, and a run-in's
+length is set by a distance nobody chose. What bounds it instead is the run-in
+_working_: `rangeToTheStructureMeters` holds the smallest range seen since the
+course was set, and `readingsSinceCloser` counts how long it has been since that
+fell. A ship that is closing gets as long as the distance requires; a ship that
+has stopped closing gets `dockingRunInPatienceReadings` and then the command
+again. That is `stall_watch.py`'s own question, unit and value, so the bot and
+the watchdog watching it cannot disagree about what a stalled approach looks
+like.
+
+`dockCommands` is read by nothing that decides anything. It is the number this
+whole guard is about, carried into the status line so a run says outright how
+many times it restarted its own dock: a working one shows 1.
+
+-}
+type alias DockingRunIn =
+    { rangeToTheStructureMeters : Maybe Int
+    , readingsSinceCloser : Int
+    , dockCommands : Int
+    }
+
+
+{-| How many readings a confirmed run-in may go without getting closer before
+the bot commands the dock again.
+
+**Not a budget for the run-in; a budget for the run-in showing nothing**, which
+is the whole of the distinction. A clock would have to be picked against the
+longest dock anybody might fly and there is no such number. So the run-in is
+allowed as long as the range keeps falling, and this bounds only the case where
+it has stopped: a command that was swallowed, a ship stopped by something, a
+structure that left the overview.
+
+Twenty readings, the same unit and the same value as `stall_watch.py`'s
+`APPROACH_PATIENCE`, which was calibrated for exactly this question on exactly
+this signal. Reusing its number rather than inventing one is what keeps the two
+from disagreeing.
+
+What it costs when it is wrong is stated rather than hidden, and it is wrong in
+the permissive direction: a run-in this bot cannot measure gets one re-command
+every twenty readings rather than one per reading.
+
+-}
+dockingRunInPatienceReadings : Int
+dockingRunInPatienceReadings =
+    20
+
+
+{-| The docking run-in as it stands after this reading.
+
+**Docked ends it.** The run-in finished, whatever it was doing, and a latch that
+survived into the next undock would suppress the first Dock of the next trip.
+
+**A fresh course-setting restarts it** rather than being ignored as already
+latched: the client writes the line each time it accepts a Dock, so a second one
+means a second run-in from wherever the ship now is, and the range to beat is
+this reading's rather than the old one's. That also picks up a dock an operator
+commanded by hand, which is the same run-in and equally not to be interrupted.
+
+**Otherwise it is the falling-range test**, and an unreadable range counts as no
+gain rather than as a reason to drop the latch -- see
+`rangeToTheHomeStructureInMeters` for the three ways it can be `Nothing`, none
+of which is evidence the ship is closing. The `( Just _, Nothing )` case is a
+gain, because the reading now has something to measure against and the patience
+should start from it rather than from a count already part-spent.
+
+-}
+dockingRunInAfterReading :
+    { before : Maybe DockingRunIn
+    , courseSetThisReading : Bool
+    , rangeNow : Maybe Int
+    , docked : Bool
+    }
+    -> Maybe DockingRunIn
+dockingRunInAfterReading { before, courseSetThisReading, rangeNow, docked } =
+    if docked then
+        Nothing
+
+    else if courseSetThisReading then
+        Just
+            { rangeToTheStructureMeters = rangeNow
+            , readingsSinceCloser = 0
+            , dockCommands = (before |> Maybe.map .dockCommands |> Maybe.withDefault 0) + 1
+            }
+
+    else
+        before
+            |> Maybe.andThen
+                (\runIn ->
+                    let
+                        gotCloser =
+                            case ( rangeNow, runIn.rangeToTheStructureMeters ) of
+                                ( Just now, Just nearestSoFar ) ->
+                                    now < nearestSoFar
+
+                                ( Just _, Nothing ) ->
+                                    True
+
+                                _ ->
+                                    False
+                    in
+                    if gotCloser then
+                        Just
+                            { runIn
+                                | rangeToTheStructureMeters = rangeNow
+                                , readingsSinceCloser = 0
+                            }
+
+                    else if runIn.readingsSinceCloser + 1 < dockingRunInPatienceReadings then
+                        Just { runIn | readingsSinceCloser = runIn.readingsSinceCloser + 1 }
+
+                    else
+                        Nothing
+                )
+
+
+{-| What the bot says on every reading it declines to command the dock again.
+
+Said every time rather than once, for the reason every declining branch in this
+file says so every time: a stretch of readings where nothing happens is
+otherwise indistinguishable from a bot that has fallen through to something
+else. The range is what makes those readings distinguishable from each other,
+which matters because `stall_watch.py` keys its circling test on the decision
+text changing and would otherwise raise an alarm on a ship flying its run-in
+perfectly.
+
+-}
+describeDockingRunIn : DockingRunIn -> String
+describeDockingRunIn runIn =
+    "The client is already flying this dock -- '"
+        ++ courseSetToDockingPerimeterMarker
+        ++ "' stands, at "
+        ++ (runIn.rangeToTheStructureMeters
+                |> Maybe.map (\meters -> String.fromInt meters ++ " m")
+                |> Maybe.withDefault "a range this reading cannot say"
+           )
+        ++ ", "
+        ++ String.fromInt runIn.readingsSinceCloser
+        ++ " of "
+        ++ String.fromInt dockingRunInPatienceReadings
+        ++ " readings since it last got closer. Commanding it again would restart the run-in."
+
+
+{-| How far the home structure is, where this reading can say.
+
+`Nothing` covers a structure that is not on the overview, a row that is not
+rendered, and a distance the parser could not read -- which includes an AU
+distance, since `parseOverviewEntryDistanceInMetersFromText` answers `Err` for
+one rather than a number that would read as merely far. None of the three is
+evidence the ship is closing, so the run-in counts all of them as no gain, and
+the worst that degrades to is one Dock per patience window.
+
+The **smallest** of the matching rows, because a `home-structure-name` ending in
+`*` can match more than one and the nearest is the one a dock would land at.
+
+-}
+rangeToTheHomeStructureInMeters : Maybe String -> ReadingFromGameClient -> Maybe Int
+rangeToTheHomeStructureInMeters homeStructureName readingFromGameClient =
+    homeStructureRowsOnTheOverview homeStructureName
+        (readingFromGameClient.overviewWindows |> List.concatMap .entries)
+        |> List.filterMap (.objectDistanceInMeters >> Result.toMaybe)
+        |> List.minimum
+
+
+{-| The Selected Item panel's Dock button, by both identifiers the client
+carries for it.
+
+`selectedItemOrbitButton`'s shape and for its reasons -- found by name in the
+reading it is pressed in and never by position, and matched on either the node's
+own id or the `cmdName` beside it so that a rename of one does not silently
+stop the deposit. #456 read `selectedItemDock` off a live structure's panel;
+`CmdDockAtItem` is the client's own command name for the same button and is the
+insurance rather than the evidence.
+
+-}
+selectedItemDockButton : { elementId : String, cmdName : String }
+selectedItemDockButton =
+    { elementId = "selectedItemDock", cmdName = "CmdDockAtItem" }
+
+
+{-| Whether the previous step pressed a mouse button at all.
+
+The drag and the dialog's OK both need it. A repeat drag is not harmless -- it
+can move part of a stack somewhere unintended while the first is still catching
+up -- and a repeat OK is a second answer to a dialog that may already be gone,
+which lands wherever the client has drawn something else. `pressModuleHotkey`
+is the same guard for the keyboard; this is the mouse half of it.
+
+Read from the effects the bot dispatched rather than from anything the client
+says, because what was asked for is knowable where what the client did with it
+is not.
+
+-}
+previousStepDispatchedAMouseButton : BotDecisionContext -> Bool
+previousStepDispatchedAMouseButton context =
+    context.previousStepsEffects
+        |> List.head
+        |> Maybe.withDefault []
+        |> List.any
+            (\effect ->
+                case effect of
+                    EffectOnWindow.ButtonDown _ ->
+                        True
+
+                    _ ->
+                        False
+            )
+
+
+{-| Whether a dispatched step was a drag rather than a click.
+
+**A move made while a button is held**, which is the one thing that separates
+the two: `effectsForDragAndDrop` presses, moves and releases, and
+`effectsMouseClickAtLocation` presses and releases without moving. Nothing else
+in this app holds a button over a move, so the shape names the gesture and no
+memory of what the branch decided is needed -- which matters because
+`updateMemoryForNewReadingFromGame` is the only place that can write memory and
+the one place that never sees a decision.
+
+Counted rather than acted on: `DepositRun.drags` is what separates _the drag has
+not gone out yet_ from _it went out and the client has said nothing_, which is
+the pair an operator watching a deposit that is not finishing has to tell apart.
+
+-}
+stepDraggedSomething : List EffectOnWindow.EffectOnWindowStruct -> Bool
+stepDraggedSomething effects =
+    effects
+        |> List.foldl
+            (\effect ( holding, dragged ) ->
+                case effect of
+                    EffectOnWindow.ButtonDown _ ->
+                        ( True, dragged )
+
+                    EffectOnWindow.ButtonUp _ ->
+                        ( False, dragged )
+
+                    EffectOnWindow.MouseMoveTo _ ->
+                        ( holding, dragged || holding )
+
+                    _ ->
+                        ( holding, dragged )
+            )
+            ( False, False )
+        |> Tuple.second
+
+
+{-| The one OK button on screen, whichever dialog it belongs to.
+
+Not a `MessageBox`, so `closeMessageBox` never reaches it, and it carries no
+name of its own either -- which leaves its label. `reload_drones.py` finds it
+the same way.
+
+**It cannot tell one dialog from another, and this file does not pretend it
+can.** The confirmation a successful drag raises and the client's refusal of one
+are both single-OK-button windows, which is the caveat #464 quotes from
+`restockDroneBayWhileDocked`: clicking whichever OK is on screen and calling it
+success reports a transfer that moved nothing. So the OK is clicked -- something
+has to be, or the dialog sits over the client for the rest of the session -- and
+**the click is never evidence of anything**. What says the transfer landed is
+`depositConfirmedInGameLog` and nothing else.
+
+Widest rather than first, so the click lands on the clickable box around the
+label rather than on a nested fragment of it, and matched on the node's own
+first visible text so that a window merely containing an OK somewhere below it
+is not itself the button.
+
+-}
+okButtonInReading : ReadingFromGameClient -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+okButtonInReading readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter (firstVisibleTextOfNode >> Maybe.map labelReadsOk >> Maybe.withDefault False)
+        |> List.sortBy (.totalDisplayRegionVisible >> .width >> negate)
+        |> List.head
+
+
+firstVisibleTextOfNode : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Maybe String
+firstVisibleTextOfNode node =
+    node.uiNode
+        |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+        |> List.map String.trim
+        |> List.filter (String.isEmpty >> not)
+        |> List.head
+
+
+{-| Whether a label is the client's own `OK`, decorated or not.
+
+Equality rather than a substring, because `OK` is a substring of a great many
+sentences a dialog can carry, and the `>ok<` form because the client wraps a
+button's label in its own tags -- which is the same pair `parseStationWindow`'s
+`buttonFromDisplayText` matches on for the Undock button.
+
+-}
+labelReadsOk : String -> Bool
+labelReadsOk text =
+    let
+        lowered =
+            text |> String.toLower |> String.trim
+    in
+    (lowered == "ok") || String.contains ">ok<" lowered
+
+
+{-| Drag an inventory item onto a sidebar row, taking hold of the item's icon.
+
+`effectsForDragAndDrop` starts wherever it is told, and in the icon view the
+centre of an `InvItem` box is where the icon meets the label under it --
+`reload_drones.py` had to aim 25 px below the top of the box to get the icon,
+and `dragFromItemIconOntoUiElement` in `eve-online-mission-runner` carries the
+same offset. It is clamped to half the height so that a list-view row, which is
+shorter than that, is still grabbed inside itself.
+
+The host skips its own interleaved waits while a button is held -- otherwise EVE
+reads a press followed by a pause as a click and the later motion as the cursor
+wandering off -- so the waypoint in the middle is what makes this a drag rather
+than a teleport.
+
+-}
+dragFromItemIconOntoUiElement :
+    EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    -> EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    -> DecisionPathNode
+dragFromItemIconOntoUiElement itemElement targetElement =
+    let
+        itemRegion =
+            itemElement.totalDisplayRegionVisible
+
+        from =
+            { x = itemRegion.x + (itemRegion.width // 2)
+            , y = itemRegion.y + min itemIconOffsetFromTop (itemRegion.height // 2)
+            }
+
+        to =
+            targetElement.totalDisplayRegionVisible
+                |> EveOnline.ParseUserInterface.centerFromDisplayRegion
+    in
+    decideActionForCurrentStep
+        (EffectOnWindow.effectsForDragAndDrop
+            { startLocation = from
+            , mouseButton = MouseButtonLeft
+            , waypointsPositionsInBetween =
+                [ { x = (from.x + to.x) // 2, y = (from.y + to.y) // 2 } ]
+            , endLocation = to
+            }
+        )
+
+
+itemIconOffsetFromTop : Int
+itemIconOffsetFromTop =
+    25
+
+
+{-| How long a deposit may take before the session ends with the hold still
+full.
+
+**A give-up that ends the session**, which is #464's own requirement and is why
+it is asked from the head of the decision root beside the evasion's rather than
+from inside the deposit -- PR #115's rule, and #102 and #133 are what happens
+when that placement is got wrong. The counter behind it advances in
+`updateMemoryForNewReadingFromGame` on every reading of the run whatever the
+tree is doing, so a comparison asked only where the tree gets that far runs late
+by however long something above it holds.
+
+**Ending is the point rather than a last resort.** An operator empties a hold by
+hand in seconds; a bot cycling on one -- warping to a structure it cannot dock
+at, dragging into a hangar that is not there, answering a dialog that keeps
+coming back -- wastes a session and reports itself busy throughout. So every way
+a deposit can fail runs under this one clock and none of them can become a
+second forever-loop.
+
+Three hundred readings, written as fifteen patience windows so that an operator
+who retunes one moves the other with it. It is **not calibrated against
+anything**: no recorded run of this app exists and nobody has watched a deposit.
+What it rests on is the shape of the trip -- one warp, a docking run-in that may
+stall and be re-commanded several times, a handful of readings apiece for the
+hangar work, and an undock -- and on what expiry costs, which is a session that
+stops with the ship docked or beside a structure and a hold a person can empty.
+
+-}
+depositGiveUpReadings : Int
+depositGiveUpReadings =
+    dockingRunInPatienceReadings * 15
+
+
+depositOutOfTime : { readings : Int } -> Maybe String
+depositOutOfTime deposit =
+    if depositGiveUpReadings <= deposit.readings then
+        Just
+            ("Tried to deposit the hold for "
+                ++ String.fromInt deposit.readings
+                ++ " readings without the client ever saying the transfer landed, which is past the bound of "
+                ++ String.fromInt depositGiveUpReadings
+                ++ ". THE HOLD IS STILL FULL. This is the end of the session rather than something to keep trying: an operator empties a hold by hand in seconds, and a bot cycling on one wastes an evening reporting itself busy. The status line's own deposit clause says which step it was on when it stopped."
+            )
+
+    else
+        Nothing
+
+
+{-| The deposit run under way, if there is one.
+
+`Maybe` rather than a flag, because _no deposit is running_ and _a deposit is
+running and has confirmed nothing_ are different facts and only the second
+spends the bound.
+
+`confirmation` is the client's own sentence rather than a `Bool`, so the status
+line can quote what the client actually said. A reading's game-log entries are
+gone by the next reading, which is why it is latched here rather than read where
+it is acted on -- the ammo swap's `loadRefusedByClient` is the worked example
+and #464 names the same rule.
+
+`drags` is read by nothing that decides anything: it is the number that
+separates _the drag has not gone out yet_ from _it went out and the client has
+said nothing_, carried into the status line.
+
+-}
+type alias DepositRun =
+    { readings : Int
+    , confirmation : Maybe String
+    , drags : Int
+    }
+
+
+{-| The deposit run as it stands after this reading.
+
+**A full hold starts one**, and nothing else does. `HoldFillCannotBeRead` never
+starts one, which is `holdFillFromCapacityGauge`'s chosen fail direction seen
+from the other end, and `HoldTransferIsInFlight` never starts one either --
+during a transfer the gauge is saying what it is doing rather than how full the
+hold is.
+
+**Only an in-space reading ends one**, and that is the clause the undock rests
+on. After the client has confirmed the transfer the hold is empty and there is
+still work to do -- re-select the hold, undock -- so a run that ended on the
+confirmation would leave a ship sitting docked with nothing in the tree willing
+to undock it. Ending on the first reading **outside** the structure means the
+undock is part of the deposit and the run is over exactly when the ship is back
+where #461 can pick a site again.
+
+Two ways to end, and the second is the operator's: the client confirmed, or the
+hold reads as having room while the ship is in space, which is a hold somebody
+emptied by hand. A hold that cannot be read ends nothing, for the reason it
+starts nothing.
+
+-}
+depositRunAfterReading :
+    { before : Maybe DepositRun
+    , holdFill : HoldFill
+    , docked : Bool
+    , confirmationNow : Maybe String
+    , dragDispatched : Bool
+    }
+    -> Maybe DepositRun
+depositRunAfterReading answer =
+    case answer.before of
+        Nothing ->
+            if answer.holdFill == HoldIsFull then
+                Just
+                    { readings = 1
+                    , confirmation = answer.confirmationNow
+                    , drags =
+                        if answer.dragDispatched then
+                            1
+
+                        else
+                            0
+                    }
+
+            else
+                Nothing
+
+        Just run ->
+            let
+                confirmation =
+                    [ run.confirmation, answer.confirmationNow ]
+                        |> List.filterMap identity
+                        |> List.head
+            in
+            if
+                not answer.docked
+                    && ((confirmation /= Nothing) || (answer.holdFill == HoldHasRoom))
+            then
+                Nothing
+
+            else
+                Just
+                    { readings = run.readings + 1
+                    , confirmation = confirmation
+                    , drags =
+                        run.drags
+                            + (if answer.dragDispatched then
+                                1
+
+                               else
+                                0
+                              )
+                    }
+
+
+{-| Everything the deposit decides on, as plain readable facts.
+
+A record rather than a `BotDecisionContext`, for #106's reason and for the same
+one `HarvestSituation` and `EvasionSituation` give: this rule orders a dozen
+commands across two states the ship cannot be in at once, and a rule reachable
+only through a decision context is one no case can execute -- so it would be
+checked by being read, which is how a rule that does the right things in the
+wrong order passes for one that works.
+
+-}
+type alias DepositSituation =
+    { runIsUnderWay : Bool
+    , docked : Bool
+    , holdFill : HoldFill
+    , confirmedByClient : Bool
+    , shipIsWarping : Bool
+    , dockingRunIn : Maybe DockingRunIn
+    , homeStructureIsOnTheOverview : Bool
+    , panelShowsTheHomeStructure : Bool
+    , dockButtonIsOffered : Bool
+    , inventoryListsTheHold : Bool
+    , holdIsTheSelectedContainer : Bool
+    , structureHangarIsInTheInventory : Bool
+    , itemsInTheHold : Int
+    , okButtonIsOnScreen : Bool
+    }
+
+
+{-| What the bot does next about a hold that has filled.
+
+**One rule with the whole ordering in it**, `harvestStep`'s and `evasionStep`'s
+shape and for the same reason: every stage can fail to be reachable and each has
+to fall through or say so rather than holding the loop. The order is #464's own
+sequence with two things in front of it that are not about depositing at all:
+
+  - **no run under way** is the exit, asked first, and it is what lets the
+    harvest run on every ordinary reading. `runIsUnderWay` is the latched
+    `DepositRun` rather than a live look at the gauge, because the hold reads
+    empty for the whole of the trip home after the transfer lands and the ship
+    still has to undock;
+  - **a transfer in flight** is waited through and never acted on, which is
+    #464's second emphasis. It is asked above both halves because it can be
+    read in either.
+
+Docked, in order: the confirmation is what ends the work, and it re-selects the
+hold before undocking so the gauge is readable again on the far side and the
+next reading in space can end the run; an OK on screen is answered before
+anything else is tried, because a dialog blocks the drag underneath it; then the
+hangar, the hold, and the drag.
+
+In space, in order: a ship in warp is left alone rather than re-commanded, which
+is `huntAndHarvest`'s own argument; a confirmed docking run-in is waited on
+rather than restarted, which is #464's fourth emphasis and the mission runner's
+run 27; then the structure is selected, docked at where the panel offers Dock,
+and warped to where it does not -- that absence being the natural gate between
+the two, exactly as it is for `dockAtDestinationStation`, since the Dock button
+is drawn only inside docking range.
+
+Every state that cannot proceed answers a step that **says so**, rather than a
+wait: `NowhereToDepositAt`, `NoInventoryListingTheHold`,
+`NoStructureHangarInTheInventory` and `TheHoldShowsNothingToMove` are four
+different things for an operator to fix and they are four different sentences.
+All four are bounded by `depositGiveUpReadings`, which ends the session.
+
+-}
+type DepositStep
+    = TheHoldDoesNotNeedDepositing
+    | WaitThroughTheTransfer
+    | ReSelectTheHoldBeforeUndocking
+    | Undock
+    | ConfirmWhateverDialogIsOnScreen
+    | NoStructureHangarInTheInventory
+    | NoInventoryListingTheHold
+    | SelectTheHold
+    | TheHoldShowsNothingToMove
+    | DragTheHoldIntoTheStructureHangar
+    | WaitForTheWarpToLand
+    | WaitForTheDockingRunIn DockingRunIn
+    | NowhereToDepositAt
+    | SelectTheHomeStructure
+    | PressTheDockButton
+    | WarpToTheHomeStructure
+
+
+depositStep : DepositSituation -> DepositStep
+depositStep situation =
+    if not situation.runIsUnderWay then
+        TheHoldDoesNotNeedDepositing
+
+    else if situation.holdFill == HoldTransferIsInFlight then
+        WaitThroughTheTransfer
+
+    else if situation.docked then
+        if situation.confirmedByClient then
+            if not situation.inventoryListsTheHold then
+                Undock
+
+            else if situation.holdIsTheSelectedContainer then
+                Undock
+
+            else
+                ReSelectTheHoldBeforeUndocking
+
+        else if situation.okButtonIsOnScreen then
+            ConfirmWhateverDialogIsOnScreen
+
+        else if not situation.inventoryListsTheHold then
+            NoInventoryListingTheHold
+
+        else if not situation.structureHangarIsInTheInventory then
+            NoStructureHangarInTheInventory
+
+        else if not situation.holdIsTheSelectedContainer then
+            SelectTheHold
+
+        else if situation.itemsInTheHold < 1 then
+            TheHoldShowsNothingToMove
+
+        else
+            DragTheHoldIntoTheStructureHangar
+
+    else if situation.shipIsWarping then
+        WaitForTheWarpToLand
+
+    else
+        case situation.dockingRunIn of
+            Just runIn ->
+                WaitForTheDockingRunIn runIn
+
+            Nothing ->
+                if not situation.homeStructureIsOnTheOverview then
+                    NowhereToDepositAt
+
+                else if not situation.panelShowsTheHomeStructure then
+                    SelectTheHomeStructure
+
+                else if situation.dockButtonIsOffered then
+                    PressTheDockButton
+
+                else
+                    WarpToTheHomeStructure
+
+
+depositSituationFromContext : BotDecisionContext -> DepositSituation
+depositSituationFromContext context =
+    let
+        readingFromGameClient =
+            context.readingFromGameClient
+
+        inventory =
+            depositInventoryFromReading readingFromGameClient
+
+        homeStructureRow =
+            homeStructureRowsOnTheOverview
+                context.eventContext.botSettings.homeStructureName
+                (readingFromGameClient.overviewWindows |> List.concatMap .entries)
+                |> List.head
+    in
+    { runIsUnderWay = context.memory.deposit /= Nothing
+    , docked = readingFromGameClient.shipUI == Nothing
+    , holdFill = holdFillFromReading readingFromGameClient
+    , confirmedByClient =
+        (context.memory.deposit |> Maybe.andThen .confirmation) /= Nothing
+    , shipIsWarping =
+        readingFromGameClient.shipUI
+            |> Maybe.map shipIsWarping
+            |> Maybe.withDefault False
+    , dockingRunIn = context.memory.dockingRunIn
+    , homeStructureIsOnTheOverview = homeStructureRow /= Nothing
+    , panelShowsTheHomeStructure =
+        homeStructureRow
+            |> Maybe.map (selectedItemIsOverviewEntry readingFromGameClient)
+            |> Maybe.withDefault False
+    , dockButtonIsOffered =
+        selectedItemPanelButton readingFromGameClient selectedItemDockButton /= Nothing
+    , inventoryListsTheHold = inventory /= Nothing
+    , holdIsTheSelectedContainer =
+        inventory
+            |> Maybe.map (.window >> holdIsTheSelectedContainer)
+            |> Maybe.withDefault False
+    , structureHangarIsInTheInventory =
+        (inventory |> Maybe.andThen .structureHangarTreeEntry) /= Nothing
+    , itemsInTheHold =
+        inventory
+            |> Maybe.map (.window >> inventoryItemsInView >> List.length)
+            |> Maybe.withDefault 0
+    , okButtonIsOnScreen = okButtonInReading readingFromGameClient /= Nothing
+    }
+
+
+{-| Command whatever `depositStep` says is next, or decline so the harvest runs.
+
+`Nothing` for the one answer that is not about depositing, which is the shape
+`refreshTheDirectionalScanner`, `actOnTheEvasionStep` and every entry in
+`generalSetupInUserInterface` have: a hold that does not need emptying falls
+straight through to the work rather than being wrapped in a branch announcing
+that the bot is not depositing.
+
+Nothing is decided here. This is the mapping from an answer onto the effects
+that carry it out, kept apart from the rule so that the ordering can be executed
+without a client and the effects read without one.
+
+-}
+actOnTheDepositStep : BotDecisionContext -> DepositSituation -> Maybe DecisionPathNode
+actOnTheDepositStep context situation =
+    let
+        readingFromGameClient =
+            context.readingFromGameClient
+
+        inventory =
+            depositInventoryFromReading readingFromGameClient
+
+        homeStructureRow =
+            homeStructureRowsOnTheOverview
+                context.eventContext.botSettings.homeStructureName
+                (readingFromGameClient.overviewWindows |> List.concatMap .entries)
+                |> List.head
+
+        structureName =
+            homeStructureRow
+                |> Maybe.andThen .objectName
+                |> Maybe.withDefault "the home structure"
+
+        clickOn description element =
+            describeBranch description
+                (decideActionForCurrentStep
+                    (element |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault [])
+                )
+
+        unlessJustClicked description action =
+            if previousStepDispatchedAMouseButton context then
+                describeBranch
+                    (description ++ " -- but the previous step already pressed the mouse, so wait for the reading to catch up rather than doing it twice.")
+                    waitForProgressInGame
+
+            else
+                action
+
+        treeEntryElement entry =
+            entry.selectRegion |> Maybe.withDefault entry.uiNode
+    in
+    case depositStep situation of
+        TheHoldDoesNotNeedDepositing ->
+            Nothing
+
+        WaitThroughTheTransfer ->
+            Just
+                (describeBranch
+                    ("The hold's gauge is carrying its parenthesised form, which is the client saying a transfer is in flight rather than a fill level -- wait through it. See '"
+                        ++ miningHoldTreeEntryText
+                        ++ "' in the status line."
+                    )
+                    waitForProgressInGame
+                )
+
+        ReSelectTheHoldBeforeUndocking ->
+            case inventory of
+                Just found ->
+                    Just
+                        (unlessJustClicked
+                            "The client says the transfer landed -- select the ship's Mining Hold again so its gauge is readable on the far side of the undock"
+                            (clickOn
+                                "The client says the transfer landed -- select the ship's Mining Hold again so its gauge is readable on the far side of the undock."
+                                (treeEntryElement found.holdTreeEntry)
+                            )
+                        )
+
+                Nothing ->
+                    -- Unreachable: the step is only answered where the
+                    -- situation said the inventory lists the hold, and the
+                    -- situation was built from this reading.
+                    Just
+                        (describeBranch
+                            "The inventory changed between reading it and selecting the hold -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        Undock ->
+            Just (undockUsingTheStationWindow context)
+
+        ConfirmWhateverDialogIsOnScreen ->
+            case okButtonInReading readingFromGameClient of
+                Just okButton ->
+                    Just
+                        (unlessJustClicked
+                            "There is a dialog with an OK on screen -- answer it, which is not evidence of anything"
+                            (clickOn
+                                "There is a dialog with an OK on screen -- answer it. Whether it is the transfer's confirmation or the client's refusal of it, this click says nothing about either: what says the deposit landed is the client's own '(notify) ... item(s) was moved to your hangar' line and nothing else."
+                                okButton
+                            )
+                        )
+
+                Nothing ->
+                    Just
+                        (describeBranch
+                            "The dialog closed between reading it and answering it -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        NoInventoryListingTheHold ->
+            Just
+                (describeBranch
+                    ("Docked with a full hold and no inventory window listing a '"
+                        ++ miningHoldTreeEntryText
+                        ++ "' -- there is nothing here to drag out of. Open the inventory on the ship's Mining Hold; the session ends at the deposit bound if it stays this way."
+                    )
+                    waitForProgressInGame
+                )
+
+        NoStructureHangarInTheInventory ->
+            Just
+                (describeBranch
+                    ("Docked with a full hold and no '"
+                        ++ structureHangarTreeEntryText
+                        ++ "' row in the inventory to drop it into -- this structure may offer no hangar to this character, which is not something this bot can fix. The session ends at the deposit bound."
+                    )
+                    waitForProgressInGame
+                )
+
+        SelectTheHold ->
+            case inventory of
+                Just found ->
+                    Just
+                        (unlessJustClicked
+                            "Select the ship's Mining Hold, so its own items are the ones in view to drag"
+                            (clickOn
+                                "Select the ship's Mining Hold, so its own items are the ones in view to drag and its own gauge is the one being read."
+                                (treeEntryElement found.holdTreeEntry)
+                            )
+                        )
+
+                Nothing ->
+                    Just
+                        (describeBranch
+                            "The inventory changed between reading it and selecting the hold -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        TheHoldShowsNothingToMove ->
+            Just
+                (describeBranch
+                    "The Mining Hold is selected and its gauge reads full, and the client is rendering no item in it to take hold of -- either the items view has not drawn yet or the gauge and the contents disagree. Nothing is dragged on a reading with nothing to drag; the session ends at the deposit bound if it stays this way."
+                    waitForProgressInGame
+                )
+
+        DragTheHoldIntoTheStructureHangar ->
+            case
+                ( inventory |> Maybe.andThen .structureHangarTreeEntry
+                , inventory |> Maybe.map (.window >> inventoryItemsInView) |> Maybe.withDefault []
+                )
+            of
+                ( Just hangarEntry, item :: _ ) ->
+                    Just
+                        (unlessJustClicked
+                            "Drag the Mining Hold's contents into the structure's item hangar"
+                            (describeBranch
+                                ("Drag the Mining Hold's contents into the structure's item hangar (drag "
+                                    ++ String.fromInt
+                                        ((context.memory.deposit |> Maybe.map .drags |> Maybe.withDefault 0) + 1)
+                                    ++ " of this deposit). What says it landed is the client's own line, never the gauge."
+                                )
+                                (dragFromItemIconOntoUiElement item (treeEntryElement hangarEntry))
+                            )
+                        )
+
+                _ ->
+                    Just
+                        (describeBranch
+                            "The inventory changed between reading it and dragging out of it -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        WaitForTheWarpToLand ->
+            Just
+                (describeBranch
+                    "On the way to deposit, and the ship is in warp -- wait for it to land rather than re-commanding a warp that is already going."
+                    waitForProgressInGame
+                )
+
+        WaitForTheDockingRunIn runIn ->
+            Just (describeBranch (describeDockingRunIn runIn) waitForProgressInGame)
+
+        NowhereToDepositAt ->
+            Just
+                (describeBranch
+                    ("The hold is full and there is no row on this overview matching "
+                        ++ (case context.eventContext.botSettings.homeStructureName of
+                                Nothing ->
+                                    "anything, because 'home-structure-name' is unset and has no default"
+
+                                Just name ->
+                                    "'" ++ name ++ "'"
+                           )
+                        ++ " -- nowhere to deposit from here. The session ends at the deposit bound with the hold still full."
+                    )
+                    waitForProgressInGame
+                )
+
+        SelectTheHomeStructure ->
+            case homeStructureRow of
+                Just row ->
+                    Just
+                        (clickOn
+                            ("Select '" ++ structureName ++ "', so the Selected Item panel's own Dock button acts on it.")
+                            row.uiNode
+                        )
+
+                Nothing ->
+                    Just
+                        (describeBranch
+                            "The overview changed between choosing the home structure and selecting it -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        PressTheDockButton ->
+            case selectedItemPanelButton readingFromGameClient selectedItemDockButton of
+                Just dockButton ->
+                    Just
+                        (clickOn
+                            ("Dock at '"
+                                ++ structureName
+                                ++ "' with the Selected Item panel's own Dock button. Commanded once: the client answers by flying a run-in, and the next reading waits on it rather than asking again."
+                            )
+                            dockButton
+                        )
+
+                Nothing ->
+                    Just
+                        (describeBranch
+                            "The Dock button left the panel between reading it and pressing it -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        WarpToTheHomeStructure ->
+            case homeStructureRow of
+                Just row ->
+                    Just
+                        (describeBranch
+                            ("The hold is full -- warp to '"
+                                ++ structureName
+                                ++ "' at "
+                                ++ warpAtZeroMenuEntry
+                                ++ " to deposit it. The panel offers no '"
+                                ++ selectedItemDockButton.elementId
+                                ++ "', which is what says the structure is out of docking range."
+                            )
+                            (useContextMenuCascade ( structureName, row.uiNode )
+                                (warpCascadeWithin warpAtZeroMenuEntry)
+                                context
+                            )
+                        )
+
+                Nothing ->
+                    Just
+                        (describeBranch
+                            "The overview changed between choosing the home structure and warping to it -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+
+{-| Leave the structure, using the client's own Undock button.
+
+`eve-online-mission-runner`'s `undockUsingStationWindow`, ported with the guard
+that matters: **the same button carries three labels in turn** -- `Undock` while
+docked, then `Abort Undock`, then `Undocking...` -- and pressing either of the
+last two cancels the undock already under way, which saxrat's run 43 turned into
+10,310 readings of asking for help while docked and 20,486 clicks in between.
+The vendored parser already answers that question, leaving `undockButton` empty
+while `abortUndockButton` is present, so this reads the two rather than the
+label.
+
+An undock that never lands is bounded by `depositGiveUpReadings`, which ends the
+session -- the deposit run is still under way until the ship is outside, so
+every reading spent here spends the budget.
+
+-}
+undockUsingTheStationWindow : BotDecisionContext -> DecisionPathNode
+undockUsingTheStationWindow context =
+    case context.readingFromGameClient.stationWindow of
+        Nothing ->
+            describeBranch
+                "The deposit is done and there is no station window in this reading to undock from. The session ends at the deposit bound if it stays this way."
+                waitForProgressInGame
+
+        Just stationWindow ->
+            case ( stationWindow.undockButton, stationWindow.abortUndockButton ) of
+                ( Just undockButton, Nothing ) ->
+                    describeBranch
+                        "The deposit is done and the hold is empty -- undock and go back to work. #461 picks a site again from the reading after this one."
+                        (decideActionForCurrentStep
+                            (mouseClickOnUIElement MouseButtonLeft undockButton
+                                |> Result.withDefault []
+                            )
+                        )
+
+                ( _, Just _ ) ->
+                    describeBranch
+                        "Already undocking -- the button in that slot now undoes the undock, so pressing it would cancel this one and start again."
+                        waitForProgressInGame
+
+                ( Nothing, Nothing ) ->
+                    describeBranch
+                        "The deposit is done and the station window offers no Undock button in this reading. The session ends at the deposit bound if it stays this way."
+                        waitForProgressInGame
+
+
+{-| What an operator reads about the hold and the deposit, on every reading.
+
+Printed whether or not a deposit is running, because the reading an operator
+wants the hold's own state on is the quiet one **while it is filling**: a hold
+nobody can read is cheap to fix then -- open the inventory on the Mining Hold --
+and it is the difference between a bot that will deposit and one that never
+will, which is otherwise invisible until the hold is full and nothing happens.
+
+The bound is printed beside the count rather than only in the give-up sentence,
+which is `describeEvasion`'s own finding: a first version of that clause read
+the sentence out of the source instead, and a mutation that dropped the bound
+from the count while leaving it in the sentence survived it.
+
+-}
+describeDeposit :
+    { holdFill : HoldFill
+    , deposit : Maybe DepositRun
+    , dockingRunIn : Maybe DockingRunIn
+    , homeStructureName : Maybe String
+    }
+    -> String
+describeDeposit state =
+    let
+        hold =
+            case state.holdFill of
+                HoldFillCannotBeRead ->
+                    "NOT READABLE -- no inventory window in this reading has the ship's Mining Hold selected, so nothing here knows how full it is and nothing will ever decide to deposit. Open the inventory on the Mining Hold"
+
+                HoldHasRoom ->
+                    "room for more"
+
+                HoldIsFull ->
+                    "FULL"
+
+                HoldTransferIsInFlight ->
+                    "carrying the parenthesised transient, which is a transfer in flight rather than a fill level -- waiting through it"
+
+        run =
+            case state.deposit of
+                Nothing ->
+                    "no deposit under way"
+
+                Just deposit ->
+                    "depositing, "
+                        ++ String.fromInt deposit.readings
+                        ++ "/"
+                        ++ String.fromInt depositGiveUpReadings
+                        ++ " readings and the session ends at that bound with the hold still full, "
+                        ++ String.fromInt deposit.drags
+                        ++ " drag(s) dispatched, "
+                        ++ (case deposit.confirmation of
+                                Nothing ->
+                                    "and the client has not said the transfer landed"
+
+                                Just confirmation ->
+                                    "and the client said: '" ++ confirmation ++ "'"
+                           )
+
+        runIn =
+            case state.dockingRunIn of
+                Nothing ->
+                    ""
+
+                Just dockingRunIn ->
+                    " Docking run-in: "
+                        ++ String.fromInt dockingRunIn.dockCommands
+                        ++ " dock command(s), "
+                        ++ (dockingRunIn.rangeToTheStructureMeters
+                                |> Maybe.map (\meters -> String.fromInt meters ++ " m")
+                                |> Maybe.withDefault "range unreadable"
+                           )
+                        ++ ", "
+                        ++ String.fromInt dockingRunIn.readingsSinceCloser
+                        ++ "/"
+                        ++ String.fromInt dockingRunInPatienceReadings
+                        ++ " readings since it last got closer."
+    in
+    "Hold: "
+        ++ hold
+        ++ ". Deposit: "
+        ++ run
+        ++ ", at "
+        ++ (state.homeStructureName
+                |> Maybe.map (\name -> "'" ++ name ++ "'")
+                |> Maybe.withDefault "nowhere named ('home-structure-name' is unset, so this bot cannot deposit at all)"
+           )
+        ++ "."
+        ++ runIn
+
+
+
 -- The decision tree
 
 
@@ -4461,6 +5996,9 @@ initBotMemory =
     , evasion = initEvasionCounters
     , warpNotExecutingLastChange = Nothing
     , modulesUnidentifiedReadings = 0
+    , lastGridVerdictInSpaceIsClean = Nothing
+    , dockingRunIn = Nothing
+    , deposit = Nothing
     }
 
 
@@ -4501,13 +6039,23 @@ hours and forty-four minutes. `closeMessageBox`'s standoff bounds that one known
 starver here, but it is a bound on one of them rather than a guarantee about the
 list, and this bound is asked whatever holds it.
 
-PR #115's rule is what says it belongs here rather than beside the evasion: **a
-give-up that ends the session bounds elapsed time and belongs where nothing can
-decline to ask it; a give-up that declines an action bounds effort and belongs
-where the action is.** This one ends the session, has no state to reach and no
-click to make, so nothing has a reason to be placed over it. The evasion's other
-two bounds -- the warp alarm and the cloak -- decline an action apiece and are
-asked inside `evasionStep`, where the actions are.
+PR #115's rule is what says both bounds belong here rather than beside the
+branches that own them: **a give-up that ends the session bounds elapsed time and
+belongs where nothing can decline to ask it; a give-up that declines an action
+bounds effort and belongs where the action is.** Both of these end the session,
+have no state to reach and no click to make, so nothing has a reason to be
+placed over them. The three that decline an action -- the warp alarm, the cloak
+and the docking run-in's patience -- are asked inside `evasionStep` and
+`depositStep`, where the actions are.
+
+**The scan, the leaving and the deposit are all asked above the
+docked-or-in-space split**, and the ordering between them is what #464 is
+emphatic about. The retreat outranks the deposit, so a grid that stops reading
+clean takes the ship out of a docking run-in and keeps a docked ship docked
+rather than undocking a full one into somebody else's grid to finish an errand.
+Inverting the two compiles and reads perfectly well, which is why
+`TheRetreatOutranksTheDepositTest` pins it rather than this paragraph. The split
+below therefore decides one thing only: whether there is a grid to harvest.
 
 -}
 gasHufferDecisionRootBeforeApplyingSettings : BotDecisionContext -> DecisionPathNode
@@ -4521,27 +6069,61 @@ gasHufferDecisionRootBeforeApplyingSettings context =
                 context.memory.messageBoxStandoff
                 context.previousStepsEffects
                 context.readingFromGameClient
-                |> Maybe.withDefault
-                    (branchDependingOnDockedOrInSpace
-                        { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
-                        , ifSeeShipUI = huntAndHarvest context
-                        }
-                        context
-                    )
+                |> Maybe.withDefault (watchLeaveDepositOrHarvest context)
 
 
-{-| End the session where the evasion has run past its bound.
+{-| The four things this bot does, in the order it does them.
+
+Split out so the ordering is one expression a reader can take in at once, which
+is what an ordering that decides whether a full ship undocks into a hostile grid
+is worth.
+
+-}
+watchLeaveDepositOrHarvest : BotDecisionContext -> DecisionPathNode
+watchLeaveDepositOrHarvest context =
+    case refreshTheDirectionalScanner context of
+        Just refresh ->
+            refresh
+
+        Nothing ->
+            case actOnTheEvasionStep context (evasionSituationFromContext context) of
+                Just leaving ->
+                    describeBranch (describeRetreatSearch (retreatSearchFromContext context))
+                        (describeBranch (describeCloak (cloakSearchFromContext context)) leaving)
+
+                Nothing ->
+                    case actOnTheDepositStep context (depositSituationFromContext context) of
+                        Just depositing ->
+                            depositing
+
+                        Nothing ->
+                            branchDependingOnDockedOrInSpace
+                                { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
+                                , ifSeeShipUI = huntAndHarvest context
+                                }
+                                context
+
+
+{-| End the session where one of the two bounds that end it has expired.
 
 A `describeBranch` around `FinishSession` and nothing else -- no click, no wait,
 no menu -- which is what makes it evaluable on any reading at all and is the
-property the placement above depends on. One bound rather than a list, because
-this app has one thing that ends a session; the mission runner's has two and
-`List.filterMap`s them.
+property the placement above depends on.
+
+The evasion is asked first where both have expired, and the reason is the same
+one that puts the retreat above the deposit one level down: the evasion's bound
+is about a ship that cannot get off somebody else's grid, and the deposit's is
+about an errand. An operator reading one sentence should read that one.
 
 -}
 endSessionOnAnExpiredBound : BotDecisionContext -> Maybe DecisionPathNode
 endSessionOnAnExpiredBound context =
-    evasionOutOfTime { readings = context.memory.evasion.readings }
+    [ evasionOutOfTime { readings = context.memory.evasion.readings }
+    , depositOutOfTime
+        { readings = context.memory.deposit |> Maybe.map .readings |> Maybe.withDefault 0 }
+    ]
+        |> List.filterMap identity
+        |> List.head
         |> Maybe.map
             (\reason ->
                 describeBranch reason
@@ -4565,36 +6147,17 @@ The site clause is printed above both, from the same `siteSearchFromContext`
 call the status line makes, so the decision log and the status text cannot come
 to disagree about which site was chosen.
 
-**The D-Scan refresh is asked first, and it is the one thing here that outranks
-harvesting.** It costs one reading per `dscan-interval-seconds` -- roughly one in
-ten at the shipped step delay -- and what it buys is the only instrument this
-ship has for seeing something before it is on the overview. A reading spent
-scanning is a reading not spent locking a cloud, which is the trade, and it is
-taken the same way round in warp: a scan made on the way in is a scan already
-answered when the grid arrives.
+**The scan, the leaving and the deposit are all asked before this** -- see
+`watchLeaveDepositOrHarvest` -- so this is reached only on a reading whose grid
+reads clean, whose hold does not need emptying, and which carries a ship UI.
 
 -}
 huntAndHarvest : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> DecisionPathNode
 huntAndHarvest context shipUI =
-    let
-        site =
-            siteSearchFromContext context
-
-        search =
-            cloudSearchFromReading context.eventContext.botSettings context.readingFromGameClient
-    in
-    case refreshTheDirectionalScanner context of
-        Just refresh ->
-            refresh
-
-        Nothing ->
-            case actOnTheEvasionStep context (evasionSituationFromContext context) of
-                Just leaving ->
-                    describeBranch (describeRetreatSearch (retreatSearchFromContext context))
-                        (describeBranch (describeCloak (cloakSearchFromContext context)) leaving)
-
-                Nothing ->
-                    harvestTheCloudsOnThisGrid context shipUI site search
+    harvestTheCloudsOnThisGrid context
+        shipUI
+        (siteSearchFromContext context)
+        (cloudSearchFromReading context.eventContext.botSettings context.readingFromGameClient)
 
 
 {-| The harvesting half, reached only on a reading whose grid reads clean.
@@ -4643,10 +6206,19 @@ straight through to the work -- the shape every entry in
 `generalSetupInUserInterface` has, for the same reason: a step on this hot path
 that answered `Just` unconditionally would own the whole bot.
 
+**Not asked at all on a reading with no ship UI**, which is a docked one. A
+docked client answers no Directional Scan, so the keypress would go nowhere and
+the reading spent on it would be spent for nothing; and the grid a docked ship
+would be scanning is not the one it is on. What the evasion judges an undock on
+instead is the last verdict taken from space -- see `EvasionSituation`.
+
 -}
 refreshTheDirectionalScanner : BotDecisionContext -> Maybe DecisionPathNode
 refreshTheDirectionalScanner context =
-    if
+    if context.readingFromGameClient.shipUI == Nothing then
+        Nothing
+
+    else if
         dscanRefreshIsDue
             { nowMilliseconds = context.eventContext.timeInMilliseconds
             , intervalSeconds = context.eventContext.botSettings.dscanIntervalSeconds
@@ -4683,7 +6255,7 @@ names the issue that fills it in.
 -}
 nothingToDoDockedYet : String
 nothingToDoDockedYet =
-    "Docked. This bot has no docked behaviour yet -- depositing the hold is issue #464 -- so it is doing nothing on purpose."
+    "Docked with nothing to deposit and nothing to leave -- this bot undocks only to finish a deposit, so it is sitting still on purpose. Undock by hand to start it working; the client-setup list in this file's own header is what a run wants before that."
 
 
 {-| What the bot says on a grid with no cloud and nowhere to go.
@@ -4696,7 +6268,7 @@ already said _why_ nothing is hunted on the same reading.
 -}
 nothingToHuntInSpace : String
 nothingToHuntInSpace =
-    "In space with no harvestable cloud on the overview and no site to hunt -- nothing to warp to, so it is waiting on purpose. The grid reads clean on this reading, which is the only reason this wait is reached at all; anything arriving takes the ship out of it (#463). What is still missing here is the deposit run (#464), so a hold that fills is a hold nothing empties."
+    "In space with no harvestable cloud on the overview and no site to hunt -- nothing to warp to, so it is waiting on purpose. The grid reads clean on this reading and the hold does not need emptying, which are the only two reasons this wait is reached at all; anything arriving takes the ship out of it (#463) and a full hold takes it home (#464)."
 
 
 {-| The things that have to be dealt with before any decision about the game.
@@ -5262,6 +6834,9 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     )
                 |> cloakAmongFittedModules
 
+        docked =
+            context.readingFromGameClient.shipUI == Nothing
+
         gridIsClean =
             gridReadsClean
                 (gridVerdict
@@ -5281,6 +6856,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         evasion =
             evasionCountersAfterReading
                 { gridIsClean = gridIsClean
+                , docked = docked
                 , shipIsWarping =
                     context.readingFromGameClient.shipUI
                         |> Maybe.map shipIsWarping
@@ -5307,6 +6883,22 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 { before = botMemoryBefore.evasion.warpUnexecutedReadings
                 , now = evasion.warpUnexecutedReadings
                 }
+
+        -- The same `holdFillFromReading` the decision and the status line ask,
+        -- so the run cannot come to be about a hold the bot was not looking at.
+        -- #102: one rule, three readers.
+        holdFill =
+            holdFillFromReading context.readingFromGameClient
+
+        -- Read from the effects the bot dispatched rather than from anything
+        -- the client says, because what was asked for is knowable where what
+        -- the client did with it is not. A drag is the one gesture in this app
+        -- that presses a button and then moves, so the shape is what names it.
+        dragDispatched =
+            context.previousStepsEffects
+                |> List.head
+                |> Maybe.map stepDraggedSomething
+                |> Maybe.withDefault False
     in
     { readingsCount = botMemoryBefore.readingsCount + 1
     , lastDockedStationNameFromInfoPanel =
@@ -5364,6 +6956,30 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
         else
             botMemoryBefore.modulesUnidentifiedReadings
+    , lastGridVerdictInSpaceIsClean =
+        if docked then
+            botMemoryBefore.lastGridVerdictInSpaceIsClean
+
+        else
+            Just gridIsClean
+    , dockingRunIn =
+        dockingRunInAfterReading
+            { before = botMemoryBefore.dockingRunIn
+            , courseSetThisReading =
+                courseSetToDockingPerimeterFromGameLog context.readingFromGameClient /= Nothing
+            , rangeNow =
+                rangeToTheHomeStructureInMeters context.botSettings.homeStructureName
+                    context.readingFromGameClient
+            , docked = docked
+            }
+    , deposit =
+        depositRunAfterReading
+            { before = botMemoryBefore.deposit
+            , holdFill = holdFill
+            , docked = docked
+            , confirmationNow = depositConfirmedInGameLog context.readingFromGameClient
+            , dragDispatched = dragDispatched
+            }
     }
 
 
@@ -5411,7 +7027,7 @@ statusTextFromState context =
                 ( Nothing, _ ) ->
                     []
     in
-    [ "LEAVES WITHOUT ITS PROPULSION MODULE: this bot warps to a gas site, harvests it, watches the grid and leaves when something arrives (#463) -- and nothing here keeps the propulsion module on across a warp (#465), so it evades slower than it flew in, and nothing deposits the hold when it fills (#464)."
+    [ "LEAVES WITHOUT ITS PROPULSION MODULE: this bot warps to a gas site, harvests it, watches the grid and leaves when something arrives (#463), and deposits the hold at the home structure when it fills (#464) -- and nothing here keeps the propulsion module on across a warp (#465), so it evades, and flies home, slower than it flew in."
     , describeGrid (gridEvidenceFromContext context)
     , describeDscanSightingsFromReading context.readingFromGameClient
     , describeDscanCadence
@@ -5423,7 +7039,12 @@ statusTextFromState context =
     ]
         ++ harvestClause
         ++ [ describeMiningRange context.memory.miningRangeRefusal
-           , describeHoldFill context.readingFromGameClient
+           , describeDeposit
+                { holdFill = holdFillFromReading context.readingFromGameClient
+                , deposit = context.memory.deposit
+                , dockingRunIn = context.memory.dockingRunIn
+                , homeStructureName = settings.homeStructureName
+                }
            , "Readings: "
                 ++ String.fromInt context.memory.readingsCount
                 ++ ". Site group: '"
@@ -5441,9 +7062,6 @@ statusTextFromState context =
            , describeRetreatSearch (retreatSearchFromContext context)
            , describeCloak (cloakSearchFromContext context)
            , describeEvasion context.memory.evasion
-           , "Deposit at: "
-                ++ Maybe.withDefault "nowhere named ('home-structure-name' is unset)" settings.homeStructureName
-                ++ "."
                 ++ describeMessageBoxStandoff context.memory.messageBoxStandoff
            ]
         |> String.join "\n"
