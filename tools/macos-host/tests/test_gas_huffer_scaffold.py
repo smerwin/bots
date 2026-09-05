@@ -670,13 +670,21 @@ class TheMessageBoxLadderIsPortedWholeTest(unittest.TestCase):
         self.assertIn("&&", body)
 
 
-class TheRetreatCoverSaysWhenNothingIsArmedTest(unittest.TestCase):
-    """`attritionIsUnguarded`'s posture, adapted.
+class TheRetreatCoverSaysWhereItWouldGoTest(unittest.TestCase):
+    """What replaced `RETREAT NOT ARMED`, and why it is a replacement.
 
-    That rule exists because the mission runner's damage-window guard cannot see
-    a ship being ground down. The same shape is worse here: this hull's survival
-    plan is to leave rather than to tank it, so a retreat that is not armed is
-    no plan at all rather than a weaker one.
+    That clause was `attritionIsUnguarded`'s posture applied to a bot that could
+    notice a hostile and not leave: it fired on every reading of every run and
+    named the half that was missing. #463 is what filled it, so the clause has
+    nothing left to be unarmed about -- and deleting it outright would throw away
+    the thing it protected, which is that an operator learns *before* a hostile
+    arrives whether this ship has anywhere to run to.
+
+    So `describeRetreatSearch` is asked the same question one reading at a time:
+    which of the three rungs this reading would take, and, on the one reading
+    where the answer is none of them, why. It is executed rather than read,
+    because a clause that printed nothing at all would satisfy a substring check
+    on the function that builds it.
     """
 
     @classmethod
@@ -687,103 +695,111 @@ class TheRetreatCoverSaysWhenNothingIsArmedTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.repl.close()
 
-    def cover(self, detection="False", leaving="False", home="Nothing",
-              prefix='"*"'):
-        return ("{ hostileDetectionIsArmed = %s, leavingIsImplemented = %s"
-                ", homeStructureName = %s"
-                ", retreatBookmarkPrefix = %s }" % (
-                    detection, leaving, home, prefix))
+    def search(self, prefix='"*"', home="Nothing", window_open="True",
+               bookmarks="0", prefixed="[]", structures="[]",
+               destination="Nothing"):
+        return ("{ settings = { bookmarkPrefix = %s, homeStructureName = %s }"
+                ", locationsWindowIsOpen = %s"
+                ", bookmarksInTheWindow = %s"
+                ", bookmarksCarryingThePrefix = %s"
+                ", homeStructureRowsOnTheOverview = %s"
+                ", destination = %s }" % (
+                    prefix, home, window_open, bookmarks, prefixed,
+                    structures, destination))
 
-    def test_every_half_has_to_hold_for_the_retreat_to_read_as_armed(self):
-        """Three halves since #462, and each of them alone still reads unarmed.
+    def test_the_clause_shouts_when_there_is_nowhere_and_says_which_fix(self):
+        """The two ways of having nowhere to go want different repairs -- a
+        window to open, or a structure that is not on this grid -- so they are
+        separate sentences rather than one.
 
-        The third is what that issue added rather than removed: noticing and
-        leaving are separate, and a bot that has the first is not a bot that has
-        a retreat.
+        The three rungs that *do* answer are asserted in
+        `test_gas_huffer_retreats_and_evades`, where a `RetreatDestination`
+        carries a real `PlaceEntry` off the real parser rather than a record
+        written here with a `uiNode` nothing could click.
         """
         home = 'Just "%s"' % FICTIONAL_STRUCTURE
-        answers = self.repl.evaluate([
-            "retreatIsUnarmed " + self.cover(),
-            "retreatIsUnarmed " + self.cover(detection="True"),
-            "retreatIsUnarmed " + self.cover(leaving="True"),
-            "retreatIsUnarmed " + self.cover(home=home),
-            "retreatIsUnarmed " + self.cover(detection="True", leaving="True"),
-            "retreatIsUnarmed " + self.cover(detection="True", home=home),
-            "retreatIsUnarmed " + self.cover(
-                detection="True", leaving="True", home=home),
+        nowhere, shut = self.repl.strings([
+            "describeRetreatSearch " + self.search(home=home, bookmarks="3"),
+            "describeRetreatSearch " + self.search(window_open="False"),
         ])
-        self.assertEqual(
-            answers, [True, True, True, True, True, True, False])
+        self.assertIn("NOWHERE TO RUN TO", nowhere)
+        self.assertIn(FICTIONAL_STRUCTURE, nowhere)
+        self.assertIn("3 bookmark(s)", nowhere)
+        self.assertIn("NOWHERE TO RUN TO", shut)
+        self.assertIn("not open", shut)
+        self.assertIn("'home-structure-name' is unset", shut)
 
-    def test_it_fires_today_because_nothing_leaves_yet(self):
-        """Reachability, said as the state the code actually runs in.
+    def test_the_clause_is_on_every_reading_rather_than_only_while_evading(self):
+        """The reading an operator can act on is the quiet one before anything
+        arrives, which is exactly the reading an evasion-only clause is absent
+        from."""
+        body = collapsed(block("statusTextFromState"))
+        for clause in ("describeRetreatSearch (retreatSearchFromContext context)",
+                       "describeCloak (cloakSearchFromContext context)",
+                       "describeEvasion context.memory.evasion"):
+            with self.subTest(clause):
+                self.assertIn(clause, body)
 
-        `hostileDetectionIsArmed` was the constant here until #462 and is a real
-        read now; `leavingIsImplemented` is the one that replaced it, `False` at
-        its one call site because nothing in this app retreats, cloaks or
-        evades. So this clause still fires on every reading of every run, which
-        is exactly what it should do while that is true, and #463 is what flips
-        it.
+    def test_the_clause_that_said_the_retreat_was_unarmed_is_gone(self):
+        """Replaced rather than kept beside its replacement: two clauses about
+        where this ship would go is #102's defect, and the older of the two would
+        go on saying `RETREAT NOT ARMED` about a bot that leaves.
+
+        Over the declaration *bodies*, with their doc comments stripped, because
+        `describeRetreatSearch`'s own comment names the clause it replaced --
+        which is worth keeping and is not the same thing as still printing it.
         """
-        body = collapsed(block("retreatCoverFromContext"))
-        self.assertIn("hostileDetectionIsArmed = True", body)
-        self.assertIn("leavingIsImplemented = False", body)
-
-    def test_the_clause_names_which_half_is_missing(self):
-        home = 'Just "%s"' % FICTIONAL_STRUCTURE
-        unarmed, no_leaving, no_home, armed = self.repl.strings([
-            "describeRetreatCover " + self.cover(),
-            "describeRetreatCover " + self.cover(detection="True", home=home),
-            "describeRetreatCover " + self.cover(
-                detection="True", leaving="True"),
-            "describeRetreatCover " + self.cover(
-                detection="True", leaving="True", home=home),
-        ])
-        self.assertIn("RETREAT NOT ARMED", unarmed)
-        self.assertIn("notices a hostile", unarmed)
-        self.assertIn("RETREAT NOT ARMED", no_leaving)
-        self.assertNotIn("notices a hostile", no_leaving)
-        self.assertIn("#463", no_leaving)
-        self.assertIn("RETREAT NOT ARMED", no_home)
-        self.assertNotIn("notices a hostile", no_home)
-        self.assertIn("home-structure-name", no_home)
-        self.assertNotIn("RETREAT NOT ARMED", armed)
-        self.assertIn(FICTIONAL_STRUCTURE, armed)
-
-    def test_nothing_decides_on_it(self):
-        source = bot_source()
-        readers = [name for name, text in top_level_declarations(source).items()
-                   if "retreatIsUnarmed" in collapsed(text)
-                   and name not in ("retreatIsUnarmed", "describeRetreatCover")]
-        self.assertEqual(readers, [], readers)
+        bodies = " ".join(collapsed(text) for text
+                          in top_level_declarations(bot_source()).values())
+        for retired in ("retreatIsUnarmed", "describeRetreatCover",
+                        "leavingIsImplemented", "RETREAT NOT ARMED"):
+            with self.subTest(retired):
+                self.assertNotIn(retired, bodies)
 
 
-class TheSessionEndingBoundHasNowhereToGoYetTest(unittest.TestCase):
-    """The deferral marker for #102 / #133, recorded rather than assumed.
+class TheSessionEndingBoundIsAskedAtTheHeadTest(unittest.TestCase):
+    """#102 / #133's placement rule, honoured by the first bound this app grew.
 
     Both of those issues are one defect: a bound counted in
     `updateMemoryForNewReadingFromGame` on every reading, and compared inside a
-    branch the tree reaches on a fraction of them. The fix is placement -- the
-    comparison is asked from the head of the decision root, where nothing can
-    decline to ask it.
+    branch the tree reaches on a fraction of them. Run 30 took one to 10,811
+    against a bound of 200. The fix is placement -- the comparison is asked from
+    the head of the decision root, where nothing can decline to ask it.
 
-    This app has no such bound, so there is nothing to place. What it has
-    instead is a doc comment saying so and naming the shape, and this case,
-    which goes red the day something here ends a session -- so whoever writes
-    #463's give-up has to decide where it is asked rather than inheriting the
-    answer by default.
+    This class was `TheSessionEndingBoundHasNowhereToGoYetTest` and asserted the
+    *absence* of any such bound, so #463's evasion give-up collides with it. It
+    is replaced rather than deleted, because what it was protecting is the
+    placement rather than the absence.
     """
 
-    def test_nothing_here_ends_a_session_yet(self):
+    def test_the_only_thing_that_ends_a_session_is_asked_at_the_head(self):
+        head = collapsed(block("gasHufferDecisionRootBeforeApplyingSettings"))
+        self.assertIn("endSessionOnAnExpiredBound context", head)
+        # Above the setup list, which is what the whole rule is about: a bound
+        # asked below it runs late by however long a message box holds the tree.
+        self.assertLess(head.index("endSessionOnAnExpiredBound"),
+                        head.index("generalSetupInUserInterface"), head)
+
+    def test_the_branch_ends_the_session_and_does_nothing_else(self):
+        """No click, no wait, no state to reach -- which is what makes it
+        evaluable on any reading and is why nothing may be placed over it."""
+        body = collapsed(block("endSessionOnAnExpiredBound"))
+        self.assertIn("endDecisionPath FinishSession", body)
+        for acting in ("decideActionForCurrentStep", "waitForProgressInGame",
+                       "useContextMenuCascade", "askForHelpToGetUnstuck"):
+            with self.subTest(acting):
+                self.assertNotIn(acting, body)
+
+    def test_nothing_else_in_the_file_ends_a_session(self):
         # Over the declaration *bodies*, with their doc comments stripped: the
         # whole source carries `InternalFinishSession` in prose, explaining what
         # a rejected setting costs, and a case that read that as code would be
         # red from the day it was written.
-        bodies = " ".join(collapsed(text) for text
-                          in top_level_declarations(bot_source()).values())
-        self.assertNotIn("FinishSession", bodies)
+        enders = [name for name, text in top_level_declarations(
+            bot_source()).items() if "FinishSession" in collapsed(text)]
+        self.assertEqual(enders, ["endSessionOnAnExpiredBound"], enders)
 
-    def test_the_root_names_the_shape_a_future_bound_has_to_take(self):
+    def test_the_root_still_names_the_shape_the_bound_had_to_take(self):
         # Collapsed, because `elm-format` owns where these lines break and a
         # phrase this reads for is one wrap away from being unfindable.
         doc = collapsed(bot_source().split(
@@ -797,13 +813,17 @@ class TheSessionEndingBoundHasNowhereToGoYetTest(unittest.TestCase):
 
 # The marker the bot opens its header and its status line with. It was
 # `SCAFFOLD ONLY` while #459 was all there was; #461 gave the bot the whole
-# harvesting half, and #462 gave it the watching half, so the honest opening
-# has moved twice -- "this does nothing", then "this earns and cannot survive",
-# and now "this sees what is coming and cannot get out of the way". Every
-# wording answers the same question -- what is an operator told before they read
-# anything reassuring -- which is why this is one constant updated rather than a
-# case deleted, and why the *worse* half is what it names each time.
-CANNOT_DO_MARKER = "NOTICES BUT CANNOT LEAVE"
+# harvesting half, #462 gave it the watching half, and #463 gave it the leaving
+# -- so the honest opening has moved three times: "this does nothing", then
+# "this earns and cannot survive", then "this sees what is coming and cannot get
+# out of the way", and now "it gets out of the way slowly". Every wording answers
+# the same question -- what is an operator told before they read anything
+# reassuring -- which is why this is one constant updated rather than a case
+# deleted, and why the *worse* half is what it names each time. #464 (the
+# deposit) and #465 (the propulsion module across a warp) are what is left, and
+# #465 is the worse of the two because it is on the survival path: every retreat
+# and every celestial bounce is a warp.
+CANNOT_DO_MARKER = "LEAVES WITHOUT ITS PROPULSION MODULE"
 
 
 class TheBotSaysWhatItCannotDoTest(unittest.TestCase):
@@ -811,11 +831,13 @@ class TheBotSaysWhatItCannotDoTest(unittest.TestCase):
     one that is stuck, and a bot that reports only what it *can* do is worse.
 
     That is `/review-silent-success` exactly. Before #461 the thing an operator
-    had to be told was that nothing would be harvested; since #461 it is the
-    opposite half -- the ship warps, orbits, locks and harvests, and it has no
-    way of noticing a stranger on the grid and no way of leaving. A console
-    reporting the working half while the half that keeps the ship is missing is
-    a console reporting success, which is the failure this repo is named after.
+    had to be told was that nothing would be harvested; #461 and #462 made it
+    the opposite half, and #463 filled that. What is left is narrower and no less
+    worth saying first: the ship leaves, and it leaves with its propulsion module
+    off, because nothing switches one back on after a warp except the harvest
+    loop at the far end of a clean grid. A console reporting the working halves
+    while the ship crawls off a hostile grid is a console reporting success,
+    which is the failure this repo is named after.
     """
 
     @classmethod
@@ -833,17 +855,17 @@ class TheBotSaysWhatItCannotDoTest(unittest.TestCase):
             self.assertIn("on purpose", text)
             self.assertIn("#46", text)
         self.assertIn("#464", docked)
-        # The in-space leaf is reached only where there is nothing to warp to,
-        # so what it has to name is the half that is still missing rather than
-        # the halves that arrived. #462 gave this bot eyes, which is why the
-        # leaf no longer names it and #463 is the one left.
+        # The in-space leaf is reached only where the grid reads clean and there
+        # is nothing to warp to, so what it has to name is the half that is still
+        # missing rather than the halves that arrived. #462 gave this bot eyes
+        # and #463 gave it the way out, so the leaf names neither as absent.
         self.assertNotIn("#462", in_space)
-        self.assertIn("#463", in_space)
+        self.assertIn("#464", in_space)
 
     def test_the_status_line_opens_by_saying_so(self):
         body = collapsed(block("statusTextFromState"))
         self.assertIn(CANNOT_DO_MARKER, body)
-        for missing in ("#463", "#464", "#465"):
+        for missing in ("#464", "#465"):
             with self.subTest(missing):
                 self.assertIn(missing, body)
 

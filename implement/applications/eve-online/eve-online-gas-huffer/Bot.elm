@@ -1,4 +1,4 @@
-{- EVE Online gas huffer -- NOTICES BUT CANNOT LEAVE
+{- EVE Online gas huffer -- LEAVES WITHOUT ITS PROPULSION MODULE
 
       This app is meant to harvest gas from a wormhole gas site, deposit it at a
       structure, and leave the moment anything else shows up on the grid. Since
@@ -14,19 +14,29 @@
       `friendly-ship-tag`. `gridVerdict` is that answer and the status line
       carries it on every reading.
 
-      **Nothing here retreats**, which is the one thing to be clear about before
-      starting a run. Leaving is #463, so a session left unattended is a ship
-      that will still be sitting on its cloud when somebody else warps in --
-      knowing perfectly well that they are there, saying so in the status line,
-      and doing nothing about it, because it has no guns, no tank worth the name
-      and no plan but to leave. Nor does it deposit the hold when that fills
-      (#464), and nothing keeps the propulsion module on across a warp (#465).
-      The status line says all of that on every reading rather than letting a bot
-      that looks busy read as a bot that is covered.
+      Since #463 it **leaves**. A grid that does not read clean sends the ship to
+      the first of three destinations it can reach -- a bookmark whose label
+      starts with `retreat-bookmark-prefix`, else the overview row matching
+      `home-structure-name`, else any bookmark at all at 100 km -- then activates
+      a cloak if one is fitted, keeps refreshing D-Scan, and bounces between
+      celestials at ranges drawn per attempt until the grid reads clean again. A
+      reading the bot **cannot see** never counts as clean, so an evasion does
+      not end on a shut D-Scan window or an unreadable row. If the grid never
+      comes clean, the session ends with the ship wherever the last warp put it,
+      which is a legitimate end to an evening in somebody else's wormhole.
+
+      **What is still missing is the propulsion module across a warp (#465)**,
+      which is the one to be clear about before starting a run: the retreat and
+      every celestial bounce are warps, nothing here switches the module back on
+      afterwards except the harvest loop at the far end of a clean grid, so the
+      ship evades slower than it flew in. Nor does anything deposit the hold when
+      it fills (#464), so a full hold is a session that goes on harvesting
+      nothing. The status line says both on every reading rather than letting a
+      bot that looks busy read as a bot that is covered.
 
       Started under issue #459; the behaviour is #460 (which site to hunt), #461
-      (the harvest loop, here), #462 (hostile detection), #463 (retreat, cloak
-      and evade), #464 (deposit the hold when it fills) and #465 (the propulsion
+      (the harvest loop), #462 (hostile detection), #463 (retreat, cloak and
+      evade), #464 (deposit the hold when it fills) and #465 (the propulsion
       module surviving every warp).
 
       ## Setting up the Game Client
@@ -50,11 +60,15 @@
         bot cannot identify is one it declines rather than warps to, so a
         scanner set up without that column hunts nothing at all. It says which
         of those two it is on every reading; see `describeSiteSearch`.
-      + **Leave the Locations window open if you want the bookmark fallback.**
-        With no scanned row reading the hunted Group, this bot will take a
-        bookmark whose name carries `Reservoir` -- the client's own naming for
-        the wormhole gas sites (Ordinary/Sizeable Perimeter Reservoir,
-        Vast/Bountiful Frontier Reservoir, Vital/Instrumental Core Reservoir).
+      + **Leave the Locations window open.** Two separate things need it, and the
+        second is the one that keeps the ship. With no scanned row reading the
+        hunted Group, this bot will hunt a bookmark whose name carries
+        `Reservoir` -- the client's own naming for the wormhole gas sites
+        (Ordinary/Sizeable Perimeter Reservoir, Vast/Bountiful Frontier
+        Reservoir, Vital/Instrumental Core Reservoir). And **two of the three
+        places it runs to when it leaves are bookmarks**, so a shut Locations
+        window takes both of those rungs away and leaves only
+        `home-structure-name`, which has to be on the overview to be usable.
         With that window shut there is no fallback, which is a different thing
         from having no such bookmark and reads differently in the status line.
       + **The overview must show gas clouds, with the Name and Type columns
@@ -108,7 +122,23 @@
       + Name the bookmarks you are willing to be warped to so that they all
         start with the same prefix, and give that prefix to
         `retreat-bookmark-prefix`. Every bookmark matching it is a place this bot
-        may run to unattended.
+        may run to unattended, **arrived at at 0 m**, so they want to be
+        instadock-style bookmarks already placed for that.
+      + **Have something on the overview at AU range wherever this bot works.**
+        Once it is off the site it evades by warping between celestials, and the
+        only thing it counts as one is an overview row whose Distance reads in
+        AU -- which is what "off this grid" means and is the only property that
+        matters when leaving. An overview preset that hides celestials leaves the
+        evasion with nowhere to bounce to, and it says so rather than waiting
+        quietly.
+      + **A cloak, if the ship has one, is recognised only by its tooltip.** A
+        module button carries no name of its own, so this bot hovers the modules
+        it has not identified on the readings where it has nothing else to press,
+        and looks for the client's own `Cloaking Device` in what comes back. That
+        happens during quiet harvesting or not at all -- a session whose first
+        hostile arrives in its first minute evades uncloaked. Nothing here needs
+        the cloak in a particular slot, and a fit with no cloak in it evades
+        without one on purpose; the status line says which of the three it is.
 
       ## Configuration Settings
 
@@ -143,14 +173,22 @@
         `Fullerite-C50`, and `Fullerite-C100` over both, which is why the digits
         are parsed rather than the string sorted. See `trailingNumberFromName`.
       + `home-structure-name` : the overview name of the structure to deposit at,
-        which is also the second place this bot will run to when it leaves. **No
-        default** -- with none set, this bot has nowhere to deposit and one fewer
-        place to retreat to, and the status line says so on every reading.
+        which is also the **second** place this bot will run to when it leaves.
+        **No default** -- with none set, this bot has nowhere to deposit and one
+        fewer place to retreat to, and the status line says so on every reading.
+        Matched against the overview's Name column the way `anomaly-group` is
+        matched against the scanner's Group: whole, ignoring case and surrounding
+        space, with a trailing `*` meaning a prefix.
       + `retreat-bookmark-prefix` : the prefix marking bookmarks that are safe to
-        run to. Defaults to `*`, which is a common convention rather than a
-        claim about your bookmarks: a prefix is a pattern, and nothing here can
-        tell you whether any bookmark actually matches it until a run reads the
-        Locations window.
+        run to, and the **first** place this bot leaves for. Defaults to `*`,
+        which is a common convention rather than a claim about your bookmarks: a
+        prefix is a pattern, and nothing here can tell you whether any bookmark
+        actually matches it until a run reads the Locations window. Matched with
+        `String.startsWith` against the **label** of a Locations row rather than
+        against the whole row, which the client renders as the label and the
+        folder joined -- so a folder named for your prefix does not make every
+        bookmark in it a retreat target. Case is not folded: a marker you chose
+        to be distinctive is one you can type consistently.
       + `friendly-ship-tag` : a substring marking a ship as one of yours. A ship
         whose name carries it reads friendly; **every other ship reads hostile,
         and so does every ship when this setting is unset.** That direction is
@@ -209,11 +247,13 @@ import EveOnline.BotFramework
         , ShipModulesMemory
         , menuCascadeCompleted
         , mouseClickOnUIElement
-        , useMenuEntryWithTextContaining
+        , useMenuEntryInLastContextMenuInCascade
+        , useMenuEntryWithTextEqual
         )
 import EveOnline.BotFrameworkSeparatingMemory
     exposing
         ( DecisionPathNode
+        , EndDecisionPathStructure(..)
         , UpdateMemoryContext
         , askForHelpToGetUnstuck
         , branchDependingOnDockedOrInSpace
@@ -423,6 +463,22 @@ type alias BotMemory =
     -- rather than derived from a reading because no reading says how old the
     -- rows in the D-Scan window are. See `dscanMemoryAfterReading`.
     , dscan : DscanMemory
+
+    -- How long this evasion has run, how much of it was spent commanding a warp
+    -- that did not start, and how long the cloak has gone unanswered. All three
+    -- are things a single reading cannot say, and the first is what ends the
+    -- session. See `evasionCountersAfterReading`.
+    , evasion : EvasionCounters
+
+    -- Said at the root on the one reading a commanded warp crosses
+    -- `warpNotExecutingAlarmReadings` without ever taking, and on no other. The
+    -- status line goes on carrying the count against the bound.
+    , warpNotExecutingLastChange : Maybe String
+
+    -- How many readings have been spent hovering module buttons whose tooltip
+    -- is still unknown. Bounds `identifyTheModulesFitted`, which is the only
+    -- thing in this app that can tell a cloak from a hardener.
+    , modulesUnidentifiedReadings : Int
     }
 
 
@@ -2051,7 +2107,9 @@ actOnTheHarvestStep context shipUI cloud situation =
         NothingLeftToCommand ->
             describeBranch
                 (describeHarvestSituation situation)
-                waitForProgressInGame
+                (identifyTheModulesFitted context
+                    |> Maybe.withDefault waitForProgressInGame
+                )
 
 
 {-| What the harvest loop is doing, and which of its stages it has given up on.
@@ -2137,30 +2195,121 @@ describeHarvestSituation situation =
 -- Getting to the site
 
 
-{-| The two menu entries a warp to zero takes, in both cascades this bot drives.
+{-| The top-level entry that opens the distance submenu, matched as a prefix.
 
-Two levels, measured on this client for a bookmark: the top-level entry reads
-`Warp to Within (0 m)` -- carrying the client's _current default_ in those
-brackets, which is why it is matched on the `to within` part and not whole --
-and hovering it opens a fixed submenu of `Within 0 m | Within 10 km | ... |
-Within 100 km`. A scanned anomaly's own menu takes the same two steps, which is
-what lets one pair of literals drive both.
+Two levels, measured on this client for a bookmark. The top-level entry reads
 
-**Zero rather than a setting.** A gas site is warped into to be harvested, and
-the clouds are what the ship has to be next to; every other distance in that
-submenu is a distance the ship then has to close by hand, which this bot has no
-command for. `retreat-bookmark-prefix`'s own fallback wants `Within 100 km` and
-is #463's.
+    Warp to Within (0 m) | Align to | Show Info | Add Waypoint | Edit Location | Remove Location
+
+and hovering the first opens a fixed submenu of `Within 0 m | Within 10 km |
+Within 20 km | Within 30 km | Within 50 km | Within 70 km | Within 100 km | Set
+Default`. A scanned anomaly's own menu takes the same two steps, which is what
+lets one pair of literals drive both.
+
+**Matched on the prefix and never on the whole string**, which is #463's own
+emphasis and the one detail here that a plausible implementation gets wrong. The
+parenthesised distance is the **client's current default**, so it moves: an
+operator who takes `Within 100 km` once from any menu leaves this entry reading
+`Warp to Within (100 km)` afterwards, and a rule comparing the whole string would
+stop matching on a client that had been used by hand. The prefix is the part the
+client writes for every bookmark and every scan result alike.
+
+**A bookmark row's menu also varies by kind**: one measured row offered
+`Approach Location` where another offered `Align to`. So the cascade matches the
+entries it wants and ignores everything else rather than asserting a shape, which
+is what `chooseEntry` does by construction -- but it is worth saying, because the
+tempting alternative is to check the menu looks the way it was measured.
 
 -}
 warpToWithinMenuEntry : String
 warpToWithinMenuEntry =
-    "to within"
+    "Warp to Within"
 
 
+menuEntryOpensTheWarpDistanceSubmenu : String -> Bool
+menuEntryOpensTheWarpDistanceSubmenu entryText =
+    entryText |> String.trim |> String.startsWith warpToWithinMenuEntry
+
+
+{-| The distance submenu's own entries, as the client writes them.
+
+`Set Default` is deliberately **not** here. It is the eighth entry of that
+submenu and it changes the client's own default rather than warping anywhere, so
+a random pick over the whole menu -- which is what
+`EveOnline.BotFramework.useRandomMenuEntry` would give -- would eventually press
+it and quietly retune the client while warping nowhere.
+
+Ordered as the client draws them, nearest first, so that a reader can see the
+list is the measured one rather than a set. `warpAtZeroMenuEntry` and
+`warpAt100KmMenuEntry` are members of it, which is asserted rather than left to
+be noticed: three declarations that could come to disagree about what the client
+writes are #102's defect, and here it would mean a retreat asking for a distance
+the submenu does not offer.
+
+-}
+warpDistanceMenuEntries : List String
+warpDistanceMenuEntries =
+    [ "Within 0 m"
+    , "Within 10 km"
+    , "Within 20 km"
+    , "Within 30 km"
+    , "Within 50 km"
+    , "Within 70 km"
+    , "Within 100 km"
+    ]
+
+
+{-| Zero, which is what a site and a prepared bookmark both want.
+
+A gas site is warped into to be harvested, and the clouds are what the ship has
+to be next to; a bookmark carrying `retreat-bookmark-prefix` is an
+instadock-style bookmark the operator has already placed for a 0 m arrival. Every
+other distance in that submenu is a distance the ship then has to close by hand,
+which this bot has no command for.
+
+-}
 warpAtZeroMenuEntry : String
 warpAtZeroMenuEntry =
     "Within 0 m"
+
+
+{-| A hundred kilometres, which is what an unknown bookmark wants.
+
+#463's last-resort rung takes _any_ bookmark there is, and nothing here knows
+what that bookmark is on top of -- a station, a gate, a wormhole, somebody's
+tower. Landing 100 km off it is the one arrival that does not depend on knowing,
+and it is a literal the client offers exactly, so the submenu match can be an
+equality rather than a substring.
+
+-}
+warpAt100KmMenuEntry : String
+warpAt100KmMenuEntry =
+    "Within 100 km"
+
+
+{-| The two-level cascade, at whichever distance the caller wants.
+
+**One declaration with three readers** -- the hunt warp at zero, the retreat's
+first two rungs at zero and its last at 100 km -- because the two levels are one
+fact about this client and three copies of them would be three places to be wrong
+about a menu that has already been measured once.
+
+The distance is matched with `useMenuEntryWithTextEqual` rather than
+`...TextContaining`, since every entry in that submenu is a literal the client
+writes exactly and `Within 0 m` is a substring of nothing else there. The
+top-level entry cannot be matched that way -- see `warpToWithinMenuEntry` -- so it
+takes a custom choice, which is `useMenuEntryWithTextContaining`'s own shape with
+the predicate swapped.
+
+-}
+warpCascadeWithin : String -> EveOnline.BotFramework.UseContextMenuCascadeNode
+warpCascadeWithin distanceMenuEntry =
+    useMenuEntryInLastContextMenuInCascade
+        { describeChoice = "with text starting '" ++ warpToWithinMenuEntry ++ "'"
+        , chooseEntry =
+            List.filter (.text >> menuEntryOpensTheWarpDistanceSubmenu) >> List.head
+        }
+        (useMenuEntryWithTextEqual distanceMenuEntry menuCascadeCompleted)
 
 
 {-| Warp to the site `siteSearch` chose.
@@ -2188,8 +2337,7 @@ warpToTheHuntedSite : BotDecisionContext -> SiteToHunt -> DecisionPathNode
 warpToTheHuntedSite context site =
     let
         warpMenu =
-            useMenuEntryWithTextContaining warpToWithinMenuEntry
-                (useMenuEntryWithTextContaining warpAtZeroMenuEntry menuCascadeCompleted)
+            warpCascadeWithin warpAtZeroMenuEntry
     in
     case site of
         ScannedAnomaly anomaly ->
@@ -3111,107 +3259,1160 @@ describeDscanCadence cadence =
 
 
 
--- What would make this bot leave, and whether any of it is armed
+-- Where this bot goes when it leaves, and what it does once it is there
 
 
-{-| The two things a retreat needs: something that notices, and somewhere to go.
+{-| The label half of a Locations row's text.
 
-`attritionIsUnguarded`'s posture, adapted. That rule exists because the mission
-runner's damage-window guard cannot see a ship being ground down, so a
-configuration with both percentage thresholds off is uncovered while looking
-fine. The same shape is worse here, because **this hull's survival plan is to
-leave rather than to tank it**: there is no gauge to fall back on and no guns to
-fight with, so a retreat that is not armed is not a weaker plan, it is no plan.
+A `PlaceEntry`'s `mainText` is not a label: the client renders that window as a
+grid and the parser takes the row's own text node, which arrives as the row's
+cells joined by `<t>` tags -- `Label<t>Folder` on the rows measured for #457,
+the same shape `parseLocationsWindowPlaceEntry`'s own comment quotes from the
+2024 recording (`...<t>Refinery<t>0<t>Y5C-YD<t>...`).
 
-Read by the status line and by no decision, which is `quickMessage`'s posture
-(#130) and is the right one while the thing being reported is a gap rather than
-a signal.
+So `retreat-bookmark-prefix` is matched against the **first** field and not
+against the blob. Matching the blob would make the prefix match a folder name as
+readily as a bookmark's own, which is a widening in the direction that decides
+where this ship is sent unattended -- and it would also silently stop matching
+the day the client puts another column in front.
+
+A row carrying no tag at all is its own label, which is what makes this safe to
+run over every row rather than only over the ones that look joined.
 
 -}
-type alias RetreatCover =
-    { hostileDetectionIsArmed : Bool
-    , leavingIsImplemented : Bool
-    , homeStructureName : Maybe String
-    , retreatBookmarkPrefix : String
+bookmarkCellSeparator : String
+bookmarkCellSeparator =
+    "<t>"
+
+
+bookmarkLabel : String -> String
+bookmarkLabel mainText =
+    mainText
+        |> String.split bookmarkCellSeparator
+        |> List.head
+        |> Maybe.withDefault mainText
+        |> String.trim
+
+
+{-| Whether a bookmark's label starts with the operator's retreat prefix.
+
+`String.startsWith` on the label, which is the issue's own wording and is
+narrower than the `stringContainsIgnoringCase` this file uses for
+`bookmarkedGasSiteMarker` one section up. The two are matched differently on
+purpose: that one is the **client's** word for a site family and can sit
+anywhere inside a name an operator typed around it, where this one is a marker
+the operator puts at the front themselves, precisely so that a glance at the
+Locations window says which bookmarks the bot may use.
+
+Case is not folded, for the same reason. A prefix chosen to be distinctive --
+`*` is the shipped default -- is one an operator can type consistently, and
+folding case here would quietly admit a bookmark named `Safe` to a fleet that
+marks its safes `safe-`.
+
+-}
+bookmarkLabelStartsWithPrefix : String -> String -> Bool
+bookmarkLabelStartsWithPrefix prefix mainText =
+    bookmarkLabel mainText |> String.startsWith prefix
+
+
+{-| The three places this bot will run to, as the three different facts they are.
+
+The order is #463's and the reasons are not interchangeable, which is why this is
+a type rather than a list of candidates:
+
+  - a **bookmark carrying `retreat-bookmark-prefix`** is a place the operator has
+    said in advance is safe to arrive at unattended, and it is warped to at zero
+    because instadock-style bookmarks are already placed for that;
+  - the **home structure on the overview** is somewhere with a tether and a dock,
+    warped to at zero for the same reason -- but it is second because it is a
+    place the operator named for _depositing_ (#464) rather than for arriving at
+    under somebody else's guns;
+  - **any bookmark at all, at 100 km**, is the last resort and the range is the
+    whole of the difference. Nothing here knows what that bookmark is on top of,
+    so landing 100 km off it is the one arrival that does not depend on knowing.
+
+`destination` is a `Maybe` and the reasons it is `Nothing` are carried beside it
+rather than folded into it, for `AnomalyVerdict`'s reason one section up: an
+operator watching a bot with nowhere to go fixes a different thing depending on
+whether the Locations window is shut, no bookmark carries the prefix, or
+`home-structure-name` names a structure that is not on this grid.
+
+-}
+type RetreatDestination
+    = ToAPrefixedBookmark EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
+    | ToTheHomeStructure EveOnline.ParseUserInterface.OverviewWindowEntry
+    | ToAnyBookmarkAtAll EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
+
+
+{-| The two windows the retreat reads, and nothing else.
+
+`SiteSearchReading`'s shape and for its reason: a record of parsed windows rather
+than a whole `BotDecisionContext`, so `retreatSearch` is a rule a case can hand a
+reading and execute (#106). The overview entries arrive already concatenated,
+because which window a row came from decides nothing here.
+
+-}
+type alias RetreatSearchReading =
+    { locationsWindow : Maybe EveOnline.ParseUserInterface.LocationsWindow
+    , overviewEntries : List EveOnline.ParseUserInterface.OverviewWindowEntry
     }
 
 
-retreatIsUnarmed : RetreatCover -> Bool
-retreatIsUnarmed cover =
-    not cover.hostileDetectionIsArmed
-        || not cover.leavingIsImplemented
-        || (cover.homeStructureName == Nothing)
+type alias RetreatSearchSettings =
+    { bookmarkPrefix : String
+    , homeStructureName : Maybe String
+    }
 
 
-{-| The cover clause, said on every reading.
+{-| Everything one reading has to say about where this ship would run to.
 
-**Reachability, since a guard that cannot fire is this repo's signature bug
-(#15, #34, #42):** `hostileDetectionIsArmed` was `False` at its one call site
-until #462, because nothing in this app detected a hostile at all; it is a real
-read now, and `leavingIsImplemented` is the constant that replaced it, because
-noticing and leaving are two halves and only the first of them has arrived.
-Naming the half that is missing rather than letting the clause fall silent is
-the whole point: a bot that notices a stranger, says so, and goes on harvesting
-is worse to misread than one that never noticed. #463 flips it.
-
-The third half is a real setting and is false-able now: a run given no
-`home-structure-name` has one named destination fewer, and a bookmark _prefix_ is
-a pattern rather than a place, so it is deliberately not counted as a
-destination -- nothing here can say whether any bookmark matches it until the
-Locations window is readable (#457).
+The window's _presence_ is carried apart from what it held, which is
+`SiteSearch`'s rule and wants the same fix from an operator: a Locations window
+that is shut and a Locations window holding no matching bookmark are different
+states, and a list that is empty for either reason cannot tell them apart.
 
 -}
-describeRetreatCover : RetreatCover -> String
-describeRetreatCover cover =
-    if retreatIsUnarmed cover then
-        "RETREAT NOT ARMED: "
-            ++ (if not cover.hostileDetectionIsArmed then
-                    "nothing in this bot notices a hostile yet, so nothing can ever start a retreat. "
+type alias RetreatSearch =
+    { settings : RetreatSearchSettings
+    , locationsWindowIsOpen : Bool
+    , bookmarksInTheWindow : Int
+    , bookmarksCarryingThePrefix : List String
+    , homeStructureRowsOnTheOverview : List String
+    , destination : Maybe RetreatDestination
+    }
 
-                else
-                    ""
-               )
-            ++ (if not cover.leavingIsImplemented then
-                    "This bot notices what is on the grid and says so, and nothing here acts on that -- leaving is #463. "
 
-                else
-                    ""
-               )
-            ++ (if cover.homeStructureName == Nothing then
-                    "No 'home-structure-name' is set, so the only retreat destination named is the bookmark prefix '"
-                        ++ cover.retreatBookmarkPrefix
-                        ++ "', which is a pattern rather than a place. "
+{-| The one declaration that decides where this bot runs to, with two readers.
 
-                else
-                    ""
-               )
-            ++ "This ship's plan for anything arriving is to leave, and it cannot."
+The decision and the status line both call it through `retreatSearchFromContext`
+-- #102, and the way it fails here is a status line naming a bookmark the ship
+was not sent to. The rungs are evaluated in order and the first that answers
+wins; nothing below a rung that answered is looked at at all, because a fallback
+that can outrank the thing it is a fallback for is not a fallback.
+
+**The home-structure row is filtered on `_display` and the bookmarks are not**,
+and that asymmetry is the overview's own. An overview row is a click at a screen
+position and the overview virtualises, so a hidden row's region belongs to
+whatever was recycled into it -- see `overviewEntryIsDisplayed`. A Locations row
+is a row in a list the client is not recycling that way, and the parser drops any
+node it cannot read a region for before this ever sees it.
+
+`siteCellMatches` is what the home structure's name is matched with rather than a
+second matcher written here: it is whole and case-insensitive with a trailing `*`
+meaning a prefix, which is what `anomaly-group` already promises an operator, and
+two spellings of "does this setting match this cell" would be two places to
+disagree.
+
+-}
+retreatSearch : RetreatSearchSettings -> RetreatSearchReading -> RetreatSearch
+retreatSearch settings reading =
+    let
+        bookmarks =
+            reading.locationsWindow
+                |> Maybe.map .placeEntries
+                |> Maybe.withDefault []
+
+        prefixed =
+            bookmarks
+                |> List.filter
+                    (.mainText >> bookmarkLabelStartsWithPrefix settings.bookmarkPrefix)
+
+        homeStructureRows =
+            case settings.homeStructureName of
+                Nothing ->
+                    []
+
+                Just name ->
+                    reading.overviewEntries
+                        |> List.filter overviewEntryIsDisplayed
+                        |> List.filter
+                            (\entry ->
+                                entry.objectName
+                                    |> Maybe.map (\objectName -> siteCellMatches objectName name)
+                                    |> Maybe.withDefault False
+                            )
+    in
+    { settings = settings
+    , locationsWindowIsOpen = reading.locationsWindow /= Nothing
+    , bookmarksInTheWindow = List.length bookmarks
+    , bookmarksCarryingThePrefix = prefixed |> List.map (.mainText >> bookmarkLabel)
+    , homeStructureRowsOnTheOverview =
+        homeStructureRows |> List.map (.objectName >> Maybe.withDefault "")
+    , destination =
+        [ prefixed |> List.head |> Maybe.map ToAPrefixedBookmark
+        , homeStructureRows |> List.head |> Maybe.map ToTheHomeStructure
+        , bookmarks |> List.head |> Maybe.map ToAnyBookmarkAtAll
+        ]
+            |> List.filterMap identity
+            |> List.head
+    }
+
+
+retreatSearchFromContext : BotDecisionContext -> RetreatSearch
+retreatSearchFromContext context =
+    let
+        settings =
+            context.eventContext.botSettings
+    in
+    retreatSearch
+        { bookmarkPrefix = settings.retreatBookmarkPrefix
+        , homeStructureName = settings.homeStructureName
+        }
+        { locationsWindow = context.readingFromGameClient.locationsWindow
+        , overviewEntries =
+            context.readingFromGameClient.overviewWindows |> List.concatMap .entries
+        }
+
+
+{-| What an operator reads about where this ship would go, on every reading.
+
+Said whether or not anything is on the grid, which is the whole point of it being
+here rather than inside the retreat: the reading an operator wants this sentence
+on is the quiet one **before** a hostile arrives, while there is still time to
+open the Locations window. `RETREAT NOT ARMED` was this clause's ancestor and
+said the same thing about a bot that could not leave at all; what replaced it
+says which of the three rungs this reading would take, and shouts on the one
+reading where the answer is none of them.
+
+-}
+describeRetreatSearch : RetreatSearch -> String
+describeRetreatSearch search =
+    let
+        homeClause =
+            case search.settings.homeStructureName of
+                Nothing ->
+                    "'home-structure-name' is unset"
+
+                Just name ->
+                    "'" ++ name ++ "' is not a row on this overview"
+
+        rung =
+            case search.destination of
+                Just (ToAPrefixedBookmark bookmark) ->
+                    "to the bookmark '"
+                        ++ bookmarkLabel bookmark.mainText
+                        ++ "', which carries '"
+                        ++ search.settings.bookmarkPrefix
+                        ++ "', at "
+                        ++ warpAtZeroMenuEntry
+                        ++ "."
+
+                Just (ToTheHomeStructure entry) ->
+                    "no bookmark carries '"
+                        ++ search.settings.bookmarkPrefix
+                        ++ "', so to the home structure '"
+                        ++ (entry.objectName |> Maybe.withDefault "")
+                        ++ "' on the overview, at "
+                        ++ warpAtZeroMenuEntry
+                        ++ "."
+
+                Just (ToAnyBookmarkAtAll bookmark) ->
+                    "no prefixed bookmark and "
+                        ++ homeClause
+                        ++ ", so to '"
+                        ++ bookmarkLabel bookmark.mainText
+                        ++ "', which is simply the first bookmark there is, at "
+                        ++ warpAt100KmMenuEntry
+                        ++ "."
+
+                Nothing ->
+                    "NOWHERE TO RUN TO -- "
+                        ++ (if search.locationsWindowIsOpen then
+                                "the Locations window is open and holds "
+                                    ++ String.fromInt search.bookmarksInTheWindow
+                                    ++ " bookmark(s)"
+
+                            else
+                                "the Locations window is not open, so neither bookmark rung can be read at all"
+                           )
+                        ++ ", and "
+                        ++ homeClause
+                        ++ ". This ship's whole plan for anything arriving is to leave."
+    in
+    "Retreat: "
+        ++ rung
+        ++ " Locations: "
+        ++ (if search.locationsWindowIsOpen then
+                String.fromInt search.bookmarksInTheWindow
+                    ++ " bookmark(s), "
+                    ++ String.fromInt (List.length search.bookmarksCarryingThePrefix)
+                    ++ " carrying '"
+                    ++ search.settings.bookmarkPrefix
+                    ++ "'."
+
+            else
+                "window not open."
+           )
+
+
+
+-- The cloak, which may not be fitted at all
+
+
+{-| What the client's own tooltip calls a cloak.
+
+Stock EVE terminology in the sense `Gas Site`, `Reservoir` and
+`Harvestable Cloud` are -- it is the game's own module group, shared by every
+covert-ops and improved cloak there is -- so shipping it names nobody's fit, and
+it is a constant rather than a setting under #456's rule.
+
+Matched against the tooltip's texts because **nothing else in a reading says what
+a module is.** A module button carries no name of its own: the two gas harvesters
+on the hull #456 measured share a `_name` and an icon texture, which is why
+`harvesterModulesFromShipUI` identifies them by row and position instead.
+Position cannot answer this one -- a cloak can sit in any slot -- and the client
+setup contract deliberately does not claim a row for it, because a contract
+nothing can check produces a bot pressing whatever is bound where it expected a
+cloak.
+
+-}
+cloakingDeviceTooltipMarker : String
+cloakingDeviceTooltipMarker =
+    "Cloaking Device"
+
+
+{-| One fitted module, as the two facts the cloak rule needs about it.
+
+A record of plain facts rather than a `ShipUIModuleButton` and a
+`ShipModulesMemory`, so `cloakAmongFittedModules` is a rule a case can execute
+(#106). `tooltipTexts` empty is _this module has not been identified yet_, which
+is not the same fact as a module identified as something else, and the two are
+told apart in the status line because they want different things from an
+operator: patience, or a fit with no cloak in it.
+
+-}
+type alias FittedModule =
+    { tooltipTexts : List String
+    , runningState : ModuleRunningState
+    }
+
+
+{-| Whether this ship has a cloak, and whether it is already on.
+
+**Four answers, and the two negative ones are deliberately not one.** #456
+records that whether a cloak is fitted at all is unverified -- five modules were
+read on the measured hull and none was identified as one -- so the answer this
+rule gives most often may well be `NoCloakAmongTheModulesIdentified` forever, and
+an operator has to be able to tell that from `TheModulesAreNotIdentifiedYet`,
+which is a session that has simply not hovered them all yet and where waiting is
+the right thing.
+
+**Neither of them stalls the evasion**, which is the issue's own requirement:
+`evasionStep` reads this and falls through to the celestial bounce for both, so a
+fit with no cloak in it evades without one rather than waiting for a module that
+does not exist.
+
+-}
+type CloakSearch
+    = TheModulesAreNotIdentifiedYet { identified : Int, total : Int }
+    | NoCloakAmongTheModulesIdentified Int
+    | TheCloakIsAlreadyRunning
+    | TheCloakIsFittedAndNotRunning Int
+
+
+cloakAmongFittedModules : List FittedModule -> CloakSearch
+cloakAmongFittedModules modules =
+    let
+        identified =
+            modules |> List.filter (.tooltipTexts >> List.isEmpty >> not)
+
+        cloaks =
+            modules
+                |> List.indexedMap Tuple.pair
+                |> List.filter
+                    (Tuple.second
+                        >> .tooltipTexts
+                        >> List.any (stringContainsIgnoringCase cloakingDeviceTooltipMarker)
+                    )
+    in
+    case cloaks of
+        ( index, cloak ) :: _ ->
+            case cloak.runningState of
+                ModuleIsRunning ->
+                    TheCloakIsAlreadyRunning
+
+                ModuleIsNotRunning ->
+                    TheCloakIsFittedAndNotRunning index
+
+        [] ->
+            if List.length identified < List.length modules then
+                TheModulesAreNotIdentifiedYet
+                    { identified = List.length identified
+                    , total = List.length modules
+                    }
+
+            else
+                NoCloakAmongTheModulesIdentified (List.length modules)
+
+
+{-| Every module button in the reading, paired with what has been learned of it.
+
+**The whole ship rather than one row**, unlike everything else in this file that
+reads module buttons: a cloak can be fitted anywhere, where the two harvesters
+and the propulsion module are found by row because the client setup contract puts
+those in known places. The order is the parser's own and is used only to index
+back into this same list on this same reading, which is `RunTheHarvester`'s
+arrangement and carries the same caveat -- an index into a module list is only
+ever good for the reading it was taken from.
+
+-}
+fittedModulesFromContext : BotDecisionContext -> List ( EveOnline.ParseUserInterface.ShipUIModuleButton, FittedModule )
+fittedModulesFromContext context =
+    context.readingFromGameClient.shipUI
+        |> Maybe.map .moduleButtons
+        |> Maybe.withDefault []
+        |> List.map
+            (\moduleButton ->
+                ( moduleButton
+                , { tooltipTexts =
+                        EveOnline.BotFramework.getModuleButtonTooltipFromModuleButton
+                            context.memory.shipModules
+                            moduleButton
+                            |> Maybe.map
+                                (.allContainedDisplayTextsWithRegion >> List.map Tuple.first)
+                            |> Maybe.withDefault []
+                  , runningState = moduleRunningState moduleButton
+                  }
+                )
+            )
+
+
+cloakSearchFromContext : BotDecisionContext -> CloakSearch
+cloakSearchFromContext context =
+    fittedModulesFromContext context |> List.map Tuple.second |> cloakAmongFittedModules
+
+
+describeCloak : CloakSearch -> String
+describeCloak search =
+    "Cloak: "
+        ++ (case search of
+                TheModulesAreNotIdentifiedYet counts ->
+                    "NOT KNOWN YET -- "
+                        ++ String.fromInt counts.identified
+                        ++ " of "
+                        ++ String.fromInt counts.total
+                        ++ " module(s) have had their tooltip read, and a cloak is only ever recognised by its tooltip saying '"
+                        ++ cloakingDeviceTooltipMarker
+                        ++ "'. An evasion starting now runs without one."
+
+                NoCloakAmongTheModulesIdentified total ->
+                    "NONE FITTED -- all "
+                        ++ String.fromInt total
+                        ++ " module(s) have been identified and none is a '"
+                        ++ cloakingDeviceTooltipMarker
+                        ++ "'. Evading without one is what this bot then does, on purpose."
+
+                TheCloakIsAlreadyRunning ->
+                    "fitted, and running."
+
+                TheCloakIsFittedAndNotRunning index ->
+                    "fitted in module slot "
+                        ++ String.fromInt (index + 1)
+                        ++ ", and not running."
+           )
+
+
+{-| How many readings the bot may spend hovering modules it has not identified.
+
+**Spent only on readings the bot had nothing else to press**, which is where this
+is asked from -- `NothingLeftToCommand`, the harvest loop's steady state once the
+ship orbits, the cloud is locked and both harvesters cycle. So the bound is not
+protecting the harvest, which cannot be starved from there; it is protecting
+against the one failure `eve-online-mining-bot` records for this mechanism, which
+is a tooltip that never lands and a hover repeated for the rest of the session.
+
+Large, because those readings are free and a tooltip needs a hover sustained
+across two consecutive readings to be stored at all
+(`integrateCurrentReadingsIntoShipModulesMemory`). Two hundred is roughly a
+hundred seconds at the shipped step delay; a session that has not identified them
+by then is one where the mechanism is not working, and `describeCloak` says so
+rather than the bot going on hovering.
+
+-}
+moduleIdentificationGiveUpReadings : Int
+moduleIdentificationGiveUpReadings =
+    200
+
+
+{-| Learn what is fitted, on the readings there is nothing else to do.
+
+`readShipUIModuleButtonTooltipWhereNotYetInMemory` is the framework's own, used
+unchanged by `eve-online-mining-bot` and `eve-online-warp-to-0-autopilot`, and it
+is the only thing in this repo that can tell a cloak from a hardener.
+
+**Placed below the harvest loop and above nothing**, which is a trade stated
+rather than assumed. The mining bot records the cost: reached only where there is
+otherwise nothing to do, this mechanism identified one of that ship's two mining
+lasers in a whole session, because something always wanted the mouse. Here the
+thing that would starve it is the harvest loop, and the harvest loop's steady
+state is precisely the state with nothing to press -- so the readings exist.
+What it means is that **a cloak is identified during the quiet readings or not at
+all**: a session whose first hostile arrives in its first minute evades without
+one and says so, and that is better than spending a retreat's readings hovering
+modules.
+
+-}
+identifyTheModulesFitted : BotDecisionContext -> Maybe DecisionPathNode
+identifyTheModulesFitted context =
+    if moduleIdentificationGiveUpReadings <= context.memory.modulesUnidentifiedReadings then
+        Nothing
 
     else
-        "Retreat: to a bookmark starting '"
-            ++ cover.retreatBookmarkPrefix
-            ++ "', else to '"
-            ++ Maybe.withDefault "" cover.homeStructureName
-            ++ "'."
+        EveOnline.BotFrameworkSeparatingMemory.readShipUIModuleButtonTooltipWhereNotYetInMemory
+            context
+            |> Maybe.map
+                (describeBranch
+                    ("Nothing left to command on this cloud, so spend the reading learning what is fitted -- a cloak is recognised only by its tooltip, and #463 needs one identified before a hostile arrives rather than after ("
+                        ++ String.fromInt context.memory.modulesUnidentifiedReadings
+                        ++ "/"
+                        ++ String.fromInt moduleIdentificationGiveUpReadings
+                        ++ " readings spent)."
+                    )
+                )
 
 
-retreatCoverFromContext : BotDecisionContext -> RetreatCover
-retreatCoverFromContext context =
-    { hostileDetectionIsArmed =
-        -- True since #462, and true structurally rather than conditionally:
-        -- `gridVerdict` is asked of every reading and answers `GridIsClean` for
-        -- exactly one of its three cases. An unset `friendly-ship-tag` does not
-        -- disarm it -- it makes it fire on every ship there is.
-        True
-    , leavingIsImplemented =
-        -- Not a placeholder that could rot into a lie: nothing in this app
-        -- retreats, cloaks or evades, so there is nothing to ask. #463 is where
-        -- this becomes a read, and the clause above is what an operator sees
-        -- until it does.
-        False
-    , homeStructureName = context.eventContext.botSettings.homeStructureName
-    , retreatBookmarkPrefix = context.eventContext.botSettings.retreatBookmarkPrefix
+
+-- Leaving, and staying gone until the grid reads clean
+
+
+{-| How many readings one escape choice stays put.
+
+Ported from the mission runner's `runAwayCelestialStickyReadings`, with its
+reason: a choice has to outlive the manoeuvre that acts on it, or the bot opens a
+context menu on one celestial and finishes the cascade on whichever one the next
+reading picked instead. That cascade is longer here than the mission runner's
+two-click one -- a right-click, a hover that opens the distance submenu, and a
+click -- so twelve readings is if anything tight rather than generous.
+
+It also has to keep moving while the grid stays dirty, which is why the choice
+rotates at all rather than being drawn once.
+
+-}
+evasionCelestialStickyReadings : Int
+evasionCelestialStickyReadings =
+    12
+
+
+{-| How long a commanded warp may fail to happen before a person is told.
+
+**Issue #141's number and #141's posture, ported.** That issue is the worked
+example this one is told to follow: a mission-runner retreat decided on 36
+consecutive readings with the ship never entering warp, on a grid it was being
+shot on. Three full rotations of the escape choice is where the only
+self-correction a retreat owns has been spent on three separate destinations and
+the ship is still where it was.
+
+Written as three rotations rather than as `36`, so that an operator who changes
+one changes the other with it and the argument cannot drift away from the figure.
+`dscanStaleAfterIntervals` has the same shape for the same reason.
+
+**It reports and does not repair**, which is the half that matters here: the
+branch that carries this line goes on commanding the warp. See
+`describeWarpNotExecuting`.
+
+-}
+warpNotExecutingAlarmReadings : Int
+warpNotExecutingAlarmReadings =
+    evasionCelestialStickyReadings * 3
+
+
+{-| The exact sentence the watchdog treats as an alarm, shared rather than spelt
+twice.
+
+`EveOnline.BotFrameworkSeparatingMemory.askForHelpToGetUnstuck` writes it and
+`stall_watch.py` matches it as a substring of any log line, which is what turns
+it into a screenshot of the client. Three copies of one string across two
+languages is a coupling this repo pins with a test rather than remembers, and a
+drift here is silent in the direction that looks like a healthy run -- the line
+still prints and nothing escalates.
+
+The framework's copy is not imported because that value is a `DecisionPathNode`
+rather than the string inside it, and the module is vendored eight times:
+exporting one more name from it would be eight edits to make a literal reachable
+(#467). `eve-online-mission-runner` carries the same constant for the same
+reason.
+
+-}
+askForHelpToGetUnstuckText : String
+askForHelpToGetUnstuckText =
+    "I am stuck here and need help to continue."
+
+
+{-| The one line an operator gets when a commanded warp is not happening.
+
+It says what was commanded and how often, that the cause is unknown, and **that
+the bot is still commanding it** -- the last because a reader who has just been
+told the bot is stuck would otherwise reasonably assume it had stopped trying,
+and the whole argument for reporting rather than acting is that it has not.
+
+The sentence is carried into this line rather than reached by branching to
+`askForHelpToGetUnstuck`, because that leaf dispatches no effects. Taking it
+would stop the retreat commanding the warp, and stopping cannot help a ship that
+is still on a hostile grid.
+
+The count is in readings and the sentence says so, because this file has two
+units -- readings and decisions -- and a log is easiest to mis-read in the other
+one.
+
+-}
+describeWarpNotExecuting : Int -> String
+describeWarpNotExecuting readings =
+    "RETREAT NOT EXECUTING: I have decided to leave on "
+        ++ String.fromInt readings
+        ++ " consecutive readings -- readings, not decisions -- and the ship has"
+        ++ " not been in warp on any of them. The warp is being commanded and it"
+        ++ " is not taking. I do not know why, this hull has no guns and no tank"
+        ++ " worth the name, and I am still commanding it because stopping cannot"
+        ++ " help. "
+        ++ askForHelpToGetUnstuckText
+
+
+warpNotExecutingAlarm : { before : Int, now : Int } -> Maybe String
+warpNotExecutingAlarm readings =
+    if
+        (readings.before < warpNotExecutingAlarmReadings)
+            && (warpNotExecutingAlarmReadings <= readings.now)
+    then
+        Just (describeWarpNotExecuting readings.now)
+
+    else
+        Nothing
+
+
+{-| How many readings the cloak may be asked for before the bot stops asking.
+
+A module button is a toggle, so a press that is not answered is either a client
+that did not take it or a press that switched something **off** -- and either way
+a bot pressing it once per reading for the rest of an evasion is the failure
+`pressModuleHotkey`'s settling window exists to prevent, one step further out.
+
+Larger than `moduleButtonClickSettlingSteps`, because a cloak has a real spool-up
+and this counts readings the client has answered nothing on; small next to
+`moduleIdentificationGiveUpReadings`, because the readings this one spends are
+readings of an evasion rather than readings of a quiet grid. On expiry the
+evasion carries on uncloaked, which is the same fall-through a fit with no cloak
+in it takes.
+
+-}
+cloakGiveUpReadings : Int
+cloakGiveUpReadings =
+    20
+
+
+{-| How long this bot will evade before deciding the wormhole is not worth it.
+
+**A give-up that ends the session, which is a different animal from the one above
+and is placed differently for PR #115's reason:** it bounds elapsed time and
+belongs where nothing can decline to ask it, so it is asked from the head of the
+decision root and the counter behind it advances in
+`updateMemoryForNewReadingFromGame` on every reading whatever the tree is doing.
+The mission runner's #102 and saxrat's #133 are both what happens when that
+placement is got wrong -- run 30 took a counter to 10,811 against a bound of 200,
+because something above the comparison held the tree.
+
+**Ending is a legitimate outcome here and it is not one for the warp bound
+above.** A wormhole with somebody living in it is a wormhole this bot has no work
+in: ending with the ship cloaked at a safe is a fine place to leave it, and
+better than bouncing celestials until the session clock runs out. That is the
+opposite of the retreat warp's bound, where ending would leave a ship on a
+hostile grid with nobody at the controls -- which is how the mission runner's
+run 7 lost a ship.
+
+Six hundred readings is fifty rotations of the escape choice and roughly five
+minutes at the shipped `bot-step-delay` of 499 ms. It is **not calibrated against
+anything**: no recorded run of this app exists and nobody has watched an evasion.
+What it rests on is what expiry costs, which is a session that stops with the
+ship safe -- so it is set long enough that a hostile passing through does not end
+a run, and short enough that a resident does.
+
+-}
+evasionGiveUpReadings : Int
+evasionGiveUpReadings =
+    evasionCelestialStickyReadings * 50
+
+
+evasionOutOfTime : { readings : Int } -> Maybe String
+evasionOutOfTime evasion =
+    if evasionGiveUpReadings <= evasion.readings then
+        Just
+            ("Evaded for "
+                ++ String.fromInt evasion.readings
+                ++ " readings without the grid reading clean once, which is past the bound of "
+                ++ String.fromInt evasionGiveUpReadings
+                ++ ". A wormhole with somebody living in it is one this bot has no work in, so this is the end of the session rather than something to shout about: the ship is wherever the last evasion warp put it, cloaked if one is fitted. Nothing here is stuck -- there is nothing here to do."
+            )
+
+    else
+        Nothing
+
+
+{-| The counters bounding everything the leaving does.
+
+Advanced in `updateMemoryForNewReadingFromGame`, which is the only place that can
+write memory and the one place that never sees a decision -- so what they count
+is the **client's** answer rather than the branch's activity, and they keep
+counting whatever else holds the tree. That is the half #102's placement rule is
+about.
+
+`readings` and `warpUnexecutedReadings` count different things and it matters
+which is which: the first is how long this evasion has run at all, which is what
+ends the session, and the second is how many of those readings were spent
+commanding a warp that did not start, which is what fetches a person. An evasion
+that is warping between celestials perfectly happily runs the first up and keeps
+the second at zero.
+
+`longestWarpUnexecutedReadings` survives the reset, because a session whose worst
+retreat is over must still be able to say how bad it was.
+
+-}
+type alias EvasionCounters =
+    { readings : Int
+    , warpUnexecutedReadings : Int
+    , longestWarpUnexecutedReadings : Int
+    , cloakUnansweredReadings : Int
     }
+
+
+initEvasionCounters : EvasionCounters
+initEvasionCounters =
+    { readings = 0
+    , warpUnexecutedReadings = 0
+    , longestWarpUnexecutedReadings = 0
+    , cloakUnansweredReadings = 0
+    }
+
+
+{-| What one reading says about the leaving, in the terms the counters need.
+
+A record rather than a reading, so a case can fold a whole session through
+`evasionCountersAfterReading` and read the counters back -- which is how the one
+property this issue rests on gets executed rather than argued: a session of
+dirty, dirty, cannot-tell, dirty, clean resets on the last reading and on no
+earlier one.
+
+`gridIsClean` is `gridReadsClean`'s answer and nothing else, so a reading the bot
+**cannot see** never resets any of these. That is the same line the whole design
+rests on, read here rather than restated.
+
+-}
+type alias EvasionAnswerFromClient =
+    { gridIsClean : Bool
+    , shipIsWarping : Bool
+    , cloakAnsweredTheAsk : Bool
+    }
+
+
+evasionCountersAfterReading : EvasionAnswerFromClient -> EvasionCounters -> EvasionCounters
+evasionCountersAfterReading answer counters =
+    if answer.gridIsClean then
+        { initEvasionCounters
+            | longestWarpUnexecutedReadings = counters.longestWarpUnexecutedReadings
+        }
+
+    else
+        let
+            warpUnexecuted =
+                if answer.shipIsWarping then
+                    0
+
+                else
+                    counters.warpUnexecutedReadings + 1
+        in
+        { readings = counters.readings + 1
+        , warpUnexecutedReadings = warpUnexecuted
+        , longestWarpUnexecutedReadings =
+            max warpUnexecuted counters.longestWarpUnexecutedReadings
+        , cloakUnansweredReadings =
+            if answer.cloakAnsweredTheAsk then
+                0
+
+            else
+                counters.cloakUnansweredReadings + 1
+        }
+
+
+{-| Everything the leaving decides on, as plain readable facts.
+
+A record rather than a `BotDecisionContext`, for #106's reason and more sharply
+here than anywhere else in this file: this is the rule that decides whether the
+ship stays on a grid somebody else has arrived on, and a rule reachable only
+through a decision context is one no case can execute -- so it would be checked
+by being read, which is how a rule that resumes work on a reading the bot cannot
+see passes for one that works.
+
+`stillOnTheHarvestSite` is read off the overview rather than remembered, which is
+`huntAndHarvest`'s own argument turned around: harvestable clouds exist only
+inside a gas site, so a reading whose overview carries one is a reading taken on a
+site and nothing has to remember having warped.
+
+-}
+type alias EvasionSituation =
+    { gridIsClean : Bool
+    , stillOnTheHarvestSite : Bool
+    , shipIsWarping : Bool
+    , destination : Maybe RetreatDestination
+    , cloak : CloakSearch
+    , celestialsOnTheOverview : Int
+    , celestialRotation : Int
+    , counters : EvasionCounters
+    }
+
+
+{-| What the bot does about a grid that does not read clean.
+
+**One rule with the whole ordering in it**, `harvestStep`'s shape and for the
+same reason: every stage here can fail to be reachable, and each has to fall
+through to the next rather than holding the loop. The order is the issue's -- get
+out, cloak, keep scanning, bounce celestials at random ranges -- with two things
+in front of it that are not about leaving at all:
+
+  - **a clean grid resumes work**, and it is asked first because it is the exit.
+    `gridIsClean` is `gridReadsClean`'s answer, which is `True` for `GridIsClean`
+    and for nothing else, so a grid the bot cannot see never ends an evasion.
+    That is the line this whole issue rests on;
+  - **a ship already in warp is left alone**, because re-commanding a warp that is
+    going is how a cascade re-opens on every reading of a manoeuvre already doing
+    what it was told. `huntAndHarvest` declines the hunt warp for the same reason.
+
+Then:
+
+  - **still on the site with somewhere to go** warps out, and this is the only
+    rung that uses `retreatSearch`. Nowhere to go falls through rather than
+    stopping: sitting on a hostile grid because no bookmark is named is worse than
+    cloaking on it and worse again than bouncing off it;
+  - **a cloak fitted and not running** is switched on, unless it has been asked
+    for `cloakGiveUpReadings` readings and answered nothing. A fit with no cloak in
+    it, or one whose modules are not identified yet, falls straight through --
+    which is #463's own requirement and the mutation it names;
+  - **a celestial on the overview** is warped to, at a range drawn per attempt.
+    Which celestial rotates with the reading count, so an evasion that is not
+    working tries a different corner of the system;
+  - **nothing left** is a grid with no celestial at AU range on the overview, and
+    it says so rather than reading as a bot quietly waiting.
+
+-}
+type EvasionStep
+    = TheGridReadsCleanSoResumeWork
+    | WaitForTheWarpToLand
+    | WarpOutOfTheSite RetreatDestination
+    | ActivateTheCloak Int
+    | WarpToACelestial Int
+    | NothingLeftToLeaveWith
+
+
+evasionStep : EvasionSituation -> EvasionStep
+evasionStep situation =
+    if situation.gridIsClean then
+        TheGridReadsCleanSoResumeWork
+
+    else if situation.shipIsWarping then
+        WaitForTheWarpToLand
+
+    else
+        case ( situation.stillOnTheHarvestSite, situation.destination ) of
+            ( True, Just destination ) ->
+                WarpOutOfTheSite destination
+
+            _ ->
+                case situation.cloak of
+                    TheCloakIsFittedAndNotRunning index ->
+                        if situation.counters.cloakUnansweredReadings < cloakGiveUpReadings then
+                            ActivateTheCloak index
+
+                        else
+                            bounceOffACelestial situation
+
+                    _ ->
+                        bounceOffACelestial situation
+
+
+bounceOffACelestial : EvasionSituation -> EvasionStep
+bounceOffACelestial situation =
+    if situation.celestialsOnTheOverview < 1 then
+        NothingLeftToLeaveWith
+
+    else
+        WarpToACelestial
+            (modBy situation.celestialsOnTheOverview
+                (situation.celestialRotation // evasionCelestialStickyReadings)
+            )
+
+
+{-| Somewhere to bounce to: whatever the overview reports at AU range.
+
+`eve-online-mission-runner`'s `escapeCelestialsOnOverview`, ported with its
+reasons. Distance in AU means off this grid, which is the only property that
+matters when leaving, and it is self-correcting -- arriving turns that entry into
+a km-range one that no longer qualifies, so the next warp necessarily picks
+somewhere else.
+
+Deliberately **not** "anything whose name contains station", which is what killed
+that bot's run 102: an `Angel Asteroid Outpost` carries the object type
+`Asteroid Station - 1`, matched as a station, and the bot then waited 119 readings
+for a Dock button that site scenery never offers.
+
+Filtered on `_display`, because these rows are right-clicked and a hidden overview
+row's region belongs to whatever was recycled into it.
+
+-}
+celestialsToBounceOffOnTheOverview : ReadingFromGameClient -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+celestialsToBounceOffOnTheOverview readingFromGameClient =
+    readingFromGameClient.overviewWindows
+        |> List.concatMap .entries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter
+            (.objectDistance
+                >> Maybe.map (String.toUpper >> String.contains "AU")
+                >> Maybe.withDefault False
+            )
+
+
+evasionSituationFromContext : BotDecisionContext -> EvasionSituation
+evasionSituationFromContext context =
+    { gridIsClean = gridReadsClean (gridVerdict (gridEvidenceFromContext context))
+    , stillOnTheHarvestSite =
+        0
+            < (cloudSearchFromReading context.eventContext.botSettings
+                context.readingFromGameClient
+              ).cloudRowsInTheReading
+    , shipIsWarping =
+        context.readingFromGameClient.shipUI
+            |> Maybe.map shipIsWarping
+            |> Maybe.withDefault False
+    , destination = (retreatSearchFromContext context).destination
+    , cloak = cloakSearchFromContext context
+    , celestialsOnTheOverview =
+        celestialsToBounceOffOnTheOverview context.readingFromGameClient |> List.length
+    , celestialRotation = context.memory.readingsCount
+    , counters = context.memory.evasion
+    }
+
+
+{-| Command whatever `evasionStep` says is next, or decline so the harvest runs.
+
+`Nothing` for the one answer that is not about leaving, which is the shape
+`refreshTheDirectionalScanner` and every entry in `generalSetupInUserInterface`
+has: a clean grid falls straight through to the work rather than being wrapped in
+a branch announcing that the bot is not leaving.
+
+Nothing is decided here. This is the mapping from an answer onto the effects that
+carry it out, kept apart from the rule so that the ordering can be executed
+without a client and the effects read without one.
+
+-}
+actOnTheEvasionStep : BotDecisionContext -> EvasionSituation -> Maybe DecisionPathNode
+actOnTheEvasionStep context situation =
+    case evasionStep situation of
+        TheGridReadsCleanSoResumeWork ->
+            Nothing
+
+        WaitForTheWarpToLand ->
+            Just
+                (describeBranch
+                    "Leaving, and the ship is in warp -- wait for it to land rather than re-commanding a warp that is already going."
+                    waitForProgressInGame
+                )
+
+        WarpOutOfTheSite destination ->
+            Just (warpToTheRetreatDestination context destination)
+
+        ActivateTheCloak index ->
+            case fittedModulesFromContext context |> List.drop index |> List.head of
+                Just ( moduleButton, _ ) ->
+                    Just
+                        (describeBranch
+                            ("Cloak up -- module slot "
+                                ++ String.fromInt (index + 1)
+                                ++ " reads as a '"
+                                ++ cloakingDeviceTooltipMarker
+                                ++ "' and is not cycling ("
+                                ++ String.fromInt situation.counters.cloakUnansweredReadings
+                                ++ "/"
+                                ++ String.fromInt cloakGiveUpReadings
+                                ++ " readings it has been asked for and not answered)."
+                            )
+                            (EveOnline.BotFrameworkSeparatingMemory.clickModuleButtonButWaitIfClickedInPreviousStep
+                                context
+                                moduleButton
+                            )
+                        )
+
+                Nothing ->
+                    -- Unreachable: the index came from the same list on the same
+                    -- reading. Says so rather than pretending, because a silent
+                    -- wait here would be a branch reporting nothing and doing
+                    -- nothing.
+                    Just
+                        (describeBranch
+                            "The module row changed between reading it and pressing the cloak -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        WarpToACelestial index ->
+            case celestialsToBounceOffOnTheOverview context.readingFromGameClient |> List.drop index |> List.head of
+                Just celestial ->
+                    Just (warpToACelestialAtARandomRange context celestial)
+
+                Nothing ->
+                    Just
+                        (describeBranch
+                            "The overview changed between choosing a celestial and warping to it -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        NothingLeftToLeaveWith ->
+            Just
+                (describeBranch
+                    ("NOWHERE TO GO: the grid does not read clean, there is no retreat destination in this reading and nothing at AU range on the overview to bounce off. This hull has no guns and no tank worth the name, so there is nothing left to try. "
+                        ++ askForHelpToGetUnstuckText
+                    )
+                    waitForProgressInGame
+                )
+
+
+{-| Warp out of the site, to whichever rung `retreatSearch` answered.
+
+**One cascade for all three rungs**, because the difference between them is which
+node is right-clicked and which distance is taken and nothing else --
+`warpToTheHuntedSite`'s argument, which is why both of them build their menu with
+`warpCascadeWithin` rather than spelling the two levels out.
+
+`askForHelpToGetUnstuckText` rides on the description once the warp has been
+commanded for `warpNotExecutingAlarmReadings` readings with the ship never in
+warp, and **the branch still commands the warp**. See `describeWarpNotExecuting`
+for why that sentence is carried rather than branched to.
+
+-}
+warpToTheRetreatDestination : BotDecisionContext -> RetreatDestination -> DecisionPathNode
+warpToTheRetreatDestination context destination =
+    let
+        stillNotWarping =
+            if warpNotExecutingAlarmReadings <= context.memory.evasion.warpUnexecutedReadings then
+                " " ++ describeWarpNotExecuting context.memory.evasion.warpUnexecutedReadings
+
+            else
+                ""
+
+        leave what target menuDistance =
+            describeBranch
+                ("Get out -- warp to " ++ what ++ " at " ++ menuDistance ++ "." ++ stillNotWarping)
+                (useContextMenuCascade target (warpCascadeWithin menuDistance) context)
+    in
+    case destination of
+        ToAPrefixedBookmark bookmark ->
+            leave
+                ("the bookmark '"
+                    ++ bookmarkLabel bookmark.mainText
+                    ++ "', which carries '"
+                    ++ context.eventContext.botSettings.retreatBookmarkPrefix
+                    ++ "'"
+                )
+                ( bookmark.mainText, bookmark.uiNode )
+                warpAtZeroMenuEntry
+
+        ToTheHomeStructure entry ->
+            leave
+                ("the home structure '"
+                    ++ (entry.objectName |> Maybe.withDefault "")
+                    ++ "' on the overview, no bookmark carrying '"
+                    ++ context.eventContext.botSettings.retreatBookmarkPrefix
+                    ++ "' being in the Locations window"
+                )
+                ( entry.objectName |> Maybe.withDefault "the home structure", entry.uiNode )
+                warpAtZeroMenuEntry
+
+        ToAnyBookmarkAtAll bookmark ->
+            leave
+                ("'"
+                    ++ bookmarkLabel bookmark.mainText
+                    ++ "', which is simply the first bookmark there is"
+                )
+                ( bookmark.mainText, bookmark.uiNode )
+                warpAt100KmMenuEntry
+
+
+{-| Bounce to a celestial, at a range drawn fresh for this attempt.
+
+**Randomising the range is the point rather than a flourish**, which is #463's
+own emphasis: a bot that always lands at the same spot on the same celestial is
+trivially caught, and the client's own distance submenu is a ready-made set of
+seven ranges to draw from.
+
+The draw is from `randomIntegers`, the host's own supply, and it is made per
+reading rather than held. That is safe because only one reading of the cascade
+ever clicks a distance -- the earlier ones right-click the row and open the
+submenu -- so a fresh draw cannot change a choice that has already been acted on.
+`useRandomMenuEntry` is deliberately not used: it picks from every entry in the
+menu, and one of the entries in this one is `Set Default`.
+
+-}
+warpToACelestialAtARandomRange : BotDecisionContext -> EveOnline.ParseUserInterface.OverviewWindowEntry -> DecisionPathNode
+warpToACelestialAtARandomRange context celestial =
+    let
+        distance =
+            warpDistanceMenuEntries
+                |> Common.Basics.listElementAtWrappedIndex
+                    (context.randomIntegers |> List.head |> Maybe.withDefault 0)
+                |> Maybe.withDefault warpAt100KmMenuEntry
+
+        name =
+            celestial.objectName |> Maybe.withDefault "a celestial"
+    in
+    describeBranch
+        ("Stay gone -- the grid still does not read clean, so bounce to '"
+            ++ name
+            ++ "' at "
+            ++ distance
+            ++ " (drawn for this attempt; a fixed range is a fixed landing spot)."
+        )
+        (useContextMenuCascade ( name, celestial.uiNode ) (warpCascadeWithin distance) context)
+
+
+{-| What an operator reads about the leaving, on every reading.
+
+Printed whether or not anything is on the grid, because the numbers it carries
+are the ones an operator watches **climb**: a retreat approaching the alarm and
+one that is merely slow read identically unless the bound is shown beside the
+count. That is `describeRetreatLatencyFromProgress`'s own finding -- a first
+version of that clause read the sentence out of the source instead, and a
+mutation that dropped the bound from the count while leaving it in the sentence
+survived it.
+
+-}
+describeEvasion : EvasionCounters -> String
+describeEvasion counters =
+    if counters.readings < 1 then
+        "Evasion: not evading."
+            ++ (if counters.longestWarpUnexecutedReadings < 1 then
+                    ""
+
+                else
+                    " Worst this session: "
+                        ++ String.fromInt counters.longestWarpUnexecutedReadings
+                        ++ " consecutive readings deciding to leave with the ship not in warp."
+               )
+
+    else
+        "Evasion: "
+            ++ String.fromInt counters.readings
+            ++ "/"
+            ++ String.fromInt evasionGiveUpReadings
+            ++ " readings the grid has not read clean, and the session ends at that bound with the ship wherever the last warp put it. "
+            ++ (if counters.warpUnexecutedReadings < 1 then
+                    "The ship is in warp."
+
+                else
+                    String.fromInt counters.warpUnexecutedReadings
+                        ++ "/"
+                        ++ String.fromInt warpNotExecutingAlarmReadings
+                        ++ " consecutive readings deciding to leave with the ship not in warp"
+                        ++ (if warpNotExecutingAlarmReadings <= counters.warpUnexecutedReadings then
+                                " -- past the bound, and a person has been asked for."
+
+                            else
+                                "."
+                           )
+               )
 
 
 
@@ -3243,6 +4444,9 @@ initBotMemory =
     , miningRangeLastChange = Nothing
     , harvestCounters = initHarvestCounters
     , dscan = initDscanMemory
+    , evasion = initEvasionCounters
+    , warpNotExecutingLastChange = Nothing
+    , modulesUnidentifiedReadings = 0
     }
 
 
@@ -3260,6 +4464,7 @@ gasHufferDecisionRoot : BotDecisionContext -> DecisionPathNode
 gasHufferDecisionRoot context =
     ([ context.memory.messageBoxLastChange
      , context.memory.miningRangeLastChange
+     , context.memory.warpNotExecutingLastChange
      ]
         |> List.filterMap identity
         |> List.foldr describeBranch (gasHufferDecisionRootBeforeApplyingSettings context)
@@ -3268,39 +4473,65 @@ gasHufferDecisionRoot context =
             context.eventContext.botSettings.botStepDelayMilliseconds
 
 
-{-| Everything above the docked-or-in-space split, and what is deliberately not
-here yet.
+{-| Everything above the docked-or-in-space split, headed by the one bound that
+ends the session.
 
-**There is no `endSessionOnAnExpiredBound` head, because there is no bound to
-put in one.** The mission runner's #102 and saxrat's #133 both settled the shape
-a give-up that _ends the session_ has to take: it is asked from the head of this
-function, above the setup list, because the counter behind it advances in
+**`endSessionOnAnExpiredBound` is asked first, above the setup list**, which is
+the mission runner's #102 and saxrat's #133 and is placement rather than
+preference. The counter behind it advances in
 `updateMemoryForNewReadingFromGame` on every reading whatever the bot is doing,
-and a comparison asked only where the tree gets that far runs late by however
-long something above it holds. Run 30 took one to 10,811 against a bound of 200.
-Nothing here counts readings towards ending a session, so that head would be a
-`Maybe.map` over nothing.
+so a comparison asked only where the tree gets that far runs late by however long
+something above it holds -- run 30 took one to 10,811 against a bound of 200,
+because an undismissable window held `generalSetupInUserInterface` for three
+hours and forty-four minutes. `closeMessageBox`'s standoff bounds that one known
+starver here, but it is a bound on one of them rather than a guarantee about the
+list, and this bound is asked whatever holds it.
 
-It is named rather than left out silently, because the first thing this app
-grows that ends a session -- a pod recovery, or a retreat that gives up -- will
-inherit the question and would otherwise inherit the wrong answer by default.
-PR #115's rule is what decides it: **a give-up that ends the session bounds
-elapsed time and belongs where nothing can decline to ask it; a give-up that
-declines an action bounds effort and belongs where the action is.**
+PR #115's rule is what says it belongs here rather than beside the evasion: **a
+give-up that ends the session bounds elapsed time and belongs where nothing can
+decline to ask it; a give-up that declines an action bounds effort and belongs
+where the action is.** This one ends the session, has no state to reach and no
+click to make, so nothing has a reason to be placed over it. The evasion's other
+two bounds -- the warp alarm and the cloak -- decline an action apiece and are
+asked inside `evasionStep`, where the actions are.
 
 -}
 gasHufferDecisionRootBeforeApplyingSettings : BotDecisionContext -> DecisionPathNode
 gasHufferDecisionRootBeforeApplyingSettings context =
-    generalSetupInUserInterface
-        context.memory.messageBoxStandoff
-        context.previousStepsEffects
-        context.readingFromGameClient
-        |> Maybe.withDefault
-            (branchDependingOnDockedOrInSpace
-                { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
-                , ifSeeShipUI = huntAndHarvest context
-                }
-                context
+    case endSessionOnAnExpiredBound context of
+        Just expired ->
+            expired
+
+        Nothing ->
+            generalSetupInUserInterface
+                context.memory.messageBoxStandoff
+                context.previousStepsEffects
+                context.readingFromGameClient
+                |> Maybe.withDefault
+                    (branchDependingOnDockedOrInSpace
+                        { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
+                        , ifSeeShipUI = huntAndHarvest context
+                        }
+                        context
+                    )
+
+
+{-| End the session where the evasion has run past its bound.
+
+A `describeBranch` around `FinishSession` and nothing else -- no click, no wait,
+no menu -- which is what makes it evaluable on any reading at all and is the
+property the placement above depends on. One bound rather than a list, because
+this app has one thing that ends a session; the mission runner's has two and
+`List.filterMap`s them.
+
+-}
+endSessionOnAnExpiredBound : BotDecisionContext -> Maybe DecisionPathNode
+endSessionOnAnExpiredBound context =
+    evasionOutOfTime { readings = context.memory.evasion.readings }
+        |> Maybe.map
+            (\reason ->
+                describeBranch reason
+                    (Common.DecisionPath.endDecisionPath FinishSession)
             )
 
 
@@ -3343,29 +4574,52 @@ huntAndHarvest context shipUI =
             refresh
 
         Nothing ->
-            describeBranch
-                (describeSiteSearch site)
-                (describeBranch (describeCloudSearch search)
-                    (case search.chosen of
-                        Just cloud ->
-                            actOnTheHarvestStep context
-                                shipUI
-                                cloud
-                                (harvestSituationFromContext context shipUI cloud)
+            case actOnTheEvasionStep context (evasionSituationFromContext context) of
+                Just leaving ->
+                    describeBranch (describeRetreatSearch (retreatSearchFromContext context))
+                        (describeBranch (describeCloak (cloakSearchFromContext context)) leaving)
 
-                        Nothing ->
-                            if shipIsWarping shipUI then
-                                describeBranch "In warp -- wait for the grid the ship is going to." waitForProgressInGame
+                Nothing ->
+                    harvestTheCloudsOnThisGrid context shipUI site search
 
-                            else
-                                case site.hunted of
-                                    Just hunted ->
-                                        warpToTheHuntedSite context hunted
 
-                                    Nothing ->
-                                        describeBranch nothingToHuntInSpace waitForProgressInGame
-                    )
-                )
+{-| The harvesting half, reached only on a reading whose grid reads clean.
+
+Split out of `huntAndHarvest` when #463 put the leaving in front of it, so that
+the two halves are two expressions rather than one nest -- the ordering is what
+matters here and it should be readable in one screen.
+
+-}
+harvestTheCloudsOnThisGrid :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.ShipUI
+    -> SiteSearch
+    -> CloudSearch
+    -> DecisionPathNode
+harvestTheCloudsOnThisGrid context shipUI site search =
+    describeBranch
+        (describeSiteSearch site)
+        (describeBranch (describeCloudSearch search)
+            (case search.chosen of
+                Just cloud ->
+                    actOnTheHarvestStep context
+                        shipUI
+                        cloud
+                        (harvestSituationFromContext context shipUI cloud)
+
+                Nothing ->
+                    if shipIsWarping shipUI then
+                        describeBranch "In warp -- wait for the grid the ship is going to." waitForProgressInGame
+
+                    else
+                        case site.hunted of
+                            Just hunted ->
+                                warpToTheHuntedSite context hunted
+
+                            Nothing ->
+                                describeBranch nothingToHuntInSpace waitForProgressInGame
+            )
+        )
 
 
 {-| Press the scan key, where the interval says one is due.
@@ -3428,7 +4682,7 @@ already said _why_ nothing is hunted on the same reading.
 -}
 nothingToHuntInSpace : String
 nothingToHuntInSpace =
-    "In space with no harvestable cloud on the overview and no site to hunt -- nothing to warp to, so it is waiting on purpose. This bot watches the grid and says what is on it, and leaving is #463 and is not here, so nothing about this wait is a safe place to leave a ship."
+    "In space with no harvestable cloud on the overview and no site to hunt -- nothing to warp to, so it is waiting on purpose. The grid reads clean on this reading, which is the only reason this wait is reached at all; anything arriving takes the ship out of it (#463). What is still missing here is the deposit run (#464), so a hold that fills is a hold nothing empties."
 
 
 {-| The things that have to be dealt with before any decision about the game.
@@ -3963,15 +5217,89 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         -- counters cannot come to be about a cloud the bot was not working on.
         cloudChosen =
             (cloudSearchFromReading context.botSettings context.readingFromGameClient).chosen
+
+        shipModules =
+            botMemoryBefore.shipModules
+                |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory
+                    context.readingFromGameClient
+
+        moduleButtons =
+            context.readingFromGameClient.shipUI
+                |> Maybe.map .moduleButtons
+                |> Maybe.withDefault []
+
+        -- The same `cloakAmongFittedModules` the decision and the status line
+        -- ask, over the memory this reading has just written rather than the one
+        -- before it -- so a tooltip that landed on this reading counts on this
+        -- reading. #102: one rule, three readers.
+        cloakNow =
+            moduleButtons
+                |> List.map
+                    (\moduleButton ->
+                        { tooltipTexts =
+                            EveOnline.BotFramework.getModuleButtonTooltipFromModuleButton
+                                shipModules
+                                moduleButton
+                                |> Maybe.map
+                                    (.allContainedDisplayTextsWithRegion >> List.map Tuple.first)
+                                |> Maybe.withDefault []
+                        , runningState = moduleRunningState moduleButton
+                        }
+                    )
+                |> cloakAmongFittedModules
+
+        gridIsClean =
+            gridReadsClean
+                (gridVerdict
+                    (gridEvidenceFromReading (hostileTrustFromSettings context.botSettings)
+                        { secondsSinceScan =
+                            secondsSinceLastScan
+                                { nowMilliseconds = context.timeInMilliseconds
+                                , dscan = botMemoryBefore.dscan
+                                }
+                        , staleAfterSeconds =
+                            dscanStaleAfterSeconds context.botSettings.dscanIntervalSeconds
+                        }
+                        context.readingFromGameClient
+                    )
+                )
+
+        evasion =
+            evasionCountersAfterReading
+                { gridIsClean = gridIsClean
+                , shipIsWarping =
+                    context.readingFromGameClient.shipUI
+                        |> Maybe.map shipIsWarping
+                        |> Maybe.withDefault False
+
+                -- A fit with no cloak in it, and one whose modules are not
+                -- identified yet, both count as answered: there is nothing being
+                -- asked for, so there is nothing to bound.
+                , cloakAnsweredTheAsk =
+                    case cloakNow of
+                        TheCloakIsFittedAndNotRunning _ ->
+                            False
+
+                        _ ->
+                            True
+                }
+                botMemoryBefore.evasion
+
+        -- Said at the root on the one reading the warp bound is crossed. The
+        -- count only ever rises while one evasion runs, so the crossing happens
+        -- once per evasion rather than once per reading past it.
+        warpNotExecutingLastChange =
+            warpNotExecutingAlarm
+                { before = botMemoryBefore.evasion.warpUnexecutedReadings
+                , now = evasion.warpUnexecutedReadings
+                }
     in
     { readingsCount = botMemoryBefore.readingsCount + 1
     , lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
             |> List.filterMap identity
             |> List.head
-    , shipModules =
-        botMemoryBefore.shipModules
-            |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
+    , shipModules = shipModules
     , messageBoxStandoff = messageBoxStandoff
     , messageBoxLastChange = messageBoxLastChange
     , miningRangeRefusal = miningRangeRefusal
@@ -4001,17 +5329,46 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 context.readingFromGameClient.directionalScannerWindow /= Nothing
             }
             botMemoryBefore.dscan
+    , evasion = evasion
+    , warpNotExecutingLastChange = warpNotExecutingLastChange
+
+    -- Advanced only on a reading that could have learned something and did not:
+    -- a ship UI in the reading, and at least one module button whose tooltip is
+    -- still unknown. So a docked session, or one whose modules are all
+    -- identified, spends none of the budget.
+    , modulesUnidentifiedReadings =
+        if
+            (moduleButtons |> List.isEmpty |> not)
+                && (moduleButtons
+                        |> List.any
+                            (EveOnline.BotFramework.getModuleButtonTooltipFromModuleButton shipModules
+                                >> (==) Nothing
+                            )
+                   )
+        then
+            botMemoryBefore.modulesUnidentifiedReadings + 1
+
+        else
+            botMemoryBefore.modulesUnidentifiedReadings
     }
 
 
 {-| What an operator watching a run reads on every reading.
 
 Deliberately opens with what the bot **cannot** do, because everything else here
-is a bot that looks like it is working: it warps, orbits, locks and harvests, and
-a console reporting that while the ship has no way of noticing a stranger on the
-grid would be a console reporting success for the half that is missing. That is
-the failure this repo is named after, and the half that is missing is the one
-that keeps the ship.
+is a bot that looks like it is working: it warps, orbits, locks, harvests,
+notices and leaves, and a console reporting all of that while the ship crawls out
+of a hostile grid with its propulsion module off would be a console reporting
+success for the half that is missing. That is the failure this repo is named
+after, and the marker has moved with each issue that closed one -- `SCAFFOLD
+ONLY`, then `HARVESTS BUT CANNOT LEAVE`, then `NOTICES BUT CANNOT LEAVE`, and now
+the propulsion module, which is the worse of the two halves left because it is
+the one on the survival path.
+
+The retreat and cloak clauses are printed on **every** reading rather than only
+while evading, because the reading an operator wants them on is the quiet one
+before anything arrives: a Locations window nobody opened and a cloak nobody
+identified are both cheap to fix then and not fixable at all afterwards.
 
 The harvest clause and the cloud clause are only printed where the reading has
 them, since a docked reading has no grid and a clause an operator reads on every
@@ -4040,7 +5397,7 @@ statusTextFromState context =
                 ( Nothing, _ ) ->
                     []
     in
-    [ "NOTICES BUT CANNOT LEAVE: this bot warps to a gas site, harvests it and watches the grid, and it does not retreat (#463), deposit the hold (#464) or keep the propulsion module on across a warp (#465)."
+    [ "LEAVES WITHOUT ITS PROPULSION MODULE: this bot warps to a gas site, harvests it, watches the grid and leaves when something arrives (#463) -- and nothing here keeps the propulsion module on across a warp (#465), so it evades slower than it flew in, and nothing deposits the hold when it fills (#464)."
     , describeGrid (gridEvidenceFromContext context)
     , describeDscanSightingsFromReading context.readingFromGameClient
     , describeDscanCadence
@@ -4067,7 +5424,9 @@ statusTextFromState context =
                    )
                 ++ "."
            , describeHostileTrust (hostileTrustFromSettings settings)
-           , describeRetreatCover (retreatCoverFromContext context)
+           , describeRetreatSearch (retreatSearchFromContext context)
+           , describeCloak (cloakSearchFromContext context)
+           , describeEvasion context.memory.evasion
            , "Deposit at: "
                 ++ Maybe.withDefault "nowhere named ('home-structure-name' is unset)" settings.homeStructureName
                 ++ "."

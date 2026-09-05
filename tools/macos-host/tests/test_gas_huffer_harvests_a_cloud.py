@@ -687,14 +687,16 @@ class AHiddenOverviewRowIsNeverActedOnTest(unittest.TestCase):
         of `cloudSearch`, and the filter is applied there.
 
         #462 added the second reader of the overview and it is deliberately
-        *not* filtered, which is why this case names both rather than counting
-        one. The two want opposite directions from a hidden row. `cloudSearch`
-        is choosing something to click, and a hidden row's region belongs to
-        whatever was recycled into it, so acting on one acts on the wrong
-        object. `gridEvidenceFromReading` is choosing nothing: it asks whether
-        anything on this grid means leave, a row it declined to read is a thing
-        it would not have left over, and reading a recycled row's stale name is
-        an unnecessary retreat rather than a click on a stranger's ship.
+        *not* filtered, which is why this case names every reader rather than
+        counting one. The split is between readers that **click** a row and the
+        one that merely judges it. `cloudSearch`, `retreatSearch` and
+        `celestialsToBounceOffOnTheOverview` all end in a right-click or a click
+        at the row's own screen position, and a hidden row's region belongs to
+        whatever was recycled into it, so acting on one acts on the wrong object.
+        `gridEvidenceFromReading` is choosing nothing: it asks whether anything
+        on this grid means leave, a row it declined to read is a thing it would
+        not have left over, and reading a recycled row's stale name is an
+        unnecessary retreat rather than a click on a stranger's ship.
         """
         body = collapsed(block("cloudSearch"))
         self.assertIn("List.filter overviewEntryIsDisplayed", body)
@@ -702,11 +704,19 @@ class AHiddenOverviewRowIsNeverActedOnTest(unittest.TestCase):
             bot_source()).items()
             if ".overviewWindows" in collapsed(text)]
         self.assertEqual(
-            readers, ["cloudSearchFromReading", "gridEvidenceFromReading"],
+            readers, ["cloudSearchFromReading", "gridEvidenceFromReading",
+                      "retreatSearchFromContext",
+                      "celestialsToBounceOffOnTheOverview"],
             readers)
         self.assertNotIn(
             "overviewEntryIsDisplayed",
             collapsed(block("gridEvidenceFromReading")))
+        # #463's own two, which do click, and which therefore filter where the
+        # rows are chosen rather than where they are read out of the reading.
+        for clicks in ("retreatSearch", "celestialsToBounceOffOnTheOverview"):
+            with self.subTest(clicks):
+                self.assertIn("List.filter overviewEntryIsDisplayed",
+                              collapsed(block(clicks)))
 
 
 class ThePrefixNarrowsWithoutReorderingTest(unittest.TestCase):
@@ -1243,10 +1253,15 @@ class TheGridIsWhatSaysTheShipHasArrivedTest(unittest.TestCase):
     carries one is a reading taken on a site -- the same argument saxrat's gate
     branch makes about acceleration gates, and it needs no memory of what the
     bot asked for.
+
+    #463 split the harvesting out of `huntAndHarvest` into
+    `harvestTheCloudsOnThisGrid`, because the leaving now sits in front of it and
+    a nest holding both was one screen too long to read the ordering off. These
+    cases follow the harvesting rather than the name.
     """
 
     def test_the_in_space_branch_harvests_before_it_warps(self):
-        body = collapsed(block("huntAndHarvest"))
+        body = collapsed(block("harvestTheCloudsOnThisGrid"))
         for named in ("actOnTheHarvestStep", "warpToTheHuntedSite"):
             with self.subTest(named):
                 self.assertIn(named, body)
@@ -1256,7 +1271,7 @@ class TheGridIsWhatSaysTheShipHasArrivedTest(unittest.TestCase):
     def test_a_ship_in_warp_is_not_sent_warping_again(self):
         """Re-opening the cascade on every reading of a warp that is already
         going where it was told is the repeat this declines."""
-        body = collapsed(block("huntAndHarvest"))
+        body = collapsed(block("harvestTheCloudsOnThisGrid"))
         self.assertIn("shipIsWarping shipUI", body)
         self.assertIn("warpToTheHuntedSite", body)
         self.assertLess(body.index("shipIsWarping shipUI"),
