@@ -3538,7 +3538,21 @@ describeRetreatSearch search =
                     ++ String.fromInt (List.length search.bookmarksCarryingThePrefix)
                     ++ " carrying '"
                     ++ search.settings.bookmarkPrefix
-                    ++ "'."
+                    ++ "'"
+                    ++ (if List.isEmpty search.bookmarksCarryingThePrefix then
+                            "."
+
+                        else
+                            -- Named rather than counted, because the question an
+                            -- operator asks of this clause is "why did it not
+                            -- take mine", and a count cannot answer it. These
+                            -- are labels rather than whole rows for
+                            -- `bookmarkLabel`'s reason: a name they cannot find
+                            -- in their own client is worse than none.
+                            ": "
+                                ++ String.join ", " search.bookmarksCarryingThePrefix
+                                ++ "."
+                       )
 
             else
                 "window not open."

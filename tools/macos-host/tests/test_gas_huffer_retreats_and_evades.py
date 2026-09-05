@@ -459,10 +459,15 @@ class TheLabelIsTheFirstCellTest(unittest.TestCase):
         self.assertEqual(trailing, FICTIONAL_SAFE)
 
     def test_a_folder_named_for_the_prefix_is_not_a_retreat_target(self):
-        """The mutation this exists for: matching the blob rather than the label.
+        """The widening this exists for: matching the blob, or matching it
+        loosely.
 
         Both rows below carry the prefix *somewhere*, and only the first carries
-        it where the operator put it.
+        it where the operator put it. `String.startsWith` on the blob happens to
+        agree with `String.startsWith` on the label for any prefix that does not
+        itself span the separator, so what this case really separates is the
+        `contains`-shaped widening -- which is the direction a later edit would
+        take to "make it match more bookmarks".
         """
         answers = self.repl.evaluate([
             "bookmarkLabelStartsWithPrefix \"*\" %s" % json.dumps(
@@ -471,6 +476,25 @@ class TheLabelIsTheFirstCellTest(unittest.TestCase):
                 FICTIONAL_PLAIN_BOOKMARK + CELL + "*" + FICTIONAL_FOLDER),
         ])
         self.assertEqual(answers, [True, False])
+
+    def test_the_label_is_what_the_operator_is_shown_as_well(self):
+        """`bookmarkLabel` has two readers and the second is the one a person
+        acts on: the clause and the decision line both name the bookmark, and a
+        blob printed there is a name nobody can find in their own client.
+
+        Which is also what makes the split load-bearing rather than decorative --
+        for a prefix that does not span the separator the *match* would answer
+        the same either way, and the printed name would not.
+        """
+        printed = self.repl.strings([
+            "describeRetreatSearch { settings ="
+            " { bookmarkPrefix = \"*\", homeStructureName = Nothing }"
+            ", locationsWindowIsOpen = True, bookmarksInTheWindow = 2"
+            ", bookmarksCarryingThePrefix = [ bookmarkLabel %s ]"
+            ", homeStructureRowsOnTheOverview = [], destination = Nothing }"
+            % json.dumps(FICTIONAL_SAFE + CELL + FICTIONAL_FOLDER)])[0]
+        self.assertIn(FICTIONAL_SAFE, printed)
+        self.assertNotIn(FICTIONAL_FOLDER, printed)
 
     def test_the_prefix_is_matched_at_the_front_and_case_is_not_folded(self):
         """`String.startsWith`, which is narrower than the substring match this
@@ -538,6 +562,9 @@ class TheThreeRungsAndTheFallThroughTest(unittest.TestCase):
         self.assertIn("at Within 0 m", printed)
         self.assertNotIn(FICTIONAL_STRUCTURE, printed)
         self.assertNotIn(FICTIONAL_PLAIN_BOOKMARK, printed)
+        # And the name is the label rather than the row, since a name an
+        # operator cannot find in their own client is worse than none.
+        self.assertNotIn(FICTIONAL_FOLDER, printed)
 
     def test_the_home_structure_is_taken_where_no_bookmark_carries_the_prefix(self):
         printed = self.rung([
@@ -568,6 +595,29 @@ class TheThreeRungsAndTheFallThroughTest(unittest.TestCase):
         printed = self.rung([overview_window([structure_row()])])
         self.assertIn("NOWHERE TO RUN TO", printed)
         self.assertNotIn(FICTIONAL_STRUCTURE, printed)
+
+    def test_the_home_structure_name_is_matched_whole_rather_than_loosely(self):
+        """`siteCellMatches`, which is what `anomaly-group` already promises an
+        operator: whole and case-insensitive, with a trailing `*` meaning a
+        prefix and nothing else widening it.
+
+        The exactness is the half worth executing. `attack-object` records what a
+        substring cost this codebase once -- a wreck's Type is its owner's name
+        with `Wreck` appended, so the bot fired on the corpse of what it had just
+        killed -- and here the cost is a retreat aimed at whatever structure
+        happens to share a word with the one the operator named.
+        """
+        partial, exact, prefix, cased = [
+            self.rung([overview_window([structure_row()])], home=home)
+            for home in ("Example Refinery", FICTIONAL_STRUCTURE,
+                         "Fictional IX*", FICTIONAL_STRUCTURE.upper())]
+        self.assertIn("NOWHERE TO RUN TO", partial)
+        self.assertIn("so to the home structure", exact)
+        self.assertIn("so to the home structure", prefix)
+        # Case is folded here and not on the bookmark prefix, and the difference
+        # is deliberate: this is a name the *client* writes and an operator
+        # copies, where the prefix is a marker they type themselves.
+        self.assertIn("so to the home structure", cased)
 
     def test_a_hidden_home_structure_row_is_not_clicked(self):
         """The overview virtualises: a hidden row's region belongs to whatever
@@ -824,8 +874,15 @@ class TheCloakDegradesCleanlyTest(unittest.TestCase):
         of the session."""
         body = collapsed(top_level_declarations(bot_source())[
             "identifyTheModulesFitted"])
-        self.assertIn("moduleIdentificationGiveUpReadings", body)
-        self.assertIn("modulesUnidentifiedReadings", body)
+        # The comparison's *form*, not the two names -- the branch prints both
+        # of them in its own decision line, so a guard neutralised to `if False`
+        # leaves a body that still mentions each and a substring check that
+        # still passes. #109's status clause and #145's named button each cost
+        # this repo one survived mutation for exactly that reason.
+        self.assertIn(
+            "if moduleIdentificationGiveUpReadings <="
+            " context.memory.modulesUnidentifiedReadings then Nothing else",
+            body)
         self.assertIn("readShipUIModuleButtonTooltipWhereNotYetInMemory", body)
         acting = collapsed(top_level_declarations(bot_source())[
             "actOnTheHarvestStep"])
@@ -1294,30 +1351,32 @@ class TheMutationsThisFileCatches(unittest.TestCase):
         (`String.trim >> (==) "Warp to Within (0 m)"`) --
         `TheWarpMenuIsMatchedOnItsPrefixTest
         .test_it_survives_a_different_parenthesised_default`.
-    2.  the prefix match weakened to `String.contains`, so the entry is found
-        anywhere in a menu -- same class,
-        `test_a_menu_missing_the_entry_answers_err_rather_than_wedging`, where a
-        menu with no warp entry then matches nothing and the cascade would have
-        needed a different failure.
-    3.  the submenu match loosened from `useMenuEntryWithTextEqual` to
-        `...TextContaining`, so `Within 0 m` no longer separates from
-        `Within 10 km` under a shorter search string --
-        `test_the_submenu_distance_is_matched_exactly`.
+    2.  the prefix match written as `String.endsWith`, which is the plausible
+        typo -- every case in that class, beginning with
+        `test_the_top_level_entry_is_found_by_its_prefix`.
+    3.  `warpCascadeWithin` ignoring its argument and always taking
+        `warpAtZeroMenuEntry` -- `test_the_submenu_distance_is_matched_exactly`
+        and `TheOneCascadeDrivesEveryWarpTest`.
     4.  `Set Default` added to `warpDistanceMenuEntries` --
         `test_set_default_is_not_one_of_the_distances_this_bot_draws_from`.
     5.  `warpAt100KmMenuEntry` written as `"Within 100km"` --
+        `test_any_bookmark_at_all_is_the_last_rung` and
         `test_both_named_distances_are_entries_the_client_offers`.
-    6.  `bookmarkLabelStartsWithPrefix` matching the whole `mainText` rather than
-        the label -- `TheLabelIsTheFirstCellTest
-        .test_a_folder_named_for_the_prefix_is_not_a_retreat_target`.
-    7.  the prefix match weakened to `stringContainsIgnoringCase` --
-        `test_the_prefix_is_matched_at_the_front_and_case_is_not_folded`.
+    6.  `bookmarkLabel` not splitting, so the blob is what is matched *and*
+        printed -- `TheLabelIsTheFirstCellTest
+        .test_the_label_is_taken_from_in_front_of_the_separator` and
+        `test_the_label_is_what_the_operator_is_shown_as_well`.
+    7.  the prefix match weakened to `stringContainsIgnoringCase`, on the label
+        or on the blob -- `test_the_prefix_is_matched_at_the_front_and_case_is_
+        not_folded` and `test_a_folder_named_for_the_prefix_is_not_a_retreat_
+        target`.
     8.  `retreatSearch`'s rungs reordered so any bookmark outranks a prefixed one
         -- `TheThreeRungsAndTheFallThroughTest
         .test_a_prefixed_bookmark_outranks_everything_beside_it`.
-    9.  the home-structure rung reached with `Maybe.withDefault ""` for an unset
-        `home-structure-name`, so every structure matches --
-        `test_the_home_structure_is_not_taken_where_the_setting_is_unset`.
+    9.  the home-structure name matched with `stringContainsIgnoringCase` rather
+        than `siteCellMatches`, so a structure sharing a word with the one the
+        operator named is warped to -- `test_the_home_structure_name_is_matched_
+        whole_rather_than_loosely`.
     10. the `_display` filter dropped from the home-structure rung, so a
         virtualised row is right-clicked --
         `test_a_hidden_home_structure_row_is_not_clicked`, and
@@ -1359,8 +1418,13 @@ class TheMutationsThisFileCatches(unittest.TestCase):
     22. the identification hover asked above the harvest loop rather than from
         `NothingLeftToCommand` -- `test_the_identification_hover_is_bounded_and_
         spends_quiet_readings`.
-    23. its bound dropped, so a tooltip that never lands is hovered for the rest
-        of the session -- same case.
+    23. its guard neutralised to `if False`, so a tooltip that never lands is
+        hovered for the rest of the session -- same case. **This one survived the
+        first sweep**, and the hole was real: the branch prints both the counter
+        and the bound in its own decision line, so a case asserting the two names
+        appear passed on a guard that could not fire. The comparison's *form* is
+        what is asserted now, which is the correction #109's status clause and
+        #145's named button each made once already.
     24. `warpNotExecutingAlarm`'s crossing weakened to `<=`, so the line repeats
         -- `TheWarpThatDoesNotTakeIsReportedAndStillCommandedTest
         .test_the_alarm_fires_once_on_the_reading_the_bound_is_crossed`.
@@ -1377,9 +1441,11 @@ class TheMutationsThisFileCatches(unittest.TestCase):
     29. the celestial choice taken fresh every reading rather than rotating --
         `TheOrderingOfTheLeavingTest
         .test_the_celestial_choice_rotates_rather_than_retrying_one`.
-    30. the bounce distance pinned to `warpAtZeroMenuEntry` --
+    30. the bounce distance pinned to `warpAtZeroMenuEntry` rather than drawn --
         `TheOneCascadeDrivesEveryWarpTest
-        .test_the_bounce_draws_its_range_rather_than_taking_a_fixed_one`.
+        .test_the_bounce_draws_its_range_rather_than_taking_a_fixed_one`. A bot
+        that always lands at the same spot on the same celestial is trivially
+        caught, which is #463's own reason for the draw.
     31. the fallback rung taking `warpAtZeroMenuEntry` instead of 100 km --
         `test_the_retreat_takes_zero_for_the_first_two_rungs_and_100km_for_the_
         last`, which is #463's own named mutation.
