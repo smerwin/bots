@@ -883,7 +883,7 @@ def _windows_for(pid):
     return rows
 
 
-def find_eve_processes():
+def find_eve_processes(character_name=None):
     """Returns [{"processId": int, "mainWindowId": str, "mainWindowTitle":
     str, "mainWindowZIndex": int}, ...] -- matches
     VolatileProcessInterface.GameClientProcessSummaryStruct. The
@@ -893,48 +893,91 @@ def find_eve_processes():
     with whichever window we can find for it, checking both possible
     owners. Picks the largest layer>=0 window by area (a fullscreen game
     window can have smaller overlay windows -- e.g. the reveal-on-hover
-    menu bar strip -- that would otherwise be picked by accident)."""
+    menu bar strip -- that would otherwise be picked by accident).
+
+    Every EVE client shares the one bundle ID (com.ccpgames.eveonline), so
+    with two accounts logged in on the same Mac `lsappinfo list` reports it
+    twice and there is nothing in the bundle to tell them apart -- only the
+    window title does, since the client puts the character name in it
+    ("EVE - <character>"). The single-client case that used to overwrite a
+    scalar `game_pid` on every match (last one in lsappinfo's own listing
+    wins, silently) is exactly this repo's signature failure aimed at itself:
+    two bots would each start reading one client fine and then post input at
+    whichever client the *other* one's caller happened to resolve to.
+
+    So every candidate is collected rather than the last one kept, and
+    `character_name` (matched case-insensitively against the window title,
+    same as this repo's own `stringContainsIgnoringCase` convention) picks
+    among them. With no name given, one candidate is unambiguous and is
+    returned exactly as before; more than one is refused -- printing what was
+    found and asking for a name -- rather than guessing, because a wrong
+    guess here means synthetic input landing on the wrong person's account."""
     if IS_WINDOWS:
         return win_platform.find_eve_processes()
     out = subprocess.run(["lsappinfo", "list"], capture_output=True, text=True, check=True)
     text = out.stdout
-    game_pid = None
+    game_pids = []
     launcher_pid = None
     for m in re.finditer(r'bundleID="([^"]+)"[^\x00]*?pid = (\d+)', text):
         bundle, pid = m.group(1), int(m.group(2))
         if bundle == "com.ccpgames.eveonline":
-            game_pid = pid
+            if pid not in game_pids:
+                game_pids.append(pid)
         elif bundle == "com.ccpgames.eve-online-launcher":
             launcher_pid = pid
-    if game_pid is None:
+    if not game_pids:
         return []
 
-    windows = [w for w in _windows_for(game_pid) if w["layer"] >= 0]
-    if not windows and launcher_pid:
-        windows = [w for w in _windows_for(launcher_pid) if w["layer"] >= 0]
-    if not windows:
-        # lsappinfo found the process, so this is not the same "no EVE Online
-        # client process" the caller's own message reads it as -- that wording
-        # belongs to game_pid being None above. A found pid with no matching
-        # window most often means a missing Screen Recording grant on whatever
-        # terminal app is running this host: without it every window's title
-        # comes back unreadable, which WINDOW_LINE_RE now still parses (see
-        # above) rather than silently dropping the line, so this path should be
-        # rare -- but if it fires, the log should say so rather than leaving an
-        # operator staring at "I did not find an EVE Online client process"
-        # for a process that plainly was found.
-        print(f"# find_eve_processes: found the EVE process (pid {game_pid}) but no "
-              "window for it -- if this persists, check Screen Recording permission "
-              "for this terminal app in System Settings > Privacy & Security",
+    candidates = []
+    for game_pid in game_pids:
+        windows = [w for w in _windows_for(game_pid) if w["layer"] >= 0]
+        if not windows and launcher_pid and len(game_pids) == 1:
+            windows = [w for w in _windows_for(launcher_pid) if w["layer"] >= 0]
+        if not windows:
+            # lsappinfo found the process, so this is not the same "no EVE
+            # Online client process" the caller's own message reads it as --
+            # that wording belongs to game_pids being empty above. A found
+            # pid with no matching window most often means a missing Screen
+            # Recording grant on whatever terminal app is running this host:
+            # without it every window's title comes back unreadable, which
+            # WINDOW_LINE_RE now still parses (see above) rather than
+            # silently dropping the line, so this path should be rare -- but
+            # if it fires, the log should say so rather than leaving an
+            # operator staring at "I did not find an EVE Online client
+            # process" for a process that plainly was found.
+            print(f"# find_eve_processes: found the EVE process (pid {game_pid}) but no "
+                  "window for it -- if this persists, check Screen Recording permission "
+                  "for this terminal app in System Settings > Privacy & Security",
+                  file=sys.stderr)
+            continue
+        best = max(windows, key=lambda w: w["w"] * w["h"])
+        candidates.append({
+            "processId": game_pid,
+            "mainWindowId": str(best["window"]),
+            "mainWindowTitle": best["name"] or "EVE",
+            "mainWindowZIndex": 0,
+        })
+
+    if character_name is not None:
+        matches = [c for c in candidates
+                   if character_name.lower() in (c["mainWindowTitle"] or "").lower()]
+        if len(matches) == 1:
+            return matches
+        titles = ", ".join(repr(c["mainWindowTitle"]) for c in candidates) or "none"
+        print(f"# find_eve_processes: {len(matches)} window(s) matched character name "
+              f"{character_name!r} among [{titles}] -- need exactly one, refusing to guess",
               file=sys.stderr)
         return []
-    best = max(windows, key=lambda w: w["w"] * w["h"])
-    return [{
-        "processId": game_pid,
-        "mainWindowId": str(best["window"]),
-        "mainWindowTitle": best["name"] or "EVE",
-        "mainWindowZIndex": 0,
-    }]
+
+    if len(candidates) == 1:
+        return candidates
+
+    if len(candidates) > 1:
+        titles = ", ".join(repr(c["mainWindowTitle"]) for c in candidates)
+        print(f"# find_eve_processes: {len(candidates)} EVE clients running "
+              f"([{titles}]) and no character name given -- refusing to guess which "
+              "one to drive; pass a character name", file=sys.stderr)
+    return []
 
 
 def get_window_rect(window_number):
@@ -1525,7 +1568,17 @@ def synthetic_kills_node(kills):
 
 
 class VolatileHost:
-    def __init__(self, game_log=None):
+    def __init__(self, game_log=None, character_name=None):
+        # Which EVE client to drive when more than one is running -- see
+        # find_eve_processes' own doc comment. Read by handle_request on
+        # every ListGameClientProcessesRequest, so it has to live here and
+        # not only on the TaskDispatcher that owns this object -- an
+        # AttributeError here is caught by run_task's blanket except and
+        # turned into ProcessNotFound, which the Elm framework reads as "the
+        # volatile process died" and answers by tearing it down and
+        # recreating it, forever, since the same missing attribute recurs on
+        # every retry.
+        self.character_name = character_name
         self.roots = {}          # processId -> ui root address (int)
         self.root_search = {}    # processId -> {"begin": ms, "thread": Thread, "result": addr|None|"pending"}
         self.metatype = {}       # processId -> metatype addr
@@ -1565,7 +1618,7 @@ class VolatileHost:
     def handle_request(self, request_json_str):
         req = json.loads(request_json_str)
         if "ListGameClientProcessesRequest" in req:
-            procs = find_eve_processes()
+            procs = find_eve_processes(self.character_name)
             if procs:
                 self.game_pid = procs[0]["processId"]
                 self.game_window_title = procs[0].get("mainWindowTitle")
@@ -2331,11 +2384,17 @@ class ConnectionLostWatch:
 
 
 class TaskDispatcher:
-    def __init__(self, execute_input=False, capture_screenshots=False, game_log=None):
-        self.volatile = VolatileHost(game_log=game_log)
+    def __init__(self, execute_input=False, capture_screenshots=False, game_log=None,
+                 character_name=None):
+        self.volatile = VolatileHost(game_log=game_log, character_name=character_name)
         self._process_ids = {}
         self.execute_input = execute_input
         self.capture_screenshots = capture_screenshots
+        # Which EVE client to drive when more than one is running -- see
+        # find_eve_processes' own doc comment. None is fine with exactly one
+        # client up; with two, every ListGameClientProcessesRequest would
+        # otherwise refuse rather than guess.
+        self.character_name = character_name
         self._scale_x = 1.0
         self._scale_y = 1.0
         # How far the game's canvas sits inside its window, in game pixels.
@@ -2436,7 +2495,7 @@ class TaskDispatcher:
             return ["# CONNECTION LOST: cannot click Quit -- no window read has"
                     " calibrated the screen origin yet, so %s is not a place on"
                     " the screen" % (point,)]
-        processes = find_eve_processes()
+        processes = find_eve_processes(self.character_name)
         if not processes:
             return ["# CONNECTION LOST: cannot click Quit -- no client window"
                     " to click in"]
@@ -3148,7 +3207,7 @@ def tick_bound_note(tick, elapsed_seconds, decisions, abandoned_tasks):
 
 
 def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_screenshots=False,
-            session_duration_minutes=None, game_log_dir=None, console=None):
+            session_duration_minutes=None, game_log_dir=None, console=None, character_name=None):
     proc = subprocess.Popen(
         ["node", DRIVER_JS, bot_js_path],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
@@ -3163,7 +3222,7 @@ def run_bot(bot_js_path, settings, max_ticks=None, execute_input=False, capture_
     )
     game_log = GameLogTail(game_log_dir) if game_log_dir else None
     dispatcher = TaskDispatcher(execute_input=execute_input, capture_screenshots=capture_screenshots,
-                                game_log=game_log)
+                                game_log=game_log, character_name=character_name)
 
     def send_event(event_at_time):
         event = {"timeInMilliseconds": int(time.time() * 1000), "eventAtTime": event_at_time}
@@ -4198,6 +4257,12 @@ def main():
                           "continueIfShouldHide docks (and stays docked) once ~200s remain "
                           "(see secondsToSessionEnd in EveOnline/BotFramework.elm). Unset by "
                           "default: no session end, the bot runs indefinitely.")
+    ap.add_argument("--character-name", default=None,
+                     help="which EVE client to drive, matched case-insensitively against its "
+                          "window title (\"EVE - <character>\"). Required when more than one "
+                          "EVE client is running -- find_eve_processes refuses to guess rather "
+                          "than risk posting input to the wrong account. Unneeded and ignored "
+                          "in the ordinary one-client case.")
     args = ap.parse_args()
 
     workdir = tempfile.mkdtemp(prefix="botlab-host-")
@@ -4246,7 +4311,7 @@ def main():
                 capture_screenshots=args.capture_screenshots,
                 session_duration_minutes=args.session_duration_minutes,
             game_log_dir=None if args.no_game_log else args.game_log_dir,
-            console=console)
+            console=console, character_name=args.character_name)
     finally:
         if args.keep_build_dir:
             print(f"# left build dir at {workdir}", file=sys.stderr)
