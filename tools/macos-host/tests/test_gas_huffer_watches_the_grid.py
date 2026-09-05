@@ -194,6 +194,17 @@ def pilot_row(name):
         color=STRUCTURE_COLOR)
 
 
+def unreadable_icon_row(name="Fictional Beacon"):
+    """An overview row whose icon colour this reading cannot say anything about.
+
+    Produced the way the client produces one -- the `SpaceObjectIcon` is there
+    and carries no `iconSprite` with a `_color` on it -- rather than by leaving
+    the row out, since the whole point is a row that is present and judged.
+    """
+    return overview_row(
+        {"Icon": "-", "Type": "Beacon", "Name": name, "Distance": "40 km"})
+
+
 def structure_row(name="Fictional IX - Example Waystation"):
     return overview_row(
         {"Icon": "-", "Type": "Example Citadel", "Name": name,
@@ -441,6 +452,21 @@ class TheFixturesReachTheParserTest(unittest.TestCase):
             '{ distance = Just "1.2 AU", name = Nothing'
             ', type_ = Just "Venture" }]')
 
+    def test_a_row_with_no_icon_sprite_answers_nothing_for_its_colour(self):
+        """The state the icon rule's `Nothing` branch is about, produced as the
+        client produces it: the row parses, carries its cells, and simply has no
+        colour to read."""
+        printed = self.repl.rendered([
+            "reading |> Maybe.map (.overviewWindows"
+            " >> List.concatMap .entries"
+            " >> List.map (\\entry -> ( entry.objectName"
+            ", entry.iconSpriteColorPercent )))"
+        ], definitions=[reading_binding("reading", [overview_window([
+            unreadable_icon_row("Fictional Beacon"),
+        ])])])[0]
+        self.assertEqual(
+            printed, 'Just [(Just "Fictional Beacon",Nothing)]')
+
     def test_a_reading_with_no_local_chat_window_says_so(self):
         """The state one whole case below is about, produced as the client
         produces it: everything else parses and Local is simply not there."""
@@ -512,6 +538,23 @@ class TheThreeTriggersFireIndependentlyTest(unittest.TestCase):
             printed,
             'Just (SomethingIsOnTheGrid ["1 pilot(s) on the overview who are '
             'not in this fleet: Fictional Stranger"])')
+
+    def test_a_row_whose_icon_colour_cannot_be_read_is_not_a_rat(self):
+        """The one place in this section where absent evidence does *not* read
+        as hostile, and the reason is that the colour is how a **rat** is
+        recognised rather than how anything is cleared.
+
+        A row it cannot be read for is a row this trigger has nothing to say
+        about, and the other two still see it -- so answering `True` instead
+        would not be a safer bot, it would be one that leaves a site over a
+        beacon whose icon the client drew in a colour nobody parsed.
+        """
+        printed = self.verdict_from([
+            overview_window([unreadable_icon_row("Fictional Beacon")]),
+            local_chat([]),
+            scanner_window([]),
+        ])
+        self.assertEqual(printed, "Just GridIsClean")
 
     def test_a_pilot_who_is_in_the_fleet_fires_nothing(self):
         """The other half of the trigger, and the one a rule that had dropped
@@ -1385,7 +1428,10 @@ class TheMutationsThisFileCatches(unittest.TestCase):
         .test_detection_alone_does_not_arm_the_retreat`.
     22. `iconSpriteHasColorOfRat`'s `Nothing` branch answering `True`, so every
         unreadable icon is a rat -- `TheThreeTriggersFireIndependentlyTest
-        .test_a_quiet_grid_reads_clean`.
+        .test_a_row_whose_icon_colour_cannot_be_read_is_not_a_rat`. **This one
+        survived the first sweep**, and the hole was real: every fixture in the
+        file gave its rows a colour, so the branch had nothing to be wrong
+        about. The row above and the parse case beside it are what close it.
     """
 
     def test_this_file_names_the_mutations_it_was_graded_against(self):

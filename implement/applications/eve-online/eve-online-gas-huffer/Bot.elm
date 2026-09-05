@@ -2347,12 +2347,13 @@ pilotsOnTheOverviewNotInTheFleet localChatUsers overviewEntries =
         |> List.filter (\name -> strangers |> List.member (normalize name))
 
 
-{-| Every rat on the overview, named.
+{-| Every rat on the overview, as rows rather than as names.
 
-The names are for the operator rather than for the rule -- what fires the trigger
-is the icon colour, and a rat whose Name column is not visible still fires it.
-That is why this answers the count and the names separately at its two call
-sites rather than a list of names a nameless row could drop out of.
+The rows rather than their names, because what fires this trigger is the icon
+colour and a rat whose Name column is not visible fires it just the same -- so a
+rule answering a list of names would have a nameless rat drop out of it
+silently. `gridEvidenceFromReading` is what names them afterwards, and it writes
+a sentence in place of a name it could not read rather than one fewer entry.
 
 -}
 ratsOnTheOverview :
