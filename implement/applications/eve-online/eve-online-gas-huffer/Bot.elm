@@ -1,4 +1,4 @@
-{- EVE Online gas huffer -- HARVESTS BUT CANNOT LEAVE
+{- EVE Online gas huffer -- NOTICES BUT CANNOT LEAVE
 
       This app is meant to harvest gas from a wormhole gas site, deposit it at a
       structure, and leave the moment anything else shows up on the grid. Since
@@ -7,14 +7,22 @@
       highest trailing number, orbits it, keeps the propulsion module running,
       locks it and runs both gas harvesters.
 
-      **Nothing here watches the grid and nothing here retreats**, which is the
-      one thing to be clear about before starting a run. Noticing a hostile is
-      #462 and leaving is #463, so a session left unattended is a ship that will
-      still be sitting on its cloud when somebody else warps in -- and it has no
-      guns, no tank worth the name and no plan but to leave. Nor does it deposit
-      the hold when that fills (#464), and nothing keeps the propulsion module on
-      across a warp (#465). The status line says all of that on every reading
-      rather than letting a bot that looks busy read as a bot that is covered.
+      Since #462 it also **watches the grid**: it refreshes the Directional
+      Scanner on a cadence, and judges every reading against three independent
+      triggers -- a rat on the overview by icon colour, a pilot on the overview
+      who is not in the fleet, and a ship on D-Scan whose name does not carry
+      `friendly-ship-tag`. `gridVerdict` is that answer and the status line
+      carries it on every reading.
+
+      **Nothing here retreats**, which is the one thing to be clear about before
+      starting a run. Leaving is #463, so a session left unattended is a ship
+      that will still be sitting on its cloud when somebody else warps in --
+      knowing perfectly well that they are there, saying so in the status line,
+      and doing nothing about it, because it has no guns, no tank worth the name
+      and no plan but to leave. Nor does it deposit the hold when that fills
+      (#464), and nothing keeps the propulsion module on across a warp (#465).
+      The status line says all of that on every reading rather than letting a bot
+      that looks busy read as a bot that is covered.
 
       Started under issue #459; the behaviour is #460 (which site to hunt), #461
       (the harvest loop, here), #462 (hostile detection), #463 (retreat, cloak
@@ -55,6 +63,25 @@
         the bot needs both: the Type is what makes a row a cloud at all, and the
         Name is what `gas-cloud-name-prefix` is matched against and what carries
         the trailing number the site's clouds are ordered by.
+      + **Leave the Directional Scanner window open, and set its range and angle
+        wide enough to cover the grid.** Everything this bot knows about ships it
+        cannot see on the overview comes from that window, and a reading with no
+        such window is not a quiet grid -- it is a grid this bot cannot see, which
+        it reports as `CANNOT TELL` and never as clean. Nothing here opens the
+        window, sets its range or sets its angle; a scanner pointed at one degree
+        of sky reads empty and reads exactly like a clean one.
+      + **Bind the Directional Scanner's scan to `V`, which is the client's own
+        default, and leave it bound.** The refresh this bot makes is that
+        keypress and nothing else. **Nobody has watched it land** -- see
+        `directionalScanHotkey` -- so a client whose scan sits on some other key
+        is a bot whose D-Scan never refreshes, and what says so is the status
+        line's own staleness clause rather than anything the client reports.
+      + **Leave the Local chat window open.** It is the only thing in a reading
+        that names the pilots in the system and says which of them are in the
+        fleet, so an overview row is known to be a *player* only by its name
+        appearing there. With that window shut this bot cannot tell a pilot's row
+        from a rock's, and it says `CANNOT TELL` rather than reading the grid as
+        clean -- see `pilotsOnTheOverviewNotInTheFleet`.
       + Set the overview to sort by distance with the nearest entry at the top.
       + In the ship UI, arrange the modules:
         + Put the gas harvesters in the **top** row, side by side.
@@ -135,7 +162,12 @@
         Defaults to 5. **This number is unmeasured** -- nothing has yet watched a
         ship arrive on this bot's D-Scan, so it is a starting point chosen to
         cost roughly one reading in ten rather than a figure derived from how
-        long a hostile takes to arrive.
+        long a hostile takes to arrive. It is a **floor** rather than a promise:
+        this host stands down for five seconds after any *human* input, so a
+        refresh can simply not go out, and what covers that is the staleness
+        bound rather than the interval -- a scan older than
+        `dscanStaleAfterIntervals` of these reads as *we do not know* and never
+        as clean.
       + `bot-step-delay` : milliseconds between readings, e.g.
         `bot-step-delay=499`. Inherited from `eve-online-saxrat`'s own default
         rather than measured for this bot.
@@ -385,6 +417,12 @@ type alias BotMemory =
     -- unanswered. Both bound a branch that would otherwise repeat forever on a
     -- hot path, which is #257's shape. See `harvestCountersAfterReading`.
     , harvestCounters : HarvestCounters
+
+    -- When the scan key last went out, and when a scan last came back. The
+    -- second is what the grid verdict is allowed to believe, and it is here
+    -- rather than derived from a reading because no reading says how old the
+    -- rows in the D-Scan window are. See `dscanMemoryAfterReading`.
+    , dscan : DscanMemory
     }
 
 
@@ -2203,6 +2241,875 @@ describeHoldFill readingFromGameClient =
 
 
 
+-- Whether anything on this grid means leave
+
+
+{-| The overview's own icon colour for a rat, ported unchanged.
+
+`eve-online-combat-anomaly-bot`, `eve-online-saxrat` and `eve-online-wingman`
+all carry this identical predicate over `iconSpriteColorPercent`, and it is the
+one thing in this file that identifies a hostile without an operator having
+named anything: red against the white and yellow the client draws stargates and
+the sun in. Live readings quoted in `CLAUDE.md` put every rat at
+`{aPercent = 100, rPercent = 100, gPercent = 10, bPercent = 10}`.
+
+**A row whose icon colour this reading cannot read answers `False`**, which is
+the one place in this section where absent evidence does _not_ read as hostile,
+and it is deliberate rather than an oversight. The colour is how a _rat_ is
+recognised; a row it cannot be read for is not thereby a friendly row, it is a
+row this trigger has nothing to say about -- and the other two triggers still
+see it, because an unnamed row on the overview is exactly what
+`pilotsOnTheOverviewNotInTheFleet` is unsure about and what D-Scan answers for
+separately. Answering `True` instead would make every unreadable icon a rat, and
+this bot would leave a site over a beacon.
+
+-}
+iconSpriteHasColorOfRat : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+iconSpriteHasColorOfRat overviewEntry =
+    case overviewEntry.iconSpriteColorPercent of
+        Nothing ->
+            False
+
+        Just colorPercent ->
+            (colorPercent.g * 3 < colorPercent.r)
+                && (colorPercent.b * 3 < colorPercent.r)
+                && (60 < colorPercent.r && 50 < colorPercent.a)
+
+
+{-| The client's own words for a fleet-mate's icon in Local, ported unchanged.
+
+Captured live on `FlagIconWithState` nodes inside `XmppChatUserEntry` rows and
+recorded in `CLAUDE.md` under "Strings and identities read off a live client",
+where it is also recorded that this hint is **not** on the overview row: five
+rows were checked and none carried a `rightAlignedIconsHints` entry at all. That
+is why fleet membership is asked of the chat row and matched onto the overview
+row by name, rather than being read off the row this bot is judging.
+
+-}
+chatUserFleetmateMarker : String
+chatUserFleetmateMarker =
+    "Pilot is in your fleet"
+
+
+{-| Whether Local says this pilot is one of ours.
+
+`Nothing` is a chat row whose standing icon this reading could not resolve, and
+it answers `False` -- a stranger. That is the fail-closed direction for this
+particular question: read as a fleet-mate, an unresolvable row would take a
+pilot **out** of the list this bot leaves over, which is the one mistake here
+that costs the ship.
+
+-}
+chatUserIsKnownFleetmate : EveOnline.ParseUserInterface.ChatUserEntry -> Bool
+chatUserIsKnownFleetmate chatUser =
+    case chatUser.standingIconHint of
+        Nothing ->
+            False
+
+        Just standingIconHint ->
+            stringContainsIgnoringCase chatUserFleetmateMarker standingIconHint
+
+
+{-| Every pilot on the overview who Local does not say is a fleet-mate.
+
+`getNamesOfOtherPilotsInOverview`'s shape, from
+`eve-online-combat-anomaly-bot`: the chat rows are what say a name belongs to a
+_player_, so an overview row is a pilot exactly where its Name appears in Local,
+and the fleet-mates are filtered out of that list before the match rather than
+after it.
+
+**Gas-huffing doctrine is trust nobody, so a blue who is not fleeted still means
+leave** -- #456's own wording. Nothing here reads standings; a pilot is either in
+this fleet, by the client's own hint, or they are a reason to go.
+
+Compared trimmed and ignoring case, because the two sides are two renderings of
+one name by two widgets and nothing guarantees the client capitalises them
+alike.
+
+-}
+pilotsOnTheOverviewNotInTheFleet :
+    List EveOnline.ParseUserInterface.ChatUserEntry
+    -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> List String
+pilotsOnTheOverviewNotInTheFleet localChatUsers overviewEntries =
+    let
+        normalize =
+            String.trim >> String.toLower
+
+        strangers =
+            localChatUsers
+                |> List.filter (chatUserIsKnownFleetmate >> not)
+                |> List.filterMap .name
+                |> List.map normalize
+    in
+    overviewEntries
+        |> List.filterMap .objectName
+        |> List.filter (\name -> strangers |> List.member (normalize name))
+
+
+{-| Every rat on the overview, named.
+
+The names are for the operator rather than for the rule -- what fires the trigger
+is the icon colour, and a rat whose Name column is not visible still fires it.
+That is why this answers the count and the names separately at its two call
+sites rather than a list of names a nameless row could drop out of.
+
+-}
+ratsOnTheOverview :
+    List EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+ratsOnTheOverview =
+    List.filter iconSpriteHasColorOfRat
+
+
+{-| The Type cells that are not a ship, and the whole subtlety of trigger 3.
+
+**A system's own structures sit on D-Scan permanently and carry no ship-naming
+tag** -- the home structure this bot deposits at among them. So a rule of the
+form "any untagged D-Scan entry is a threat" puts this bot into permanent
+evasion in any inhabited system, retreating from furniture rather than from
+threats, and #456 confirmed it live: with D-Scan widened, every row present was
+a structure.
+
+The filter is therefore on the **Type** column, against Upwell structure and
+deployable hulls. That is public CCP game data in exactly the sense the rat
+icon-colour rule above is: it identifies a class of object in the game and names
+no corporation, alliance, system, structure or pilot, so it is a constant here
+rather than one of #456's operator settings.
+
+**Three groups, each with its own reason:**
+
+  - the Upwell hulls, which is what the issue names. Matched as substrings, so a
+    faction Fortizar (`'Moreau' Fortizar`) and an `Upwell Palatine Keepstar`
+    are covered by the plain hull name rather than by a list of every variant.
+  - `Mobile` as a family, because every deployable in the game is named that
+    way -- Mobile Depot, Mobile Tractor Unit, Mobile Micro Jump Unit, the warp
+    disruption bubbles -- and no ship hull is. One entry rather than a dozen that
+    would go out of date the next time CCP ships one.
+  - the harvestable cloud, which is **this bot's own reason for being there**.
+    Whether a gas cloud appears on D-Scan at all is unverified; if it does not,
+    this entry costs nothing, and if it does, leaving it out would have this bot
+    read the cloud it is harvesting as an untagged ship and evade its own site
+    forever. It is `harvestableCloudTypeMarker`, the same constant the overview
+    rule reads, rather than the string written a second time.
+
+**What is deliberately _not_ here is everything else that is not a ship.** A
+fleet-mate's drones, a wreck and a jettisoned container all carry no ship tag and
+would read as hostile. That is the safe direction -- an unnecessary retreat costs
+a warp -- and widening this list is the direction that costs the ship, so nothing
+goes in it without something that measured the string.
+
+-}
+notAShipOnDscanTypeMarkers : List String
+notAShipOnDscanTypeMarkers =
+    [ "Astrahus"
+    , "Fortizar"
+    , "Keepstar"
+    , "Raitaru"
+    , "Azbel"
+    , "Sotiyo"
+    , "Athanor"
+    , "Tatara"
+    , "Ansiblex Jump Gate"
+    , "Pharolux Cyno Beacon"
+    , "Tenebrex Cyno Jammer"
+    , "Metenox Moon Drill"
+    , "Control Tower"
+    , "Customs Office"
+    , "Mobile "
+    , harvestableCloudTypeMarker
+    ]
+
+
+{-| Whether a D-Scan row's Type says it is not a ship.
+
+Matched ignoring case as a substring, for `notAShipOnDscanTypeMarkers`' reasons.
+
+**A Type cell this parser could not read is not a structure**, which is where
+this rule fails closed: `dscanRowVerdict` reaches this with a `Maybe` and an
+absent Type falls straight through to the ship branch, where an unreadable Name
+then reads hostile. Defaulting the Type to `""` here would be the same collapse
+one column along -- and `""` matches no marker, so it would happen to behave
+today and would be one edit from a marker that matched everything.
+
+-}
+dscanTypeIsNotAShip : String -> Bool
+dscanTypeIsNotAShip typeText =
+    notAShipOnDscanTypeMarkers
+        |> List.any (\marker -> stringContainsIgnoringCase marker typeText)
+
+
+{-| The three cells of one D-Scan row, as a record a case can write out.
+
+A record rather than `EveOnline.ParseUserInterface.DirectionalScanResult`,
+which carries a `uiNode` nothing here reads and which no case could build
+without a whole UI tree. `dscanSightingsFromWindow` is the one place the two
+meet.
+
+-}
+type alias DscanSighting =
+    { name : Maybe String
+    , type_ : Maybe String
+    , distance : Maybe String
+    }
+
+
+dscanSightingsFromWindow : EveOnline.ParseUserInterface.DirectionalScannerWindow -> List DscanSighting
+dscanSightingsFromWindow window =
+    window.scanResults
+        |> List.map
+            (\row -> { name = row.name, type_ = row.type_, distance = row.distance })
+
+
+{-| What this bot makes of one row on D-Scan.
+
+Three answers rather than two, and every one of them names what it read, because
+this is the rule whose premise is least settled: **no row for a piloted ship has
+ever been measured** (#458), so the first live run that meets one has to be able
+to see, from the log alone, which of these three it produced and off which
+cells.
+
+-}
+type DscanRowVerdict
+    = RowIsNotAShip String
+    | ShipIsOneOfOurs String
+    | ShipIsHostile DscanHostileReason
+
+
+{-| Why a row read hostile, which is two different things.
+
+`ShipNameCouldNotBeRead` is the one #458 answers `Nothing` rather than `""`
+precisely so this file can express -- a row whose Name cell the parser declined
+to read, which is what a row of an unexpected shape produces. Collapsing it into
+the other reason would lose the distinction on the reading that matters most: a
+grid full of them is the parser meeting a shape nobody predicted, where a grid
+full of the other is a grid full of strangers.
+
+-}
+type DscanHostileReason
+    = ShipNameCarriesNoFriendlyTag String
+    | ShipNameCouldNotBeRead
+
+
+{-| The rule the whole of trigger 3 is, over one row.
+
+**Absent evidence reads as hostile here, which inverts this repo's usual
+direction**, and it is asserted rather than assumed at each of the three places
+it could be undone:
+
+  - `friendly-ship-tag` unset makes `shipReadsFriendly` answer `False` for every
+    name there is, so every ship reads hostile. That is `TrustNobody`, decided
+    in `hostileTrustFromSettings` and read here rather than restated.
+  - a Name cell the parser could not read is `Nothing` and answers hostile. It
+    is **not** defaulted to `""`: an empty string carries no tag, so today's
+    behaviour would be identical and the safety would be an accident of the tag
+    never being empty -- and `valueTypeNonEmptyString` is the only thing keeping
+    that true.
+  - a Type cell the parser could not read is not a structure, so the row is
+    judged as a ship.
+
+The direction costs a warp when it is wrong and costs the ship when it is wrong
+the other way, which is the whole of why it is this way round.
+
+-}
+dscanRowVerdict : HostileTrust -> DscanSighting -> DscanRowVerdict
+dscanRowVerdict trust row =
+    case row.type_ |> Maybe.andThen structureTypeThatIsNotAShip of
+        Just typeText ->
+            RowIsNotAShip typeText
+
+        Nothing ->
+            case row.name of
+                Nothing ->
+                    ShipIsHostile ShipNameCouldNotBeRead
+
+                Just name ->
+                    if shipReadsFriendly trust name then
+                        ShipIsOneOfOurs name
+
+                    else
+                        ShipIsHostile (ShipNameCarriesNoFriendlyTag name)
+
+
+structureTypeThatIsNotAShip : String -> Maybe String
+structureTypeThatIsNotAShip typeText =
+    if dscanTypeIsNotAShip typeText then
+        Just typeText
+
+    else
+        Nothing
+
+
+{-| What the Directional Scanner is telling this bot, including that it is not.
+
+Four answers, and the three that are not `DscanWasRead` are the whole of #462's
+"a reading with no D-Scan window at all is not a clean grid". **"We do not know"
+must not read as safe**, which is how a bot concludes it is safe because nothing
+answered -- so they are separate constructors rather than an empty row list, and
+`gridVerdict` can neither read one as clean nor lose which of them it was.
+
+-}
+type DscanState
+    = DscanWindowIsNotInTheReading
+    | DscanHasNeverBeenScanned
+    | DscanIsStale { secondsSinceScan : Int, staleAfterSeconds : Int }
+    | DscanWasRead (List DscanRowVerdict)
+
+
+{-| How many refresh intervals a scan may be old before it stops counting.
+
+A **multiple of `dscan-interval-seconds` rather than a number**, so an operator
+who lengthens the interval lengthens the bound with it and the argument cannot
+drift away from the figure -- `messageBoxStandoffGiveUpReadings`' form for the
+same reason.
+
+Three, because that is the smallest bound a refresh can miss twice without
+firing: the host stands down for five seconds after any human input, the ask goes
+out again at the next interval, and a bound of one would report `CANNOT TELL`
+every time somebody touched the mouse. What it does catch is a scan that has
+stopped arriving at all -- a shut D-Scan window, a keybind that is not the one
+this bot presses, a docked reading, or anything above this branch holding the
+tree -- which is what makes it reachable rather than a bound nothing can meet.
+
+-}
+dscanStaleAfterIntervals : Int
+dscanStaleAfterIntervals =
+    3
+
+
+dscanStaleAfterSeconds : Int -> Int
+dscanStaleAfterSeconds intervalSeconds =
+    intervalSeconds * dscanStaleAfterIntervals
+
+
+{-| The D-Scan half of the verdict, over facts a case can write out.
+
+Both `Maybe`s here are a distinct answer rather than an empty one.
+`windowSightings` of `Nothing` is _no window in the reading_, where `Just []` is
+a window that scanned and found nothing -- and the status line prints those two
+differently, because collapsing them is the failure the issue names.
+`secondsSinceScan` of `Nothing` is _no scan has completed this session_, which
+is where every run starts and which is not the same fact as a scan that has gone
+old.
+
+-}
+dscanState :
+    HostileTrust
+    ->
+        { windowSightings : Maybe (List DscanSighting)
+        , secondsSinceScan : Maybe Int
+        , staleAfterSeconds : Int
+        }
+    -> DscanState
+dscanState trust reading =
+    case reading.windowSightings of
+        Nothing ->
+            DscanWindowIsNotInTheReading
+
+        Just sightings ->
+            case reading.secondsSinceScan of
+                Nothing ->
+                    DscanHasNeverBeenScanned
+
+                Just secondsSinceScan ->
+                    if reading.staleAfterSeconds < secondsSinceScan then
+                        DscanIsStale
+                            { secondsSinceScan = secondsSinceScan
+                            , staleAfterSeconds = reading.staleAfterSeconds
+                            }
+
+                    else
+                        DscanWasRead (sightings |> List.map (dscanRowVerdict trust))
+
+
+{-| Everything one reading says about whether this ship should still be here.
+
+A record of plain facts rather than a `BotDecisionContext`, for #106's reason:
+this is the rule the ship's survival rests on, and a rule reachable only through
+a decision context is one no case can execute -- so it would be checked by being
+read, which is how a rule that answers `clean` for the wrong reason passes for
+one that works.
+
+-}
+type alias GridEvidence =
+    { ratsOnOverview : List String
+    , pilotsNotInTheFleet : List String
+    , localChatIsReadable : Bool
+    , dscan : DscanState
+    }
+
+
+{-| The verdict, and the two ways of not being clean.
+
+**Three answers rather than two.** A grid this bot cannot see is not a grid it
+may go on harvesting, and it is also not a grid it has seen a hostile on -- and
+#463 needs to tell them apart to say why it is still evading. What neither of
+them is is _clean_: `gridReadsClean` answers `True` for `GridIsClean` and for
+nothing else, which is the one line the whole design rests on.
+
+A hostile outranks a doubt where both are present, because the hostile is the
+one an operator can act on and the doubt is already implied by it.
+
+-}
+type GridVerdict
+    = GridIsClean
+    | SomethingIsOnTheGrid (List String)
+    | CannotTellWhetherTheGridIsClean (List String)
+
+
+gridReadsClean : GridVerdict -> Bool
+gridReadsClean verdict =
+    verdict == GridIsClean
+
+
+{-| The three triggers, and the doubts, asked in one place.
+
+The reasons are strings because they are for an operator and for #463's own
+decision line, and building them here rather than at the two call sites is
+#102's rule: one fact settled once and read twice cannot come to disagree, and
+the way it would fail here is a status line reporting a clean grid the retreat
+was acting on.
+
+-}
+gridVerdict : GridEvidence -> GridVerdict
+gridVerdict evidence =
+    let
+        named what names =
+            String.fromInt (List.length names)
+                ++ " "
+                ++ what
+                ++ (if List.isEmpty names then
+                        ""
+
+                    else
+                        ": " ++ String.join ", " names
+                   )
+
+        hostileReasons =
+            [ if List.isEmpty evidence.ratsOnOverview then
+                Nothing
+
+              else
+                Just (named "rat(s) on the overview by icon colour" evidence.ratsOnOverview)
+            , if List.isEmpty evidence.pilotsNotInTheFleet then
+                Nothing
+
+              else
+                Just
+                    (named "pilot(s) on the overview who are not in this fleet"
+                        evidence.pilotsNotInTheFleet
+                    )
+            ]
+                |> List.filterMap identity
+
+        hostileShips =
+            case evidence.dscan of
+                DscanWasRead verdicts ->
+                    verdicts |> List.filterMap dscanHostileReason
+
+                _ ->
+                    []
+
+        dscanHostileClause =
+            if List.isEmpty hostileShips then
+                []
+
+            else
+                [ named "ship(s) on D-Scan that are not ours" hostileShips ]
+
+        doubts =
+            [ case evidence.dscan of
+                DscanWindowIsNotInTheReading ->
+                    Just "there is no Directional Scanner window in this reading, so nothing here can see a ship that is not already on the overview"
+
+                DscanHasNeverBeenScanned ->
+                    Just "the Directional Scanner has not answered a refresh yet this session"
+
+                DscanIsStale stale ->
+                    Just
+                        ("the last Directional Scan completed "
+                            ++ String.fromInt stale.secondsSinceScan
+                            ++ "s ago, past the "
+                            ++ String.fromInt stale.staleAfterSeconds
+                            ++ "s a scan is believed for"
+                        )
+
+                DscanWasRead _ ->
+                    Nothing
+            , if evidence.localChatIsReadable then
+                Nothing
+
+              else
+                Just "Local chat is not readable, so nothing here can tell which overview rows are pilots at all"
+            ]
+                |> List.filterMap identity
+    in
+    case hostileReasons ++ dscanHostileClause of
+        [] ->
+            case doubts of
+                [] ->
+                    GridIsClean
+
+                _ ->
+                    CannotTellWhetherTheGridIsClean doubts
+
+        reasons ->
+            SomethingIsOnTheGrid reasons
+
+
+dscanHostileReason : DscanRowVerdict -> Maybe String
+dscanHostileReason verdict =
+    case verdict of
+        ShipIsHostile (ShipNameCarriesNoFriendlyTag name) ->
+            Just ("'" ++ name ++ "'")
+
+        ShipIsHostile ShipNameCouldNotBeRead ->
+            Just "one whose Name cell this parser could not read at all"
+
+        RowIsNotAShip _ ->
+            Nothing
+
+        ShipIsOneOfOurs _ ->
+            Nothing
+
+
+{-| The evidence this reading carries, assembled from the client.
+
+The Local chat window is asked for through `EveOnline.BotFramework`'s own
+`localChatWindowFromUserInterface` rather than by matching a window name here,
+because that helper is what every other app in this repo uses for the same
+question and a second spelling of "which window is Local" would be a second
+place to be wrong.
+
+**`overviewEntryIsDisplayed` is deliberately not applied here**, and it is the
+one place in this app where a hidden overview row is read on purpose. That
+filter exists because the overview virtualises and a hidden row's _region_
+belongs to whatever was recycled into it -- so `cloudSearch`, which is choosing
+something to click, must never see one. Nothing here clicks anything. What a
+recycled row can do to this rule is contribute a stale name, and a stale name
+this bot leaves over costs a warp where a row it declined to read costs the
+ship. Same argument as everything else in this section, applied to the one
+filter that runs the other way.
+
+-}
+gridEvidenceFromReading :
+    HostileTrust
+    -> { secondsSinceScan : Maybe Int, staleAfterSeconds : Int }
+    -> ReadingFromGameClient
+    -> GridEvidence
+gridEvidenceFromReading trust scanAge readingFromGameClient =
+    let
+        localChatUsers =
+            readingFromGameClient
+                |> EveOnline.BotFramework.localChatWindowFromUserInterface
+                |> Maybe.andThen .userlist
+                |> Maybe.map .visibleUsers
+
+        overviewEntries =
+            readingFromGameClient.overviewWindows |> List.concatMap .entries
+    in
+    { ratsOnOverview =
+        ratsOnTheOverview overviewEntries
+            |> List.map (.objectName >> Maybe.withDefault "a rat whose Name column is not readable")
+    , pilotsNotInTheFleet =
+        pilotsOnTheOverviewNotInTheFleet
+            (localChatUsers |> Maybe.withDefault [])
+            overviewEntries
+    , localChatIsReadable = localChatUsers /= Nothing
+    , dscan =
+        dscanState trust
+            { windowSightings =
+                readingFromGameClient.directionalScannerWindow
+                    |> Maybe.map dscanSightingsFromWindow
+            , secondsSinceScan = scanAge.secondsSinceScan
+            , staleAfterSeconds = scanAge.staleAfterSeconds
+            }
+    }
+
+
+gridEvidenceFromContext : BotDecisionContext -> GridEvidence
+gridEvidenceFromContext context =
+    let
+        settings =
+            context.eventContext.botSettings
+    in
+    gridEvidenceFromReading (hostileTrustFromSettings settings)
+        { secondsSinceScan =
+            secondsSinceLastScan
+                { nowMilliseconds = context.eventContext.timeInMilliseconds
+                , dscan = context.memory.dscan
+                }
+        , staleAfterSeconds = dscanStaleAfterSeconds settings.dscanIntervalSeconds
+        }
+        context.readingFromGameClient
+
+
+{-| What an operator reads about the grid, on every reading.
+
+Opens with the verdict, because it is the one line that says whether this ship
+should still be here, and then prints the D-Scan rows **raw**.
+
+**Printing every judged row's own three cells is #462's own requirement rather
+than decoration.** No D-Scan row for a piloted ship has ever been read here: all
+four rows measured for #458 were structures, and the dangerous direction is a
+corporation ticker landing in the Name cell and matching the friendly tag. So
+the first run that meets a ship has to settle the row's shape from the log
+alone, which it can only do if the log carries what the parser made of each cell
+-- including which cells it made nothing of, which is why an unreadable cell
+prints in words rather than as a blank.
+
+-}
+describeGrid : GridEvidence -> String
+describeGrid evidence =
+    (case gridVerdict evidence of
+        GridIsClean ->
+            "Grid: CLEAN -- nothing on the overview or on D-Scan says otherwise."
+
+        SomethingIsOnTheGrid reasons ->
+            "Grid: SOMETHING IS HERE -- " ++ String.join "; " reasons ++ "."
+
+        CannotTellWhetherTheGridIsClean doubts ->
+            "Grid: CANNOT TELL, which is not the same as clean -- "
+                ++ String.join "; " doubts
+                ++ "."
+    )
+        ++ " "
+        ++ describeDscanRows evidence.dscan
+
+
+describeDscanRows : DscanState -> String
+describeDscanRows state =
+    case state of
+        DscanWindowIsNotInTheReading ->
+            "D-Scan: no window in this reading, so there are no rows to print."
+
+        DscanHasNeverBeenScanned ->
+            "D-Scan: the window is open and no refresh has completed yet this session."
+
+        DscanIsStale stale ->
+            "D-Scan: the window is open and its last completed scan is "
+                ++ String.fromInt stale.secondsSinceScan
+                ++ "s old, past the "
+                ++ String.fromInt stale.staleAfterSeconds
+                ++ "s bound, so its rows are not being judged."
+
+        DscanWasRead [] ->
+            "D-Scan: scanned, and nothing at all is on it."
+
+        DscanWasRead verdicts ->
+            "D-Scan judged "
+                ++ String.fromInt (List.length verdicts)
+                ++ " row(s): "
+                ++ (verdicts |> List.map describeDscanRowVerdict |> String.join "; ")
+                ++ "."
+
+
+describeDscanRowVerdict : DscanRowVerdict -> String
+describeDscanRowVerdict verdict =
+    case verdict of
+        RowIsNotAShip typeText ->
+            "not a ship (Type '" ++ typeText ++ "')"
+
+        ShipIsOneOfOurs name ->
+            "ours ('" ++ name ++ "')"
+
+        ShipIsHostile (ShipNameCarriesNoFriendlyTag name) ->
+            "HOSTILE, no friendly tag ('" ++ name ++ "')"
+
+        ShipIsHostile ShipNameCouldNotBeRead ->
+            "HOSTILE, Name cell unreadable"
+
+
+{-| Every D-Scan row's cells exactly as the parser answered them.
+
+Separate from `describeDscanRowVerdict` because the two say different things: one
+is what this bot concluded and the other is what it concluded it _from_, and the
+run that settles a ship's row shape needs the second. An unreadable cell prints
+`<unreadable>` rather than an empty string, so a cell the parser declined and a
+cell holding nothing cannot read alike in the one place that was built to keep
+them apart.
+
+-}
+describeDscanSightings : List DscanSighting -> String
+describeDscanSightings sightings =
+    let
+        cell =
+            Maybe.withDefault "<unreadable>"
+    in
+    if List.isEmpty sightings then
+        "D-Scan rows: none."
+
+    else
+        "D-Scan rows (Name | Type | Distance, as parsed): "
+            ++ (sightings
+                    |> List.map
+                        (\sighting ->
+                            "["
+                                ++ cell sighting.name
+                                ++ " | "
+                                ++ cell sighting.type_
+                                ++ " | "
+                                ++ cell sighting.distance
+                                ++ "]"
+                        )
+                    |> String.join " "
+               )
+            ++ "."
+
+
+describeDscanSightingsFromReading : ReadingFromGameClient -> String
+describeDscanSightingsFromReading readingFromGameClient =
+    case readingFromGameClient.directionalScannerWindow of
+        Nothing ->
+            "D-Scan rows: no window in this reading."
+
+        Just window ->
+            describeDscanSightings (dscanSightingsFromWindow window)
+
+
+
+-- Keeping the Directional Scanner fresh
+
+
+{-| The keypress that refreshes the Directional Scanner.
+
+`V` is the client's own default binding for the scan, and this bot presses it
+and nothing else -- there is no click here, because the parser #458 built exposes
+the window's rows and no button, and adding a button lookup would be an
+eight-copy parser concern (#467) rather than a one-file edit.
+
+**Nobody has watched this land.** The keypress is what #462 says the refresh is,
+and the client's answer to it -- a scan that completes, and results that replace
+the previous ones -- is not something a reading can distinguish from results that
+were already there. What covers a key that is not bound is the staleness bound:
+a client that never scans reports `CANNOT TELL` within
+`dscanStaleAfterIntervals` intervals rather than reporting a clean grid, which
+is the direction this has to fail in.
+
+-}
+directionalScanHotkey : List EffectOnWindow.VirtualKeyCode
+directionalScanHotkey =
+    [ EffectOnWindow.vkey_V ]
+
+
+{-| When the last refresh went out, and when a scan last came back.
+
+Two clocks rather than one, because they answer different questions and only one
+of them is about safety. `lastRefreshAskedAtMilliseconds` paces the asking, which
+is a cost question -- a refresh every reading would be a keypress every reading.
+`lastScanAtMilliseconds` is what the verdict is allowed to believe, and it only
+moves on a reading that had both an ask behind it and a window to read.
+
+-}
+type alias DscanMemory =
+    { lastRefreshAskedAtMilliseconds : Maybe Int
+    , lastScanAtMilliseconds : Maybe Int
+    }
+
+
+initDscanMemory : DscanMemory
+initDscanMemory =
+    { lastRefreshAskedAtMilliseconds = Nothing
+    , lastScanAtMilliseconds = Nothing
+    }
+
+
+{-| The two clocks after this reading.
+
+Written in `updateMemoryForNewReadingFromGame`, the one place that can write
+memory and the one that never sees a decision -- so what it records is what the
+previous step **dispatched** and what this reading **holds**, rather than what a
+branch believed it was doing.
+
+**What it cannot record is whether the client acted on the press**, and that is
+stated here rather than left to be discovered. This host skips an input sequence
+for five seconds after any human touch of the mouse or keyboard, and the bot is
+not told; the client's D-Scan window goes on showing the previous scan's rows
+either way. So `lastScanAtMilliseconds` is a moment the bot _asked_ and could
+read the window afterwards, which makes the age it yields a **lower bound** on
+the true age of those rows. Nothing in a reading can do better, and what a
+smaller bound would buy is not more truth but more `CANNOT TELL`.
+
+-}
+dscanMemoryAfterReading :
+    { nowMilliseconds : Int
+    , refreshAskedInPreviousStep : Bool
+    , windowIsInTheReading : Bool
+    }
+    -> DscanMemory
+    -> DscanMemory
+dscanMemoryAfterReading reading before =
+    { lastRefreshAskedAtMilliseconds =
+        if reading.refreshAskedInPreviousStep then
+            Just reading.nowMilliseconds
+
+        else
+            before.lastRefreshAskedAtMilliseconds
+    , lastScanAtMilliseconds =
+        if reading.refreshAskedInPreviousStep && reading.windowIsInTheReading then
+            Just reading.nowMilliseconds
+
+        else
+            before.lastScanAtMilliseconds
+    }
+
+
+secondsSinceLastScan : { nowMilliseconds : Int, dscan : DscanMemory } -> Maybe Int
+secondsSinceLastScan { nowMilliseconds, dscan } =
+    dscan.lastScanAtMilliseconds
+        |> Maybe.map (\scannedAt -> (nowMilliseconds - scannedAt) // 1000)
+
+
+{-| Whether it is time to press the scan key again.
+
+**A floor rather than a schedule**, which is #462's own word for it. A refresh
+that does not go out -- the host standing down for a human at the keyboard, the
+tree held above this branch by a message box -- costs nothing here and is asked
+for again at the next reading past the interval, because the comparison is
+against when one last _went_ rather than against a tick the bot has to keep up
+with.
+
+Never having asked is due, which is what gets the first scan of a session out on
+the first reading in space rather than an interval into it.
+
+-}
+dscanRefreshIsDue :
+    { nowMilliseconds : Int, intervalSeconds : Int, dscan : DscanMemory }
+    -> Bool
+dscanRefreshIsDue { nowMilliseconds, intervalSeconds, dscan } =
+    case dscan.lastRefreshAskedAtMilliseconds of
+        Nothing ->
+            True
+
+        Just askedAt ->
+            intervalSeconds * 1000 <= nowMilliseconds - askedAt
+
+
+describeDscanCadence :
+    { nowMilliseconds : Int, intervalSeconds : Int, dscan : DscanMemory }
+    -> String
+describeDscanCadence cadence =
+    "D-Scan cadence: refreshing every "
+        ++ String.fromInt cadence.intervalSeconds
+        ++ "s (a floor, not a promise -- this host skips input for five seconds after any human touch), believing a scan for "
+        ++ String.fromInt (dscanStaleAfterSeconds cadence.intervalSeconds)
+        ++ "s. "
+        ++ (case secondsSinceLastScan { nowMilliseconds = cadence.nowMilliseconds, dscan = cadence.dscan } of
+                Nothing ->
+                    "No scan has completed this session."
+
+                Just seconds ->
+                    "Last completed scan " ++ String.fromInt seconds ++ "s ago."
+           )
+        ++ (if dscanRefreshIsDue cadence then
+                " A refresh is due now."
+
+            else
+                ""
+           )
+
+
+
 -- What would make this bot leave, and whether any of it is armed
 
 
@@ -2222,6 +3129,7 @@ a signal.
 -}
 type alias RetreatCover =
     { hostileDetectionIsArmed : Bool
+    , leavingIsImplemented : Bool
     , homeStructureName : Maybe String
     , retreatBookmarkPrefix : String
     }
@@ -2229,20 +3137,27 @@ type alias RetreatCover =
 
 retreatIsUnarmed : RetreatCover -> Bool
 retreatIsUnarmed cover =
-    not cover.hostileDetectionIsArmed || (cover.homeStructureName == Nothing)
+    not cover.hostileDetectionIsArmed
+        || not cover.leavingIsImplemented
+        || (cover.homeStructureName == Nothing)
 
 
 {-| The cover clause, said on every reading.
 
 **Reachability, since a guard that cannot fire is this repo's signature bug
-(#15, #34, #42):** `hostileDetectionIsArmed` is `False` at its one call site
-today because nothing in this app detects a hostile yet -- so this clause fires
-on every reading of every run, which is exactly what it should do while that is
-true, and it is the thing #462 flips. The other half is a real setting and is
-false-able now: a run given no `home-structure-name` has one named destination
-fewer, and a bookmark _prefix_ is a pattern rather than a place, so it is
-deliberately not counted as a destination -- nothing here can say whether any
-bookmark matches it until the Locations window is readable (#457).
+(#15, #34, #42):** `hostileDetectionIsArmed` was `False` at its one call site
+until #462, because nothing in this app detected a hostile at all; it is a real
+read now, and `leavingIsImplemented` is the constant that replaced it, because
+noticing and leaving are two halves and only the first of them has arrived.
+Naming the half that is missing rather than letting the clause fall silent is
+the whole point: a bot that notices a stranger, says so, and goes on harvesting
+is worse to misread than one that never noticed. #463 flips it.
+
+The third half is a real setting and is false-able now: a run given no
+`home-structure-name` has one named destination fewer, and a bookmark _prefix_ is
+a pattern rather than a place, so it is deliberately not counted as a
+destination -- nothing here can say whether any bookmark matches it until the
+Locations window is readable (#457).
 
 -}
 describeRetreatCover : RetreatCover -> String
@@ -2251,6 +3166,12 @@ describeRetreatCover cover =
         "RETREAT NOT ARMED: "
             ++ (if not cover.hostileDetectionIsArmed then
                     "nothing in this bot notices a hostile yet, so nothing can ever start a retreat. "
+
+                else
+                    ""
+               )
+            ++ (if not cover.leavingIsImplemented then
+                    "This bot notices what is on the grid and says so, and nothing here acts on that -- leaving is #463. "
 
                 else
                     ""
@@ -2276,10 +3197,16 @@ describeRetreatCover cover =
 retreatCoverFromContext : BotDecisionContext -> RetreatCover
 retreatCoverFromContext context =
     { hostileDetectionIsArmed =
+        -- True since #462, and true structurally rather than conditionally:
+        -- `gridVerdict` is asked of every reading and answers `GridIsClean` for
+        -- exactly one of its three cases. An unset `friendly-ship-tag` does not
+        -- disarm it -- it makes it fire on every ship there is.
+        True
+    , leavingIsImplemented =
         -- Not a placeholder that could rot into a lie: nothing in this app
-        -- reads the Directional Scanner or classifies an overview row, so
-        -- there is nothing to ask. #462 is where this becomes a read, and the
-        -- clause above is what an operator sees until it does.
+        -- retreats, cloaks or evades, so there is nothing to ask. #463 is where
+        -- this becomes a read, and the clause above is what an operator sees
+        -- until it does.
         False
     , homeStructureName = context.eventContext.botSettings.homeStructureName
     , retreatBookmarkPrefix = context.eventContext.botSettings.retreatBookmarkPrefix
@@ -2314,6 +3241,7 @@ initBotMemory =
     , miningRangeRefusal = Nothing
     , miningRangeLastChange = Nothing
     , harvestCounters = initHarvestCounters
+    , dscan = initDscanMemory
     }
 
 
@@ -2391,6 +3319,14 @@ The site clause is printed above both, from the same `siteSearchFromContext`
 call the status line makes, so the decision log and the status text cannot come
 to disagree about which site was chosen.
 
+**The D-Scan refresh is asked first, and it is the one thing here that outranks
+harvesting.** It costs one reading per `dscan-interval-seconds` -- roughly one in
+ten at the shipped step delay -- and what it buys is the only instrument this
+ship has for seeing something before it is on the overview. A reading spent
+scanning is a reading not spent locking a cloud, which is the trade, and it is
+taken the same way round in warp: a scan made on the way in is a scan already
+answered when the grid arrives.
+
 -}
 huntAndHarvest : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> DecisionPathNode
 huntAndHarvest context shipUI =
@@ -2401,29 +3337,64 @@ huntAndHarvest context shipUI =
         search =
             cloudSearchFromReading context.eventContext.botSettings context.readingFromGameClient
     in
-    describeBranch
-        (describeSiteSearch site)
-        (describeBranch (describeCloudSearch search)
-            (case search.chosen of
-                Just cloud ->
-                    actOnTheHarvestStep context
-                        shipUI
-                        cloud
-                        (harvestSituationFromContext context shipUI cloud)
+    case refreshTheDirectionalScanner context of
+        Just refresh ->
+            refresh
 
-                Nothing ->
-                    if shipIsWarping shipUI then
-                        describeBranch "In warp -- wait for the grid the ship is going to." waitForProgressInGame
+        Nothing ->
+            describeBranch
+                (describeSiteSearch site)
+                (describeBranch (describeCloudSearch search)
+                    (case search.chosen of
+                        Just cloud ->
+                            actOnTheHarvestStep context
+                                shipUI
+                                cloud
+                                (harvestSituationFromContext context shipUI cloud)
 
-                    else
-                        case site.hunted of
-                            Just hunted ->
-                                warpToTheHuntedSite context hunted
+                        Nothing ->
+                            if shipIsWarping shipUI then
+                                describeBranch "In warp -- wait for the grid the ship is going to." waitForProgressInGame
 
-                            Nothing ->
-                                describeBranch nothingToHuntInSpace waitForProgressInGame
+                            else
+                                case site.hunted of
+                                    Just hunted ->
+                                        warpToTheHuntedSite context hunted
+
+                                    Nothing ->
+                                        describeBranch nothingToHuntInSpace waitForProgressInGame
+                    )
+                )
+
+
+{-| Press the scan key, where the interval says one is due.
+
+`Nothing` rather than a branch that waits, so a reading with no refresh due falls
+straight through to the work -- the shape every entry in
+`generalSetupInUserInterface` has, for the same reason: a step on this hot path
+that answered `Just` unconditionally would own the whole bot.
+
+-}
+refreshTheDirectionalScanner : BotDecisionContext -> Maybe DecisionPathNode
+refreshTheDirectionalScanner context =
+    if
+        dscanRefreshIsDue
+            { nowMilliseconds = context.eventContext.timeInMilliseconds
+            , intervalSeconds = context.eventContext.botSettings.dscanIntervalSeconds
+            , dscan = context.memory.dscan
+            }
+    then
+        Just
+            (describeBranch
+                ("Refresh the Directional Scanner -- it is the only thing here that sees a ship before the overview does, and the last refresh went out at least "
+                    ++ String.fromInt context.eventContext.botSettings.dscanIntervalSeconds
+                    ++ "s ago."
+                )
+                (decideActionForCurrentStep (hotkeyEffects directionalScanHotkey))
             )
-        )
+
+    else
+        Nothing
 
 
 shipIsWarping : EveOnline.ParseUserInterface.ShipUI -> Bool
@@ -2456,7 +3427,7 @@ already said _why_ nothing is hunted on the same reading.
 -}
 nothingToHuntInSpace : String
 nothingToHuntInSpace =
-    "In space with no harvestable cloud on the overview and no site to hunt -- nothing to warp to, so it is waiting on purpose. Noticing a hostile is #462 and leaving is #463, and neither is here, so nothing about this wait is a safe place to leave a ship."
+    "In space with no harvestable cloud on the overview and no site to hunt -- nothing to warp to, so it is waiting on purpose. This bot watches the grid and says what is on it, and leaving is #463 and is not here, so nothing about this wait is a safe place to leave a ship."
 
 
 {-| The things that have to be dealt with before any decision about the game.
@@ -3017,6 +3988,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     |> Maybe.withDefault False
             }
             botMemoryBefore.harvestCounters
+    , dscan =
+        dscanMemoryAfterReading
+            { nowMilliseconds = context.timeInMilliseconds
+            , refreshAskedInPreviousStep =
+                context.previousStepsEffects
+                    |> List.head
+                    |> Maybe.map (stepPressedExactly directionalScanHotkey)
+                    |> Maybe.withDefault False
+            , windowIsInTheReading =
+                context.readingFromGameClient.directionalScannerWindow /= Nothing
+            }
+            botMemoryBefore.dscan
     }
 
 
@@ -3056,7 +4039,14 @@ statusTextFromState context =
                 ( Nothing, _ ) ->
                     []
     in
-    [ "HARVESTS BUT CANNOT LEAVE: this bot warps to a gas site and harvests it, and it does not watch for anything arriving (#462), retreat (#463), deposit the hold (#464) or keep the propulsion module on across a warp (#465)."
+    [ "NOTICES BUT CANNOT LEAVE: this bot warps to a gas site, harvests it and watches the grid, and it does not retreat (#463), deposit the hold (#464) or keep the propulsion module on across a warp (#465)."
+    , describeGrid (gridEvidenceFromContext context)
+    , describeDscanSightingsFromReading context.readingFromGameClient
+    , describeDscanCadence
+        { nowMilliseconds = context.eventContext.timeInMilliseconds
+        , intervalSeconds = settings.dscanIntervalSeconds
+        , dscan = context.memory.dscan
+        }
     , describeSiteSearch (siteSearchFromContext context)
     ]
         ++ harvestClause
@@ -3074,9 +4064,7 @@ statusTextFromState context =
                         Just prefix ->
                             "those named '" ++ prefix ++ "...'"
                    )
-                ++ ". D-Scan every "
-                ++ String.fromInt settings.dscanIntervalSeconds
-                ++ "s."
+                ++ "."
            , describeHostileTrust (hostileTrustFromSettings settings)
            , describeRetreatCover (retreatCoverFromContext context)
            , "Deposit at: "
