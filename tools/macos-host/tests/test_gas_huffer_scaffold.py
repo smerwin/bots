@@ -772,14 +772,26 @@ class TheSessionEndingBoundHasNowhereToGoYetTest(unittest.TestCase):
         self.assertIn("bounds elapsed time", doc)
 
 
-class TheScaffoldSaysItIsAScaffoldTest(unittest.TestCase):
-    """A branch that does nothing and reports nothing is indistinguishable from
-    one that is stuck.
+# The marker the bot opens its header and its status line with. It was
+# `SCAFFOLD ONLY` while #459 was all there was; #461 gave the bot the whole
+# harvesting half, so the honest opening moved from "this does nothing" to
+# "this does the half that earns and none of the half that survives". Both
+# wordings answer the same question -- what is an operator being told before
+# they read anything reassuring -- which is why this is one constant updated
+# rather than a case deleted.
+CANNOT_DO_MARKER = "HARVESTS BUT CANNOT LEAVE"
 
-    That is `/review-silent-success` exactly, and it is the one thing about a
-    scaffold that can go wrong before any behaviour exists: an operator starting
-    this bot has to be told it is not going to harvest, on every reading, rather
-    than watching a decision log that looks like a bot thinking.
+
+class TheBotSaysWhatItCannotDoTest(unittest.TestCase):
+    """A branch that does nothing and reports nothing is indistinguishable from
+    one that is stuck, and a bot that reports only what it *can* do is worse.
+
+    That is `/review-silent-success` exactly. Before #461 the thing an operator
+    had to be told was that nothing would be harvested; since #461 it is the
+    opposite half -- the ship warps, orbits, locks and harvests, and it has no
+    way of noticing a stranger on the grid and no way of leaving. A console
+    reporting the working half while the half that keeps the ship is missing is
+    a console reporting success, which is the failure this repo is named after.
     """
 
     @classmethod
@@ -790,23 +802,30 @@ class TheScaffoldSaysItIsAScaffoldTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.repl.close()
 
-    def test_both_branches_name_themselves_and_the_issue_that_fills_them(self):
+    def test_both_leaves_name_themselves_and_the_issue_that_fills_them(self):
         docked, in_space = self.repl.strings(
-            ["nothingToDoDockedYet", "nothingToDoInSpaceYet"])
+            ["nothingToDoDockedYet", "nothingToHuntInSpace"])
         for text in (docked, in_space):
             self.assertIn("on purpose", text)
             self.assertIn("#46", text)
         self.assertIn("#464", docked)
-        self.assertIn("#461", in_space)
+        # The in-space leaf is now reached only where there is nothing to warp
+        # to, so what it has to name is the halves that are still missing
+        # rather than the harvest loop that arrived.
+        self.assertIn("#462", in_space)
+        self.assertIn("#463", in_space)
 
     def test_the_status_line_opens_by_saying_so(self):
         body = collapsed(block("statusTextFromState"))
-        self.assertIn("SCAFFOLD ONLY", body)
+        self.assertIn(CANNOT_DO_MARKER, body)
+        for missing in ("#462", "#463", "#464", "#465"):
+            with self.subTest(missing):
+                self.assertIn(missing, body)
 
     def test_the_header_says_it_before_the_settings_an_operator_would_read(self):
         header = bot_source().split("\n-}", 1)[0]
-        self.assertIn("SCAFFOLD ONLY", header)
-        self.assertLess(header.index("SCAFFOLD ONLY"),
+        self.assertIn(CANNOT_DO_MARKER, header)
+        self.assertLess(header.index(CANNOT_DO_MARKER),
                         header.index("## Configuration Settings"))
 
 

@@ -1,24 +1,25 @@
-{- EVE Online gas huffer -- SCAFFOLD ONLY, it does not harvest anything yet
+{- EVE Online gas huffer -- HARVESTS BUT CANNOT LEAVE
 
       This app is meant to harvest gas from a wormhole gas site, deposit it at a
-      structure, and leave the moment anything else shows up on the grid. **Only
-      the first step of that is here.** What is here is the app: its settings,
-      the client-setup contract below, the two general-purpose recoveries every
-      bot in this repo needs (the game's own Settings/pause menu, and a message
-      box that will not close), and -- since #460 -- the rule that decides
-      **which site this bot would hunt**, reported on every reading.
+      structure, and leave the moment anything else shows up on the grid. Since
+      #461 the **harvesting** half of that works: it decides which site to hunt,
+      warps to it, picks the cloud on the grid whose designation carries the
+      highest trailing number, orbits it, keeps the propulsion module running,
+      locks it and runs both gas harvesters.
 
-      **Nothing flies to that site yet**, which is the one thing to be clear
-      about before reading further. #460 asked for the filter and for a status
-      line saying why nothing is being hunted; taking the site is the harvest
-      loop's, and the mechanism it should reuse is named on `siteSearch`.
+      **Nothing here watches the grid and nothing here retreats**, which is the
+      one thing to be clear about before starting a run. Noticing a hostile is
+      #462 and leaving is #463, so a session left unattended is a ship that will
+      still be sitting on its cloud when somebody else warps in -- and it has no
+      guns, no tank worth the name and no plan but to leave. Nor does it deposit
+      the hold when that fills (#464), and nothing keeps the propulsion module on
+      across a warp (#465). The status line says all of that on every reading
+      rather than letting a bot that looks busy read as a bot that is covered.
 
-      Started under issue #459; the behaviour is #460 (which site to hunt, here),
-      #461 (the harvest loop), #462 (hostile detection), #463 (retreat, cloak and
-      evade) and #464 (deposit the hold). Run today, this bot reads the client,
-      keeps the two recoveries above armed, says which site it would hunt and why
-      it would decline the rest, and does nothing else -- and it says so on every
-      reading rather than looking busy.
+      Started under issue #459; the behaviour is #460 (which site to hunt), #461
+      (the harvest loop, here), #462 (hostile detection), #463 (retreat, cloak
+      and evade), #464 (deposit the hold when it fills) and #465 (the propulsion
+      module surviving every warp).
 
       ## Setting up the Game Client
 
@@ -72,7 +73,11 @@
         which the client reports as `deactivates without transfering ore to your
         cargo hold because your ship has strayed to a distance of ... beyond its
         mining range of ...` -- a game-log line, which is the only thing that
-        will ever tell the bot the setup is wrong.
+        will ever tell the bot the setup is wrong. **This bot reads that line and
+        reports it, naming both distances, and does not act on it.** It cannot:
+        the range it would have to orbit at is not something any command here can
+        express, so the only repair is the one above, made by hand. See
+        `miningRangeRefusalFromGameLog`.
       + Name the bookmarks you are willing to be warped to so that they all
         start with the same prefix, and give that prefix to
         `retreat-bookmark-prefix`. Every bookmark matching it is a place this bot
@@ -106,7 +111,10 @@
         trailing number rather than by kind. Set it to take only one family, and
         write it as the overview shows it: the Name column carries the cloud's
         own designation, not the generic `Harvestable Cloud` the Type column
-        carries.
+        carries. Whichever clouds this leaves, the one taken is the one whose
+        name carries the **highest trailing number** -- `Fullerite-C84` over
+        `Fullerite-C50`, and `Fullerite-C100` over both, which is why the digits
+        are parsed rather than the string sorted. See `trailingNumberFromName`.
       + `home-structure-name` : the overview name of the structure to deposit at,
         which is also the second place this bot will run to when it leaves. **No
         default** -- with none set, this bot has nowhere to deposit and one fewer
@@ -167,7 +175,9 @@ import EveOnline.BotFramework
     exposing
         ( ReadingFromGameClient
         , ShipModulesMemory
+        , menuCascadeCompleted
         , mouseClickOnUIElement
+        , useMenuEntryWithTextContaining
         )
 import EveOnline.BotFrameworkSeparatingMemory
     exposing
@@ -177,9 +187,11 @@ import EveOnline.BotFrameworkSeparatingMemory
         , branchDependingOnDockedOrInSpace
         , decideActionForCurrentStep
         , ensureInfoPanelLocationInfoIsExpanded
+        , useContextMenuCascade
         , waitForProgressInGame
         )
 import EveOnline.ParseUserInterface
+import Json.Decode
 
 
 {-| What this bot does with no settings at all.
@@ -344,10 +356,13 @@ type alias State =
 
 {-| Everything this bot carries from one reading to the next.
 
-Deliberately small. A reading's game-log entries and quick messages are gone by
-the next reading, so every verdict drawn from them has to be written here -- but
-this app draws none yet, and a field nothing writes and nothing reads is #125's
-shape. #461 through #464 each add what they need.
+Deliberately small, and every field here is something a single reading cannot
+say. A reading's game-log entries are gone by the next reading, so a verdict
+drawn from them has to be written here or it is seen once and then behaves
+exactly as it did before -- the ammo swap's `loadRefusedByClient` is the worked
+example, and `miningRangeRefusal` is this app's. The two counters are the same
+argument about a repeat: how many readings in a row the bot has asked for
+something the client has not answered is not a fact about this reading.
 
 -}
 type alias BotMemory =
@@ -359,6 +374,17 @@ type alias BotMemory =
     -- said when the bot stops answering it. See `MessageBoxStandoff`.
     , messageBoxStandoff : Maybe MessageBoxStandoff
     , messageBoxLastChange : Maybe String
+
+    -- The client's own statement that the orbit is too wide for the
+    -- harvesters, carried forward with its age. Read by the status line and by
+    -- no decision, deliberately -- see `miningRangeRefusalFromGameLog`.
+    , miningRangeRefusal : Maybe MiningRangeRefusal
+    , miningRangeLastChange : Maybe String
+
+    -- How long the two things the harvest loop asks the client for have gone
+    -- unanswered. Both bound a branch that would otherwise repeat forever on a
+    -- hot path, which is #257's shape. See `harvestCountersAfterReading`.
+    , harvestCounters : HarvestCounters
     }
 
 
@@ -678,13 +704,12 @@ one fact settled in one place and read in another, and the way that fails here
 would be a status line reporting a site the decision was not acting on. Two
 callers of one pure function over one reading cannot disagree.
 
-**Nothing here flies anywhere.** #460 asked for the filter and for a status line
-saying why nothing is being hunted, and that is what this is; taking the site
-belongs to the harvest loop (#461). When it lands, the mechanism to reuse for
-the bookmark half is `eve-online-mining-bot`'s
-`useContextMenuOnLocationWithMatchingName`, which already drives a context menu
-off a `LocationsWindowPlaceEntry` -- a second mechanism for that job is the kind
-of thing this codebase keeps having to reconcile later.
+**Nothing here flies anywhere; `warpToTheHuntedSite` does.** This answers which
+site, and #461's harvest loop takes the answer. The bookmark half of that is
+`eve-online-mining-bot`'s `useContextMenuOnLocationWithMatchingName` reduced to
+its locations-window arm -- `useContextMenuCascade` over the `PlaceEntry` whose
+name matched -- rather than a second mechanism for the same job, which is the
+kind of thing this codebase keeps having to reconcile later.
 
 `anomalyVerdicts` keeps a verdict for **every** row rather than only the
 declined ones, so that the status line can report a missing `Group` column on
@@ -763,16 +788,16 @@ describeSiteHunted : SiteSearch -> String
 describeSiteHunted search =
     case search.hunted of
         Just (ScannedAnomaly anomaly) ->
-            "Site: would hunt the scanned anomaly "
+            "Site: hunting the scanned anomaly "
                 ++ describeAnomalyIdentity anomaly
-                ++ " (nothing warps to it yet -- that is #461)."
+                ++ "."
 
         Just (BookmarkedSite bookmark) ->
             "Site: nothing scanned reads "
                 ++ describeAnomalyFilter search.filter
                 ++ ", so falling back to the bookmark '"
                 ++ bookmark.mainText
-                ++ "' (nothing warps to it yet -- that is #461)."
+                ++ "'."
 
         Nothing ->
             "Site: NOTHING TO HUNT."
@@ -890,6 +915,1294 @@ describeBookmarksForHunting search =
 
 
 
+-- Which cloud on the grid this bot would harvest
+
+
+{-| What the overview's **Type** column reads for a gas cloud.
+
+Measured live on 2026-09-04, where a cloud renders as
+
+    '-' | 'Harvestable Cloud' | 'Fullerite-C84' | 'Harvestable Cloud (Fullerite-C84)' | '833 m'
+
+so the Type column carries this generic wording for every cloud in the site and
+the **Name** column carries the cloud's own designation. That split is the whole
+reason `gas-cloud-name-prefix` is matched against the Name while "is this a
+cloud at all" is asked of the Type: the designation differs from site to site --
+the operator's own spec said `Fullerite-N` and the grid said `Fullerite-C` --
+and the Type does not.
+
+**Matched as a substring**, which is the looser direction this codebase usually
+refuses and is chosen here with the reason stated. `attack-object` records what
+a substring would cost where a wider name contains a narrower one: a wreck's
+Type is its owner's name with `Wreck` appended, so a substring rule there would
+have had the bot open fire on the corpse of what it had just killed, forever,
+since a wreck cannot die. There is no such pair here -- the wider strings this admits
+are the client's own longer renderings of the same fact, `Harvestable Cloud
+(Fullerite-C84)` being one of them in the very row above, and which of the two
+an overview preset puts in the column an operator made visible is not something
+a reading can say. What a wrong match costs is also different in kind: a lock
+and a harvester cycle on something that yields nothing, reported by the hold's
+own gauge, rather than a gun pointed at the wrong object.
+
+-}
+harvestableCloudTypeMarker : String
+harvestableCloudTypeMarker =
+    "Harvestable Cloud"
+
+
+{-| Whether an overview row is really on screen.
+
+The overview virtualises: every object in space has an entry in the UI tree, but
+only the rows that fit are rendered, and the rest keep whatever position they
+last held while being recycled. So a hidden entry reports a perfectly plausible
+region pointing at a row that now belongs to something else, and clicking it is
+worse than a no-op -- it acts on the wrong object. `_display` is what
+distinguishes them; the region does not.
+
+**This is the standing rule for every overview consumer in this repo** rather
+than a precaution taken here, and #461 restates it because everything this bot
+does on a grid starts from one of these rows: the click that selects the cloud
+for the Selected Item panel's Orbit button, and the Ctrl+click that locks it. A
+cloud chosen off a hidden row is a ship orbiting and locking whatever was
+recycled into its place -- and the log would name the cloud throughout, because
+the row the bot read is not the row the click landed on.
+
+-}
+overviewEntryIsDisplayed : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+overviewEntryIsDisplayed entry =
+    entry.uiNode.uiNode.dictEntriesOfInterest
+        |> Dict.get "_display"
+        |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.bool >> Result.toMaybe)
+        |> Maybe.withDefault True
+
+
+{-| The number a cloud's own designation ends in, where it ends in one.
+
+**The digits are parsed; the string is not sorted.** `Fullerite-C84` has to beat
+`Fullerite-C50`, and a lexical sort gets that pair right by luck -- `8` sorts
+after `5`. It gets `Fullerite-C100` against `Fullerite-C84` wrong, because `1`
+sorts before `8`, and the site holding a three-digit cloud is exactly the site
+where taking the wrong one costs the most.
+
+**A name ending in no digits answers `Nothing`, and `Nothing` is not zero.**
+That is `loadRefusalFromGameLog`'s register applied to an ordering: a
+designation this bot cannot rank is one it has no opinion about, where zero is
+an opinion -- the lowest one available. Read as zero, a cloud named
+`Harvestable Cloud` sorts behind every numbered cloud and is taken only when
+there are none, which is the reading that would never take it **when it is the
+only cloud on the grid**. `gasCloudOrder` ranks it last explicitly instead, so
+it loses to anything numbered and still wins when nothing else is there.
+
+-}
+trailingNumberFromName : String -> Maybe Int
+trailingNumberFromName name =
+    let
+        digitsFromTheEnd remaining collected =
+            case remaining |> String.right 1 of
+                "" ->
+                    collected
+
+                lastCharacter ->
+                    if lastCharacter |> String.all Char.isDigit then
+                        digitsFromTheEnd (remaining |> String.dropRight 1) (lastCharacter ++ collected)
+
+                    else
+                        collected
+    in
+    digitsFromTheEnd (String.trim name) "" |> String.toInt
+
+
+{-| The order clouds are taken in: highest trailing number first, unrankable
+last.
+
+A `comparable` for `List.sortBy` rather than a comparison written at the call
+site, and a **pair** rather than one number, because the two facts being ordered
+are of different kinds. The first element separates rankable from unrankable, so
+nothing the second element can hold puts a name with no number ahead of a name
+that has one; the second is the number negated, so the largest sorts first.
+Folding the two -- ranking an unrankable name as `0`, or as a very large
+negative -- is exactly what `trailingNumberFromName`'s doc comment refuses, in
+the one place the refusal could be undone without changing that function at all.
+
+A rule over the name alone, so a case can hand it a list of strings and read the
+order back rather than assembling a reading to ask it.
+
+-}
+gasCloudOrder : String -> ( Int, Int )
+gasCloudOrder name =
+    case trailingNumberFromName name of
+        Just number ->
+            ( 0, negate number )
+
+        Nothing ->
+            ( 1, 0 )
+
+
+{-| Whether one cloud's designation is one `gas-cloud-name-prefix` asks for.
+
+A prefix rather than a substring or a whole match, which is what the setting's
+name says and what the designations are shaped for: `Fullerite-` names a family
+and the trailing number names the member. Compared trimmed and ignoring case,
+for `siteCellMatches`' reasons. An unset prefix takes every cloud, and an
+**empty** one can never reach here at all -- `valueTypeNonEmptyString` refuses
+it, which matters more for this setting than for most, since `String.startsWith
+""` is true of every row on the grid.
+
+-}
+gasCloudNameMatchesPrefix : Maybe String -> String -> Bool
+gasCloudNameMatchesPrefix prefix name =
+    case prefix of
+        Nothing ->
+            True
+
+        Just wanted ->
+            (name |> String.trim |> String.toLower)
+                |> String.startsWith (wanted |> String.trim |> String.toLower)
+
+
+{-| What one reading has to say about the clouds on this grid.
+
+Every count here is a **reason a row was passed over**, kept separately rather
+than folded into one number, because they are fixed in different places: rows
+the client is not rendering are a scrolled overview, rows with no Name are an
+overview column an operator never made visible, and rows the prefix declined are
+a setting. A single "no cloud to harvest" would send them to the wrong one of
+the three -- which is `describeSiteSearch`'s argument one window along.
+
+`unrankableNames` is carried for the same reason and is not a decline: those
+clouds are candidates, ranked last, and the count exists so that a run taking an
+unnumbered cloud says so rather than looking like a run that ignored the
+ordering.
+
+-}
+type alias CloudSearch =
+    { prefix : Maybe String
+    , cloudRowsInTheReading : Int
+    , hiddenCloudRows : Int
+    , namelessCloudRows : Int
+    , declinedByThePrefix : Int
+    , namesInTheOrderTheyWouldBeTaken : List String
+    , unrankableNames : List String
+    , chosen : Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+    }
+
+
+{-| The one declaration that decides which cloud this bot harvests.
+
+A rule over the prefix and the overview's rows rather than over a
+`BotDecisionContext`, so a case can hand it really parsed rows and execute it.
+#106 records what the other shape costs: a rule reachable only through a
+decision context is one nothing can run, so it gets checked by being read, which
+is how a rule that answers nothing passes for one that works.
+
+Three readers -- the decision, the status line and
+`updateMemoryForNewReadingFromGame`, through `cloudSearchFromReading`. That is
+#102's shape, and the way it would fail here is a status line naming a cloud the
+ship is not orbiting.
+
+-}
+cloudSearch : Maybe String -> List EveOnline.ParseUserInterface.OverviewWindowEntry -> CloudSearch
+cloudSearch prefix overviewEntries =
+    let
+        cloudRows =
+            overviewEntries
+                |> List.filter
+                    (.objectType
+                        >> Maybe.map (stringContainsIgnoringCase harvestableCloudTypeMarker)
+                        >> Maybe.withDefault False
+                    )
+
+        displayedCloudRows =
+            cloudRows |> List.filter overviewEntryIsDisplayed
+
+        namedCloudRows =
+            displayedCloudRows
+                |> List.filterMap
+                    (\entry -> entry.objectName |> Maybe.map (\name -> ( name, entry )))
+
+        wanted =
+            namedCloudRows
+                |> List.filter (Tuple.first >> gasCloudNameMatchesPrefix prefix)
+                |> List.sortBy (Tuple.first >> gasCloudOrder)
+
+        wantedNames =
+            wanted |> List.map Tuple.first
+    in
+    { prefix = prefix
+    , cloudRowsInTheReading = List.length cloudRows
+    , hiddenCloudRows = List.length cloudRows - List.length displayedCloudRows
+    , namelessCloudRows = List.length displayedCloudRows - List.length namedCloudRows
+    , declinedByThePrefix = List.length namedCloudRows - List.length wanted
+    , namesInTheOrderTheyWouldBeTaken = wantedNames
+    , unrankableNames = wantedNames |> List.filter (trailingNumberFromName >> (==) Nothing)
+    , chosen = wanted |> List.head |> Maybe.map Tuple.second
+    }
+
+
+cloudSearchFromReading : BotSettings -> ReadingFromGameClient -> CloudSearch
+cloudSearchFromReading settings readingFromGameClient =
+    cloudSearch settings.gasCloudNamePrefix
+        (readingFromGameClient.overviewWindows |> List.concatMap .entries)
+
+
+{-| What an operator reads about the clouds, on every reading with a grid.
+
+Says which cloud was chosen **and why it beat the others**, because "the highest
+trailing number" is the one thing about this bot that is easy to get wrong
+silently: a lexical sort agrees with the numeric one on most pairs, so a run
+that had reverted to one would look correct until the day a site held a
+three-digit cloud.
+
+-}
+describeCloudSearch : CloudSearch -> String
+describeCloudSearch search =
+    let
+        passedOver =
+            [ ( search.hiddenCloudRows
+              , "not rendered by the client, so their positions belong to whatever was recycled into them"
+              )
+            , ( search.namelessCloudRows
+              , "with no readable Name column -- the column both the ordering and 'gas-cloud-name-prefix' read"
+              )
+            , ( search.declinedByThePrefix
+              , "named for something other than '"
+                    ++ Maybe.withDefault "" search.prefix
+                    ++ "'"
+              )
+            ]
+                |> List.filter (Tuple.first >> (<) 0)
+                |> List.map
+                    (\( count, why ) -> String.fromInt count ++ " " ++ why)
+
+        passedOverClause =
+            if List.isEmpty passedOver then
+                ""
+
+            else
+                " Passed over: " ++ String.join "; " passedOver ++ "."
+    in
+    (case search.chosen of
+        Nothing ->
+            "Clouds: NONE TO HARVEST out of "
+                ++ String.fromInt search.cloudRowsInTheReading
+                ++ " '"
+                ++ harvestableCloudTypeMarker
+                ++ "' row(s) on the overview."
+
+        Just _ ->
+            "Clouds: harvesting '"
+                ++ (search.namesInTheOrderTheyWouldBeTaken |> List.head |> Maybe.withDefault "")
+                ++ "', the highest trailing number of "
+                ++ String.fromInt (List.length search.namesInTheOrderTheyWouldBeTaken)
+                ++ " candidate(s) ["
+                ++ String.join ", " search.namesInTheOrderTheyWouldBeTaken
+                ++ "]"
+                ++ (if List.isEmpty search.unrankableNames then
+                        "."
+
+                    else
+                        ", of which "
+                            ++ String.fromInt (List.length search.unrankableNames)
+                            ++ " carry no trailing number and are ranked last rather than as zero."
+                   )
+    )
+        ++ passedOverClause
+
+
+
+-- What the client says when the orbit is too wide for the harvesters
+
+
+{-| The client's own account of an orbit the harvesters cannot reach across,
+carried forward with its age.
+
+The numbers are kept **as the client wrote them** rather than parsed into
+metres. Nothing here does arithmetic on them; what they are for is an operator
+reading a status line and going to fix the Orbit button, and a distance this bot
+reformatted is one they cannot match against what the client told them.
+
+-}
+type alias MiningRangeRefusal =
+    { strayedToMeters : String
+    , miningRangeMeters : String
+    , readingsSince : Int
+    }
+
+
+harvesterDeactivationMarker : String
+harvesterDeactivationMarker =
+    "deactivates without transfering ore"
+
+
+harvesterStrayedMarker : String
+harvesterStrayedMarker =
+    "strayed to a distance of"
+
+
+harvesterMiningRangeMarker : String
+harvesterMiningRangeMarker =
+    "beyond its mining range of"
+
+
+{-| Whether a game-log entry is on the channel this bot reads.
+
+`(notify)` is where the client puts its refusals, and it is the channel
+`loadRefusalFromGameLog` already uses in two other apps here. Worth asking
+rather than assuming: #41's locked-gate sentence arrives on `info` instead, and
+a matcher pointed at the wrong channel is a guard that can never fire and looks
+exactly like a client that never complains.
+
+-}
+gameLogEntryIsFromNotifyChannel : EveOnline.ParseUserInterface.GameLogEntry -> Bool
+gameLogEntryIsFromNotifyChannel entry =
+    entry.channel
+        |> Maybe.map (stringContainsIgnoringCase "notify")
+        |> Maybe.withDefault False
+
+
+{-| The one thing that ever tells this bot its orbit is too wide, read and
+**never acted on**.
+
+The client writes, on `(notify)`:
+
+    <harvester> deactivates without transfering ore to your cargo hold because
+    your ship has strayed to a distance of 1628.94 m, beyond its mining range of
+    1500.00 m.
+
+so both numbers are there for the taking, and the temptation is to take them and
+re-orbit closer. **Nothing here does, and that is the decision rather than an
+omission.** No command in this repository orbits at a _distance_: the Selected
+Item panel's Orbit button orbits at whatever range the client last used, and
+that range is remembered by the client rather than stated in any reading. So a
+bot acting on this line could only press the same button again, read the same
+refusal again, and press again -- a bot that silently re-orbits forever, which is
+the failure this repo keeps paying for. The repair is a client setting an
+operator changes once, and what this rule owes them is the two numbers.
+
+**Three substrings rather than one.** `deactivates without transfering ore` is
+the client's own sentence, misspelling and all, and it is what makes this the
+harvester's refusal rather than any other module's; the two markers below are
+also what the numbers are sliced after, so an extraction can never succeed on a
+sentence the matcher would have declined -- `gateKeyClosingMarker`'s
+arrangement. A number that cannot be read declines the whole entry rather than
+being defaulted, because a status line naming a distance this bot invented is
+worse than one saying nothing.
+
+-}
+miningRangeRefusalFromGameLog : ReadingFromGameClient -> Maybe { strayedToMeters : String, miningRangeMeters : String }
+miningRangeRefusalFromGameLog readingFromGameClient =
+    readingFromGameClient.gameLogEntriesSinceLastReading
+        |> Maybe.withDefault []
+        |> List.filter gameLogEntryIsFromNotifyChannel
+        |> List.filterMap
+            (\entry ->
+                if stringContainsIgnoringCase harvesterDeactivationMarker entry.text then
+                    Maybe.map2
+                        (\strayed range ->
+                            { strayedToMeters = strayed, miningRangeMeters = range }
+                        )
+                        (numberAfterMarker harvesterStrayedMarker entry.text)
+                        (numberAfterMarker harvesterMiningRangeMarker entry.text)
+
+                else
+                    Nothing
+            )
+        |> List.head
+
+
+{-| The number the client wrote straight after one of its own phrases.
+
+Sliced out of the **lower-cased** text on both sides, so the marker can be
+matched ignoring case without a second index into a differently cased string.
+The characters taken are digits, `.` and `,` -- the client writes `1628.94` and
+would write `11,628.94` -- and nothing else, so the trailing `m` stops it.
+
+An empty result answers `Nothing` rather than `""`: a marker that matched with
+no number after it is the client having written something this rule does not
+understand, and reporting that as a distance is the fabrication
+`miningRangeRefusalFromGameLog` exists not to make.
+
+-}
+numberAfterMarker : String -> String -> Maybe String
+numberAfterMarker marker text =
+    let
+        lowered =
+            String.toLower text
+    in
+    lowered
+        |> String.indexes (String.toLower marker)
+        |> List.head
+        |> Maybe.andThen
+            (\markerStart ->
+                case
+                    lowered
+                        |> String.dropLeft (markerStart + String.length marker)
+                        |> String.trimLeft
+                        |> takeWhileNumeric
+                of
+                    "" ->
+                        Nothing
+
+                    number ->
+                        Just number
+            )
+
+
+takeWhileNumeric : String -> String
+takeWhileNumeric text =
+    case text |> String.left 1 of
+        "" ->
+            ""
+
+        firstCharacter ->
+            if firstCharacter |> String.all (\character -> Char.isDigit character || character == '.' || character == ',') then
+                firstCharacter ++ takeWhileNumeric (String.dropLeft 1 text)
+
+            else
+                ""
+
+
+{-| The refusal as it stands after this reading.
+
+A fresh sighting replaces whatever was there and resets the age; a reading with
+none ages the one already held rather than dropping it, because the whole point
+of writing it down is that the entry itself is gone by the next reading. Nothing
+expires it within a session -- an expiry would be a number with no evidence
+behind it, and the age already says how stale the sighting is, which is
+`quickMessage`'s arrangement for the same problem.
+
+-}
+miningRangeRefusalAfterReading :
+    { before : Maybe MiningRangeRefusal
+    , refusalNow : Maybe { strayedToMeters : String, miningRangeMeters : String }
+    }
+    -> Maybe MiningRangeRefusal
+miningRangeRefusalAfterReading { before, refusalNow } =
+    case refusalNow of
+        Just refusal ->
+            Just
+                { strayedToMeters = refusal.strayedToMeters
+                , miningRangeMeters = refusal.miningRangeMeters
+                , readingsSince = 0
+                }
+
+        Nothing ->
+            before |> Maybe.map (\held -> { held | readingsSince = held.readingsSince + 1 })
+
+
+{-| The clause an operator acts on, naming both distances.
+
+Both, rather than the difference or a verdict, because the fix is a number they
+type into the client and neither one alone is it. The age is printed for the
+same reason `quickMessage`'s is: a refusal from four hundred readings ago and one
+from this reading want very different responses, and a clause that carried the
+sentence without the age reads identically for both.
+
+-}
+describeMiningRange : Maybe MiningRangeRefusal -> String
+describeMiningRange refusal =
+    case refusal of
+        Nothing ->
+            "Harvester range: the client has not complained about the orbit this session."
+
+        Just present ->
+            "HARVESTER OUT OF RANGE: the client says the ship strayed to "
+                ++ present.strayedToMeters
+                ++ " m, beyond a mining range of "
+                ++ present.miningRangeMeters
+                ++ " m ("
+                ++ (if present.readingsSince == 0 then
+                        "on this reading"
+
+                    else
+                        String.fromInt present.readingsSince ++ " reading(s) ago"
+                   )
+                ++ "). Nothing here can orbit at a distance, so this is reported and not corrected -- set the Orbit button's range by hand and restart."
+
+
+
+-- Running the modules
+
+
+{-| The keys held down together, as one press.
+
+Written as the list of codes rather than as the effects, so `stepPressedExactly`
+can compare what a step pressed against what this bot meant to press. That
+comparison has to be exact rather than "contains", because `Alt+F1` and `F1` are
+two different commands on this ship -- the propulsion module and the first
+harvester -- and a settling window that could not tell them apart would let one
+press suppress the other's.
+
+-}
+propulsionModuleHotkey : List EffectOnWindow.VirtualKeyCode
+propulsionModuleHotkey =
+    [ EffectOnWindow.vkey_MENU, EffectOnWindow.vkey_F1 ]
+
+
+{-| The hotkey for one module in the ship UI's **top** row, by position.
+
+With the default EVE keybinds F1-F4 activate the first four high-slot modules
+directly, which is one effect where a click on the module button is a move and a
+press with a settling window of its own. Only the first four get a hotkey; the
+rest fall back to the button.
+
+The index is the module's place in the row **sorted by x**, never its place in
+the parser's list -- see `moduleButtonsLeftToRight`.
+
+-}
+topRowModuleHotkeyFromIndex : Int -> Maybe EffectOnWindow.VirtualKeyCode
+topRowModuleHotkeyFromIndex index =
+    case index of
+        0 ->
+            Just EffectOnWindow.vkey_F1
+
+        1 ->
+            Just EffectOnWindow.vkey_F2
+
+        2 ->
+            Just EffectOnWindow.vkey_F3
+
+        3 ->
+            Just EffectOnWindow.vkey_F4
+
+        _ ->
+            Nothing
+
+
+{-| One module row, in the order the client draws it.
+
+**Sorted by x, never taken by index off the parsed list**, which is this repo's
+standing rule about module rows: the parser drops any node whose display region
+it cannot read, so a slot can leave and rejoin while nothing moves on screen,
+and an index into that list then names a different module. It cost a live run a
+click on a neighbouring module once.
+
+It matters more here than it usually does. The two gas harvesters sit side by
+side in the top row **sharing a `_name` and an icon texture**, measured on the
+hull #456 was written from -- so position is not merely the safer identity, it
+is the only one there is.
+
+-}
+moduleButtonsLeftToRight : List EveOnline.ParseUserInterface.ShipUIModuleButton -> List EveOnline.ParseUserInterface.ShipUIModuleButton
+moduleButtonsLeftToRight =
+    List.sortBy (.uiNode >> .totalDisplayRegion >> .x)
+
+
+{-| Whether a module button says the module is doing something.
+
+**This is the question #456 records as unsettled, answered from the corpus
+rather than from a live read, and it is the weakest thing in this change.** The
+issue asks for a live sample of a gas harvester being switched off and on --
+nobody has watched one, every reading taken on 2026-09-04 was with both
+harvesters already running -- and none was available when this was written. What
+is available is #286's measurement of the same three dictionary entries over
+**61,948 module observations** across 34 recorded runs of two other bots, and it
+says two things that decide this without needing to know whether a harvester
+behaves like a weapon or like a propulsion module:
+
+  - `isInActiveState` is not a toggle at all. It is `not isDeactivating`, exact
+    complements with no exceptions anywhere in that corpus, and it reads `True`
+    for a module that is running **and** for a module that is off and idle. It
+    is close to a constant, so a rule reading it as "switched on" would press a
+    harvester that was already running -- and a module button is a toggle, so
+    that press switches it **off**.
+  - `ramp_active` is absent from the tree exactly when the `ShipModuleButtonRamps`
+    widget does not exist, which is when the module is not cycling. On the
+    20,095 observations where it is absent, nothing was running; it is created
+    when a module starts and destroyed when it stops.
+
+So the reading here is **the ramp widget's existence and not its value**: a
+module whose `ramp_active` is present is cycling, whether this reading caught it
+between cycles (`Just False`, which is what a weapon's duty cycle does) or in
+one (`Just True`, which is what a latch does). That is the one answer that is
+right whichever of the two a gas harvester turns out to be, which is what makes
+it the safe thing to ship against an unsettled question.
+
+**It fails towards not pressing.** A harvester this rule cannot tell is running
+is one the bot leaves alone, so the cost of being wrong is a hold that does not
+fill -- visible in the status line and in the gauge -- rather than a bot toggling
+a module off and on forever, which is #12, #34, #35, #76 and #286 and is the
+failure the issue names by number.
+
+-}
+type ModuleRunningState
+    = ModuleIsRunning
+    | ModuleIsNotRunning
+
+
+moduleRunningState : EveOnline.ParseUserInterface.ShipUIModuleButton -> ModuleRunningState
+moduleRunningState moduleButton =
+    case moduleButton.stateFromDictEntries.ramp_active of
+        Just _ ->
+            ModuleIsRunning
+
+        Nothing ->
+            ModuleIsNotRunning
+
+
+{-| The propulsion module, which the client-setup contract puts first in the
+middle row.
+
+`Nothing` is a middle row this reading could not read at all, and it declines
+rather than defaulting: pressing `Alt+F1` at a ship whose modules are arranged
+some other way is pressing whatever is bound there.
+
+-}
+propulsionModuleFromShipUI : EveOnline.ParseUserInterface.ShipUI -> Maybe EveOnline.ParseUserInterface.ShipUIModuleButton
+propulsionModuleFromShipUI shipUI =
+    shipUI.moduleButtonsRows.middle |> moduleButtonsLeftToRight |> List.head
+
+
+harvesterModulesFromShipUI : EveOnline.ParseUserInterface.ShipUI -> List EveOnline.ParseUserInterface.ShipUIModuleButton
+harvesterModulesFromShipUI shipUI =
+    shipUI.moduleButtonsRows.top |> moduleButtonsLeftToRight
+
+
+{-| The keys one press holds down, in the order a chord wants them.
+
+Down in order and up in reverse, so a modifier is released after the key it
+modifies -- which is the shape `Alt+F1` already has everywhere in this repo, and
+the shape `cg_input`'s modifier stamping expects since PR #241.
+
+-}
+hotkeyEffects : List EffectOnWindow.VirtualKeyCode -> List EffectOnWindow.EffectOnWindowStruct
+hotkeyEffects chord =
+    (chord |> List.map EffectOnWindow.KeyDown)
+        ++ (chord |> List.reverse |> List.map EffectOnWindow.KeyUp)
+
+
+{-| Whether a dispatched step pressed **exactly** this chord and nothing else.
+
+Equality on the step's own key-down sequence rather than "contains every key of
+the chord", because `F1` is a subsequence of `Alt+F1` -- and a settling window
+that answered `True` for the harvester's press when the propulsion module's went
+out would suppress a press this bot meant to make, on a toggle, silently.
+
+-}
+stepPressedExactly : List EffectOnWindow.VirtualKeyCode -> List EffectOnWindow.EffectOnWindowStruct -> Bool
+stepPressedExactly chord effects =
+    (effects
+        |> List.filterMap
+            (\effect ->
+                case effect of
+                    EffectOnWindow.KeyDown keyCode ->
+                        Just keyCode
+
+                    _ ->
+                        Nothing
+            )
+    )
+        == chord
+
+
+{-| Press a module's hotkey, unless this bot pressed the same one a moment ago.
+
+**Every module hotkey on this ship is a toggle**, so a second press before the
+client has shown the result of the first switches the module back off -- which
+is `clickModuleButtonButWaitIfClickedInPreviousStep`'s reason, applied to the
+key that stands in for the click. `moduleButtonClickSettlingSteps` is the same
+window, taken from the framework rather than restated, so the two mechanisms
+cannot come to disagree about how long a press takes to appear.
+
+One declaration with two readers -- the propulsion module and each harvester --
+because "how long a module press takes to show up" is one fact about the client
+and two copies of it would be two places to retune.
+
+-}
+pressModuleHotkey : BotDecisionContext -> String -> List EffectOnWindow.VirtualKeyCode -> DecisionPathNode
+pressModuleHotkey context describe chord =
+    if
+        context.previousStepsEffects
+            |> List.take EveOnline.BotFrameworkSeparatingMemory.moduleButtonClickSettlingSteps
+            |> List.any (stepPressedExactly chord)
+    then
+        describeBranch
+            "Already pressed that module hotkey in a previous step -- a module button is a toggle, so wait for the client to show the result rather than pressing it off again."
+            waitForProgressInGame
+
+    else
+        describeBranch describe (decideActionForCurrentStep (hotkeyEffects chord))
+
+
+
+-- The harvest loop
+
+
+{-| How many readings the bot asks the Selected Item panel to show a cloud
+before it stops asking.
+
+The selection lands on the next reading when it lands at all, so ten is an order
+of magnitude more than it should take. **It is not calibrated against a corpus**
+-- no recorded run of this app exists at all -- and what the direction rests on
+is what expiry costs: the reading is handed to the lock and the harvesters, so
+the bot harvests without an orbit rather than clicking one overview row forever,
+which is #257's shape on the hottest path this bot has.
+
+-}
+panelSelectGiveUpReadings : Int
+panelSelectGiveUpReadings =
+    10
+
+
+{-| How many readings a lock may go unanswered before the bot stops asking for
+it.
+
+Larger than the selection's bound because a lock is the client's own asynchronous
+action with a visible in-progress state, where a selection either lands on the
+next reading or did not happen. Same argument for having one at all: without it
+a cloud the client will not lock is a Ctrl+click dispatched on every reading for
+the rest of the session, and the status line would say `harvesting` throughout.
+
+-}
+lockGiveUpReadings : Int
+lockGiveUpReadings =
+    20
+
+
+{-| The two counters bounding the two things the harvest loop asks for.
+
+Advanced in `updateMemoryForNewReadingFromGame`, which is the only place that
+can write memory and the one place that never sees a decision -- so what they
+count is the **client's** answer rather than the branch's activity, and they
+therefore keep counting whatever else holds the tree. That is the half #102's
+placement rule is about, and the comparison against them is asked inside
+`harvestStep`, which is reached on every reading the ship is on a grid with a
+cloud on it.
+
+Both reset outright on a reading where the client has answered, and on any
+reading with no cloud chosen at all -- so a session that harvests forty clouds
+starts from zero at each one.
+
+-}
+type alias HarvestCounters =
+    { panelSelectUnansweredReadings : Int
+    , lockUnansweredReadings : Int
+    }
+
+
+initHarvestCounters : HarvestCounters
+initHarvestCounters =
+    { panelSelectUnansweredReadings = 0, lockUnansweredReadings = 0 }
+
+
+{-| What one reading says about the two asks, in the terms the counters need.
+
+A record rather than a reading, so a case can fold a whole session through
+`harvestCountersAfterReading` and read the counters back.
+
+-}
+type alias HarvestAnswerFromClient =
+    { cloudIsChosen : Bool
+    , panelShowsTheCloud : Bool
+    , cloudReadsLocked : Bool
+    }
+
+
+harvestCountersAfterReading : HarvestAnswerFromClient -> HarvestCounters -> HarvestCounters
+harvestCountersAfterReading answer counters =
+    if not answer.cloudIsChosen then
+        initHarvestCounters
+
+    else
+        { panelSelectUnansweredReadings =
+            if answer.panelShowsTheCloud then
+                0
+
+            else
+                counters.panelSelectUnansweredReadings + 1
+        , lockUnansweredReadings =
+            if answer.cloudReadsLocked then
+                0
+
+            else
+                counters.lockUnansweredReadings + 1
+        }
+
+
+{-| Everything about a grid the harvest loop decides on, as plain readable facts.
+
+A record rather than a `BotDecisionContext`, for #106's reason: this is the one
+rule in this app that orders four separate commands, and a rule reachable only
+through a decision context is one no case can execute -- so it would be checked
+by being read, which is how a rule that does the right things in the wrong order
+passes for one that works.
+
+-}
+type alias HarvestSituation =
+    { propulsionModule : Maybe ModuleRunningState
+    , shipIsOrbiting : Bool
+    , panelShowsTheCloud : Bool
+    , orbitButtonIsOffered : Bool
+    , cloudReadsLocked : Bool
+    , cloudReadsLocking : Bool
+    , harvestersNotRunning : List Int
+    , counters : HarvestCounters
+    }
+
+
+{-| What the bot commands next on a grid it is harvesting.
+
+**One rule with the whole ordering in it**, rather than four branches each
+deciding whether it is its turn. The order is the issue's own -- keep the
+propulsion module running, orbit the cloud, lock it, run both harvesters -- and
+what makes it worth writing as one rule is that every stage can _fail to be
+reachable_, and each of those has to fall through to the next rather than
+holding the loop:
+
+  - a middle row this reading cannot read means no propulsion module to press,
+  - a panel that never comes to show the cloud expires and the bot harvests
+    without an orbit,
+  - a panel showing the cloud and offering no Orbit button is the ordinary
+    contextual button set rather than a failure, and waits by falling through,
+  - a lock the client will not grant expires, and then there is genuinely
+    nothing left to command, because a harvester runs on the active target.
+
+`NothingLeftToCommand` is therefore two different situations -- everything
+running, and nothing left that can be tried -- which is why the status line
+renders the _situation_ beside the step rather than the step alone.
+
+-}
+type HarvestStep
+    = SwitchThePropulsionModuleOn
+    | SelectTheCloud
+    | PressTheOrbitButton
+    | LockTheCloud
+    | WaitForTheLockToLand
+    | RunTheHarvester Int
+    | NothingLeftToCommand
+
+
+harvestStep : HarvestSituation -> HarvestStep
+harvestStep situation =
+    if situation.propulsionModule == Just ModuleIsNotRunning then
+        SwitchThePropulsionModuleOn
+
+    else if not situation.shipIsOrbiting && not situation.panelShowsTheCloud && situation.counters.panelSelectUnansweredReadings < panelSelectGiveUpReadings then
+        SelectTheCloud
+
+    else if not situation.shipIsOrbiting && situation.panelShowsTheCloud && situation.orbitButtonIsOffered then
+        PressTheOrbitButton
+
+    else if situation.cloudReadsLocked then
+        case situation.harvestersNotRunning of
+            [] ->
+                NothingLeftToCommand
+
+            index :: _ ->
+                RunTheHarvester index
+
+    else if situation.cloudReadsLocking then
+        WaitForTheLockToLand
+
+    else if situation.counters.lockUnansweredReadings < lockGiveUpReadings then
+        LockTheCloud
+
+    else
+        NothingLeftToCommand
+
+
+{-| Whether the Selected Item panel is showing this overview row.
+
+Compared on **words** rather than as a substring, because a substring has cost
+this codebase real bugs -- a rogue drone called a `Wrecker` contains `wreck` --
+and the panel's own label carries decoration around the name.
+
+The exposure it does not remove is stated rather than implied: two clouds of one
+designation share a name, so a selection that landed on the neighbour reads as
+correct. Every site measured for #456 carried clouds with distinct designations,
+and the ordering this bot picks by is derived from those designations, so two
+identically named rows would already be a site this rule has nothing to say
+about.
+
+-}
+selectedItemIsOverviewEntry : ReadingFromGameClient -> EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+selectedItemIsOverviewEntry readingFromGameClient entry =
+    case ( readingFromGameClient.selectedItemWindow, entry.objectName ) of
+        ( Just window, Just name ) ->
+            EveOnline.ParseUserInterface.getAllContainedDisplayTexts window.uiNode.uiNode
+                |> List.any (containsWords name)
+
+        _ ->
+            False
+
+
+{-| Whether `pattern` occurs in `text` as whole words rather than as a substring.
+
+Whitespace is normalised and both sides padded, so a match can neither begin nor
+end mid-word and a multi-word pattern still matches as a sequence.
+
+-}
+containsWords : String -> String -> Bool
+containsWords pattern text =
+    let
+        padded value =
+            " " ++ (value |> String.toLower |> String.words |> String.join " ") ++ " "
+    in
+    String.contains (padded pattern) (padded text)
+
+
+{-| The Selected Item panel's Orbit button, by **both** the identifiers the
+client carries for it.
+
+The client writes an id on the node (`_name` / `_elementId`, which read alike on
+every panel button this repo has ever pressed) and a `cmdName` beside it --
+`selectedItemOrbit` and `CmdOrbitItem` name the same button -- so matching either
+survives a rename of one. That is cheap insurance on a widget name, which is the
+class of thing that has cost this repo whole sessions.
+
+Found by name in the reading it is pressed in and **never by position**:
+`selectedItemOrbit` was read live at x=1515 in one reading and x=1551 in another
+moments later, because two buttons left the row and everything shifted.
+
+-}
+selectedItemOrbitButton : { elementId : String, cmdName : String }
+selectedItemOrbitButton =
+    { elementId = "selectedItemOrbit", cmdName = "CmdOrbitItem" }
+
+
+selectedItemPanelButton :
+    ReadingFromGameClient
+    -> { elementId : String, cmdName : String }
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+selectedItemPanelButton readingFromGameClient button =
+    let
+        property name node =
+            node.uiNode |> EveOnline.ParseUserInterface.getStringPropertyFromDictEntries name
+    in
+    readingFromGameClient.selectedItemWindow
+        |> Maybe.map (.uiNode >> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion)
+        |> Maybe.withDefault []
+        |> List.filter
+            (\node ->
+                [ property "_name" node, property "_elementId" node ]
+                    |> List.member (Just button.elementId)
+                    |> (||) (property "cmdName" node == Just button.cmdName)
+            )
+        |> List.head
+
+
+{-| The lock chord for one row: Ctrl held over a plain left click.
+
+The row is filtered on `_display` before it ever reaches here -- see
+`overviewEntryIsDisplayed` -- because this is a click at a screen position, and a
+hidden row's position belongs to something else.
+
+-}
+lockChordForOverviewEntry : EveOnline.ParseUserInterface.OverviewWindowEntry -> List EffectOnWindow.EffectOnWindowStruct
+lockChordForOverviewEntry overviewEntry =
+    [ [ EffectOnWindow.KeyDown EffectOnWindow.vkey_CONTROL ]
+    , overviewEntry.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault []
+    , [ EffectOnWindow.KeyUp EffectOnWindow.vkey_CONTROL ]
+    ]
+        |> List.concat
+
+
+harvestSituationFromContext :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.ShipUI
+    -> EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> HarvestSituation
+harvestSituationFromContext context shipUI cloud =
+    { propulsionModule = propulsionModuleFromShipUI shipUI |> Maybe.map moduleRunningState
+    , shipIsOrbiting =
+        (shipUI.indication |> Maybe.andThen .maneuverType)
+            == Just EveOnline.ParseUserInterface.ManeuverOrbit
+    , panelShowsTheCloud = selectedItemIsOverviewEntry context.readingFromGameClient cloud
+    , orbitButtonIsOffered =
+        selectedItemPanelButton context.readingFromGameClient selectedItemOrbitButton /= Nothing
+    , cloudReadsLocked = cloud.commonIndications.targetedByMe
+    , cloudReadsLocking = cloud.commonIndications.targeting
+    , harvestersNotRunning =
+        harvesterModulesFromShipUI shipUI
+            |> List.indexedMap Tuple.pair
+            |> List.filter (Tuple.second >> moduleRunningState >> (==) ModuleIsNotRunning)
+            |> List.map Tuple.first
+    , counters = context.memory.harvestCounters
+    }
+
+
+{-| Command whatever `harvestStep` says is next.
+
+Nothing is decided here: this is the mapping from an answer onto the effects
+that carry it out, kept apart from the rule so the ordering can be executed
+without a client and the effects can be read without one.
+
+-}
+actOnTheHarvestStep :
+    BotDecisionContext
+    -> EveOnline.ParseUserInterface.ShipUI
+    -> EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> HarvestSituation
+    -> DecisionPathNode
+actOnTheHarvestStep context shipUI cloud situation =
+    let
+        cloudName =
+            cloud.objectName |> Maybe.withDefault "the cloud"
+    in
+    case harvestStep situation of
+        SwitchThePropulsionModuleOn ->
+            pressModuleHotkey context
+                "The propulsion module does not read as running -- switch it on (Alt+F1)."
+                propulsionModuleHotkey
+
+        SelectTheCloud ->
+            describeBranch
+                ("Select '" ++ cloudName ++ "', so the Selected Item panel's own Orbit button acts on it.")
+                (decideActionForCurrentStep
+                    (cloud.uiNode |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault [])
+                )
+
+        PressTheOrbitButton ->
+            case selectedItemPanelButton context.readingFromGameClient selectedItemOrbitButton of
+                Just button ->
+                    describeBranch
+                        ("Orbit '" ++ cloudName ++ "' with the Selected Item panel's own button, at whatever range the client last used.")
+                        (decideActionForCurrentStep
+                            (button |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault [])
+                        )
+
+                Nothing ->
+                    -- Unreachable: `harvestStep` only answers this where the
+                    -- situation said the button was offered, and the situation
+                    -- is built from the same reading. Says so rather than
+                    -- pretending, because a silent wait here would be a branch
+                    -- reporting nothing and doing nothing.
+                    describeBranch
+                        "The Orbit button left the panel between reading it and pressing it -- ask again next reading."
+                        waitForProgressInGame
+
+        LockTheCloud ->
+            describeBranch
+                ("Lock '" ++ cloudName ++ "' (Ctrl+click its overview row) -- a harvester runs on the active target.")
+                (decideActionForCurrentStep (lockChordForOverviewEntry cloud))
+
+        WaitForTheLockToLand ->
+            describeBranch
+                ("The client is still locking '" ++ cloudName ++ "'.")
+                waitForProgressInGame
+
+        RunTheHarvester index ->
+            case
+                ( topRowModuleHotkeyFromIndex index
+                , harvesterModulesFromShipUI shipUI |> List.drop index |> List.head
+                )
+            of
+                ( Just keyCode, _ ) ->
+                    pressModuleHotkey context
+                        ("Run gas harvester "
+                            ++ String.fromInt (index + 1)
+                            ++ " on '"
+                            ++ cloudName
+                            ++ "' -- it does not read as cycling."
+                        )
+                        [ keyCode ]
+
+                ( Nothing, Just moduleButton ) ->
+                    describeBranch
+                        ("Run gas harvester " ++ String.fromInt (index + 1) ++ " -- past the four the hotkeys reach, so click its button.")
+                        (EveOnline.BotFrameworkSeparatingMemory.clickModuleButtonButWaitIfClickedInPreviousStep
+                            context
+                            moduleButton
+                        )
+
+                ( Nothing, Nothing ) ->
+                    describeBranch
+                        "The module row changed between reading it and pressing it -- ask again next reading."
+                        waitForProgressInGame
+
+        NothingLeftToCommand ->
+            describeBranch
+                (describeHarvestSituation situation)
+                waitForProgressInGame
+
+
+{-| What the harvest loop is doing, and which of its stages it has given up on.
+
+Printed on every reading with a cloud rather than only where something is wrong,
+because the two states `NothingLeftToCommand` covers -- everything running, and
+nothing left that can be tried -- are the same silence from outside, and only one
+of them wants an operator.
+
+-}
+describeHarvestSituation : HarvestSituation -> String
+describeHarvestSituation situation =
+    let
+        propulsion =
+            case situation.propulsionModule of
+                Nothing ->
+                    "no module read in the middle row (see the client-setup list)"
+
+                Just ModuleIsRunning ->
+                    "running"
+
+                Just ModuleIsNotRunning ->
+                    "not running"
+
+        orbit =
+            if situation.shipIsOrbiting then
+                "orbiting"
+
+            else if situation.counters.panelSelectUnansweredReadings >= panelSelectGiveUpReadings then
+                "NOT ORBITING and GIVEN UP ON SELECTING the cloud after "
+                    ++ String.fromInt panelSelectGiveUpReadings
+                    ++ " readings -- harvesting without an orbit"
+
+            else
+                "not orbiting yet ("
+                    ++ String.fromInt situation.counters.panelSelectUnansweredReadings
+                    ++ "/"
+                    ++ String.fromInt panelSelectGiveUpReadings
+                    ++ " readings the panel has not shown the cloud)"
+
+        lock =
+            if situation.cloudReadsLocked then
+                "locked"
+
+            else if situation.cloudReadsLocking then
+                "locking"
+
+            else if situation.counters.lockUnansweredReadings >= lockGiveUpReadings then
+                "NOT LOCKED and GIVEN UP ON after "
+                    ++ String.fromInt lockGiveUpReadings
+                    ++ " readings -- a harvester runs on the active target, so nothing is being harvested"
+
+            else
+                "not locked yet ("
+                    ++ String.fromInt situation.counters.lockUnansweredReadings
+                    ++ "/"
+                    ++ String.fromInt lockGiveUpReadings
+                    ++ ")"
+
+        harvesters =
+            case situation.harvestersNotRunning of
+                [] ->
+                    "both cycling"
+
+                notRunning ->
+                    String.fromInt (List.length notRunning)
+                        ++ " not cycling (top-row slot(s) "
+                        ++ (notRunning |> List.map (\index -> String.fromInt (index + 1)) |> String.join ", ")
+                        ++ ")"
+    in
+    "Harvest: propulsion module "
+        ++ propulsion
+        ++ "; "
+        ++ orbit
+        ++ "; cloud "
+        ++ lock
+        ++ "; harvesters "
+        ++ harvesters
+        ++ "."
+
+
+
+-- Getting to the site
+
+
+{-| The two menu entries a warp to zero takes, in both cascades this bot drives.
+
+Two levels, measured on this client for a bookmark: the top-level entry reads
+`Warp to Within (0 m)` -- carrying the client's _current default_ in those
+brackets, which is why it is matched on the `to within` part and not whole --
+and hovering it opens a fixed submenu of `Within 0 m | Within 10 km | ... |
+Within 100 km`. A scanned anomaly's own menu takes the same two steps, which is
+what lets one pair of literals drive both.
+
+**Zero rather than a setting.** A gas site is warped into to be harvested, and
+the clouds are what the ship has to be next to; every other distance in that
+submenu is a distance the ship then has to close by hand, which this bot has no
+command for. `retreat-bookmark-prefix`'s own fallback wants `Within 100 km` and
+is #463's.
+
+-}
+warpToWithinMenuEntry : String
+warpToWithinMenuEntry =
+    "to within"
+
+
+warpAtZeroMenuEntry : String
+warpAtZeroMenuEntry =
+    "Within 0 m"
+
+
+{-| Warp to the site `siteSearch` chose.
+
+**One cascade for both sources**, because the difference between them is which
+node is right-clicked and nothing else. The bookmark half is
+`eve-online-mining-bot`'s `useContextMenuOnLocationWithMatchingName` reduced to
+the arm this bot needs: that function's whole locations-window branch is
+`useContextMenuCascade ( placeEntry.mainText, placeEntry.uiNode )` over the
+entry whose name matched, and `siteSearch` has already done the matching. Its
+other two arms -- the overview row and the solar-system menu -- are ways of
+finding a place this bot has not found in the Locations window, and it has no
+use for either.
+
+**Nothing deactivates the propulsion module on the way out, and that is #465.**
+Every other bot here funnels its warps through
+`ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping`, and this one
+must not: the propulsion module has to survive every warp this bot makes, so
+there is no shared helper to reach and no branch that presses `Alt+F1` to switch
+one off. `SwitchThePropulsionModuleOn` is the only step in this file that
+touches it, and it only ever switches it on.
+
+-}
+warpToTheHuntedSite : BotDecisionContext -> SiteToHunt -> DecisionPathNode
+warpToTheHuntedSite context site =
+    let
+        warpMenu =
+            useMenuEntryWithTextContaining warpToWithinMenuEntry
+                (useMenuEntryWithTextContaining warpAtZeroMenuEntry menuCascadeCompleted)
+    in
+    case site of
+        ScannedAnomaly anomaly ->
+            describeBranch
+                ("Warp to the scanned anomaly " ++ describeAnomalyIdentity anomaly ++ ", at zero.")
+                (useContextMenuCascade ( "Scan result", anomaly.uiNode ) warpMenu context)
+
+        BookmarkedSite bookmark ->
+            describeBranch
+                ("Warp to the bookmark '" ++ bookmark.mainText ++ "', at zero.")
+                (useContextMenuCascade ( bookmark.mainText, bookmark.uiNode ) warpMenu context)
+
+
+{-| How full the hold is, where a reading can say.
+
+Read off whichever inventory window this reading carries a capacity gauge for.
+**Nothing in this bot opens one and the client-setup list does not ask for one**,
+so the ordinary answer today is that there is none -- which is said in those
+words rather than reported as an empty hold. An operator watching a bot that
+never deposits has to be able to tell a hold that is not filling from a hold
+nobody is looking at, and #464 is what has to decide which of the two it wants:
+`InvContCapacityGauge` read `0/12,500.0 m3` on the hull #456 was measured on,
+and carries a transient `(12,500.0) 12,500.0/12,500.0 m3` form while a transfer
+is in flight, which is a state to wait through rather than to act on.
+
+-}
+describeHoldFill : ReadingFromGameClient -> String
+describeHoldFill readingFromGameClient =
+    case
+        readingFromGameClient.inventoryWindows
+            |> List.filterMap .selectedContainerCapacityGauge
+            |> List.filterMap Result.toMaybe
+            |> List.head
+    of
+        Nothing ->
+            "Hold: no inventory window with a readable capacity gauge in this reading, so nothing here knows how full it is."
+
+        Just gauge ->
+            "Hold: "
+                ++ String.fromInt gauge.used
+                ++ (case gauge.maximum of
+                        Just maximum ->
+                            "/" ++ String.fromInt maximum
+
+                        Nothing ->
+                            " (the gauge states no maximum)"
+                   )
+                ++ " -- nothing empties it yet, which is #464."
+
+
+
 -- What would make this bot leave, and whether any of it is armed
 
 
@@ -998,21 +2311,27 @@ initBotMemory =
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , messageBoxStandoff = Nothing
     , messageBoxLastChange = Nothing
+    , miningRangeRefusal = Nothing
+    , miningRangeLastChange = Nothing
+    , harvestCounters = initHarvestCounters
     }
 
 
 {-| The root, and the one place anything the memory update concluded is said.
 
-`messageBoxLastChange` holds a message only on the reading its conclusion
-changed, so this is one line per change with no separate "already reported" flag
-to get wrong -- and it is said here rather than in the branch that learned it,
+Each of these holds a message only on the reading its conclusion changed, so
+this is one line per change with no separate "already reported" flag to get
+wrong -- and they are said here rather than in the branches that learned them,
 because the branch that learns a message box has been given up on is precisely
-the branch that has just stopped running.
+the branch that has just stopped running, and the harvester's own refusal is
+read on readings the bot may be doing anything at all on.
 
 -}
 gasHufferDecisionRoot : BotDecisionContext -> DecisionPathNode
 gasHufferDecisionRoot context =
-    ([ context.memory.messageBoxLastChange ]
+    ([ context.memory.messageBoxLastChange
+     , context.memory.miningRangeLastChange
+     ]
         |> List.filterMap identity
         |> List.foldr describeBranch (gasHufferDecisionRootBeforeApplyingSettings context)
     )
@@ -1050,30 +2369,67 @@ gasHufferDecisionRootBeforeApplyingSettings context =
         |> Maybe.withDefault
             (branchDependingOnDockedOrInSpace
                 { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
-                , ifSeeShipUI = \_ -> huntForASite context
+                , ifSeeShipUI = huntAndHarvest context
                 }
                 context
             )
 
 
-{-| Says which site it would take, and then takes none of them.
+{-| The whole of what this bot does in space: find a cloud, or go where the
+clouds are.
 
-The decision line is the same sentence the status line carries, from the same
-call, so the two cannot come to disagree about which site was chosen -- and it
-is on the decision path rather than only in the status text because that is
-where an operator reading a run looks for what the bot decided.
+**The grid is what says the ship has arrived**, rather than anything about the
+warp having completed. Harvestable clouds exist only inside a gas site, so a
+reading whose overview carries one is a reading taken on a site -- which is the
+same argument saxrat's gate branch makes about acceleration gates, and it needs
+no memory of what the bot asked for. A ship still in warp reads no clouds and
+falls through to the branch below, which is why the warp is declined outright on
+a reading that says the ship is warping: the cascade would otherwise be
+re-opened on every reading of a warp that is already going where it was told.
 
-The wait underneath is unchanged and still says so in words. A branch that
-reports nothing and does nothing is indistinguishable from a branch that is
-stuck, which is `/review-silent-success` exactly; the difference here is that
-the doing-nothing is deliberate and names the issue that fills it.
+The site clause is printed above both, from the same `siteSearchFromContext`
+call the status line makes, so the decision log and the status text cannot come
+to disagree about which site was chosen.
 
 -}
-huntForASite : BotDecisionContext -> DecisionPathNode
-huntForASite context =
+huntAndHarvest : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> DecisionPathNode
+huntAndHarvest context shipUI =
+    let
+        site =
+            siteSearchFromContext context
+
+        search =
+            cloudSearchFromReading context.eventContext.botSettings context.readingFromGameClient
+    in
     describeBranch
-        (describeSiteSearch (siteSearchFromContext context))
-        (describeBranch nothingToDoInSpaceYet waitForProgressInGame)
+        (describeSiteSearch site)
+        (describeBranch (describeCloudSearch search)
+            (case search.chosen of
+                Just cloud ->
+                    actOnTheHarvestStep context
+                        shipUI
+                        cloud
+                        (harvestSituationFromContext context shipUI cloud)
+
+                Nothing ->
+                    if shipIsWarping shipUI then
+                        describeBranch "In warp -- wait for the grid the ship is going to." waitForProgressInGame
+
+                    else
+                        case site.hunted of
+                            Just hunted ->
+                                warpToTheHuntedSite context hunted
+
+                            Nothing ->
+                                describeBranch nothingToHuntInSpace waitForProgressInGame
+            )
+        )
+
+
+shipIsWarping : EveOnline.ParseUserInterface.ShipUI -> Bool
+shipIsWarping shipUI =
+    (shipUI.indication |> Maybe.andThen .maneuverType)
+        == Just EveOnline.ParseUserInterface.ManeuverWarp
 
 
 {-| What the bot says while it has no behaviour, docked.
@@ -1090,9 +2446,17 @@ nothingToDoDockedYet =
     "Docked. This bot has no docked behaviour yet -- depositing the hold is issue #464 -- so it is doing nothing on purpose."
 
 
-nothingToDoInSpaceYet : String
-nothingToDoInSpaceYet =
-    "In space. Deciding which site to hunt is #460 and is done; nothing flies to it yet -- warping and harvesting are #461, noticing a hostile is #462, leaving is #463 -- so it is doing nothing on purpose."
+{-| What the bot says on a grid with no cloud and nowhere to go.
+
+Named rather than left as a bare wait, for the reason above: this is the state a
+bot that has quietly stopped working looks like from outside, so it says which
+of the two it is and where the operator should look. `describeSiteSearch` has
+already said _why_ nothing is hunted on the same reading.
+
+-}
+nothingToHuntInSpace : String
+nothingToHuntInSpace =
+    "In space with no harvestable cloud on the overview and no site to hunt -- nothing to warp to, so it is waiting on purpose. Noticing a hostile is #462 and leaving is #463, and neither is here, so nothing about this wait is a safe place to leave a ship."
 
 
 {-| The things that have to be dealt with before any decision about the game.
@@ -1599,6 +2963,34 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
                 _ ->
                     Nothing
+
+        miningRangeRefusal =
+            miningRangeRefusalAfterReading
+                { before = botMemoryBefore.miningRangeRefusal
+                , refusalNow = miningRangeRefusalFromGameLog context.readingFromGameClient
+                }
+
+        -- Said at the root on the reading a refusal arrives and on no other, so
+        -- an operator gets one line per complaint rather than one per reading
+        -- for the rest of the session. The status line keeps saying it, with
+        -- its age.
+        miningRangeLastChange =
+            miningRangeRefusalFromGameLog context.readingFromGameClient
+                |> Maybe.map
+                    (\refusal ->
+                        describeMiningRange
+                            (Just
+                                { strayedToMeters = refusal.strayedToMeters
+                                , miningRangeMeters = refusal.miningRangeMeters
+                                , readingsSince = 0
+                                }
+                            )
+                    )
+
+        -- The same `cloudSearch` the decision and the status line ask, so the
+        -- counters cannot come to be about a cloud the bot was not working on.
+        cloudChosen =
+            (cloudSearchFromReading context.botSettings context.readingFromGameClient).chosen
     in
     { readingsCount = botMemoryBefore.readingsCount + 1
     , lastDockedStationNameFromInfoPanel =
@@ -1610,16 +3002,36 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
     , messageBoxStandoff = messageBoxStandoff
     , messageBoxLastChange = messageBoxLastChange
+    , miningRangeRefusal = miningRangeRefusal
+    , miningRangeLastChange = miningRangeLastChange
+    , harvestCounters =
+        harvestCountersAfterReading
+            { cloudIsChosen = cloudChosen /= Nothing
+            , panelShowsTheCloud =
+                cloudChosen
+                    |> Maybe.map (selectedItemIsOverviewEntry context.readingFromGameClient)
+                    |> Maybe.withDefault False
+            , cloudReadsLocked =
+                cloudChosen
+                    |> Maybe.map (.commonIndications >> .targetedByMe)
+                    |> Maybe.withDefault False
+            }
+            botMemoryBefore.harvestCounters
     }
 
 
 {-| What an operator watching a run reads on every reading.
 
-Deliberately opens by saying the bot has no harvesting behaviour, because
-everything else here is a bot that looks like it is working: it reads the
-client, keeps two recoveries armed, and prints settings back. A console that did
-not say so would be a console reporting success for a bot that does nothing,
-which is the failure this repo is named after.
+Deliberately opens with what the bot **cannot** do, because everything else here
+is a bot that looks like it is working: it warps, orbits, locks and harvests, and
+a console reporting that while the ship has no way of noticing a stranger on the
+grid would be a console reporting success for the half that is missing. That is
+the failure this repo is named after, and the half that is missing is the one
+that keeps the ship.
+
+The harvest clause and the cloud clause are only printed where the reading has
+them, since a docked reading has no grid and a clause an operator reads on every
+reading regardless is a clause they stop seeing.
 
 -}
 statusTextFromState : BotDecisionContext -> String
@@ -1627,29 +3039,49 @@ statusTextFromState context =
     let
         settings =
             context.eventContext.botSettings
-    in
-    [ "SCAFFOLD ONLY: this bot decides which site to hunt and goes nowhere -- it does not warp, harvest, deposit, watch for hostiles or retreat yet (issues #461-#464)."
-    , describeSiteSearch (siteSearchFromContext context)
-    , "Readings: "
-        ++ String.fromInt context.memory.readingsCount
-        ++ ". Site group: '"
-        ++ settings.anomalyGroup
-        ++ "'. Clouds: "
-        ++ (case settings.gasCloudNamePrefix of
-                Nothing ->
-                    "any harvestable cloud"
 
-                Just prefix ->
-                    "those named '" ++ prefix ++ "...'"
-           )
-        ++ ". D-Scan every "
-        ++ String.fromInt settings.dscanIntervalSeconds
-        ++ "s."
-    , describeHostileTrust (hostileTrustFromSettings settings)
-    , describeRetreatCover (retreatCoverFromContext context)
-    , "Deposit at: "
-        ++ Maybe.withDefault "nowhere named ('home-structure-name' is unset)" settings.homeStructureName
-        ++ "."
-        ++ describeMessageBoxStandoff context.memory.messageBoxStandoff
+        cloudSearchNow =
+            cloudSearchFromReading settings context.readingFromGameClient
+
+        harvestClause =
+            case ( context.readingFromGameClient.shipUI, cloudSearchNow.chosen ) of
+                ( Just shipUI, Just cloud ) ->
+                    [ describeCloudSearch cloudSearchNow
+                    , describeHarvestSituation (harvestSituationFromContext context shipUI cloud)
+                    ]
+
+                ( Just _, Nothing ) ->
+                    [ describeCloudSearch cloudSearchNow ]
+
+                ( Nothing, _ ) ->
+                    []
+    in
+    [ "HARVESTS BUT CANNOT LEAVE: this bot warps to a gas site and harvests it, and it does not watch for anything arriving (#462), retreat (#463), deposit the hold (#464) or keep the propulsion module on across a warp (#465)."
+    , describeSiteSearch (siteSearchFromContext context)
     ]
+        ++ harvestClause
+        ++ [ describeMiningRange context.memory.miningRangeRefusal
+           , describeHoldFill context.readingFromGameClient
+           , "Readings: "
+                ++ String.fromInt context.memory.readingsCount
+                ++ ". Site group: '"
+                ++ settings.anomalyGroup
+                ++ "'. Clouds: "
+                ++ (case settings.gasCloudNamePrefix of
+                        Nothing ->
+                            "any harvestable cloud"
+
+                        Just prefix ->
+                            "those named '" ++ prefix ++ "...'"
+                   )
+                ++ ". D-Scan every "
+                ++ String.fromInt settings.dscanIntervalSeconds
+                ++ "s."
+           , describeHostileTrust (hostileTrustFromSettings settings)
+           , describeRetreatCover (retreatCoverFromContext context)
+           , "Deposit at: "
+                ++ Maybe.withDefault "nowhere named ('home-structure-name' is unset)" settings.homeStructureName
+                ++ "."
+                ++ describeMessageBoxStandoff context.memory.messageBoxStandoff
+           ]
         |> String.join "\n"
