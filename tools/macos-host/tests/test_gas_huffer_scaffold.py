@@ -74,6 +74,7 @@ PREAMBLE = (
 # value and this file must not claim credit for that.
 NAME_SETTINGS = {
     "anomaly-group": "anomalyGroup",
+    "anomaly-name": "anomalyName",
     "gas-cloud-name-prefix": "gasCloudNamePrefix",
     "home-structure-name": "homeStructureName",
     "retreat-bookmark-prefix": "retreatBookmarkPrefix",
