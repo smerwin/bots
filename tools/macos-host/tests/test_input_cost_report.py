@@ -31,6 +31,7 @@ because that count is exactly the kind of thing a growing corpus must not be
 allowed to turn red.
 """
 import glob
+import inspect
 import io
 import os
 import re
@@ -43,8 +44,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MACOS_HOST_DIR = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(MACOS_HOST_DIR, "botlab_host"))
+sys.path.insert(0, MACOS_HOST_DIR)
 
 import botlab_host  # noqa: E402
+import web_console  # noqa: E402
 from prerequisites import recorded_runs  # noqa: E402
 
 EVE_BOT_LOGS = os.path.join(os.path.expanduser("~"), "eve-bot-logs")
@@ -393,6 +396,129 @@ class TheCorpusStillDrawsACleanGapTest(unittest.TestCase):
             "if this ever goes empty, the finding that motivated placing the "
             "threshold where it is has reverted and the doc comment above "
             "INPUT_COST_SATURATED_MS needs rewriting, not silencing")
+
+
+def host_lines(state):
+    """The console's own lines, which is where a slow event is announced --
+    reused from `test_console_names_the_character.host_lines`'s shape rather
+    than a second helper."""
+    return [line["text"] for line in state.snapshot()["lines"]
+            if line["kind"] == "host"]
+
+
+class ConsoleNoteInputCostTest(unittest.TestCase):
+    """`web_console.ConsoleState.note_input_cost` -- a real `ConsoleState`,
+    told a cost the way the dispatcher tells it."""
+
+    def setUp(self):
+        self.state = web_console.ConsoleState()
+
+    def test_a_console_nobody_has_told_reports_nothing_measured(self):
+        snapshot = self.state.snapshot()
+        self.assertIsNone(snapshot["lastInputCostMs"])
+        self.assertEqual(snapshot["slowInputEvents"], 0)
+
+    def test_an_absent_cost_does_not_move_the_last_reading(self):
+        # A step that posted no glide answers `None`, and that must not be
+        # read as healthy -- see `describe_input_cost`'s own reasoning.
+        self.state.note_input_cost(5.0, threshold_ms=30.0)
+        self.state.note_input_cost(None, threshold_ms=30.0)
+        self.assertEqual(self.state.snapshot()["lastInputCostMs"], 5.0)
+        self.assertEqual(self.state.snapshot()["slowInputEvents"], 0)
+
+    def test_a_healthy_cost_updates_the_reading_and_counts_nothing(self):
+        self.state.note_input_cost(12.0, threshold_ms=30.0)
+        snapshot = self.state.snapshot()
+        self.assertEqual(snapshot["lastInputCostMs"], 12.0)
+        self.assertEqual(snapshot["slowInputEvents"], 0)
+        self.assertEqual(host_lines(self.state), [])
+
+    def test_a_saturated_cost_counts_and_says_so(self):
+        self.state.note_input_cost(85.0, threshold_ms=30.0)
+        snapshot = self.state.snapshot()
+        self.assertEqual(snapshot["lastInputCostMs"], 85.0)
+        self.assertEqual(snapshot["slowInputEvents"], 1)
+        self.assertEqual(len(host_lines(self.state)), 1)
+        self.assertIn("INPUT COST HIGH", host_lines(self.state)[0])
+        self.assertIn("#163", host_lines(self.state)[0])
+
+    def test_at_the_threshold_counts_as_saturated(self):
+        """`>=`, matching `describe_input_cost`'s own boundary."""
+        self.state.note_input_cost(30.0, threshold_ms=30.0)
+        self.assertEqual(self.state.snapshot()["slowInputEvents"], 1)
+
+    def test_every_saturated_event_is_counted_not_only_the_first(self):
+        for _ in range(3):
+            self.state.note_input_cost(85.0, threshold_ms=30.0)
+        self.assertEqual(self.state.snapshot()["slowInputEvents"], 3)
+
+    def test_it_decides_nothing(self):
+        """Same posture as #123's quick message: `note_input_cost` sets a
+        field and, past the threshold, appends a log line -- nothing here
+        compares `slow_input_events` against anything, and nothing pauses,
+        stops or retreats on its strength."""
+        body = inspect.getsource(web_console.ConsoleState.note_input_cost)
+        self.assertNotIn("slow_input_events >", body)
+        self.assertNotIn("pending_commands", body)
+        self.assertNotIn("paused", body)
+
+
+class ReportInputCostTellsTheConsoleTest(unittest.TestCase):
+    """The wiring from `_report_input_cost` to a real `ConsoleState` --
+    exercised end to end rather than with a stub, so what is checked is the
+    same object `/api/state` would serve."""
+
+    def dispatcher_with_console(self):
+        dispatcher = botlab_host.TaskDispatcher.__new__(botlab_host.TaskDispatcher)
+        dispatcher._glide_costs_this_step = []
+        dispatcher._console = web_console.ConsoleState()
+        return dispatcher
+
+    def test_a_saturated_reading_reaches_the_console(self):
+        dispatcher = self.dispatcher_with_console()
+        dispatcher._glide_costs_this_step = [85.0]
+        captured_stderr(dispatcher._report_input_cost)
+        snapshot = dispatcher._console.snapshot()
+        self.assertEqual(snapshot["lastInputCostMs"], 85.0)
+        self.assertEqual(snapshot["slowInputEvents"], 1)
+
+    def test_a_healthy_reading_reaches_the_console_without_counting(self):
+        dispatcher = self.dispatcher_with_console()
+        dispatcher._glide_costs_this_step = [5.0]
+        captured_stderr(dispatcher._report_input_cost)
+        snapshot = dispatcher._console.snapshot()
+        self.assertEqual(snapshot["lastInputCostMs"], 5.0)
+        self.assertEqual(snapshot["slowInputEvents"], 0)
+
+    def test_a_quiet_step_does_not_disturb_the_console(self):
+        dispatcher = self.dispatcher_with_console()
+        dispatcher._console.note_input_cost(12.0, threshold_ms=30.0)
+        dispatcher._glide_costs_this_step = []
+        captured_stderr(dispatcher._report_input_cost)
+        # A step that posted nothing must not overwrite the last real
+        # reading with silence.
+        self.assertEqual(dispatcher._console.snapshot()["lastInputCostMs"], 12.0)
+
+    def test_a_dispatcher_with_no_console_still_reports_to_stderr(self):
+        """The overwhelming majority of existing dispatchers -- every raw
+        `TaskDispatcher.__new__` in this suite included -- never set
+        `_console` at all, since `__init__` is what would. The report must
+        stay reachable without it."""
+        dispatcher = new_dispatcher()
+        dispatcher._glide_costs_this_step = [5.0]
+        output = captured_stderr(dispatcher._report_input_cost)
+        self.assertIn("input cost:", output)
+
+
+class RunBotHandsTheDispatcherItsConsoleTest(unittest.TestCase):
+    """The wiring that cannot be executed from here without a running bot
+    process -- read out of `run_bot`'s own source instead."""
+
+    def test_run_bot_passes_its_console_to_the_dispatcher(self):
+        body = inspect.getsource(botlab_host.run_bot)
+        constructor = body[body.index("TaskDispatcher("):]
+        constructor = constructor[:constructor.index(")") + 1]
+        self.assertIn("console=console", constructor)
 
 
 if __name__ == "__main__":
