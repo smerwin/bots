@@ -1144,6 +1144,28 @@ class TheSequenceFoldedOverASessionTest(unittest.TestCase):
             ]),
             ["ReSelectTheHoldBeforeUndocking", "Undock"])
 
+    def test_a_hold_that_reads_empty_with_no_client_line_goes_on_trying(self):
+        """The issue's own named mutation, asked of the step rather than of the
+        run: **success read from the gauge instead of the client's line**.
+
+        A gauge reading zero because the drag silently moved nothing and a gauge
+        reading zero because the deposit worked are the same reading, so a
+        docked ship whose hold reads empty and whose client has said nothing is
+        a ship that has not deposited anything -- and it must go on trying
+        rather than undocking and reporting the trip done. The confirmed
+        readings beside it are what make the pair discriminating: the same hold
+        state, and only the client's line separates them.
+        """
+        self.assertEqual(
+            self.steps([
+                situation(docked=True, confirmed=False, hold="HoldHasRoom"),
+                situation(docked=True, confirmed=False, hold="HoldHasRoom",
+                          items=0),
+                situation(docked=True, confirmed=True, hold="HoldHasRoom"),
+            ]),
+            ["DragTheHoldIntoTheStructureHangar", "TheHoldShowsNothingToMove",
+             "Undock"])
+
     def test_a_confirmed_deposit_undocks_even_with_no_inventory_to_re_select(self):
         """The one place the re-selection is skipped rather than waited for: the
         transfer landed, the ship is safe to leave, and an inventory this reading
@@ -1252,6 +1274,29 @@ class TheRunIsLatchedAndBoundedTest(unittest.TestCase):
                                                 confirmation=CONFIRMATION_LINE,
                                                 drags=1),
                       [("HoldHasRoom", False, None, False)]),
+            "Nothing")
+
+    def test_the_client_s_line_ends_the_run_where_the_gauge_cannot(self):
+        """The other half of the same clause, and the one a sweep found open.
+
+        The re-selection before the undock is a click like any other and it can
+        fail to land, so the first reading in space can carry a confirmed
+        transfer and a hold nobody can read. The run has to end there on the
+        client's own line -- otherwise the ship goes back to work with a live
+        deposit clock running underneath it and the session ends at the bound
+        while the bot is harvesting perfectly well.
+        """
+        self.assertEqual(
+            self.fold("(Just %s)" % deposit_run(readings=40,
+                                                confirmation=CONFIRMATION_LINE),
+                      [("HoldFillCannotBeRead", False, None, False)]),
+            "Nothing")
+        # And the confirmation arriving on the very reading the ship undocks on
+        # is the same answer, since the two are latched together.
+        self.assertEqual(
+            self.fold("(Just %s)" % deposit_run(readings=40),
+                      [("HoldFillCannotBeRead", False, CONFIRMATION_LINE,
+                        False)]),
             "Nothing")
 
     def test_a_hold_somebody_emptied_by_hand_ends_it_too(self):
@@ -1817,6 +1862,106 @@ class TheParserIsNotTouchedTest(unittest.TestCase):
                           "miningHoldContainerTypeName"]))
 
 
+class WhyThisShipDocksAtAllTest(unittest.TestCase):
+    """The cheaper path was looked for and is not in the evidence.
+
+    Docking is the expensive and failure-prone half of #464 -- a run-in that
+    kept a mission runner 17 km off a station for eight minutes, then the hangar
+    work, then an undock -- so emptying the hold into the structure from space
+    would remove all three. What follows is what was looked for, asserted as
+    *relations* rather than as prose, so that **the day one of them stops being
+    true the case goes red** and somebody is looking at the moment the evidence
+    for a cheaper path arrives.
+    """
+
+    def setUp(self):
+        self.apps = os.path.dirname(GAS_HUFFER_DIR)
+
+    def read(self, *path):
+        with open(os.path.join(self.apps, *path), encoding="utf-8") as handle:
+            return handle.read()
+
+    def each_app(self, *path):
+        for app in sorted(os.listdir(self.apps)):
+            if not app.startswith("eve-online-"):
+                continue
+            candidate = os.path.join(self.apps, app, *path)
+            if os.path.exists(candidate):
+                yield app, self.read(app, *path)
+
+    def test_the_parsers_offer_one_structure_container_and_only_one(self):
+        """And the same six in every vendored copy, so this is a property of
+        the parser rather than of the gas huffer's own."""
+        pattern = re.compile(
+            r'\[\s*"ShipCargo"[^\]]*\]')
+        found = {}
+        for app, source in self.each_app("EveOnline", "ParseUserInterface.elm"):
+            match = pattern.search(source)
+            self.assertIsNotNone(match, app)
+            found[app] = match.group(0)
+        self.assertGreaterEqual(len(found), 6, found)
+        self.assertEqual(len(set(found.values())), 1, found)
+        types = re.findall(r'"([A-Za-z]+)"', next(iter(found.values())))
+        self.assertEqual(
+            [name for name in types if "Structure" in name],
+            ["StructureItemHangar"], types)
+
+    def test_the_bot_that_already_deposits_at_a_structure_docks_to_do_it(self):
+        """`eve-online-mining-bot` concatenates `unload-structure-name` and
+        `unload-station-name` into one list and sends both through
+        `dockToUnloadOre`, so the app closest to this use case made the same
+        choice with a working implementation behind it."""
+        source = collapsed(self.read("eve-online-mining-bot", "Bot.elm"))
+        self.assertIn("unloadStationNames , context.eventContext.botSettings"
+                      ".unloadStructureNames", source)
+        self.assertIn("dockToUnloadOre context = case"
+                      " unloadStationOrStructureNames context", source)
+
+    def test_its_only_in_space_unload_is_a_fleet_ship_rather_than_a_structure(self):
+        """The repo's one hold-emptying that skips a dock, and what its own
+        setting text says it needs."""
+        source = self.read("eve-online-mining-bot", "Bot.elm")
+        self.assertIn("fleet hangar", source)
+        self.assertIn("you must be in a fleet with an orca or a rorqual",
+                      source)
+        in_space = collapsed(source).split(
+            "inSpaceWithMiningHoldSelectedWithFleetHangar", 1)[1]
+        self.assertIn("effectsForDragAndDrop", in_space)
+        # And no decision anywhere reaches for a structure's hangar container.
+        # Over the declaration *bodies* rather than the file, since this file's
+        # own doc comment names the type while reading it nowhere -- a case that
+        # read prose would be red the day the finding was written down.
+        for app, bot in self.each_app("Bot.elm"):
+            with self.subTest(app):
+                for name, text in top_level_declarations(bot).items():
+                    self.assertNotIn("StructureItemHangar", collapsed(text),
+                                     "%s.%s" % (app, name))
+
+    def test_the_one_lead_is_a_button_nothing_here_has_ever_pressed(self):
+        """`selectedItemAccessDropbox` is on #456's measured structure panel and
+        is the only button that could plausibly be an in-space access. This is
+        the case that goes red the day somebody reads what it opens.
+
+        Over the declaration bodies rather than the file, for the reason above:
+        this bot's own doc comment names the button while pressing it nowhere,
+        and that is the state being asserted rather than a violation of it.
+        """
+        for app, bot in self.each_app("Bot.elm"):
+            with self.subTest(app):
+                for name, text in top_level_declarations(bot).items():
+                    self.assertNotIn("selectedItemAccessDropbox",
+                                     collapsed(text), "%s.%s" % (app, name))
+
+    def test_the_finding_is_written_down_where_the_next_reader_will_be(self):
+        """Beside the drop target rather than in a pull request, because the
+        next person to ask this question will be reading `Bot.elm`."""
+        doc = bot_source().split("structureHangarTreeEntryText :", 1)[0].rsplit(
+            "{-|", 1)[1]
+        self.assertIn("selectedItemAccessDropbox", doc)
+        self.assertIn("eve-online-mining-bot", doc)
+        self.assertIn("undocked", doc)
+
+
 class TheHeaderTellsAnOperatorWhatToOpenTest(unittest.TestCase):
     """The one setup item this change adds, and it cannot be enforced.
 
@@ -1848,12 +1993,22 @@ class TheMutationsThisFileCatches(unittest.TestCase):
     The four the issue names by hand are 1, 2, 6 and 11.
 
     1.  **success read from the gauge instead of the client's line** --
-        `depositRunAfterReading` ending the run on `holdFill == HoldHasRoom`
-        while docked, which is what a drag that moved nothing also produces --
-        `TheClientConfirmsTheDepositAndTheGaugeDoesNotTest
-        .test_an_empty_hold_while_docked_is_not_a_confirmation` and
+        `depositStep` undocking on `holdFill == HoldHasRoom` rather than on
+        `confirmedByClient`, which is what a drag that moved nothing also
+        produces -- `TheSequenceFoldedOverASessionTest.test_a_hold_that_reads_
+        empty_with_no_client_line_goes_on_trying` and
+        `test_the_confirmation_re_selects_the_hold_and_then_undocks`.
+    1b. the same inference one level down: `depositRunAfterReading` ending the
+        run on the gauge alone, with the client's line dropped from the
+        condition -- `TheClientConfirmsTheDepositAndTheGaugeDoesNotTest
+        .test_an_empty_hold_while_docked_is_not_a_confirmation`,
         `TheRunIsLatchedAndBoundedTest.test_the_run_survives_the_hold_reading_
-        empty_while_docked`.
+        empty_while_docked` and `test_the_client_s_line_ends_the_run_where_the_
+        gauge_cannot`. **The last of those was written after a sweep**: the
+        first version of this file asked only about a hold that could be read,
+        so a run carrying a confirmation and an unreadable hold on the first
+        reading in space did not end, and the session would have ended at the
+        bound while the bot was harvesting perfectly well.
     2.  **the transient read as a fill level** -- the `selected /= Nothing`
         clause moved below the used-against-maximum comparison, or dropped --
         `TheGaugeIsReadInAllThreeMeasuredFormsTest.test_the_transient_is_its_own_
@@ -1969,6 +2124,16 @@ class TheMutationsThisFileCatches(unittest.TestCase):
         `test_an_unreadable_hold_shouts_and_says_what_to_do_about_it`.
     40. the client-setup bullet removed from the header --
         `TheHeaderTellsAnOperatorWhatToOpenTest`.
+    41. the whole scan/leave/deposit chain put back inside `huntAndHarvest`, so
+        it is reached only in space and a docked bot undocks with nothing able
+        to stop it -- `TheRetreatOutranksTheDepositTest.test_both_are_asked_
+        above_the_docked_or_in_space_split`, and
+        `test_gas_huffer_watches_the_grid`'s own ordering case.
+    42. a decision reaching for `StructureItemHangar` or pressing
+        `selectedItemAccessDropbox` -- `WhyThisShipDocksAtAllTest`, which is
+        the finding rather than the behaviour: those two cases go red on the
+        day the evidence for an in-space deposit arrives, which is exactly when
+        somebody should be looking at this again.
     """
 
     def test_this_file_names_the_mutations_it_was_graded_against(self):

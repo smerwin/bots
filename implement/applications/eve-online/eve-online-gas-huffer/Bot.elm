@@ -4566,7 +4566,44 @@ miningHoldContainerTypeName =
     "ShipGeneralMiningHold"
 
 
-{-| The structure's own hangar row, which is what the hold is dragged onto.
+{-| Why this ship docks at all, which is the first question to ask about a
+deposit and is answered here rather than left to be re-asked.
+
+Docking is the expensive and failure-prone half of #464 -- the run-in
+`DockingRunIn` documents keeping a ship 17 km off a station for eight minutes,
+then the hangar work, then an undock. Emptying the hold into the structure from
+space would remove all three, so it was looked for before this was built.
+**Nothing in this repository supports it, and what was looked for is worth
+writing down so nobody looks again from nothing:**
+
+  - `parseInventoryWindow` recognises six selected-container types --
+    `ShipCargo`, `ShipDroneBay`, `ShipGeneralMiningHold`, `StationItems`,
+    `ShipFleetHangar`, `StructureItemHangar` -- byte for byte the same six in
+    all eight vendored copies. Exactly one of them is a structure's, and no
+    reading anywhere here has ever carried it from an undocked ship.
+  - **`eve-online-mining-bot` already deposits at a structure and docks to do
+    it.** Its `unload-structure-name` and `unload-station-name` are concatenated
+    into one list and both go through `dockToUnloadOre`, so the app closest to
+    this use case made the same choice with a working implementation behind it.
+  - That bot's **only** in-space unload is `unload-fleet-hangar-percent`, which
+    drags into a `fleet hangar` row and whose own setting text says it needs an
+    Orca or a Rorqual in the fleet with its hangar visible in the inventory.
+    That is a _ship_, not a structure, and #456 describes a solo hull in
+    somebody else's wormhole with `friendly-ship-tag` defaulting to trust
+    nobody.
+  - The one lead is `selectedItemAccessDropbox`, which #456 measured on a
+    structure's Selected Item panel. **It occurs in no `Bot.elm` in this
+    repository**, nothing has pressed it, and what it opens is recorded
+    nowhere. Pressing an unread button on the deposit path and inferring from
+    what changed afterwards is the class of guess this file exists to avoid.
+
+So the docked sequence #464 measured by hand is what ships. If a run ever reads
+a structure's hangar, or anything else transferable, out of an **undocked**
+inventory, that is the evidence a cheaper path would need and this comment is
+what it contradicts.
+
+
+## The row itself
 
 Matched by the sidebar row's text rather than by the `StructureItemHangar` node
 type, because the drop target is a row to click and the type name only ever
