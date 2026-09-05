@@ -511,18 +511,20 @@ class TheUnsetTagTrustsNobodyTest(unittest.TestCase):
         self.assertIn(FICTIONAL_TAG, configured)
         self.assertIn("every other ship reads hostile", configured)
 
-    def test_nothing_but_the_status_line_reads_the_trust_rule(self):
-        """`quickMessage`'s posture (#130), pinned while it is still true.
+    def test_the_one_thing_that_reads_the_trust_rule_is_the_dscan_verdict(self):
+        """`quickMessage`'s posture (#130) spent, and replaced by a count.
 
-        The rule exists for #462 to plug into. Until then it is an instrument,
-        and a case here is what makes a decision starting to consult it a
-        decision somebody argues for rather than one that drifts in.
+        This case pinned *no* readers while the rule was an instrument waiting
+        for #462 to plug into. That issue is the plug, so the assertion moves
+        rather than being deleted: exactly one declaration asks the trust rule,
+        it is named, and a second one is a decision somebody argues for rather
+        than one that drifts in against a vocabulary this repo has watched grow.
         """
         source = bot_source()
         readers = [name for name, text in top_level_declarations(source).items()
                    if "shipReadsFriendly" in collapsed(text)
                    and name != "shipReadsFriendly"]
-        self.assertEqual(readers, [], readers)
+        self.assertEqual(readers, ["dscanRowVerdict"], readers)
 
 
 class TheSetupListPutsThePauseMenuFirstTest(unittest.TestCase):
@@ -685,42 +687,63 @@ class TheRetreatCoverSaysWhenNothingIsArmedTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.repl.close()
 
-    def cover(self, detection="False", home="Nothing", prefix='"*"'):
-        return ("{ hostileDetectionIsArmed = %s, homeStructureName = %s"
-                ", retreatBookmarkPrefix = %s }" % (detection, home, prefix))
+    def cover(self, detection="False", leaving="False", home="Nothing",
+              prefix='"*"'):
+        return ("{ hostileDetectionIsArmed = %s, leavingIsImplemented = %s"
+                ", homeStructureName = %s"
+                ", retreatBookmarkPrefix = %s }" % (
+                    detection, leaving, home, prefix))
 
-    def test_both_halves_have_to_hold_for_the_retreat_to_read_as_armed(self):
+    def test_every_half_has_to_hold_for_the_retreat_to_read_as_armed(self):
+        """Three halves since #462, and each of them alone still reads unarmed.
+
+        The third is what that issue added rather than removed: noticing and
+        leaving are separate, and a bot that has the first is not a bot that has
+        a retreat.
+        """
+        home = 'Just "%s"' % FICTIONAL_STRUCTURE
         answers = self.repl.evaluate([
             "retreatIsUnarmed " + self.cover(),
             "retreatIsUnarmed " + self.cover(detection="True"),
+            "retreatIsUnarmed " + self.cover(leaving="True"),
+            "retreatIsUnarmed " + self.cover(home=home),
+            "retreatIsUnarmed " + self.cover(detection="True", leaving="True"),
+            "retreatIsUnarmed " + self.cover(detection="True", home=home),
             "retreatIsUnarmed " + self.cover(
-                home='Just "%s"' % FICTIONAL_STRUCTURE),
-            "retreatIsUnarmed " + self.cover(
-                detection="True", home='Just "%s"' % FICTIONAL_STRUCTURE),
+                detection="True", leaving="True", home=home),
         ])
-        self.assertEqual(answers, [True, True, True, False])
+        self.assertEqual(
+            answers, [True, True, True, True, True, True, False])
 
-    def test_it_fires_today_because_nothing_detects_a_hostile_yet(self):
+    def test_it_fires_today_because_nothing_leaves_yet(self):
         """Reachability, said as the state the code actually runs in.
 
-        `hostileDetectionIsArmed` is `False` at its one call site because
-        nothing in this app reads the Directional Scanner or classifies an
-        overview row. So this clause fires on every reading of every run, which
-        is exactly what it should do while that is true, and #462 is what flips
+        `hostileDetectionIsArmed` was the constant here until #462 and is a real
+        read now; `leavingIsImplemented` is the one that replaced it, `False` at
+        its one call site because nothing in this app retreats, cloaks or
+        evades. So this clause still fires on every reading of every run, which
+        is exactly what it should do while that is true, and #463 is what flips
         it.
         """
         body = collapsed(block("retreatCoverFromContext"))
-        self.assertIn("hostileDetectionIsArmed = False", body)
+        self.assertIn("hostileDetectionIsArmed = True", body)
+        self.assertIn("leavingIsImplemented = False", body)
 
     def test_the_clause_names_which_half_is_missing(self):
-        unarmed, no_home, armed = self.repl.strings([
+        home = 'Just "%s"' % FICTIONAL_STRUCTURE
+        unarmed, no_leaving, no_home, armed = self.repl.strings([
             "describeRetreatCover " + self.cover(),
-            "describeRetreatCover " + self.cover(detection="True"),
+            "describeRetreatCover " + self.cover(detection="True", home=home),
             "describeRetreatCover " + self.cover(
-                detection="True", home='Just "%s"' % FICTIONAL_STRUCTURE),
+                detection="True", leaving="True"),
+            "describeRetreatCover " + self.cover(
+                detection="True", leaving="True", home=home),
         ])
         self.assertIn("RETREAT NOT ARMED", unarmed)
         self.assertIn("notices a hostile", unarmed)
+        self.assertIn("RETREAT NOT ARMED", no_leaving)
+        self.assertNotIn("notices a hostile", no_leaving)
+        self.assertIn("#463", no_leaving)
         self.assertIn("RETREAT NOT ARMED", no_home)
         self.assertNotIn("notices a hostile", no_home)
         self.assertIn("home-structure-name", no_home)
@@ -774,12 +797,13 @@ class TheSessionEndingBoundHasNowhereToGoYetTest(unittest.TestCase):
 
 # The marker the bot opens its header and its status line with. It was
 # `SCAFFOLD ONLY` while #459 was all there was; #461 gave the bot the whole
-# harvesting half, so the honest opening moved from "this does nothing" to
-# "this does the half that earns and none of the half that survives". Both
-# wordings answer the same question -- what is an operator being told before
-# they read anything reassuring -- which is why this is one constant updated
-# rather than a case deleted.
-CANNOT_DO_MARKER = "HARVESTS BUT CANNOT LEAVE"
+# harvesting half, and #462 gave it the watching half, so the honest opening
+# has moved twice -- "this does nothing", then "this earns and cannot survive",
+# and now "this sees what is coming and cannot get out of the way". Every
+# wording answers the same question -- what is an operator told before they read
+# anything reassuring -- which is why this is one constant updated rather than a
+# case deleted, and why the *worse* half is what it names each time.
+CANNOT_DO_MARKER = "NOTICES BUT CANNOT LEAVE"
 
 
 class TheBotSaysWhatItCannotDoTest(unittest.TestCase):
@@ -809,16 +833,17 @@ class TheBotSaysWhatItCannotDoTest(unittest.TestCase):
             self.assertIn("on purpose", text)
             self.assertIn("#46", text)
         self.assertIn("#464", docked)
-        # The in-space leaf is now reached only where there is nothing to warp
-        # to, so what it has to name is the halves that are still missing
-        # rather than the harvest loop that arrived.
-        self.assertIn("#462", in_space)
+        # The in-space leaf is reached only where there is nothing to warp to,
+        # so what it has to name is the half that is still missing rather than
+        # the halves that arrived. #462 gave this bot eyes, which is why the
+        # leaf no longer names it and #463 is the one left.
+        self.assertNotIn("#462", in_space)
         self.assertIn("#463", in_space)
 
     def test_the_status_line_opens_by_saying_so(self):
         body = collapsed(block("statusTextFromState"))
         self.assertIn(CANNOT_DO_MARKER, body)
-        for missing in ("#462", "#463", "#464", "#465"):
+        for missing in ("#463", "#464", "#465"):
             with self.subTest(missing):
                 self.assertIn(missing, body)
 

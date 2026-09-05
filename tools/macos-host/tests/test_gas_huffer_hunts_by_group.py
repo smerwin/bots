@@ -897,7 +897,10 @@ class TheHuntTookTheWarpWithTheMechanismItNamedTest(unittest.TestCase):
         """
         text = self.repl.strings(["nothingToHuntInSpace"])[0]
         self.assertIn("on purpose", text)
-        self.assertIn("#462", text)
+        # #462 arrived, so what this leaf has to name is the half that has not:
+        # a bot that notices a stranger and goes on sitting there is worse to
+        # misread than one that never noticed.
+        self.assertNotIn("#462", text)
         self.assertIn("#463", text)
 
 

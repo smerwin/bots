@@ -683,14 +683,30 @@ class AHiddenOverviewRowIsNeverActedOnTest(unittest.TestCase):
 
     def test_the_filter_is_in_the_one_place_the_candidates_come_from(self):
         """Structural, because the cases above cannot see a second list of rows
-        built somewhere else. Every overview row this bot acts on comes out of
-        `cloudSearch`, and the filter is applied there."""
+        built somewhere else. Every overview row this bot **acts on** comes out
+        of `cloudSearch`, and the filter is applied there.
+
+        #462 added the second reader of the overview and it is deliberately
+        *not* filtered, which is why this case names both rather than counting
+        one. The two want opposite directions from a hidden row. `cloudSearch`
+        is choosing something to click, and a hidden row's region belongs to
+        whatever was recycled into it, so acting on one acts on the wrong
+        object. `gridEvidenceFromReading` is choosing nothing: it asks whether
+        anything on this grid means leave, a row it declined to read is a thing
+        it would not have left over, and reading a recycled row's stale name is
+        an unnecessary retreat rather than a click on a stranger's ship.
+        """
         body = collapsed(block("cloudSearch"))
         self.assertIn("List.filter overviewEntryIsDisplayed", body)
         readers = [name for name, text in top_level_declarations(
             bot_source()).items()
             if ".overviewWindows" in collapsed(text)]
-        self.assertEqual(readers, ["cloudSearchFromReading"], readers)
+        self.assertEqual(
+            readers, ["cloudSearchFromReading", "gridEvidenceFromReading"],
+            readers)
+        self.assertNotIn(
+            "overviewEntryIsDisplayed",
+            collapsed(block("gridEvidenceFromReading")))
 
 
 class ThePrefixNarrowsWithoutReorderingTest(unittest.TestCase):
