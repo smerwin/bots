@@ -1311,9 +1311,15 @@ class TheWiringTest(unittest.TestCase):
         reached when none is due."""
         # #464 moved this chain out of `huntAndHarvest` and above the
         # docked-or-in-space split, so that the retreat outranks the deposit's
-        # undock as well as the harvest loop. The ordering it reads is the same
-        # ordering; what moved is which declaration holds it.
-        body = collapsed(self.declarations["watchLeaveDepositOrHarvest"])
+        # undock as well as the harvest loop; #465 split its tail into
+        # `leaveDepositOrHarvest` so the propulsion module could be asked above
+        # all of it. The ordering read here is the same ordering both times;
+        # what moved is which declaration holds which half, so the two are read
+        # one after the other, in call order.
+        body = " ".join([
+            collapsed(self.declarations["watchLeaveDepositOrHarvest"]),
+            collapsed(self.declarations["leaveDepositOrHarvest"]),
+        ])
         self.assertIn("refreshTheDirectionalScanner context", body)
         for later in ("actOnTheEvasionStep", "huntAndHarvest"):
             with self.subTest(later):

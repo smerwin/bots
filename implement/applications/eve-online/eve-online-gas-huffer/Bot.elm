@@ -1,11 +1,11 @@
-{- EVE Online gas huffer -- LEAVES WITHOUT ITS PROPULSION MODULE
+{- EVE Online gas huffer -- NEVER FLOWN
 
       This app is meant to harvest gas from a wormhole gas site, deposit it at a
       structure, and leave the moment anything else shows up on the grid. Since
       #461 the **harvesting** half of that works: it decides which site to hunt,
       warps to it, picks the cloud on the grid whose designation carries the
-      highest trailing number, orbits it, keeps the propulsion module running,
-      locks it and runs both gas harvesters.
+      highest trailing number, orbits it, locks it and runs both gas
+      harvesters.
 
       Since #462 it also **watches the grid**: it refreshes the Directional
       Scanner on a cadence, and judges every reading against three independent
@@ -42,13 +42,27 @@
       ship docked rather than undocking a full ship into somebody else's grid to
       finish an errand.
 
-      **What is still missing is the propulsion module across a warp (#465)**,
-      which is the one to be clear about before starting a run: the retreat, the
-      deposit trip and every celestial bounce are warps, nothing here switches
-      the module back on afterwards except the harvest loop at the far end of a
-      clean grid, so the ship evades slower than it flew in. The status line says
-      so on every reading rather than letting a bot that looks busy read as a bot
-      that is covered.
+      Since #465 the **propulsion module survives every warp**, which is the
+      last of #456 and the one that is about the ship rather than about the
+      work. Speed is this hull's whole survival plan -- it has no guns and no
+      tank worth the name -- so the module is switched on above the leaving, the
+      deposit and the harvest alike, on every reading in space, and **nothing in
+      this file ever switches one off**. That is the opposite of every other app
+      here: they funnel their warps through
+      `ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping` and this
+      one has no such helper to reach. The status line says on every reading
+      whether the module reads as running, because a bot that warps correctly
+      with the module off looks exactly like one that is covered.
+
+      **What is still missing is a run.** No session of this app has ever been
+      flown against a live client, so every premise under it is either one read
+      taken on 2026-09-04 or a corpus measured on other bots -- and a bot that
+      looks right in a repl is what this repository is named after. What to
+      watch on the first run is in the paragraphs each feature's own doc comment
+      ends with; the shortest list is that the status line's `Propulsion
+      module:` clause should read `running` on essentially every reading in
+      space, that `Grid:` should read clean while harvesting, and that the hold
+      should climb and then be emptied rather than climbing and stopping.
 
       Started under issue #459; the behaviour is #460 (which site to hunt), #461
       (the harvest loop), #462 (hostile detection), #463 (retreat, cloak and
@@ -483,6 +497,13 @@ type alias BotMemory =
     -- unanswered. Both bound a branch that would otherwise repeat forever on a
     -- hot path, which is #257's shape. See `harvestCountersAfterReading`.
     , harvestCounters : HarvestCounters
+
+    -- How many presses of `Alt+F1` the client has left unanswered. Bounds
+    -- `keepThePropulsionModuleRunning`, which sits above the retreat, so an
+    -- unbounded version of it is a ship that never leaves a hostile grid. Reset
+    -- outright the moment the module reads running. See
+    -- `propulsionPressesAfterReading`.
+    , propulsionPressesUnanswered : Int
 
     -- When the scan key last went out, and when a scan last came back. The
     -- second is what the grid verdict is allowed to believe, and it is here
@@ -1663,6 +1684,31 @@ fill -- visible in the status line and in the gauge -- rather than a bot togglin
 a module off and on forever, which is #12, #34, #35, #76 and #286 and is the
 failure the issue names by number.
 
+**#465 asks whether the propulsion module wants a different field, and the
+answer is that it wants this same one read from the other end.** saxrat's
+`deactivatePropulsionModuleBeforeWarping` reads `.isActive` and #465 is right
+that it is correct to -- but `.isActive` **is** `ramp_active`, the very entry
+this reads, so the two rules differ in which of its three values they act on
+rather than in which field they consult. Each takes the half that is strong
+evidence for its own press, and neither presses on the middle:
+
+  - a _deactivation_ has to be sure the module is **on**, and `Just True` is the
+    only value that says so. saxrat's rule presses on that and declines both
+    `Just False` and an absent widget.
+  - an _activation_ has to be sure it is **off**, and the widget being **absent**
+    is the only value that says so -- 20,095 observations of it in #286 and not
+    one of them a module that was running. This rule presses on that and
+    declines both `Just False` and `Just True`.
+
+So `Just False` is the value neither can read safely and neither acts on, and a
+propulsion module ought never to produce it anyway: #35 watched a middle-slot
+module go `True` at 60-70 s and stay there, which is a latch rather than a duty
+cycle. **That measurement is from another hull on another bot**, though, and a
+rule on this ship's survival path that is only safe while it holds is not one to
+ship -- so the propulsion module reads through this declaration exactly as the
+harvesters do, and #456's open question about the harvesters costs nothing here
+in either direction.
+
 -}
 type ModuleRunningState
     = ModuleIsRunning
@@ -1750,17 +1796,268 @@ and two copies of it would be two places to retune.
 -}
 pressModuleHotkey : BotDecisionContext -> String -> List EffectOnWindow.VirtualKeyCode -> DecisionPathNode
 pressModuleHotkey context describe chord =
-    if
-        context.previousStepsEffects
-            |> List.take EveOnline.BotFrameworkSeparatingMemory.moduleButtonClickSettlingSteps
-            |> List.any (stepPressedExactly chord)
-    then
+    if chordPressedInSettlingWindow context chord then
         describeBranch
             "Already pressed that module hotkey in a previous step -- a module button is a toggle, so wait for the client to show the result rather than pressing it off again."
             waitForProgressInGame
 
     else
         describeBranch describe (decideActionForCurrentStep (hotkeyEffects chord))
+
+
+{-| Whether this bot pressed this exact chord inside the settling window.
+
+**One declaration with two readers**, and they want the same fact and opposite
+answers to it: `pressModuleHotkey` waits the window out where the harvest loop
+has nothing else to do with the reading, and `propulsionStep` falls through it
+so that a retreat is never held up by a module press. Two copies of "how long a
+press takes to show up" would be two places to retune, which is #102.
+
+The window itself is `moduleButtonClickSettlingSteps`, taken from the framework
+rather than restated, for the same reason.
+
+-}
+chordPressedInSettlingWindow : BotDecisionContext -> List EffectOnWindow.VirtualKeyCode -> Bool
+chordPressedInSettlingWindow context chord =
+    context.previousStepsEffects
+        |> List.take EveOnline.BotFrameworkSeparatingMemory.moduleButtonClickSettlingSteps
+        |> List.any (stepPressedExactly chord)
+
+
+
+-- Keeping the propulsion module running
+
+
+{-| How many presses the client may leave unanswered before the bot stops asking.
+
+**A branch on the hot path that can act forever without progressing is the
+failure this repository keeps a section on**, and this is one: a middle row
+whose first module is not a propulsion module at all, or one that is offline or
+out of capacitor, reads as not running on every reading of the session, and an
+unbounded rule would press `Alt+F1` at it in front of every retreat, every
+deposit and every harvest until somebody noticed. That is #257's shape, and it
+would be the worst possible place to put it -- in front of the branch that gets
+the ship off a hostile grid.
+
+Six, and it is a relation rather than a measurement because no run of this app
+exists to measure. The client answers a press by creating the
+`ShipModuleButtonRamps` widget, which the next reading carries, and each press
+is followed by a whole `moduleButtonClickSettlingSteps` window before another
+goes out -- so six presses is six windows, an order of magnitude more than one
+press that is going to land needs.
+
+**The counter resets the moment the module reads running**, so this is not a
+session latch: an ordinary run spends nothing, and a run that docks (which
+switches modules off) gets its whole budget back on the reading after it
+undocks. What latches, and correctly, is the fit this cannot work on -- a ship
+with no propulsion module first in the middle row never resets, so it spends six
+presses once and then gets on with the session.
+
+What expiry costs is a ship that flies at its base speed, which is exactly the
+state this app was in before #465 and which the status line names. What no bound
+costs is a ship that never leaves.
+
+-}
+propulsionPressesBeforeGivingUp : Int
+propulsionPressesBeforeGivingUp =
+    6
+
+
+{-| Everything the propulsion module rule decides on, as plain readable facts.
+
+A record rather than a `BotDecisionContext`, for #106's reason and with more
+riding on it than usual: this rule sits above the retreat, so a case that could
+only reach it through a whole decision context would be a case that never
+executed the one rule that can hold the ship on a hostile grid.
+
+-}
+type alias PropulsionSituation =
+    { moduleReading : Maybe ModuleRunningState
+    , pressedRecently : Bool
+    , pressesUnanswered : Int
+    }
+
+
+{-| What this bot does about the propulsion module on one reading.
+
+Five answers, and **only one of them presses anything** -- which is the property
+#465 is about, since the module's hotkey is a toggle and every press that is not
+aimed at a module reading _not running_ switches a running one off.
+
+  - `TheModuleIsRunning` -- nothing to do, which is the ordinary reading.
+  - `CannotTellWhetherItIsRunning` -- no ship UI in this reading, or a middle row
+    it cannot read. **A toggle is never pressed on a guess**, so this declines,
+    which also covers every docked reading by construction.
+  - `WaitForTheLastPressToShow` -- a press went out inside the settling window
+    and the client has not shown its result yet. Pressing again here is the
+    module switched back off, which is `clickModuleButtonButWaitIfClickedInPreviousStep`'s
+    own reason.
+  - `GivenUpOnSwitchingItOn` -- see `propulsionPressesBeforeGivingUp`.
+  - `SwitchItOn` -- the one press.
+
+**Nothing here waits**: four of the five answers hand the reading straight back
+to whatever would have had it, so a retreat is never delayed by this rule beyond
+the single reading a press costs. That is the difference between this and
+`pressModuleHotkey`, which waits its settling window out because the harvest loop
+has nothing else to do with the reading.
+
+-}
+type PropulsionStep
+    = TheModuleIsRunning
+    | SwitchItOn
+    | WaitForTheLastPressToShow
+    | CannotTellWhetherItIsRunning
+    | GivenUpOnSwitchingItOn
+
+
+propulsionStep : PropulsionSituation -> PropulsionStep
+propulsionStep situation =
+    case situation.moduleReading of
+        Nothing ->
+            CannotTellWhetherItIsRunning
+
+        Just ModuleIsRunning ->
+            TheModuleIsRunning
+
+        Just ModuleIsNotRunning ->
+            if situation.pressedRecently then
+                WaitForTheLastPressToShow
+
+            else if propulsionPressesBeforeGivingUp <= situation.pressesUnanswered then
+                GivenUpOnSwitchingItOn
+
+            else
+                SwitchItOn
+
+
+propulsionSituationFromContext : BotDecisionContext -> PropulsionSituation
+propulsionSituationFromContext context =
+    { moduleReading =
+        context.readingFromGameClient.shipUI
+            |> Maybe.andThen propulsionModuleFromShipUI
+            |> Maybe.map moduleRunningState
+    , pressedRecently = chordPressedInSettlingWindow context propulsionModuleHotkey
+    , pressesUnanswered = context.memory.propulsionPressesUnanswered
+    }
+
+
+{-| How many presses the client has left unanswered, after this reading.
+
+Reset outright the moment the module reads running, which is what makes the
+bound a bound on _one_ attempt to switch it on rather than a session budget --
+see `propulsionPressesBeforeGivingUp`.
+
+**A reading that could not read the module holds the count rather than clearing
+it**, which is the rule #145 records paying for: a reset on a reading that did
+not ask is what pins a counter at one forever, and here the readings that cannot
+answer are the docked ones, which is precisely the stretch a deposit spends
+before the module needs switching on again.
+
+The press is read out of the **effects the bot dispatched** rather than out of
+anything the client said, because what was asked for is knowable where what the
+client did with it is not. Only the previous step is looked at, so one press
+counts once however long the settling window is.
+
+-}
+propulsionPressesAfterReading : { pressDispatched : Bool, readsRunning : Bool } -> Int -> Int
+propulsionPressesAfterReading answer before =
+    if answer.readsRunning then
+        0
+
+    else if answer.pressDispatched then
+        before + 1
+
+    else
+        before
+
+
+{-| Switch the propulsion module on, wherever it is not running.
+
+**This is #465.** The operator's reason for it is that a gas huffer's survival
+plan is speed rather than tank, so the module is what keeps the ship alive if
+rats spawn -- which makes the reading it matters most on the reading the ship is
+about to leave a grid on, not the one it is harvesting on.
+
+So it is placed **above** the leaving, the deposit and the harvest, and the cost
+of that placement is stated rather than hidden: on the first reading of a retreat
+where the module is off, one reading goes to the press instead of to the warp
+cascade. That is one reading against a whole retreat flown at base speed, on a
+hull whose whole answer to being shot at is not being there.
+
+**There is exactly one controller for this button**, which is why the harvest
+loop no longer has a propulsion stage of its own. Two branches pressing one
+toggle is the flicker `manageMiddleRowModules` was split up to end, and here it
+would be worse than a flicker: the harvest loop's copy would press _inside_ this
+one's settling window, which is a press aimed at a module the client is in the
+middle of switching on, on a toggle.
+
+`Nothing` on four of the five answers, so a reading with nothing to do here falls
+straight through to the work -- the shape every entry in
+`generalSetupInUserInterface` has, and for the same reason.
+
+-}
+keepThePropulsionModuleRunning : BotDecisionContext -> Maybe DecisionPathNode
+keepThePropulsionModuleRunning context =
+    case propulsionStep (propulsionSituationFromContext context) of
+        SwitchItOn ->
+            Just
+                (describeBranch
+                    "The propulsion module does not read as running -- switch it on (Alt+F1) before anything else this reading. Speed is this hull's whole survival plan, so it goes on before the ship is asked to go anywhere."
+                    (decideActionForCurrentStep (hotkeyEffects propulsionModuleHotkey))
+                )
+
+        _ ->
+            Nothing
+
+
+{-| What an operator reads about the propulsion module, on every reading.
+
+#465 asks for this in those words: _say whether the module reads active on every
+in-space reading_, because a gas huffer whose propulsion module is off is in a
+worse position than one that never armed it, and an operator should be able to
+see that at a glance rather than infer it from the ship's speed.
+
+Printed on **every** reading rather than only while harvesting, which is the
+change #465 makes to where this is said: the reading it matters most on is the
+one the ship is leaving on, and until now the only place it appeared was the
+harvest clause, which a reading with no cloud on the grid does not carry.
+
+The last sentence is the standing fact rather than this reading's, and it is
+here because it is the one an operator cannot check for themselves from a log:
+nothing in this file ever switches the module off.
+
+-}
+describePropulsionModule : PropulsionSituation -> String
+describePropulsionModule situation =
+    let
+        spent =
+            String.fromInt situation.pressesUnanswered
+                ++ "/"
+                ++ String.fromInt propulsionPressesBeforeGivingUp
+                ++ " presses unanswered"
+    in
+    "Propulsion module: "
+        ++ (case propulsionStep situation of
+                TheModuleIsRunning ->
+                    "running"
+
+                SwitchItOn ->
+                    "NOT RUNNING -- pressing Alt+F1 at it this reading (" ++ spent ++ ")"
+
+                WaitForTheLastPressToShow ->
+                    "not running yet, and a press went out in the last few steps -- the button is a toggle, so this reading waits for the client to show the result rather than pressing it off again ("
+                        ++ spent
+                        ++ ")"
+
+                CannotTellWhetherItIsRunning ->
+                    "CANNOT TELL -- this reading carries no module in the middle row, which is every docked reading and, in space, a ship whose modules are not arranged the way the client-setup list asks. Not pressed at: a toggle pressed on a guess is a module switched off"
+
+                GivenUpOnSwitchingItOn ->
+                    "GIVEN UP ON: "
+                        ++ String.fromInt situation.pressesUnanswered
+                        ++ " presses went out and the client answered none of them, so this ship is flying at its base speed and nothing here will ask again until the module reads running. Check that the first module in the middle row is the propulsion module, and that it is online"
+           )
+        ++ ". Nothing in this bot ever switches it off (#465)."
 
 
 
@@ -1868,8 +2165,7 @@ passes for one that works.
 
 -}
 type alias HarvestSituation =
-    { propulsionModule : Maybe ModuleRunningState
-    , shipIsOrbiting : Bool
+    { shipIsOrbiting : Bool
     , panelShowsTheCloud : Bool
     , orbitButtonIsOffered : Bool
     , cloudReadsLocked : Bool
@@ -1881,14 +2177,12 @@ type alias HarvestSituation =
 
 {-| What the bot commands next on a grid it is harvesting.
 
-**One rule with the whole ordering in it**, rather than four branches each
-deciding whether it is its turn. The order is the issue's own -- keep the
-propulsion module running, orbit the cloud, lock it, run both harvesters -- and
-what makes it worth writing as one rule is that every stage can _fail to be
-reachable_, and each of those has to fall through to the next rather than
-holding the loop:
+**One rule with the whole ordering in it**, rather than three branches each
+deciding whether it is its turn. The order is the issue's own -- orbit the
+cloud, lock it, run both harvesters -- and what makes it worth writing as one
+rule is that every stage can _fail to be reachable_, and each of those has to
+fall through to the next rather than holding the loop:
 
-  - a middle row this reading cannot read means no propulsion module to press,
   - a panel that never comes to show the cloud expires and the bot harvests
     without an orbit,
   - a panel showing the cloud and offering no Orbit button is the ordinary
@@ -1900,10 +2194,16 @@ holding the loop:
 running, and nothing left that can be tried -- which is why the status line
 renders the _situation_ beside the step rather than the step alone.
 
+**The propulsion module was the first stage of this rule until #465 and is not
+here any more.** It moved to `keepThePropulsionModuleRunning`, above the leaving
+and the deposit as well as this, because the reading it matters most on is the
+one the ship is leaving on rather than one it is harvesting on -- and once it is
+asked there, a second copy here would be two branches pressing one toggle, the
+second of them inside the first's settling window.
+
 -}
 type HarvestStep
-    = SwitchThePropulsionModuleOn
-    | SelectTheCloud
+    = SelectTheCloud
     | PressTheOrbitButton
     | LockTheCloud
     | WaitForTheLockToLand
@@ -1913,10 +2213,7 @@ type HarvestStep
 
 harvestStep : HarvestSituation -> HarvestStep
 harvestStep situation =
-    if situation.propulsionModule == Just ModuleIsNotRunning then
-        SwitchThePropulsionModuleOn
-
-    else if not situation.shipIsOrbiting && not situation.panelShowsTheCloud && situation.counters.panelSelectUnansweredReadings < panelSelectGiveUpReadings then
+    if not situation.shipIsOrbiting && not situation.panelShowsTheCloud && situation.counters.panelSelectUnansweredReadings < panelSelectGiveUpReadings then
         SelectTheCloud
 
     else if not situation.shipIsOrbiting && situation.panelShowsTheCloud && situation.orbitButtonIsOffered then
@@ -2042,8 +2339,7 @@ harvestSituationFromContext :
     -> EveOnline.ParseUserInterface.OverviewWindowEntry
     -> HarvestSituation
 harvestSituationFromContext context shipUI cloud =
-    { propulsionModule = propulsionModuleFromShipUI shipUI |> Maybe.map moduleRunningState
-    , shipIsOrbiting =
+    { shipIsOrbiting =
         (shipUI.indication |> Maybe.andThen .maneuverType)
             == Just EveOnline.ParseUserInterface.ManeuverOrbit
     , panelShowsTheCloud = selectedItemIsOverviewEntry context.readingFromGameClient cloud
@@ -2079,11 +2375,6 @@ actOnTheHarvestStep context shipUI cloud situation =
             cloud.objectName |> Maybe.withDefault "the cloud"
     in
     case harvestStep situation of
-        SwitchThePropulsionModuleOn ->
-            pressModuleHotkey context
-                "The propulsion module does not read as running -- switch it on (Alt+F1)."
-                propulsionModuleHotkey
-
         SelectTheCloud ->
             describeBranch
                 ("Select '" ++ cloudName ++ "', so the Selected Item panel's own Orbit button acts on it.")
@@ -2168,17 +2459,6 @@ of them wants an operator.
 describeHarvestSituation : HarvestSituation -> String
 describeHarvestSituation situation =
     let
-        propulsion =
-            case situation.propulsionModule of
-                Nothing ->
-                    "no module read in the middle row (see the client-setup list)"
-
-                Just ModuleIsRunning ->
-                    "running"
-
-                Just ModuleIsNotRunning ->
-                    "not running"
-
         orbit =
             if situation.shipIsOrbiting then
                 "orbiting"
@@ -2225,9 +2505,7 @@ describeHarvestSituation situation =
                         ++ (notRunning |> List.map (\index -> String.fromInt (index + 1)) |> String.join ", ")
                         ++ ")"
     in
-    "Harvest: propulsion module "
-        ++ propulsion
-        ++ "; "
+    "Harvest: "
         ++ orbit
         ++ "; cloud "
         ++ lock
@@ -2374,8 +2652,14 @@ Every other bot here funnels its warps through
 `ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping`, and this one
 must not: the propulsion module has to survive every warp this bot makes, so
 there is no shared helper to reach and no branch that presses `Alt+F1` to switch
-one off. `SwitchThePropulsionModuleOn` is the only step in this file that
-touches it, and it only ever switches it on.
+one off. `keepThePropulsionModuleRunning` is the only declaration in this file
+that presses that key at all, it presses it only at a module reading _not
+running_, and it is reached above this rather than through it.
+
+That is asserted over every warp in this file rather than stated here, and over
+the call graph rather than over this one declaration -- the shape #465 warns
+about is a deactivation reached _through_ a warp helper as a courtesy, under a
+name with no "deactivate" in it, which reading one branch would not catch.
 
 -}
 warpToTheHuntedSite : BotDecisionContext -> SiteToHunt -> DecisionPathNode
@@ -6029,6 +6313,7 @@ initBotMemory =
     , miningRangeRefusal = Nothing
     , miningRangeLastChange = Nothing
     , harvestCounters = initHarvestCounters
+    , propulsionPressesUnanswered = 0
     , dscan = initDscanMemory
     , evasion = initEvasionCounters
     , warpNotExecutingLastChange = Nothing
@@ -6109,11 +6394,21 @@ gasHufferDecisionRootBeforeApplyingSettings context =
                 |> Maybe.withDefault (watchLeaveDepositOrHarvest context)
 
 
-{-| The four things this bot does, in the order it does them.
+{-| The five things this bot does, in the order it does them.
 
 Split out so the ordering is one expression a reader can take in at once, which
 is what an ordering that decides whether a full ship undocks into a hostile grid
 is worth.
+
+**The propulsion module goes above the leaving, which is #465's placement and
+the one entry here that is about the ship rather than about the work.** Speed is
+this hull's whole survival plan, so the module is switched on before the ship is
+asked to warp anywhere rather than after it has arrived -- and the cost of that
+is one reading at the head of a retreat that begins with the module off, against
+a whole retreat flown at base speed. It sits below the scan because the scan is
+the instrument the leaving is decided on, and a scan skipped is a grid the bot
+cannot see; four of `propulsionStep`'s five answers hand the reading straight
+back, so this holds nothing up on any other reading.
 
 -}
 watchLeaveDepositOrHarvest : BotDecisionContext -> DecisionPathNode
@@ -6123,22 +6418,35 @@ watchLeaveDepositOrHarvest context =
             refresh
 
         Nothing ->
-            case actOnTheEvasionStep context (evasionSituationFromContext context) of
-                Just leaving ->
-                    describeBranch (describeRetreatSearch (retreatSearchFromContext context))
-                        (describeBranch (describeCloak (cloakSearchFromContext context)) leaving)
+            case keepThePropulsionModuleRunning context of
+                Just switchItOn ->
+                    switchItOn
 
                 Nothing ->
-                    case actOnTheDepositStep context (depositSituationFromContext context) of
-                        Just depositing ->
-                            depositing
+                    leaveDepositOrHarvest context
 
-                        Nothing ->
-                            branchDependingOnDockedOrInSpace
-                                { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
-                                , ifSeeShipUI = huntAndHarvest context
-                                }
-                                context
+
+{-| The three that are about the work, split out so the ordering above stays one
+expression.
+-}
+leaveDepositOrHarvest : BotDecisionContext -> DecisionPathNode
+leaveDepositOrHarvest context =
+    case actOnTheEvasionStep context (evasionSituationFromContext context) of
+        Just leaving ->
+            describeBranch (describeRetreatSearch (retreatSearchFromContext context))
+                (describeBranch (describeCloak (cloakSearchFromContext context)) leaving)
+
+        Nothing ->
+            case actOnTheDepositStep context (depositSituationFromContext context) of
+                Just depositing ->
+                    depositing
+
+                Nothing ->
+                    branchDependingOnDockedOrInSpace
+                        { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
+                        , ifSeeShipUI = huntAndHarvest context
+                        }
+                        context
 
 
 {-| End the session where one of the two bounds that end it has expired.
@@ -6927,6 +7235,15 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         holdFill =
             holdFillFromReading context.readingFromGameClient
 
+        -- The same reading `keepThePropulsionModuleRunning` and the status line
+        -- take, through the same declaration, so the count cannot come to be
+        -- about a module the decision was not looking at. #102: one rule, three
+        -- readers.
+        propulsionReading =
+            context.readingFromGameClient.shipUI
+                |> Maybe.andThen propulsionModuleFromShipUI
+                |> Maybe.map moduleRunningState
+
         -- Read from the effects the bot dispatched rather than from anything
         -- the client says, because what was asked for is knowable where what
         -- the client did with it is not. A drag is the one gesture in this app
@@ -6960,6 +7277,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     |> Maybe.withDefault False
             }
             botMemoryBefore.harvestCounters
+    , propulsionPressesUnanswered =
+        propulsionPressesAfterReading
+            { pressDispatched =
+                context.previousStepsEffects
+                    |> List.head
+                    |> Maybe.map (stepPressedExactly propulsionModuleHotkey)
+                    |> Maybe.withDefault False
+            , readsRunning = propulsionReading == Just ModuleIsRunning
+            }
+            botMemoryBefore.propulsionPressesUnanswered
     , dscan =
         dscanMemoryAfterReading
             { nowMilliseconds = context.timeInMilliseconds
@@ -7024,18 +7351,25 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
 Deliberately opens with what the bot **cannot** do, because everything else here
 is a bot that looks like it is working: it warps, orbits, locks, harvests,
-notices and leaves, and a console reporting all of that while the ship crawls out
-of a hostile grid with its propulsion module off would be a console reporting
-success for the half that is missing. That is the failure this repo is named
-after, and the marker has moved with each issue that closed one -- `SCAFFOLD
-ONLY`, then `HARVESTS BUT CANNOT LEAVE`, then `NOTICES BUT CANNOT LEAVE`, and now
-the propulsion module, which is the worse of the two halves left because it is
-the one on the survival path.
+notices and leaves, and a console reporting all of that while something under it
+is inert would be a console reporting success. That is the failure this repo is
+named after, and the marker has moved with each issue that closed one --
+`SCAFFOLD ONLY`, then `HARVESTS BUT CANNOT LEAVE`, then `NOTICES BUT CANNOT
+LEAVE`, then `LEAVES WITHOUT ITS PROPULSION MODULE`, and with #465 the last of
+#456's behaviour is in.
 
-The retreat and cloak clauses are printed on **every** reading rather than only
-while evading, because the reading an operator wants them on is the quiet one
-before anything arrives: a Locations window nobody opened and a cloak nobody
-identified are both cheap to fix then and not fixable at all afterwards.
+**What is left is that none of it has ever run**, which is a weaker sentence
+than the four it replaces and is the honest one: there is no recorded session of
+this app at all, so every bound in it is a relation rather than a measurement
+and every premise is one read taken on 2026-09-04 or a corpus from another bot.
+A marker that named a missing feature was something an operator could not fix;
+this one is, by flying it and reading the clauses below.
+
+The retreat, cloak and propulsion clauses are printed on **every** reading rather
+than only while they are being acted on, because the reading an operator wants
+them on is the quiet one before anything arrives: a Locations window nobody
+opened, a cloak nobody identified and a propulsion module that never came on are
+all cheap to fix then and not fixable at all afterwards.
 
 The harvest clause and the cloud clause are only printed where the reading has
 them, since a docked reading has no grid and a clause an operator reads on every
@@ -7064,7 +7398,8 @@ statusTextFromState context =
                 ( Nothing, _ ) ->
                     []
     in
-    [ "LEAVES WITHOUT ITS PROPULSION MODULE: this bot warps to a gas site, harvests it, watches the grid and leaves when something arrives (#463), and deposits the hold at the home structure when it fills (#464) -- and nothing here keeps the propulsion module on across a warp (#465), so it evades, and flies home, slower than it flew in."
+    [ "NEVER FLOWN: this bot warps to a gas site, harvests it, watches the grid and leaves when something arrives (#463), deposits the hold at the home structure when it fills (#464), and keeps its propulsion module running through every warp it makes (#465) -- and no session of it has ever been run against a live client, so every one of those is a rule executed in a repl rather than a thing anybody has watched happen. Read the clauses below as instruments that have not been calibrated."
+    , describePropulsionModule (propulsionSituationFromContext context)
     , describeGrid (gridEvidenceFromContext context)
     , describeDscanSightingsFromReading context.readingFromGameClient
     , describeDscanCadence

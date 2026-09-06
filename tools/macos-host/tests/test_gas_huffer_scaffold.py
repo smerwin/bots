@@ -565,8 +565,13 @@ class TheSetupListPutsThePauseMenuFirstTest(unittest.TestCase):
         root = collapsed(block("gasHufferDecisionRootBeforeApplyingSettings"))
         self.assertLess(root.index("generalSetupInUserInterface"),
                         root.index("watchLeaveDepositOrHarvest"), root)
-        self.assertIn("branchDependingOnDockedOrInSpace",
+        # #465 split the tail of that ordering out, so the docked-or-in-space
+        # split is one declaration further down. The relation being asserted is
+        # unchanged: everything that flies the ship is below the setup list.
+        self.assertIn("leaveDepositOrHarvest",
                       collapsed(block("watchLeaveDepositOrHarvest")))
+        self.assertIn("branchDependingOnDockedOrInSpace",
+                      collapsed(block("leaveDepositOrHarvest")))
 
     def test_the_pause_menu_branch_fires_on_the_menu_the_client_draws(self):
         """Reachability, which a placement case cannot see.
@@ -828,7 +833,7 @@ class TheSessionEndingBoundIsAskedAtTheHeadTest(unittest.TestCase):
 # case deleted, and why the *worse* half is what it names each time. #465 (the
 # propulsion module across a warp) is what is left, and it is on the survival
 # path: every retreat, every celestial bounce and now every trip home is a warp.
-CANNOT_DO_MARKER = "LEAVES WITHOUT ITS PROPULSION MODULE"
+CANNOT_DO_MARKER = "NEVER FLOWN"
 
 
 class TheBotSaysWhatItCannotDoTest(unittest.TestCase):
@@ -837,12 +842,16 @@ class TheBotSaysWhatItCannotDoTest(unittest.TestCase):
 
     That is `/review-silent-success` exactly. Before #461 the thing an operator
     had to be told was that nothing would be harvested; #461 and #462 made it
-    the opposite half, and #463 filled that. What is left is narrower and no less
-    worth saying first: the ship leaves, and it leaves with its propulsion module
-    off, because nothing switches one back on after a warp except the harvest
-    loop at the far end of a clean grid. A console reporting the working halves
-    while the ship crawls off a hostile grid is a console reporting success,
-    which is the failure this repo is named after.
+    the opposite half, #463 filled that, and #465 filled the last one -- the
+    propulsion module, which the ship used to leave a hostile grid without.
+
+    **With #465 there is no feature of #456 left to name**, and the marker is
+    not deleted, because a bot reporting only what it *can* do is the failure
+    this repo is named after. What replaces it is weaker and is the honest thing
+    left to say: no session of this app has ever been run against a live client,
+    so every clause under it is a rule executed in a repl rather than an
+    instrument anybody has calibrated. Unlike the four markers before it, this
+    one is something an operator can retire themselves, by flying it.
     """
 
     @classmethod
@@ -876,9 +885,13 @@ class TheBotSaysWhatItCannotDoTest(unittest.TestCase):
     def test_the_status_line_opens_by_saying_so(self):
         body = collapsed(block("statusTextFromState"))
         self.assertIn(CANNOT_DO_MARKER, body)
-        for missing in ("#464", "#465"):
-            with self.subTest(missing):
-                self.assertIn(missing, body)
+        # It still names what the bot does, since a marker with no list beside
+        # it says nothing about what the reader is being warned off believing.
+        # #465 is in that list now rather than in the missing half.
+        for issue in ("#463", "#464", "#465"):
+            with self.subTest(issue):
+                self.assertIn(issue, body)
+        self.assertIn("ever been run against a live client", body)
 
     def test_the_header_says_it_before_the_settings_an_operator_would_read(self):
         header = bot_source().split("\n-}", 1)[0]
