@@ -288,8 +288,7 @@ def cloud_search_binding(name, reading, prefix=None):
                 "Nothing" if prefix is None else "(Just %s)" % json.dumps(prefix)))
 
 
-def situation(propulsion="Just ModuleIsRunning", orbiting=True,
-              panel_shows=True, orbit_button=True, locked=True,
+def situation(orbiting=True, panel_shows=True, orbit_button=True, locked=True,
               locking=False, harvesters_not_running="[]",
               panel_unanswered=0, lock_unanswered=0):
     """A `HarvestSituation` written out, since it is a record of plain facts.
@@ -300,9 +299,14 @@ def situation(propulsion="Just ModuleIsRunning", orbiting=True,
     precisely so they can be asked for directly. `harvestSituationFromContext`
     is what builds one from a client, and it is read out of the source
     separately.
+
+    The propulsion module was the first field of this record until #465 and is
+    not here any more: it moved out of the harvest loop to a rule asked above
+    the leaving as well as above this, since the reading it matters most on is
+    the one the ship is leaving on. See
+    `test_gas_huffer_keeps_the_propulsion_module_on`.
     """
-    return ("{ propulsionModule = %s"
-            ", shipIsOrbiting = %s"
+    return ("{ shipIsOrbiting = %s"
             ", panelShowsTheCloud = %s"
             ", orbitButtonIsOffered = %s"
             ", cloudReadsLocked = %s"
@@ -310,7 +314,7 @@ def situation(propulsion="Just ModuleIsRunning", orbiting=True,
             ", harvestersNotRunning = %s"
             ", counters = { panelSelectUnansweredReadings = %d"
             ", lockUnansweredReadings = %d } }" % (
-                propulsion, orbiting, panel_shows, orbit_button, locked,
+                orbiting, panel_shows, orbit_button, locked,
                 locking, harvesters_not_running,
                 panel_unanswered, lock_unanswered))
 
@@ -937,10 +941,19 @@ class TheHarvesterRefusalIsReportedAndNeverActedOnTest(unittest.TestCase):
 class TheHarvestLoopCommandsThingsInOrderTest(unittest.TestCase):
     """One rule with the whole ordering in it, executed rather than read.
 
-    The order is the issue's own -- keep the propulsion module running, orbit
-    the cloud, lock it, run both harvesters -- and what makes it worth writing
-    as one rule is that every stage can fail to be reachable and each of those
-    has to fall through to the next rather than holding the loop.
+    The order is the issue's own -- orbit the cloud, lock it, run both
+    harvesters -- and what makes it worth writing as one rule is that every
+    stage can fail to be reachable and each of those has to fall through to the
+    next rather than holding the loop.
+
+    **The propulsion module was the first stage of it until #465** and is not
+    part of this rule any more. It is asked above the leaving and the deposit as
+    well as above this, because the reading it matters most on is the one the
+    ship is leaving on -- and a second copy here would be two branches pressing
+    one toggle, the second of them inside the first's settling window. The three
+    cases that were here are in
+    `test_gas_huffer_keeps_the_propulsion_module_on`, where they are asked of
+    the rule that now owns the press.
     """
 
     @classmethod
@@ -954,26 +967,12 @@ class TheHarvestLoopCommandsThingsInOrderTest(unittest.TestCase):
     def step(self, **kwargs):
         return self.repl.rendered(["harvestStep %s" % situation(**kwargs)])[0]
 
-    def test_the_propulsion_module_comes_first(self):
+    def test_the_orbit_comes_first(self):
+        """With the propulsion module gone from this rule, the ordering starts
+        at the selection the Orbit button acts on."""
         self.assertEqual(
-            self.step(propulsion="Just ModuleIsNotRunning", orbiting=False,
-                      locked=False, harvesters_not_running="[ 0, 1 ]"),
-            "SwitchThePropulsionModuleOn")
-
-    def test_a_running_propulsion_module_is_left_alone(self):
-        """It is a toggle, so a press aimed at a module that is already on
-        switches it off -- which is the failure #465 depends on not happening."""
-        self.assertEqual(
-            self.step(propulsion="Just ModuleIsRunning", orbiting=False,
-                      panel_shows=False),
-            "SelectTheCloud")
-
-    def test_a_middle_row_this_reading_cannot_read_is_not_pressed_at(self):
-        """Absent evidence declines: pressing Alt+F1 at a ship whose modules
-        are arranged some other way presses whatever is bound there."""
-        self.assertEqual(
-            self.step(propulsion="Nothing", orbiting=False,
-                      panel_shows=False),
+            self.step(orbiting=False, panel_shows=False, locked=False,
+                      harvesters_not_running="[ 0, 1 ]"),
             "SelectTheCloud")
 
     def test_the_orbit_is_a_selection_and_then_a_press(self):
@@ -1194,14 +1193,22 @@ class TheModuleReadingIsTheRampWidgetsExistenceTest(unittest.TestCase):
 
 
 class ThePropulsionModuleIsOnlyEverSwitchedOnTest(unittest.TestCase):
-    """#465, held from the day the warp arrived rather than from the day it is
-    written.
+    """#465, held here from the day the warp arrived rather than from the day
+    it was written -- and now largely somewhere else.
 
     Every other bot here funnels its warps through
     `ensureDronesRecalledAndPropulsionModuleDeactivatedBeforeWarping`, and this
     one must not: the propulsion module has to survive every warp this bot
-    makes. So there is no shared helper to reach, and the one press that touches
-    it only ever switches it on.
+    makes. So there is no shared helper to reach, and the one declaration that
+    presses the module's hotkey only ever switches it on.
+
+    **#465 is where that lives now**, as a property over the call graph from
+    every warp call site rather than as a read of this app's first warp -- see
+    `test_gas_huffer_keeps_the_propulsion_module_on`, which also carries the
+    activation guard's own cases. What is kept here is the half that belongs to
+    the harvest loop: the chord this file's own harvester presses is a different
+    press from the propulsion module's, and a settling window that could not
+    tell them apart would suppress one of them silently.
     """
 
     @classmethod
@@ -1239,15 +1246,19 @@ class ThePropulsionModuleIsOnlyEverSwitchedOnTest(unittest.TestCase):
             with self.subTest(helper):
                 self.assertNotIn(helper, body)
 
-    def test_the_one_press_that_touches_it_is_the_switch_on(self):
-        pressers = [name for name, text in top_level_declarations(
-            bot_source()).items()
-            if "propulsionModuleHotkey" in collapsed(text)]
-        self.assertEqual(sorted(pressers),
-                         ["actOnTheHarvestStep", "propulsionModuleHotkey"],
-                         pressers)
-        self.assertIn("SwitchThePropulsionModuleOn",
-                      collapsed(block("actOnTheHarvestStep")))
+    def test_the_harvest_loop_no_longer_touches_it_at_all(self):
+        """It did until #465, and two branches pressing one toggle is the
+        flicker `manageMiddleRowModules` was split up to end. The full list of
+        declarations that name the chord, and what each does with it, is in
+        `test_gas_huffer_keeps_the_propulsion_module_on`.
+        """
+        for name in ("actOnTheHarvestStep", "harvestStep",
+                     "harvestSituationFromContext"):
+            with self.subTest(name):
+                self.assertNotIn("propulsionModuleHotkey",
+                                 collapsed(block(name)))
+        self.assertIn("propulsionModuleHotkey",
+                      collapsed(block("keepThePropulsionModuleRunning")))
 
     def test_the_chord_is_alt_f1_and_a_bare_f1_is_a_different_press(self):
         """`F1` is a subsequence of `Alt+F1`, so a settling window that could

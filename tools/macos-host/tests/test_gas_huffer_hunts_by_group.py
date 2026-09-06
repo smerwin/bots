@@ -813,10 +813,14 @@ class TheSearchIsOneDeclarationWithSeveralReadersTest(unittest.TestCase):
 
     def test_the_in_space_branch_is_the_hunt(self):
         # #464 moved the split one declaration down, under the scan, the
-        # leaving and the deposit -- see `watchLeaveDepositOrHarvest`. The
-        # in-space arm is unchanged and is still the hunt.
-        root = collapsed(block("watchLeaveDepositOrHarvest"))
+        # leaving and the deposit; #465 moved it one further, under the
+        # propulsion module -- see `watchLeaveDepositOrHarvest` and
+        # `leaveDepositOrHarvest`. The in-space arm is unchanged either time and
+        # is still the hunt.
+        root = collapsed(block("leaveDepositOrHarvest"))
         self.assertIn("ifSeeShipUI = huntAndHarvest context", root)
+        self.assertIn("leaveDepositOrHarvest",
+                      collapsed(block("watchLeaveDepositOrHarvest")))
 
     def test_the_rule_takes_a_reading_rather_than_a_decision_context(self):
         """#106's lesson: a rule reachable only through a `BotDecisionContext`

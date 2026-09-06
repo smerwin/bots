@@ -1426,8 +1426,22 @@ class TheRetreatOutranksTheDepositTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.repl.close()
 
+    def ordering(self):
+        """The whole ordering, read in call order across the two declarations.
+
+        #465 split the tail of `watchLeaveDepositOrHarvest` out into
+        `leaveDepositOrHarvest` so that the propulsion module could be asked
+        above all of it and the head stay one expression. The relation these
+        cases assert is unchanged; what moved is which declaration holds which
+        half, so they are read one after the other.
+        """
+        return " ".join([
+            collapsed(self.declarations["watchLeaveDepositOrHarvest"]),
+            collapsed(self.declarations["leaveDepositOrHarvest"]),
+        ])
+
     def test_the_leaving_is_asked_before_the_deposit(self):
-        body = collapsed(self.declarations["watchLeaveDepositOrHarvest"])
+        body = self.ordering()
         self.assertIn("actOnTheEvasionStep", body)
         self.assertIn("actOnTheDepositStep", body)
         self.assertLess(body.index("actOnTheEvasionStep"),
@@ -1437,7 +1451,7 @@ class TheRetreatOutranksTheDepositTest(unittest.TestCase):
         """Which is what makes the ordering reach a docked reading at all. Below
         the split the retreat would be in the in-space arm and a docked bot
         would undock to finish an errand with nothing able to stop it."""
-        body = collapsed(self.declarations["watchLeaveDepositOrHarvest"])
+        body = self.ordering()
         for above in ("actOnTheEvasionStep", "actOnTheDepositStep"):
             with self.subTest(above):
                 self.assertLess(body.index(above),
