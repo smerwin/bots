@@ -2,18 +2,22 @@
 # Launches the eve-online-gas-huffer bot (implement/applications/eve-online/
 # eve-online-gas-huffer) via botlab_host.py.
 #
-# LEAVES WITHOUT ITS PROPULSION MODULE. Since #461 that app warps to a gas site,
-# picks the cloud whose designation carries the highest trailing number, orbits
-# it, keeps the propulsion module running, locks it and runs both harvesters;
-# since #462 it refreshes the Directional Scanner and says on every reading
-# whether anything on the grid means leave; and since #463 it acts on that --
-# warps to a prefixed bookmark, else the home structure, else any bookmark at
-# 100 km, cloaks if one is fitted, and bounces celestials at random ranges until
-# the grid reads clean, ending the session if it never does. It does **not**
-# deposit the hold when it fills (#464), or keep the propulsion module on across
-# a warp (#465), so it evades slower than it flew in. It says so on every
-# reading rather than looking busy, which is the whole reason it is launchable
-# at all.
+# NEVER FLOWN. Since #461 that app warps to a gas site, picks the cloud whose
+# designation carries the highest trailing number, orbits it, locks it and runs
+# both harvesters; since #462 it refreshes the Directional Scanner and says on
+# every reading whether anything on the grid means leave; since #463 it acts on
+# that -- warps to a prefixed bookmark, else the home structure, else any
+# bookmark at 100 km, cloaks if one is fitted, and bounces celestials at random
+# ranges until the grid reads clean, ending the session if it never does; since
+# #464 it deposits the hold at the home structure when it fills; and since #465
+# it keeps its propulsion module running through every one of those warps, which
+# nothing in that app ever switches off.
+#
+# That is all of #456, and **none of it has ever been run against a live
+# client** -- so every bound in it is a relation rather than a measurement and
+# every premise is one read taken on 2026-09-04 or a corpus measured on another
+# bot. The status line says so on every reading rather than looking busy, which
+# is the whole reason it is launchable at all.
 #
 # Before running, per this bot's own setup instructions (see its Bot.elm
 # header): set the UI language to English; open the overview, the probe scanner
@@ -57,7 +61,7 @@ for arg in "$@"; do
         -h | --help)
             python3 "${SCRIPT_DIR}/bot_help.py" "$BOT_SOURCE" \
                 --script "run_gas_huffer.sh" \
-                --summary "runs the eve-online-gas-huffer bot, which is meant to harvest gas from a wormhole site and leave the moment anything else turns up. Since #463 it does the harvesting, the watching and the leaving; it still does not deposit the hold (#464) or keep the propulsion module on across a warp (#465), so it evades slower than it flew in and reports both on every reading." \
+                --summary "runs the eve-online-gas-huffer bot, which is meant to harvest gas from a wormhole site and leave the moment anything else turns up. It does the harvesting, the watching, the leaving (#463), the deposit (#464) and the propulsion module through every warp (#465) -- and NO SESSION OF IT HAS EVER BEEN RUN against a live client, so read its status line as a set of instruments nobody has calibrated." \
                 --note "This always passes --execute-input: it WILL drive your real mouse and
 keyboard. Starting a run also kills any bot session already running, since two
 of them fighting over the cursor produces chaos.
