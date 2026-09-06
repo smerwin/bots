@@ -102,12 +102,14 @@ import EveOnline.BotFrameworkSeparatingMemory
         , useContextMenuCascadeOnOverviewEntry
         , waitForProgressInGame
         )
+import EveOnline.MemoryReading
 import EveOnline.ParseUserInterface
     exposing
         ( OverviewWindowEntry
         , centerFromDisplayRegion
         , getAllContainedDisplayTextsWithRegion
         )
+import Json.Decode
 import List.Extra
 import Maybe.Extra
 import Result.Extra
@@ -1482,6 +1484,7 @@ useContextMenuOnLocationWithMatchingName nameMatches useMenu context =
         matchingOverviewEntry =
             context.readingFromGameClient.overviewWindows
                 |> List.concatMap .entries
+                |> List.filter overviewEntryIsDisplayed
                 |> List.filter
                     (.objectName
                         >> Maybe.map nameMatches
@@ -2258,6 +2261,7 @@ activeShipTreeEntryFromInventoryWindow =
 clickableMineablesFromOverviewWindow : ReadingFromGameClient -> List OverviewWindowEntry
 clickableMineablesFromOverviewWindow =
     overviewWindowEntriesRepresentingMineable
+        >> List.filter overviewEntryIsDisplayed
         >> List.filter (.uiNode >> uiNodeVisibleRegionLargeEnoughForClicking)
         >> List.filter (.opacityPercent >> Maybe.map ((<=) 50) >> Maybe.withDefault True)
         >> List.sortBy (.uiNode >> .totalDisplayRegion >> .y)
@@ -2312,6 +2316,30 @@ overviewWindowEntriesRepresentingMineable =
     .overviewWindows
         >> List.map (.entries >> List.filter overviewWindowEntryRepresentsMineable)
         >> List.concat
+
+
+{-| The widget's own `_display` flag, defaulting to shown when absent (most
+nodes never set it).
+-}
+nodeIsDisplayed : EveOnline.MemoryReading.UITreeNode -> Bool
+nodeIsDisplayed uiNode =
+    uiNode.dictEntriesOfInterest
+        |> Dict.get "_display"
+        |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.bool >> Result.toMaybe)
+        |> Maybe.withDefault True
+
+
+{-| With more than one overview window open, the same physical object gets one
+entry per window, and only the rows that fit on screen are actually rendered
+-- the rest keep whatever region they last occupied while recycled (#479). A
+hidden entry's region therefore points at whatever real object now sits in
+that spot, so clicking it acts on the wrong thing rather than doing nothing.
+`_display` is what distinguishes a rendered row from a stale one; the region
+alone does not.
+-}
+overviewEntryIsDisplayed : OverviewWindowEntry -> Bool
+overviewEntryIsDisplayed entry =
+    nodeIsDisplayed entry.uiNode.uiNode
 
 
 overviewWindowEntryRepresentsMineable : OverviewWindowEntry -> Bool
