@@ -338,6 +338,21 @@ dockWhenDroneWindowInvisibleCount =
     4
 
 
+{-| How many consecutive readings `dockedWithMiningHoldSelected` (and the fleet
+hangar's own drag) may repeat the identical drag-and-drop before giving up.
+
+20 is a multiple of the ordinary case rather than a guess against the incident:
+a single stack drags in one or two readings when it lands at all, and a full
+hold with several distinct ore stacks in it clears in well under this count
+since every stack that actually drags resets the counter, one reading each. The
+stuck run this bound answers reached 285 before an operator ended it by hand;
+20 catches that within about a minute rather than nine.
+-}
+miningHoldDragGiveUpReadings : Int
+miningHoldDragGiveUpReadings =
+    20
+
+
 type alias BotSettings =
     { runAwayShieldHitpointsThresholdPercent : Int
     , unloadStationNames : List String
@@ -367,6 +382,7 @@ type alias BotMemory =
     , timesUnloaded : Int
     , volumeUnloadedCubicMeters : Int
     , lastUsedCapacityInMiningHold : Maybe Int
+    , miningHoldDragAttemptReadings : Int
     , shipModules : ShipModulesMemory
     , overviewWindows : OverviewWindowsMemory
     , lastReadingsInSpaceDronesWindowWasVisible : List Bool
@@ -648,22 +664,15 @@ dockedWithMiningHoldSelected context inventoryWindowWithMiningHoldSelected =
                         )
 
                 Just itemInInventory ->
-                    describeBranch "I see at least one item in the mining hold. Move this to the item hangar."
-                        (describeBranch "Drag and drop."
-                            (decideActionForCurrentStep
-                                (EffectOnWindow.effectsForDragAndDrop
-                                    { startLocation = itemInInventory.totalDisplayRegionVisible |> centerFromDisplayRegion
-                                    , mouseButton = MouseButtonLeft
-                                    , waypointsPositionsInBetween = []
-                                    , endLocation = itemHangar.totalDisplayRegionVisible |> centerFromDisplayRegion
-                                    }
-                                )
-                            )
-                        )
+                    dragItemOutOfMiningHoldOrGiveUp context
+                        { destinationName = "item hangar"
+                        , dragToLocation = itemHangar.totalDisplayRegionVisible |> centerFromDisplayRegion
+                        }
+                        itemInInventory
 
 
 inSpaceWithMiningHoldSelectedWithFleetHangar : BotDecisionContext -> EveOnline.ParseUserInterface.InventoryWindow -> DecisionPathNode
-inSpaceWithMiningHoldSelectedWithFleetHangar _ inventoryWindowWithMiningHoldSelected =
+inSpaceWithMiningHoldSelectedWithFleetHangar context inventoryWindowWithMiningHoldSelected =
     case
         inventoryWindowWithMiningHoldSelected |> fleetHangarFromInventoryWindow |> Maybe.map .uiNode
     of
@@ -681,18 +690,58 @@ inSpaceWithMiningHoldSelectedWithFleetHangar _ inventoryWindowWithMiningHoldSele
                         )
 
                 Just itemInInventory ->
-                    describeBranch "I see at least one item in the mining hold. Move this to the fleet hangar."
-                        (describeBranch "Drag and drop."
-                            (decideActionForCurrentStep
-                                (EffectOnWindow.effectsForDragAndDrop
-                                    { startLocation = itemInInventory.totalDisplayRegionVisible |> centerFromDisplayRegion
-                                    , mouseButton = MouseButtonLeft
-                                    , waypointsPositionsInBetween = []
-                                    , endLocation = fleetHangarFromInventory.totalDisplayRegionVisible |> centerFromDisplayRegion
-                                    }
-                                )
-                            )
-                        )
+                    dragItemOutOfMiningHoldOrGiveUp context
+                        { destinationName = "fleet hangar"
+                        , dragToLocation = fleetHangarFromInventory.totalDisplayRegionVisible |> centerFromDisplayRegion
+                        }
+                        itemInInventory
+
+
+{-| The one drag-and-drop both callers above end in, with the give-up neither
+of them had. Confirmed live: this drag can simply not land, with nothing else
+in the reading -- no dialog, no message box -- to say so, and the branch it sat
+in re-issued the identical gesture every reading for as long as an item
+answered `Just`. `miningHoldDragAttemptReadings` (computed in
+`updateMemoryForNewReadingFromGame`, the only place that can write memory) is
+what notices: it counts consecutive readings the hold still holds an item and
+its capacity gauge has not moved, and resets the moment either changes -- so a
+hold with several distinct ore stacks in it still clears well under the bound,
+since every stack that actually drags is progress by that measure.
+
+Past `miningHoldDragGiveUpReadings` this stops dispatching the same input and
+says so instead, naming the destination and the count, and asks for help
+rather than trying something else the client has already shown it eleven or
+more times in a row that it will not take.
+-}
+dragItemOutOfMiningHoldOrGiveUp :
+    BotDecisionContext
+    -> { destinationName : String, dragToLocation : EffectOnWindow.Location2d }
+    -> UIElement
+    -> DecisionPathNode
+dragItemOutOfMiningHoldOrGiveUp context { destinationName, dragToLocation } itemInInventory =
+    if miningHoldDragGiveUpReadings <= context.memory.miningHoldDragAttemptReadings then
+        describeBranch
+            ("An item has sat in the mining hold through "
+                ++ (context.memory.miningHoldDragAttemptReadings |> String.fromInt)
+                ++ " readings of dragging it to the "
+                ++ destinationName
+                ++ ", and the capacity gauge has not moved once in that time. The drag is not landing, and repeating the identical gesture again cannot be what fixes it."
+            )
+            askForHelpToGetUnstuck
+
+    else
+        describeBranch ("I see at least one item in the mining hold. Move this to the " ++ destinationName ++ ".")
+            (describeBranch "Drag and drop."
+                (decideActionForCurrentStep
+                    (EffectOnWindow.effectsForDragAndDrop
+                        { startLocation = itemInInventory.totalDisplayRegionVisible |> centerFromDisplayRegion
+                        , mouseButton = MouseButtonLeft
+                        , waypointsPositionsInBetween = []
+                        , endLocation = dragToLocation
+                        }
+                    )
+                )
+            )
 
 
 undockUsingStationWindow :
@@ -2047,6 +2096,7 @@ initBotMemory =
     , timesUnloaded = 0
     , volumeUnloadedCubicMeters = 0
     , lastUsedCapacityInMiningHold = Nothing
+    , miningHoldDragAttemptReadings = 0
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , overviewWindows = EveOnline.BotFramework.initOverviewWindowsMemory
     , lastReadingsInSpaceDronesWindowWasVisible = []
@@ -2184,6 +2234,43 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
         volumeUnloadedCubicMeters =
             botMemoryBefore.volumeUnloadedCubicMeters + volumeUnloadedSincePreviousReading
 
+        {- Confirmed live on 2026-09-06: a drag-and-drop out of the mining hold
+           can simply not land -- no dialog, no message box, nothing else in the
+           reading changes -- and `dockedWithMiningHoldSelected` had nothing that
+           could ever notice. It re-issues the identical gesture from the
+           identical two points every reading for as long as the hold's item
+           list still answers `Just`, with no counter and no confirmation that a
+           previous attempt worked. One run sat there for over nine minutes and
+           285 readings, unloaded nothing, and only cleared when the operator
+           dragged it by hand. That is #34's family exactly: a wait with no
+           bound and nothing it consults about its own progress.
+
+           `volumeUnloadedSincePreviousReading` is already computed above from
+           the same capacity gauge this counts against, and reusing it rather
+           than adding a second read is what keeps a legitimate multi-stack
+           unload from tripping this: each stack that actually drags resets the
+           count, because the gauge falls whether the drag empties the hold
+           outright or only takes one stack off it. Only a reading where the
+           gauge does not move at all, with an item still sitting there, adds to
+           it -- which is exactly the shape the stuck run had on every one of
+           its 285 readings.
+        -}
+        miningHoldHasAnItemNow =
+            context.readingFromGameClient
+                |> inventoryWindowWithMiningHoldSelectedFromGameClient
+                |> Maybe.andThen selectedContainerFirstItemFromInventoryWindow
+                |> (\item -> item /= Nothing)
+
+        miningHoldDragAttemptReadings =
+            if not miningHoldHasAnItemNow then
+                0
+
+            else if 0 < volumeUnloadedSincePreviousReading then
+                0
+
+            else
+                botMemoryBefore.miningHoldDragAttemptReadings + 1
+
         lastReadingsInSpaceDronesWindowWasVisible =
             if context.readingFromGameClient.shipUI == Nothing then
                 botMemoryBefore.lastReadingsInSpaceDronesWindowWasVisible
@@ -2211,6 +2298,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     , timesUnloaded = timesUnloaded
     , volumeUnloadedCubicMeters = volumeUnloadedCubicMeters
     , lastUsedCapacityInMiningHold = lastUsedCapacityInMiningHold
+    , miningHoldDragAttemptReadings = miningHoldDragAttemptReadings
     , shipModules =
         botMemoryBefore.shipModules
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
