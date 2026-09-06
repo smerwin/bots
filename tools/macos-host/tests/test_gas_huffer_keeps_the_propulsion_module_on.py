@@ -519,12 +519,26 @@ class ThePressesAreBoundedTest(unittest.TestCase):
         """In the memory update, which is the one thing that runs on every
         reading whatever the decision tree did with it -- and the press is read
         out of the effects the bot dispatched rather than out of anything the
-        client said."""
+        client said.
+
+        **The argument is sliced rather than searched for**, which is the half
+        this case did not have on its first pass: `previousStepsEffects |>
+        List.head` occurs in that declaration twice, once here and once for the
+        deposit's drag, so a mutation that pointed *this* one at the whole
+        settling window went on satisfying a substring check on the strength of
+        the other one. Asserting the form is the lesson #109's status clause,
+        #122's trust rule and #145's named button each paid for once already.
+        """
         update = collapsed(top_level_declarations(
             bot_source())["updateMemoryForNewReadingFromGame"])
         self.assertIn("propulsionPressesAfterReading", update)
-        self.assertIn("stepPressedExactly propulsionModuleHotkey", update)
-        self.assertIn("previousStepsEffects |> List.head", update)
+        argument = update.split("propulsionPressesAfterReading", 1)[1].split(
+            "botMemoryBefore.propulsionPressesUnanswered", 1)[0]
+        self.assertIn("stepPressedExactly propulsionModuleHotkey", argument)
+        self.assertIn("previousStepsEffects |> List.head", argument)
+        for whole_window in ("List.any", "List.take", "moduleButtonClickSettlingSteps"):
+            with self.subTest(whole_window):
+                self.assertNotIn(whole_window, argument)
 
 
 class NoWarpPathReachesADeactivationTest(unittest.TestCase):
@@ -860,8 +874,12 @@ class TheMutationsThisFileCatches(unittest.TestCase):
         `test_a_reading_that_could_not_read_the_module_holds_the_count`.
     11. the counter reading the whole of `previousStepsEffects` rather than its
         head, so one press counts once per step of its settling window --
-        `test_one_press_counts_once_however_long_the_window_is` and
-        `test_the_counter_is_written_where_every_reading_reaches_it`.
+        `test_the_counter_is_written_where_every_reading_reaches_it`. **This one
+        survived the first sweep and the hole was real**: that declaration reads
+        the head of the effects twice, once for this press and once for the
+        deposit's drag, so a substring check went on being satisfied by the
+        other one while this extraction was pointed at the whole window. The
+        argument handed to the rule is sliced now rather than searched for.
     12. **the guard placed below the leaving**, so the retreat warps before the
         module is switched on -- `TheGuardIsAskedAboveTheLeavingTest.test_the_
         scan_is_asked_first_and_the_module_second`.
