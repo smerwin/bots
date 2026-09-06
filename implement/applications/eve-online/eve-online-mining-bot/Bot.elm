@@ -353,6 +353,30 @@ miningHoldDragGiveUpReadings =
     20
 
 
+{-| How many consecutive readings `ensureInfoPanelLocationInfoIsExpanded` (the
+shared framework's own setup step, unchanged here) may go on reporting the
+location info panel missing or collapsed -- and, for the collapsed case,
+clicking to expand it -- before this bot stops waiting on it.
+
+Confirmed live on 2026-09-06: that click can simply not land, the same way the
+mining-hold drag above can. Unlike the drag, this step has **no** counter of
+any kind today, in either of its two `Just` branches -- a collapsed panel that
+does not respond to the click is retried forever, and the operator has no way
+to tell from the log how long it has been going, only that it still is. The
+underlying shared function is left as it is; it already tries the one thing
+that can fix a collapsed panel, and adding a bound is a decision each app
+using it can make about its own memory rather than a change every one of the
+eight vendored copies has to take on together.
+
+20 is picked for the same reason `miningHoldDragGiveUpReadings` is: several
+times the one or two readings a landed click actually needs, and small next to
+an incident with no bound to end it at all.
+-}
+infoPanelSetupGiveUpReadings : Int
+infoPanelSetupGiveUpReadings =
+    20
+
+
 type alias BotSettings =
     { runAwayShieldHitpointsThresholdPercent : Int
     , unloadStationNames : List String
@@ -383,6 +407,7 @@ type alias BotMemory =
     , volumeUnloadedCubicMeters : Int
     , lastUsedCapacityInMiningHold : Maybe Int
     , miningHoldDragAttemptReadings : Int
+    , infoPanelSetupAttemptReadings : Int
     , shipModules : ShipModulesMemory
     , overviewWindows : OverviewWindowsMemory
     , lastReadingsInSpaceDronesWindowWasVisible : List Bool
@@ -574,7 +599,7 @@ returnDronesAndRunAwayIfHitpointsAreTooLowOrWithoutDrones context shipUI =
 generalSetupInUserInterface : BotDecisionContext -> Maybe DecisionPathNode
 generalSetupInUserInterface context =
     [ closeMessageBox
-    , ensureInfoPanelLocationInfoIsExpanded
+    , ensureInfoPanelLocationInfoIsExpandedOrGiveUp context.memory.infoPanelSetupAttemptReadings
     , ensureOverviewsSorted
         { sortColumnName = "Distance", skipSortingWhenNotScrollable = True }
         context.memory.overviewWindows
@@ -586,6 +611,26 @@ generalSetupInUserInterface context =
     ]
         |> List.filterMap ((|>) context.readingFromGameClient)
         |> List.head
+
+
+{-| `ensureInfoPanelLocationInfoIsExpanded` with the give-up it does not have.
+See `infoPanelSetupGiveUpReadings` for why this bound lives here rather than in
+the shared function itself.
+-}
+ensureInfoPanelLocationInfoIsExpandedOrGiveUp : Int -> ReadingFromGameClient -> Maybe DecisionPathNode
+ensureInfoPanelLocationInfoIsExpandedOrGiveUp attemptReadingsSoFar readingFromGameClient =
+    if infoPanelSetupGiveUpReadings <= attemptReadingsSoFar then
+        Just
+            (describeBranch
+                ("The location info panel has been missing, or collapsed and not responding to a click to expand it, for "
+                    ++ String.fromInt attemptReadingsSoFar
+                    ++ " readings in a row. Clicking it again cannot be what is missing here."
+                )
+                askForHelpToGetUnstuck
+            )
+
+    else
+        ensureInfoPanelLocationInfoIsExpanded readingFromGameClient
 
 
 closeMessageBox : ReadingFromGameClient -> Maybe DecisionPathNode
@@ -2097,6 +2142,7 @@ initBotMemory =
     , volumeUnloadedCubicMeters = 0
     , lastUsedCapacityInMiningHold = Nothing
     , miningHoldDragAttemptReadings = 0
+    , infoPanelSetupAttemptReadings = 0
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , overviewWindows = EveOnline.BotFramework.initOverviewWindowsMemory
     , lastReadingsInSpaceDronesWindowWasVisible = []
@@ -2271,6 +2317,22 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             else
                 botMemoryBefore.miningHoldDragAttemptReadings + 1
 
+        {- Same shape as the drag counter above: count readings the shared
+           setup step still has something to do about the location info
+           panel (whether that is "I do not see it at all" or "it is
+           collapsed, click to expand"), and reset the moment it reports
+           nothing left to do. Calling the pure function a second time here
+           is cheap and keeps the counter from needing its own copy of the
+           panel-reading logic, which could drift from the real one.
+        -}
+        infoPanelSetupAttemptReadings =
+            case ensureInfoPanelLocationInfoIsExpanded context.readingFromGameClient of
+                Nothing ->
+                    0
+
+                Just _ ->
+                    botMemoryBefore.infoPanelSetupAttemptReadings + 1
+
         lastReadingsInSpaceDronesWindowWasVisible =
             if context.readingFromGameClient.shipUI == Nothing then
                 botMemoryBefore.lastReadingsInSpaceDronesWindowWasVisible
@@ -2299,6 +2361,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     , volumeUnloadedCubicMeters = volumeUnloadedCubicMeters
     , lastUsedCapacityInMiningHold = lastUsedCapacityInMiningHold
     , miningHoldDragAttemptReadings = miningHoldDragAttemptReadings
+    , infoPanelSetupAttemptReadings = infoPanelSetupAttemptReadings
     , shipModules =
         botMemoryBefore.shipModules
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
