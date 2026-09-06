@@ -812,7 +812,10 @@ class TheSearchIsOneDeclarationWithSeveralReadersTest(unittest.TestCase):
         self.assertEqual(callers, ["siteSearchFromContext"], callers)
 
     def test_the_in_space_branch_is_the_hunt(self):
-        root = collapsed(block("gasHufferDecisionRootBeforeApplyingSettings"))
+        # #464 moved the split one declaration down, under the scan, the
+        # leaving and the deposit -- see `watchLeaveDepositOrHarvest`. The
+        # in-space arm is unchanged and is still the hunt.
+        root = collapsed(block("watchLeaveDepositOrHarvest"))
         self.assertIn("ifSeeShipUI = huntAndHarvest context", root)
 
     def test_the_rule_takes_a_reading_rather_than_a_decision_context(self):

@@ -706,17 +706,42 @@ class AHiddenOverviewRowIsNeverActedOnTest(unittest.TestCase):
         self.assertEqual(
             readers, ["cloudSearchFromReading", "gridEvidenceFromReading",
                       "retreatSearchFromContext",
-                      "celestialsToBounceOffOnTheOverview"],
+                      "celestialsToBounceOffOnTheOverview",
+                      # #464's three, all of which reach the overview through
+                      # `homeStructureRowsOnTheOverview` and are filtered there
+                      # rather than here. Two of them click the row -- the
+                      # deposit selects it and warps to it -- and the third only
+                      # measures a range, and it is filtered all the same: a
+                      # recycled row's distance belongs to whatever was drawn in
+                      # its place, and the docking run-in reads that number as
+                      # progress.
+                      "rangeToTheHomeStructureInMeters",
+                      "depositSituationFromContext",
+                      "actOnTheDepositStep"],
             readers)
         self.assertNotIn(
             "overviewEntryIsDisplayed",
             collapsed(block("gridEvidenceFromReading")))
-        # #463's own two, which do click, and which therefore filter where the
-        # rows are chosen rather than where they are read out of the reading.
-        for clicks in ("retreatSearch", "celestialsToBounceOffOnTheOverview"):
+        # #463's two and #464's one, which all click, and which therefore filter
+        # where the rows are chosen rather than where they are read out of the
+        # reading.
+        # `retreatSearch` filters through `homeStructureRowsOnTheOverview` since
+        # #464 shared that rule with the deposit, which is why the filter is
+        # asserted there rather than in the retreat's own body.
+        self.assertIn("homeStructureRowsOnTheOverview",
+                      collapsed(block("retreatSearch")))
+        for clicks in ("celestialsToBounceOffOnTheOverview",
+                       "homeStructureRowsOnTheOverview"):
             with self.subTest(clicks):
                 self.assertIn("List.filter overviewEntryIsDisplayed",
                               collapsed(block(clicks)))
+        # And the three new readers reach the overview through that one rule
+        # rather than filtering, or failing to filter, for themselves.
+        for through in ("rangeToTheHomeStructureInMeters",
+                        "depositSituationFromContext", "actOnTheDepositStep"):
+            with self.subTest(through):
+                self.assertIn("homeStructureRowsOnTheOverview",
+                              collapsed(block(through)))
 
 
 class ThePrefixNarrowsWithoutReorderingTest(unittest.TestCase):

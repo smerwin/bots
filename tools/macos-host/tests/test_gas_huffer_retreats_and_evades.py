@@ -296,7 +296,8 @@ def evasion_counters(readings=0, warp_unexecuted=0, longest=0, cloak=0):
                 readings, warp_unexecuted, longest, cloak))
 
 
-def situation(clean=False, on_site=False, warping=False, destination="Nothing",
+def situation(clean=False, docked=False, on_site=False, warping=False,
+              destination="Nothing",
               cloak="(NoCloakAmongTheModulesIdentified 5)", celestials=3,
               rotation=0, counters=None):
     """An `EvasionSituation` written out, since it is a record of plain facts.
@@ -308,6 +309,7 @@ def situation(clean=False, on_site=False, warping=False, destination="Nothing",
     they can be asked for directly.
     """
     return ("{ gridIsClean = %s"
+            ", docked = %s"
             ", stillOnTheHarvestSite = %s"
             ", shipIsWarping = %s"
             ", destination = %s"
@@ -316,6 +318,7 @@ def situation(clean=False, on_site=False, warping=False, destination="Nothing",
             ", celestialRotation = %d"
             ", counters = %s }" % (
                 "True" if clean else "False",
+                "True" if docked else "False",
                 "True" if on_site else "False",
                 "True" if warping else "False",
                 destination, cloak, celestials, rotation,
@@ -328,10 +331,11 @@ def fitted(tooltip=None, running=False):
         "ModuleIsRunning" if running else "ModuleIsNotRunning")
 
 
-def answer(clean=False, warping=False, cloak_answered=True):
-    return ("{ gridIsClean = %s, shipIsWarping = %s"
+def answer(clean=False, docked=False, warping=False, cloak_answered=True):
+    return ("{ gridIsClean = %s, docked = %s, shipIsWarping = %s"
             ", cloakAnsweredTheAsk = %s }" % (
                 "True" if clean else "False",
+                "True" if docked else "False",
                 "True" if warping else "False",
                 "True" if cloak_answered else "False"))
 
@@ -1037,7 +1041,7 @@ class TheOrderingOfTheLeavingTest(unittest.TestCase):
                 bookmark_rows([FICTIONAL_SAFE]))]),
             retreat_search_binding("search", "reading"),
         ])[0]
-        self.assertEqual(printed, "Just WaitForTheWarpToLand")
+        self.assertEqual(printed, "Just WaitForTheEvasionWarpToLand")
 
     def test_still_on_the_site_with_somewhere_to_go_warps_out(self):
         printed = self.repl.rendered([
@@ -1287,8 +1291,13 @@ class TheOneCascadeDrivesEveryWarpTest(unittest.TestCase):
                    and name != "warpCascadeWithin"]
         self.assertEqual(
             sorted(readers),
-            ["warpToACelestialAtARandomRange", "warpToTheHuntedSite",
-             "warpToTheRetreatDestination"],
+            # #464's trip home is the fourth reader and joined for this rule's
+            # own reason: the deposit warps to the same overview row the
+            # retreat's second rung right-clicks, so a second copy of the two
+            # menu levels would be a bot that arrives at 0 m when it is
+            # frightened and somewhere else when it is full.
+            ["actOnTheDepositStep", "warpToACelestialAtARandomRange",
+             "warpToTheHuntedSite", "warpToTheRetreatDestination"],
             readers)
 
     def test_the_retreat_takes_zero_for_the_first_two_rungs_and_100km_for_the_last(self):
