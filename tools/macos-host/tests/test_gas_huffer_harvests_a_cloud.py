@@ -290,6 +290,8 @@ def cloud_search_binding(name, reading, prefix=None):
 
 def situation(orbiting=True, panel_shows=True, orbit_button=True, locked=True,
               locking=False, harvesters_not_running="[]",
+              harvesters_needing_a_kick="[]",
+              harvesters_kicked_readings_ago="[]",
               panel_unanswered=0, lock_unanswered=0):
     """A `HarvestSituation` written out, since it is a record of plain facts.
 
@@ -305,6 +307,12 @@ def situation(orbiting=True, panel_shows=True, orbit_button=True, locked=True,
     the leaving as well as above this, since the reading it matters most on is
     the one the ship is leaving on. See
     `test_gas_huffer_keeps_the_propulsion_module_on`.
+
+    `harvestersNeedingAKick` and `counters.harvestersKickedReadingsAgo` are the
+    periodic-recheck fields the harvest loop gained after this fixture was
+    first written -- kept optional, defaulting to nothing needing a kick and no
+    kick history, so every existing case that never mentioned them keeps asking
+    exactly the question it always asked.
     """
     return ("{ shipIsOrbiting = %s"
             ", panelShowsTheCloud = %s"
@@ -312,11 +320,14 @@ def situation(orbiting=True, panel_shows=True, orbit_button=True, locked=True,
             ", cloudReadsLocked = %s"
             ", cloudReadsLocking = %s"
             ", harvestersNotRunning = %s"
+            ", harvestersNeedingAKick = %s"
             ", counters = { panelSelectUnansweredReadings = %d"
-            ", lockUnansweredReadings = %d } }" % (
+            ", lockUnansweredReadings = %d"
+            ", harvestersKickedReadingsAgo = %s } }" % (
                 orbiting, panel_shows, orbit_button, locked,
-                locking, harvesters_not_running,
-                panel_unanswered, lock_unanswered))
+                locking, harvesters_not_running, harvesters_needing_a_kick,
+                panel_unanswered, lock_unanswered,
+                harvesters_kicked_readings_ago))
 
 
 class GasHufferRepl(ElmRepl):
@@ -721,7 +732,22 @@ class AHiddenOverviewRowIsNeverActedOnTest(unittest.TestCase):
                       # progress.
                       "rangeToTheHomeStructureInMeters",
                       "depositSituationFromContext",
-                      "actOnTheDepositStep"],
+                      "actOnTheDepositStep",
+                      # Reads every row unfiltered on purpose: it is hunting
+                      # for a row that IS hidden (`overviewEntryIsDisplayed`
+                      # answering False), to scroll the containing window
+                      # toward it rather than to click the row itself -- the
+                      # scroll targets the window's own scrollbar track and
+                      # handle, never the row's screen position.
+                      "scrollToRevealHiddenHomeStructureWhileDepositing",
+                      # `depositChainHop`'s own "is the structure reachable at
+                      # all" check, read the same way every other memory-update
+                      # answer is: this function never sees a decision, so it
+                      # asks the reading directly rather than through a
+                      # decision-context reader. Filtered the same way as
+                      # `depositSituationFromContext`, through
+                      # `homeStructureRowsOnTheOverview`.
+                      "updateMemoryForNewReadingFromGame"],
             readers)
         self.assertNotIn(
             "overviewEntryIsDisplayed",
@@ -1079,28 +1105,67 @@ class TheCountersAreAboutTheClientsAnswerTest(unittest.TestCase):
             " initHarvestCounters" % ", ".join(answers)])[0]
 
     @staticmethod
-    def answer(chosen=True, panel=False, locked=False):
+    def answer(chosen=True, panel=False, locked=False, kicked=None,
+               active_by_ramp=()):
+        """`kicked` and `active_by_ramp` are the periodic-recheck fields this
+        answer gained after this fixture was first written -- both default to
+        "nothing to report", which is what every case below that never
+        mentions them means to ask about."""
         return ("{ cloudIsChosen = %s, panelShowsTheCloud = %s"
-                ", cloudReadsLocked = %s }" % (chosen, panel, locked))
+                ", cloudReadsLocked = %s"
+                ", harvesterIndexJustKicked = %s"
+                ", harvesterIndicesLookingActiveByRamp = %s }" % (
+                    chosen, panel, locked,
+                    "Nothing" if kicked is None else "(Just %d)" % kicked,
+                    "[ %s ]" % ", ".join(str(i) for i in active_by_ramp)))
 
     def test_both_climb_while_the_client_says_nothing(self):
         self.assertEqual(
             self.fold([self.answer()] * 3),
-            "{ lockUnansweredReadings = 3, panelSelectUnansweredReadings = 3 }")
+            "{ harvestersKickedReadingsAgo = []"
+            ", lockUnansweredReadings = 3, panelSelectUnansweredReadings = 3 }")
 
     def test_each_resets_on_the_answer_it_is_waiting_for(self):
         self.assertEqual(
             self.fold([self.answer()] * 3 + [self.answer(panel=True)]),
-            "{ lockUnansweredReadings = 4, panelSelectUnansweredReadings = 0 }")
+            "{ harvestersKickedReadingsAgo = []"
+            ", lockUnansweredReadings = 4, panelSelectUnansweredReadings = 0 }")
         self.assertEqual(
             self.fold([self.answer()] * 3 + [self.answer(locked=True)]),
-            "{ lockUnansweredReadings = 0, panelSelectUnansweredReadings = 4 }")
+            "{ harvestersKickedReadingsAgo = []"
+            ", lockUnansweredReadings = 0, panelSelectUnansweredReadings = 4 }")
 
     def test_a_reading_with_no_cloud_starts_the_next_one_from_zero(self):
         """A session that harvests forty clouds counts each one on its own."""
         self.assertEqual(
             self.fold([self.answer()] * 5 + [self.answer(chosen=False)]),
-            "{ lockUnansweredReadings = 0, panelSelectUnansweredReadings = 0 }")
+            "{ harvestersKickedReadingsAgo = []"
+            ", lockUnansweredReadings = 0, panelSelectUnansweredReadings = 0 }")
+
+    def test_a_kick_or_a_live_ramp_reading_restarts_that_index_s_clock(self):
+        """The recheck's own reset, folded rather than asked in isolation --
+        see `harvesterLooksActiveByRamp` for why a live ramp reading counts as
+        a reset the same way a dispatched kick does."""
+        self.assertEqual(
+            self.fold([self.answer(locked=True)] * 3
+                      + [self.answer(locked=True, kicked=0)]),
+            "{ harvestersKickedReadingsAgo = [(0,0)]"
+            ", lockUnansweredReadings = 0, panelSelectUnansweredReadings = 4 }")
+        self.assertEqual(
+            self.fold([self.answer(locked=True)] * 3
+                      + [self.answer(locked=True, active_by_ramp=(1,))]),
+            "{ harvestersKickedReadingsAgo = [(1,0)]"
+            ", lockUnansweredReadings = 0, panelSelectUnansweredReadings = 4 }")
+
+    def test_losing_the_lock_forgets_every_harvester_s_clock(self):
+        """`harvestersKickedReadingsAgo` is a fact about *this* lock -- see its
+        own doc comment -- so losing the lock clears it even though the cloud
+        is still chosen."""
+        self.assertEqual(
+            self.fold([self.answer(locked=True, kicked=0)]
+                      + [self.answer(locked=False)]),
+            "{ harvestersKickedReadingsAgo = []"
+            ", lockUnansweredReadings = 1, panelSelectUnansweredReadings = 2 }")
 
     def test_the_memory_update_asks_the_same_cloud_search_the_decision_does(self):
         """#102: one fact settled in one place. The way this fails is a counter

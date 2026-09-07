@@ -1840,19 +1840,22 @@ harvester genuinely running for the whole of a 20-reading window is spinning
 for nearly all of it, so requiring this to read idle _at the recheck reading_
 before pressing removes most of the exposure without adding a second counter.
 
-**Declared and never wired up once already.** `eve-online-saxrat` has the
-identical rule under the name `moduleIsActiveOrReloading` and calls it from
-nowhere -- confirmed by search, not by the doc comment there. Naming it after
-what it is measuring, and actually reading it, is the whole of the fix asked
-for: treat top-row modules whose duty cycle cannot be trusted the way this
-codebase already knows to, rather than repeating a declaration that compiles
-and does nothing.
+**`eve-online-saxrat` has a declaration that reads almost like this one, named
+`moduleIsActiveOrReloading`, and it is deliberately not copied whole.** That
+one is `moduleButton.isActive || rampRotationMilli /= 0`, and it is also called
+from nowhere -- confirmed by search, not by the doc comment there. `.isActive`
+**is** `ramp_active`, the very field the paragraphs above this one spend three
+bullet points establishing this app must read only through `moduleRunningState`'s
+absence-only test: `Just True` is indistinguishable from a module mid-cycle
+between ramps, and a rule that credits it as "definitely active" is #12's
+mistake with a second entry point into the same field. `rampRotationMilli` is
+the one term of saxrat's declaration that names evidence this reading cannot
+already give some other way, so it is the only one taken.
 
 -}
 harvesterLooksActiveByRamp : EveOnline.ParseUserInterface.ShipUIModuleButton -> Bool
 harvesterLooksActiveByRamp moduleButton =
-    (moduleButton.isActive |> Maybe.withDefault False)
-        || ((moduleButton.rampRotationMilli |> Maybe.withDefault 0) /= 0)
+    (moduleButton.rampRotationMilli |> Maybe.withDefault 0) /= 0
 
 
 {-| The propulsion module, which the client-setup contract puts first in the
