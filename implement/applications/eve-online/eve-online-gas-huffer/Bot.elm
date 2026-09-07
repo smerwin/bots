@@ -299,6 +299,7 @@ import EveOnline.BotFramework
         , menuCascadeCompleted
         , mouseClickOnUIElement
         , useMenuEntryInLastContextMenuInCascade
+        , useMenuEntryWithTextContaining
         , useMenuEntryWithTextEqual
         )
 import EveOnline.BotFrameworkSeparatingMemory
@@ -562,6 +563,11 @@ type alias BotMemory =
     -- next reading, so the confirmation has to be latched here or it is seen
     -- once and the bot goes back to dragging. See `depositRunAfterReading`.
     , deposit : Maybe DepositRun
+
+    -- How many wormholes this deposit trip has jumped trying to work back
+    -- toward `home-structure-name`, and the solar system the ship was last
+    -- known to be in. See `depositChainHopMemoryAfterReading`.
+    , depositChainHop : DepositChainHopMemory
     }
 
 
@@ -1192,6 +1198,10 @@ trailingNumberFromName name =
 {-| The order clouds are taken in: highest trailing number first, unrankable
 last.
 
+**This is the fallback order, used only among candidates nothing has already
+claimed** -- see `gasCloudAlreadyClaimed` and `cloudSearch`'s own doc comment for
+why a lock or a lock in progress outranks it.
+
 A `comparable` for `List.sortBy` rather than a comparison written at the call
 site, and a **pair** rather than one number, because the two facts being ordered
 are of different kinds. The first element separates rankable from unrankable, so
@@ -1213,6 +1223,30 @@ gasCloudOrder name =
 
         Nothing ->
             ( 1, 0 )
+
+
+{-| Whether the client already reads this cloud as locked or as locking.
+
+`cloudSearch` asks this **before** the trailing-number order, which is the fix
+for a real live failure (run 4, 2026-09-07): a site held `Fullerite-C84` and
+`Fullerite-C50`, `gasCloudOrder` picked C84 for its higher trailing number, and
+the bot spent the rest of the run asking the client to select and lock C84 while
+C50 sat locked in the ship's own target bar the whole time -- confirmed live by
+the operator watching the client, and never so much as looked at, because
+`chosen` is re-derived fresh every reading with nothing remembering that a lock
+was already held.
+
+Both indications are read off the row being ranked, so this needs no memory of
+its own and cannot go stale the way a remembered choice would: once the claimed
+cloud is mined out or the ship leaves for a new site, it is simply gone from the
+rows being ranked on the next reading, and the fallback order in `gasCloudOrder`
+picks among whatever candidates are left -- there is no separate "forget the old
+cloud" step to write or to get wrong.
+
+-}
+gasCloudAlreadyClaimed : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+gasCloudAlreadyClaimed entry =
+    entry.commonIndications.targetedByMe || entry.commonIndications.targeting
 
 
 {-| Whether one cloud's designation is one `gas-cloud-name-prefix` asks for.
@@ -1251,6 +1285,11 @@ clouds are candidates, ranked last, and the count exists so that a run taking an
 unnumbered cloud says so rather than looking like a run that ignored the
 ordering.
 
+`chosenIsAlreadyClaimed` is carried for the same reason as both of those: it is
+what lets `describeCloudSearch` say *why* `chosen` won, rather than always
+crediting the trailing-number order when a lock already held is what actually
+decided it.
+
 -}
 type alias CloudSearch =
     { prefix : Maybe String
@@ -1261,6 +1300,7 @@ type alias CloudSearch =
     , namesInTheOrderTheyWouldBeTaken : List String
     , unrankableNames : List String
     , chosen : Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+    , chosenIsAlreadyClaimed : Bool
     }
 
 
@@ -1276,6 +1316,18 @@ Three readers -- the decision, the status line and
 `updateMemoryForNewReadingFromGame`, through `cloudSearchFromReading`. That is
 #102's shape, and the way it would fail here is a status line naming a cloud the
 ship is not orbiting.
+
+**A cloud the client already reads as locked or as locking outranks every other
+candidate**, ahead of the trailing-number order `gasCloudOrder` alone would give.
+Nothing here remembers *which* cloud a previous reading chose -- `chosen` is
+re-derived fresh from this reading's own rows every time, which is exactly what
+let a real run (#485, live on 2026-09-07) pick `Fullerite-C84` over
+`Fullerite-C50` by trailing number and spend the whole session asking the client
+to select and lock C84, never once considering that C50 was already locked in
+the ship's own target bar. `HarvestSituation.cloudReadsLocked` is asked only of
+whichever cloud `chosen` names, so a choice that cannot see an existing lock can
+never make use of one. See `gasCloudAlreadyClaimed` for why this needs no memory
+of its own and cannot outlive the lock it is about.
 
 -}
 cloudSearch : Maybe String -> List EveOnline.ParseUserInterface.OverviewWindowEntry -> CloudSearch
@@ -1300,7 +1352,16 @@ cloudSearch prefix overviewEntries =
         wanted =
             namedCloudRows
                 |> List.filter (Tuple.first >> gasCloudNameMatchesPrefix prefix)
-                |> List.sortBy (Tuple.first >> gasCloudOrder)
+                |> List.sortBy
+                    (\( name, entry ) ->
+                        ( if gasCloudAlreadyClaimed entry then
+                            0
+
+                          else
+                            1
+                        , gasCloudOrder name
+                        )
+                    )
 
         wantedNames =
             wanted |> List.map Tuple.first
@@ -1313,6 +1374,11 @@ cloudSearch prefix overviewEntries =
     , namesInTheOrderTheyWouldBeTaken = wantedNames
     , unrankableNames = wantedNames |> List.filter (trailingNumberFromName >> (==) Nothing)
     , chosen = wanted |> List.head |> Maybe.map Tuple.second
+    , chosenIsAlreadyClaimed =
+        wanted
+            |> List.head
+            |> Maybe.map (Tuple.second >> gasCloudAlreadyClaimed)
+            |> Maybe.withDefault False
     }
 
 
@@ -1328,7 +1394,9 @@ Says which cloud was chosen **and why it beat the others**, because "the highest
 trailing number" is the one thing about this bot that is easy to get wrong
 silently: a lexical sort agrees with the numeric one on most pairs, so a run
 that had reverted to one would look correct until the day a site held a
-three-digit cloud.
+three-digit cloud. Since #485 that reason can also be "already locked or
+locking" -- see `gasCloudAlreadyClaimed` -- and the clause says which of the two
+it was rather than always crediting the trailing number.
 
 -}
 describeCloudSearch : CloudSearch -> String
@@ -1369,7 +1437,14 @@ describeCloudSearch search =
         Just _ ->
             "Clouds: harvesting '"
                 ++ (search.namesInTheOrderTheyWouldBeTaken |> List.head |> Maybe.withDefault "")
-                ++ "', the highest trailing number of "
+                ++ "', "
+                ++ (if search.chosenIsAlreadyClaimed then
+                        "already locked or locking"
+
+                    else
+                        "the highest trailing number"
+                   )
+                ++ " of "
                 ++ String.fromInt (List.length search.namesInTheOrderTheyWouldBeTaken)
                 ++ " candidate(s) ["
                 ++ String.join ", " search.namesInTheOrderTheyWouldBeTaken
@@ -4329,6 +4404,39 @@ homeStructureRowsOnTheOverview homeStructureName overviewEntries =
                     )
 
 
+{-| A bookmark in the Locations window carrying the home structure's own name.
+
+The overview is where this bot docks from, but it is not the only place the
+structure's name can appear: an operator who bookmarked the structure directly
+gets a bookmark this bot can warp to at zero from anywhere in the same system,
+without depending on the overview having rendered the structure at all. This is
+what `depositChainHop` asks before it concludes there is genuinely nowhere to
+run to and starts working a wormhole chain back toward known space.
+
+Matched with `siteCellMatches` against `bookmarkLabel`, which is the same rule
+`homeStructureRowsOnTheOverview` uses against the overview's Name column --
+whole, ignoring case and surrounding space, with a trailing `*` meaning a
+prefix -- so an operator's one setting means the same thing read off either
+window.
+
+-}
+homeStructureBookmarkInLocations :
+    Maybe String
+    -> Maybe EveOnline.ParseUserInterface.LocationsWindow
+    -> Maybe EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
+homeStructureBookmarkInLocations homeStructureName locationsWindow =
+    case homeStructureName of
+        Nothing ->
+            Nothing
+
+        Just name ->
+            locationsWindow
+                |> Maybe.map .placeEntries
+                |> Maybe.withDefault []
+                |> List.filter (\entry -> siteCellMatches (bookmarkLabel entry.mainText) name)
+                |> List.head
+
+
 retreatSearchFromContext : BotDecisionContext -> RetreatSearch
 retreatSearchFromContext context =
     let
@@ -6157,6 +6265,149 @@ itemIconOffsetFromTop =
     25
 
 
+{-| The overview's own word for a wormhole, matched against the Type column the
+way `harvestableCloudTypeMarker` is matched against a cloud's.
+
+-}
+wormholeTypeMarker : String
+wormholeTypeMarker =
+    "Wormhole"
+
+
+{-| The wormholes on this grid, filtered on `_display` for
+`overviewEntryIsDisplayed`'s reason: `depositChainHop` right-clicks whichever
+row this answers, and a hidden row's screen position belongs to whatever was
+recycled into it.
+
+-}
+wormholeRowsOnTheOverview : List EveOnline.ParseUserInterface.OverviewWindowEntry -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+wormholeRowsOnTheOverview overviewEntries =
+    overviewEntries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter
+            (.objectType
+                >> Maybe.map (stringContainsIgnoringCase wormholeTypeMarker)
+                >> Maybe.withDefault False
+            )
+
+
+{-| The menu text a wormhole's own jump entry is matched against.
+
+A substring rather than the exact wording, because nobody has read a wormhole's
+context menu on a live client here -- this app has never jumped one. `"jump"`
+is the same width of net this codebase already uses for a stargate's own
+`Jump Through Stargate` entry in the apps that have one, and it is chosen
+narrow on purpose: a wormhole's menu also draws `Show Info`, `Warp to Within`
+and the rest of the ordinary set, and none of them contain the word.
+
+-}
+jumpWormholeMenuEntry : String
+jumpWormholeMenuEntry =
+    "jump"
+
+
+jumpWormholeCascade : EveOnline.BotFramework.UseContextMenuCascadeNode
+jumpWormholeCascade =
+    useMenuEntryWithTextContaining jumpWormholeMenuEntry menuCascadeCompleted
+
+
+{-| How many wormholes this bot will jump looking for a way back to
+`home-structure-name`, in one deposit trip.
+
+Bounded because a chain that has gone wrong -- a bookmark that leads nowhere, a
+wormhole that closed behind the ship, a chain this operator never walked in
+this direction -- must not spend the whole of `depositGiveUpReadings` jumping
+forever with the hold still full. Five, on the operator's own word: "can't
+imagine we'll stray further than that" is not a measurement, and none exists
+yet for a path nobody has flown, so this is a stated judgement call rather than
+a number derived from a corpus, unlike almost every other bound in this file.
+
+**This bounds hops, not readings.** `depositGiveUpReadings` (300, and asked
+from the same place every other deposit failure is asked from) is still the
+backstop that ends the session if the chain-hop machinery itself gets stuck
+mid-hop -- waiting on a warp that never lands, a menu that never offers
+`jump`. The two are independent for the reason #120 keeps guards independent
+elsewhere in this codebase: a hop counter that never advances must not disarm
+the reading-based bound underneath it.
+
+-}
+depositChainHopLimit : Int
+depositChainHopLimit =
+    5
+
+
+{-| How many wormholes this trip has jumped, and where the ship was last known
+to be.
+
+A `DepositRun` counts readings; this counts **hops**, which is a different
+question and wants a different clock -- seeing the same system on two
+consecutive readings must not look like a hop, and a hop that takes many
+readings (the docking-run-in shape, stretched across a whole warp and a jump)
+must not go uncounted just because it was slow. The solar system's own name is
+what says a hop landed: it is the one thing in a reading that changes if and
+only if the ship is now somewhere else, where the ship's own screen position,
+its speed and everything about the overview are exactly as true of a slow
+warp that has not arrived as of a jump that has.
+
+-}
+type alias DepositChainHopMemory =
+    { hopsMade : Int
+    , lastSolarSystemName : Maybe String
+    }
+
+
+initDepositChainHopMemory : DepositChainHopMemory
+initDepositChainHopMemory =
+    { hopsMade = 0, lastSolarSystemName = Nothing }
+
+
+{-| The chain-hop counters as they stand after this reading.
+
+**Reset whenever there is no deposit run under way, and the moment the home
+structure becomes reachable again** -- by either of `depositChainHop`'s own two
+checks, on the overview or in Locations. A hop count left standing across two
+different deposit trips would tell the second trip it had already spent hops
+the first trip took, and a chain successfully finished is exactly the reading
+this bot has no further use for the count on.
+
+The first reading with no `lastSolarSystemName` to compare against can never
+register a hop, deliberately: a hop is a **change**, and there is nothing yet
+to have changed from.
+
+-}
+depositChainHopMemoryAfterReading :
+    { runIsUnderWay : Bool
+    , homeStructureIsReachable : Bool
+    , currentSolarSystemName : Maybe String
+    }
+    -> DepositChainHopMemory
+    -> DepositChainHopMemory
+depositChainHopMemoryAfterReading answer memory =
+    if not answer.runIsUnderWay || answer.homeStructureIsReachable then
+        initDepositChainHopMemory
+
+    else
+        { hopsMade =
+            case ( memory.lastSolarSystemName, answer.currentSolarSystemName ) of
+                ( Just before, Just now ) ->
+                    if before /= now then
+                        memory.hopsMade + 1
+
+                    else
+                        memory.hopsMade
+
+                _ ->
+                    memory.hopsMade
+        , lastSolarSystemName =
+            case answer.currentSolarSystemName of
+                Just now ->
+                    Just now
+
+                Nothing ->
+                    memory.lastSolarSystemName
+        }
+
+
 {-| How long a deposit may take before the session ends with the hold still
 full.
 
@@ -6322,6 +6573,7 @@ type alias DepositSituation =
     , shipIsWarping : Bool
     , dockingRunIn : Maybe DockingRunIn
     , homeStructureIsOnTheOverview : Bool
+    , homeStructureBookmark : Maybe EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
     , panelShowsTheHomeStructure : Bool
     , dockButtonIsOffered : Bool
     , inventoryListsTheHold : Bool
@@ -6329,6 +6581,9 @@ type alias DepositSituation =
     , structureHangarIsInTheInventory : Bool
     , itemsInTheHold : Int
     , okButtonIsOnScreen : Bool
+    , chainHopBookmark : Maybe EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
+    , wormholesOnTheOverview : List EveOnline.ParseUserInterface.OverviewWindowEntry
+    , chainHopsMade : Int
     }
 
 
@@ -6362,11 +6617,28 @@ and warped to where it does not -- that absence being the natural gate between
 the two, exactly as it is for `dockAtDestinationStation`, since the Dock button
 is drawn only inside docking range.
 
+**A structure that is on neither the overview nor in Locations is not
+necessarily unreachable, and `depositChainHop` is what that costs.** This ship
+harvests in a wormhole, and a session that has wandered several systems from
+its own home structure has nothing on either window to say where home even is
+-- a `NowhereToDepositAt` that ends the session there would strand a full hold
+for the rest of the evening on nothing worse than distance. So a structure
+findable neither way sends the ship looking for a way back instead: warp to
+the nearest bookmark carrying `retreat-bookmark-prefix` (the same instadock
+convention `RetreatDestination` already uses, at the same zero), and where the
+grid on arrival carries exactly one wormhole, jump it and ask the whole
+question again from the new system. Two wormholes on one grid is declined
+rather than guessed at -- see `ChainHopAmbiguousWormholes` -- and the whole
+approach is abandoned after `depositChainHopLimit` hops, on the operator's own
+word that the chain should not run longer than that.
+
 Every state that cannot proceed answers a step that **says so**, rather than a
 wait: `NowhereToDepositAt`, `NoInventoryListingTheHold`,
 `NoStructureHangarInTheInventory` and `TheHoldShowsNothingToMove` are four
 different things for an operator to fix and they are four different sentences.
-All four are bounded by `depositGiveUpReadings`, which ends the session.
+All are bounded by `depositGiveUpReadings`, which ends the session; the
+chain-hop steps carry the additional, tighter bound of `depositChainHopLimit`
+hops before they give up on the chain and answer `NowhereToDepositAt` too.
 
 -}
 type DepositStep
@@ -6386,6 +6658,10 @@ type DepositStep
     | SelectTheHomeStructure
     | PressTheDockButton
     | WarpToTheHomeStructure
+    | WarpToTheHomeStructureBookmark EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
+    | WarpToTheChainHopBookmark EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
+    | JumpTheChainHopWormhole EveOnline.ParseUserInterface.OverviewWindowEntry
+    | ChainHopAmbiguousWormholes Int
 
 
 depositStep : DepositSituation -> DepositStep
@@ -6434,17 +6710,49 @@ depositStep situation =
                 WaitForTheDockingRunIn runIn
 
             Nothing ->
-                if not situation.homeStructureIsOnTheOverview then
+                if situation.homeStructureIsOnTheOverview then
+                    if not situation.panelShowsTheHomeStructure then
+                        SelectTheHomeStructure
+
+                    else if situation.dockButtonIsOffered then
+                        PressTheDockButton
+
+                    else
+                        WarpToTheHomeStructure
+
+                else if situation.homeStructureBookmark /= Nothing then
+                    case situation.homeStructureBookmark of
+                        Just bookmark ->
+                            -- Found in Locations but not on this grid's
+                            -- overview -- the ordinary warp-to-a-bookmark
+                            -- path, at zero, the same as `warpToTheHuntedSite`'s
+                            -- `BookmarkedSite` arm. Landing there should put
+                            -- the structure on the overview, which the next
+                            -- reading reads through the branch above.
+                            WarpToTheHomeStructureBookmark bookmark
+
+                        Nothing ->
+                            -- Unreachable: guarded by the `/= Nothing` above.
+                            NowhereToDepositAt
+
+                else if depositChainHopLimit <= situation.chainHopsMade then
                     NowhereToDepositAt
 
-                else if not situation.panelShowsTheHomeStructure then
-                    SelectTheHomeStructure
-
-                else if situation.dockButtonIsOffered then
-                    PressTheDockButton
-
                 else
-                    WarpToTheHomeStructure
+                    case situation.wormholesOnTheOverview of
+                        [] ->
+                            case situation.chainHopBookmark of
+                                Just bookmark ->
+                                    WarpToTheChainHopBookmark bookmark
+
+                                Nothing ->
+                                    NowhereToDepositAt
+
+                        [ onlyWormhole ] ->
+                            JumpTheChainHopWormhole onlyWormhole
+
+                        several ->
+                            ChainHopAmbiguousWormholes (List.length several)
 
 
 depositSituationFromContext : BotDecisionContext -> DepositSituation
@@ -6461,6 +6769,9 @@ depositSituationFromContext context =
                 context.eventContext.botSettings.homeStructureName
                 (readingFromGameClient.overviewWindows |> List.concatMap .entries)
                 |> List.head
+
+        settings =
+            context.eventContext.botSettings
     in
     { runIsUnderWay = context.memory.deposit /= Nothing
     , docked = readingFromGameClient.shipUI == Nothing
@@ -6473,6 +6784,8 @@ depositSituationFromContext context =
             |> Maybe.withDefault False
     , dockingRunIn = context.memory.dockingRunIn
     , homeStructureIsOnTheOverview = homeStructureRow /= Nothing
+    , homeStructureBookmark =
+        homeStructureBookmarkInLocations settings.homeStructureName readingFromGameClient.locationsWindow
     , panelShowsTheHomeStructure =
         homeStructureRow
             |> Maybe.map (selectedItemIsOverviewEntry readingFromGameClient)
@@ -6491,6 +6804,15 @@ depositSituationFromContext context =
             |> Maybe.map (.window >> inventoryItemsInView >> List.length)
             |> Maybe.withDefault 0
     , okButtonIsOnScreen = okButtonInReading readingFromGameClient /= Nothing
+    , chainHopBookmark =
+        readingFromGameClient.locationsWindow
+            |> Maybe.map .placeEntries
+            |> Maybe.withDefault []
+            |> List.filter (.mainText >> bookmarkLabelStartsWithPrefix settings.retreatBookmarkPrefix)
+            |> List.head
+    , wormholesOnTheOverview =
+        wormholeRowsOnTheOverview (readingFromGameClient.overviewWindows |> List.concatMap .entries)
+    , chainHopsMade = context.memory.depositChainHop.hopsMade
     }
 
 
@@ -6689,13 +7011,26 @@ actOnTheDepositStep context situation =
         NowhereToDepositAt ->
             Just
                 (describeBranch
-                    ("The hold is full and there is no row on this overview matching "
+                    ("The hold is full and "
                         ++ (case context.eventContext.botSettings.homeStructureName of
                                 Nothing ->
-                                    "anything, because 'home-structure-name' is unset and has no default"
+                                    "'home-structure-name' is unset and has no default"
 
                                 Just name ->
-                                    "'" ++ name ++ "'"
+                                    "'" ++ name ++ "' is on neither this overview nor in Locations"
+                           )
+                        ++ (if depositChainHopLimit <= situation.chainHopsMade then
+                                ", and the chain-hop fallback already spent all "
+                                    ++ String.fromInt depositChainHopLimit
+                                    ++ " of its wormhole jumps without finding it"
+
+                            else if situation.chainHopBookmark == Nothing then
+                                ", and there is no bookmark in Locations carrying '"
+                                    ++ context.eventContext.botSettings.retreatBookmarkPrefix
+                                    ++ "' to try a chain hop from either"
+
+                            else
+                                ""
                            )
                         ++ " -- nowhere to deposit from here. The session ends at the deposit bound with the hold still full."
                     )
@@ -6763,6 +7098,76 @@ actOnTheDepositStep context situation =
                             waitForProgressInGame
                         )
 
+        WarpToTheHomeStructureBookmark bookmark ->
+            Just
+                (describeBranch
+                    ("The hold is full, and '"
+                        ++ bookmarkLabel bookmark.mainText
+                        ++ "' in Locations carries the home structure's own name -- warp to it at "
+                        ++ warpAtZeroMenuEntry
+                        ++ ", which is not on this grid's overview at all."
+                    )
+                    (useContextMenuCascade ( bookmarkLabel bookmark.mainText, bookmark.uiNode )
+                        (warpCascadeWithin warpAtZeroMenuEntry)
+                        context
+                    )
+                )
+
+        WarpToTheChainHopBookmark bookmark ->
+            Just
+                (describeBranch
+                    ("The hold is full and '"
+                        ++ (context.eventContext.botSettings.homeStructureName |> Maybe.withDefault "the home structure")
+                        ++ "' is on neither this overview nor in Locations -- warp to '"
+                        ++ bookmarkLabel bookmark.mainText
+                        ++ "', which carries '"
+                        ++ context.eventContext.botSettings.retreatBookmarkPrefix
+                        ++ "', at "
+                        ++ warpAtZeroMenuEntry
+                        ++ " and look there for a way back (hop "
+                        ++ String.fromInt (situation.chainHopsMade + 1)
+                        ++ " of "
+                        ++ String.fromInt depositChainHopLimit
+                        ++ ")."
+                    )
+                    (useContextMenuCascade ( bookmarkLabel bookmark.mainText, bookmark.uiNode )
+                        (warpCascadeWithin warpAtZeroMenuEntry)
+                        context
+                    )
+                )
+
+        JumpTheChainHopWormhole wormhole ->
+            let
+                wormholeName =
+                    wormhole.objectName |> Maybe.withDefault "the wormhole"
+            in
+            Just
+                (describeBranch
+                    ("The hold is full and there is exactly one wormhole on this grid -- jump '"
+                        ++ wormholeName
+                        ++ "' looking for a way back toward "
+                        ++ (context.eventContext.botSettings.homeStructureName |> Maybe.withDefault "the home structure")
+                        ++ " (hop "
+                        ++ String.fromInt (situation.chainHopsMade + 1)
+                        ++ " of "
+                        ++ String.fromInt depositChainHopLimit
+                        ++ ")."
+                    )
+                    (useContextMenuCascade ( wormholeName, wormhole.uiNode ) jumpWormholeCascade context)
+                )
+
+        ChainHopAmbiguousWormholes wormholeCount ->
+            Just
+                (describeBranch
+                    ("The hold is full, "
+                        ++ (context.eventContext.botSettings.homeStructureName |> Maybe.withDefault "the home structure")
+                        ++ " is on neither this overview nor in Locations, and this grid carries "
+                        ++ String.fromInt wormholeCount
+                        ++ " wormholes rather than one -- declining to guess which one leads back rather than jumping the wrong way. An operator watching this reading can jump the right one by hand."
+                    )
+                    waitForProgressInGame
+                )
+
 
 {-| Leave the structure, using the client's own Undock button.
 
@@ -6829,6 +7234,7 @@ describeDeposit :
     , deposit : Maybe DepositRun
     , dockingRunIn : Maybe DockingRunIn
     , homeStructureName : Maybe String
+    , depositChainHop : DepositChainHopMemory
     }
     -> String
 describeDeposit state =
@@ -6886,6 +7292,24 @@ describeDeposit state =
                         ++ "/"
                         ++ String.fromInt dockingRunInPatienceReadings
                         ++ " readings since it last got closer."
+
+        chainHop =
+            case state.deposit of
+                Nothing ->
+                    ""
+
+                Just _ ->
+                    if state.depositChainHop.hopsMade < 1 then
+                        ""
+
+                    else
+                        " Chain hop: "
+                            ++ String.fromInt state.depositChainHop.hopsMade
+                            ++ "/"
+                            ++ String.fromInt depositChainHopLimit
+                            ++ " wormhole(s) jumped looking for a way back, last known system "
+                            ++ (state.depositChainHop.lastSolarSystemName |> Maybe.withDefault "unreadable")
+                            ++ "."
     in
     "Hold: "
         ++ hold
@@ -6898,6 +7322,7 @@ describeDeposit state =
            )
         ++ "."
         ++ runIn
+        ++ chainHop
 
 
 
@@ -6936,6 +7361,7 @@ initBotMemory =
     , lastGridVerdictInSpaceIsClean = Nothing
     , dockingRunIn = Nothing
     , deposit = Nothing
+    , depositChainHop = initDepositChainHopMemory
     }
 
 
@@ -7041,8 +7467,155 @@ watchLeaveDepositOrHarvest context =
                     leaveDepositOrHarvest context
 
 
+{-| Whether the home structure has a row somewhere among this reading's raw
+overview entries that is not currently `_display`ed.
+
+The overview virtualises -- every object in the system has an entry in the UI
+tree, but only the rows that fit on screen render, and the rest keep whatever
+position they last held while recycled; see `overviewEntryIsDisplayed`.
+`homeStructureRowsOnTheOverview` already declines a row in that state rather
+than clicking whatever was recycled into its place, which is right, but on its
+own it cannot tell a row that is genuinely absent from a row that is merely off
+screen -- both read as "no row on this overview matching X". Gas huffer's own
+first live deposit (run3, 2026-09-07) spent 286 of its 300-reading give-up
+budget on exactly that: the ship never moved, so the row was never gone, only
+unrendered, and it entered view on its own only once enough of the site's own
+clutter (mined-out clouds, expired wrecks) fell off the sort order ahead of it
+-- with 14 readings left to find, select, warp to, dock at and drag into before
+the session gave up with the hold still full.
+
+-}
+homeStructureRowIsHiddenRatherThanAbsent :
+    Maybe String
+    -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> Bool
+homeStructureRowIsHiddenRatherThanAbsent homeStructureName overviewEntries =
+    case homeStructureName of
+        Nothing ->
+            False
+
+        Just name ->
+            let
+                matchingRows =
+                    overviewEntries
+                        |> List.filter
+                            (\entry ->
+                                entry.objectName
+                                    |> Maybe.map (\objectName -> siteCellMatches objectName name)
+                                    |> Maybe.withDefault False
+                            )
+            in
+            (matchingRows |> List.isEmpty |> not)
+                && (matchingRows |> List.all (overviewEntryIsDisplayed >> not))
+
+
+{-| Turn the mouse wheel over the overview, a notch at a time, so a home
+structure row that exists but is not rendered gets a chance to scroll into
+view rather than waiting on the site's own clutter to fall away by itself.
+
+`eve-online-mission-runner`'s `scrollOverviewToReveal` is the same mechanism
+for the same reason, and the argument against computing a scrollbar position
+from a row's rank by distance -- rows recycle, and hidden ones keep stale
+positions -- does not change by moving apps, so this turns the wheel a fixed
+notch and re-reads rather than aiming at a computed offset.
+
+Reached only while a deposit is under way and the ship is in space, and only
+when the structure is present-but-hidden rather than genuinely absent --
+`NowhereToDepositAt`'s own sentence still fires, unchanged, once every row
+naming the structure really is gone from a reading.
+
+-}
+scrollToRevealHiddenHomeStructureWhileDepositing : BotDecisionContext -> Maybe DecisionPathNode
+scrollToRevealHiddenHomeStructureWhileDepositing context =
+    if
+        (context.memory.deposit == Nothing)
+            || (context.readingFromGameClient.shipUI == Nothing)
+    then
+        Nothing
+
+    else
+        let
+            homeStructureName =
+                context.eventContext.botSettings.homeStructureName
+
+            windowHidingIt =
+                context.readingFromGameClient.overviewWindows
+                    |> List.filter
+                        (\overviewWindow ->
+                            homeStructureRowIsHiddenRatherThanAbsent homeStructureName overviewWindow.entries
+                        )
+                    |> List.head
+        in
+        case windowHidingIt of
+            Nothing ->
+                Nothing
+
+            Just overviewWindow ->
+                let
+                    track =
+                        (overviewWindow.scrollControls
+                            |> Maybe.map .uiNode
+                            |> Maybe.withDefault overviewWindow.uiNode
+                        ).totalDisplayRegion
+
+                    handle =
+                        overviewWindow.scrollControls
+                            |> Maybe.andThen .scrollHandle
+                            |> Maybe.map .totalDisplayRegion
+                            |> Maybe.withDefault track
+
+                    roomBelow =
+                        (track.y + track.height) - (handle.y + handle.height)
+
+                    notches =
+                        if 2 < roomBelow then
+                            -homeStructureOverviewScrollNotchesPerStep
+
+                        else
+                            homeStructureOverviewScrollNotchesPerStep
+
+                    scrollOver =
+                        overviewWindow.uiNode.totalDisplayRegion
+                            |> EveOnline.ParseUserInterface.centerFromDisplayRegion
+                in
+                Just
+                    (describeBranch
+                        ("The home structure has a row on this overview that is not currently rendered -- turn the wheel "
+                            ++ (if notches < 0 then
+                                    "down"
+
+                                else
+                                    "up"
+                               )
+                            ++ " over it rather than waiting on the site's own clutter to clear by itself."
+                        )
+                        (decideActionForCurrentStep
+                            (EffectOnWindow.effectsMouseScrollAtLocation scrollOver notches)
+                        )
+                    )
+
+
+{-| How far one scroll step turns the wheel while hunting for the home
+structure. Small enough that the row is not skipped past between readings --
+`eve-online-mission-runner`'s own `overviewScrollNotchesPerStep`.
+-}
+homeStructureOverviewScrollNotchesPerStep : Int
+homeStructureOverviewScrollNotchesPerStep =
+    3
+
+
 {-| The three that are about the work, split out so the ordering above stays one
 expression.
+
+**The scroll for a hidden home structure is asked between the evasion and the
+deposit**, above `actOnTheDepositStep` rather than inside it: `depositStep`'s
+own `NowhereToDepositAt` is a rule executed in a repl over a plain record
+(#106), and giving it a screen-position-dependent mouse gesture to decide would
+put a client-only concern into the one part of this file that can be checked
+without one. Below the evasion, because a grid that stops reading clean still
+takes the ship out of turning a wheel exactly as it takes it out of a docking
+run-in.
+
 -}
 leaveDepositOrHarvest : BotDecisionContext -> DecisionPathNode
 leaveDepositOrHarvest context =
@@ -7052,16 +7625,21 @@ leaveDepositOrHarvest context =
                 (describeBranch (describeCloak (cloakSearchFromContext context)) leaving)
 
         Nothing ->
-            case actOnTheDepositStep context (depositSituationFromContext context) of
-                Just depositing ->
-                    depositing
+            case scrollToRevealHiddenHomeStructureWhileDepositing context of
+                Just scrolling ->
+                    scrolling
 
                 Nothing ->
-                    branchDependingOnDockedOrInSpace
-                        { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
-                        , ifSeeShipUI = huntAndHarvest context
-                        }
-                        context
+                    case actOnTheDepositStep context (depositSituationFromContext context) of
+                        Just depositing ->
+                            depositing
+
+                        Nothing ->
+                            branchDependingOnDockedOrInSpace
+                                { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
+                                , ifSeeShipUI = huntAndHarvest context
+                                }
+                                context
 
 
 {-| End the session where one of the two bounds that end it has expired.
@@ -7905,6 +8483,18 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 |> List.indexedMap Tuple.pair
                 |> List.filter (Tuple.second >> harvesterLooksActiveByRamp)
                 |> List.map Tuple.first
+
+        -- Both of `depositChainHop`'s own reasons to run to somewhere -- see
+        -- `homeStructureRowsOnTheOverview` and `homeStructureBookmarkInLocations`.
+        homeStructureIsReachableForDeposit =
+            (homeStructureRowsOnTheOverview context.botSettings.homeStructureName
+                (context.readingFromGameClient.overviewWindows |> List.concatMap .entries)
+                /= []
+            )
+                || (homeStructureBookmarkInLocations context.botSettings.homeStructureName
+                        context.readingFromGameClient.locationsWindow
+                        /= Nothing
+                   )
     in
     { readingsCount = botMemoryBefore.readingsCount + 1
     , lastDockedStationNameFromInfoPanel =
@@ -7998,6 +8588,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             , confirmationNow = depositConfirmedInGameLog context.readingFromGameClient
             , dragDispatched = dragDispatched
             }
+    , depositChainHop =
+        depositChainHopMemoryAfterReading
+            { runIsUnderWay = botMemoryBefore.deposit /= Nothing
+            , homeStructureIsReachable = homeStructureIsReachableForDeposit
+            , currentSolarSystemName =
+                context.readingFromGameClient.infoPanelContainer
+                    |> Maybe.andThen .infoPanelLocationInfo
+                    |> Maybe.andThen .currentSolarSystemName
+            }
+            botMemoryBefore.depositChainHop
     }
 
 
@@ -8070,6 +8670,7 @@ statusTextFromState context =
                 , deposit = context.memory.deposit
                 , dockingRunIn = context.memory.dockingRunIn
                 , homeStructureName = settings.homeStructureName
+                , depositChainHop = context.memory.depositChainHop
                 }
            , "Readings: "
                 ++ String.fromInt context.memory.readingsCount
