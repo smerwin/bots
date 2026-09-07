@@ -5153,9 +5153,17 @@ Then:
     stopping: sitting on a hostile grid because no bookmark is named is worse than
     cloaking on it and worse again than bouncing off it;
   - **a cloak fitted and not running** is switched on, unless it has been asked
-    for `cloakGiveUpReadings` readings and answered nothing. A fit with no cloak in
-    it, or one whose modules are not identified yet, falls straight through --
-    which is #463's own requirement and the mutation it names;
+    for `cloakGiveUpReadings` readings and answered nothing. A fit with no cloak
+    in it, once every module has been identified, falls straight through --
+    which is #463's own requirement and the mutation it names. **A fit whose
+    modules are not identified yet does not fall through the same way**: run 3
+    evaded with `0 of 5` identified and no cloak, and the operator's own
+    keybind presses the module by hotkey regardless of which slot a cloak
+    turns out to be in, so `ActivateTheCloakByHotkey` presses it speculatively
+    -- on the same `cloakGiveUpReadings` clock -- rather than leaving the ship
+    uncloaked for however long identification takes. The tooltip answer still
+    wins the moment it lands, at which point this reads as one of the other
+    two cases;
   - **a celestial on the overview** is warped to, at a range drawn per attempt.
     Which celestial rotates with the reading count, so an evasion that is not
     working tries a different corner of the system;
