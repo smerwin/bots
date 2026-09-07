@@ -1080,42 +1080,11 @@ parseContextMenusFromUITreeRoot uiTreeRoot =
 
 parseInfoPanelContainerFromUIRoot : UITreeNodeWithDisplayRegion -> Maybe InfoPanelContainer
 parseInfoPanelContainerFromUIRoot uiTreeRoot =
-    let
-        candidates =
-            uiTreeRoot
-                |> listDescendantsWithDisplayRegion
-                |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "InfoPanelContainer")
-
-        {- The client can have more than one 'InfoPanelContainer' on screen at
-           once -- confirmed live while docked at a player-owned structure,
-           where a second container hosts an 'InfoPanelShipTree' panel beside
-           the ordinary Location/Search/Route one. Picking by descendant count
-           alone is a coin flip between them: the Ship Tree container had one
-           more descendant than the real one in that reading, so the bot read
-           'no location info panel' while it was plainly on screen. Prefer
-           whichever candidate actually contains an 'InfoPanelLocationInfo',
-           and only fall back to the old count-based pick when none do -- which
-           keeps this unchanged for every reading with just the one container.
-        -}
-        containsInfoPanelLocationInfo candidateNode =
-            candidateNode
-                |> listDescendantsWithDisplayRegion
-                |> List.any (.uiNode >> .pythonObjectTypeName >> (==) "InfoPanelLocationInfo")
-
-        candidatesWithLocationInfo =
-            candidates |> List.filter containsInfoPanelLocationInfo
-
-        byDescendantCountDescending =
-            List.sortBy (.uiNode >> EveOnline.MemoryReading.countDescendantsInUITreeNode >> negate)
-    in
     case
-        (if List.isEmpty candidatesWithLocationInfo then
-            candidates
-
-         else
-            candidatesWithLocationInfo
-        )
-            |> byDescendantCountDescending
+        uiTreeRoot
+            |> listDescendantsWithDisplayRegion
+            |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) "InfoPanelContainer")
+            |> List.sortBy (.uiNode >> EveOnline.MemoryReading.countDescendantsInUITreeNode >> negate)
             |> List.head
     of
         Nothing ->
