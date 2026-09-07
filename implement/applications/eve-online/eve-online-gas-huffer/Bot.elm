@@ -2112,7 +2112,7 @@ lockGiveUpReadings =
     20
 
 
-{-| The two counters bounding the two things the harvest loop asks for.
+{-| The counters bounding the things the harvest loop asks for.
 
 Advanced in `updateMemoryForNewReadingFromGame`, which is the only place that
 can write memory and the one place that never sees a decision -- so what they
@@ -2122,20 +2122,24 @@ placement rule is about, and the comparison against them is asked inside
 `harvestStep`, which is reached on every reading the ship is on a grid with a
 cloud on it.
 
-Both reset outright on a reading where the client has answered, and on any
-reading with no cloud chosen at all -- so a session that harvests forty clouds
-starts from zero at each one.
+The first two reset outright on a reading where the client has answered, and
+on any reading with no cloud chosen at all -- so a session that harvests forty
+clouds starts from zero at each one. `harvestersKickedThisLock` resets on the
+same "no cloud chosen" edge and additionally the moment the lock is lost, since
+it is a fact about *this* lock rather than about the cloud-picking loop -- see
+its own doc comment.
 
 -}
 type alias HarvestCounters =
     { panelSelectUnansweredReadings : Int
     , lockUnansweredReadings : Int
+    , harvestersKickedThisLock : List Int
     }
 
 
 initHarvestCounters : HarvestCounters
 initHarvestCounters =
-    { panelSelectUnansweredReadings = 0, lockUnansweredReadings = 0 }
+    { panelSelectUnansweredReadings = 0, lockUnansweredReadings = 0, harvestersKickedThisLock = [] }
 
 
 {-| What one reading says about the two asks, in the terms the counters need.
@@ -2143,11 +2147,21 @@ initHarvestCounters =
 A record rather than a reading, so a case can fold a whole session through
 `harvestCountersAfterReading` and read the counters back.
 
+`harvesterIndexJustKicked` is read out of the **effects the bot dispatched**
+rather than out of which `HarvestStep` was taken, for `propulsionPressesAfterReading`'s
+own reason: what was asked for is knowable from the previous step's effects
+where what the decision function returned is not, once the decision for the
+next reading is what is being computed. It answers the same way whether the
+press came from `RunTheHarvester` (the module read as off) or `KickTheHarvester`
+(it read as on but had not been confirmed since this lock landed) -- either one
+means this index does not need forcing again until the lock changes.
+
 -}
 type alias HarvestAnswerFromClient =
     { cloudIsChosen : Bool
     , panelShowsTheCloud : Bool
     , cloudReadsLocked : Bool
+    , harvesterIndexJustKicked : Maybe Int
     }
 
 
@@ -2169,6 +2183,17 @@ harvestCountersAfterReading answer counters =
 
             else
                 counters.lockUnansweredReadings + 1
+        , harvestersKickedThisLock =
+            if not answer.cloudReadsLocked then
+                []
+
+            else
+                case answer.harvesterIndexJustKicked of
+                    Just index ->
+                        index :: counters.harvestersKickedThisLock
+
+                    Nothing ->
+                        counters.harvestersKickedThisLock
         }
 
 
@@ -2188,6 +2213,7 @@ type alias HarvestSituation =
     , cloudReadsLocked : Bool
     , cloudReadsLocking : Bool
     , harvestersNotRunning : List Int
+    , harvestersNeedingAKick : List Int
     , counters : HarvestCounters
     }
 
@@ -2209,7 +2235,7 @@ fall through to the next rather than holding the loop:
 
 `NothingLeftToCommand` is therefore two different situations -- everything
 running, and nothing left that can be tried -- which is why the status line
-renders the _situation_ beside the step rather than the step alone.
+renders the _situation_ beside the step alone.
 
 **The propulsion module was the first stage of this rule until #465 and is not
 here any more.** It moved to `keepThePropulsionModuleRunning`, above the leaving
@@ -2218,6 +2244,32 @@ one the ship is leaving on rather than one it is harvesting on -- and once it is
 asked there, a second copy here would be two branches pressing one toggle, the
 second of them inside the first's settling window.
 
+**`KickTheHarvester` is #456's other open question, closed the safe way rather
+than guessed.** `moduleRunningState` treats the widget's `ramp_active` entry
+being present **at all** as running, and only its absence as not -- deliberate,
+per that declaration's own doc comment, because an activation must be sure the
+module is off before pressing a toggle. Run 1, live on 2026-09-07: this bot
+pressed a harvester's hotkey twice, in its first few readings, and then not
+once more across the rest of a thousand-tick session, because `ramp_active`
+never went absent again -- whether that is the client honestly reporting the
+module still cycling, or the reading going stale the way a middle-slot module
+did on another hull in #35, is exactly what #456 could not settle without a
+live run, and now one has answered it by never restarting the harvester across
+several evasion warps and re-locks, in a session the operator had to keep
+retriggering by hand.
+
+**A `ramp_active` reading from *before* the current lock landed cannot be
+evidence about the target under it now**, whichever of the two it is: a
+harvester needs the active target to do anything, so nothing about it could
+have been genuinely cycling on a cloud this ship had not yet locked. That is
+the one moment this rule is allowed to distrust "reads as running" -- once,
+per lock, per harvester -- and `harvestersKickedThisLock` is what keeps it to
+once: an index is added to it the reading its hotkey is actually dispatched,
+by `RunTheHarvester` or by this, and stays there until the lock is lost, so a
+harvester that genuinely is running fine under the new lock gets exactly one
+press and is then left alone for as long as this lock holds -- never repeatedly
+toggled the way #12/#34/#76/#286 warn a guess on this field can cause.
+
 -}
 type HarvestStep
     = SelectTheCloud
@@ -2225,6 +2277,7 @@ type HarvestStep
     | LockTheCloud
     | WaitForTheLockToLand
     | RunTheHarvester Int
+    | KickTheHarvester Int
     | NothingLeftToCommand
 
 
@@ -2238,11 +2291,16 @@ harvestStep situation =
 
     else if situation.cloudReadsLocked then
         case situation.harvestersNotRunning of
-            [] ->
-                NothingLeftToCommand
-
             index :: _ ->
                 RunTheHarvester index
+
+            [] ->
+                case situation.harvestersNeedingAKick of
+                    index :: _ ->
+                        KickTheHarvester index
+
+                    [] ->
+                        NothingLeftToCommand
 
     else if situation.cloudReadsLocking then
         WaitForTheLockToLand
@@ -2369,6 +2427,12 @@ harvestSituationFromContext context shipUI cloud =
             |> List.indexedMap Tuple.pair
             |> List.filter (Tuple.second >> moduleRunningState >> (==) ModuleIsNotRunning)
             |> List.map Tuple.first
+    , harvestersNeedingAKick =
+        harvesterModulesFromShipUI shipUI
+            |> List.indexedMap Tuple.pair
+            |> List.filter (Tuple.second >> moduleRunningState >> (==) ModuleIsRunning)
+            |> List.map Tuple.first
+            |> List.filter (\index -> not (List.member index context.memory.harvestCounters.harvestersKickedThisLock))
     , counters = context.memory.harvestCounters
     }
 
@@ -2446,6 +2510,38 @@ actOnTheHarvestStep context shipUI cloud situation =
                         "The module row changed between reading it and pressing it -- ask again next reading."
                         waitForProgressInGame
 
+        KickTheHarvester index ->
+            case
+                ( topRowModuleHotkeyFromIndex index
+                , harvesterModulesFromShipUI shipUI |> List.drop index |> List.head
+                )
+            of
+                ( Just keyCode, _ ) ->
+                    pressModuleHotkey context
+                        ("Run gas harvester "
+                            ++ String.fromInt (index + 1)
+                            ++ " on '"
+                            ++ cloudName
+                            ++ "' once even though it reads as cycling -- not confirmed since this lock landed, so the reading may be left over from a target this ship no longer has (#456)."
+                        )
+                        [ keyCode ]
+
+                ( Nothing, Just moduleButton ) ->
+                    describeBranch
+                        ("Run gas harvester "
+                            ++ String.fromInt (index + 1)
+                            ++ " once -- past the four the hotkeys reach, so click its button. It reads as cycling but has not been confirmed since this lock landed (#456)."
+                        )
+                        (EveOnline.BotFrameworkSeparatingMemory.clickModuleButtonButWaitIfClickedInPreviousStep
+                            context
+                            moduleButton
+                        )
+
+                ( Nothing, Nothing ) ->
+                    describeBranch
+                        "The module row changed between reading it and pressing it -- ask again next reading."
+                        waitForProgressInGame
+
         NothingLeftToCommand ->
             describeBranch
                 (describeHarvestSituation situation)
@@ -2500,16 +2596,37 @@ describeHarvestSituation situation =
                     ++ String.fromInt lockGiveUpReadings
                     ++ ")"
 
-        harvesters =
-            case situation.harvestersNotRunning of
-                [] ->
-                    "both cycling"
+        describeSlots slots =
+            slots |> List.map (\index -> String.fromInt (index + 1)) |> String.join ", "
 
-                notRunning ->
+        harvesters =
+            case ( situation.harvestersNotRunning, situation.harvestersNeedingAKick ) of
+                ( [], [] ) ->
+                    "both cycling, confirmed since this lock landed"
+
+                ( [], needingKick ) ->
+                    "both read as cycling, "
+                        ++ String.fromInt (List.length needingKick)
+                        ++ " not yet confirmed since this lock landed (top-row slot(s) "
+                        ++ describeSlots needingKick
+                        ++ ")"
+
+                ( notRunning, needingKick ) ->
                     String.fromInt (List.length notRunning)
                         ++ " not cycling (top-row slot(s) "
-                        ++ (notRunning |> List.map (\index -> String.fromInt (index + 1)) |> String.join ", ")
+                        ++ describeSlots notRunning
                         ++ ")"
+                        ++ (case needingKick of
+                                [] ->
+                                    ""
+
+                                _ ->
+                                    ", "
+                                        ++ String.fromInt (List.length needingKick)
+                                        ++ " more not yet confirmed since this lock landed (slot(s) "
+                                        ++ describeSlots needingKick
+                                        ++ ")"
+                           )
     in
     "Harvest: "
         ++ orbit
@@ -3194,6 +3311,7 @@ type DscanRowVerdict
     = RowIsNotAShip String
     | ShipIsOneOfOurs String
     | ShipIsHostile DscanHostileReason
+    | RowCouldNotBeRead
 
 
 {-| Why a row read hostile, which is two different things.
@@ -3214,22 +3332,43 @@ type DscanHostileReason
 {-| The rule the whole of trigger 3 is, over one row.
 
 **Absent evidence reads as hostile here, which inverts this repo's usual
-direction**, and it is asserted rather than assumed at each of the three places
-it could be undone:
+direction**, and it is asserted rather than assumed at each of the places it
+could be undone:
 
   - `friendly-ship-tag` unset makes `shipReadsFriendly` answer `False` for every
     name there is, so every ship reads hostile. That is `TrustNobody`, decided
     in `hostileTrustFromSettings` and read here rather than restated.
-  - a Name cell the parser could not read is `Nothing` and answers hostile. It
-    is **not** defaulted to `""`: an empty string carries no tag, so today's
-    behaviour would be identical and the safety would be an accident of the tag
-    never being empty -- and `valueTypeNonEmptyString` is the only thing keeping
-    that true.
-  - a Type cell the parser could not read is not a structure, so the row is
-    judged as a ship.
+  - a Name cell the parser could not read, **with the Type cell readable**, is
+    `Nothing` and answers hostile. It is **not** defaulted to `""`: an empty
+    string carries no tag, so today's behaviour would be identical and the
+    safety would be an accident of the tag never being empty -- and
+    `valueTypeNonEmptyString` is the only thing keeping that true.
+  - a Type cell the parser could not read, **with the Name cell readable**, is
+    not a structure, so the row is judged as a ship.
 
 The direction costs a warp when it is wrong and costs the ship when it is wrong
 the other way, which is the whole of why it is this way round.
+
+**Both cells unreadable is a fourth case, and it is not evidence of anything.**
+Run 1, live on 2026-09-07: every reading that produced `ShipIsHostile
+ShipNameCouldNotBeRead` for a real site's own scanner probes had `[<unreadable>
+| <unreadable> | <unreadable>]` for **all three** cells, Distance included, and
+landed on a reading logged `Last completed scan 0s ago` -- the row captured in
+the instant between the refresh landing and the client finishing drawing the
+new result text into it, not a ship of an unusual shape. The same probes read
+correctly (`Type 'Sisters Core Scanner Probe'`, excluded) on the very next
+scan. Treating a blank row as `ShipNameCouldNotBeRead` made the site's own
+probes flip between harmless and hostile from one D-Scan refresh to the next,
+which is what drove the ship to evade a clean grid and warp home over and over.
+
+A Type cell that reads *something* -- any text at all, matching no known marker
+-- is still real evidence of an object out there, and stays hostile: that is
+the case the two bullets above are about, and it is untouched. Only the reading
+that produced **no cell text whatsoever** is reclassified, to `RowCouldNotBeRead`,
+which `dscanHostileReason` answers `Nothing` for -- the same as a row this bot
+has positively identified as harmless, but distinguished in the decision log
+(`describeDscanRowVerdict`) so a grid that is genuinely full of unreadable rows
+still reads differently from one with nothing on it at all.
 
 -}
 dscanRowVerdict : HostileTrust -> DscanSighting -> DscanRowVerdict
@@ -3247,11 +3386,17 @@ dscanRowVerdict trust row =
                 RowIsNotAShip typeText
 
             Nothing ->
-                case row.name of
-                    Nothing ->
+                case ( row.type_, row.name ) of
+                    ( Nothing, Nothing ) ->
+                        -- The whole row came back blank -- no cell said
+                        -- anything at all, which is a reading that raced the
+                        -- D-Scan refresh rather than a sighting of anything.
+                        RowCouldNotBeRead
+
+                    ( _, Nothing ) ->
                         ShipIsHostile ShipNameCouldNotBeRead
 
-                    Just name ->
+                    ( _, Just name ) ->
                         if shipReadsFriendly trust name then
                             ShipIsOneOfOurs name
 
@@ -3500,6 +3645,9 @@ dscanHostileReason verdict =
         ShipIsOneOfOurs _ ->
             Nothing
 
+        RowCouldNotBeRead ->
+            Nothing
+
 
 {-| The evidence this reading carries, assembled from the client.
 
@@ -3646,6 +3794,9 @@ describeDscanRowVerdict verdict =
 
         ShipIsHostile ShipNameCouldNotBeRead ->
             "HOSTILE, Name cell unreadable"
+
+        RowCouldNotBeRead ->
+            "row unreadable this reading, not judged"
 
 
 {-| Every D-Scan row's cells exactly as the parser answered them.
@@ -7597,6 +7748,30 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 |> List.head
                 |> Maybe.map stepDraggedSomething
                 |> Maybe.withDefault False
+
+        -- Which harvester's hotkey the previous step actually pressed, read the
+        -- same way `dragDispatched` is: off the effects dispatched rather than
+        -- off which `HarvestStep` produced them, since only the effects say
+        -- what was asked for. `[ 0, 1 ]` rather than deriving the indices from
+        -- `harvesterModulesFromShipUI`, because this ship is fitted with two of
+        -- them throughout this file ("run both harvesters") and a docked
+        -- reading has no `shipUI` to derive them from at all -- the same reason
+        -- `describeHarvestSituation` hardcodes "both" rather than a count.
+        harvesterIndexJustKicked =
+            [ 0, 1 ]
+                |> List.filter
+                    (\index ->
+                        topRowModuleHotkeyFromIndex index
+                            |> Maybe.map
+                                (\keyCode ->
+                                    context.previousStepsEffects
+                                        |> List.head
+                                        |> Maybe.map (stepPressedExactly [ keyCode ])
+                                        |> Maybe.withDefault False
+                                )
+                            |> Maybe.withDefault False
+                    )
+                |> List.head
     in
     { readingsCount = botMemoryBefore.readingsCount + 1
     , lastDockedStationNameFromInfoPanel =
@@ -7619,6 +7794,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 cloudChosen
                     |> Maybe.map (.commonIndications >> .targetedByMe)
                     |> Maybe.withDefault False
+            , harvesterIndexJustKicked = harvesterIndexJustKicked
             }
             botMemoryBefore.harvestCounters
     , propulsionPressesUnanswered =
