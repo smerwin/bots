@@ -144,21 +144,24 @@
           row.
         + Hide passive modules by disabling the check-box `Display Passive
           Modules`, so the rows the bot counts are the rows it can press.
-      + **Set the Orbit button's distance by hand, once, before starting a run.**
-        This is the one setup item with no way to check itself. Nothing in this
-        repo can command an orbit *at a distance*: the Selected Item panel's
-        Orbit button orbits at whatever range the **client** last used, and that
-        range is remembered by the client rather than stated in any reading. So
-        orbit something at the range you want by hand once, and the button will
-        keep it. Get this wrong and the ship orbits outside harvester range,
-        which the client reports as `deactivates without transfering ore to your
-        cargo hold because your ship has strayed to a distance of ... beyond its
-        mining range of ...` -- a game-log line, which is the only thing that
-        will ever tell the bot the setup is wrong. **This bot reads that line and
-        reports it, naming both distances, and does not act on it.** It cannot:
-        the range it would have to orbit at is not something any command here can
-        express, so the only repair is the one above, made by hand. See
-        `miningRangeRefusalFromGameLog`.
+      + **The orbit range needs no setup.** It used to: this list said the
+        Selected Item panel's Orbit button inherits whatever range the client
+        last used, that no command here could orbit at a *distance*, and that
+        the operator therefore had to arrange it by hand. That was a true
+        statement about this repository written down as a statement about the
+        client. The cloud's own context menu offers `Orbit (5,000 m)`, and that
+        entry opens a flyout of ranges of which `500 m` is one -- read live on
+        2026-09-07. The bot commands the range in `orbit-range` (default
+        `500 m`); see `orbitCascadeAt`.
+
+        The client still reports an orbit that is too wide, as
+        `deactivates without transfering ore to your cargo hold because your
+        ship has strayed to a distance of ... beyond its mining range of ...`.
+        **This bot reads that line and reports it, naming both distances, and
+        does not act on it.** That is now a backstop against a range that is
+        wrong for the fit rather than the only signal about a setup nobody could
+        check -- and the repair is `orbit-range`, not a button pressed by hand.
+        See `miningRangeRefusalFromGameLog`.
       + Name the bookmarks you are willing to be warped to so that they all
         start with the same prefix, and give that prefix to
         `retreat-bookmark-prefix`. Every bookmark matching it is a place this bot
@@ -236,6 +239,14 @@
         an unset tag means trust nobody, never trust everybody. Matched ignoring
         case, as a substring, so it can be a corporation ticker in brackets or a
         naming convention of your own.
+      + `orbit-range` : the range to orbit a cloud at, as the client's own
+        flyout writes it. Defaults to `500 m`. Must be one of the literals that
+        flyout offers -- `500 m`, `1,000 m`, `2,500 m`, `5,000 m`, `7,500 m`,
+        `10 km`, `15 km`, `20 km`, `25 km`, `30 km` -- including the comma,
+        because the cascade matches the entry by equality. A value the flyout
+        does not carry is a cascade that finds no entry and gives up, which the
+        status line reports rather than silently orbiting at the client's
+        default. See `orbitRangeMenuEntries`.
       + `dscan-interval-seconds` : how often to refresh the Directional Scanner.
         Defaults to 5. **This number is unmeasured** -- nothing has yet watched a
         ship arrive on this bot's D-Scan, so it is a starting point chosen to
@@ -341,6 +352,7 @@ defaultBotSettings =
     -- `hostileTrustFromSettings`, which is where that is decided, and
     -- `shipReadsFriendly`, which is the rule the rest of the bot will ask.
     , friendlyShipTag = Nothing
+    , orbitRange = defaultOrbitRange
     , dscanIntervalSeconds = defaultDscanIntervalSeconds
     , botStepDelayMilliseconds = 499
     }
@@ -389,6 +401,10 @@ parseBotSettings =
          , ( "friendly-ship-tag"
            , valueTypeNonEmptyString
                 (\tag settings -> { settings | friendlyShipTag = Just tag })
+           )
+         , ( "orbit-range"
+           , valueTypeNonEmptyString
+                (\range settings -> { settings | orbitRange = range })
            )
          , ( "dscan-interval-seconds"
            , AppSettings.valueTypeInteger
@@ -457,6 +473,7 @@ type alias BotSettings =
     , homeStructureName : Maybe String
     , retreatBookmarkPrefix : String
     , friendlyShipTag : Maybe String
+    , orbitRange : String
     , dscanIntervalSeconds : Int
     , botStepDelayMilliseconds : Int
     }
@@ -2383,23 +2400,12 @@ actOnTheHarvestStep context shipUI cloud situation =
                 )
 
         PressTheOrbitButton ->
-            case selectedItemPanelButton context.readingFromGameClient selectedItemOrbitButton of
-                Just button ->
-                    describeBranch
-                        ("Orbit '" ++ cloudName ++ "' with the Selected Item panel's own button, at whatever range the client last used.")
-                        (decideActionForCurrentStep
-                            (button |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault [])
-                        )
-
-                Nothing ->
-                    -- Unreachable: `harvestStep` only answers this where the
-                    -- situation said the button was offered, and the situation
-                    -- is built from the same reading. Says so rather than
-                    -- pretending, because a silent wait here would be a branch
-                    -- reporting nothing and doing nothing.
-                    describeBranch
-                        "The Orbit button left the panel between reading it and pressing it -- ask again next reading."
-                        waitForProgressInGame
+            describeBranch
+                ("Orbit '" ++ cloudName ++ "' at " ++ context.eventContext.botSettings.orbitRange ++ ", commanded rather than inherited from the client's own default.")
+                (useContextMenuCascade ( cloudName, cloud.uiNode )
+                    (orbitCascadeAt context.eventContext.botSettings.orbitRange)
+                    context
+                )
 
         LockTheCloud ->
             describeBranch
@@ -2549,9 +2555,56 @@ warpToWithinMenuEntry =
     "Warp to Within"
 
 
+{-| A scan result's menu carries **two** entries this prefix matches, and they do
+different things.
+
+Read live on 2026-09-07, right-clicking a scanned site that is not on grid:
+
+    Warp to Within 0 m | Warp to Within | Align to | Save Location... | Ignore Result | Ignore Other Results
+
+`Warp to Within 0 m` warps when it is **clicked**. `Warp to Within` is the
+submenu parent and opens a flyout when it is **hovered**. A bookmark's menu is
+different again -- one entry reading `Warp to Within (0 m)`, with the client's
+current default in parentheses, which is the submenu parent there.
+
+So the prefix alone cannot say which kind of entry it has found, and the cascade
+treats whatever it matches as a submenu parent: it hovers, and a hover on a
+direct entry does nothing at all. That is #485's site warp -- 16 hovers and no
+click.
+
+`menuEntryIsTheWarpSubmenuParent` is what the cascade wants: the parent, and
+never the direct entry beside it. The parenthesised distance still moves, so the
+comparison is on the trimmed text with any parenthesised suffix removed rather
+than on the whole string -- which is `warpToWithinMenuEntry`'s original argument,
+kept, with the ambiguity it did not know about taken out.
+
+-}
 menuEntryOpensTheWarpDistanceSubmenu : String -> Bool
-menuEntryOpensTheWarpDistanceSubmenu entryText =
-    entryText |> String.trim |> String.startsWith warpToWithinMenuEntry
+menuEntryOpensTheWarpDistanceSubmenu =
+    menuEntryIsTheWarpSubmenuParent
+
+
+menuEntryIsTheWarpSubmenuParent : String -> Bool
+menuEntryIsTheWarpSubmenuParent entryText =
+    menuEntryTextWithoutParenthesisedSuffix entryText == warpToWithinMenuEntry
+
+
+{-| The entry text with a trailing parenthesised value removed, and trimmed.
+
+`Orbit (5,000 m)` and `Warp to Within (0 m)` both carry the client's own current
+default in that suffix, and it moves the moment an operator takes a different
+distance by hand. Removing it is what lets a submenu parent be recognised by
+equality rather than by a prefix that also matches its neighbours.
+
+-}
+menuEntryTextWithoutParenthesisedSuffix : String -> String
+menuEntryTextWithoutParenthesisedSuffix entryText =
+    case entryText |> String.trim |> String.split "(" of
+        before :: _ ->
+            String.trim before
+
+        [] ->
+            String.trim entryText
 
 
 {-| The distance submenu's own entries, as the client writes them.
@@ -2608,6 +2661,164 @@ equality rather than a substring.
 warpAt100KmMenuEntry : String
 warpAt100KmMenuEntry =
     "Within 100 km"
+
+
+{-| Whether a scanned site is on this grid, read off the unit of its distance.
+
+Ported from `eve-online-saxrat`'s `scanResultLooksLikeItIsOnGrid`, which reads
+the **unit** rather than parsing a number -- and that is the whole of why it
+works. `CLAUDE.md` records that an `AU` distance does not parse at all, and that
+every consumer which tried turned the failure into a `999999` placeholder that
+reads as _merely far away_ rather than as _not on this grid_.
+
+Measured live on 2026-09-07: the site the ship was sitting on read `2,507 m`
+while every other result read `3.62 AU`, `5.07 AU`, `3.88 AU`.
+
+`Maybe Bool` and not `Bool`, deliberately. A `Distance` cell that is absent or
+unreadable is **not** on grid, and it is also not licence to warp -- it is
+unknown, and collapsing the two is how this bot would either strand itself on a
+site it cannot see it is on, or warp at something it cannot see it is not. The
+caller reads `Just True` and nothing else as "do not warp".
+
+The test is a substring on `" m"`, which `" km"` also satisfies. That is
+saxrat's own behaviour and it is correct here: both units mean on grid.
+
+-}
+scanResultIsOnGrid : EveOnline.ParseUserInterface.ProbeScanResult -> Maybe Bool
+scanResultIsOnGrid =
+    .cellsTexts
+        >> Dict.get scanResultDistanceColumn
+        >> Maybe.map (\text -> String.contains " m" text || String.contains " km" text)
+
+
+scanResultDistanceColumn : String
+scanResultDistanceColumn =
+    "Distance"
+
+
+{-| Orbit the cloud at a commanded range, rather than at whatever the client
+last used.
+
+`#456` said, and this file's own header said, that no command here can orbit at a
+_distance_ -- that the Selected Item panel's Orbit button inherits the client's
+default and that the range is therefore a client-setup requirement the operator
+has to arrange by hand. **That was true of this repository and false of this
+client**, and reading the menu is what settled it. Right-clicking a
+`Harvestable Cloud` overview row on 2026-09-07:
+
+    Approach | Orbit (5,000 m) | Look at | Track | Lock Target | Show Info | ...
+
+and that entry opens a flyout:
+
+    500 m | 1,000 m | 2,500 m | 5,000 m | 7,500 m | 10 km | 15 km | 20 km | 25 km | 30 km | Current 0 m | Set Default
+
+So the range this bot needs is a literal the client offers, and commanding it
+removes one of the three items the header lists as unenforceable -- the class of
+requirement whose own framing is that getting it wrong "produces a bot that looks
+like it is working". The harvesters' range refusal stays as the backstop rather
+than as the only signal.
+
+**The parent is matched with its parenthesised default removed**, for
+`menuEntryTextWithoutParenthesisedSuffix`'s reason: `(5,000 m)` is the client's
+current default and moves the moment anybody takes a different range by hand.
+
+**The flyout opened to the _left_ of its parent** (x=1449 against the parent's
+x=1557). Nothing here depends on that, since the cascade finds entries by text
+rather than by position -- but a future change that starts reasoning about where
+a submenu appears would be wrong about this one.
+
+-}
+orbitCascadeAt : String -> EveOnline.BotFramework.UseContextMenuCascadeNode
+orbitCascadeAt rangeMenuEntry =
+    useMenuEntryInLastContextMenuInCascade
+        { describeChoice = "'" ++ orbitMenuEntry ++ "', ignoring the client's own default in parentheses"
+        , chooseEntry =
+            List.filter (.text >> menuEntryIsTheOrbitSubmenuParent) >> List.head
+        }
+        (useMenuEntryWithTextEqual rangeMenuEntry menuCascadeCompleted)
+
+
+orbitMenuEntry : String
+orbitMenuEntry =
+    "Orbit"
+
+
+menuEntryIsTheOrbitSubmenuParent : String -> Bool
+menuEntryIsTheOrbitSubmenuParent entryText =
+    menuEntryTextWithoutParenthesisedSuffix entryText == orbitMenuEntry
+
+
+{-| The orbit flyout's own entries, as the client writes them, nearest first.
+
+`Set Default` and `Current 0 m` are deliberately **not** here, for
+`warpDistanceMenuEntries`' reason: the first retunes the client rather than
+orbiting, and the second orbits at zero, which is not a range anybody asked for
+and would put the ship inside the cloud rather than around it.
+
+-}
+orbitRangeMenuEntries : List String
+orbitRangeMenuEntries =
+    [ "500 m"
+    , "1,000 m"
+    , "2,500 m"
+    , "5,000 m"
+    , "7,500 m"
+    , "10 km"
+    , "15 km"
+    , "20 km"
+    , "25 km"
+    , "30 km"
+    ]
+
+
+defaultOrbitRange : String
+defaultOrbitRange =
+    "500 m"
+
+
+{-| Warp to a scanned site with the row's **own** warp button.
+
+`ProbeScanResult.warpButton` is parsed on every reading and was read by nothing.
+One click on it warped the ship, measured live on 2026-09-07:
+
+    before:    0.0 m/s
+    after 2s:  (Warping)  Establishing Warp Vector
+    after 6s:  (Warping)  Warp Drive Active
+
+It replaces a two-level context-menu cascade for this path, which matters beyond
+being fewer steps. A cascade's hover and its click fall in **different readings**,
+and #485 is the D-Scan refresh taking the reading in between -- every time,
+because the refresh runs on its own interval and outranks the site branch. A
+single click cannot be starved that way: there is no intermediate state for
+another branch to interrupt.
+
+**The bookmark half keeps its cascade**, because a `PlaceEntry` has no such
+button and its menu genuinely is the two-level `Warp to Within (0 m)` ->
+`Within 0 m` shape. So the retreat path remains exposed to the same starvation,
+which is #485's other half and is not fixed here.
+
+A row with no warp button falls back to the cascade rather than declining: the
+button is absent on results that cannot be warped to at all, and the on-grid
+guard above has already taken the case this bot meets in practice.
+
+-}
+warpToScanResult : BotDecisionContext -> EveOnline.ParseUserInterface.ProbeScanResult -> DecisionPathNode
+warpToScanResult context anomaly =
+    case anomaly.warpButton of
+        Just button ->
+            describeBranch
+                "Click the scan result's own warp button -- one click, no menu to be interrupted between hovering and clicking."
+                (decideActionForCurrentStep
+                    (button |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault [])
+                )
+
+        Nothing ->
+            describeBranch
+                "This scan result carries no warp button, so take the context menu instead."
+                (useContextMenuCascade ( "Scan result", anomaly.uiNode )
+                    (warpCascadeWithin warpAtZeroMenuEntry)
+                    context
+                )
 
 
 {-| The two-level cascade, at whichever distance the caller wants.
@@ -2670,9 +2881,23 @@ warpToTheHuntedSite context site =
     in
     case site of
         ScannedAnomaly anomaly ->
-            describeBranch
-                ("Warp to the scanned anomaly " ++ describeAnomalyIdentity anomaly ++ ", at zero.")
-                (useContextMenuCascade ( "Scan result", anomaly.uiNode ) warpMenu context)
+            if scanResultIsOnGrid anomaly == Just True then
+                -- #485: the ship is already here. Warping is not merely
+                -- redundant, it cannot succeed and cannot self-correct: the
+                -- client offers no warp entry at all on a result the ship is
+                -- sitting on (measured live -- `Align to | Save Location... |
+                -- Ignore Result | Ignore Other Results` and nothing else), so
+                -- the cascade opens a menu, fails to find its entry, and starts
+                -- over for as long as the ship stays. The clouds are on the
+                -- overview the whole time.
+                describeBranch
+                    ("Already on grid with " ++ describeAnomalyIdentity anomaly ++ " -- nothing to warp to, so wait for a cloud rather than commanding a warp the client will not offer.")
+                    waitForProgressInGame
+
+            else
+                describeBranch
+                    ("Warp to the scanned anomaly " ++ describeAnomalyIdentity anomaly ++ ", at zero.")
+                    (warpToScanResult context anomaly)
 
         BookmarkedSite bookmark ->
             describeBranch
@@ -2880,6 +3105,60 @@ dscanTypeIsNotAShip typeText =
         |> List.any (\marker -> stringContainsIgnoringCase marker typeText)
 
 
+{-| A probe is not a ship -- **except a combat probe, which is a hunt in progress.**
+
+Run 3, live on 2026-09-07, evaded on eight rows all reading `Scanner Probe` and
+harvested nothing. Probes are deployable objects rather than ships and carry no
+ship name to tag, so the untagged rule reads every one of them as hostile: this
+bot could not work in any system where anybody's probes were out, **including
+its own**, since the operator scans the site down before hunting it.
+
+The operator's own rule, and the reason this is two predicates rather than one
+more entry in the list above: _evading combat probes is good; evading scanner
+probes is paranoid._ Core probes are somebody scanning signatures, which is
+ordinary wormhole traffic. **Combat** probes are the thing that scans a ship
+down, and a cloaked huffer's whole defence is not being found -- so they are
+exactly what this bot should leave for, and they must not be swept up by a rule
+written to ignore their harmless siblings.
+
+**Both cells are tested, deliberately.** The live rows printed `Scanner Probe`
+and nothing else, and with D-Scan empty by the time this was written there was no
+reading to say whether that came from the Name column or the Type column. Asking
+both is what makes the rule correct either way rather than correct if a guess
+about column layout holds -- and it costs nothing, since no ship hull carries
+either phrase.
+
+**Unverified, and it is the half that matters:** no combat probe has been seen on
+this bot's D-Scan, so `combatProbeMarker` is CCP's own naming for the item rather
+than a string read off a reading. If it is wrong, this bot ignores the probes it
+most needs to run from -- which is the direction this whole file otherwise
+refuses, and it is accepted here only because the alternative measured live is a
+bot that evades continuously and never harvests. **The first run that meets one
+is what settles it**, and the status line prints every judged row's cells for
+exactly that reason.
+
+-}
+probeMarker : String
+probeMarker =
+    "Scanner Probe"
+
+
+combatProbeMarker : String
+combatProbeMarker =
+    "Combat Scanner Probe"
+
+
+dscanRowIsHarmlessProbe : { name : Maybe String, type_ : Maybe String } -> Bool
+dscanRowIsHarmlessProbe row =
+    let
+        anyCellContains marker =
+            [ row.name, row.type_ ]
+                |> List.filterMap identity
+                |> List.any (stringContainsIgnoringCase marker)
+    in
+    anyCellContains probeMarker && not (anyCellContains combatProbeMarker)
+
+
 {-| The three cells of one D-Scan row, as a record a case can write out.
 
 A record rather than `EveOnline.ParseUserInterface.DirectionalScanResult`,
@@ -2955,21 +3234,29 @@ the other way, which is the whole of why it is this way round.
 -}
 dscanRowVerdict : HostileTrust -> DscanSighting -> DscanRowVerdict
 dscanRowVerdict trust row =
-    case row.type_ |> Maybe.andThen structureTypeThatIsNotAShip of
-        Just typeText ->
-            RowIsNotAShip typeText
+    if dscanRowIsHarmlessProbe { name = row.name, type_ = row.type_ } then
+        -- Asked before the Type list and before the name, because a probe is
+        -- identified by either cell and carries no ship name to tag. See
+        -- `dscanRowIsHarmlessProbe`: a *combat* probe fails this and falls
+        -- through to the ship branch below, which is the whole point of it.
+        RowIsNotAShip (row.type_ |> Maybe.withDefault probeMarker)
 
-        Nothing ->
-            case row.name of
-                Nothing ->
-                    ShipIsHostile ShipNameCouldNotBeRead
+    else
+        case row.type_ |> Maybe.andThen structureTypeThatIsNotAShip of
+            Just typeText ->
+                RowIsNotAShip typeText
 
-                Just name ->
-                    if shipReadsFriendly trust name then
-                        ShipIsOneOfOurs name
+            Nothing ->
+                case row.name of
+                    Nothing ->
+                        ShipIsHostile ShipNameCouldNotBeRead
 
-                    else
-                        ShipIsHostile (ShipNameCarriesNoFriendlyTag name)
+                    Just name ->
+                        if shipReadsFriendly trust name then
+                            ShipIsOneOfOurs name
+
+                        else
+                            ShipIsHostile (ShipNameCarriesNoFriendlyTag name)
 
 
 structureTypeThatIsNotAShip : String -> Maybe String
