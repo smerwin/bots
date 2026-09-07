@@ -412,6 +412,8 @@ type alias BotMemory =
     , lastUsedCapacityInMiningHold : Maybe Int
     , miningHoldDragAttemptReadings : Int
     , infoPanelSetupAttemptReadings : Int
+    , contextMenuLastDepth : Int
+    , contextMenuStuckTicks : Int
     , shipModules : ShipModulesMemory
     , overviewWindows : OverviewWindowsMemory
     , lastReadingsInSpaceDronesWindowWasVisible : List Bool
@@ -444,6 +446,24 @@ miningBotDecisionRoot context =
 -}
 miningBotDecisionRootBeforeApplyingSettings : BotDecisionContext -> DecisionPathNode
 miningBotDecisionRootBeforeApplyingSettings context =
+    clearStrayContextMenu context
+        |> Maybe.withDefault (miningBotDecisionRootAfterClearingStrayContextMenu context)
+
+
+{-| Ahead of `generalSetupInUserInterface` rather than folded into it, and
+checked regardless of docked-or-in-space state -- unlike `eve-online-saxrat`'s
+own copy of this guard, which only runs from its in-space branch.
+
+Confirmed live on 2026-09-06: the menu that stalled this bot was opened by
+`dockToUnloadOre`'s solar-system-menu fallback while in space, was never
+closed when that fallback gave way to something else, and was still open
+several thousand readings later with the ship docked -- so a version of this
+guard scoped to one docked-or-in-space state would have missed exactly the
+incident it exists for.
+
+-}
+miningBotDecisionRootAfterClearingStrayContextMenu : BotDecisionContext -> DecisionPathNode
+miningBotDecisionRootAfterClearingStrayContextMenu context =
     generalSetupInUserInterface
         context
         |> Maybe.withDefault
@@ -598,6 +618,190 @@ returnDronesAndRunAwayIfHitpointsAreTooLowOrWithoutDrones context shipUI =
 
     else
         Nothing
+
+
+{-| Ported from `eve-online-saxrat`, which has carried this since it started
+losing whole sessions to exactly this shape: a context menu opened by one
+cascade, abandoned before it closed, sitting open indefinitely because nothing
+here ever checked for one outside of a cascade actively driving it.
+
+**Cascade depth, not menu presence**, is what is counted. Context menus nest --
+descending a level adds an entry to `readingFromGameClient.contextMenus` rather
+than replacing it -- so `BotMemory.contextMenuStuckTicks` only increments when
+the menu count has stayed the same (or dropped without reaching zero) since the
+last reading; any tick that goes deeper resets it. A cascade that keeps
+advancing, however slowly, never trips this; one stuck at the same depth does
+within a few readings.
+
+**12 readings, not saxrat's original 3**, carried over rather than re-derived:
+this bot's own anomaly-warp cascade goes through the same
+`useContextMenuCascadeOnListSurroundingsButton` -> `useContextMenuCascadeWithCustomConfig`
+machinery saxrat's does, with the same 8-reading lookback before a stuck-but-open
+menu is discarded and reopened on its own. 12 clears that with the same margin
+saxrat measured, so a cascade that is about to recover on its own still gets the
+chance to.
+
+**No `ammoSwapOwnsTheMenu` clause here**, unlike saxrat's copy -- this bot has no
+ammo swap, so there is nothing else here that legitimately holds a weapon's
+context menu open across several readings for the swap's own reasons.
+
+`Nothing` rather than an alarm, deliberately: the menu stays on the screen and
+every branch below now works around it, which is worse than a cleared menu and
+incomparably better than nothing running at all.
+
+-}
+clearStrayContextMenu : BotDecisionContext -> Maybe DecisionPathNode
+clearStrayContextMenu context =
+    if
+        strayContextMenuIsStray
+            { stuckTicks = context.memory.contextMenuStuckTicks }
+    then
+        Just
+            (case emptyPointBesideTheInfoPanel context.readingFromGameClient of
+                Just location ->
+                    describeBranch
+                        "A context menu has sat at the same depth for several ticks in a row without advancing to a deeper submenu -- likely a stray menu from an abandoned cascade or a misclick. Clear it (left click beside the info panel)."
+                        (decideActionForCurrentStep
+                            (EffectOnWindow.effectsMouseClickAtLocation
+                                MouseButtonLeft
+                                location
+                            )
+                        )
+
+                Nothing ->
+                    describeBranch
+                        "A context menu has sat at the same depth for several ticks in a row without advancing to a deeper submenu, and this reading has no info panel to measure an empty point beside -- press Escape instead, which can open the client's own settings menu and is why it is the fallback rather than the rule."
+                        (decideActionForCurrentStep
+                            [ EffectOnWindow.KeyDown EffectOnWindow.vkey_ESCAPE
+                            , EffectOnWindow.KeyUp EffectOnWindow.vkey_ESCAPE
+                            ]
+                        )
+            )
+
+    else
+        Nothing
+
+
+{-| Everything the stray-menu verdict turns on, as a record rather than the
+whole context so a case can execute the rule directly.
+-}
+type alias StrayContextMenuCase =
+    { stuckTicks : Int
+    }
+
+
+strayContextMenuIsStray : StrayContextMenuCase -> Bool
+strayContextMenuIsStray strayCase =
+    (strayContextMenuStuckTicksThreshold <= strayCase.stuckTicks)
+        && (strayCase.stuckTicks < strayContextMenuGiveUpTicks)
+
+
+strayContextMenuStuckTicksThreshold : Int
+strayContextMenuStuckTicksThreshold =
+    12
+
+
+{-| How long the dismissal gets before the bot works around the menu instead,
+written as a multiple of the threshold that arms it so the two cannot drift
+apart. Twenty attempts is far past anything a working dismissal needs -- one
+click ought to clear it -- and far short of a session.
+-}
+strayContextMenuGiveUpTicks : Int
+strayContextMenuGiveUpTicks =
+    strayContextMenuStuckTicksThreshold * 20
+
+
+{-| How far right of the info panel's own edge to click, in the client's
+coordinates. Wide enough to clear the panel's border and any hover affordance,
+narrow enough that it stays in the gap rather than reaching whatever is laid
+out further right.
+-}
+strayMenuClearGapFromInfoPanel : Int
+strayMenuClearGapFromInfoPanel =
+    80
+
+
+{-| A point beside the info panel, for dismissing a stray context menu.
+
+Escape does not reliably do this job (confirmed live on saxrat, see that app's
+own copy of this function), and can open the client's own settings menu
+instead -- so a computed point is the rule and Escape is the fallback rather
+than the other way around.
+
+The point is derived from the info panel's own parsed region every reading
+rather than a remembered coordinate, so it moves with the layout the way every
+other self-calibrated number here does, and it is checked against every open
+context menu before being used: the point beside the panel is where the last
+dismissal's click went, and the client opens a context menu at the cursor, so
+the reading after a click lands the same point on a menu entry rather than on
+empty canvas. Stepping below every open menu's lowest edge is what keeps a
+retried dismissal a dismissal rather than a second stray menu.
+
+`Nothing` when the info panel is not in the reading, because then there is no
+anchor and no point known to be empty; the caller falls back to Escape there.
+
+-}
+emptyPointBesideTheInfoPanel : ReadingFromGameClient -> Maybe EffectOnWindow.Location2d
+emptyPointBesideTheInfoPanel readingFromGameClient =
+    readingFromGameClient.infoPanelContainer
+        |> Maybe.andThen
+            (\infoPanelContainer ->
+                let
+                    region =
+                        infoPanelContainer.uiNode.totalDisplayRegion
+
+                    beside =
+                        { x = region.x + region.width + strayMenuClearGapFromInfoPanel
+                        , y = region.y + (region.height // 2)
+                        }
+
+                    canvas =
+                        readingFromGameClient.uiTree.totalDisplayRegion
+
+                    menuCovers point menu =
+                        let
+                            menuRegion =
+                                menu.uiNode.totalDisplayRegion
+                        in
+                        (menuRegion.x <= point.x)
+                            && (point.x <= menuRegion.x + menuRegion.width)
+                            && (menuRegion.y <= point.y)
+                            && (point.y <= menuRegion.y + menuRegion.height)
+
+                    covered point =
+                        readingFromGameClient.contextMenus
+                            |> List.any (menuCovers point)
+
+                    belowEveryMenu =
+                        readingFromGameClient.contextMenus
+                            |> List.map
+                                (\menu ->
+                                    menu.uiNode.totalDisplayRegion.y
+                                        + menu.uiNode.totalDisplayRegion.height
+                                )
+                            |> List.maximum
+                            |> Maybe.map
+                                (\lowest ->
+                                    { beside | y = lowest + strayMenuClearGapFromInfoPanel }
+                                )
+                in
+                if not (covered beside) then
+                    Just beside
+
+                else
+                    belowEveryMenu
+                        |> Maybe.andThen
+                            (\below ->
+                                if
+                                    (below.y < canvas.y + canvas.height)
+                                        && not (covered below)
+                                then
+                                    Just below
+
+                                else
+                                    Nothing
+                            )
+            )
 
 
 generalSetupInUserInterface : BotDecisionContext -> Maybe DecisionPathNode
@@ -2149,6 +2353,8 @@ initBotMemory =
     , lastUsedCapacityInMiningHold = Nothing
     , miningHoldDragAttemptReadings = 0
     , infoPanelSetupAttemptReadings = 0
+    , contextMenuLastDepth = 0
+    , contextMenuStuckTicks = 0
     , shipModules = EveOnline.BotFramework.initShipModulesMemory
     , overviewWindows = EveOnline.BotFramework.initOverviewWindowsMemory
     , lastReadingsInSpaceDronesWindowWasVisible = []
@@ -2339,6 +2545,24 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 Just _ ->
                     botMemoryBefore.infoPanelSetupAttemptReadings + 1
 
+        {- Ported from eve-online-saxrat alongside clearStrayContextMenu. Depth
+           rather than presence: a reading that goes deeper than the last one
+           is a cascade making progress and resets the count; one that stays at
+           the same depth or drops without reaching zero is not, and adds to it.
+        -}
+        currentContextMenuDepth =
+            context.readingFromGameClient.contextMenus |> List.length
+
+        contextMenuStuckTicks =
+            if currentContextMenuDepth == 0 then
+                0
+
+            else if currentContextMenuDepth > botMemoryBefore.contextMenuLastDepth then
+                0
+
+            else
+                botMemoryBefore.contextMenuStuckTicks + 1
+
         lastReadingsInSpaceDronesWindowWasVisible =
             if context.readingFromGameClient.shipUI == Nothing then
                 botMemoryBefore.lastReadingsInSpaceDronesWindowWasVisible
@@ -2368,6 +2592,8 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
     , lastUsedCapacityInMiningHold = lastUsedCapacityInMiningHold
     , miningHoldDragAttemptReadings = miningHoldDragAttemptReadings
     , infoPanelSetupAttemptReadings = infoPanelSetupAttemptReadings
+    , contextMenuLastDepth = currentContextMenuDepth
+    , contextMenuStuckTicks = contextMenuStuckTicks
     , shipModules =
         botMemoryBefore.shipModules
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoShipModulesMemory context.readingFromGameClient
