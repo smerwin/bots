@@ -4240,7 +4240,7 @@ cloakAmongFittedModules modules =
         identified =
             modules |> List.filter (.tooltipTexts >> List.isEmpty >> not)
 
-        cloaks =
+        byTooltip =
             modules
                 |> List.indexedMap Tuple.pair
                 |> List.filter
@@ -4249,7 +4249,7 @@ cloakAmongFittedModules modules =
                         >> List.any (stringContainsIgnoringCase cloakingDeviceTooltipMarker)
                     )
     in
-    case cloaks of
+    case byTooltip of
         ( index, cloak ) :: _ ->
             case cloak.runningState of
                 ModuleIsRunning ->
@@ -4267,6 +4267,39 @@ cloakAmongFittedModules modules =
 
             else
                 NoCloakAmongTheModulesIdentified (List.length modules)
+
+
+{-| The cloak's own hotkey, which the operator states rather than the bot discovering.
+
+**The tooltip hunt above is kept and asked first**, and this is the fallback --
+which is the opposite of how it reads, so the reason matters. A tooltip is the
+only thing in a reading that says _what a module is_, and it is right whatever
+the fit. What it is not is _timely_: the hover happens only on readings with
+nothing else to press, so run 3 reached its first evasion with `0 of 5 module(s)`
+identified and evaded uncloaked -- and an evasion is exactly when the cloak is
+wanted and exactly when there is no quiet reading to spend on a hover.
+
+The operator's own keybinds -- scoops on `F1` and `F2`, cloak on `F3` -- make it
+pressable on the first reading, with no discovery at all.
+
+**A hotkey and not a module index**, which is the correction that matters here.
+`ActivateTheCloak` indexes into `fittedModulesFromContext`, and that list is the
+**whole ship** in the parser's own order -- so "the third top-row module" and
+"index 2 of every module on the hull" are different modules the moment the fit
+has anything above the top row. Pressing the key the operator bound says exactly
+what was meant and cannot drift with the fit; the index route would have clicked
+whatever happened to be third.
+
+**It is a claim about one fit.** A ship with no cloak on `F3` presses whatever is
+there on the reading it leaves. The tooltip rule is asked first precisely to
+bound that: once a hover has identified a real cloak anywhere on the hull, the
+tooltip answer wins and this is never reached. Measured against run 3's cost,
+which was evading with no cloak at all.
+
+-}
+cloakHotkey : List EffectOnWindow.VirtualKeyCode
+cloakHotkey =
+    [ EffectOnWindow.vkey_F3 ]
 
 
 {-| Every module button in the reading, paired with what has been learned of it.
@@ -4754,6 +4787,7 @@ type EvasionStep
     | WaitForTheEvasionWarpToLand
     | WarpOutOfTheSite RetreatDestination
     | ActivateTheCloak Int
+    | ActivateTheCloakByHotkey
     | WarpToACelestial Int
     | NothingLeftToLeaveWith
 
@@ -4779,6 +4813,17 @@ evasionStep situation =
                     TheCloakIsFittedAndNotRunning index ->
                         if situation.counters.cloakUnansweredReadings < cloakGiveUpReadings then
                             ActivateTheCloak index
+
+                        else
+                            bounceOffACelestial situation
+
+                    TheModulesAreNotIdentifiedYet _ ->
+                        -- Run 3 evaded here with `0 of 5` identified and no
+                        -- cloak. The operator's keybind says F3 without any
+                        -- discovery, so press it rather than leave uncloaked;
+                        -- the tooltip answer above still wins once it lands.
+                        if situation.counters.cloakUnansweredReadings < cloakGiveUpReadings then
+                            ActivateTheCloakByHotkey
 
                         else
                             bounceOffACelestial situation
@@ -4921,6 +4966,18 @@ actOnTheEvasionStep context situation =
                             "The module row changed between reading it and pressing the cloak -- ask again next reading."
                             waitForProgressInGame
                         )
+
+        ActivateTheCloakByHotkey ->
+            Just
+                (describeBranch
+                    ("Cloak up with its own hotkey (F3) -- no module here has been identified by tooltip yet, and an evasion is exactly when there is no quiet reading to spend on a hover ("
+                        ++ String.fromInt situation.counters.cloakUnansweredReadings
+                        ++ "/"
+                        ++ String.fromInt cloakGiveUpReadings
+                        ++ " readings it has been asked for and not answered)."
+                    )
+                    (decideActionForCurrentStep (hotkeyEffects cloakHotkey))
+                )
 
         WarpToACelestial index ->
             case celestialsToBounceOffOnTheOverview context.readingFromGameClient |> List.drop index |> List.head of
