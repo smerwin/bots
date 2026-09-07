@@ -1742,6 +1742,44 @@ moduleRunningState moduleButton =
             ModuleIsNotRunning
 
 
+{-| Whether the module's own ramp animation is visibly turning right now, read
+straight off the two ramp sprites' rotation rather than off `ramp_active`.
+
+**This is the evidence `KickTheHarvester` was missing.** Live on 2026-09-07:
+`harvesterRecheckIntervalReadings` fires on a fixed 20-reading clock with no
+corroborating evidence either way, so it presses a harvester's hotkey whenever
+that clock runs out -- including on a harvester the client's own combat log
+shows mining every few readings the whole time. The hotkey is a toggle, so that
+press is indistinguishable from `moduleRunningState`'s own `ModuleIsRunning`
+case, and pressing it is exactly the flicker #12/#34/#35/#76/#286 are about.
+`moduleRunningState` itself is not the problem -- its absence-only reading is
+the strong evidence an *activation* needs, per the doc comment above -- the
+problem is that the recheck has no equivalent strong evidence for the opposite
+question, "is it safe to press this because it is genuinely idle".
+
+`rampRotationMilli` is that evidence where it is available: it comes off the
+`leftRamp`/`rightRamp` sprites' live rotation angle rather than the
+`ramp_active` dictionary entry, so it can say the module is mid-cycle on a
+reading where `ramp_active` itself has not been re-read as anything new. A
+harvester genuinely running for the whole of a 20-reading window is spinning
+for nearly all of it, so requiring this to read idle *at the recheck reading*
+before pressing removes most of the exposure without adding a second counter.
+
+**Declared and never wired up once already.** `eve-online-saxrat` has the
+identical rule under the name `moduleIsActiveOrReloading` and calls it from
+nowhere -- confirmed by search, not by the doc comment there. Naming it after
+what it is measuring, and actually reading it, is the whole of the fix asked
+for: treat top-row modules whose duty cycle cannot be trusted the way this
+codebase already knows to, rather than repeating a declaration that compiles
+and does nothing.
+
+-}
+harvesterLooksActiveByRamp : EveOnline.ParseUserInterface.ShipUIModuleButton -> Bool
+harvesterLooksActiveByRamp moduleButton =
+    (moduleButton.isActive |> Maybe.withDefault False)
+        || ((moduleButton.rampRotationMilli |> Maybe.withDefault 0) /= 0)
+
+
 {-| The propulsion module, which the client-setup contract puts first in the
 middle row.
 
@@ -2166,6 +2204,17 @@ for this: both are "how long before this rule stops taking a stale-looking
 reading on faith", and nothing here has measured a harvester's own timing
 closely enough to argue for a different figure.
 
+**The clock alone turned out not to be enough.** Live on 2026-09-07, this
+interval fired on its own schedule against a harvester the client's own combat
+log showed mining every few readings throughout -- the toggle-flicker #12 and
+its successors are about, landed on a module this rule itself calls running.
+`harvesterLooksActiveByRamp` is the fix: the clock still bounds how long a
+stale-looking reading is taken on faith, but it is only spent pressing a
+harvester that also fails a live check of its ramp animation at the moment the
+clock runs out, and it is reset early -- see `harvestCountersAfterReading` --
+on any reading the ramp is seen turning, which is most readings of a harvester
+that is genuinely fine.
+
 -}
 harvesterRecheckIntervalReadings : Int
 harvesterRecheckIntervalReadings =
@@ -2186,12 +2235,18 @@ press came from `RunTheHarvester` (the module read as off) or `KickTheHarvester`
 (it read as on but due for a recheck) -- either one restarts this index's own
 clock towards its next recheck.
 
+`harvesterIndicesLookingActiveByRamp` is the other way a clock restarts, and it
+is read from the **current** reading rather than the previous step's effects,
+because it is evidence about the module rather than about what this bot asked
+for -- see `harvesterLooksActiveByRamp`.
+
 -}
 type alias HarvestAnswerFromClient =
     { cloudIsChosen : Bool
     , panelShowsTheCloud : Bool
     , cloudReadsLocked : Bool
     , harvesterIndexJustKicked : Maybe Int
+    , harvesterIndicesLookingActiveByRamp : List Int
     }
 
 
@@ -2222,13 +2277,22 @@ harvestCountersAfterReading answer counters =
                     aged =
                         counters.harvestersKickedReadingsAgo
                             |> List.map (Tuple.mapSecond ((+) 1))
-                in
-                case answer.harvesterIndexJustKicked of
-                    Just index ->
-                        ( index, 0 ) :: (aged |> List.filter (Tuple.first >> (/=) index))
 
-                    Nothing ->
-                        aged
+                    confirmedFreshThisReading =
+                        (answer.harvesterIndexJustKicked |> Maybe.map List.singleton |> Maybe.withDefault [])
+                            ++ answer.harvesterIndicesLookingActiveByRamp
+                            |> List.foldl
+                                (\index unique ->
+                                    if List.member index unique then
+                                        unique
+
+                                    else
+                                        index :: unique
+                                )
+                                []
+                in
+                (confirmedFreshThisReading |> List.map (\index -> ( index, 0 )))
+                    ++ (aged |> List.filter (\( index, _ ) -> not (List.member index confirmedFreshThisReading)))
         }
 
 
@@ -2471,6 +2535,13 @@ harvestSituationFromContext context shipUI cloud =
         harvesterModulesFromShipUI shipUI
             |> List.indexedMap Tuple.pair
             |> List.filter (Tuple.second >> moduleRunningState >> (==) ModuleIsRunning)
+            -- Never kick a module whose ramp is visibly turning right now --
+            -- see `harvesterLooksActiveByRamp`. Belt and braces alongside the
+            -- clock reset in `harvestCountersAfterReading`: that reset keeps
+            -- the clock from reaching the interval in the first place on an
+            -- ordinary reading, and this keeps a kick from firing on the one
+            -- reading the clock and a momentary ramp reading disagree.
+            |> List.filter (Tuple.second >> harvesterLooksActiveByRamp >> not)
             |> List.map Tuple.first
             |> List.filter
                 (\index ->
@@ -7821,6 +7892,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                             |> Maybe.withDefault False
                     )
                 |> List.head
+
+        -- Read off the current reading rather than the previous step's
+        -- effects, because this is evidence about the module rather than
+        -- about what this bot asked for -- see `harvesterLooksActiveByRamp`.
+        -- `[ 0, 1 ]` for the same reason `harvesterIndexJustKicked` uses it: a
+        -- docked reading has no `shipUI` to derive real indices from at all.
+        harvesterIndicesLookingActiveByRamp =
+            context.readingFromGameClient.shipUI
+                |> Maybe.map harvesterModulesFromShipUI
+                |> Maybe.withDefault []
+                |> List.indexedMap Tuple.pair
+                |> List.filter (Tuple.second >> harvesterLooksActiveByRamp)
+                |> List.map Tuple.first
     in
     { readingsCount = botMemoryBefore.readingsCount + 1
     , lastDockedStationNameFromInfoPanel =
@@ -7844,6 +7928,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                     |> Maybe.map (.commonIndications >> .targetedByMe)
                     |> Maybe.withDefault False
             , harvesterIndexJustKicked = harvesterIndexJustKicked
+            , harvesterIndicesLookingActiveByRamp = harvesterIndicesLookingActiveByRamp
             }
             botMemoryBefore.harvestCounters
     , propulsionPressesUnanswered =
