@@ -347,6 +347,7 @@ hold with several distinct ore stacks in it clears in well under this count
 since every stack that actually drags resets the counter, one reading each. The
 stuck run this bound answers reached 285 before an operator ended it by hand;
 20 catches that within about a minute rather than nine.
+
 -}
 miningHoldDragGiveUpReadings : Int
 miningHoldDragGiveUpReadings =
@@ -712,6 +713,7 @@ Past `miningHoldDragGiveUpReadings` this stops dispatching the same input and
 says so instead, naming the destination and the count, and asks for help
 rather than trying something else the client has already shown it eleven or
 more times in a row that it will not take.
+
 -}
 dragItemOutOfMiningHoldOrGiveUp :
     BotDecisionContext
