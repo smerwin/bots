@@ -2124,22 +2124,52 @@ cloud on it.
 
 The first two reset outright on a reading where the client has answered, and
 on any reading with no cloud chosen at all -- so a session that harvests forty
-clouds starts from zero at each one. `harvestersKickedThisLock` resets on the
-same "no cloud chosen" edge and additionally the moment the lock is lost, since
-it is a fact about *this* lock rather than about the cloud-picking loop -- see
-its own doc comment.
+clouds starts from zero at each one. `harvestersKickedReadingsAgo` resets on
+the same "no cloud chosen" edge and additionally the moment the lock is lost,
+since it is a fact about *this* lock rather than about the cloud-picking loop
+-- see its own doc comment.
 
 -}
 type alias HarvestCounters =
     { panelSelectUnansweredReadings : Int
     , lockUnansweredReadings : Int
-    , harvestersKickedThisLock : List Int
+    , harvestersKickedReadingsAgo : List ( Int, Int )
     }
 
 
 initHarvestCounters : HarvestCounters
 initHarvestCounters =
-    { panelSelectUnansweredReadings = 0, lockUnansweredReadings = 0, harvestersKickedThisLock = [] }
+    { panelSelectUnansweredReadings = 0, lockUnansweredReadings = 0, harvestersKickedReadingsAgo = [] }
+
+
+{-| How long a forced press stands before this rule is willing to distrust
+"reads as running" again for the same harvester, under the same lock.
+
+Run 2, live on 2026-09-07: a one-shot version of this rule (kick once per lock,
+never again) forced both harvesters once when the lock landed and then reported
+`confirmed since this lock landed` for the rest of the lock's life -- while the
+operator, watching the client, could see they were not actually cycling. The
+one-shot design assumed `ramp_active` going stale was a fact about the *previous*
+target that a fresh lock settles once and for all; it does not settle whether the
+module keeps running for the rest of that lock, and this bot has no verified
+field that says so on its own.
+
+Bounded rather than continuous for the same reason the one-shot version was
+one-shot at all: every press is a toggle, and a harvester that genuinely is
+running is switched off by pressing it again. A short interval trades a
+possible one-cycle interruption of a module that was fine for the alternative
+this run just measured -- a harvester stuck off for the rest of a lock with
+nothing left in this rule that will ever ask again.
+
+20, matching `lockGiveUpReadings`' scale rather than a shorter number invented
+for this: both are "how long before this rule stops taking a stale-looking
+reading on faith", and nothing here has measured a harvester's own timing
+closely enough to argue for a different figure.
+
+-}
+harvesterRecheckIntervalReadings : Int
+harvesterRecheckIntervalReadings =
+    20
 
 
 {-| What one reading says about the two asks, in the terms the counters need.
@@ -2153,8 +2183,8 @@ own reason: what was asked for is knowable from the previous step's effects
 where what the decision function returned is not, once the decision for the
 next reading is what is being computed. It answers the same way whether the
 press came from `RunTheHarvester` (the module read as off) or `KickTheHarvester`
-(it read as on but had not been confirmed since this lock landed) -- either one
-means this index does not need forcing again until the lock changes.
+(it read as on but due for a recheck) -- either one restarts this index's own
+clock towards its next recheck.
 
 -}
 type alias HarvestAnswerFromClient =
@@ -2183,17 +2213,22 @@ harvestCountersAfterReading answer counters =
 
             else
                 counters.lockUnansweredReadings + 1
-        , harvestersKickedThisLock =
+        , harvestersKickedReadingsAgo =
             if not answer.cloudReadsLocked then
                 []
 
             else
+                let
+                    aged =
+                        counters.harvestersKickedReadingsAgo
+                            |> List.map (Tuple.mapSecond ((+) 1))
+                in
                 case answer.harvesterIndexJustKicked of
                     Just index ->
-                        index :: counters.harvestersKickedThisLock
+                        ( index, 0 ) :: (aged |> List.filter (Tuple.first >> (/=) index))
 
                     Nothing ->
-                        counters.harvestersKickedThisLock
+                        aged
         }
 
 
@@ -2262,13 +2297,18 @@ retriggering by hand.
 evidence about the target under it now**, whichever of the two it is: a
 harvester needs the active target to do anything, so nothing about it could
 have been genuinely cycling on a cloud this ship had not yet locked. That is
-the one moment this rule is allowed to distrust "reads as running" -- once,
-per lock, per harvester -- and `harvestersKickedThisLock` is what keeps it to
-once: an index is added to it the reading its hotkey is actually dispatched,
-by `RunTheHarvester` or by this, and stays there until the lock is lost, so a
-harvester that genuinely is running fine under the new lock gets exactly one
-press and is then left alone for as long as this lock holds -- never repeatedly
-toggled the way #12/#34/#76/#286 warn a guess on this field can cause.
+the first moment this rule is allowed to distrust "reads as running", and
+`harvestersKickedReadingsAgo` is what times it out: an index's clock starts the
+reading its hotkey is actually dispatched, by `RunTheHarvester` or by this, and
+runs until `harvesterRecheckIntervalReadings` -- so a harvester that genuinely
+is running fine under this lock is left alone for that whole window rather than
+toggled every reading, and one that has quietly stopped without `ramp_active`
+ever clearing gets asked again rather than left stuck for the rest of the lock,
+which is what a true one-shot version of this rule did in run 2. Both directions
+are costs rather than certainties: pressing a module that was fine costs one of
+its cycles, and waiting out the interval on one that had already stopped costs
+up to that many readings of it doing nothing -- there is no reading available
+here that tells the difference in advance.
 
 -}
 type HarvestStep
@@ -2432,7 +2472,12 @@ harvestSituationFromContext context shipUI cloud =
             |> List.indexedMap Tuple.pair
             |> List.filter (Tuple.second >> moduleRunningState >> (==) ModuleIsRunning)
             |> List.map Tuple.first
-            |> List.filter (\index -> not (List.member index context.memory.harvestCounters.harvestersKickedThisLock))
+            |> List.filter
+                (\index ->
+                    context.memory.harvestCounters.harvestersKickedReadingsAgo
+                        |> List.filter (Tuple.first >> (==) index)
+                        |> List.all (Tuple.second >> (<=) harvesterRecheckIntervalReadings)
+                )
     , counters = context.memory.harvestCounters
     }
 
@@ -2522,7 +2567,9 @@ actOnTheHarvestStep context shipUI cloud situation =
                             ++ String.fromInt (index + 1)
                             ++ " on '"
                             ++ cloudName
-                            ++ "' once even though it reads as cycling -- not confirmed since this lock landed, so the reading may be left over from a target this ship no longer has (#456)."
+                            ++ "' even though it reads as cycling -- due for a recheck ("
+                            ++ String.fromInt harvesterRecheckIntervalReadings
+                            ++ " readings since the last one), so the reading may be stale rather than the module still doing anything (#456)."
                         )
                         [ keyCode ]
 
@@ -2530,7 +2577,7 @@ actOnTheHarvestStep context shipUI cloud situation =
                     describeBranch
                         ("Run gas harvester "
                             ++ String.fromInt (index + 1)
-                            ++ " once -- past the four the hotkeys reach, so click its button. It reads as cycling but has not been confirmed since this lock landed (#456)."
+                            ++ " -- past the four the hotkeys reach, so click its button. It reads as cycling but is due for a recheck (#456)."
                         )
                         (EveOnline.BotFrameworkSeparatingMemory.clickModuleButtonButWaitIfClickedInPreviousStep
                             context
@@ -2602,12 +2649,14 @@ describeHarvestSituation situation =
         harvesters =
             case ( situation.harvestersNotRunning, situation.harvestersNeedingAKick ) of
                 ( [], [] ) ->
-                    "both cycling, confirmed since this lock landed"
+                    "both cycling, rechecked within the last "
+                        ++ String.fromInt harvesterRecheckIntervalReadings
+                        ++ " readings"
 
                 ( [], needingKick ) ->
                     "both read as cycling, "
                         ++ String.fromInt (List.length needingKick)
-                        ++ " not yet confirmed since this lock landed (top-row slot(s) "
+                        ++ " due for a recheck (top-row slot(s) "
                         ++ describeSlots needingKick
                         ++ ")"
 
@@ -2623,7 +2672,7 @@ describeHarvestSituation situation =
                                 _ ->
                                     ", "
                                         ++ String.fromInt (List.length needingKick)
-                                        ++ " more not yet confirmed since this lock landed (slot(s) "
+                                        ++ " more due for a recheck (slot(s) "
                                         ++ describeSlots needingKick
                                         ++ ")"
                            )
