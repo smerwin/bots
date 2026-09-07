@@ -347,6 +347,7 @@ hold with several distinct ore stacks in it clears in well under this count
 since every stack that actually drags resets the counter, one reading each. The
 stuck run this bound answers reached 285 before an operator ended it by hand;
 20 catches that within about a minute rather than nine.
+
 -}
 miningHoldDragGiveUpReadings : Int
 miningHoldDragGiveUpReadings =
@@ -371,6 +372,7 @@ eight vendored copies has to take on together.
 20 is picked for the same reason `miningHoldDragGiveUpReadings` is: several
 times the one or two readings a landed click actually needs, and small next to
 an incident with no bound to end it at all.
+
 -}
 infoPanelSetupGiveUpReadings : Int
 infoPanelSetupGiveUpReadings =
@@ -456,6 +458,7 @@ closed when that fallback gave way to something else, and was still open
 several thousand readings later with the ship docked -- so a version of this
 guard scoped to one docked-or-in-space state would have missed exactly the
 incident it exists for.
+
 -}
 miningBotDecisionRootAfterClearingStrayContextMenu : BotDecisionContext -> DecisionPathNode
 miningBotDecisionRootAfterClearingStrayContextMenu context =
@@ -643,6 +646,7 @@ context menu open across several readings for the swap's own reasons.
 `Nothing` rather than an alarm, deliberately: the menu stays on the screen and
 every branch below now works around it, which is worse than a cleared menu and
 incomparably better than nothing running at all.
+
 -}
 clearStrayContextMenu : BotDecisionContext -> Maybe DecisionPathNode
 clearStrayContextMenu context =
@@ -733,6 +737,7 @@ retried dismissal a dismissal rather than a second stray menu.
 
 `Nothing` when the info panel is not in the reading, because then there is no
 anchor and no point known to be empty; the caller falls back to Escape there.
+
 -}
 emptyPointBesideTheInfoPanel : ReadingFromGameClient -> Maybe EffectOnWindow.Location2d
 emptyPointBesideTheInfoPanel readingFromGameClient =
@@ -958,6 +963,7 @@ Past `miningHoldDragGiveUpReadings` this stops dispatching the same input and
 says so instead, naming the destination and the count, and asks for help
 rather than trying something else the client has already shown it eleven or
 more times in a row that it will not take.
+
 -}
 dragItemOutOfMiningHoldOrGiveUp :
     BotDecisionContext
