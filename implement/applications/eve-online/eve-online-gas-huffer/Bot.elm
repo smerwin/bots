@@ -1286,7 +1286,7 @@ unnumbered cloud says so rather than looking like a run that ignored the
 ordering.
 
 `chosenIsAlreadyClaimed` is carried for the same reason as both of those: it is
-what lets `describeCloudSearch` say *why* `chosen` won, rather than always
+what lets `describeCloudSearch` say _why_ `chosen` won, rather than always
 crediting the trailing-number order when a lock already held is what actually
 decided it.
 
@@ -1319,7 +1319,7 @@ ship is not orbiting.
 
 **A cloud the client already reads as locked or as locking outranks every other
 candidate**, ahead of the trailing-number order `gasCloudOrder` alone would give.
-Nothing here remembers *which* cloud a previous reading chose -- `chosen` is
+Nothing here remembers _which_ cloud a previous reading chose -- `chosen` is
 re-derived fresh from this reading's own rows every time, which is exactly what
 let a real run (#485, live on 2026-09-07) pick `Fullerite-C84` over
 `Fullerite-C50` by trailing number and spend the whole session asking the client
@@ -1828,7 +1828,7 @@ shows mining every few readings the whole time. The hotkey is a toggle, so that
 press is indistinguishable from `moduleRunningState`'s own `ModuleIsRunning`
 case, and pressing it is exactly the flicker #12/#34/#35/#76/#286 are about.
 `moduleRunningState` itself is not the problem -- its absence-only reading is
-the strong evidence an *activation* needs, per the doc comment above -- the
+the strong evidence an _activation_ needs, per the doc comment above -- the
 problem is that the recheck has no equivalent strong evidence for the opposite
 question, "is it safe to press this because it is genuinely idle".
 
@@ -1837,7 +1837,7 @@ question, "is it safe to press this because it is genuinely idle".
 `ramp_active` dictionary entry, so it can say the module is mid-cycle on a
 reading where `ramp_active` itself has not been re-read as anything new. A
 harvester genuinely running for the whole of a 20-reading window is spinning
-for nearly all of it, so requiring this to read idle *at the recheck reading*
+for nearly all of it, so requiring this to read idle _at the recheck reading_
 before pressing removes most of the exposure without adding a second counter.
 
 **Declared and never wired up once already.** `eve-online-saxrat` has the
@@ -2239,7 +2239,7 @@ The first two reset outright on a reading where the client has answered, and
 on any reading with no cloud chosen at all -- so a session that harvests forty
 clouds starts from zero at each one. `harvestersKickedReadingsAgo` resets on
 the same "no cloud chosen" edge and additionally the moment the lock is lost,
-since it is a fact about *this* lock rather than about the cloud-picking loop
+since it is a fact about _this_ lock rather than about the cloud-picking loop
 -- see its own doc comment.
 
 -}
@@ -2262,7 +2262,7 @@ Run 2, live on 2026-09-07: a one-shot version of this rule (kick once per lock,
 never again) forced both harvesters once when the lock landed and then reported
 `confirmed since this lock landed` for the rest of the lock's life -- while the
 operator, watching the client, could see they were not actually cycling. The
-one-shot design assumed `ramp_active` going stale was a fact about the *previous*
+one-shot design assumed `ramp_active` going stale was a fact about the _previous_
 target that a fresh lock settles once and for all; it does not settle whether the
 module keeps running for the rest of that lock, and this bot has no verified
 field that says so on its own.
@@ -2432,7 +2432,7 @@ live run, and now one has answered it by never restarting the harvester across
 several evasion warps and re-locks, in a session the operator had to keep
 retriggering by hand.
 
-**A `ramp_active` reading from *before* the current lock landed cannot be
+**A `ramp_active` reading from _before_ the current lock landed cannot be
 evidence about the target under it now**, whichever of the two it is: a
 harvester needs the active target to do anything, so nothing about it could
 have been genuinely cycling on a cloud this ship had not yet locked. That is
@@ -3556,7 +3556,7 @@ scan. Treating a blank row as `ShipNameCouldNotBeRead` made the site's own
 probes flip between harmless and hostile from one D-Scan refresh to the next,
 which is what drove the ship to evade a clean grid and warp home over and over.
 
-A Type cell that reads *something* -- any text at all, matching no known marker
+A Type cell that reads _something_ -- any text at all, matching no known marker
 -- is still real evidence of an object out there, and stays hostile: that is
 the case the two bullets above are about, and it is untouched. Only the reading
 that produced **no cell text whatsoever** is reclassified, to `RowCouldNotBeRead`,
@@ -6267,7 +6267,6 @@ itemIconOffsetFromTop =
 
 {-| The overview's own word for a wormhole, matched against the Type column the
 way `harvestableCloudTypeMarker` is matched against a cloud's.
-
 -}
 wormholeTypeMarker : String
 wormholeTypeMarker =
@@ -6278,7 +6277,6 @@ wormholeTypeMarker =
 `overviewEntryIsDisplayed`'s reason: `depositChainHop` right-clicks whichever
 row this answers, and a hidden row's screen position belongs to whatever was
 recycled into it.
-
 -}
 wormholeRowsOnTheOverview : List EveOnline.ParseUserInterface.OverviewWindowEntry -> List EveOnline.ParseUserInterface.OverviewWindowEntry
 wormholeRowsOnTheOverview overviewEntries =
