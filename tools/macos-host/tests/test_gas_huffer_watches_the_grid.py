@@ -705,8 +705,15 @@ class StructuresAreNotShipsTest(unittest.TestCase):
 
     def test_a_type_cell_the_parser_could_not_read_is_not_a_structure(self):
         """Fail-closed one column along: an unreadable Type falls through to the
-        ship branch rather than being read as furniture, and the unreadable Name
-        beside it then reads hostile."""
+        ship branch rather than being read as furniture, and an unreadable Name
+        beside a readable Type still reads hostile.
+
+        A row with **neither** cell readable is different again, and reads
+        `RowCouldNotBeRead` rather than assumed hostile -- #456's own finding
+        that a row captured mid-render can have every cell answer `Nothing`
+        simultaneously, which is a parser artifact rather than a real
+        unidentifiable ship. See `dscanRowVerdict`'s own doc comment.
+        """
         unreadable_type, both_unreadable = self.repl.rendered([
             "dscanRowVerdict TrustNobody %s" % sighting(
                 name="Fictional Ship", type_text=None),
@@ -716,8 +723,7 @@ class StructuresAreNotShipsTest(unittest.TestCase):
         self.assertEqual(
             unreadable_type,
             'ShipIsHostile (ShipNameCarriesNoFriendlyTag "Fictional Ship")')
-        self.assertEqual(
-            both_unreadable, "ShipIsHostile ShipNameCouldNotBeRead")
+        self.assertEqual(both_unreadable, "RowCouldNotBeRead")
 
     def test_the_harvestable_cloud_is_the_overview_rules_own_constant(self):
         """The one entry that is this bot's own reason for being there, and the

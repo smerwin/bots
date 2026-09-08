@@ -376,7 +376,9 @@ def situation(under_way=True, docked=False, hold="HoldIsFull",
               confirmed=False, warping=False, docking_run_in="Nothing",
               structure_on_overview=True, panel_shows=True,
               dock_offered=False, lists_hold=True, hold_selected=True,
-              hangar_in_inventory=True, items=1, ok_on_screen=False):
+              hangar_in_inventory=True, items=1, ok_on_screen=False,
+              home_structure_bookmark="Nothing", chain_hop_bookmark="Nothing",
+              wormholes_on_the_overview="[]", chain_hops_made=0):
     """A `DepositSituation` written out, since it is a record of plain facts.
 
     Written here rather than derived from a reading on purpose: these cases are
@@ -385,6 +387,11 @@ def situation(under_way=True, docked=False, hold="HoldIsFull",
     and `depositStep` takes the record precisely so they can be asked for
     directly. Every field that a reading *can* answer is separately executed
     off a real one in `TheFixturesReachTheParserTest` and the classes under it.
+
+    The four chain-hop fields all default to "nothing to fall back to", which
+    is what every case below that never mentions them means to ask: the
+    ordinary path where the structure is (or is not) simply on the overview,
+    with the wormhole-chain fallback never in play.
     """
     def flag(value):
         return "True" if value else "False"
@@ -396,18 +403,24 @@ def situation(under_way=True, docked=False, hold="HoldIsFull",
             ", shipIsWarping = %s"
             ", dockingRunIn = %s"
             ", homeStructureIsOnTheOverview = %s"
+            ", homeStructureBookmark = %s"
             ", panelShowsTheHomeStructure = %s"
             ", dockButtonIsOffered = %s"
             ", inventoryListsTheHold = %s"
             ", holdIsTheSelectedContainer = %s"
             ", structureHangarIsInTheInventory = %s"
             ", itemsInTheHold = %d"
-            ", okButtonIsOnScreen = %s }" % (
+            ", okButtonIsOnScreen = %s"
+            ", chainHopBookmark = %s"
+            ", wormholesOnTheOverview = %s"
+            ", chainHopsMade = %d }" % (
                 flag(under_way), flag(docked), hold, flag(confirmed),
                 flag(warping), docking_run_in, flag(structure_on_overview),
+                home_structure_bookmark,
                 flag(panel_shows), flag(dock_offered), flag(lists_hold),
                 flag(hold_selected), flag(hangar_in_inventory), items,
-                flag(ok_on_screen)))
+                flag(ok_on_screen), chain_hop_bookmark,
+                wormholes_on_the_overview, chain_hops_made))
 
 
 def evasion_situation(clean=False, docked=False):
@@ -1703,12 +1716,15 @@ class TheStatusLineSaysWhatTheHoldIsDoingTest(unittest.TestCase):
         cls.repl.close()
 
     def clause(self, hold="HoldHasRoom", deposit="Nothing",
-               docking_run_in="Nothing", home=FICTIONAL_STRUCTURE):
+               docking_run_in="Nothing", home=FICTIONAL_STRUCTURE,
+               chain_hop="{ hopsMade = 0, lastSolarSystemName = Nothing }"):
         return self.repl.strings([
             "describeDeposit { holdFill = %s, deposit = %s"
-            ", dockingRunIn = %s, homeStructureName = %s }" % (
+            ", dockingRunIn = %s, homeStructureName = %s"
+            ", depositChainHop = %s }" % (
                 hold, deposit, docking_run_in,
-                "Nothing" if home is None else "(Just %s)" % json.dumps(home))])[0]
+                "Nothing" if home is None else "(Just %s)" % json.dumps(home),
+                chain_hop)])[0]
 
     def test_an_unreadable_hold_shouts_and_says_what_to_do_about_it(self):
         printed = self.clause(hold="HoldFillCannotBeRead")
@@ -1792,7 +1808,12 @@ class TheRulesTakeRecordsRatherThanADecisionContextTest(unittest.TestCase):
         self.assertEqual(
             sorted(readers),
             ["actOnTheDepositStep", "depositSituationFromContext",
-             "rangeToTheHomeStructureInMeters", "retreatSearch"],
+             "rangeToTheHomeStructureInMeters", "retreatSearch",
+             # `depositChainHop`'s own "is the structure reachable at all"
+             # check -- see the matching entry in
+             # test_gas_huffer_harvests_a_cloud.py's
+             # AHiddenOverviewRowIsNeverActedOnTest for the full argument.
+             "updateMemoryForNewReadingFromGame"],
             readers)
 
     def test_the_gauge_is_read_in_one_place_and_asked_in_three(self):

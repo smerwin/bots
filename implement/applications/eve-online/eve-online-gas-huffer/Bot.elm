@@ -144,21 +144,24 @@
           row.
         + Hide passive modules by disabling the check-box `Display Passive
           Modules`, so the rows the bot counts are the rows it can press.
-      + **Set the Orbit button's distance by hand, once, before starting a run.**
-        This is the one setup item with no way to check itself. Nothing in this
-        repo can command an orbit *at a distance*: the Selected Item panel's
-        Orbit button orbits at whatever range the **client** last used, and that
-        range is remembered by the client rather than stated in any reading. So
-        orbit something at the range you want by hand once, and the button will
-        keep it. Get this wrong and the ship orbits outside harvester range,
-        which the client reports as `deactivates without transfering ore to your
-        cargo hold because your ship has strayed to a distance of ... beyond its
-        mining range of ...` -- a game-log line, which is the only thing that
-        will ever tell the bot the setup is wrong. **This bot reads that line and
-        reports it, naming both distances, and does not act on it.** It cannot:
-        the range it would have to orbit at is not something any command here can
-        express, so the only repair is the one above, made by hand. See
-        `miningRangeRefusalFromGameLog`.
+      + **The orbit range needs no setup.** It used to: this list said the
+        Selected Item panel's Orbit button inherits whatever range the client
+        last used, that no command here could orbit at a *distance*, and that
+        the operator therefore had to arrange it by hand. That was a true
+        statement about this repository written down as a statement about the
+        client. The cloud's own context menu offers `Orbit (5,000 m)`, and that
+        entry opens a flyout of ranges of which `500 m` is one -- read live on
+        2026-09-07. The bot commands the range in `orbit-range` (default
+        `500 m`); see `orbitCascadeAt`.
+
+        The client still reports an orbit that is too wide, as
+        `deactivates without transfering ore to your cargo hold because your
+        ship has strayed to a distance of ... beyond its mining range of ...`.
+        **This bot reads that line and reports it, naming both distances, and
+        does not act on it.** That is now a backstop against a range that is
+        wrong for the fit rather than the only signal about a setup nobody could
+        check -- and the repair is `orbit-range`, not a button pressed by hand.
+        See `miningRangeRefusalFromGameLog`.
       + Name the bookmarks you are willing to be warped to so that they all
         start with the same prefix, and give that prefix to
         `retreat-bookmark-prefix`. Every bookmark matching it is a place this bot
@@ -236,6 +239,14 @@
         an unset tag means trust nobody, never trust everybody. Matched ignoring
         case, as a substring, so it can be a corporation ticker in brackets or a
         naming convention of your own.
+      + `orbit-range` : the range to orbit a cloud at, as the client's own
+        flyout writes it. Defaults to `500 m`. Must be one of the literals that
+        flyout offers -- `500 m`, `1,000 m`, `2,500 m`, `5,000 m`, `7,500 m`,
+        `10 km`, `15 km`, `20 km`, `25 km`, `30 km` -- including the comma,
+        because the cascade matches the entry by equality. A value the flyout
+        does not carry is a cascade that finds no entry and gives up, which the
+        status line reports rather than silently orbiting at the client's
+        default. See `orbitRangeMenuEntries`.
       + `dscan-interval-seconds` : how often to refresh the Directional Scanner.
         Defaults to 5. **This number is unmeasured** -- nothing has yet watched a
         ship arrive on this bot's D-Scan, so it is a starting point chosen to
@@ -288,6 +299,7 @@ import EveOnline.BotFramework
         , menuCascadeCompleted
         , mouseClickOnUIElement
         , useMenuEntryInLastContextMenuInCascade
+        , useMenuEntryWithTextContaining
         , useMenuEntryWithTextEqual
         )
 import EveOnline.BotFrameworkSeparatingMemory
@@ -341,6 +353,7 @@ defaultBotSettings =
     -- `hostileTrustFromSettings`, which is where that is decided, and
     -- `shipReadsFriendly`, which is the rule the rest of the bot will ask.
     , friendlyShipTag = Nothing
+    , orbitRange = defaultOrbitRange
     , dscanIntervalSeconds = defaultDscanIntervalSeconds
     , botStepDelayMilliseconds = 499
     }
@@ -389,6 +402,10 @@ parseBotSettings =
          , ( "friendly-ship-tag"
            , valueTypeNonEmptyString
                 (\tag settings -> { settings | friendlyShipTag = Just tag })
+           )
+         , ( "orbit-range"
+           , valueTypeNonEmptyString
+                (\range settings -> { settings | orbitRange = range })
            )
          , ( "dscan-interval-seconds"
            , AppSettings.valueTypeInteger
@@ -457,6 +474,7 @@ type alias BotSettings =
     , homeStructureName : Maybe String
     , retreatBookmarkPrefix : String
     , friendlyShipTag : Maybe String
+    , orbitRange : String
     , dscanIntervalSeconds : Int
     , botStepDelayMilliseconds : Int
     }
@@ -545,6 +563,11 @@ type alias BotMemory =
     -- next reading, so the confirmation has to be latched here or it is seen
     -- once and the bot goes back to dragging. See `depositRunAfterReading`.
     , deposit : Maybe DepositRun
+
+    -- How many wormholes this deposit trip has jumped trying to work back
+    -- toward `home-structure-name`, and the solar system the ship was last
+    -- known to be in. See `depositChainHopMemoryAfterReading`.
+    , depositChainHop : DepositChainHopMemory
     }
 
 
@@ -1175,6 +1198,10 @@ trailingNumberFromName name =
 {-| The order clouds are taken in: highest trailing number first, unrankable
 last.
 
+**This is the fallback order, used only among candidates nothing has already
+claimed** -- see `gasCloudAlreadyClaimed` and `cloudSearch`'s own doc comment for
+why a lock or a lock in progress outranks it.
+
 A `comparable` for `List.sortBy` rather than a comparison written at the call
 site, and a **pair** rather than one number, because the two facts being ordered
 are of different kinds. The first element separates rankable from unrankable, so
@@ -1196,6 +1223,30 @@ gasCloudOrder name =
 
         Nothing ->
             ( 1, 0 )
+
+
+{-| Whether the client already reads this cloud as locked or as locking.
+
+`cloudSearch` asks this **before** the trailing-number order, which is the fix
+for a real live failure (run 4, 2026-09-07): a site held `Fullerite-C84` and
+`Fullerite-C50`, `gasCloudOrder` picked C84 for its higher trailing number, and
+the bot spent the rest of the run asking the client to select and lock C84 while
+C50 sat locked in the ship's own target bar the whole time -- confirmed live by
+the operator watching the client, and never so much as looked at, because
+`chosen` is re-derived fresh every reading with nothing remembering that a lock
+was already held.
+
+Both indications are read off the row being ranked, so this needs no memory of
+its own and cannot go stale the way a remembered choice would: once the claimed
+cloud is mined out or the ship leaves for a new site, it is simply gone from the
+rows being ranked on the next reading, and the fallback order in `gasCloudOrder`
+picks among whatever candidates are left -- there is no separate "forget the old
+cloud" step to write or to get wrong.
+
+-}
+gasCloudAlreadyClaimed : EveOnline.ParseUserInterface.OverviewWindowEntry -> Bool
+gasCloudAlreadyClaimed entry =
+    entry.commonIndications.targetedByMe || entry.commonIndications.targeting
 
 
 {-| Whether one cloud's designation is one `gas-cloud-name-prefix` asks for.
@@ -1234,6 +1285,11 @@ clouds are candidates, ranked last, and the count exists so that a run taking an
 unnumbered cloud says so rather than looking like a run that ignored the
 ordering.
 
+`chosenIsAlreadyClaimed` is carried for the same reason as both of those: it is
+what lets `describeCloudSearch` say _why_ `chosen` won, rather than always
+crediting the trailing-number order when a lock already held is what actually
+decided it.
+
 -}
 type alias CloudSearch =
     { prefix : Maybe String
@@ -1244,6 +1300,7 @@ type alias CloudSearch =
     , namesInTheOrderTheyWouldBeTaken : List String
     , unrankableNames : List String
     , chosen : Maybe EveOnline.ParseUserInterface.OverviewWindowEntry
+    , chosenIsAlreadyClaimed : Bool
     }
 
 
@@ -1259,6 +1316,18 @@ Three readers -- the decision, the status line and
 `updateMemoryForNewReadingFromGame`, through `cloudSearchFromReading`. That is
 #102's shape, and the way it would fail here is a status line naming a cloud the
 ship is not orbiting.
+
+**A cloud the client already reads as locked or as locking outranks every other
+candidate**, ahead of the trailing-number order `gasCloudOrder` alone would give.
+Nothing here remembers _which_ cloud a previous reading chose -- `chosen` is
+re-derived fresh from this reading's own rows every time, which is exactly what
+let a real run (#485, live on 2026-09-07) pick `Fullerite-C84` over
+`Fullerite-C50` by trailing number and spend the whole session asking the client
+to select and lock C84, never once considering that C50 was already locked in
+the ship's own target bar. `HarvestSituation.cloudReadsLocked` is asked only of
+whichever cloud `chosen` names, so a choice that cannot see an existing lock can
+never make use of one. See `gasCloudAlreadyClaimed` for why this needs no memory
+of its own and cannot outlive the lock it is about.
 
 -}
 cloudSearch : Maybe String -> List EveOnline.ParseUserInterface.OverviewWindowEntry -> CloudSearch
@@ -1283,7 +1352,16 @@ cloudSearch prefix overviewEntries =
         wanted =
             namedCloudRows
                 |> List.filter (Tuple.first >> gasCloudNameMatchesPrefix prefix)
-                |> List.sortBy (Tuple.first >> gasCloudOrder)
+                |> List.sortBy
+                    (\( name, entry ) ->
+                        ( if gasCloudAlreadyClaimed entry then
+                            0
+
+                          else
+                            1
+                        , gasCloudOrder name
+                        )
+                    )
 
         wantedNames =
             wanted |> List.map Tuple.first
@@ -1296,6 +1374,11 @@ cloudSearch prefix overviewEntries =
     , namesInTheOrderTheyWouldBeTaken = wantedNames
     , unrankableNames = wantedNames |> List.filter (trailingNumberFromName >> (==) Nothing)
     , chosen = wanted |> List.head |> Maybe.map Tuple.second
+    , chosenIsAlreadyClaimed =
+        wanted
+            |> List.head
+            |> Maybe.map (Tuple.second >> gasCloudAlreadyClaimed)
+            |> Maybe.withDefault False
     }
 
 
@@ -1311,7 +1394,9 @@ Says which cloud was chosen **and why it beat the others**, because "the highest
 trailing number" is the one thing about this bot that is easy to get wrong
 silently: a lexical sort agrees with the numeric one on most pairs, so a run
 that had reverted to one would look correct until the day a site held a
-three-digit cloud.
+three-digit cloud. Since #485 that reason can also be "already locked or
+locking" -- see `gasCloudAlreadyClaimed` -- and the clause says which of the two
+it was rather than always crediting the trailing number.
 
 -}
 describeCloudSearch : CloudSearch -> String
@@ -1352,7 +1437,14 @@ describeCloudSearch search =
         Just _ ->
             "Clouds: harvesting '"
                 ++ (search.namesInTheOrderTheyWouldBeTaken |> List.head |> Maybe.withDefault "")
-                ++ "', the highest trailing number of "
+                ++ "', "
+                ++ (if search.chosenIsAlreadyClaimed then
+                        "already locked or locking"
+
+                    else
+                        "the highest trailing number"
+                   )
+                ++ " of "
                 ++ String.fromInt (List.length search.namesInTheOrderTheyWouldBeTaken)
                 ++ " candidate(s) ["
                 ++ String.join ", " search.namesInTheOrderTheyWouldBeTaken
@@ -1725,6 +1817,47 @@ moduleRunningState moduleButton =
             ModuleIsNotRunning
 
 
+{-| Whether the module's own ramp animation is visibly turning right now, read
+straight off the two ramp sprites' rotation rather than off `ramp_active`.
+
+**This is the evidence `KickTheHarvester` was missing.** Live on 2026-09-07:
+`harvesterRecheckIntervalReadings` fires on a fixed 20-reading clock with no
+corroborating evidence either way, so it presses a harvester's hotkey whenever
+that clock runs out -- including on a harvester the client's own combat log
+shows mining every few readings the whole time. The hotkey is a toggle, so that
+press is indistinguishable from `moduleRunningState`'s own `ModuleIsRunning`
+case, and pressing it is exactly the flicker #12/#34/#35/#76/#286 are about.
+`moduleRunningState` itself is not the problem -- its absence-only reading is
+the strong evidence an _activation_ needs, per the doc comment above -- the
+problem is that the recheck has no equivalent strong evidence for the opposite
+question, "is it safe to press this because it is genuinely idle".
+
+`rampRotationMilli` is that evidence where it is available: it comes off the
+`leftRamp`/`rightRamp` sprites' live rotation angle rather than the
+`ramp_active` dictionary entry, so it can say the module is mid-cycle on a
+reading where `ramp_active` itself has not been re-read as anything new. A
+harvester genuinely running for the whole of a 20-reading window is spinning
+for nearly all of it, so requiring this to read idle _at the recheck reading_
+before pressing removes most of the exposure without adding a second counter.
+
+**`eve-online-saxrat` has a declaration that reads almost like this one, named
+`moduleIsActiveOrReloading`, and it is deliberately not copied whole.** That
+one is `moduleButton.isActive || rampRotationMilli /= 0`, and it is also called
+from nowhere -- confirmed by search, not by the doc comment there. `.isActive`
+**is** `ramp_active`, the very field the paragraphs above this one spend three
+bullet points establishing this app must read only through `moduleRunningState`'s
+absence-only test: `Just True` is indistinguishable from a module mid-cycle
+between ramps, and a rule that credits it as "definitely active" is #12's
+mistake with a second entry point into the same field. `rampRotationMilli` is
+the one term of saxrat's declaration that names evidence this reading cannot
+already give some other way, so it is the only one taken.
+
+-}
+harvesterLooksActiveByRamp : EveOnline.ParseUserInterface.ShipUIModuleButton -> Bool
+harvesterLooksActiveByRamp moduleButton =
+    (moduleButton.rampRotationMilli |> Maybe.withDefault 0) /= 0
+
+
 {-| The propulsion module, which the client-setup contract puts first in the
 middle row.
 
@@ -2095,7 +2228,7 @@ lockGiveUpReadings =
     20
 
 
-{-| The two counters bounding the two things the harvest loop asks for.
+{-| The counters bounding the things the harvest loop asks for.
 
 Advanced in `updateMemoryForNewReadingFromGame`, which is the only place that
 can write memory and the one place that never sees a decision -- so what they
@@ -2105,20 +2238,65 @@ placement rule is about, and the comparison against them is asked inside
 `harvestStep`, which is reached on every reading the ship is on a grid with a
 cloud on it.
 
-Both reset outright on a reading where the client has answered, and on any
-reading with no cloud chosen at all -- so a session that harvests forty clouds
-starts from zero at each one.
+The first two reset outright on a reading where the client has answered, and
+on any reading with no cloud chosen at all -- so a session that harvests forty
+clouds starts from zero at each one. `harvestersKickedReadingsAgo` resets on
+the same "no cloud chosen" edge and additionally the moment the lock is lost,
+since it is a fact about _this_ lock rather than about the cloud-picking loop
+-- see its own doc comment.
 
 -}
 type alias HarvestCounters =
     { panelSelectUnansweredReadings : Int
     , lockUnansweredReadings : Int
+    , harvestersKickedReadingsAgo : List ( Int, Int )
     }
 
 
 initHarvestCounters : HarvestCounters
 initHarvestCounters =
-    { panelSelectUnansweredReadings = 0, lockUnansweredReadings = 0 }
+    { panelSelectUnansweredReadings = 0, lockUnansweredReadings = 0, harvestersKickedReadingsAgo = [] }
+
+
+{-| How long a forced press stands before this rule is willing to distrust
+"reads as running" again for the same harvester, under the same lock.
+
+Run 2, live on 2026-09-07: a one-shot version of this rule (kick once per lock,
+never again) forced both harvesters once when the lock landed and then reported
+`confirmed since this lock landed` for the rest of the lock's life -- while the
+operator, watching the client, could see they were not actually cycling. The
+one-shot design assumed `ramp_active` going stale was a fact about the _previous_
+target that a fresh lock settles once and for all; it does not settle whether the
+module keeps running for the rest of that lock, and this bot has no verified
+field that says so on its own.
+
+Bounded rather than continuous for the same reason the one-shot version was
+one-shot at all: every press is a toggle, and a harvester that genuinely is
+running is switched off by pressing it again. A short interval trades a
+possible one-cycle interruption of a module that was fine for the alternative
+this run just measured -- a harvester stuck off for the rest of a lock with
+nothing left in this rule that will ever ask again.
+
+20, matching `lockGiveUpReadings`' scale rather than a shorter number invented
+for this: both are "how long before this rule stops taking a stale-looking
+reading on faith", and nothing here has measured a harvester's own timing
+closely enough to argue for a different figure.
+
+**The clock alone turned out not to be enough.** Live on 2026-09-07, this
+interval fired on its own schedule against a harvester the client's own combat
+log showed mining every few readings throughout -- the toggle-flicker #12 and
+its successors are about, landed on a module this rule itself calls running.
+`harvesterLooksActiveByRamp` is the fix: the clock still bounds how long a
+stale-looking reading is taken on faith, but it is only spent pressing a
+harvester that also fails a live check of its ramp animation at the moment the
+clock runs out, and it is reset early -- see `harvestCountersAfterReading` --
+on any reading the ramp is seen turning, which is most readings of a harvester
+that is genuinely fine.
+
+-}
+harvesterRecheckIntervalReadings : Int
+harvesterRecheckIntervalReadings =
+    20
 
 
 {-| What one reading says about the two asks, in the terms the counters need.
@@ -2126,11 +2304,27 @@ initHarvestCounters =
 A record rather than a reading, so a case can fold a whole session through
 `harvestCountersAfterReading` and read the counters back.
 
+`harvesterIndexJustKicked` is read out of the **effects the bot dispatched**
+rather than out of which `HarvestStep` was taken, for `propulsionPressesAfterReading`'s
+own reason: what was asked for is knowable from the previous step's effects
+where what the decision function returned is not, once the decision for the
+next reading is what is being computed. It answers the same way whether the
+press came from `RunTheHarvester` (the module read as off) or `KickTheHarvester`
+(it read as on but due for a recheck) -- either one restarts this index's own
+clock towards its next recheck.
+
+`harvesterIndicesLookingActiveByRamp` is the other way a clock restarts, and it
+is read from the **current** reading rather than the previous step's effects,
+because it is evidence about the module rather than about what this bot asked
+for -- see `harvesterLooksActiveByRamp`.
+
 -}
 type alias HarvestAnswerFromClient =
     { cloudIsChosen : Bool
     , panelShowsTheCloud : Bool
     , cloudReadsLocked : Bool
+    , harvesterIndexJustKicked : Maybe Int
+    , harvesterIndicesLookingActiveByRamp : List Int
     }
 
 
@@ -2152,6 +2346,31 @@ harvestCountersAfterReading answer counters =
 
             else
                 counters.lockUnansweredReadings + 1
+        , harvestersKickedReadingsAgo =
+            if not answer.cloudReadsLocked then
+                []
+
+            else
+                let
+                    aged =
+                        counters.harvestersKickedReadingsAgo
+                            |> List.map (Tuple.mapSecond ((+) 1))
+
+                    confirmedFreshThisReading =
+                        (answer.harvesterIndexJustKicked |> Maybe.map List.singleton |> Maybe.withDefault [])
+                            ++ answer.harvesterIndicesLookingActiveByRamp
+                            |> List.foldl
+                                (\index unique ->
+                                    if List.member index unique then
+                                        unique
+
+                                    else
+                                        index :: unique
+                                )
+                                []
+                in
+                (confirmedFreshThisReading |> List.map (\index -> ( index, 0 )))
+                    ++ (aged |> List.filter (\( index, _ ) -> not (List.member index confirmedFreshThisReading)))
         }
 
 
@@ -2171,6 +2390,7 @@ type alias HarvestSituation =
     , cloudReadsLocked : Bool
     , cloudReadsLocking : Bool
     , harvestersNotRunning : List Int
+    , harvestersNeedingAKick : List Int
     , counters : HarvestCounters
     }
 
@@ -2192,7 +2412,7 @@ fall through to the next rather than holding the loop:
 
 `NothingLeftToCommand` is therefore two different situations -- everything
 running, and nothing left that can be tried -- which is why the status line
-renders the _situation_ beside the step rather than the step alone.
+renders the _situation_ beside the step alone.
 
 **The propulsion module was the first stage of this rule until #465 and is not
 here any more.** It moved to `keepThePropulsionModuleRunning`, above the leaving
@@ -2201,6 +2421,37 @@ one the ship is leaving on rather than one it is harvesting on -- and once it is
 asked there, a second copy here would be two branches pressing one toggle, the
 second of them inside the first's settling window.
 
+**`KickTheHarvester` is #456's other open question, closed the safe way rather
+than guessed.** `moduleRunningState` treats the widget's `ramp_active` entry
+being present **at all** as running, and only its absence as not -- deliberate,
+per that declaration's own doc comment, because an activation must be sure the
+module is off before pressing a toggle. Run 1, live on 2026-09-07: this bot
+pressed a harvester's hotkey twice, in its first few readings, and then not
+once more across the rest of a thousand-tick session, because `ramp_active`
+never went absent again -- whether that is the client honestly reporting the
+module still cycling, or the reading going stale the way a middle-slot module
+did on another hull in #35, is exactly what #456 could not settle without a
+live run, and now one has answered it by never restarting the harvester across
+several evasion warps and re-locks, in a session the operator had to keep
+retriggering by hand.
+
+**A `ramp_active` reading from _before_ the current lock landed cannot be
+evidence about the target under it now**, whichever of the two it is: a
+harvester needs the active target to do anything, so nothing about it could
+have been genuinely cycling on a cloud this ship had not yet locked. That is
+the first moment this rule is allowed to distrust "reads as running", and
+`harvestersKickedReadingsAgo` is what times it out: an index's clock starts the
+reading its hotkey is actually dispatched, by `RunTheHarvester` or by this, and
+runs until `harvesterRecheckIntervalReadings` -- so a harvester that genuinely
+is running fine under this lock is left alone for that whole window rather than
+toggled every reading, and one that has quietly stopped without `ramp_active`
+ever clearing gets asked again rather than left stuck for the rest of the lock,
+which is what a true one-shot version of this rule did in run 2. Both directions
+are costs rather than certainties: pressing a module that was fine costs one of
+its cycles, and waiting out the interval on one that had already stopped costs
+up to that many readings of it doing nothing -- there is no reading available
+here that tells the difference in advance.
+
 -}
 type HarvestStep
     = SelectTheCloud
@@ -2208,6 +2459,7 @@ type HarvestStep
     | LockTheCloud
     | WaitForTheLockToLand
     | RunTheHarvester Int
+    | KickTheHarvester Int
     | NothingLeftToCommand
 
 
@@ -2221,11 +2473,16 @@ harvestStep situation =
 
     else if situation.cloudReadsLocked then
         case situation.harvestersNotRunning of
-            [] ->
-                NothingLeftToCommand
-
             index :: _ ->
                 RunTheHarvester index
+
+            [] ->
+                case situation.harvestersNeedingAKick of
+                    index :: _ ->
+                        KickTheHarvester index
+
+                    [] ->
+                        NothingLeftToCommand
 
     else if situation.cloudReadsLocking then
         WaitForTheLockToLand
@@ -2352,6 +2609,24 @@ harvestSituationFromContext context shipUI cloud =
             |> List.indexedMap Tuple.pair
             |> List.filter (Tuple.second >> moduleRunningState >> (==) ModuleIsNotRunning)
             |> List.map Tuple.first
+    , harvestersNeedingAKick =
+        harvesterModulesFromShipUI shipUI
+            |> List.indexedMap Tuple.pair
+            |> List.filter (Tuple.second >> moduleRunningState >> (==) ModuleIsRunning)
+            -- Never kick a module whose ramp is visibly turning right now --
+            -- see `harvesterLooksActiveByRamp`. Belt and braces alongside the
+            -- clock reset in `harvestCountersAfterReading`: that reset keeps
+            -- the clock from reaching the interval in the first place on an
+            -- ordinary reading, and this keeps a kick from firing on the one
+            -- reading the clock and a momentary ramp reading disagree.
+            |> List.filter (Tuple.second >> harvesterLooksActiveByRamp >> not)
+            |> List.map Tuple.first
+            |> List.filter
+                (\index ->
+                    context.memory.harvestCounters.harvestersKickedReadingsAgo
+                        |> List.filter (Tuple.first >> (==) index)
+                        |> List.all (Tuple.second >> (<=) harvesterRecheckIntervalReadings)
+                )
     , counters = context.memory.harvestCounters
     }
 
@@ -2383,23 +2658,12 @@ actOnTheHarvestStep context shipUI cloud situation =
                 )
 
         PressTheOrbitButton ->
-            case selectedItemPanelButton context.readingFromGameClient selectedItemOrbitButton of
-                Just button ->
-                    describeBranch
-                        ("Orbit '" ++ cloudName ++ "' with the Selected Item panel's own button, at whatever range the client last used.")
-                        (decideActionForCurrentStep
-                            (button |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault [])
-                        )
-
-                Nothing ->
-                    -- Unreachable: `harvestStep` only answers this where the
-                    -- situation said the button was offered, and the situation
-                    -- is built from the same reading. Says so rather than
-                    -- pretending, because a silent wait here would be a branch
-                    -- reporting nothing and doing nothing.
-                    describeBranch
-                        "The Orbit button left the panel between reading it and pressing it -- ask again next reading."
-                        waitForProgressInGame
+            describeBranch
+                ("Orbit '" ++ cloudName ++ "' at " ++ context.eventContext.botSettings.orbitRange ++ ", commanded rather than inherited from the client's own default.")
+                (useContextMenuCascade ( cloudName, cloud.uiNode )
+                    (orbitCascadeAt context.eventContext.botSettings.orbitRange)
+                    context
+                )
 
         LockTheCloud ->
             describeBranch
@@ -2430,6 +2694,40 @@ actOnTheHarvestStep context shipUI cloud situation =
                 ( Nothing, Just moduleButton ) ->
                     describeBranch
                         ("Run gas harvester " ++ String.fromInt (index + 1) ++ " -- past the four the hotkeys reach, so click its button.")
+                        (EveOnline.BotFrameworkSeparatingMemory.clickModuleButtonButWaitIfClickedInPreviousStep
+                            context
+                            moduleButton
+                        )
+
+                ( Nothing, Nothing ) ->
+                    describeBranch
+                        "The module row changed between reading it and pressing it -- ask again next reading."
+                        waitForProgressInGame
+
+        KickTheHarvester index ->
+            case
+                ( topRowModuleHotkeyFromIndex index
+                , harvesterModulesFromShipUI shipUI |> List.drop index |> List.head
+                )
+            of
+                ( Just keyCode, _ ) ->
+                    pressModuleHotkey context
+                        ("Run gas harvester "
+                            ++ String.fromInt (index + 1)
+                            ++ " on '"
+                            ++ cloudName
+                            ++ "' even though it reads as cycling -- due for a recheck ("
+                            ++ String.fromInt harvesterRecheckIntervalReadings
+                            ++ " readings since the last one), so the reading may be stale rather than the module still doing anything (#456)."
+                        )
+                        [ keyCode ]
+
+                ( Nothing, Just moduleButton ) ->
+                    describeBranch
+                        ("Run gas harvester "
+                            ++ String.fromInt (index + 1)
+                            ++ " -- past the four the hotkeys reach, so click its button. It reads as cycling but is due for a recheck (#456)."
+                        )
                         (EveOnline.BotFrameworkSeparatingMemory.clickModuleButtonButWaitIfClickedInPreviousStep
                             context
                             moduleButton
@@ -2494,16 +2792,39 @@ describeHarvestSituation situation =
                     ++ String.fromInt lockGiveUpReadings
                     ++ ")"
 
-        harvesters =
-            case situation.harvestersNotRunning of
-                [] ->
-                    "both cycling"
+        describeSlots slots =
+            slots |> List.map (\index -> String.fromInt (index + 1)) |> String.join ", "
 
-                notRunning ->
+        harvesters =
+            case ( situation.harvestersNotRunning, situation.harvestersNeedingAKick ) of
+                ( [], [] ) ->
+                    "both cycling, rechecked within the last "
+                        ++ String.fromInt harvesterRecheckIntervalReadings
+                        ++ " readings"
+
+                ( [], needingKick ) ->
+                    "both read as cycling, "
+                        ++ String.fromInt (List.length needingKick)
+                        ++ " due for a recheck (top-row slot(s) "
+                        ++ describeSlots needingKick
+                        ++ ")"
+
+                ( notRunning, needingKick ) ->
                     String.fromInt (List.length notRunning)
                         ++ " not cycling (top-row slot(s) "
-                        ++ (notRunning |> List.map (\index -> String.fromInt (index + 1)) |> String.join ", ")
+                        ++ describeSlots notRunning
                         ++ ")"
+                        ++ (case needingKick of
+                                [] ->
+                                    ""
+
+                                _ ->
+                                    ", "
+                                        ++ String.fromInt (List.length needingKick)
+                                        ++ " more due for a recheck (slot(s) "
+                                        ++ describeSlots needingKick
+                                        ++ ")"
+                           )
     in
     "Harvest: "
         ++ orbit
@@ -2549,9 +2870,56 @@ warpToWithinMenuEntry =
     "Warp to Within"
 
 
+{-| A scan result's menu carries **two** entries this prefix matches, and they do
+different things.
+
+Read live on 2026-09-07, right-clicking a scanned site that is not on grid:
+
+    Warp to Within 0 m | Warp to Within | Align to | Save Location... | Ignore Result | Ignore Other Results
+
+`Warp to Within 0 m` warps when it is **clicked**. `Warp to Within` is the
+submenu parent and opens a flyout when it is **hovered**. A bookmark's menu is
+different again -- one entry reading `Warp to Within (0 m)`, with the client's
+current default in parentheses, which is the submenu parent there.
+
+So the prefix alone cannot say which kind of entry it has found, and the cascade
+treats whatever it matches as a submenu parent: it hovers, and a hover on a
+direct entry does nothing at all. That is #485's site warp -- 16 hovers and no
+click.
+
+`menuEntryIsTheWarpSubmenuParent` is what the cascade wants: the parent, and
+never the direct entry beside it. The parenthesised distance still moves, so the
+comparison is on the trimmed text with any parenthesised suffix removed rather
+than on the whole string -- which is `warpToWithinMenuEntry`'s original argument,
+kept, with the ambiguity it did not know about taken out.
+
+-}
 menuEntryOpensTheWarpDistanceSubmenu : String -> Bool
-menuEntryOpensTheWarpDistanceSubmenu entryText =
-    entryText |> String.trim |> String.startsWith warpToWithinMenuEntry
+menuEntryOpensTheWarpDistanceSubmenu =
+    menuEntryIsTheWarpSubmenuParent
+
+
+menuEntryIsTheWarpSubmenuParent : String -> Bool
+menuEntryIsTheWarpSubmenuParent entryText =
+    menuEntryTextWithoutParenthesisedSuffix entryText == warpToWithinMenuEntry
+
+
+{-| The entry text with a trailing parenthesised value removed, and trimmed.
+
+`Orbit (5,000 m)` and `Warp to Within (0 m)` both carry the client's own current
+default in that suffix, and it moves the moment an operator takes a different
+distance by hand. Removing it is what lets a submenu parent be recognised by
+equality rather than by a prefix that also matches its neighbours.
+
+-}
+menuEntryTextWithoutParenthesisedSuffix : String -> String
+menuEntryTextWithoutParenthesisedSuffix entryText =
+    case entryText |> String.trim |> String.split "(" of
+        before :: _ ->
+            String.trim before
+
+        [] ->
+            String.trim entryText
 
 
 {-| The distance submenu's own entries, as the client writes them.
@@ -2608,6 +2976,164 @@ equality rather than a substring.
 warpAt100KmMenuEntry : String
 warpAt100KmMenuEntry =
     "Within 100 km"
+
+
+{-| Whether a scanned site is on this grid, read off the unit of its distance.
+
+Ported from `eve-online-saxrat`'s `scanResultLooksLikeItIsOnGrid`, which reads
+the **unit** rather than parsing a number -- and that is the whole of why it
+works. `CLAUDE.md` records that an `AU` distance does not parse at all, and that
+every consumer which tried turned the failure into a `999999` placeholder that
+reads as _merely far away_ rather than as _not on this grid_.
+
+Measured live on 2026-09-07: the site the ship was sitting on read `2,507 m`
+while every other result read `3.62 AU`, `5.07 AU`, `3.88 AU`.
+
+`Maybe Bool` and not `Bool`, deliberately. A `Distance` cell that is absent or
+unreadable is **not** on grid, and it is also not licence to warp -- it is
+unknown, and collapsing the two is how this bot would either strand itself on a
+site it cannot see it is on, or warp at something it cannot see it is not. The
+caller reads `Just True` and nothing else as "do not warp".
+
+The test is a substring on `" m"`, which `" km"` also satisfies. That is
+saxrat's own behaviour and it is correct here: both units mean on grid.
+
+-}
+scanResultIsOnGrid : EveOnline.ParseUserInterface.ProbeScanResult -> Maybe Bool
+scanResultIsOnGrid =
+    .cellsTexts
+        >> Dict.get scanResultDistanceColumn
+        >> Maybe.map (\text -> String.contains " m" text || String.contains " km" text)
+
+
+scanResultDistanceColumn : String
+scanResultDistanceColumn =
+    "Distance"
+
+
+{-| Orbit the cloud at a commanded range, rather than at whatever the client
+last used.
+
+`#456` said, and this file's own header said, that no command here can orbit at a
+_distance_ -- that the Selected Item panel's Orbit button inherits the client's
+default and that the range is therefore a client-setup requirement the operator
+has to arrange by hand. **That was true of this repository and false of this
+client**, and reading the menu is what settled it. Right-clicking a
+`Harvestable Cloud` overview row on 2026-09-07:
+
+    Approach | Orbit (5,000 m) | Look at | Track | Lock Target | Show Info | ...
+
+and that entry opens a flyout:
+
+    500 m | 1,000 m | 2,500 m | 5,000 m | 7,500 m | 10 km | 15 km | 20 km | 25 km | 30 km | Current 0 m | Set Default
+
+So the range this bot needs is a literal the client offers, and commanding it
+removes one of the three items the header lists as unenforceable -- the class of
+requirement whose own framing is that getting it wrong "produces a bot that looks
+like it is working". The harvesters' range refusal stays as the backstop rather
+than as the only signal.
+
+**The parent is matched with its parenthesised default removed**, for
+`menuEntryTextWithoutParenthesisedSuffix`'s reason: `(5,000 m)` is the client's
+current default and moves the moment anybody takes a different range by hand.
+
+**The flyout opened to the _left_ of its parent** (x=1449 against the parent's
+x=1557). Nothing here depends on that, since the cascade finds entries by text
+rather than by position -- but a future change that starts reasoning about where
+a submenu appears would be wrong about this one.
+
+-}
+orbitCascadeAt : String -> EveOnline.BotFramework.UseContextMenuCascadeNode
+orbitCascadeAt rangeMenuEntry =
+    useMenuEntryInLastContextMenuInCascade
+        { describeChoice = "'" ++ orbitMenuEntry ++ "', ignoring the client's own default in parentheses"
+        , chooseEntry =
+            List.filter (.text >> menuEntryIsTheOrbitSubmenuParent) >> List.head
+        }
+        (useMenuEntryWithTextEqual rangeMenuEntry menuCascadeCompleted)
+
+
+orbitMenuEntry : String
+orbitMenuEntry =
+    "Orbit"
+
+
+menuEntryIsTheOrbitSubmenuParent : String -> Bool
+menuEntryIsTheOrbitSubmenuParent entryText =
+    menuEntryTextWithoutParenthesisedSuffix entryText == orbitMenuEntry
+
+
+{-| The orbit flyout's own entries, as the client writes them, nearest first.
+
+`Set Default` and `Current 0 m` are deliberately **not** here, for
+`warpDistanceMenuEntries`' reason: the first retunes the client rather than
+orbiting, and the second orbits at zero, which is not a range anybody asked for
+and would put the ship inside the cloud rather than around it.
+
+-}
+orbitRangeMenuEntries : List String
+orbitRangeMenuEntries =
+    [ "500 m"
+    , "1,000 m"
+    , "2,500 m"
+    , "5,000 m"
+    , "7,500 m"
+    , "10 km"
+    , "15 km"
+    , "20 km"
+    , "25 km"
+    , "30 km"
+    ]
+
+
+defaultOrbitRange : String
+defaultOrbitRange =
+    "500 m"
+
+
+{-| Warp to a scanned site with the row's **own** warp button.
+
+`ProbeScanResult.warpButton` is parsed on every reading and was read by nothing.
+One click on it warped the ship, measured live on 2026-09-07:
+
+    before:    0.0 m/s
+    after 2s:  (Warping)  Establishing Warp Vector
+    after 6s:  (Warping)  Warp Drive Active
+
+It replaces a two-level context-menu cascade for this path, which matters beyond
+being fewer steps. A cascade's hover and its click fall in **different readings**,
+and #485 is the D-Scan refresh taking the reading in between -- every time,
+because the refresh runs on its own interval and outranks the site branch. A
+single click cannot be starved that way: there is no intermediate state for
+another branch to interrupt.
+
+**The bookmark half keeps its cascade**, because a `PlaceEntry` has no such
+button and its menu genuinely is the two-level `Warp to Within (0 m)` ->
+`Within 0 m` shape. So the retreat path remains exposed to the same starvation,
+which is #485's other half and is not fixed here.
+
+A row with no warp button falls back to the cascade rather than declining: the
+button is absent on results that cannot be warped to at all, and the on-grid
+guard above has already taken the case this bot meets in practice.
+
+-}
+warpToScanResult : BotDecisionContext -> EveOnline.ParseUserInterface.ProbeScanResult -> DecisionPathNode
+warpToScanResult context anomaly =
+    case anomaly.warpButton of
+        Just button ->
+            describeBranch
+                "Click the scan result's own warp button -- one click, no menu to be interrupted between hovering and clicking."
+                (decideActionForCurrentStep
+                    (button |> mouseClickOnUIElement MouseButtonLeft |> Result.withDefault [])
+                )
+
+        Nothing ->
+            describeBranch
+                "This scan result carries no warp button, so take the context menu instead."
+                (useContextMenuCascade ( "Scan result", anomaly.uiNode )
+                    (warpCascadeWithin warpAtZeroMenuEntry)
+                    context
+                )
 
 
 {-| The two-level cascade, at whichever distance the caller wants.
@@ -2670,9 +3196,23 @@ warpToTheHuntedSite context site =
     in
     case site of
         ScannedAnomaly anomaly ->
-            describeBranch
-                ("Warp to the scanned anomaly " ++ describeAnomalyIdentity anomaly ++ ", at zero.")
-                (useContextMenuCascade ( "Scan result", anomaly.uiNode ) warpMenu context)
+            if scanResultIsOnGrid anomaly == Just True then
+                -- #485: the ship is already here. Warping is not merely
+                -- redundant, it cannot succeed and cannot self-correct: the
+                -- client offers no warp entry at all on a result the ship is
+                -- sitting on (measured live -- `Align to | Save Location... |
+                -- Ignore Result | Ignore Other Results` and nothing else), so
+                -- the cascade opens a menu, fails to find its entry, and starts
+                -- over for as long as the ship stays. The clouds are on the
+                -- overview the whole time.
+                describeBranch
+                    ("Already on grid with " ++ describeAnomalyIdentity anomaly ++ " -- nothing to warp to, so wait for a cloud rather than commanding a warp the client will not offer.")
+                    waitForProgressInGame
+
+            else
+                describeBranch
+                    ("Warp to the scanned anomaly " ++ describeAnomalyIdentity anomaly ++ ", at zero.")
+                    (warpToScanResult context anomaly)
 
         BookmarkedSite bookmark ->
             describeBranch
@@ -2880,6 +3420,60 @@ dscanTypeIsNotAShip typeText =
         |> List.any (\marker -> stringContainsIgnoringCase marker typeText)
 
 
+{-| A probe is not a ship -- **except a combat probe, which is a hunt in progress.**
+
+Run 3, live on 2026-09-07, evaded on eight rows all reading `Scanner Probe` and
+harvested nothing. Probes are deployable objects rather than ships and carry no
+ship name to tag, so the untagged rule reads every one of them as hostile: this
+bot could not work in any system where anybody's probes were out, **including
+its own**, since the operator scans the site down before hunting it.
+
+The operator's own rule, and the reason this is two predicates rather than one
+more entry in the list above: _evading combat probes is good; evading scanner
+probes is paranoid._ Core probes are somebody scanning signatures, which is
+ordinary wormhole traffic. **Combat** probes are the thing that scans a ship
+down, and a cloaked huffer's whole defence is not being found -- so they are
+exactly what this bot should leave for, and they must not be swept up by a rule
+written to ignore their harmless siblings.
+
+**Both cells are tested, deliberately.** The live rows printed `Scanner Probe`
+and nothing else, and with D-Scan empty by the time this was written there was no
+reading to say whether that came from the Name column or the Type column. Asking
+both is what makes the rule correct either way rather than correct if a guess
+about column layout holds -- and it costs nothing, since no ship hull carries
+either phrase.
+
+**Unverified, and it is the half that matters:** no combat probe has been seen on
+this bot's D-Scan, so `combatProbeMarker` is CCP's own naming for the item rather
+than a string read off a reading. If it is wrong, this bot ignores the probes it
+most needs to run from -- which is the direction this whole file otherwise
+refuses, and it is accepted here only because the alternative measured live is a
+bot that evades continuously and never harvests. **The first run that meets one
+is what settles it**, and the status line prints every judged row's cells for
+exactly that reason.
+
+-}
+probeMarker : String
+probeMarker =
+    "Scanner Probe"
+
+
+combatProbeMarker : String
+combatProbeMarker =
+    "Combat Scanner Probe"
+
+
+dscanRowIsHarmlessProbe : { name : Maybe String, type_ : Maybe String } -> Bool
+dscanRowIsHarmlessProbe row =
+    let
+        anyCellContains marker =
+            [ row.name, row.type_ ]
+                |> List.filterMap identity
+                |> List.any (stringContainsIgnoringCase marker)
+    in
+    anyCellContains probeMarker && not (anyCellContains combatProbeMarker)
+
+
 {-| The three cells of one D-Scan row, as a record a case can write out.
 
 A record rather than `EveOnline.ParseUserInterface.DirectionalScanResult`,
@@ -2915,6 +3509,7 @@ type DscanRowVerdict
     = RowIsNotAShip String
     | ShipIsOneOfOurs String
     | ShipIsHostile DscanHostileReason
+    | RowCouldNotBeRead
 
 
 {-| Why a row read hostile, which is two different things.
@@ -2935,41 +3530,76 @@ type DscanHostileReason
 {-| The rule the whole of trigger 3 is, over one row.
 
 **Absent evidence reads as hostile here, which inverts this repo's usual
-direction**, and it is asserted rather than assumed at each of the three places
-it could be undone:
+direction**, and it is asserted rather than assumed at each of the places it
+could be undone:
 
   - `friendly-ship-tag` unset makes `shipReadsFriendly` answer `False` for every
     name there is, so every ship reads hostile. That is `TrustNobody`, decided
     in `hostileTrustFromSettings` and read here rather than restated.
-  - a Name cell the parser could not read is `Nothing` and answers hostile. It
-    is **not** defaulted to `""`: an empty string carries no tag, so today's
-    behaviour would be identical and the safety would be an accident of the tag
-    never being empty -- and `valueTypeNonEmptyString` is the only thing keeping
-    that true.
-  - a Type cell the parser could not read is not a structure, so the row is
-    judged as a ship.
+  - a Name cell the parser could not read, **with the Type cell readable**, is
+    `Nothing` and answers hostile. It is **not** defaulted to `""`: an empty
+    string carries no tag, so today's behaviour would be identical and the
+    safety would be an accident of the tag never being empty -- and
+    `valueTypeNonEmptyString` is the only thing keeping that true.
+  - a Type cell the parser could not read, **with the Name cell readable**, is
+    not a structure, so the row is judged as a ship.
 
 The direction costs a warp when it is wrong and costs the ship when it is wrong
 the other way, which is the whole of why it is this way round.
 
+**Both cells unreadable is a fourth case, and it is not evidence of anything.**
+Run 1, live on 2026-09-07: every reading that produced `ShipIsHostile
+ShipNameCouldNotBeRead` for a real site's own scanner probes had `[<unreadable>
+| <unreadable> | <unreadable>]` for **all three** cells, Distance included, and
+landed on a reading logged `Last completed scan 0s ago` -- the row captured in
+the instant between the refresh landing and the client finishing drawing the
+new result text into it, not a ship of an unusual shape. The same probes read
+correctly (`Type 'Sisters Core Scanner Probe'`, excluded) on the very next
+scan. Treating a blank row as `ShipNameCouldNotBeRead` made the site's own
+probes flip between harmless and hostile from one D-Scan refresh to the next,
+which is what drove the ship to evade a clean grid and warp home over and over.
+
+A Type cell that reads _something_ -- any text at all, matching no known marker
+-- is still real evidence of an object out there, and stays hostile: that is
+the case the two bullets above are about, and it is untouched. Only the reading
+that produced **no cell text whatsoever** is reclassified, to `RowCouldNotBeRead`,
+which `dscanHostileReason` answers `Nothing` for -- the same as a row this bot
+has positively identified as harmless, but distinguished in the decision log
+(`describeDscanRowVerdict`) so a grid that is genuinely full of unreadable rows
+still reads differently from one with nothing on it at all.
+
 -}
 dscanRowVerdict : HostileTrust -> DscanSighting -> DscanRowVerdict
 dscanRowVerdict trust row =
-    case row.type_ |> Maybe.andThen structureTypeThatIsNotAShip of
-        Just typeText ->
-            RowIsNotAShip typeText
+    if dscanRowIsHarmlessProbe { name = row.name, type_ = row.type_ } then
+        -- Asked before the Type list and before the name, because a probe is
+        -- identified by either cell and carries no ship name to tag. See
+        -- `dscanRowIsHarmlessProbe`: a *combat* probe fails this and falls
+        -- through to the ship branch below, which is the whole point of it.
+        RowIsNotAShip (row.type_ |> Maybe.withDefault probeMarker)
 
-        Nothing ->
-            case row.name of
-                Nothing ->
-                    ShipIsHostile ShipNameCouldNotBeRead
+    else
+        case row.type_ |> Maybe.andThen structureTypeThatIsNotAShip of
+            Just typeText ->
+                RowIsNotAShip typeText
 
-                Just name ->
-                    if shipReadsFriendly trust name then
-                        ShipIsOneOfOurs name
+            Nothing ->
+                case ( row.type_, row.name ) of
+                    ( Nothing, Nothing ) ->
+                        -- The whole row came back blank -- no cell said
+                        -- anything at all, which is a reading that raced the
+                        -- D-Scan refresh rather than a sighting of anything.
+                        RowCouldNotBeRead
 
-                    else
-                        ShipIsHostile (ShipNameCarriesNoFriendlyTag name)
+                    ( _, Nothing ) ->
+                        ShipIsHostile ShipNameCouldNotBeRead
+
+                    ( _, Just name ) ->
+                        if shipReadsFriendly trust name then
+                            ShipIsOneOfOurs name
+
+                        else
+                            ShipIsHostile (ShipNameCarriesNoFriendlyTag name)
 
 
 structureTypeThatIsNotAShip : String -> Maybe String
@@ -3213,6 +3843,9 @@ dscanHostileReason verdict =
         ShipIsOneOfOurs _ ->
             Nothing
 
+        RowCouldNotBeRead ->
+            Nothing
+
 
 {-| The evidence this reading carries, assembled from the client.
 
@@ -3359,6 +3992,9 @@ describeDscanRowVerdict verdict =
 
         ShipIsHostile ShipNameCouldNotBeRead ->
             "HOSTILE, Name cell unreadable"
+
+        RowCouldNotBeRead ->
+            "row unreadable this reading, not judged"
 
 
 {-| Every D-Scan row's cells exactly as the parser answered them.
@@ -3771,6 +4407,39 @@ homeStructureRowsOnTheOverview homeStructureName overviewEntries =
                     )
 
 
+{-| A bookmark in the Locations window carrying the home structure's own name.
+
+The overview is where this bot docks from, but it is not the only place the
+structure's name can appear: an operator who bookmarked the structure directly
+gets a bookmark this bot can warp to at zero from anywhere in the same system,
+without depending on the overview having rendered the structure at all. This is
+what `depositChainHop` asks before it concludes there is genuinely nowhere to
+run to and starts working a wormhole chain back toward known space.
+
+Matched with `siteCellMatches` against `bookmarkLabel`, which is the same rule
+`homeStructureRowsOnTheOverview` uses against the overview's Name column --
+whole, ignoring case and surrounding space, with a trailing `*` meaning a
+prefix -- so an operator's one setting means the same thing read off either
+window.
+
+-}
+homeStructureBookmarkInLocations :
+    Maybe String
+    -> Maybe EveOnline.ParseUserInterface.LocationsWindow
+    -> Maybe EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
+homeStructureBookmarkInLocations homeStructureName locationsWindow =
+    case homeStructureName of
+        Nothing ->
+            Nothing
+
+        Just name ->
+            locationsWindow
+                |> Maybe.map .placeEntries
+                |> Maybe.withDefault []
+                |> List.filter (\entry -> siteCellMatches (bookmarkLabel entry.mainText) name)
+                |> List.head
+
+
 retreatSearchFromContext : BotDecisionContext -> RetreatSearch
 retreatSearchFromContext context =
     let
@@ -3953,7 +4622,7 @@ cloakAmongFittedModules modules =
         identified =
             modules |> List.filter (.tooltipTexts >> List.isEmpty >> not)
 
-        cloaks =
+        byTooltip =
             modules
                 |> List.indexedMap Tuple.pair
                 |> List.filter
@@ -3962,7 +4631,7 @@ cloakAmongFittedModules modules =
                         >> List.any (stringContainsIgnoringCase cloakingDeviceTooltipMarker)
                     )
     in
-    case cloaks of
+    case byTooltip of
         ( index, cloak ) :: _ ->
             case cloak.runningState of
                 ModuleIsRunning ->
@@ -3980,6 +4649,39 @@ cloakAmongFittedModules modules =
 
             else
                 NoCloakAmongTheModulesIdentified (List.length modules)
+
+
+{-| The cloak's own hotkey, which the operator states rather than the bot discovering.
+
+**The tooltip hunt above is kept and asked first**, and this is the fallback --
+which is the opposite of how it reads, so the reason matters. A tooltip is the
+only thing in a reading that says _what a module is_, and it is right whatever
+the fit. What it is not is _timely_: the hover happens only on readings with
+nothing else to press, so run 3 reached its first evasion with `0 of 5 module(s)`
+identified and evaded uncloaked -- and an evasion is exactly when the cloak is
+wanted and exactly when there is no quiet reading to spend on a hover.
+
+The operator's own keybinds -- scoops on `F1` and `F2`, cloak on `F3` -- make it
+pressable on the first reading, with no discovery at all.
+
+**A hotkey and not a module index**, which is the correction that matters here.
+`ActivateTheCloak` indexes into `fittedModulesFromContext`, and that list is the
+**whole ship** in the parser's own order -- so "the third top-row module" and
+"index 2 of every module on the hull" are different modules the moment the fit
+has anything above the top row. Pressing the key the operator bound says exactly
+what was meant and cannot drift with the fit; the index route would have clicked
+whatever happened to be third.
+
+**It is a claim about one fit.** A ship with no cloak on `F3` presses whatever is
+there on the reading it leaves. The tooltip rule is asked first precisely to
+bound that: once a hover has identified a real cloak anywhere on the hull, the
+tooltip answer wins and this is never reached. Measured against run 3's cost,
+which was evading with no cloak at all.
+
+-}
+cloakHotkey : List EffectOnWindow.VirtualKeyCode
+cloakHotkey =
+    [ EffectOnWindow.vkey_F3 ]
 
 
 {-| Every module button in the reading, paired with what has been learned of it.
@@ -4451,9 +5153,17 @@ Then:
     stopping: sitting on a hostile grid because no bookmark is named is worse than
     cloaking on it and worse again than bouncing off it;
   - **a cloak fitted and not running** is switched on, unless it has been asked
-    for `cloakGiveUpReadings` readings and answered nothing. A fit with no cloak in
-    it, or one whose modules are not identified yet, falls straight through --
-    which is #463's own requirement and the mutation it names;
+    for `cloakGiveUpReadings` readings and answered nothing. A fit with no cloak
+    in it, once every module has been identified, falls straight through --
+    which is #463's own requirement and the mutation it names. **A fit whose
+    modules are not identified yet does not fall through the same way**: run 3
+    evaded with `0 of 5` identified and no cloak, and the operator's own
+    keybind presses the module by hotkey regardless of which slot a cloak
+    turns out to be in, so `ActivateTheCloakByHotkey` presses it speculatively
+    -- on the same `cloakGiveUpReadings` clock -- rather than leaving the ship
+    uncloaked for however long identification takes. The tooltip answer still
+    wins the moment it lands, at which point this reads as one of the other
+    two cases;
   - **a celestial on the overview** is warped to, at a range drawn per attempt.
     Which celestial rotates with the reading count, so an evasion that is not
     working tries a different corner of the system;
@@ -4467,6 +5177,7 @@ type EvasionStep
     | WaitForTheEvasionWarpToLand
     | WarpOutOfTheSite RetreatDestination
     | ActivateTheCloak Int
+    | ActivateTheCloakByHotkey
     | WarpToACelestial Int
     | NothingLeftToLeaveWith
 
@@ -4492,6 +5203,17 @@ evasionStep situation =
                     TheCloakIsFittedAndNotRunning index ->
                         if situation.counters.cloakUnansweredReadings < cloakGiveUpReadings then
                             ActivateTheCloak index
+
+                        else
+                            bounceOffACelestial situation
+
+                    TheModulesAreNotIdentifiedYet _ ->
+                        -- Run 3 evaded here with `0 of 5` identified and no
+                        -- cloak. The operator's keybind says F3 without any
+                        -- discovery, so press it rather than leave uncloaked;
+                        -- the tooltip answer above still wins once it lands.
+                        if situation.counters.cloakUnansweredReadings < cloakGiveUpReadings then
+                            ActivateTheCloakByHotkey
 
                         else
                             bounceOffACelestial situation
@@ -4634,6 +5356,18 @@ actOnTheEvasionStep context situation =
                             "The module row changed between reading it and pressing the cloak -- ask again next reading."
                             waitForProgressInGame
                         )
+
+        ActivateTheCloakByHotkey ->
+            Just
+                (describeBranch
+                    ("Cloak up with its own hotkey (F3) -- no module here has been identified by tooltip yet, and an evasion is exactly when there is no quiet reading to spend on a hover ("
+                        ++ String.fromInt situation.counters.cloakUnansweredReadings
+                        ++ "/"
+                        ++ String.fromInt cloakGiveUpReadings
+                        ++ " readings it has been asked for and not answered)."
+                    )
+                    (decideActionForCurrentStep (hotkeyEffects cloakHotkey))
+                )
 
         WarpToACelestial index ->
             case celestialsToBounceOffOnTheOverview context.readingFromGameClient |> List.drop index |> List.head of
@@ -5542,6 +6276,147 @@ itemIconOffsetFromTop =
     25
 
 
+{-| The overview's own word for a wormhole, matched against the Type column the
+way `harvestableCloudTypeMarker` is matched against a cloud's.
+-}
+wormholeTypeMarker : String
+wormholeTypeMarker =
+    "Wormhole"
+
+
+{-| The wormholes on this grid, filtered on `_display` for
+`overviewEntryIsDisplayed`'s reason: `depositChainHop` right-clicks whichever
+row this answers, and a hidden row's screen position belongs to whatever was
+recycled into it.
+-}
+wormholeRowsOnTheOverview : List EveOnline.ParseUserInterface.OverviewWindowEntry -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+wormholeRowsOnTheOverview overviewEntries =
+    overviewEntries
+        |> List.filter overviewEntryIsDisplayed
+        |> List.filter
+            (.objectType
+                >> Maybe.map (stringContainsIgnoringCase wormholeTypeMarker)
+                >> Maybe.withDefault False
+            )
+
+
+{-| The menu text a wormhole's own jump entry is matched against.
+
+A substring rather than the exact wording, because nobody has read a wormhole's
+context menu on a live client here -- this app has never jumped one. `"jump"`
+is the same width of net this codebase already uses for a stargate's own
+`Jump Through Stargate` entry in the apps that have one, and it is chosen
+narrow on purpose: a wormhole's menu also draws `Show Info`, `Warp to Within`
+and the rest of the ordinary set, and none of them contain the word.
+
+-}
+jumpWormholeMenuEntry : String
+jumpWormholeMenuEntry =
+    "jump"
+
+
+jumpWormholeCascade : EveOnline.BotFramework.UseContextMenuCascadeNode
+jumpWormholeCascade =
+    useMenuEntryWithTextContaining jumpWormholeMenuEntry menuCascadeCompleted
+
+
+{-| How many wormholes this bot will jump looking for a way back to
+`home-structure-name`, in one deposit trip.
+
+Bounded because a chain that has gone wrong -- a bookmark that leads nowhere, a
+wormhole that closed behind the ship, a chain this operator never walked in
+this direction -- must not spend the whole of `depositGiveUpReadings` jumping
+forever with the hold still full. Five, on the operator's own word: "can't
+imagine we'll stray further than that" is not a measurement, and none exists
+yet for a path nobody has flown, so this is a stated judgement call rather than
+a number derived from a corpus, unlike almost every other bound in this file.
+
+**This bounds hops, not readings.** `depositGiveUpReadings` (300, and asked
+from the same place every other deposit failure is asked from) is still the
+backstop that ends the session if the chain-hop machinery itself gets stuck
+mid-hop -- waiting on a warp that never lands, a menu that never offers
+`jump`. The two are independent for the reason #120 keeps guards independent
+elsewhere in this codebase: a hop counter that never advances must not disarm
+the reading-based bound underneath it.
+
+-}
+depositChainHopLimit : Int
+depositChainHopLimit =
+    5
+
+
+{-| How many wormholes this trip has jumped, and where the ship was last known
+to be.
+
+A `DepositRun` counts readings; this counts **hops**, which is a different
+question and wants a different clock -- seeing the same system on two
+consecutive readings must not look like a hop, and a hop that takes many
+readings (the docking-run-in shape, stretched across a whole warp and a jump)
+must not go uncounted just because it was slow. The solar system's own name is
+what says a hop landed: it is the one thing in a reading that changes if and
+only if the ship is now somewhere else, where the ship's own screen position,
+its speed and everything about the overview are exactly as true of a slow
+warp that has not arrived as of a jump that has.
+
+-}
+type alias DepositChainHopMemory =
+    { hopsMade : Int
+    , lastSolarSystemName : Maybe String
+    }
+
+
+initDepositChainHopMemory : DepositChainHopMemory
+initDepositChainHopMemory =
+    { hopsMade = 0, lastSolarSystemName = Nothing }
+
+
+{-| The chain-hop counters as they stand after this reading.
+
+**Reset whenever there is no deposit run under way, and the moment the home
+structure becomes reachable again** -- by either of `depositChainHop`'s own two
+checks, on the overview or in Locations. A hop count left standing across two
+different deposit trips would tell the second trip it had already spent hops
+the first trip took, and a chain successfully finished is exactly the reading
+this bot has no further use for the count on.
+
+The first reading with no `lastSolarSystemName` to compare against can never
+register a hop, deliberately: a hop is a **change**, and there is nothing yet
+to have changed from.
+
+-}
+depositChainHopMemoryAfterReading :
+    { runIsUnderWay : Bool
+    , homeStructureIsReachable : Bool
+    , currentSolarSystemName : Maybe String
+    }
+    -> DepositChainHopMemory
+    -> DepositChainHopMemory
+depositChainHopMemoryAfterReading answer memory =
+    if not answer.runIsUnderWay || answer.homeStructureIsReachable then
+        initDepositChainHopMemory
+
+    else
+        { hopsMade =
+            case ( memory.lastSolarSystemName, answer.currentSolarSystemName ) of
+                ( Just before, Just now ) ->
+                    if before /= now then
+                        memory.hopsMade + 1
+
+                    else
+                        memory.hopsMade
+
+                _ ->
+                    memory.hopsMade
+        , lastSolarSystemName =
+            case answer.currentSolarSystemName of
+                Just now ->
+                    Just now
+
+                Nothing ->
+                    memory.lastSolarSystemName
+        }
+
+
 {-| How long a deposit may take before the session ends with the hold still
 full.
 
@@ -5707,6 +6582,7 @@ type alias DepositSituation =
     , shipIsWarping : Bool
     , dockingRunIn : Maybe DockingRunIn
     , homeStructureIsOnTheOverview : Bool
+    , homeStructureBookmark : Maybe EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
     , panelShowsTheHomeStructure : Bool
     , dockButtonIsOffered : Bool
     , inventoryListsTheHold : Bool
@@ -5714,6 +6590,9 @@ type alias DepositSituation =
     , structureHangarIsInTheInventory : Bool
     , itemsInTheHold : Int
     , okButtonIsOnScreen : Bool
+    , chainHopBookmark : Maybe EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
+    , wormholesOnTheOverview : List EveOnline.ParseUserInterface.OverviewWindowEntry
+    , chainHopsMade : Int
     }
 
 
@@ -5747,11 +6626,28 @@ and warped to where it does not -- that absence being the natural gate between
 the two, exactly as it is for `dockAtDestinationStation`, since the Dock button
 is drawn only inside docking range.
 
+**A structure that is on neither the overview nor in Locations is not
+necessarily unreachable, and `depositChainHop` is what that costs.** This ship
+harvests in a wormhole, and a session that has wandered several systems from
+its own home structure has nothing on either window to say where home even is
+-- a `NowhereToDepositAt` that ends the session there would strand a full hold
+for the rest of the evening on nothing worse than distance. So a structure
+findable neither way sends the ship looking for a way back instead: warp to
+the nearest bookmark carrying `retreat-bookmark-prefix` (the same instadock
+convention `RetreatDestination` already uses, at the same zero), and where the
+grid on arrival carries exactly one wormhole, jump it and ask the whole
+question again from the new system. Two wormholes on one grid is declined
+rather than guessed at -- see `ChainHopAmbiguousWormholes` -- and the whole
+approach is abandoned after `depositChainHopLimit` hops, on the operator's own
+word that the chain should not run longer than that.
+
 Every state that cannot proceed answers a step that **says so**, rather than a
 wait: `NowhereToDepositAt`, `NoInventoryListingTheHold`,
 `NoStructureHangarInTheInventory` and `TheHoldShowsNothingToMove` are four
 different things for an operator to fix and they are four different sentences.
-All four are bounded by `depositGiveUpReadings`, which ends the session.
+All are bounded by `depositGiveUpReadings`, which ends the session; the
+chain-hop steps carry the additional, tighter bound of `depositChainHopLimit`
+hops before they give up on the chain and answer `NowhereToDepositAt` too.
 
 -}
 type DepositStep
@@ -5771,6 +6667,10 @@ type DepositStep
     | SelectTheHomeStructure
     | PressTheDockButton
     | WarpToTheHomeStructure
+    | WarpToTheHomeStructureBookmark EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
+    | WarpToTheChainHopBookmark EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
+    | JumpTheChainHopWormhole EveOnline.ParseUserInterface.OverviewWindowEntry
+    | ChainHopAmbiguousWormholes Int
 
 
 depositStep : DepositSituation -> DepositStep
@@ -5819,17 +6719,49 @@ depositStep situation =
                 WaitForTheDockingRunIn runIn
 
             Nothing ->
-                if not situation.homeStructureIsOnTheOverview then
+                if situation.homeStructureIsOnTheOverview then
+                    if not situation.panelShowsTheHomeStructure then
+                        SelectTheHomeStructure
+
+                    else if situation.dockButtonIsOffered then
+                        PressTheDockButton
+
+                    else
+                        WarpToTheHomeStructure
+
+                else if situation.homeStructureBookmark /= Nothing then
+                    case situation.homeStructureBookmark of
+                        Just bookmark ->
+                            -- Found in Locations but not on this grid's
+                            -- overview -- the ordinary warp-to-a-bookmark
+                            -- path, at zero, the same as `warpToTheHuntedSite`'s
+                            -- `BookmarkedSite` arm. Landing there should put
+                            -- the structure on the overview, which the next
+                            -- reading reads through the branch above.
+                            WarpToTheHomeStructureBookmark bookmark
+
+                        Nothing ->
+                            -- Unreachable: guarded by the `/= Nothing` above.
+                            NowhereToDepositAt
+
+                else if depositChainHopLimit <= situation.chainHopsMade then
                     NowhereToDepositAt
 
-                else if not situation.panelShowsTheHomeStructure then
-                    SelectTheHomeStructure
-
-                else if situation.dockButtonIsOffered then
-                    PressTheDockButton
-
                 else
-                    WarpToTheHomeStructure
+                    case situation.wormholesOnTheOverview of
+                        [] ->
+                            case situation.chainHopBookmark of
+                                Just bookmark ->
+                                    WarpToTheChainHopBookmark bookmark
+
+                                Nothing ->
+                                    NowhereToDepositAt
+
+                        [ onlyWormhole ] ->
+                            JumpTheChainHopWormhole onlyWormhole
+
+                        several ->
+                            ChainHopAmbiguousWormholes (List.length several)
 
 
 depositSituationFromContext : BotDecisionContext -> DepositSituation
@@ -5846,6 +6778,9 @@ depositSituationFromContext context =
                 context.eventContext.botSettings.homeStructureName
                 (readingFromGameClient.overviewWindows |> List.concatMap .entries)
                 |> List.head
+
+        settings =
+            context.eventContext.botSettings
     in
     { runIsUnderWay = context.memory.deposit /= Nothing
     , docked = readingFromGameClient.shipUI == Nothing
@@ -5858,6 +6793,8 @@ depositSituationFromContext context =
             |> Maybe.withDefault False
     , dockingRunIn = context.memory.dockingRunIn
     , homeStructureIsOnTheOverview = homeStructureRow /= Nothing
+    , homeStructureBookmark =
+        homeStructureBookmarkInLocations settings.homeStructureName readingFromGameClient.locationsWindow
     , panelShowsTheHomeStructure =
         homeStructureRow
             |> Maybe.map (selectedItemIsOverviewEntry readingFromGameClient)
@@ -5876,6 +6813,15 @@ depositSituationFromContext context =
             |> Maybe.map (.window >> inventoryItemsInView >> List.length)
             |> Maybe.withDefault 0
     , okButtonIsOnScreen = okButtonInReading readingFromGameClient /= Nothing
+    , chainHopBookmark =
+        readingFromGameClient.locationsWindow
+            |> Maybe.map .placeEntries
+            |> Maybe.withDefault []
+            |> List.filter (.mainText >> bookmarkLabelStartsWithPrefix settings.retreatBookmarkPrefix)
+            |> List.head
+    , wormholesOnTheOverview =
+        wormholeRowsOnTheOverview (readingFromGameClient.overviewWindows |> List.concatMap .entries)
+    , chainHopsMade = context.memory.depositChainHop.hopsMade
     }
 
 
@@ -6074,13 +7020,26 @@ actOnTheDepositStep context situation =
         NowhereToDepositAt ->
             Just
                 (describeBranch
-                    ("The hold is full and there is no row on this overview matching "
+                    ("The hold is full and "
                         ++ (case context.eventContext.botSettings.homeStructureName of
                                 Nothing ->
-                                    "anything, because 'home-structure-name' is unset and has no default"
+                                    "'home-structure-name' is unset and has no default"
 
                                 Just name ->
-                                    "'" ++ name ++ "'"
+                                    "'" ++ name ++ "' is on neither this overview nor in Locations"
+                           )
+                        ++ (if depositChainHopLimit <= situation.chainHopsMade then
+                                ", and the chain-hop fallback already spent all "
+                                    ++ String.fromInt depositChainHopLimit
+                                    ++ " of its wormhole jumps without finding it"
+
+                            else if situation.chainHopBookmark == Nothing then
+                                ", and there is no bookmark in Locations carrying '"
+                                    ++ context.eventContext.botSettings.retreatBookmarkPrefix
+                                    ++ "' to try a chain hop from either"
+
+                            else
+                                ""
                            )
                         ++ " -- nowhere to deposit from here. The session ends at the deposit bound with the hold still full."
                     )
@@ -6148,6 +7107,76 @@ actOnTheDepositStep context situation =
                             waitForProgressInGame
                         )
 
+        WarpToTheHomeStructureBookmark bookmark ->
+            Just
+                (describeBranch
+                    ("The hold is full, and '"
+                        ++ bookmarkLabel bookmark.mainText
+                        ++ "' in Locations carries the home structure's own name -- warp to it at "
+                        ++ warpAtZeroMenuEntry
+                        ++ ", which is not on this grid's overview at all."
+                    )
+                    (useContextMenuCascade ( bookmarkLabel bookmark.mainText, bookmark.uiNode )
+                        (warpCascadeWithin warpAtZeroMenuEntry)
+                        context
+                    )
+                )
+
+        WarpToTheChainHopBookmark bookmark ->
+            Just
+                (describeBranch
+                    ("The hold is full and '"
+                        ++ (context.eventContext.botSettings.homeStructureName |> Maybe.withDefault "the home structure")
+                        ++ "' is on neither this overview nor in Locations -- warp to '"
+                        ++ bookmarkLabel bookmark.mainText
+                        ++ "', which carries '"
+                        ++ context.eventContext.botSettings.retreatBookmarkPrefix
+                        ++ "', at "
+                        ++ warpAtZeroMenuEntry
+                        ++ " and look there for a way back (hop "
+                        ++ String.fromInt (situation.chainHopsMade + 1)
+                        ++ " of "
+                        ++ String.fromInt depositChainHopLimit
+                        ++ ")."
+                    )
+                    (useContextMenuCascade ( bookmarkLabel bookmark.mainText, bookmark.uiNode )
+                        (warpCascadeWithin warpAtZeroMenuEntry)
+                        context
+                    )
+                )
+
+        JumpTheChainHopWormhole wormhole ->
+            let
+                wormholeName =
+                    wormhole.objectName |> Maybe.withDefault "the wormhole"
+            in
+            Just
+                (describeBranch
+                    ("The hold is full and there is exactly one wormhole on this grid -- jump '"
+                        ++ wormholeName
+                        ++ "' looking for a way back toward "
+                        ++ (context.eventContext.botSettings.homeStructureName |> Maybe.withDefault "the home structure")
+                        ++ " (hop "
+                        ++ String.fromInt (situation.chainHopsMade + 1)
+                        ++ " of "
+                        ++ String.fromInt depositChainHopLimit
+                        ++ ")."
+                    )
+                    (useContextMenuCascade ( wormholeName, wormhole.uiNode ) jumpWormholeCascade context)
+                )
+
+        ChainHopAmbiguousWormholes wormholeCount ->
+            Just
+                (describeBranch
+                    ("The hold is full, "
+                        ++ (context.eventContext.botSettings.homeStructureName |> Maybe.withDefault "the home structure")
+                        ++ " is on neither this overview nor in Locations, and this grid carries "
+                        ++ String.fromInt wormholeCount
+                        ++ " wormholes rather than one -- declining to guess which one leads back rather than jumping the wrong way. An operator watching this reading can jump the right one by hand."
+                    )
+                    waitForProgressInGame
+                )
+
 
 {-| Leave the structure, using the client's own Undock button.
 
@@ -6214,6 +7243,7 @@ describeDeposit :
     , deposit : Maybe DepositRun
     , dockingRunIn : Maybe DockingRunIn
     , homeStructureName : Maybe String
+    , depositChainHop : DepositChainHopMemory
     }
     -> String
 describeDeposit state =
@@ -6271,6 +7301,24 @@ describeDeposit state =
                         ++ "/"
                         ++ String.fromInt dockingRunInPatienceReadings
                         ++ " readings since it last got closer."
+
+        chainHop =
+            case state.deposit of
+                Nothing ->
+                    ""
+
+                Just _ ->
+                    if state.depositChainHop.hopsMade < 1 then
+                        ""
+
+                    else
+                        " Chain hop: "
+                            ++ String.fromInt state.depositChainHop.hopsMade
+                            ++ "/"
+                            ++ String.fromInt depositChainHopLimit
+                            ++ " wormhole(s) jumped looking for a way back, last known system "
+                            ++ (state.depositChainHop.lastSolarSystemName |> Maybe.withDefault "unreadable")
+                            ++ "."
     in
     "Hold: "
         ++ hold
@@ -6283,6 +7331,7 @@ describeDeposit state =
            )
         ++ "."
         ++ runIn
+        ++ chainHop
 
 
 
@@ -6321,6 +7370,7 @@ initBotMemory =
     , lastGridVerdictInSpaceIsClean = Nothing
     , dockingRunIn = Nothing
     , deposit = Nothing
+    , depositChainHop = initDepositChainHopMemory
     }
 
 
@@ -6426,8 +7476,155 @@ watchLeaveDepositOrHarvest context =
                     leaveDepositOrHarvest context
 
 
+{-| Whether the home structure has a row somewhere among this reading's raw
+overview entries that is not currently `_display`ed.
+
+The overview virtualises -- every object in the system has an entry in the UI
+tree, but only the rows that fit on screen render, and the rest keep whatever
+position they last held while recycled; see `overviewEntryIsDisplayed`.
+`homeStructureRowsOnTheOverview` already declines a row in that state rather
+than clicking whatever was recycled into its place, which is right, but on its
+own it cannot tell a row that is genuinely absent from a row that is merely off
+screen -- both read as "no row on this overview matching X". Gas huffer's own
+first live deposit (run3, 2026-09-07) spent 286 of its 300-reading give-up
+budget on exactly that: the ship never moved, so the row was never gone, only
+unrendered, and it entered view on its own only once enough of the site's own
+clutter (mined-out clouds, expired wrecks) fell off the sort order ahead of it
+-- with 14 readings left to find, select, warp to, dock at and drag into before
+the session gave up with the hold still full.
+
+-}
+homeStructureRowIsHiddenRatherThanAbsent :
+    Maybe String
+    -> List EveOnline.ParseUserInterface.OverviewWindowEntry
+    -> Bool
+homeStructureRowIsHiddenRatherThanAbsent homeStructureName overviewEntries =
+    case homeStructureName of
+        Nothing ->
+            False
+
+        Just name ->
+            let
+                matchingRows =
+                    overviewEntries
+                        |> List.filter
+                            (\entry ->
+                                entry.objectName
+                                    |> Maybe.map (\objectName -> siteCellMatches objectName name)
+                                    |> Maybe.withDefault False
+                            )
+            in
+            (matchingRows |> List.isEmpty |> not)
+                && (matchingRows |> List.all (overviewEntryIsDisplayed >> not))
+
+
+{-| Turn the mouse wheel over the overview, a notch at a time, so a home
+structure row that exists but is not rendered gets a chance to scroll into
+view rather than waiting on the site's own clutter to fall away by itself.
+
+`eve-online-mission-runner`'s `scrollOverviewToReveal` is the same mechanism
+for the same reason, and the argument against computing a scrollbar position
+from a row's rank by distance -- rows recycle, and hidden ones keep stale
+positions -- does not change by moving apps, so this turns the wheel a fixed
+notch and re-reads rather than aiming at a computed offset.
+
+Reached only while a deposit is under way and the ship is in space, and only
+when the structure is present-but-hidden rather than genuinely absent --
+`NowhereToDepositAt`'s own sentence still fires, unchanged, once every row
+naming the structure really is gone from a reading.
+
+-}
+scrollToRevealHiddenHomeStructureWhileDepositing : BotDecisionContext -> Maybe DecisionPathNode
+scrollToRevealHiddenHomeStructureWhileDepositing context =
+    if
+        (context.memory.deposit == Nothing)
+            || (context.readingFromGameClient.shipUI == Nothing)
+    then
+        Nothing
+
+    else
+        let
+            homeStructureName =
+                context.eventContext.botSettings.homeStructureName
+
+            windowHidingIt =
+                context.readingFromGameClient.overviewWindows
+                    |> List.filter
+                        (\overviewWindow ->
+                            homeStructureRowIsHiddenRatherThanAbsent homeStructureName overviewWindow.entries
+                        )
+                    |> List.head
+        in
+        case windowHidingIt of
+            Nothing ->
+                Nothing
+
+            Just overviewWindow ->
+                let
+                    track =
+                        (overviewWindow.scrollControls
+                            |> Maybe.map .uiNode
+                            |> Maybe.withDefault overviewWindow.uiNode
+                        ).totalDisplayRegion
+
+                    handle =
+                        overviewWindow.scrollControls
+                            |> Maybe.andThen .scrollHandle
+                            |> Maybe.map .totalDisplayRegion
+                            |> Maybe.withDefault track
+
+                    roomBelow =
+                        (track.y + track.height) - (handle.y + handle.height)
+
+                    notches =
+                        if 2 < roomBelow then
+                            -homeStructureOverviewScrollNotchesPerStep
+
+                        else
+                            homeStructureOverviewScrollNotchesPerStep
+
+                    scrollOver =
+                        overviewWindow.uiNode.totalDisplayRegion
+                            |> EveOnline.ParseUserInterface.centerFromDisplayRegion
+                in
+                Just
+                    (describeBranch
+                        ("The home structure has a row on this overview that is not currently rendered -- turn the wheel "
+                            ++ (if notches < 0 then
+                                    "down"
+
+                                else
+                                    "up"
+                               )
+                            ++ " over it rather than waiting on the site's own clutter to clear by itself."
+                        )
+                        (decideActionForCurrentStep
+                            (EffectOnWindow.effectsMouseScrollAtLocation scrollOver notches)
+                        )
+                    )
+
+
+{-| How far one scroll step turns the wheel while hunting for the home
+structure. Small enough that the row is not skipped past between readings --
+`eve-online-mission-runner`'s own `overviewScrollNotchesPerStep`.
+-}
+homeStructureOverviewScrollNotchesPerStep : Int
+homeStructureOverviewScrollNotchesPerStep =
+    3
+
+
 {-| The three that are about the work, split out so the ordering above stays one
 expression.
+
+**The scroll for a hidden home structure is asked between the evasion and the
+deposit**, above `actOnTheDepositStep` rather than inside it: `depositStep`'s
+own `NowhereToDepositAt` is a rule executed in a repl over a plain record
+(#106), and giving it a screen-position-dependent mouse gesture to decide would
+put a client-only concern into the one part of this file that can be checked
+without one. Below the evasion, because a grid that stops reading clean still
+takes the ship out of turning a wheel exactly as it takes it out of a docking
+run-in.
+
 -}
 leaveDepositOrHarvest : BotDecisionContext -> DecisionPathNode
 leaveDepositOrHarvest context =
@@ -6437,16 +7634,21 @@ leaveDepositOrHarvest context =
                 (describeBranch (describeCloak (cloakSearchFromContext context)) leaving)
 
         Nothing ->
-            case actOnTheDepositStep context (depositSituationFromContext context) of
-                Just depositing ->
-                    depositing
+            case scrollToRevealHiddenHomeStructureWhileDepositing context of
+                Just scrolling ->
+                    scrolling
 
                 Nothing ->
-                    branchDependingOnDockedOrInSpace
-                        { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
-                        , ifSeeShipUI = huntAndHarvest context
-                        }
-                        context
+                    case actOnTheDepositStep context (depositSituationFromContext context) of
+                        Just depositing ->
+                            depositing
+
+                        Nothing ->
+                            branchDependingOnDockedOrInSpace
+                                { ifDocked = describeBranch nothingToDoDockedYet waitForProgressInGame
+                                , ifSeeShipUI = huntAndHarvest context
+                                }
+                                context
 
 
 {-| End the session where one of the two bounds that end it has expired.
@@ -7253,6 +8455,55 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 |> List.head
                 |> Maybe.map stepDraggedSomething
                 |> Maybe.withDefault False
+
+        -- Which harvester's hotkey the previous step actually pressed, read the
+        -- same way `dragDispatched` is: off the effects dispatched rather than
+        -- off which `HarvestStep` produced them, since only the effects say
+        -- what was asked for. `[ 0, 1 ]` rather than deriving the indices from
+        -- `harvesterModulesFromShipUI`, because this ship is fitted with two of
+        -- them throughout this file ("run both harvesters") and a docked
+        -- reading has no `shipUI` to derive them from at all -- the same reason
+        -- `describeHarvestSituation` hardcodes "both" rather than a count.
+        harvesterIndexJustKicked =
+            [ 0, 1 ]
+                |> List.filter
+                    (\index ->
+                        topRowModuleHotkeyFromIndex index
+                            |> Maybe.map
+                                (\keyCode ->
+                                    context.previousStepsEffects
+                                        |> List.head
+                                        |> Maybe.map (stepPressedExactly [ keyCode ])
+                                        |> Maybe.withDefault False
+                                )
+                            |> Maybe.withDefault False
+                    )
+                |> List.head
+
+        -- Read off the current reading rather than the previous step's
+        -- effects, because this is evidence about the module rather than
+        -- about what this bot asked for -- see `harvesterLooksActiveByRamp`.
+        -- `[ 0, 1 ]` for the same reason `harvesterIndexJustKicked` uses it: a
+        -- docked reading has no `shipUI` to derive real indices from at all.
+        harvesterIndicesLookingActiveByRamp =
+            context.readingFromGameClient.shipUI
+                |> Maybe.map harvesterModulesFromShipUI
+                |> Maybe.withDefault []
+                |> List.indexedMap Tuple.pair
+                |> List.filter (Tuple.second >> harvesterLooksActiveByRamp)
+                |> List.map Tuple.first
+
+        -- Both of `depositChainHop`'s own reasons to run to somewhere -- see
+        -- `homeStructureRowsOnTheOverview` and `homeStructureBookmarkInLocations`.
+        homeStructureIsReachableForDeposit =
+            (homeStructureRowsOnTheOverview context.botSettings.homeStructureName
+                (context.readingFromGameClient.overviewWindows |> List.concatMap .entries)
+                /= []
+            )
+                || (homeStructureBookmarkInLocations context.botSettings.homeStructureName
+                        context.readingFromGameClient.locationsWindow
+                        /= Nothing
+                   )
     in
     { readingsCount = botMemoryBefore.readingsCount + 1
     , lastDockedStationNameFromInfoPanel =
@@ -7275,6 +8526,8 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
                 cloudChosen
                     |> Maybe.map (.commonIndications >> .targetedByMe)
                     |> Maybe.withDefault False
+            , harvesterIndexJustKicked = harvesterIndexJustKicked
+            , harvesterIndicesLookingActiveByRamp = harvesterIndicesLookingActiveByRamp
             }
             botMemoryBefore.harvestCounters
     , propulsionPressesUnanswered =
@@ -7344,6 +8597,16 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             , confirmationNow = depositConfirmedInGameLog context.readingFromGameClient
             , dragDispatched = dragDispatched
             }
+    , depositChainHop =
+        depositChainHopMemoryAfterReading
+            { runIsUnderWay = botMemoryBefore.deposit /= Nothing
+            , homeStructureIsReachable = homeStructureIsReachableForDeposit
+            , currentSolarSystemName =
+                context.readingFromGameClient.infoPanelContainer
+                    |> Maybe.andThen .infoPanelLocationInfo
+                    |> Maybe.andThen .currentSolarSystemName
+            }
+            botMemoryBefore.depositChainHop
     }
 
 
@@ -7416,6 +8679,7 @@ statusTextFromState context =
                 , deposit = context.memory.deposit
                 , dockingRunIn = context.memory.dockingRunIn
                 , homeStructureName = settings.homeStructureName
+                , depositChainHop = context.memory.depositChainHop
                 }
            , "Readings: "
                 ++ String.fromInt context.memory.readingsCount

@@ -86,12 +86,21 @@ PREAMBLE = (
     "import EveOnline.ParseUserInterface",
 )
 
-# The four declarations in this app that open a warp cascade, and the warps they
-# carry. #465 says "at least four" and names five warps; the deposit's return
-# leg is the hunt warp again, which is why four declarations cover five.
+# The five declarations in this app that open a warp cascade, and the warps
+# they carry. #465 says "at least four" and names five warps; the deposit's
+# return leg is the hunt warp again, which is why four declarations covered
+# five before #485 split one of them in two.
+#
+# `warpToScanResult` is `warpToTheHuntedSite`'s own `ScannedAnomaly` arm,
+# pulled out by #485 so a scan result carrying its own warp button can take
+# a one-click path instead of the two-level cascade -- the cascade stays as
+# the fallback for a result with no such button, and both live in this one
+# declaration rather than the caller.
 WARP_CALL_SITES = {
     "warpToTheHuntedSite":
         "the warp to the site (#461), and the deposit's return leg (#464)",
+    "warpToScanResult":
+        "warpToTheHuntedSite's own ScannedAnomaly arm, split out by #485",
     "warpToTheRetreatDestination": "the retreat, all three rungs (#463)",
     "warpToACelestialAtARandomRange": "each evasion bounce (#463)",
     "actOnTheDepositStep": "the deposit trip out (#464)",

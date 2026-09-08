@@ -68,10 +68,17 @@ PREAMBLE = (
     "import Result.Extra",
 )
 
-# Every setting whose value names one thing, with the field it fills. All five
+# Every setting whose value names one thing, with the field it fills. All six
 # take `valueTypeNonEmptyString`; the two integer settings are checked
 # separately, since `AppSettings.valueTypeInteger` already refuses an empty
 # value and this file must not claim credit for that.
+#
+# `orbit-range` joined this set once the orbit distance became a command
+# rather than a client-setup requirement (see "The orbit range needs no
+# setup" in the header) -- it is guarded the same way every other named
+# setting here is, and an empty value is exactly as dangerous: a cascade
+# asking the client for `Within  m` finds no matching flyout entry and gives
+# up silently.
 NAME_SETTINGS = {
     "anomaly-group": "anomalyGroup",
     "anomaly-name": "anomalyName",
@@ -79,6 +86,7 @@ NAME_SETTINGS = {
     "home-structure-name": "homeStructureName",
     "retreat-bookmark-prefix": "retreatBookmarkPrefix",
     "friendly-ship-tag": "friendlyShipTag",
+    "orbit-range": "orbitRange",
 }
 
 INTEGER_SETTINGS = ("dscan-interval-seconds", "bot-step-delay")
@@ -912,16 +920,19 @@ class TheClientSetupContractIsInTheHeaderTest(unittest.TestCase):
     def setUp(self):
         self.header = bot_source().split("\n-}", 1)[0]
 
-    def test_the_orbit_distance_is_named_as_a_client_setup_requirement(self):
-        # The instruction itself, not merely the words somewhere in the header:
-        # a mutation that removed the bullet and left the paragraph under it
-        # passed the looser form of this case.
+    def test_the_orbit_distance_needs_no_client_setup_any_more(self):
+        """The orbit range used to be a client-setup requirement the operator
+        had to arrange by hand, because no command here could orbit at a
+        *distance*. The cloud's own context menu offers a range flyout, so it
+        is commanded now -- the bullet itself, not merely the words somewhere
+        in the header: a mutation that removed it and left the mining-range
+        refusal paragraph under it passed the looser form of this case."""
         self.assertIn(
-            "**Set the Orbit button's distance by hand, once, before starting"
-            " a run.**", self.header)
-        # And the client's own refusal, which is the only thing that will ever
-        # tell the bot the setup is wrong -- there is no reading that says what
-        # range the button remembers.
+            "**The orbit range needs no setup.**", self.header)
+        self.assertIn("`orbit-range`", self.header)
+        # And the client's own refusal is still a backstop against a range
+        # that is wrong for the fit, since no reading says what range the
+        # button remembers -- it is read and reported, never acted on.
         self.assertIn("mining range", self.header)
 
     def test_the_probe_scanner_group_column_is_required(self):

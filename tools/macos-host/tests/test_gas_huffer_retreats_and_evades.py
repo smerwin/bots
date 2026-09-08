@@ -838,18 +838,35 @@ class TheCloakDegradesCleanlyTest(unittest.TestCase):
             self.search([fitted("prototype cloaking device i -- 30s")]),
             "TheCloakIsFittedAndNotRunning 0")
 
-    def test_neither_negative_answer_stalls_the_evasion(self):
-        """The requirement #463 states in words, executed: no cloak found means
-        keep evading without one, not wait for a module that does not exist."""
-        for cloak in ("(NoCloakAmongTheModulesIdentified 5)",
-                      "(TheModulesAreNotIdentifiedYet"
-                      " { identified = 1, total = 5 })"):
-            with self.subTest(cloak):
-                self.assertEqual(
-                    self.repl.rendered([
-                        "evasionStep %s" % situation(cloak=cloak,
-                                                     celestials=4)])[0],
-                    "WarpToACelestial 0")
+    def test_a_confirmed_absence_of_a_cloak_falls_straight_through(self):
+        """The requirement #463 states in words, executed: no cloak found,
+        once every module has been identified, means keep evading without
+        one -- not wait for a module that does not exist."""
+        self.assertEqual(
+            self.repl.rendered([
+                "evasionStep %s" % situation(
+                    cloak="(NoCloakAmongTheModulesIdentified 5)",
+                    celestials=4)])[0],
+            "WarpToACelestial 0")
+
+    def test_unidentified_modules_press_the_hotkey_speculatively_until_the_bound(self):
+        """Run 3 evaded with `0 of 5` identified and no cloak, and the
+        operator's own keybind presses whichever slot a cloak turns out to be
+        in without needing to know -- so this does *not* fall through the way
+        a confirmed absence does. It still gives up on the same
+        `cloakGiveUpReadings` clock rather than pressing forever."""
+        bound = int(self.repl.values(["cloakGiveUpReadings"], r"(\d+) : Int")[0])
+        cloak = "(TheModulesAreNotIdentifiedYet { identified = 1, total = 5 })"
+        still_pressing, given_up = self.repl.rendered([
+            "evasionStep %s" % situation(
+                cloak=cloak, celestials=4,
+                counters=evasion_counters(cloak=bound - 1)),
+            "evasionStep %s" % situation(
+                cloak=cloak, celestials=4,
+                counters=evasion_counters(cloak=bound)),
+        ])
+        self.assertEqual(still_pressing, "ActivateTheCloakByHotkey")
+        self.assertEqual(given_up, "WarpToACelestial 0")
 
     def test_a_cloak_the_client_will_not_answer_is_given_up_on(self):
         """Every arm that clicks needs a bound. A cloak asked for and never
@@ -1296,8 +1313,15 @@ class TheOneCascadeDrivesEveryWarpTest(unittest.TestCase):
             # retreat's second rung right-clicks, so a second copy of the two
             # menu levels would be a bot that arrives at 0 m when it is
             # frightened and somewhere else when it is full.
+            #
+            # #485 split `warpToTheHuntedSite`'s scanned-anomaly arm out into
+            # `warpToScanResult`, which is the fifth reader and reaches this
+            # same declaration for its own fallback cascade -- see
+            # `test_gas_huffer_hunts_by_group.py`'s
+            # `test_the_warp_is_one_cascade_for_both_sources`.
             ["actOnTheDepositStep", "warpToACelestialAtARandomRange",
-             "warpToTheHuntedSite", "warpToTheRetreatDestination"],
+             "warpToScanResult", "warpToTheHuntedSite",
+             "warpToTheRetreatDestination"],
             readers)
 
     def test_the_retreat_takes_zero_for_the_first_two_rungs_and_100km_for_the_last(self):

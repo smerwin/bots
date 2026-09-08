@@ -860,12 +860,28 @@ class TheHuntTookTheWarpWithTheMechanismItNamedTest(unittest.TestCase):
         A scanned anomaly and a bookmark differ in which node is right-clicked
         and in nothing else, so a second copy of the two menu entries would be
         two places to disagree about where the ship lands.
+
+        #485 split the scanned-anomaly arm out into `warpToScanResult`, so the
+        two `useContextMenuCascade` calls are no longer both textually inside
+        `warpToTheHuntedSite` -- one is in the bookmark arm here, the other is
+        in `warpToScanResult`'s own fallback for a scan result with no warp
+        button. Both still build their menu from the one shared
+        `warpCascadeWithin warpAtZeroMenuEntry`, which is what "one cascade"
+        means now: not one textual copy, but one declaration neither can drift
+        from.
         """
         body = collapsed(block("warpToTheHuntedSite"))
-        self.assertEqual(body.count("useContextMenuCascade"), 2, body)
-        self.assertEqual(body.count("warpMenu"), 3, body)
+        scan_result_body = collapsed(block("warpToScanResult"))
+        self.assertEqual(body.count("useContextMenuCascade"), 1, body)
+        self.assertEqual(scan_result_body.count("useContextMenuCascade"), 1,
+                         scan_result_body)
+        self.assertEqual(body.count("warpMenu"), 2, body)
+        self.assertIn("warpCascadeWithin warpAtZeroMenuEntry", body)
+        self.assertIn("warpCascadeWithin warpAtZeroMenuEntry",
+                      scan_result_body)
         self.assertIn("ScannedAnomaly anomaly", body)
         self.assertIn("BookmarkedSite bookmark", body)
+        self.assertIn("warpToScanResult context anomaly", body)
 
     def test_the_bookmark_arm_is_the_mining_bots_own(self):
         """The same two arguments that function's locations-window branch uses.
