@@ -136,6 +136,16 @@
         two it is on every reading; see `describeDeposit`. The bot re-selects the
         hold itself after a deposit, so this is a starting condition rather than
         something to keep watching.
+
+        **The deposit itself needs no dock.** With the home structure on the
+        grid and selected, the client offers an Access Dropbox on the Selected
+        Item panel, and this bot drags each stack out of the Mining Hold into
+        the window that opens and presses Transfer -- so the hold is emptied
+        from space and the ship never enters the structure. It still has to
+        *get* there: the button is on the Selected Item panel, so the structure
+        has to be on this grid. Where the structure offers no dropbox, or the
+        ship is not yet close enough, or the window is not one this bot can
+        read, it docks and deposits the way it always did.
       + Set the overview to sort by distance with the nearest entry at the top.
       + In the ship UI, arrange the modules:
         + Put the gas harvesters in the **top** row, side by side.
@@ -5584,41 +5594,40 @@ miningHoldContainerTypeName =
     "ShipGeneralMiningHold"
 
 
-{-| Why this ship docks at all, which is the first question to ask about a
-deposit and is answered here rather than left to be re-asked.
+{-| Why this ship no longer docks to deposit, and why the docked sequence is
+still here.
 
-Docking is the expensive and failure-prone half of #464 -- the run-in
-`DockingRunIn` documents keeping a ship 17 km off a station for eight minutes,
-then the hangar work, then an undock. Emptying the hold into the structure from
-space would remove all three, so it was looked for before this was built.
-**Nothing in this repository supports it, and what was looked for is worth
-writing down so nobody looks again from nothing:**
+#464 shipped a deposit that docks, and wrote down that the cheaper path had been
+looked for and was not in the evidence. **Two of the four things it recorded have
+since stopped being true**, which is the mechanism working rather than failing:
 
-  - `parseInventoryWindow` recognises six selected-container types --
-    `ShipCargo`, `ShipDroneBay`, `ShipGeneralMiningHold`, `StationItems`,
-    `ShipFleetHangar`, `StructureItemHangar` -- byte for byte the same six in
-    all eight vendored copies. Exactly one of them is a structure's, and no
-    reading anywhere here has ever carried it from an undocked ship.
-  - **`eve-online-mining-bot` already deposits at a structure and docks to do
-    it.** Its `unload-structure-name` and `unload-station-name` are concatenated
-    into one list and both go through `dockToUnloadOre`, so the app closest to
-    this use case made the same choice with a working implementation behind it.
-  - That bot's **only** in-space unload is `unload-fleet-hangar-percent`, which
-    drags into a `fleet hangar` row and whose own setting text says it needs an
-    Orca or a Rorqual in the fleet with its hangar visible in the inventory.
-    That is a _ship_, not a structure, and #456 describes a solo hull in
-    somebody else's wormhole with `friendly-ship-tag` defaulting to trust
-    nobody.
-  - The one lead is `selectedItemAccessDropbox`, which #456 measured on a
-    structure's Selected Item panel. **It occurs in no `Bot.elm` in this
-    repository**, nothing has pressed it, and what it opens is recorded
-    nowhere. Pressing an unread button on the deposit path and inferring from
-    what changed afterwards is the class of guess this file exists to avoid.
+  - `selectedItemAccessDropbox` was _"a button nothing here has ever pressed"_.
+    It has been pressed, on 2026-09-09 with a structure selected in space, and
+    what it opens is `DropboxWnd` -- see `dropboxWindowTypeName` for the window
+    and its parts. On 2026-09-10 the whole sequence was driven by hand on a
+    loaded hold: select the structure, press the button, drag each stack onto
+    `inputInfo`, press `transferBtn`. The client answered with
+    `(notify) 2 items were moved to your hangar in <structure>`, the Mining
+    Hold's gauge went to zero and the window reset.
+  - _"the repository's only in-space unload requires an Orca or a Rorqual in
+    fleet"_ was true of `eve-online-mining-bot` and is no longer true of the
+    repository. It stays true of that bot, which is what the case now asserts.
 
-So the docked sequence #464 measured by hand is what ships. If a run ever reads
-a structure's hangar, or anything else transferable, out of an **undocked**
-inventory, that is the evidence a cheaper path would need and this comment is
-what it contradicts.
+**The two that still hold are the reason the docked path is kept.**
+`parseInventoryWindow` still recognises exactly one structure container across
+all eight vendored copies, and no reading here has ever carried it from an
+undocked ship -- so the in-space transfer is not an inventory operation at all
+and shares none of that machinery. And `eve-online-mining-bot` still docks.
+
+**This removes the dock and not the trip.** The button is on the Selected Item
+panel, so the structure has to be selected, so the ship has to be on its grid --
+confirmed by the button's absence at a gas site in another system with a loaded
+hold. What is removed is `DockingRunIn`, the lobby, the hangar and the undock.
+
+**And #464's sequence is the fallback rather than dead code**, which #476 is
+explicit about: a structure that offers no dropbox, a ship not yet close enough,
+or a window this bot cannot read all fall through to `PressTheDockButton` and
+the docked drag behind it. See `depositStep` for where each of those falls.
 
 
 ## The row itself
@@ -5833,7 +5842,19 @@ depositInventoryFromReading readingFromGameClient =
 {-| The two substrings that make a `(notify)` line this bot's own deposit
 confirmation.
 
+**The client writes this sentence two ways, and #464's markers only read one of
+them.** #456 recorded
+
     (notify) N item(s) was moved to your hangar in <system> - <structure>
+
+and the live in-space transfer of 2026-09-10 produced
+
+    (notify) 2 items were moved to your hangar in <structure>
+
+-- plural verb, no system, and **no match** for `item(s) was moved`. So the
+markers are widened to what both carry: `item`, and `moved to your hangar`. That
+still declines the near miss two paragraphs down, which is a sentence about a
+hangar carrying no item at all, and it is what the cases are asked about.
 
 **The client's own line and not the gauge**, which is #464's third emphasis and
 the one that costs the most to get wrong. A gauge reading zero because the drag
@@ -5858,7 +5879,7 @@ dragging.
 -}
 depositConfirmationMarkers : List String
 depositConfirmationMarkers =
-    [ "item(s) was moved", "to your hangar" ]
+    [ "item", "moved to your hangar" ]
 
 
 depositConfirmedInGameLog : ReadingFromGameClient -> Maybe String
@@ -6276,6 +6297,361 @@ itemIconOffsetFromTop =
     25
 
 
+{-| The node type of the window `selectedItemAccessDropbox` opens.
+
+Read off a live client on 2026-09-09 with a structure selected in space, as a
+diff against the whole tree taken before the press -- so the window being _new_
+is established rather than assumed. It is captioned `Upwell Cargo Deposit` and
+names its own destination.
+
+-}
+dropboxWindowTypeName : String
+dropboxWindowTypeName =
+    "DropboxWnd"
+
+
+{-| The node type of the box a stack is dragged onto, inside the window.
+-}
+dropboxDropTargetTypeName : String
+dropboxDropTargetTypeName =
+    "TransferInputContainer"
+
+
+{-| The container inside the drop target that holds what has been staged.
+
+**This is what says how much is staged, and `numItemsLabel` is not** -- see
+`dropboxItemCountLabelName`.
+
+-}
+dropboxStagedItemsContainerName : String
+dropboxStagedItemsContainerName =
+    "inputScroll"
+
+
+{-| The button that commits the transfer.
+-}
+dropboxTransferButtonName : String
+dropboxTransferButtonName =
+    "transferBtn"
+
+
+{-| The label naming the structure the transfer would go to, as
+`Structure to transfer to:<structure>`.
+
+Read before anything is committed, which is the whole reason this window is
+better evidence than the docked flow's: the destination is stated on screen
+rather than inferred from having clicked the right row.
+
+-}
+dropboxDestinationLabelName : String
+dropboxDestinationLabelName =
+    "transferToLabel"
+
+
+{-| The label reading `N Items`, which is **not** a staged count.
+
+Measured live on 2026-09-10 with a loaded hold: with the window open and nothing
+dragged in it read `2 Items`, the hold's own two stacks, and after one stack was
+staged it read `1 Item`. So it counts _down_ as staging succeeds, which is
+exactly backwards from the obvious reading -- a rule taking it for "how much is
+staged" concludes a successful drag failed.
+
+It is printed in the status line and **nothing decides on it**. What decides is
+`dropboxStagedItemsContainerName`'s own contents and the transfer button's
+enabled state, which are two independent readings of the same fact.
+
+-}
+dropboxItemCountLabelName : String
+dropboxItemCountLabelName =
+    "numItemsLabel"
+
+
+{-| The text the transfer button carries **only while it is disabled**.
+
+Measured live: disabled the button carries two texts, `Nothing to transfer` and
+`Transfer`; enabled it carries only `Transfer`. So the client states whether
+pressing will do anything, and this bot reads that rather than pressing
+hopefully.
+
+-}
+dropboxNothingToTransferMarker : String
+dropboxNothingToTransferMarker =
+    "Nothing to transfer"
+
+
+{-| The client's own key for the range at which this window will transfer.
+
+Read off `DropboxWnd` as `validRange: 10000.0`, and decoded as a **float**.
+`getIntPropertyFromDictEntries` happens to answer this particular value too --
+JSON has one number type and `10000.0` is integral, so `Json.Decode.int` takes
+it -- so the two agree here and the choice is about the values nobody has read
+yet. A structure stating a fractional range answers `Nothing` under `int`, and
+`Nothing` from this field prints as `unreadable` beside a number the operator is
+trying to check `dropboxTransferRangeMeters` against, which is the direction that
+wastes a run.
+
+**Nothing decides on it**: it is carried into the status line so that the first
+run says whether `dropboxTransferRangeMeters` is the number this structure
+states. The bot's own gate is the constant, deliberately, because the window has
+to be open before this can be read at all.
+
+-}
+dropboxValidRangeKey : String
+dropboxValidRangeKey =
+    "validRange"
+
+
+{-| How close the ship has to be before this bot will open the dropbox at all.
+
+`10000` is the `validRange` the one structure that has been read stated for
+itself, and **it is this bot's own gate rather than the client's**: the button
+was pressed successfully at roughly 90 km in one recorded attempt, so the panel
+offering it is not evidence the transfer would land. Rather than open a window
+at a range whose transfer nobody has watched, the ship closes first -- which the
+deposit was going to do anyway, since `PressTheDockButton` and
+`WarpToTheHomeStructure` are what a reading outside this range falls through to.
+
+**The range at which the panel stops offering the button is unmeasured**, and
+this gate is deliberately tighter than any plausible answer to it, so that
+question does not decide anything. A range the reading cannot say -- no row, a
+virtualised row, an AU distance -- is not within range, so the bot falls back to
+docking rather than opening a window it cannot place.
+
+-}
+dropboxTransferRangeMeters : Int
+dropboxTransferRangeMeters =
+    10000
+
+
+{-| The Selected Item panel's Access Dropbox button, by the one identifier that
+has ever been read for it.
+
+`selectedItemDockButton` and `selectedItemOrbitButton` each carry two -- the
+node's own id and the `cmdName` beside it -- so a rename of one does not stop
+the branch. **No `cmdName` has ever been read for this button**, so there is no
+second identifier here and the `cmdName` slot is filled with the same string the
+elementId carries, which no node in the client answers to. That is stated rather
+than dressed up as insurance: the match rests on `selectedItemAccessDropbox`
+alone, and a client that renames it makes this branch fall through to the docked
+deposit, which is the safe direction.
+
+-}
+selectedItemAccessDropboxElementId : String
+selectedItemAccessDropboxElementId =
+    "selectedItemAccessDropbox"
+
+
+accessDropboxButtonInReading :
+    ReadingFromGameClient
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+accessDropboxButtonInReading readingFromGameClient =
+    selectedItemPanelButton readingFromGameClient
+        { elementId = selectedItemAccessDropboxElementId
+        , cmdName = selectedItemAccessDropboxElementId
+        }
+
+
+{-| The transfer window as this reading has it, with the parts the deposit acts
+on found by name.
+
+**No parser change was needed for any of this and none was made.**
+`ParsedUserInterface` carries `uiTree` on every reading and this bot already
+reaches for raw nodes that way in `okButtonInReading`, so every node here is
+reachable with no edit to the vendored `EveOnline/ParseUserInterface.elm` --
+which is byte-identical to `eve-online-wingman`'s and would be an eight-copy
+concern (#467) rather than a one-file edit.
+
+Every part is a `Maybe` and a window missing one is **not usable**, rather than
+being acted on with the parts that were found: dragging into a window whose
+transfer button this bot cannot see is staging a hold nothing will commit.
+
+-}
+type alias DropboxWindow =
+    { uiNode : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    , dropTarget : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    , transferButton : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    , closeControl : Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    , stagedItems : Int
+    , transferReadsReady : Bool
+    , destinationText : Maybe String
+    , itemCountLabelText : Maybe String
+    , validRangeMeters : Maybe Int
+    }
+
+
+dropboxWindowFromReading : ReadingFromGameClient -> Maybe DropboxWindow
+dropboxWindowFromReading readingFromGameClient =
+    readingFromGameClient.uiTree
+        |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+        |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) dropboxWindowTypeName)
+        |> List.head
+        |> Maybe.map dropboxWindowFromNode
+
+
+dropboxWindowFromNode : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> DropboxWindow
+dropboxWindowFromNode window =
+    let
+        descendants =
+            window |> EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+
+        nodeNamed name =
+            descendants
+                |> List.filter
+                    (.uiNode
+                        >> EveOnline.ParseUserInterface.getNameFromDictEntries
+                        >> (==) (Just name)
+                    )
+                |> List.head
+
+        transferButton =
+            nodeNamed dropboxTransferButtonName
+    in
+    { uiNode = window
+    , dropTarget =
+        descendants
+            |> List.filter (.uiNode >> .pythonObjectTypeName >> (==) dropboxDropTargetTypeName)
+            |> List.head
+    , transferButton = transferButton
+    , closeControl = dropboxCloseControl window descendants
+    , stagedItems =
+        nodeNamed dropboxStagedItemsContainerName
+            |> Maybe.map EveOnline.ParseUserInterface.listDescendantsWithDisplayRegion
+            |> Maybe.withDefault []
+            |> List.filter nodeIsAnInventoryItem
+            |> List.length
+    , transferReadsReady =
+        case transferButton of
+            Nothing ->
+                False
+
+            Just button ->
+                button.uiNode
+                    |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+                    |> List.any (stringContainsIgnoringCase dropboxNothingToTransferMarker)
+                    |> not
+    , destinationText =
+        nodeNamed dropboxDestinationLabelName |> Maybe.andThen firstVisibleTextOfNode
+    , itemCountLabelText =
+        nodeNamed dropboxItemCountLabelName |> Maybe.andThen firstVisibleTextOfNode
+    , validRangeMeters =
+        window.uiNode.dictEntriesOfInterest
+            |> Dict.get dropboxValidRangeKey
+            |> Maybe.andThen (Json.Decode.decodeValue Json.Decode.float >> Result.toMaybe)
+            |> Maybe.map round
+    }
+
+
+{-| A stack rendered inside a container, by either of the two things the live
+read showed one carrying.
+
+The stacks in the hold were `InvItem` nodes whose `_name` read
+`ItemEntry_30376`, and a staged stack renders inside `inputScroll`. Both are
+matched because only one of them has been read on the staged side, and a client
+that renders it as some third thing makes `stagedItems` answer `0` -- which
+declines the transfer rather than committing one nothing verified, and says so
+in the status line.
+
+-}
+nodeIsAnInventoryItem : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Bool
+nodeIsAnInventoryItem node =
+    (node.uiNode.pythonObjectTypeName |> String.contains inventoryItemTypeNameFragment)
+        || (node.uiNode
+                |> EveOnline.ParseUserInterface.getNameFromDictEntries
+                |> Maybe.map (String.startsWith inventoryItemNamePrefix)
+                |> Maybe.withDefault False
+           )
+
+
+inventoryItemTypeNameFragment : String
+inventoryItemTypeNameFragment =
+    "InvItem"
+
+
+inventoryItemNamePrefix : String
+inventoryItemNamePrefix =
+    "ItemEntry"
+
+
+{-| Whatever this window offers that would shut it.
+
+The parsed window controls first, then a button whose **only** visible text
+reads `Cancel`. The second is narrowed to a node carrying one text because a row
+container holding Cancel beside Transfer also has `Cancel` as its first text,
+and clicking the centre of that row could land on Transfer -- which is the one
+click on this window that must never happen by accident.
+
+`Nothing` is a window this bot cannot close, and `depositRunAfterReading` reads
+that: a run does not wait on a window nothing can shut.
+
+-}
+dropboxCloseControl :
+    EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    -> List EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+    -> Maybe EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion
+dropboxCloseControl window descendants =
+    [ EveOnline.ParseUserInterface.parseWindowControlsFromWindow window
+        |> Maybe.andThen .closeButton
+    , descendants
+        |> List.filter nodeReadsCancelAndNothingElse
+        |> List.sortBy (.totalDisplayRegionVisible >> .width >> negate)
+        |> List.head
+    ]
+        |> List.filterMap identity
+        |> List.head
+
+
+nodeReadsCancelAndNothingElse : EveOnline.ParseUserInterface.UITreeNodeWithDisplayRegion -> Bool
+nodeReadsCancelAndNothingElse node =
+    case
+        node.uiNode
+            |> EveOnline.ParseUserInterface.getAllContainedDisplayTexts
+            |> List.map String.trim
+            |> List.filter (String.isEmpty >> not)
+    of
+        [ onlyText ] ->
+            labelReadsCancel onlyText
+
+        _ ->
+            False
+
+
+labelReadsCancel : String -> Bool
+labelReadsCancel text =
+    let
+        lowered =
+            text |> String.toLower |> String.trim
+    in
+    (lowered == "cancel") || String.contains ">cancel<" lowered
+
+
+{-| Whether the transfer window names the structure the panel is showing.
+
+Matched against the **overview row's own name** rather than against
+`home-structure-name`, for `selectedItemIsOverviewEntry`'s reason: the setting
+may end in `*` and mean a prefix, where the question here is whether the window
+and the panel are talking about the same object. `containsWords` is the same
+whole-word matcher that question is already asked with elsewhere in this file,
+and the colon in `Structure to transfer to:<structure>` is read as a separator
+so the name is not glued to the word before it.
+
+**A window that names nothing readable answers `False`**, which stops the
+transfer rather than committing one nothing corroborated -- and the deposit says
+so and waits, bounded by `depositGiveUpReadings`. That is the harsher of the two
+available directions and is chosen: a window this bot cannot read is a client
+shape it does not recognise, and the operator can see the label the status line
+prints.
+
+-}
+dropboxNamesTheStructure : String -> DropboxWindow -> Bool
+dropboxNamesTheStructure structureName dropbox =
+    case dropbox.destinationText of
+        Nothing ->
+            False
+
+        Just text ->
+            containsWords structureName (text |> String.replace ":" " ")
+
+
 {-| The overview's own word for a wormhole, matched against the Type column the
 way `harvestableCloudTypeMarker` is matched against a cloud's.
 -}
@@ -6509,6 +6885,20 @@ hold reads as having room while the ship is in space, which is a hold somebody
 emptied by hand. A hold that cannot be read ends nothing, for the reason it
 starts nothing.
 
+**And a run does not end while the transfer window this bot opened is still on
+the screen and still closable**, which is the one clause #476 adds. The in-space
+deposit opens a 400x400 window over the client, and the reading that would
+otherwise end the run -- the confirmation, or the hold reading empty in space --
+is the same reading the window is finished with. Ending there would leave it
+standing over every later reading of the session, and this bot clicks at screen
+positions.
+
+`dropboxWindowIsOpen` therefore means _open **and** carrying something this bot
+could press to shut it_, never merely open. A window with no close control ends
+the run exactly as it always did, so a window shape this bot does not recognise
+can never strand a deposit -- and the one it does recognise is bounded by
+`depositGiveUpReadings`, which ends the session naming what is still on screen.
+
 -}
 depositRunAfterReading :
     { before : Maybe DepositRun
@@ -6516,6 +6906,7 @@ depositRunAfterReading :
     , docked : Bool
     , confirmationNow : Maybe String
     , dragDispatched : Bool
+    , dropboxWindowIsOpen : Bool
     }
     -> Maybe DepositRun
 depositRunAfterReading answer =
@@ -6546,6 +6937,7 @@ depositRunAfterReading answer =
             if
                 not answer.docked
                     && ((confirmation /= Nothing) || (answer.holdFill == HoldHasRoom))
+                    && not answer.dropboxWindowIsOpen
             then
                 Nothing
 
@@ -6593,6 +6985,13 @@ type alias DepositSituation =
     , chainHopBookmark : Maybe EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
     , wormholesOnTheOverview : List EveOnline.ParseUserInterface.OverviewWindowEntry
     , chainHopsMade : Int
+    , accessDropboxButtonIsOffered : Bool
+    , structureIsWithinDropboxRange : Bool
+    , dropboxWindowIsOpen : Bool
+    , dropboxNamesTheSelectedStructure : Bool
+    , dropboxIsUsable : Bool
+    , dropboxStagedItems : Int
+    , dropboxTransferReadsReady : Bool
     }
 
 
@@ -6619,12 +7018,48 @@ anything else is tried, because a dialog blocks the drag underneath it; then the
 hangar, the hold, and the drag.
 
 In space, in order: a ship in warp is left alone rather than re-commanded, which
-is `huntAndHarvest`'s own argument; a confirmed docking run-in is waited on
-rather than restarted, which is #464's fourth emphasis and the mission runner's
-run 27; then the structure is selected, docked at where the panel offers Dock,
-and warped to where it does not -- that absence being the natural gate between
-the two, exactly as it is for `dockAtDestinationStation`, since the Dock button
-is drawn only inside docking range.
+is `huntAndHarvest`'s own argument; **then the transfer window, if one is open**;
+then a confirmed docking run-in is waited on rather than restarted, which is
+#464's fourth emphasis and the mission runner's run 27; then the structure is
+selected, the dropbox is opened where the panel offers it and the ship is close
+enough, docked at where the panel offers Dock, and warped to where it does not --
+that last absence being the natural gate between the two, exactly as it is for
+`dockAtDestinationStation`, since the Dock button is drawn only inside docking
+range.
+
+**The in-space transfer removes the dock and not the trip**, which is #476's own
+correction of its framing. `selectedItemAccessDropbox` is on the Selected Item
+panel, so the structure has to be _selected_, so it has to be on this grid --
+verified by its absence at a gas site in another system. What the sequence
+replaces is the run-in, the lobby, the hangar and the undock; the warp home is
+the same warp.
+
+**And the docked deposit is still the fallback, at three separate points.** A
+structure whose panel offers no dropbox falls through to `PressTheDockButton`; a
+ship too far out for `dropboxTransferRangeMeters` does too; and a window this
+bot cannot read at all is said out loud and bounded rather than acted on. So
+#464's sequence is what runs whenever this one cannot, which is the constraint
+#476 carries over from it.
+
+**What commits the transfer is two independent readings of the same fact**, and
+neither of them is `numItemsLabel` -- see that constant for what it actually
+counts, which is the hold rather than what is staged. `dropboxStagedItems` is
+what `inputScroll` is holding and `dropboxTransferReadsReady` is the client's own
+enabled state on the button, and both have to agree before anything is pressed.
+The hold is drained into the window first and the transfer committed once, rather
+than one transfer per stack, because a transfer per stack would end the run on
+the first confirmation with stacks still in the hold.
+
+**Nothing staged is a condition on closing the window, and it is there because
+the hold's own gauge may be what drains as stacks are staged.** The live
+sequence shows `numItemsLabel` counting _down_ while stacks go in, which is
+consistent with a stack leaving the hold the moment it is staged -- and whether
+the capacity gauge follows it is **unmeasured**. If it does, a hold reading
+`HoldHasRoom` is what a half-staged window looks like, and closing there would
+cancel the transfer with the ship's cargo sitting in a window about to be shut.
+So the close waits until `inputScroll` is empty, which is true after the
+transfer lands and false in the middle of staging, whichever way the gauge
+behaves.
 
 **A structure that is on neither the overview nor in Locations is not
 necessarily unreachable, and `depositChainHop` is what that costs.** This ship
@@ -6649,6 +7084,37 @@ All are bounded by `depositGiveUpReadings`, which ends the session; the
 chain-hop steps carry the additional, tighter bound of `depositChainHopLimit`
 hops before they give up on the chain and answer `NowhereToDepositAt` too.
 
+
+## Unverified: any of this running, and three premises under it
+
+No session of this bot has been run against a live client. The _sequence_ has
+been driven by hand -- select, press, drag, drag, Transfer, and the client's own
+confirmation -- so what is untested is this file driving it rather than the
+mechanism itself.
+
+Three things nobody has read, each named so a first run can settle it:
+
+  - **The range at which the panel stops offering the button.** Both readings
+    that had it were at 0 m and one press was made at roughly 90 km, which do
+    not agree. `dropboxTransferRangeMeters` is this bot's own gate rather than
+    the client's, deliberately tighter than any plausible answer, so the
+    question does not decide anything here.
+  - **Whether the hold's capacity gauge drains as stacks are staged.** See the
+    staged clause on `CloseTheDropboxWindow` above for what it would cost.
+  - **What a staged stack renders as.** The hold's own stacks are `InvItem`
+    nodes named `ItemEntry_<id>` and `nodeIsAnInventoryItem` matches either;
+    a client that draws a staged one as something else answers `0` staged,
+    which declines the transfer rather than committing one nothing verified.
+
+What to watch on the first run that fills a hold: the status line's `Dropbox:`
+clause going from `no transfer window open` with a falling range, to `OPEN`
+naming the structure, to `1` then `2 stack(s) staged` with the button turning
+`READY`, and then gone. A run whose clause reads `no transfer window open,
+panel offers none` at 0 m from the structure is a panel that does not offer this
+button here, and it docks instead -- which costs nothing and is the direction
+this fails in. The one to escalate on is `OPEN` naming a structure the operator
+does not recognise.
+
 -}
 type DepositStep
     = TheHoldDoesNotNeedDepositing
@@ -6665,6 +7131,13 @@ type DepositStep
     | WaitForTheDockingRunIn DockingRunIn
     | NowhereToDepositAt
     | SelectTheHomeStructure
+    | PressTheAccessDropboxButton
+    | CloseTheDropboxWindow
+    | TheDropboxWindowDoesNotNameTheSelectedStructure
+    | TheDropboxWindowIsNotUsable
+    | DragTheHoldIntoTheDropbox
+    | PressTheTransferButton
+    | TheDropboxHasNothingStagedToTransfer
     | PressTheDockButton
     | WarpToTheHomeStructure
     | WarpToTheHomeStructureBookmark EveOnline.ParseUserInterface.LocationsWindowPlaceEntry
@@ -6713,6 +7186,34 @@ depositStep situation =
     else if situation.shipIsWarping then
         WaitForTheWarpToLand
 
+    else if situation.dropboxWindowIsOpen then
+        if
+            (situation.confirmedByClient || (situation.holdFill == HoldHasRoom))
+                && (situation.dropboxStagedItems < 1)
+        then
+            CloseTheDropboxWindow
+
+        else if not situation.dropboxNamesTheSelectedStructure then
+            TheDropboxWindowDoesNotNameTheSelectedStructure
+
+        else if not situation.dropboxIsUsable then
+            TheDropboxWindowIsNotUsable
+
+        else if not situation.inventoryListsTheHold then
+            NoInventoryListingTheHold
+
+        else if not situation.holdIsTheSelectedContainer then
+            SelectTheHold
+
+        else if 1 <= situation.itemsInTheHold then
+            DragTheHoldIntoTheDropbox
+
+        else if (1 <= situation.dropboxStagedItems) && situation.dropboxTransferReadsReady then
+            PressTheTransferButton
+
+        else
+            TheDropboxHasNothingStagedToTransfer
+
     else
         case situation.dockingRunIn of
             Just runIn ->
@@ -6722,6 +7223,9 @@ depositStep situation =
                 if situation.homeStructureIsOnTheOverview then
                     if not situation.panelShowsTheHomeStructure then
                         SelectTheHomeStructure
+
+                    else if situation.accessDropboxButtonIsOffered && situation.structureIsWithinDropboxRange then
+                        PressTheAccessDropboxButton
 
                     else if situation.dockButtonIsOffered then
                         PressTheDockButton
@@ -6781,6 +7285,9 @@ depositSituationFromContext context =
 
         settings =
             context.eventContext.botSettings
+
+        dropbox =
+            dropboxWindowFromReading readingFromGameClient
     in
     { runIsUnderWay = context.memory.deposit /= Nothing
     , docked = readingFromGameClient.shipUI == Nothing
@@ -6822,6 +7329,25 @@ depositSituationFromContext context =
     , wormholesOnTheOverview =
         wormholeRowsOnTheOverview (readingFromGameClient.overviewWindows |> List.concatMap .entries)
     , chainHopsMade = context.memory.depositChainHop.hopsMade
+    , accessDropboxButtonIsOffered =
+        accessDropboxButtonInReading readingFromGameClient /= Nothing
+    , structureIsWithinDropboxRange =
+        rangeToTheHomeStructureInMeters settings.homeStructureName readingFromGameClient
+            |> Maybe.map (\meters -> meters <= dropboxTransferRangeMeters)
+            |> Maybe.withDefault False
+    , dropboxWindowIsOpen = dropbox /= Nothing
+    , dropboxNamesTheSelectedStructure =
+        Maybe.map2 dropboxNamesTheStructure
+            (homeStructureRow |> Maybe.andThen .objectName)
+            dropbox
+            |> Maybe.withDefault False
+    , dropboxIsUsable =
+        dropbox
+            |> Maybe.map (\found -> (found.dropTarget /= Nothing) && (found.transferButton /= Nothing))
+            |> Maybe.withDefault False
+    , dropboxStagedItems = dropbox |> Maybe.map .stagedItems |> Maybe.withDefault 0
+    , dropboxTransferReadsReady =
+        dropbox |> Maybe.map .transferReadsReady |> Maybe.withDefault False
     }
 
 
@@ -6846,6 +7372,9 @@ actOnTheDepositStep context situation =
 
         inventory =
             depositInventoryFromReading readingFromGameClient
+
+        dropbox =
+            dropboxWindowFromReading readingFromGameClient
 
         homeStructureRow =
             homeStructureRowsOnTheOverview
@@ -6922,7 +7451,7 @@ actOnTheDepositStep context situation =
                         (unlessJustClicked
                             "There is a dialog with an OK on screen -- answer it, which is not evidence of anything"
                             (clickOn
-                                "There is a dialog with an OK on screen -- answer it. Whether it is the transfer's confirmation or the client's refusal of it, this click says nothing about either: what says the deposit landed is the client's own '(notify) ... item(s) was moved to your hangar' line and nothing else."
+                                "There is a dialog with an OK on screen -- answer it. Whether it is the transfer's confirmation or the client's refusal of it, this click says nothing about either: what says the deposit landed is the client's own '(notify) ... moved to your hangar' line and nothing else."
                                 okButton
                             )
                         )
@@ -7061,6 +7590,156 @@ actOnTheDepositStep context situation =
                             "The overview changed between choosing the home structure and selecting it -- ask again next reading."
                             waitForProgressInGame
                         )
+
+        PressTheAccessDropboxButton ->
+            case accessDropboxButtonInReading readingFromGameClient of
+                Just dropboxButton ->
+                    Just
+                        (unlessJustClicked
+                            ("Open the cargo deposit on '" ++ structureName ++ "' from the Selected Item panel")
+                            (clickOn
+                                ("Open the cargo deposit on '"
+                                    ++ structureName
+                                    ++ "' with the Selected Item panel's own '"
+                                    ++ selectedItemAccessDropboxElementId
+                                    ++ "'. This deposits the hold from space -- no dock, no lobby, no undock."
+                                )
+                                dropboxButton
+                            )
+                        )
+
+                Nothing ->
+                    Just
+                        (describeBranch
+                            "The Access Dropbox button left the panel between reading it and pressing it -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        CloseTheDropboxWindow ->
+            case dropbox |> Maybe.andThen .closeControl of
+                Just closeControl ->
+                    Just
+                        (unlessJustClicked
+                            "The deposit is finished -- close the transfer window"
+                            (clickOn
+                                "The deposit is finished and the transfer window is still on screen -- close it, rather than leaving it over the client for the rest of the session."
+                                closeControl
+                            )
+                        )
+
+                Nothing ->
+                    -- Unreachable: a window with no close control never holds
+                    -- the run open, so `runIsUnderWay` is already false by the
+                    -- time this reading is decided. See `depositRunAfterReading`.
+                    Just
+                        (describeBranch
+                            "The transfer window changed between reading it and closing it -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        TheDropboxWindowDoesNotNameTheSelectedStructure ->
+            Just
+                (describeBranch
+                    ("The transfer window is open and does not name '"
+                        ++ structureName
+                        ++ "' as where it would transfer to -- it says "
+                        ++ (dropbox
+                                |> Maybe.andThen .destinationText
+                                |> Maybe.map (\text -> "'" ++ text ++ "'")
+                                |> Maybe.withDefault "nothing this bot can read"
+                           )
+                        ++ ". Nothing is dragged or transferred on a reading that cannot corroborate the destination. The session ends at the deposit bound."
+                    )
+                    waitForProgressInGame
+                )
+
+        TheDropboxWindowIsNotUsable ->
+            Just
+                (describeBranch
+                    ("The transfer window is open and this bot cannot find "
+                        ++ (case dropbox |> Maybe.map (\found -> ( found.dropTarget, found.transferButton )) of
+                                Just ( Nothing, _ ) ->
+                                    "the '" ++ dropboxDropTargetTypeName ++ "' to drop items into"
+
+                                Just ( _, Nothing ) ->
+                                    "its '" ++ dropboxTransferButtonName ++ "'"
+
+                                _ ->
+                                    "the parts it needs"
+                           )
+                        ++ " -- staging a hold into a window nothing can commit would be worse than not starting. The session ends at the deposit bound."
+                    )
+                    waitForProgressInGame
+                )
+
+        DragTheHoldIntoTheDropbox ->
+            case
+                ( dropbox |> Maybe.andThen .dropTarget
+                , inventory |> Maybe.map (.window >> inventoryItemsInView) |> Maybe.withDefault []
+                )
+            of
+                ( Just dropTarget, item :: rest ) ->
+                    Just
+                        (unlessJustClicked
+                            "Drag a stack out of the Mining Hold into the transfer window"
+                            (describeBranch
+                                ("Drag a stack out of the Mining Hold into the transfer window ("
+                                    ++ String.fromInt (List.length rest)
+                                    ++ " more stack(s) in view afterwards, "
+                                    ++ String.fromInt (dropbox |> Maybe.map .stagedItems |> Maybe.withDefault 0)
+                                    ++ " staged already). Each stack needs its own drag; the transfer is committed once the hold is drained."
+                                )
+                                (dragFromItemIconOntoUiElement item dropTarget)
+                            )
+                        )
+
+                _ ->
+                    Just
+                        (describeBranch
+                            "The inventory or the transfer window changed between reading it and dragging out of it -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        PressTheTransferButton ->
+            case dropbox |> Maybe.andThen .transferButton of
+                Just transferButton ->
+                    Just
+                        (unlessJustClicked
+                            "Commit the transfer"
+                            (clickOn
+                                ("Commit the transfer of "
+                                    ++ String.fromInt (dropbox |> Maybe.map .stagedItems |> Maybe.withDefault 0)
+                                    ++ " staged stack(s) to '"
+                                    ++ structureName
+                                    ++ "'. The button reads ready, which is the client's own word for it, and the window says where it is going."
+                                )
+                                transferButton
+                            )
+                        )
+
+                Nothing ->
+                    Just
+                        (describeBranch
+                            "The transfer button left the window between reading it and pressing it -- ask again next reading."
+                            waitForProgressInGame
+                        )
+
+        TheDropboxHasNothingStagedToTransfer ->
+            Just
+                (describeBranch
+                    ("The Mining Hold shows nothing left to drag and the transfer window reports "
+                        ++ String.fromInt (dropbox |> Maybe.map .stagedItems |> Maybe.withDefault 0)
+                        ++ " staged stack(s) with its button reading "
+                        ++ (if dropbox |> Maybe.map .transferReadsReady |> Maybe.withDefault False then
+                                "ready"
+
+                            else
+                                "'" ++ dropboxNothingToTransferMarker ++ "'"
+                           )
+                        ++ " -- nothing is committed on a reading that cannot say something is staged. The session ends at the deposit bound if it stays this way."
+                    )
+                    waitForProgressInGame
+                )
 
         PressTheDockButton ->
             case selectedItemPanelButton readingFromGameClient selectedItemDockButton of
@@ -7244,6 +7923,9 @@ describeDeposit :
     , dockingRunIn : Maybe DockingRunIn
     , homeStructureName : Maybe String
     , depositChainHop : DepositChainHopMemory
+    , dropbox : Maybe DropboxWindow
+    , accessDropboxIsOffered : Bool
+    , rangeToTheStructureMeters : Maybe Int
     }
     -> String
 describeDeposit state =
@@ -7319,6 +8001,63 @@ describeDeposit state =
                             ++ " wormhole(s) jumped looking for a way back, last known system "
                             ++ (state.depositChainHop.lastSolarSystemName |> Maybe.withDefault "unreadable")
                             ++ "."
+
+        dropbox =
+            case state.dropbox of
+                Nothing ->
+                    " Dropbox: no transfer window open, panel "
+                        ++ (if state.accessDropboxIsOffered then
+                                "offers '" ++ selectedItemAccessDropboxElementId ++ "'"
+
+                            else
+                                "offers none"
+                           )
+                        ++ ", structure "
+                        ++ (state.rangeToTheStructureMeters
+                                |> Maybe.map (\meters -> String.fromInt meters ++ " m")
+                                |> Maybe.withDefault "at a range this reading cannot say"
+                           )
+                        ++ " against the "
+                        ++ String.fromInt dropboxTransferRangeMeters
+                        ++ " m this bot will open it at."
+
+                Just found ->
+                    " Dropbox: OPEN, transferring to "
+                        ++ (found.destinationText
+                                |> Maybe.map (\text -> "'" ++ text ++ "'")
+                                |> Maybe.withDefault "somewhere this bot cannot read"
+                           )
+                        ++ ", "
+                        ++ String.fromInt found.stagedItems
+                        ++ " stack(s) staged, button "
+                        ++ (if found.transferReadsReady then
+                                "READY"
+
+                            else
+                                "reading '" ++ dropboxNothingToTransferMarker ++ "'"
+                           )
+                        ++ ", "
+                        ++ (if found.closeControl == Nothing then
+                                "NO CLOSE CONTROL"
+
+                            else
+                                "closable"
+                           )
+                        ++ ", client's own "
+                        ++ dropboxValidRangeKey
+                        ++ " "
+                        ++ (found.validRangeMeters
+                                |> Maybe.map (\meters -> String.fromInt meters ++ " m")
+                                |> Maybe.withDefault "unreadable"
+                           )
+                        ++ ". Its '"
+                        ++ dropboxItemCountLabelName
+                        ++ "' reads "
+                        ++ (found.itemCountLabelText
+                                |> Maybe.map (\text -> "'" ++ text ++ "'")
+                                |> Maybe.withDefault "nothing"
+                           )
+                        ++ ", which counts the hold rather than what is staged (measured 2026-09-10) and which nothing decides on."
     in
     "Hold: "
         ++ hold
@@ -7332,6 +8071,7 @@ describeDeposit state =
         ++ "."
         ++ runIn
         ++ chainHop
+        ++ dropbox
 
 
 
@@ -8596,6 +9336,10 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             , docked = docked
             , confirmationNow = depositConfirmedInGameLog context.readingFromGameClient
             , dragDispatched = dragDispatched
+            , dropboxWindowIsOpen =
+                dropboxWindowFromReading context.readingFromGameClient
+                    |> Maybe.andThen .closeControl
+                    |> (/=) Nothing
             }
     , depositChainHop =
         depositChainHopMemoryAfterReading
@@ -8661,7 +9405,7 @@ statusTextFromState context =
                 ( Nothing, _ ) ->
                     []
     in
-    [ "NEVER FLOWN: this bot warps to a gas site, harvests it, watches the grid and leaves when something arrives (#463), deposits the hold at the home structure when it fills (#464), and keeps its propulsion module running through every warp it makes (#465) -- and no session of it has ever been run against a live client, so every one of those is a rule executed in a repl rather than a thing anybody has watched happen. Read the clauses below as instruments that have not been calibrated."
+    [ "NEVER FLOWN: this bot warps to a gas site, harvests it, watches the grid and leaves when something arrives (#463), deposits the hold into the home structure from space when it fills (#476, falling back to #464's dock), and keeps its propulsion module running through every warp it makes (#465) -- and no session of it has ever been run against a live client, so every one of those is a rule executed in a repl rather than a thing anybody has watched happen. The deposit's own sequence has been driven by hand and the rest has not. Read the clauses below as instruments that have not been calibrated."
     , describePropulsionModule (propulsionSituationFromContext context)
     , describeGrid (gridEvidenceFromContext context)
     , describeDscanSightingsFromReading context.readingFromGameClient
@@ -8680,6 +9424,12 @@ statusTextFromState context =
                 , dockingRunIn = context.memory.dockingRunIn
                 , homeStructureName = settings.homeStructureName
                 , depositChainHop = context.memory.depositChainHop
+                , dropbox = dropboxWindowFromReading context.readingFromGameClient
+                , accessDropboxIsOffered =
+                    accessDropboxButtonInReading context.readingFromGameClient /= Nothing
+                , rangeToTheStructureMeters =
+                    rangeToTheHomeStructureInMeters settings.homeStructureName
+                        context.readingFromGameClient
                 }
            , "Readings: "
                 ++ String.fromInt context.memory.readingsCount

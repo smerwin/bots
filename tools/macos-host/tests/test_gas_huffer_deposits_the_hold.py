@@ -378,7 +378,11 @@ def situation(under_way=True, docked=False, hold="HoldIsFull",
               dock_offered=False, lists_hold=True, hold_selected=True,
               hangar_in_inventory=True, items=1, ok_on_screen=False,
               home_structure_bookmark="Nothing", chain_hop_bookmark="Nothing",
-              wormholes_on_the_overview="[]", chain_hops_made=0):
+              wormholes_on_the_overview="[]", chain_hops_made=0,
+              access_dropbox_offered=False, within_dropbox_range=False,
+              dropbox_open=False, dropbox_names_structure=True,
+              dropbox_usable=True, dropbox_staged=0,
+              dropbox_transfer_ready=False):
     """A `DepositSituation` written out, since it is a record of plain facts.
 
     Written here rather than derived from a reading on purpose: these cases are
@@ -392,6 +396,14 @@ def situation(under_way=True, docked=False, hold="HoldIsFull",
     is what every case below that never mentions them means to ask: the
     ordinary path where the structure is (or is not) simply on the overview,
     with the wormhole-chain fallback never in play.
+
+    The seven #476 fields default to "no transfer window and no way to open
+    one", so every case written before it still asks exactly what it asked:
+    the docked sequence, which is now the fallback rather than the only path.
+    `dropbox_names_structure` and `dropbox_usable` default *true* rather than
+    false, so a case that opens a window without saying anything else about it
+    gets a window that works -- the interesting cases are the ones that turn
+    one of them off.
     """
     def flag(value):
         return "True" if value else "False"
@@ -413,14 +425,25 @@ def situation(under_way=True, docked=False, hold="HoldIsFull",
             ", okButtonIsOnScreen = %s"
             ", chainHopBookmark = %s"
             ", wormholesOnTheOverview = %s"
-            ", chainHopsMade = %d }" % (
+            ", chainHopsMade = %d"
+            ", accessDropboxButtonIsOffered = %s"
+            ", structureIsWithinDropboxRange = %s"
+            ", dropboxWindowIsOpen = %s"
+            ", dropboxNamesTheSelectedStructure = %s"
+            ", dropboxIsUsable = %s"
+            ", dropboxStagedItems = %d"
+            ", dropboxTransferReadsReady = %s }" % (
                 flag(under_way), flag(docked), hold, flag(confirmed),
                 flag(warping), docking_run_in, flag(structure_on_overview),
                 home_structure_bookmark,
                 flag(panel_shows), flag(dock_offered), flag(lists_hold),
                 flag(hold_selected), flag(hangar_in_inventory), items,
                 flag(ok_on_screen), chain_hop_bookmark,
-                wormholes_on_the_overview, chain_hops_made))
+                wormholes_on_the_overview, chain_hops_made,
+                flag(access_dropbox_offered), flag(within_dropbox_range),
+                flag(dropbox_open), flag(dropbox_names_structure),
+                flag(dropbox_usable), dropbox_staged,
+                flag(dropbox_transfer_ready)))
 
 
 def evasion_situation(clean=False, docked=False):
@@ -864,7 +887,7 @@ class TheClientConfirmsTheDepositAndTheGaugeDoesNotTest(unittest.TestCase):
             "List.foldl (\\( holdFill, confirmationNow ) before ->"
             " depositRunAfterReading { before = before, holdFill = holdFill"
             " , docked = True, confirmationNow = confirmationNow"
-            " , dragDispatched = False })"
+            " , dragDispatched = False, dropboxWindowIsOpen = False })"
             " (Just %s)"
             " [ ( HoldHasRoom, Nothing ), ( HoldHasRoom, Nothing )"
             " , ( HoldHasRoom, Nothing ) ]" % deposit_run(readings=4)])[0]
@@ -1252,7 +1275,8 @@ class TheRunIsLatchedAndBoundedTest(unittest.TestCase):
             " { before = before, holdFill = reading.holdFill"
             " , docked = reading.docked"
             " , confirmationNow = reading.confirmationNow"
-            " , dragDispatched = reading.dragDispatched })"
+            " , dragDispatched = reading.dragDispatched"
+            " , dropboxWindowIsOpen = False })"
             " %s [ %s ]" % (before, steps)])[0]
 
     def test_only_a_full_hold_starts_a_run(self):
@@ -1375,17 +1399,20 @@ class TheRunIsLatchedAndBoundedTest(unittest.TestCase):
         run, at_the_bound, one_short = self.repl.rendered([
             "List.foldl (\\_ before -> depositRunAfterReading"
             " { before = before, holdFill = HoldIsFull, docked = True"
-            " , confirmationNow = Nothing, dragDispatched = False })"
+            " , confirmationNow = Nothing, dragDispatched = False"
+            " , dropboxWindowIsOpen = False })"
             " (Just %s) (List.range 1 299)" % deposit_run(readings=1),
             "List.foldl (\\_ before -> depositRunAfterReading"
             " { before = before, holdFill = HoldIsFull, docked = True"
-            " , confirmationNow = Nothing, dragDispatched = False })"
+            " , confirmationNow = Nothing, dragDispatched = False"
+            " , dropboxWindowIsOpen = False })"
             " (Just %s) (List.range 1 299)"
             " |> Maybe.andThen (\\r -> depositOutOfTime { readings = r.readings })"
             " |> (/=) Nothing" % deposit_run(readings=1),
             "List.foldl (\\_ before -> depositRunAfterReading"
             " { before = before, holdFill = HoldIsFull, docked = True"
-            " , confirmationNow = Nothing, dragDispatched = False })"
+            " , confirmationNow = Nothing, dragDispatched = False"
+            " , dropboxWindowIsOpen = False })"
             " (Just %s) (List.range 1 298)"
             " |> Maybe.andThen (\\r -> depositOutOfTime { readings = r.readings })"
             " |> (/=) Nothing" % deposit_run(readings=1),
@@ -1587,16 +1614,20 @@ class EveryClickingArmSaysWhatItIsWaitingForTest(unittest.TestCase):
         clicking whichever OK is on screen and calling it success reports a
         transfer that moved nothing."""
         self.assertIn("says nothing about either", self.body)
-        self.assertIn("item(s) was moved to your hangar", self.body)
+        self.assertIn("moved to your hangar", self.body)
 
     def test_the_dead_ends_name_what_is_missing_and_what_ends_the_session(self):
         for phrase in ("no inventory window listing",
                        "row in the inventory to drop it into",
                        "nowhere to deposit from here",
-                       "the client is rendering no item in it"):
+                       "the client is rendering no item in it",
+                       # #476's three, each a different thing to fix.
+                       "as where it would transfer to",
+                       "this bot cannot find",
+                       "nothing left to drag and the transfer window reports"):
             with self.subTest(phrase):
                 self.assertIn(phrase, self.body)
-        self.assertEqual(self.body.count("deposit bound"), 4, self.body)
+        self.assertEqual(self.body.count("deposit bound"), 7, self.body)
 
     def test_the_drag_and_the_dialog_wait_for_the_previous_click_to_land(self):
         """A repeat drag can move part of a stack somewhere unintended while the
@@ -1717,14 +1748,21 @@ class TheStatusLineSaysWhatTheHoldIsDoingTest(unittest.TestCase):
 
     def clause(self, hold="HoldHasRoom", deposit="Nothing",
                docking_run_in="Nothing", home=FICTIONAL_STRUCTURE,
-               chain_hop="{ hopsMade = 0, lastSolarSystemName = Nothing }"):
+               chain_hop="{ hopsMade = 0, lastSolarSystemName = Nothing }",
+               dropbox="Nothing", access_dropbox_offered=False,
+               range_meters=None):
         return self.repl.strings([
             "describeDeposit { holdFill = %s, deposit = %s"
             ", dockingRunIn = %s, homeStructureName = %s"
-            ", depositChainHop = %s }" % (
+            ", depositChainHop = %s, dropbox = %s"
+            ", accessDropboxIsOffered = %s"
+            ", rangeToTheStructureMeters = %s }" % (
                 hold, deposit, docking_run_in,
                 "Nothing" if home is None else "(Just %s)" % json.dumps(home),
-                chain_hop)])[0]
+                chain_hop, dropbox,
+                "True" if access_dropbox_offered else "False",
+                "Nothing" if range_meters is None
+                else "(Just %d)" % range_meters)])[0]
 
     def test_an_unreadable_hold_shouts_and_says_what_to_do_about_it(self):
         printed = self.clause(hold="HoldFillCannotBeRead")
@@ -1897,16 +1935,28 @@ class TheParserIsNotTouchedTest(unittest.TestCase):
                           "miningHoldContainerTypeName"]))
 
 
-class WhyThisShipDocksAtAllTest(unittest.TestCase):
-    """The cheaper path was looked for and is not in the evidence.
+class WhyThisShipDepositsFromSpaceTest(unittest.TestCase):
+    """`WhyThisShipDocksAtAllTest`, updated on the day two of its four relations
+    stopped being true.
 
-    Docking is the expensive and failure-prone half of #464 -- a run-in that
-    kept a mission runner 17 km off a station for eight minutes, then the hangar
-    work, then an undock -- so emptying the hold into the structure from space
-    would remove all three. What follows is what was looked for, asserted as
-    *relations* rather than as prose, so that **the day one of them stops being
-    true the case goes red** and somebody is looking at the moment the evidence
-    for a cheaper path arrives.
+    #464 asserted, as *relations* rather than as prose, the four things it had
+    looked for and not found -- so that the day one of them stopped holding a
+    case would go red and somebody would be looking at the moment the evidence
+    for a cheaper path arrived. **That is what happened**, and #476 says the
+    class is to be updated to record the new relation rather than deleted.
+
+    Which two flipped, and what replaced them:
+
+      - *"`selectedItemAccessDropbox` is pressed by nothing"*. It is pressed by
+        this app now, and by no other, which is what the case asserts instead --
+        so a second app growing the press has to argue for it.
+      - *"the repository's only in-space unload needs an Orca or a Rorqual in
+        fleet"*. Scoped to `eve-online-mining-bot`, of which it is still true.
+
+    The two that still hold are kept exactly as they were, because they are the
+    reason the docked sequence is still in the file: the parsers still offer one
+    structure container and no `Bot.elm` reads it, and the bot closest to this
+    use case still docks.
     """
 
     def setUp(self):
@@ -1952,9 +2002,10 @@ class WhyThisShipDocksAtAllTest(unittest.TestCase):
         self.assertIn("dockToUnloadOre context = case"
                       " unloadStationOrStructureNames context", source)
 
-    def test_its_only_in_space_unload_is_a_fleet_ship_rather_than_a_structure(self):
-        """The repo's one hold-emptying that skips a dock, and what its own
-        setting text says it needs."""
+    def test_the_mining_bot_s_only_in_space_unload_is_still_a_fleet_ship(self):
+        """Scoped to that bot, where it is still true. As a claim about the
+        *repository* it stopped being true with #476, which empties the hold
+        into a structure from space and needs no fleet at all."""
         source = self.read("eve-online-mining-bot", "Bot.elm")
         self.assertIn("fleet hangar", source)
         self.assertIn("you must be in a fleet with an orca or a rorqual",
@@ -1972,29 +2023,63 @@ class WhyThisShipDocksAtAllTest(unittest.TestCase):
                     self.assertNotIn("StructureItemHangar", collapsed(text),
                                      "%s.%s" % (app, name))
 
-    def test_the_one_lead_is_a_button_nothing_here_has_ever_pressed(self):
-        """`selectedItemAccessDropbox` is on #456's measured structure panel and
-        is the only button that could plausibly be an in-space access. This is
-        the case that goes red the day somebody reads what it opens.
+    def test_the_dropbox_button_is_pressed_by_this_app_and_by_no_other(self):
+        """What replaced *"a button nothing here has ever pressed"*.
 
-        Over the declaration bodies rather than the file, for the reason above:
-        this bot's own doc comment names the button while pressing it nowhere,
-        and that is the state being asserted rather than a violation of it.
+        The gas huffer presses it and reaches it through exactly one lookup, so
+        a second spelling of "is the dropbox on offer" cannot appear beside the
+        first. Every other app still names it nowhere, which is the half that
+        keeps this a relation rather than a restatement of the change: an app
+        that starts pressing it has to be a decision somebody argued for.
         """
+        pressed_in = set()
         for app, bot in self.each_app("Bot.elm"):
-            with self.subTest(app):
-                for name, text in top_level_declarations(bot).items():
-                    self.assertNotIn("selectedItemAccessDropbox",
-                                     collapsed(text), "%s.%s" % (app, name))
+            for name, text in top_level_declarations(bot).items():
+                if "selectedItemAccessDropbox" in collapsed(text):
+                    pressed_in.add(app)
+        self.assertEqual(pressed_in, {"eve-online-gas-huffer"}, pressed_in)
+
+        declarations = top_level_declarations(bot_source())
+        readers = [name for name, text in declarations.items()
+                   if "accessDropboxButtonInReading" in collapsed(text)
+                   and name != "accessDropboxButtonInReading"]
+        self.assertEqual(
+            sorted(readers),
+            ["actOnTheDepositStep", "depositSituationFromContext",
+             "statusTextFromState"],
+            readers)
+
+    def test_the_docked_deposit_is_still_reachable_as_the_fallback(self):
+        """#476's own constraint, carried over from #464: a structure offering
+        no dropbox, or a reading where the window cannot be found, must still
+        deposit by docking rather than stall.
+
+        Read off the rule rather than off the branch, since the rule is what
+        decides: the dropbox is asked for only where the panel offers it *and*
+        the ship is close enough, and both `PressTheDockButton` and
+        `WarpToTheHomeStructure` are still what a reading answering `False` to
+        either falls through to.
+        """
+        rule = collapsed(top_level_declarations(bot_source())["depositStep"])
+        self.assertIn(
+            "else if situation.accessDropboxButtonIsOffered"
+            " && situation.structureIsWithinDropboxRange then"
+            " PressTheAccessDropboxButton"
+            " else if situation.dockButtonIsOffered then PressTheDockButton"
+            " else WarpToTheHomeStructure", rule)
 
     def test_the_finding_is_written_down_where_the_next_reader_will_be(self):
         """Beside the drop target rather than in a pull request, because the
-        next person to ask this question will be reading `Bot.elm`."""
+        next person to ask this question will be reading `Bot.elm` -- and what
+        it has to say now is which of #464's four relations flipped, and that
+        the docked sequence is the fallback rather than dead code."""
         doc = bot_source().split("structureHangarTreeEntryText :", 1)[0].rsplit(
             "{-|", 1)[1]
         self.assertIn("selectedItemAccessDropbox", doc)
         self.assertIn("eve-online-mining-bot", doc)
         self.assertIn("undocked", doc)
+        self.assertIn("DropboxWnd", doc)
+        self.assertIn("fallback", doc)
 
 
 class TheHeaderTellsAnOperatorWhatToOpenTest(unittest.TestCase):
