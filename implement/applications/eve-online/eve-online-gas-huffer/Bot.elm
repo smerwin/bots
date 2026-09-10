@@ -7466,7 +7466,7 @@ actOnTheDepositStep context situation =
         NoInventoryListingTheHold ->
             Just
                 (describeBranch
-                    ("Docked with a full hold and no inventory window listing a '"
+                    ("A full hold to deposit and no inventory window listing a '"
                         ++ miningHoldTreeEntryText
                         ++ "' -- there is nothing here to drag out of. Open the inventory on the ship's Mining Hold; the session ends at the deposit bound if it stays this way."
                     )
