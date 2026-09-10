@@ -1,4 +1,4 @@
-{- EVE Online gas huffer -- NEVER FLOWN
+{- EVE Online gas huffer
 
       This app is meant to harvest gas from a wormhole gas site, deposit it at a
       structure, and leave the moment anything else shows up on the grid. Since
@@ -54,15 +54,47 @@
       whether the module reads as running, because a bot that warps correctly
       with the module off looks exactly like one that is covered.
 
-      **What is still missing is a run.** No session of this app has ever been
-      flown against a live client, so every premise under it is either one read
-      taken on 2026-09-04 or a corpus measured on other bots -- and a bot that
-      looks right in a repl is what this repository is named after. What to
-      watch on the first run is in the paragraphs each feature's own doc comment
-      ends with; the shortest list is that the status line's `Propulsion
-      module:` clause should read `running` on essentially every reading in
-      space, that `Grid:` should read clean while harvesting, and that the hold
-      should climb and then be emptied rather than climbing and stopping.
+      **Seven sessions have now flown, and they separate the features rather
+      than confirming all of them at once.** Runs 1-5 (pre-#465 builds) show
+      `Harvest: orbiting; cloud locked; harvesters both cycling` for hundreds of
+      readings apiece, and it was one of these runs that caught the harvester
+      periodic-recheck oscillating a genuinely-cycling module off -- fixed as
+      `harvesterLooksActiveByRamp` and merged in PR #486. Run 1 alone cleared
+      several dozen short evasions (the `Evasion:` counter climbing to
+      1-14/600 and dropping straight back to `not evading`), read named ships
+      off D-Scan (`'GAS Clock'`, eight `'Scanner Probe'` rows) as well as many
+      whose Name cell it could not read at all, and pressed the cloak hotkey
+      blind (`Cloak up with its own hotkey`, 13 times) since the tooltip that
+      would confirm a cloak has never once resolved in any recorded run -- see
+      `cloakAmongFittedModules`. Run 6 --
+      the first on the fully merged tree, `ce0571e8` -- never got that far in
+      its short session: it spent the whole of it evading, `Grid: SOMETHING`
+      firing three times against named D-Scan rows (`'Warrior I'`,
+      `'Mining Drone I'`), and was stopped by hand at 83/600.
+
+      **Deposit (#464) is the one feature that has been watched failing.** Run
+      3's hold filled, the bot reported `depositing` toward `My Neighbor
+      Tatara`, and the give-up ran its full 300 readings to the end with **zero
+      drags dispatched** and the client never having said the transfer landed --
+      the session ended exactly as `depositGiveUpReadings`' own doc comment
+      describes, except it is no longer hypothetical. Zero drags means whatever
+      failed did so before the hangar work even started -- the dock, most
+      likely -- and that is the first thing the next run needs to watch rather
+      than the confirmation line this doc comment used to worry about.
+
+      **The propulsion-module reading (#465) has never once resolved to
+      `running` on a live client.** Every recorded run that carries the clause
+      prints `Propulsion module: CANNOT TELL` and never prints it again for the
+      rest of that session (the status line's own change-only suppression), which
+      means the middle-row read has come back empty on every reading anyone has
+      looked at so far -- not confirmed off, just never confirmed at all. That is
+      unchanged by the merge and is the next thing to check against a live client
+      before trusting the clause either way.
+
+      **The wormhole-chain-hop retreat has never fired in any recorded run** --
+      every evasion seen so far has been a short one, and none of the three
+      celestial-bounce destinations has ever been exhausted. What to watch on
+      the next run is in the paragraphs below that still say so.
 
       Started under issue #459; the behaviour is #460 (which site to hunt), #461
       (the harvest loop), #462 (hostile detection), #463 (retreat, cloak and
@@ -4645,12 +4677,18 @@ type alias FittedModule =
 {-| Whether this ship has a cloak, and whether it is already on.
 
 **Four answers, and the two negative ones are deliberately not one.** #456
-records that whether a cloak is fitted at all is unverified -- five modules were
-read on the measured hull and none was identified as one -- so the answer this
-rule gives most often may well be `NoCloakAmongTheModulesIdentified` forever, and
-an operator has to be able to tell that from `TheModulesAreNotIdentifiedYet`,
-which is a session that has simply not hovered them all yet and where waiting is
-the right thing.
+recorded this as unverified before any run had flown, and it still is --
+**the tooltip has never once resolved live.** Every recorded run (1, 5, 6, on
+three different builds) reads `NOT KNOWN YET -- 0 of 2 module(s) have had their
+tooltip read` for as long as it is asked, and every one of them eventually
+prints `NONE FITTED -- all 0 module(s) have been identified` -- zero, not "found
+none among several" -- which is `moduleIdentificationGiveUpReadings` expiring
+rather than a genuine search coming up empty. So whether this hull carries a
+cloak is exactly as unverified as #456 left it; what is now confirmed live is
+the speculative fallback beside it, `Cloak up with its own hotkey`, fired 13 and
+14 times in runs 1 and 5 with no module ever identified -- pressing F3 blind
+because an evasion is exactly when there is no quiet reading left to spend on a
+hover, never because a cloak was confirmed present.
 
 **Neither of them stalls the evasion**, which is the issue's own requirement:
 `evasionStep` reads this and falls through to the celestial bounce for both, so a
@@ -5007,11 +5045,16 @@ hostile grid with nobody at the controls -- which is how the mission runner's
 run 7 lost a ship.
 
 Six hundred readings is fifty rotations of the escape choice and roughly five
-minutes at the shipped `bot-step-delay` of 499 ms. It is **not calibrated against
-anything**: no recorded run of this app exists and nobody has watched an evasion.
-What it rests on is what expiry costs, which is a session that stops with the
-ship safe -- so it is set long enough that a hostile passing through does not end
-a run, and short enough that a resident does.
+minutes at the shipped `bot-step-delay` of 499 ms. **The bound itself has still
+never fired live**, though the counter it bounds has been watched running twice:
+run 1 cleared several dozen short evasions, the counter climbing to as little as
+1 and as much as 14 before dropping straight back to `not evading` each time --
+real recoveries, not a stuck grid -- and run 6 (the merged tree) took it to
+83/600 before being stopped by hand, the grid never once reading clean in that
+session. Neither run says anything about the upper end: what it rests on is
+still what expiry costs, which is a session that stops with the ship safe -- so
+it is set long enough that a hostile passing through does not end a run, and
+short enough that a resident does.
 
 -}
 evasionGiveUpReadings : Int
@@ -6851,12 +6894,15 @@ a deposit can fail runs under this one clock and none of them can become a
 second forever-loop.
 
 Three hundred readings, written as fifteen patience windows so that an operator
-who retunes one moves the other with it. It is **not calibrated against
-anything**: no recorded run of this app exists and nobody has watched a deposit.
-What it rests on is the shape of the trip -- one warp, a docking run-in that may
-stall and be re-commanded several times, a handful of readings apiece for the
-hangar work, and an undock -- and on what expiry costs, which is a session that
-stops with the ship docked or beside a structure and a hold a person can empty.
+who retunes one moves the other with it. **It has since fired live, on run 3,
+and not for the reason this paragraph used to guess at.** The hold filled, the
+bot reported `depositing` toward `My Neighbor Tatara`, the counter ran all the
+way to 300/300, and the session ended exactly as described below -- but with
+**zero drags dispatched** the whole time, which means whatever stopped this
+deposit did so before the hangar work this paragraph was written to cover ever
+started. The likeliest candidate is the dock itself; nothing here confirms that
+yet, and it is what the next run needs to watch rather than the drag-and-confirm
+step this bound was originally sized for.
 
 -}
 depositGiveUpReadings : Int
@@ -9444,7 +9490,7 @@ statusTextFromState context =
                 ( Nothing, _ ) ->
                     []
     in
-    [ "NEVER FLOWN: this bot warps to a gas site, harvests it, watches the grid and leaves when something arrives (#463), deposits the hold into the home structure from space when it fills (#476, falling back to #464's dock), and keeps its propulsion module running through every warp it makes (#465) -- and no session of it has ever been run against a live client, so every one of those is a rule executed in a repl rather than a thing anybody has watched happen. The deposit's own sequence has been driven by hand and the rest has not. Read the clauses below as instruments that have not been calibrated."
+    [ "FLOWN (runs 1-7): harvesting, D-Scan hostile detection and the evade/recover loop are confirmed live (runs 1-5 harvested for hundreds of readings apiece; run 1 alone cleared dozens of short evasions and read named ships off D-Scan). Deposit now tries the home structure from space first, falling back to #464's dock (#476) -- the deposit-from-space sequence has been driven by hand, but no full automated run has exercised it yet. The old dock-only path was watched failing outright: run 3 ran its 300-reading give-up to the end with zero drags dispatched, hold still full. The propulsion-module reading (#465) has answered CANNOT TELL on every live reading seen so far, never 'running'. The wormhole-chain-hop retreat has never fired live. Read the clauses below against that, not as instruments nobody has calibrated."
     , describePropulsionModule (propulsionSituationFromContext context)
     , describeGrid (gridEvidenceFromContext context)
     , describeDscanSightingsFromReading context.readingFromGameClient
