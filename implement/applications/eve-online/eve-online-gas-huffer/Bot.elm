@@ -3408,8 +3408,47 @@ notAShipOnDscanTypeMarkers =
     , "Control Tower"
     , "Customs Office"
     , "Mobile "
+    , droneTypeMarker
     , harvestableCloudTypeMarker
     ]
+
+
+{-| Every drone group the client writes carries this word, and no ship hull does.
+
+Run 6 evaded on two rows reading `Mining Drone I` and harvested nothing, which is
+the probe defect one class wider: a drone is not a piloted ship, carries no ship
+name to tag, and so reads hostile under the untagged rule. A fleetmate mining
+beside this bot is enough to keep it evading for a session.
+
+**Matched on the Type cell only**, which is what `dscanTypeIsNotAShip` is asked
+about and is the property that makes this safe. A Type is the client's own group
+name; a _Name_ is whatever a player typed. Matching `Drone` in a name would let
+anybody who calls their ship `Dronebait` read as harmless to this bot, which is
+the one direction this file refuses -- so it is deliberately not asked of the
+name, unlike `dscanRowIsHarmlessProbe`, which has to ask both because a probe's
+cells were never measured apart.
+
+Every drone group contains it -- Light Scout Drone, Medium Scout Drone, Heavy
+Attack Drone, Sentry Drone, Mining Drone, Salvage Drone, Logistic Drone,
+Electronic Warfare Drone -- so one entry covers the family rather than a list of
+hulls that goes stale the next time CCP ships one. That is `Mobile`'s argument
+next door.
+
+**`Fighter` is deliberately absent.** Carrier and supercarrier fighters are
+`Light Fighter`, `Heavy Fighter` and `Support Fighter`, none of which carry this
+word, and a fighter on grid means a capital is on grid -- which is the most
+alarming thing this bot could see, not something to ignore.
+
+**Unverified: a drone's Type cell has not been read.** The rows that provoked
+this printed `Mining Drone I`, which is the Name; D-Scan held only a fleetmate by
+the time the rule was written. If a drone's Type is empty or unreadable the row
+falls through to the name and reads hostile -- the safe direction, and the same
+one every other unreadable cell takes here.
+
+-}
+droneTypeMarker : String
+droneTypeMarker =
+    "Drone"
 
 
 {-| Whether a D-Scan row's Type says it is not a ship.
