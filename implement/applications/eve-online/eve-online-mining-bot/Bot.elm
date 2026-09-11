@@ -36,6 +36,7 @@
    + `wormhole` : Turn on wormhole-space safety -- periodically refresh the Directional Scanner and run for the unload station/structure once it shows a ship that is not one of ours. Local chat carries no roster in a wormhole, unlike known space, which is why this exists as its own setting rather than relying on `hide-when-neutral-in-local`. The only supported values are `no` and `yes`, default `no`.
    + `friendly-ship-tag` : Only meaningful with `wormhole = yes`. A substring marking a ship on the Directional Scanner as one of ours; every other ship reads hostile, and so does every ship when this is unset.
    + `dscan-interval-seconds` : Only meaningful with `wormhole = yes`. How often to refresh the Directional Scanner, in seconds. Default 5.
+   + `aggressive` : Fight rather than flee. Wherever this bot would otherwise run away, it launches drones, locks whatever on the overview reads hostile, and sends the drones after it instead -- see the setting's own description under `--help` for the detail. The only supported values are `no` and `yes`, default `no`.
 
    When using more than one setting, start a new line for each setting in the text input field.
    Here is an example of a complete settings string:
@@ -150,6 +151,7 @@ defaultBotSettings =
     , wormhole = PromptParser.No
     , friendlyShipTag = Nothing
     , dscanIntervalSeconds = defaultDscanIntervalSeconds
+    , aggressive = PromptParser.No
     }
 
 
@@ -363,6 +365,14 @@ parseBotSettings =
              , valueParser =
                 PromptParser.valueTypeInteger
                     (\seconds settings -> { settings | dscanIntervalSeconds = seconds })
+             }
+           )
+         , ( "aggressive"
+           , { alternativeNames = []
+             , description = "Fight rather than flee. Wherever this bot would otherwise run away or leave a wormhole -- a shield percentage below `run-away-shield-hitpoints-threshold-percent`, or (with `wormhole=yes`) a ship the Directional Scanner does not recognize as one of ours -- it launches drones, locks whatever on the overview reads hostile (a rat by its icon colour, or anything reading as warp disrupting this ship, checked first since that is the one thing standing between this ship and leaving), and sends the drones to engage it instead. Only takes effect where there is something on the overview to engage; with nothing there to lock, it still runs away, since there is nothing here for it to fight. The only supported values are `no` and `yes`, default `no`."
+             , valueParser =
+                PromptParser.valueTypeYesOrNo
+                    (\aggressive settings -> { settings | aggressive = aggressive })
              }
            )
          ]
@@ -1128,6 +1138,13 @@ station/structure settings, and `runAway`'s own fallback to
 `dockToRandomStationOrStructure` when none are configured, rather than
 building a second way to leave.
 
+**`aggressive = yes` replaces that `runAway` with `engageHostiles`**, the same
+substitution `returnDronesAndRunAwayIfHitpointsAreTooLowOrWithoutDrones` makes
+for its own shield-percentage trigger -- one setting, read in one place
+(`engageHostiles` itself), rather than two copies of the same override. A
+D-Scan-only sighting the ship has not met on grid yet still falls back to
+`runAway`, since `engageHostiles` can only lock what is on the overview.
+
 -}
 wormholeSafetyStep : BotDecisionContext -> Maybe DecisionPathNode
 wormholeSafetyStep context =
@@ -1150,10 +1167,16 @@ wormholeSafetyStep context =
                 else
                     Just
                         (describeBranch
-                            (describeGrid evidence
-                                ++ " This is a wormhole -- leave rather than keep mining."
+                            (describeGrid evidence)
+                            (case engageHostiles context of
+                                Just engaging ->
+                                    engaging
+
+                                Nothing ->
+                                    describeBranch
+                                        "This is a wormhole -- leave rather than keep mining."
+                                        (runAway context)
                             )
-                            (runAway context)
                         )
 
 
@@ -1232,6 +1255,7 @@ type alias BotSettings =
     , wormhole : PromptParser.YesOrNo
     , friendlyShipTag : Maybe String
     , dscanIntervalSeconds : Int
+    , aggressive : PromptParser.YesOrNo
     }
 
 
@@ -1422,6 +1446,19 @@ shouldRepairBeforeUndocking context =
     context.eventContext.botSettings.repairBeforeUndocking == Just PromptParser.Yes
 
 
+{-| The `aggressive` clause below is the one place this function's own
+`runAway` gets replaced -- see `engageHostiles`'s own doc comment for why a
+reading with nothing on the overview to fight still falls back to running
+away rather than sitting still.
+
+The "return drones" middle tier is skipped outright under `aggressive`,
+rather than fought over: recalling drones while the setting wants them out
+fighting would be two controllers for one drone bay, so an aggressive ship
+simply falls through this tier and leaves the drones exactly where the
+ordinary mining-time launch/return logic (`launchOrReturnDronesAccordingToSettings`)
+already puts them.
+
+-}
 returnDronesAndRunAwayIfHitpointsAreTooLowOrWithoutDrones : BotDecisionContext -> EveOnline.ParseUserInterface.ShipUI -> Maybe DecisionPathNode
 returnDronesAndRunAwayIfHitpointsAreTooLowOrWithoutDrones context shipUI =
     let
@@ -1434,9 +1471,21 @@ returnDronesAndRunAwayIfHitpointsAreTooLowOrWithoutDrones context shipUI =
                 (runAway context)
     in
     if shipUI.hitpointsPercent.shield < context.eventContext.botSettings.runAwayShieldHitpointsThresholdPercent then
-        Just runAwayWithDescription
+        Just
+            (case engageHostiles context of
+                Just engaging ->
+                    describeBranch
+                        ("Shield hitpoints are at " ++ (shipUI.hitpointsPercent.shield |> String.fromInt) ++ "%.")
+                        engaging
 
-    else if shipUI.hitpointsPercent.shield < returnDronesShieldHitpointsThresholdPercent then
+                Nothing ->
+                    runAwayWithDescription
+            )
+
+    else if
+        not (aggressiveIsEnabled context)
+            && (shipUI.hitpointsPercent.shield < returnDronesShieldHitpointsThresholdPercent)
+    then
         returnDronesToBay context
             |> Maybe.map
                 (describeBranch
@@ -3066,6 +3115,160 @@ returnDronesToBay context =
                             )
 
 
+{-|
+
+
+## `aggressive`: fight rather than flee
+
+`returnDronesAndRunAwayIfHitpointsAreTooLowOrWithoutDrones` and
+`wormholeSafetyStep` both call this before falling back to `runAway`, so
+`aggressive = no` (the default) leaves both of those exactly as they were --
+this function itself is the one place the setting is read, and it answers
+`Nothing` immediately when it is off.
+
+-}
+aggressiveIsEnabled : BotDecisionContext -> Bool
+aggressiveIsEnabled context =
+    context.eventContext.botSettings.aggressive == PromptParser.Yes
+
+
+{-| Every overview entry this bot is willing to fight under `aggressive = yes`.
+
+Two rules, reused rather than restated: a rat by the client's own icon colour
+(`ratsOnTheOverview`, the same test `overviewShowsRat` already uses for drone
+bookkeeping above), and anything reading `commonIndications.isWarpDisruptingMe`
+-- a scrambler can be a player ship carrying none of a rat's icon tint, and it
+is the one thing here that takes away the option to leave, which is why it is
+named explicitly rather than left to the colour rule to catch by accident.
+
+De-duplicated by `overviewEntryObjectIdentity`, since a warp-disrupting rat
+would otherwise appear in both halves at once.
+
+-}
+hostileOverviewEntries : ReadingFromGameClient -> List OverviewWindowEntry
+hostileOverviewEntries readingFromGameClient =
+    let
+        overviewEntries =
+            readingFromGameClient.overviewWindows |> List.concatMap .entries
+    in
+    (ratsOnTheOverview overviewEntries
+        ++ (overviewEntries |> List.filter (.commonIndications >> .isWarpDisruptingMe))
+    )
+        |> List.Extra.uniqueBy overviewEntryObjectIdentity
+
+
+{-| Which hostile to lock next. A row warp disrupting this ship sorts first
+regardless of distance -- it is the one thing standing between this ship and
+leaving, the same priority `overviewEntryIsWarpDisruptingMe` gets in every
+combat-capable bot in this repo -- and otherwise the nearest one wins, since a
+mining ship's drones have to close the distance themselves.
+-}
+hostileEngagementPriority : OverviewWindowEntry -> ( Int, Int )
+hostileEngagementPriority entry =
+    ( if entry.commonIndications.isWarpDisruptingMe then
+        0
+
+      else
+        1
+    , entry.objectDistanceInMeters |> Result.withDefault 999999999
+    )
+
+
+chooseHostileToEngage : List OverviewWindowEntry -> Maybe OverviewWindowEntry
+chooseHostileToEngage entries =
+    entries |> List.sortBy hostileEngagementPriority |> List.head
+
+
+{-| `aggressive = yes`'s whole answer to a hostile: launch drones, lock the
+highest-priority one, and send the drones after whatever this ship has
+locked.
+
+`Nothing` where there is nothing on the overview to fight at all -- a
+wormhole hostile the Directional Scanner has seen but that has not yet
+arrived on grid, for instance -- so both callers fall back to their own
+flight response rather than sitting still commanding an engagement against
+nothing. Also `Nothing`, unconditionally, while `aggressive = no`, which is
+what keeps both callers' default behaviour unchanged.
+
+-}
+engageHostiles : BotDecisionContext -> Maybe DecisionPathNode
+engageHostiles context =
+    if not (aggressiveIsEnabled context) then
+        Nothing
+
+    else
+        case hostileOverviewEntries context.readingFromGameClient |> chooseHostileToEngage of
+            Nothing ->
+                Nothing
+
+            Just target ->
+                Just
+                    (describeBranch
+                        ("Aggressive: engage '"
+                            ++ (target.objectName |> Maybe.withDefault "the hostile")
+                            ++ "'"
+                            ++ (if target.commonIndications.isWarpDisruptingMe then
+                                    " (warp disrupting this ship)"
+
+                                else
+                                    ""
+                               )
+                            ++ "."
+                        )
+                        (case launchDrones context of
+                            Just launching ->
+                                launching
+
+                            Nothing ->
+                                if target.commonIndications.targetedByMe then
+                                    engageTargetWithDrones context
+                                        |> Maybe.withDefault
+                                            (describeBranch "No drones in space yet to send after it." waitForProgressInGame)
+
+                                else
+                                    lockTargetFromOverviewEntryAndEnsureIsInRange
+                                        context
+                                        context.eventContext.botSettings.targetingRange
+                                        target
+                        )
+                    )
+
+
+{-| Order every drone in space to attack the ship's current target, through
+the drones window's own "Engage Target" menu entry -- the same cascade shape
+`launchDrones` and `returnDronesToBay` already use on the sibling group.
+
+`Nothing` with no drones in space, so the caller waits for the launch it just
+commanded to land rather than opening a menu on an empty group.
+
+-}
+engageTargetWithDrones : BotDecisionContext -> Maybe DecisionPathNode
+engageTargetWithDrones context =
+    context.readingFromGameClient.dronesWindow
+        |> Maybe.andThen .droneGroupInSpace
+        |> Maybe.andThen
+            (\droneGroupInSpace ->
+                let
+                    dronesInSpaceQuantityCurrent =
+                        droneGroupInSpace.header.quantityFromTitle
+                            |> Maybe.map .current
+                            |> Maybe.withDefault 0
+                in
+                if dronesInSpaceQuantityCurrent < 1 then
+                    Nothing
+
+                else
+                    Just
+                        (describeBranch "Engage target with drones."
+                            (useContextMenuCascade
+                                ( "drones group", droneGroupInSpace.header.uiNode )
+                                (useMenuEntryWithTextContaining "Engage" menuCascadeCompleted)
+                                context
+                            )
+                        )
+            )
+
+
 readShipUIModuleButtonTooltips : BotDecisionContext -> Maybe DecisionPathNode
 readShipUIModuleButtonTooltips =
     EveOnline.BotFrameworkSeparatingMemory.readShipUIModuleButtonTooltipWhereNotYetInMemory
@@ -3281,12 +3484,26 @@ statusTextFromDecisionContext context =
 
             else
                 []
+
+        describeAggressive : List String
+        describeAggressive =
+            if aggressiveIsEnabled context then
+                case hostileOverviewEntries readingFromGameClient |> chooseHostileToEngage of
+                    Just target ->
+                        [ "Aggressive: fighting '" ++ (target.objectName |> Maybe.withDefault "a hostile") ++ "'." ]
+
+                    Nothing ->
+                        [ "Aggressive: nothing hostile on the overview right now." ]
+
+            else
+                []
     in
     ([ "Session performance: " ++ describeSessionPerformance
      , "---"
      , "Current reading: " ++ describeCurrentReading
      ]
         ++ describeWormholeSafety
+        ++ describeAggressive
     )
         |> String.join "\n"
 
